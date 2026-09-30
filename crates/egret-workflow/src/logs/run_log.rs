@@ -276,14 +276,20 @@ fn prepare(values: &[String]) -> Vec<String> {
 }
 
 /// [`mask`] over values [`prepare`] already ordered.
+///
+/// **Skips an empty value itself**, rather than trusting [`prepare`] to have
+/// dropped it: an empty value matches at every position without advancing,
+/// so it would loop forever and hang the worker (measured, W5b Task 4
+/// mutation `e-empty`: 3.8 GB before it was killed).
 fn mask_prepared<'a>(message: &'a str, prepared: &[String]) -> Cow<'a, str> {
-    if !prepared.iter().any(|v| message.contains(v.as_str())) {
+    let values = prepared.iter().filter(|v| !v.is_empty());
+    if !values.clone().any(|v| message.contains(v.as_str())) {
         return Cow::Borrowed(message);
     }
     let mut out = String::with_capacity(message.len());
     let mut rest = message;
     while let Some(c) = rest.chars().next() {
-        match prepared.iter().find(|v| rest.starts_with(v.as_str())) {
+        match values.clone().find(|v| rest.starts_with(v.as_str())) {
             Some(v) => {
                 out.push_str(MASK);
                 rest = &rest[v.len()..];
@@ -764,5 +770,14 @@ mod tests {
         assert_eq!(mask("p*q", &v(&["*"])), "p******q");
         // Multi-byte text around and inside a value.
         assert_eq!(mask("é密码é", &v(&["密码"])), "é******é");
+    }
+
+    /// `mask_prepared` must not trust its caller to have dropped empties: an
+    /// empty value would match everywhere without advancing.
+    #[test]
+    fn mask_prepared_skips_an_empty_value_itself() {
+        assert_eq!(mask_prepared("abc", &v(&[""])), "abc");
+        assert_eq!(mask_prepared("abc", &v(&["b", ""])), "a******c");
+        assert_eq!(mask_prepared("abc", &v(&["", "b"])), "a******c");
     }
 }

@@ -7,25 +7,39 @@
 //! `REFUSED` row in `functions`, with the pod-spec reason): script tasks,
 //! inputs, `runIf`, `Log` and triggers all render against it. Only
 //! [`render_with_secrets`] registers a working `secret`, per render, over the
-//! refusal on a copy of the environment ([`super::env::render_str_with`]).
+//! refusal on a copy of the environment ([`super::env::render_once_with`]).
 //!
-//! # Two passes, because a render is synchronous and a fetch is not
+//! # One pass each, never the fixpoint loop (fix round 1, user ruling 1A)
+//!
+//! Every string renders **once**, as Kestra renders a plugin's properties by
+//! default (`recursiveRendering = false`). With `render_str`'s loop, text a
+//! pass produced was evaluated on the next: an input whose value was
+//! `{{ secret('db') }}` resolved a secret the author never wrote, and a
+//! secret whose value contained `{{` was evaluated as a template. With one
+//! pass, only the author's source is evaluated; render-context data and
+//! secret values are inert text.
+//!
+//! # Collect, fetch, resolve: a render is synchronous and a fetch is not
 //!
 //! The render runs on its own thread (`env::RENDER_STACK_BYTES`) and cannot
 //! await the database. So:
 //!
-//! 1. **collect**: every string renders with a `secret` that records its key
-//!    and answers `""`;
+//! 1. **collect**, from two places:
+//!    - the **source text** of every string: each `secret(` whose key is a
+//!      string literal, first positional or `key=` ([`literal_keys`]). This
+//!      sees calls a render never reaches;
+//!    - a render of every string with a `secret` that records its key and
+//!      answers `""`. This sees computed keys (`secret('db_' ~ env)`);
 //! 2. **fetch**: each distinct key is read once from the [`SecretSource`];
 //! 3. **resolve**: every string renders again with a `secret` that answers
 //!    from what was fetched, and records every value it hands out
 //!    ([`Resolved::values`], which the caller masks the attempt's log with).
 //!
-//! A key first seen in pass 3 was not reachable with `""` in place of every
-//! secret, so it was computed from a secret's value, and it is refused
-//! **without naming it** -- a name computed from a value can be the value,
-//! and a "not found" that named it would write it into the task run's
-//! message. The mechanism's one false positive is recorded on
+//! A key first seen in pass 3 was neither written literally nor reachable
+//! with `""` in place of every secret, so it was computed from a secret's
+//! value, and it is refused **without naming it** -- a name computed from a
+//! value can be the value, and a "not found" that named it would write it
+//! into the task run's message. What is left of the false positive is on
 //! [`DEPENDS_ON_A_SECRET`].
 //!
 //! # What never carries a value
@@ -46,7 +60,7 @@ use minijinja::{Environment, Error as MjError};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use super::env::{render_str_with, RenderContext};
+use super::env::{render_once_with, RenderContext};
 use super::filters::{pebble_error, Args};
 
 /// Kestra's `SecretFunction.getArgumentNames()`, in order: a positional
@@ -61,10 +75,15 @@ const REFUSED_ARGUMENTS: [&str; 2] = ["namespace", "full"];
 const VALUE_KEY: &str = "value";
 
 /// Pass 3 met a key pass 1 never saw.
+///
+/// **One false positive remains:** a *computed* key (not a string literal) in
+/// a `secret()` call the collecting render does not reach -- after an
+/// expression that fails when every secret is `""`, or in a branch `""` does
+/// not take. A literal key is always collected from the source text.
 pub const DEPENDS_ON_A_SECRET: &str = "a secret() key was computed from another secret's value, \
-     and secret names must not depend on secrets. (A secret() call that follows an expression \
-     that fails when every secret is empty cannot be collected either: the collecting pass \
-     renders each secret() as \"\".)";
+     and secret names must not depend on secrets. (A computed key in a secret() call that \
+     follows an expression failing when every secret is empty, or in a branch an empty secret \
+     does not take, cannot be collected either: write that key as a string literal.)";
 
 /// Why a secret could not be read. **`Display` names the secret, never a
 /// value.**
@@ -130,13 +149,20 @@ pub async fn render_with_secrets(
     // any error that does not depend on a value.
     let collected = Arc::new(Collected::default());
     {
+        let mut names = collected.names.lock().expect("collect lock");
+        let _ = walk_object(props, "", &mut |_, text| {
+            names.extend(literal_keys(text));
+            Ok(String::new())
+        });
+    }
+    {
         let c = collected.clone();
         let extend = move |env: &mut Environment<'static>| {
             let c = c.clone();
             env.add_function("secret", move |rest: Rest<MjValue>| c.call(rest));
         };
         let _ = walk_object(props, "", &mut |_, text| {
-            let _ = render_str_with(text, cx, &extend);
+            let _ = render_once_with(text, cx, &extend);
             Ok(String::new())
         });
     }
@@ -162,7 +188,7 @@ pub async fn render_with_secrets(
             env.add_function("secret", move |rest: Rest<MjValue>| r.call(rest));
         };
         walk_object(props, "", &mut |path, text| {
-            render_str_with(text, cx, &extend).map_err(|e| format!("`{path}` did not render: {e}"))
+            render_once_with(text, cx, &extend).map_err(|e| format!("`{path}` did not render: {e}"))
         })
     };
     let values = resolver.handed.lock().expect("resolve lock").clone();
@@ -170,6 +196,44 @@ pub async fn render_with_secrets(
         Ok(out) => Ok((out, Resolved { values })),
         Err(message) => Err(crate::logs::mask(&message, &values).into_owned()),
     }
+}
+
+/// The string-literal keys of every `secret(` call in `source`: a first
+/// argument `'k'` / `"k"`, or `key='k'` anywhere in the call.
+///
+/// **A regex, not the parser**, because minijinja 2.24 exposes its AST only
+/// under `unstable_machinery`, which this workspace does not enable. What it
+/// cannot see, each of which the collecting render still sees when it reaches
+/// the call:
+/// - a literal with an escaped quote or backslash (`'it\'s'`);
+/// - a call whose `key=` follows a nested call's `)` (`secret(subkey=f(), key='k')`);
+/// - `secret` bound to another name (`{% set s = secret %}{{ s('k') }}`).
+///
+/// It also over-matches -- text outside `{{ }}`, a `{% raw %}` region -- and
+/// that costs one extra fetch of a name the author wrote, never a value: an
+/// over-matched name that nothing asks for in pass 3 is never handed out and
+/// its failed fetch is never reported. It scans the AUTHOR's source only,
+/// never render-context data.
+fn literal_keys(source: &str) -> Vec<String> {
+    static PATTERNS: std::sync::OnceLock<[regex::Regex; 2]> = std::sync::OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        let literal = r#"(?:'([^'\\]*)'|"([^"\\]*)")"#;
+        [
+            regex::Regex::new(&format!(r"\bsecret\s*\(\s*(?:key\s*=\s*)?{literal}"))
+                .expect("first-argument pattern"),
+            regex::Regex::new(&format!(r"\bsecret\s*\([^()]*?\bkey\s*=\s*{literal}"))
+                .expect("key= pattern"),
+        ]
+    });
+    if !source.contains("secret") {
+        return Vec::new();
+    }
+    patterns
+        .iter()
+        .flat_map(|p| p.captures_iter(source))
+        .filter_map(|c| c.get(1).or_else(|| c.get(2)))
+        .map(|m| m.as_str().to_string())
+        .collect()
 }
 
 /// One `secret(...)` call's arguments, after the refusals.
@@ -182,7 +246,6 @@ struct Call {
 fn parse_call(rest: Rest<MjValue>) -> Result<Call, MjError> {
     let args = Args::new(rest);
     // `namespace` and `full`, by name, in any form. A second positional
-    // argument IS `namespace` in Kestra's signature, not the subkey.
     // argument IS `namespace` in Kestra's signature, not the subkey, so any
     // positional argument after `key` passes `namespace` first.
     let second_positional = (args.positional_only().len() > 1).then_some(ARGUMENT_NAMES[1]);
@@ -549,6 +612,122 @@ mod tests {
         let e = err("{{ secret('p') }}", &source).await;
         assert!(e.contains("secret 'p' was not found"), "{e}");
         assert!(!e.contains("theirs"), "{e}");
+    }
+
+    // -----------------------------------------------------------------
+    // Fix round 1 (user ruling 1A): one pass, and literal keys from source.
+    // -----------------------------------------------------------------
+
+    async fn render_in(
+        props: Value,
+        context: Value,
+        source: &Table,
+    ) -> Result<(Map<String, Value>, Resolved), String> {
+        let cx = RenderContext::from_json_object(&context).expect("an object");
+        render_with_secrets(props.as_object().unwrap(), &cx, WS, source).await
+    }
+
+    /// CRITICAL 1: render-context data is data. An input (or webhook body, or
+    /// prior output) whose VALUE is a `secret()` call is not evaluated, so it
+    /// cannot resolve a secret the author never wrote -- and the source is
+    /// never even asked.
+    #[tokio::test]
+    async fn an_input_holding_a_secret_call_renders_literally_and_nothing_is_fetched() {
+        let source = table();
+        // The third keeps its body and loses its markers: Kestra strips the
+        // `{% raw %}` markers from the OUTPUT of `renderOnce`
+        // (`RAW_PATTERN.matcher(x).replaceAll("$2")`), data included.
+        for (injected, stored) in [
+            ("{{ secret('p') }}", "{{ secret('p') }}"),
+            (
+                "{{ secret('db', subkey='password') }}",
+                "{{ secret('db', subkey='password') }}",
+            ),
+            (
+                "{% raw %}{{ secret('p') }}{% endraw %}",
+                "{{ secret('p') }}",
+            ),
+        ] {
+            let (out, resolved) = render_in(
+                json!({"sql": "SELECT '{{ q }}' AS v", "url": "{{ q }}"}),
+                json!({ "q": injected }),
+                &source,
+            )
+            .await
+            .unwrap();
+            assert_eq!(out["sql"], format!("SELECT '{stored}' AS v"), "{injected}");
+            assert_eq!(out["url"], stored);
+            assert!(resolved.values.is_empty(), "{injected}: {resolved:?}");
+        }
+        assert!(
+            source.reads.lock().unwrap().is_empty(),
+            "the source was asked for {:?}",
+            source.reads.lock().unwrap()
+        );
+    }
+
+    /// IMPORTANT 1: a secret's value is text, whatever it contains.
+    #[tokio::test]
+    async fn a_secret_value_with_template_syntax_renders_verbatim() {
+        let values = [
+            "a{{b",
+            "x{#y",
+            "x{{ '' }}y",
+            "{{ printContext() }}",
+            "{% if true %}t{% endif %}",
+        ];
+        let mut source = Table::default();
+        for (i, v) in values.iter().enumerate() {
+            source = source.with(WS, &format!("s{i}"), &[("value", v)]);
+        }
+        for (i, v) in values.iter().enumerate() {
+            let (out, resolved) = render(
+                json!({ "v": format!("<{{{{ secret('s{i}') }}}}>") }),
+                &source,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{v}: {e}"));
+            assert_eq!(out["v"], format!("<{v}>"));
+            assert_eq!(resolved.values, vec![v.to_string()]);
+        }
+    }
+
+    /// IMPORTANT 2: a literal key is collected from the source, so a call the
+    /// collecting render never reaches -- after an expression that fails on
+    /// `""`, or in a branch `""` does not take -- still resolves.
+    #[tokio::test]
+    async fn a_literal_key_past_a_failing_expression_or_an_untaken_branch_resolves() {
+        let source = table()
+            .with(WS, "cfg", &[("value", r#"{"x": 1}"#)])
+            .with(WS, "a", &[("value", "yes")])
+            .with(WS, "b", &[("value", "B")]);
+        let (out, _) = render(
+            json!({
+                "failing": "{{ fromJson(secret('cfg')).x }}-{{ secret('b') }}",
+                "branch": "{% if secret('a') %}{{ secret(key=\"b\") }}{% endif %}",
+            }),
+            &source,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["failing"], "1-B");
+        assert_eq!(out["branch"], "B");
+    }
+
+    #[test]
+    fn literal_keys_sees_both_spellings_and_both_quotes() {
+        let got = literal_keys(
+            "{{ secret('a') }} {{ secret(\"b\", subkey='x') }} {{ secret(key='c') }} \
+             {{ secret(subkey='y', key=\"d\") }} {{ secret( 'e' ) | upper }} \
+             {{ secret(k) }} {{ mysecret('no') }}",
+        );
+        let got: BTreeSet<String> = got.into_iter().collect();
+        let want: BTreeSet<String> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(got, want);
+        assert!(literal_keys("no call here").is_empty());
     }
 
     /// The shared environment -- the one a script task renders its commands
