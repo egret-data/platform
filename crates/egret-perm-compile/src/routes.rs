@@ -1482,11 +1482,25 @@ async fn explain(
         // `database`, so pairing the wrong def with an engine answers "nothing
         // matched" with full confidence, and declaring the engine turns that
         // silent wrong answer into `UndecidableCause::EngineMismatch`.
-        // `plugin_version` stays `None` — `EngineType::plugin_version` is
-        // already the measured value, so declaring it would only cross-check it
-        // against itself.
+        // ⚠ `plugin_version` is DECLARED, and this comment used to say the
+        // opposite: *"stays `None` — `EngineType::plugin_version` is already the
+        // measured value, so declaring it would only cross-check it against
+        // itself."* That was true while the field's only reader was the
+        // cross-check. It is not any more.
+        //
+        // SP4d-2b Task 5 measured a shape the two plugin versions answer
+        // DIFFERENTLY — a tag DENY plus a strictly higher-priority resource ALLOW
+        // with no deny items is `Allowed` on 2.8.0 and `Denied` on 2.5.0 — so
+        // `evaluate` now reads `plugin_version`, and `None` there costs an ACCESS
+        // answer (`UndecidableCause::TagDenyReopenedDiffersByPluginVersion`).
+        // Leaving it unset would refuse that shape on BOTH engines, including the
+        // one whose answer this crate reproduces exactly. The value is
+        // `EngineType::plugin_version`, which is the measured version per engine,
+        // so the cross-check still passes trivially — that was never the point of
+        // setting it.
         let config = EngineConfig {
             engine: Some(ranger_engine(engine)),
+            plugin_version: Some(ranger_engine(engine).plugin_version()),
             ..EngineConfig::without_super_users()
         };
 

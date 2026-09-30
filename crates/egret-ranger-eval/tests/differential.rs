@@ -77,9 +77,16 @@
 //! each unadmitted one (`DESCENDANT`, `NONE`); the deny-capable tag ACCESS
 //! policy, the tag MASK and the tag ROW FILTER; several tag policies at one
 //! priority; the same tag name at two match types; the empty tag set (the
-//! measured narrowing); and `tag.json`'s `ignoreCase: false`, which makes
+//! measured narrowing); `tag.json`'s `ignoreCase: false`, which makes
 //! `PII` and `pii` different tags where every resource level is
-//! case-insensitive.
+//! case-insensitive; and the audit-disabled whole-policy PRUNE together with
+//! its resource-side complement, since only the tag repository performs it.
+//!
+//! Two shapes are built DELIBERATELY, by [`composed_duel`] and
+//! [`candidacy_duel`], because a random draw does not produce them: **a rate
+//! over a population that cannot reach a refusal is not a measurement.** 800
+//! random cases reached offset 553's refusal zero times; 264 deliberate
+//! candidacy duels reach it 95.8% of the time.
 //!
 //! ## What the corpus deliberately does NOT contain
 //!
@@ -96,10 +103,15 @@
 //! quietly drift into cases the evaluator declines to answer while the gate
 //! reports green.
 //!
-//! The exceptions are the three refusals that are about an ORDER or a
-//! CANDIDACY this crate does not reproduce rather than about a construct it
-//! does not model. They are generated ON PURPOSE, counted and reported, and
-//! never compared — this crate has no answer to compare:
+//! The exceptions are the FIVE refusals that are about an ORDER, a CANDIDACY or
+//! a plugin VERSION this crate does not reproduce, rather than about a construct
+//! it does not model. They are generated ON PURPOSE, counted and reported, and
+//! never compared — this crate has no answer to compare.
+//!
+//! ⚠ **Every name added to that list is a name the escape check stops
+//! catching**, so the line is drawn deliberately and [`only_declined`] is
+//! all-or-nothing per case: a `why` mixing one of the five with a construct
+//! refusal is a generator escape wearing a disguise and still fails the run.
 //!
 //! * [`UndecidableCause::EvalOrderAmbiguous`] — two policies tie inside one
 //!   `(priority, hasDeny)` band and `getEvalOrder()` decides the winner.
@@ -119,6 +131,16 @@
 //! * [`UndecidableCause::TagSubResultSplitByResourcePolicy`] — a tag mask or
 //!   row filter whose DATA a reachable resource policy would overwrite while
 //!   Ranger keeps the tag policy's IDENTITY.
+//! * [`UndecidableCause::TagPriorityArbitrationNotModelled`] — two tag policies
+//!   at different priorities both decide, and the
+//!   `RangerAccessRequestUtil.getAccessTypeResults` map settles which survives.
+//!   Task 5 measured that arbitration; it is refused rather than modelled
+//!   because its branch structure could not be read from a disassembly.
+//! * [`UndecidableCause::TagDenyReopenedDiffersByPluginVersion`] — the one
+//!   composed shape 2.5.0 and 2.8.0 answer DIFFERENTLY. It therefore fires on
+//!   the Trino half of this corpus and never on the StarRocks half, which is an
+//!   assertion in itself: equal rates would mean the version input had stopped
+//!   being read.
 //!
 //! The one measured version divergence — an `_any` request against an
 //! ANCESTOR-matching `isDenyAllElse` policy denies at 2.5.0 and does not at
