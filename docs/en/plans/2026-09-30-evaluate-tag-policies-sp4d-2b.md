@@ -357,10 +357,14 @@ two-profile fixture.
 **Then the sibling — and read this before you write it, because the obvious
 version is a lie.** Task 4 measured that two of its refusals, and the D9 drop,
 are **unreachable by any code path today, and stay unreachable after this task**.
-The only producer of a `ResolvedTag` in the repo is
-`egret_policy::resolved_tags_for_resource_via`, which reads
-`catalog_tag_assignments`: no `options`, no `validityPeriods`, no `attributes`,
-always three or four valid levels. So a test that drives the handler end-to-end
+A review then made the claim stronger: there is **no producer of
+`egret_ranger_eval::eval::ResolvedTag` anywhere outside the crate's own tests**,
+and the one production `AccessRequest` (`routes.rs:1529`) passes
+`resolved_tags: None`. Note the type carefully — my first version of this
+paragraph named `egret_policy::ResolvedTag`, which is a **different, two-field
+type** returned by `resolved_tags_for_resource_via` over `catalog_tag_assignments`
+(no `options`, no `validityPeriods`, no `attributes`). Your task is to build the
+mapping between those two types, so do not go looking for the wrong one. So a test that drives the handler end-to-end
 **cannot** produce a payload whose shape egret could not have produced — it will
 pass while exercising nothing, and it will look like the strongest test in the
 package.
@@ -372,6 +376,15 @@ cannot arise from the live path today**. Making these refusals genuinely live
 means giving the crate a reader for the `/tags/download` payload; that is a
 feature package, not this step. Do not quietly widen scope to reach them, and do
 not write a green that implies coverage this code path does not have.
+
+- [ ] **Step 2b: Carried from Task 4 — make enrichment-before-phase
+unrepresentable, here rather than earlier.** Nothing structurally forces the tag
+enrichment to run before `tag_candidates`; it is a convention held at two call
+sites, and the two-guards-must-agree shape has produced a defect in this package
+three times. The fix is a newtype on `AccessRequest::resolved_tags`, which breaks
+every construction site — including the mapping you are writing in Step 1. Task 4
+deliberately left it rather than churn those sites twice. Do it with your mapping,
+in the same commit, or say why it is worse here than a convention.
 
 - [ ] **Step 3: The page's copy changes meaning.** SP4d-2a's blast-radius sentence
 said a tag policy anywhere makes every verdict `Undecidable` installation-wide.
