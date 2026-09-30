@@ -377,6 +377,16 @@ means giving the crate a reader for the `/tags/download` payload; that is a
 feature package, not this step. Do not quietly widen scope to reach them, and do
 not write a green that implies coverage this code path does not have.
 
+- [ ] **Step 1b: The empty-string row is a property of the REQUEST, not the query.**
+Task 4's re-review measured this and it is a trap for your mapping:
+`resolved_tags_for_resource_via(…, "", "", "")` **does** return a `('','')` row.
+Nothing in the SQL prevents it — the predicate is an exact
+`schema_name = $2 AND table_name = $3`, so an empty request matches rows written
+empty. So do not write, anywhere, that such a row "cannot be returned"; state the
+mechanism instead — which caller supplies the three values, and what constrains
+them there. If nothing constrains them, that is the finding, and the mapping is
+where it has to be handled.
+
 - [ ] **Step 2b: Carried from Task 4 — make enrichment-before-phase
 unrepresentable, here rather than earlier.** Nothing structurally forces the tag
 enrichment to run before `tag_candidates`; it is a convention held at two call
