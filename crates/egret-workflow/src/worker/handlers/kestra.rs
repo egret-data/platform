@@ -8,14 +8,16 @@
 //! 1. **parse** the leaf spec with [`plugins::parse`] -- the function publish
 //!    uses, so a draft that never passed publish is refused here by the same
 //!    named errors;
-//! 2. **render** the parsed properties ONCE with
+//! 2. **gate** with [`gate::check`] -- the one gate publish also calls -- with
+//!    `workflow_kestra_plugins` and `workflow_containers` **read now**
+//!    ([`FeatureState`]). A refusal with nothing to adopt
+//!    ([`TaskRunner::adoptable`]) fails here, before any secret is read
+//!    (fix round 1, M2);
+//! 3. **render** the parsed properties ONCE with
 //!    [`render_with_secrets`], resolving `secret()` in the execution's
 //!    workspace. It is handed the author's UNRENDERED properties: it renders
 //!    once (Kestra's `recursiveRendering=false`) and collects literal secret
 //!    names from that source text. A render error is already masked by it;
-//! 3. **gate** with [`gate::check`] -- the one gate publish also calls -- with
-//!    `workflow_kestra_plugins` and `workflow_containers` **read now**
-//!    ([`FeatureState`]);
 //! 4. **build** the [`TaskCommands`] ([`KestraRuntime::commands`]): the
 //!    configured host image, `/bin/sh -c "exec java …"`, the one input file
 //!    `task.json` (`{"type": FQCN, "properties": {…rendered…}, "mask":
@@ -260,22 +262,8 @@ impl TaskHandler for Kestra {
             }
         };
 
-        // 2. render once, resolving secret(), from the UNRENDERED properties.
-        let (rendered, resolved) = match render_with_secrets(
-            &parsed.properties,
-            &task.render,
-            task.workspace_id,
-            self.rt.secrets.as_ref(),
-        )
-        .await
-        {
-            Ok(r) => r,
-            // Already masked by `render_with_secrets`.
-            Err(message) => return Ok(Outcome::failed_with(format!("{type_id}: {message}"))),
-        };
-        let secrets = resolved.values;
-
-        // 3. the gate, with both features read now.
+        // 2. the gate, with both features read now -- BEFORE any secret is
+        //    resolved (fix round 1, M2): a refused workspace reads none.
         let feature_enabled = self
             .rt
             .features
@@ -294,6 +282,32 @@ impl TaskHandler for Kestra {
             fqcn: parsed.fqcn,
         })
         .err();
+        // A refused run is failed unless a container already exists for this
+        // (run, attempt) -- W5a's adoption. Only then are secrets resolved:
+        // the adopted container's lines must be masked with them.
+        if let Some(refusal) = &refused {
+            if !self.rt.runner.adoptable(task).await? {
+                return Ok(Outcome::failed_with(format!("{type_id}: {refusal}")));
+            }
+        }
+
+        // 3. render once, resolving secret(), from the UNRENDERED properties.
+        //    An error fails the task, also on the adopting path: without the
+        //    values nothing the container prints could be masked, and
+        //    `release` removes the container once the failure commits.
+        let (rendered, resolved) = match render_with_secrets(
+            &parsed.properties,
+            &task.render,
+            task.workspace_id,
+            self.rt.secrets.as_ref(),
+        )
+        .await
+        {
+            Ok(r) => r,
+            // Already masked by `render_with_secrets`.
+            Err(message) => return Ok(Outcome::failed_with(format!("{type_id}: {message}"))),
+        };
+        let secrets = resolved.values;
 
         // 4. the commands; 5. the masked log.
         let cmds = self.rt.commands(parsed.fqcn, rendered, &secrets);
@@ -483,7 +497,48 @@ mod tests {
             out.message
         );
         assert!(spy.seen.lock().unwrap().is_empty(), "`run` never called");
-        assert_eq!(*spy.adopt_calls.lock().unwrap(), 1);
+        assert_eq!(
+            *spy.adopt_calls.lock().unwrap(),
+            0,
+            "nothing to adopt, so `adopt` is not called either"
+        );
+    }
+
+    /// **The gate comes before `secret()` is resolved** (fix round 1, M2): a
+    /// refused run with nothing to adopt reads no secret at all; one with a
+    /// container to adopt resolves them -- it must, to mask what that
+    /// container prints -- and adopts it.
+    #[tokio::test]
+    async fn a_refused_run_reads_no_secret_unless_it_adopts() {
+        for (adoptable, reads) in [(false, 0), (true, 1)] {
+            let spy = Spy::ok(ok(serde_json::json!({})));
+            if adoptable {
+                *spy.adoptable.lock().unwrap() = Some(ok(serde_json::json!({})));
+            }
+            let secrets = Arc::new(OneSecret::default());
+            let mut rt = runtime(spy.clone(), false, PluginConfigurations::default());
+            Arc::get_mut(&mut rt).expect("unshared").secrets = secrets.clone();
+            let out = Kestra { type_id: QUERY, rt }
+                .run(&task())
+                .await
+                .expect("no worker error");
+            assert_eq!(
+                secrets.reads.lock().unwrap().len(),
+                reads,
+                "adoptable = {adoptable}"
+            );
+            assert_eq!(
+                out.state,
+                if adoptable {
+                    RunState::Success
+                } else {
+                    RunState::Failed
+                },
+                "{:?}",
+                out.message
+            );
+            assert!(spy.seen.lock().unwrap().is_empty(), "never created");
+        }
     }
 
     /// **A type outside `allowed-types` is refused at run** by the same gate.

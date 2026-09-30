@@ -1180,6 +1180,15 @@ impl TaskRunner for KubernetesRunner {
 
     /// The attempt's pod, only if it already exists: followed to its end as
     /// a re-attach. `None` when there is no pod, or it is being deleted.
+    async fn adoptable(&self, task: &TaskInput) -> Result<bool> {
+        let existing = self
+            .pods()
+            .get_opt(&pod_name(task.run_id, attempt_of(task)))
+            .await
+            .map_err(|e| internal("reading the task pod", e))?;
+        Ok(matches!(existing, Some(p) if p.metadata.deletion_timestamp.is_none()))
+    }
+
     async fn adopt(
         &self,
         task: &TaskInput,

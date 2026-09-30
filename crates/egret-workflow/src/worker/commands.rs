@@ -439,6 +439,16 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
         observer: &dyn LineObserver,
     ) -> Result<Option<CommandsResult>>;
 
+    /// Whether [`adopt`](Self::adopt) would find started work for `task`'s
+    /// (run, attempt). Lets a handler that refuses a run decide whether it
+    /// must prepare for an adoption -- the plugin handler resolves secrets
+    /// only then, to mask what the adopted container prints (W5b fix round 1,
+    /// M2). Read-only; a runner that cannot tell cheaply answers `true`, and
+    /// `adopt` still decides.
+    async fn adoptable(&self, _task: &TaskInput) -> Result<bool> {
+        Ok(true)
+    }
+
     /// Stop whatever `task` is running, addressed by **identity**.
     ///
     /// The caller is [`cancel::guarded`](super::TaskHandler::cancel) by way of
@@ -1569,6 +1579,13 @@ impl TaskRunner for DockerRunner {
     /// A container that was created and never started ran nothing of the
     /// author's, so there is nothing to finish: `None`, and `release` removes
     /// it once the refusal commits.
+    async fn adoptable(&self, task: &TaskInput) -> Result<bool> {
+        Ok(matches!(
+            self.find(&container_name(task)).await?,
+            Found::Started
+        ))
+    }
+
     async fn adopt(
         &self,
         task: &TaskInput,

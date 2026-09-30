@@ -275,6 +275,10 @@ pub(super) mod testing {
             Ok(())
         }
 
+        async fn adoptable(&self, _task: &TaskInput) -> Result<bool> {
+            Ok(self.adoptable.lock().unwrap().is_some())
+        }
+
         async fn adopt(
             &self,
             task: &TaskInput,
