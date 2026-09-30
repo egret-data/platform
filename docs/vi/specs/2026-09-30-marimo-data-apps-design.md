@@ -35,6 +35,7 @@ edit là nơi tác giả viết, chế độ run là app đã publish.
 | D12 | **Origin apps là một subdomain anh em** (`apps.<host egret>`), same-site với egret (2026-10-01). | P4 phải có cookie `__Host-` (kiểm trên HTTPS), GET không có tác dụng phụ, CSRF dựa trên header, không cho phép CORS cho origin apps (§6.1). |
 | D13 | **SQL cell: cài DuckDB, engine egret là mặc định** (2026-10-01). | DuckDB để viết SQL trên DataFrame đã lấy về, chỉ trong pod; SQL cell mới nhắm vào gateway (§4.4). |
 | D14 | **Bước kiểm `has_marimo_installed` mỗi lần khởi chạy của marimo do shim của launcher trả lời** (2026-10-01). | Một mẹo dựa vào hành vi nội bộ của marimo: ghim phiên bản marimo, test hợp đồng trong CI của image sẽ fail khi lệnh đổi; hiện chưa theo hướng sửa upstream (§6.3). |
+| D15 | **Nghiệm thu thời gian khởi động của P5 tính tương đối so với chế độ thread** (≤ 0,5 giây trung vị, ≤ 1 giây cho 3 đồng thời, Linux, ≥ 5 lần chạy); "< 2 giây" là mục tiêu trải nghiệm riêng, không chặn (2026-10-01). | Mức sàn tải trang ≈ 1,75 giây nằm ngoài tầm của launcher kernel (S0b). |
 
 ## 2. Những gì code nói
 
@@ -516,7 +517,11 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
    trên header (§6.1), launcher edit, trang danh sách Apps và trang Edit.
 5. **P5 — Chế độ run.** Launcher theo phiên bản, UI publish/versions/khôi phục, trang xem app; launcher
    kernel (warm pool hoặc fork server), mức trần session mỗi pod, giới hạn bộ nhớ và UX lúc mở session
-   đặt theo số đo trên kind (§6.3).
+   đặt theo số đo trên kind (§6.3). **Mục tiêu khởi động (D15):** tiêu chí nghiệm thu = người xem mới trên
+   pod đã ấm chậm hơn chế độ thread đo cùng lượt tối đa **0,5 giây** ở trung vị, và ba người xem mới đồng
+   thời chậm hơn tối đa **1 giây** ở giá trị lớn nhất, đo trên node Linux ở kind với ≥ 5 lần chạy xen kẽ
+   mỗi biến thể. "< 2 giây tới lần render đầu" được theo dõi như mục tiêu trải nghiệm riêng (asset
+   frontend, cache) và không chặn P5.
 6. **P6 — Gỡ notebook.** `egret-notebook`, nửa Jupyter của `egret-kernel`, `kernel-image/`, frontend
    notebook, các bảng notebook và `notebook:*`. Task workflow `egret.python` — đang tham chiếu notebook và
    chưa có handler — được trỏ sang một phiên bản app hoặc đánh dấu chưa hỗ trợ, quyết định trong plan P6.
