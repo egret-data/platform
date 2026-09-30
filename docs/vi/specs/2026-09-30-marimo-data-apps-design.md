@@ -166,8 +166,10 @@ Các bước, theo thứ tự, mỗi bước fail-closed:
 
 1. Tra token theo hash; từ chối nếu không có, đã thu hồi hoặc hết hạn (401). Cập nhật `last_used_at`.
 2. Kiểm quyền của người dùng trong workspace của token: workspace bật tính năng `apps` (đường dẫn không
-   chứa `/ws/{ws}` nên cổng tính năng không tự suy ra được — handler phải tự kiểm), `app:read` (run) hoặc
-   `app:write` (edit) trên app của token, và `query:run` trên database.
+   chứa `/ws/{ws}` nên cổng tính năng không tự suy ra được — handler phải tự kiểm), `app:read`
+   trên app của token ở chế độ run; `app:write` **và** `query:run` ở chế độ edit. Chế độ run không đòi
+   `query:run`: `ws_viewer` không có quyền này, người xem không tự viết được SQL (token không bao giờ tới
+   trình duyệt; chỉ code của tác giả gửi truy vấn), và Ranger vẫn quyết định theo từng người xem.
 3. Tra `database` **theo tên** trong workspace của token (404 nếu không có — giống như bị từ chối).
 4. Kiểm chỉ đọc (§4.3); từ chối với 400 kèm lý do.
 5. `QueryExecPort::execute_as` (hoặc `execute_as_with_params`) bằng người dùng của token, với
@@ -502,10 +504,13 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
 
 ### Các PR, theo thứ tự
 
-1. **P1 — Query gateway.** `app_sessions`, bộ kiểm chỉ đọc, `POST /api/apps/query`, audit, rate limit.
-   Chỉ backend; test được bằng token seed sẵn, không cần marimo.
-2. **P2 — Lưu trữ và vòng đời.** `apps`, `app_drafts`, `app_versions` (+ trigger), API draft với
-   revision/409, publish, khôi phục, quyền `app:*`, module tính năng `apps`.
+1. **P1 — Query gateway.** `app_sessions` (`login_sid` cascade từ bảng `sessions` của egret, nên logout
+   thu hồi nó theo cấu trúc), bộ kiểm chỉ đọc, `POST /api/apps/query`, audit, rate limit — cộng những thứ
+   gateway cần để phân quyền: bảng định danh `analytics.apps`, quyền `app:*` và module tính năng `apps`.
+   Chỉ backend; test được bằng token seed sẵn, không cần marimo. Plan:
+   `docs/en/plans/2026-10-01-data-apps-p1-query-gateway.md`.
+2. **P2 — Lưu trữ và vòng đời.** `app_drafts`, `app_versions` (+ trigger, và FK từ
+   `app_sessions.version_id`), API draft với revision/409, publish, khôi phục, CRUD app và share.
 3. **P3 — Image `egret-apps` và `egret_marimo`.** Entrypoint, `EgretStorage`, DB-API, `egret.sql`, cấu hình
    marimo đã khoá, patch IPC cho chế độ run và cách xử lý bước kiểm `has_marimo_installed` mỗi lần khởi
    chạy của marimo (D14: shim của launcher trả lời, với test hợp đồng sẽ fail khi marimo đổi lệnh); pytest

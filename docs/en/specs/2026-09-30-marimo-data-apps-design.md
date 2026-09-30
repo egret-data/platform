@@ -166,7 +166,9 @@ Steps, in order, each failing closed:
 1. Look the token up by hash; reject if absent, revoked or expired (401). Touch `last_used_at`.
 2. Authorize the token's user in the token's workspace: the workspace has the `apps` feature enabled
    (the path carries no `/ws/{ws}`, so the feature gate cannot infer it — the handler checks it),
-   `app:read` (run) or `app:write` (edit) on the token's app, and `query:run` on the database.
+   `app:read` on the token's app in run mode; `app:write` **and** `query:run` in edit mode. Run mode
+   does not require `query:run`: `ws_viewer` lacks it, the viewer cannot write SQL (the token never
+   reaches the browser; only the author's code sends queries), and Ranger still decides per viewer.
 3. Resolve `database` **by name** within the token's workspace (404 if absent — same as denied).
 4. Read-only check (§4.3); reject with 400 and the reason.
 5. `QueryExecPort::execute_as` (or `execute_as_with_params`) as the token's user, with
@@ -505,10 +507,13 @@ never merged; automated Playwright, single run per case, macOS dev laptop under 
 
 ### PRs, in order
 
-1. **P1 — Query gateway.** `app_sessions`, the read-only checker, `POST /api/apps/query`, audit, rate
-   limit. Backend only; testable with a seeded token and no marimo.
-2. **P2 — Storage and lifecycle.** `apps`, `app_drafts`, `app_versions` (+ trigger), draft API with
-   revision/409, publish, restore, `app:*` permissions, the `apps` feature module.
+1. **P1 — Query gateway.** `app_sessions` (its `login_sid` cascades from egret's `sessions`, so logout
+   revokes it by construction), the read-only checker, `POST /api/apps/query`, audit, rate limit — plus
+   what the gateway must authorize against: the `analytics.apps` identity table, the `app:*`
+   permissions and the `apps` feature module. Backend only; testable with a seeded token and no marimo.
+   Plan: `docs/en/plans/2026-10-01-data-apps-p1-query-gateway.md`.
+2. **P2 — Storage and lifecycle.** `app_drafts`, `app_versions` (+ trigger, and the FK from
+   `app_sessions.version_id`), draft API with revision/409, publish, restore, app CRUD and shares.
 3. **P3 — `egret-apps` image and `egret_marimo`.** Entrypoints, `EgretStorage`, DB-API, `egret.sql`,
    locked-down marimo configuration, the run-mode IPC patch and the fix for marimo's per-launch
    `has_marimo_installed` check (D14: the launcher shim answers it, with a contract test that fails when
