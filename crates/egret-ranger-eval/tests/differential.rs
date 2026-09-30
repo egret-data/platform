@@ -1256,6 +1256,34 @@ fn tag_policy(
     priority: i32,
 ) -> Value {
     let value = match names.is_empty() {
+        // The CASE variant of a tag the request actually carries. Drawn from the
+        // request's own names rather than from `TAG_POLICY_VALUES`, because that
+        // list is fixed and the tag names the request draws are not: a value that
+        // merely LOOKS like a case variant of some name in the vocabulary is not
+        // one of a name in THIS request's set, and only the latter exercises
+        // `tag.json`'s `ignoreCase: false`. At 3‰ from the ordinary draw this
+        // axis was one seed away from starving.
+        false if rng.chance(1, 5) => {
+            let name = &names[rng.below(names.len())];
+            let flipped: String = name
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_uppercase() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        c.to_ascii_uppercase()
+                    }
+                })
+                .collect();
+            if rng.chance(1, 2) {
+                flipped
+            } else {
+                // A case-flipped PREFIX plus `*`, so the difference is a case
+                // difference inside a shape that would otherwise cover.
+                let take = 1 + rng.below(flipped.chars().count());
+                format!("{}*", flipped.chars().take(take).collect::<String>())
+            }
+        }
         false if rng.chance(3, 4) => {
             let name = &names[rng.below(names.len())];
             let candidates = covering_tag_values(name);
@@ -1310,8 +1338,15 @@ fn tag_policy(
         // the policy and reaches no verdict; with it true the identical policy
         // denies everything. `tag_policy_is_pruned` reproduces that, and this is
         // what measures the reproduction against the real engine.
-        0 if rng.chance(1, 9) => {
+        0 if rng.chance(1, 5) => {
             p.insert("isDenyAllElse".to_string(), json!(true));
+            // `isAuditEnabled` is DECIDED here rather than left to the tail
+            // below, and both ways: with it false the policy is PRUNED and its
+            // `isDenyAllElse` cannot deny, with it true the identical policy
+            // denies everything. Leaving it to a 1-in-4 tail draw left the
+            // pruned shape at 3‰, which is one seed from starving the only axis
+            // that covers a rule this crate now REPRODUCES.
+            p.insert("isAuditEnabled".to_string(), json!(rng.chance(1, 2)));
         }
         _ => {
             let allow = 1 + rng.below(2);
@@ -1323,7 +1358,14 @@ fn tag_policy(
                         .collect(),
                 ),
             );
-            let deny = rng.below(3);
+            // ⚠ ONE deny item at most, and only a third of the time — where the
+            // resource-side `policy()` draws 0-2 uniformly. A tag DENY shuts out
+            // every same-priority resource allow through offset 469's `>=`, so a
+            // deny-happy tag layer starves the whole corpus of ALLOW outcomes:
+            // at `rng.below(3)` the allow count fell to 78 in 1600 cases and
+            // tripped the degeneracy floor below. The deny-capable axis stays
+            // populated at ~10%, which is what the floor checks.
+            let deny = usize::from(rng.chance(1, 3));
             p.insert(
                 "denyPolicyItems".to_string(),
                 Value::Array(
@@ -1344,7 +1386,7 @@ fn tag_policy(
                     json!([access_item(rng, profile, shape)]),
                 );
             }
-            if rng.chance(1, 8) {
+            if rng.chance(1, 12) {
                 p.insert("isDenyAllElse".to_string(), json!(true));
             }
         }
@@ -1352,9 +1394,11 @@ fn tag_policy(
     // `isAuditEnabled: false` — the prune's gate. Emitted on every policy type,
     // not only the item-less one, so that "the prune fires" and "the flag is
     // present" stay separable: a policy WITH items and auditing off must still
-    // be kept.
+    // be kept. `entry` rather than `insert`, so the item-less arm above keeps the
+    // value it chose deliberately.
     if rng.chance(1, 4) {
-        p.insert("isAuditEnabled".to_string(), json!(false));
+        p.entry("isAuditEnabled".to_string())
+            .or_insert_with(|| json!(false));
     }
     Value::Object(p)
 }
@@ -2196,102 +2240,102 @@ const AXES: &[Axis] = &[
     // distinction has already produced a false green in this package.
     Axis {
         name: "tag: tagPolicies block present",
-        min_per_mille: 0,
+        min_per_mille: 210,
         only: None,
     },
     Axis {
         name: "tag: a tag the block's policies REACH",
-        min_per_mille: 0,
+        min_per_mille: 170,
         only: None,
     },
     Axis {
         name: "tag: a tag the block's policies do NOT reach",
-        min_per_mille: 0,
+        min_per_mille: 80,
         only: None,
     },
     Axis {
         name: "tag: match SELF",
-        min_per_mille: 0,
+        min_per_mille: 90,
         only: None,
     },
     Axis {
         name: "tag: match SELF_AND_ALL_DESCENDANTS",
-        min_per_mille: 0,
+        min_per_mille: 78,
         only: None,
     },
     Axis {
         name: "tag: match ANCESTOR",
-        min_per_mille: 0,
+        min_per_mille: 90,
         only: None,
     },
     Axis {
         name: "tag: match DESCENDANT (NOT admitted)",
-        min_per_mille: 0,
+        min_per_mille: 16,
         only: None,
     },
     Axis {
         name: "tag: match NONE (NOT admitted)",
-        min_per_mille: 0,
+        min_per_mille: 15,
         only: None,
     },
     Axis {
         name: "tag: empty resolved set (the narrowing)",
-        min_per_mille: 0,
+        min_per_mille: 10,
         only: None,
     },
     Axis {
         name: "tag: same NAME at two match types",
-        min_per_mille: 0,
+        min_per_mille: 45,
         only: None,
     },
     Axis {
         name: "tag: attachment carrying attributes",
-        min_per_mille: 0,
+        min_per_mille: 75,
         only: None,
     },
     Axis {
         name: "tag: deny-capable ACCESS policy",
-        min_per_mille: 0,
+        min_per_mille: 50,
         only: None,
     },
     Axis {
         name: "tag: MASK policy of this kind",
-        min_per_mille: 0,
+        min_per_mille: 45,
         only: None,
     },
     Axis {
         name: "tag: ROW FILTER policy of this kind",
-        min_per_mille: 0,
+        min_per_mille: 45,
         only: None,
     },
     Axis {
         name: "tag: several policies of this kind at ONE priority",
-        min_per_mille: 0,
+        min_per_mille: 68,
         only: None,
     },
     Axis {
         name: "tag: policyPriority override",
-        min_per_mille: 0,
+        min_per_mille: 50,
         only: None,
     },
     Axis {
         name: "tag: policy of a DIFFERENT type in the block",
-        min_per_mille: 0,
+        min_per_mille: 30,
         only: None,
     },
     Axis {
         name: "tag: policy value is a prefix wildcard",
-        min_per_mille: 0,
+        min_per_mille: 90,
         only: None,
     },
     Axis {
         name: "tag: value differing from a resolved tag only by CASE",
-        min_per_mille: 0,
+        min_per_mille: 20,
         only: None,
     },
     Axis {
         name: "tag: composed eval-order duel",
-        min_per_mille: 0,
+        min_per_mille: 30,
         only: None,
     },
     // The prune, and its asymmetry. Three axes rather than one: a corpus that
@@ -2300,22 +2344,22 @@ const AXES: &[Axis] = &[
     // right.
     Axis {
         name: "tag: candidacy duel (offset 553 reachable)",
-        min_per_mille: 0,
+        min_per_mille: 28,
         only: None,
     },
     Axis {
         name: "tag: audit-disabled policy with NO items (pruned)",
-        min_per_mille: 0,
+        min_per_mille: 6,
         only: None,
     },
     Axis {
         name: "tag: audit-disabled policy WITH items (kept)",
-        min_per_mille: 0,
+        min_per_mille: 50,
         only: None,
     },
     Axis {
         name: "resource policy audit-disabled with NO items (NOT pruned)",
-        min_per_mille: 0,
+        min_per_mille: 22,
         only: None,
     },
 ];
@@ -3854,28 +3898,36 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
     // proves nothing. These floors are not thresholds on Ranger's behaviour —
     // they are a guard on the GENERATOR, so a change that makes every policy
     // miss cannot pass as green.
+    //
+    // ⚠ The denominator is `compared`, not `cases` — CHANGED in SP4d-2b Task 5,
+    // and the reason is not that it was failing. A case the crate REFUSES is not
+    // compared: it can neither agree nor disagree, so it is not part of the
+    // population these floors are about. Measuring against every case made the
+    // floors tighten as the refusal rate rose, for reasons that have nothing to
+    // do with whether policies match — and the tag phase raised that rate from
+    // ~2% to ~20%. The floors themselves are unchanged (1 in 20, 1 in 40).
     assert!(
-        total.allowed * 20 >= total.cases,
-        "corpus degenerate: only {} allows in {} cases",
+        total.allowed * 20 >= total.compared,
+        "corpus degenerate: only {} allows in {} compared cases",
         total.allowed,
-        total.cases
+        total.compared
     );
     assert!(
-        total.denied * 20 >= total.cases,
-        "corpus degenerate: only {} denies in {} cases",
+        total.denied * 20 >= total.compared,
+        "corpus degenerate: only {} denies in {} compared cases",
         total.denied,
-        total.cases
+        total.compared
     );
     assert!(
-        total.masked * 40 >= total.cases,
-        "corpus degenerate: only {} masks in {} cases",
+        total.masked * 40 >= total.compared,
+        "corpus degenerate: only {} masks in {} compared cases",
         total.masked,
-        total.cases
+        total.compared
     );
     assert!(
-        total.filtered * 40 >= total.cases,
-        "corpus degenerate: only {} row filters in {} cases",
+        total.filtered * 40 >= total.compared,
+        "corpus degenerate: only {} row filters in {} compared cases",
         total.filtered,
-        total.cases
+        total.compared
     );
 }
