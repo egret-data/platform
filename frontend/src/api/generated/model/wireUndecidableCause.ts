@@ -100,6 +100,7 @@ export type WireUndecidableCause = {
   priorities: number[];
   kind: 'tag_priority_arbitration_not_modelled';
 } | {
+  plugin_version?: null | WirePluginVersion;
   /** @nullable */
   tag_policy_id?: number | null;
   tag_policy_name: string;

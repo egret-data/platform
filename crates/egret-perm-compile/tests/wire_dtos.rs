@@ -572,23 +572,41 @@ fn cause_tag_priority_arbitration_keeps_names_and_priorities_in_step() {
 /// The version split names BOTH policies, and they are not interchangeable: one
 /// is the TAG policy that denies and one is the RESOURCE policy that allows, and
 /// a UI that swapped them would send a steward to the wrong service entirely.
+///
+/// It also carries the plugin version, in BOTH of its states (fix round 1,
+/// IMPORTANT 4). The UI branches on it because the two need different advice —
+/// a known 2.5.0 has nothing to record, and a `null` does — so a wire shape that
+/// dropped it would force one sentence to cover both, which is the defect that
+/// finding names.
 #[test]
-fn cause_tag_deny_reopened_names_the_tag_and_the_resource_policy_apart() {
-    let cause = UndecidableCause::TagDenyReopenedDiffersByPluginVersion {
+fn cause_tag_deny_reopened_carries_both_policies_and_the_plugin_version() {
+    let cause = |plugin_version| UndecidableCause::TagDenyReopenedDiffersByPluginVersion {
+        plugin_version,
         tag_policy_id: Some(8920),
         tag_policy_name: "clearance-deny".to_string(),
         resource_policy_id: Some(55),
         resource_policy_name: "grant-orders".to_string(),
     };
     assert_eq!(
-        serde_json::to_value(WireUndecidableCause::from(&cause)).unwrap(),
+        serde_json::to_value(WireUndecidableCause::from(&cause(Some(
+            PluginVersion::Ranger2_5_0
+        ))))
+        .unwrap(),
         serde_json::json!({
             "kind": "tag_deny_reopened_differs_by_plugin_version",
+            "plugin_version": "ranger_2_5_0",
             "tag_policy_id": 8920,
             "tag_policy_name": "clearance-deny",
             "resource_policy_id": 55,
             "resource_policy_name": "grant-orders",
         })
+    );
+    // The `None` arm is the one the UI's other branch renders, and a `Serialize`
+    // that skipped the key instead of emitting `null` would make the TypeScript
+    // field optional-and-absent rather than nullable — a different discriminant.
+    assert_eq!(
+        serde_json::to_value(WireUndecidableCause::from(&cause(None))).unwrap()["plugin_version"],
+        serde_json::Value::Null
     );
 }
 

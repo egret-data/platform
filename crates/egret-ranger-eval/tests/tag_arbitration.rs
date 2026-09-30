@@ -1281,8 +1281,15 @@ fn a_tag_deny_over_a_band_of_two_deniers_still_answers() {
 /// The refusal is on a DENYING rival, not on the band having more than one
 /// member: a band whose other members allow (or decide nothing) gives the same
 /// answer in every order, so it must still answer.
+///
+/// ⚠ **On 2.8.0**, and stated because fix round 1 measured the other version.
+/// Two deny-capable allowers at one priority above a tag deny answer `Allowed`
+/// on 2.8.0 — the second one trips offset 469, `determined` is set and the
+/// restore never runs — and `Denied` on 2.5.0, where a tag deny is never
+/// reopened at all. The sibling below asserts the refusal the 2.5.0 answer
+/// forces.
 #[test]
-fn a_tag_deny_over_a_band_that_cannot_disagree_still_answers() {
+fn a_tag_deny_over_a_band_that_cannot_disagree_still_answers_on_2_8_0() {
     let set = envelope(
         json!([
             {
@@ -1316,12 +1323,39 @@ fn a_tag_deny_over_a_band_that_cannot_disagree_still_answers() {
         )]),
     );
 
-    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    let d = evaluate(&set, &request(), &trino_def(), &plugin_2_8_0());
     assert!(
         matches!(&d, Decision::Allowed { .. }),
-        "two allowers in one band agree in every order, so this must answer: {}",
+        "two allowers in one band agree in every order, so on 2.8.0 this must answer: {}",
         named(&d)
     );
+
+    // …and on 2.5.0 and on an unstated version it must REFUSE, because 2.5.0
+    // answers `Denied` by the tag policy for this exact download. MEASURED on
+    // both engines: two deny-capable allowers at priority 5 over a tag deny at 0
+    // give `Allowed, policyId 1` on 2.8.0 and `Denied, policyId 900` on 2.5.0.
+    for engine in [
+        EngineConfig {
+            plugin_version: Some(PluginVersion::Ranger2_5_0),
+            ..EngineConfig::without_super_users()
+        },
+        no_superusers(),
+    ] {
+        let d = evaluate(&set, &request(), &trino_def(), &engine);
+        assert!(
+            matches!(
+                &d,
+                Decision::Undecidable { why }
+                    if why.iter().any(|c| matches!(
+                        c,
+                        UndecidableCause::TagDenyReopenedDiffersByPluginVersion { .. }
+                    ))
+            ),
+            "the two versions answer this download differently, so {:?} must refuse: {}",
+            engine.plugin_version,
+            named(&d)
+        );
+    }
 }
 
 // ── offset 553 on the mask path: what Ranger actually REACHES ────────────

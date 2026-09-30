@@ -680,6 +680,15 @@ pub enum WireUndecidableCause {
     /// a shape Ranger 2.5.0 and 2.8.0 answer DIFFERENTLY, so it can only be
     /// decided once the running plugin version is known.
     TagDenyReopenedDiffersByPluginVersion {
+        /// The plugin version the caller declared, or `null` if it declared none.
+        ///
+        /// The two states need DIFFERENT advice and the UI branches on it: a known
+        /// 2.5.0 means the running plugin is identified and the refusal is that
+        /// 2.5.0's arm is unmodelled — there is nothing to record. `null` means the
+        /// caller did not say, and recording it would make half of these
+        /// answerable. `2_8_0` never appears: that is the version the evaluator
+        /// reproduces, so the refusal is not raised for it.
+        plugin_version: Option<WirePluginVersion>,
         tag_policy_id: Option<i64>,
         tag_policy_name: String,
         resource_policy_id: Option<i64>,
@@ -857,11 +866,13 @@ impl From<&UndecidableCause> for WireUndecidableCause {
                 priorities: priorities.clone(),
             },
             UndecidableCause::TagDenyReopenedDiffersByPluginVersion {
+                plugin_version,
                 tag_policy_id,
                 tag_policy_name,
                 resource_policy_id,
                 resource_policy_name,
             } => WireUndecidableCause::TagDenyReopenedDiffersByPluginVersion {
+                plugin_version: plugin_version.map(WirePluginVersion::from),
                 tag_policy_id: *tag_policy_id,
                 tag_policy_name: tag_policy_name.clone(),
                 resource_policy_id: *resource_policy_id,

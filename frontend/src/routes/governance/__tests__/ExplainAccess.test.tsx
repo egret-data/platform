@@ -900,10 +900,19 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
                     },
                     {
                       kind: "tag_deny_reopened_differs_by_plugin_version",
+                      plugin_version: "ranger_2_5_0",
                       tag_policy_id: 8920,
                       tag_policy_name: "clearance-deny",
                       resource_policy_id: 55,
                       resource_policy_name: "grant-orders",
+                    },
+                    {
+                      kind: "tag_deny_reopened_differs_by_plugin_version",
+                      plugin_version: null,
+                      tag_policy_id: 8921,
+                      tag_policy_name: "clearance-deny-unknown",
+                      resource_policy_id: 56,
+                      resource_policy_name: "grant-invoices",
                     },
                   ],
                 },
@@ -921,7 +930,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
 
     const result = await screen.findByTestId("explain-result");
     const causes = within(result).getAllByTestId("undecidable-cause");
-    expect(causes).toHaveLength(5);
+    expect(causes).toHaveLength(6);
     for (const cause of causes) {
       expect(cause.textContent?.trim().length ?? 0).toBeGreaterThan(20);
     }
@@ -948,16 +957,27 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     expect(causes[3]).toHaveTextContent(/priority 0/);
     expect(causes[3]).toHaveTextContent(/priority 3/);
 
-    // The version split has to say that the PLUGIN VERSION is what is missing —
-    // "egret cannot decide this" would send a steward to the policies, which are
-    // both fine.
+    // ⚠ FIX ROUND 1, IMPORTANT 4. The version split renders DIFFERENTLY depending
+    // on whether the plugin version is known, and the two sentences give different
+    // remedies. The old single sentence told the steward to record the plugin
+    // version — which `explain` now always does, so in the only case `explain` can
+    // produce it the advice had already been taken and could not be taken again.
+    //
+    // Known 2.5.0: names the version, says which side egret does not reproduce,
+    // and must NOT tell anyone to record anything.
     expect(causes[4]).toHaveTextContent("clearance-deny");
     expect(causes[4]).toHaveTextContent("grant-orders");
     expect(causes[4]).toHaveTextContent(/2\.5\.0/);
     expect(causes[4]).toHaveTextContent(/2\.8\.0/);
-    expect(causes[4]).toHaveTextContent(/version/i);
+    expect(causes[4]).not.toHaveTextContent(/records which plugin version/i);
 
-    expect(new Set(causes.map((c) => c.textContent)).size).toBe(5);
+    // Unknown: this is the ONE case where "record the plugin version" is the
+    // remedy, and it must still be offered.
+    expect(causes[5]).toHaveTextContent("clearance-deny-unknown");
+    expect(causes[5]).toHaveTextContent("grant-invoices");
+    expect(causes[5]).toHaveTextContent(/records which plugin version/i);
+
+    expect(new Set(causes.map((c) => c.textContent)).size).toBe(6);
   });
 
   /**

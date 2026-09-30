@@ -312,8 +312,16 @@ function causeSentence(c: WireUndecidableCause): string {
       return `The tag “${c.tag}” on this resource ${tagAttachmentProblemPhrase(c.problem)}, so egret cannot tell whether the engine would evaluate its tag policies here.`;
     case "tag_sub_result_split_by_resource_policy":
       return `Tag policy ${policyRef(c.tag_policy_name, c.tag_policy_id)} produced a mask or row filter and the higher-priority Ranger policy ${policyRef(c.resource_policy_name, c.resource_policy_id)} then produced one too, so Ranger reports the tag policy's id with the other policy's mask.`;
-    case "tag_deny_reopened_differs_by_plugin_version":
-      return `Tag policy ${policyRef(c.tag_policy_name, c.tag_policy_id)} denies this, and the higher-priority Ranger policy ${policyRef(c.resource_policy_name, c.resource_policy_id)} allows it — a combination Ranger 2.5.0 and 2.8.0 resolve differently, so it can only be answered once this profile records which plugin version its engine is running.`;
+    case "tag_deny_reopened_differs_by_plugin_version": {
+      // Two states, two different remedies — and the sentence used to give the
+      // second one in both cases (fix round 1, IMPORTANT 4). `explain` now always
+      // declares the plugin version, so "record which plugin version its engine is
+      // running" was advice a steward had already taken and could not take again.
+      const shape = `Tag policy ${policyRef(c.tag_policy_name, c.tag_policy_id)} denies this and the higher-priority Ranger policy ${policyRef(c.resource_policy_name, c.resource_policy_id)} allows it, and Ranger 2.5.0 and 2.8.0 resolve that combination differently`;
+      return c.plugin_version
+        ? `${shape}. This engine runs ${PLUGIN_LABEL[c.plugin_version]}, which keeps the tag deny here where 2.8.0 would reopen it — egret does not yet reproduce 2.5.0's side of that split, so it will not guess. Levelling the two priorities, or removing one of the two policies, makes this decidable.`
+        : `${shape}, so it cannot be answered until this profile records which plugin version its engine is running.`;
+    }
     case "tag_priority_arbitration_not_modelled":
       return `Several tag policies at different priorities each decide this, and which one the engine keeps depends on an arbitration egret does not reproduce: ${c.policy_names
         .map((name, i) => `${policyRef(name, c.policy_ids[i] ?? null)} at priority ${c.priorities[i]}`)

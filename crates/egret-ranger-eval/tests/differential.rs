@@ -293,6 +293,17 @@ const TAG_DEF_PATH: &str = concat!(
     "/../egret-policy/src/service-defs/tag.json"
 );
 
+/// Where a TAG policy's `id` starts.
+///
+/// Resource policies are numbered from 1 and tag policies from here, so the two
+/// **never collide**. That is not cosmetic: the differential gate compares the
+/// reported `policyId` (see [`IdVerdict`]), and the only way to tell "the crate
+/// named the tag policy and Ranger named the resource policy" — the declared
+/// cross-phase restore divergence — from an ordinary mismatch is to read which
+/// side of this line the id falls on. Before SP4d-2b Task 5 fix round 1 both
+/// halves numbered from 1 and a reproducer's `policyId: 2` was ambiguous.
+const TAG_POLICY_ID_BASE: i64 = 900;
+
 /// Tag names a request's resolved set can carry. `p` is a PREFIX of `pii` and
 /// `pii_x` has `pii` as a prefix, so a `p*` or `pii*` policy value separates
 /// "covers this tag" from "is a prefix of its name"; `PII` is the case
@@ -460,6 +471,10 @@ struct Case {
     /// Built by [`candidacy_duel`]: the only shape that reaches offset 553's
     /// candidate-set refusal. Counted so that its rate has a denominator.
     candidacy_duel: bool,
+    /// Built by [`restore_duel`]: the only shape that reaches T3's skip. It
+    /// ANSWERS rather than refusing, so it has no rate — what it has is a floor,
+    /// and the property it carries is that reverting T3 makes the gate RED.
+    restore_duel: bool,
     service_policies: Value,
     request: AccessRequest,
 }
@@ -921,7 +936,21 @@ fn row_filter_item(rng: &mut Rng, profile: &Profile, shape: &Shape) -> Value {
     item
 }
 
-fn policy(rng: &mut Rng, profile: &Profile, shape: &Shape, id: i64, policy_type: i32) -> Value {
+/// One resource policy.
+///
+/// `level_priority` forces `policyPriority: 0`. ⚠ **It is set for every RANDOM
+/// tag-carrying case, and that is a held-out shape with a measured reason** — see
+/// the ⚠ block in [`generate_case`]. The deliberate duels build their own
+/// policies and keep their priorities, so every shape this gate is pointed at
+/// still varies them.
+fn policy(
+    rng: &mut Rng,
+    profile: &Profile,
+    shape: &Shape,
+    id: i64,
+    policy_type: i32,
+    level_priority: bool,
+) -> Value {
     let mut p = Map::new();
     p.insert("id".to_string(), json!(id));
     // A name-only tie-break is what Task 5 stands in for `getEvalOrder()`, so
@@ -932,7 +961,11 @@ fn policy(rng: &mut Rng, profile: &Profile, shape: &Shape, id: i64, policy_type:
     p.insert("isEnabled".to_string(), json!(!rng.chance(1, 12)));
     p.insert(
         "policyPriority".to_string(),
-        json!(if rng.chance(1, 7) { 1 } else { 0 }),
+        json!(if !level_priority && rng.chance(1, 7) {
+            1
+        } else {
+            0
+        }),
     );
     p.insert(
         "resources".to_string(),
@@ -1315,6 +1348,7 @@ fn tag_policy(
     };
 
     let mut p = Map::new();
+    let id = TAG_POLICY_ID_BASE + id;
     p.insert("id".to_string(), json!(id));
     p.insert("name".to_string(), json!(format!("t{id}")));
     p.insert("service".to_string(), json!(profile.tag_service_name));
@@ -1360,15 +1394,28 @@ fn tag_policy(
         // the policy and reaches no verdict; with it true the identical policy
         // denies everything. `tag_policy_is_pruned` reproduces that, and this is
         // what measures the reproduction against the real engine.
-        0 if rng.chance(1, 5) => {
+        0 if rng.chance(1, 4) => {
             p.insert("isDenyAllElse".to_string(), json!(true));
+            // ⚠ The tag value is REPLACED with a resolved tag's own name here, and
+            // that is what makes this shape coverage rather than decoration. FIX
+            // ROUND 1: once the prune axis started requiring a COVERING value
+            // (IMPORTANT 3) it fell to 3‰ against a 6‰ floor, because the ordinary
+            // draw covers a tag only ~1 time in 5. A pruned policy no tag reaches
+            // is indistinguishable from a pruned policy that was never there.
+            if let Some(name) = names.first() {
+                p.insert("resources".to_string(), json!({"tag": {"values": [name]}}));
+            }
             // `isAuditEnabled` is DECIDED here rather than left to the tail
             // below, and both ways: with it false the policy is PRUNED and its
             // `isDenyAllElse` cannot deny, with it true the identical policy
             // denies everything. Leaving it to a 1-in-4 tail draw left the
             // pruned shape at 3‰, which is one seed from starving the only axis
             // that covers a rule this crate now REPRODUCES.
-            p.insert("isAuditEnabled".to_string(), json!(rng.chance(1, 2)));
+            // False two times in three: the PRUNED shape is the one the crate
+            // reproduces and the one with a floor, and the KEPT shape beside it is
+            // its falsifier — but the falsifier does not need as many cases as the
+            // rule it falsifies.
+            p.insert("isAuditEnabled".to_string(), json!(!rng.chance(2, 3)));
         }
         _ => {
             let allow = 1 + rng.below(2);
@@ -1380,14 +1427,23 @@ fn tag_policy(
                         .collect(),
                 ),
             );
-            // ⚠ ONE deny item at most, and only a third of the time — where the
+            // ⚠ A deny bucket only a QUARTER of the time, where the
             // resource-side `policy()` draws 0-2 uniformly. A tag DENY shuts out
             // every same-priority resource allow through offset 469's `>=`, so a
             // deny-happy tag layer starves the whole corpus of ALLOW outcomes:
             // at `rng.below(3)` the allow count fell to 78 in 1600 cases and
-            // tripped the degeneracy floor below. The deny-capable axis stays
-            // populated at ~10%, which is what the floor checks.
-            let deny = usize::from(rng.chance(1, 3));
+            // tripped the degeneracy floor below.
+            //
+            // FIX ROUND 1, MINOR 8: it is 1 OR 2 items when it fires, not 1. The
+            // first version drew at most one, which removed the multi-deny-item
+            // shape with nothing recording the removal; `multi_deny_access` is
+            // now an axis with a floor. Expected items per policy is 0.375
+            // against the old 0.333, so the allow rate barely moves.
+            let deny = if rng.chance(1, 4) {
+                1 + rng.below(2)
+            } else {
+                0
+            };
             p.insert(
                 "denyPolicyItems".to_string(),
                 Value::Array(
@@ -1528,7 +1584,7 @@ fn composed_duel(
         "policyItems"
     };
     let mut tag_policy = Map::new();
-    tag_policy.insert("id".to_string(), json!(90));
+    tag_policy.insert("id".to_string(), json!(TAG_POLICY_ID_BASE + 90));
     tag_policy.insert("name".to_string(), json!("t-composed"));
     tag_policy.insert("service".to_string(), json!(profile.tag_service_name));
     tag_policy.insert("policyType".to_string(), json!(0));
@@ -1633,7 +1689,8 @@ fn candidacy_duel(
     let match_type = *rng.pick(ADMITTED_TAG_MATCH_TYPES);
     let tag = resolved_tag(rng, profile, &name, match_type);
     let tag_policy = json!({
-        "id": 90, "name": "t-candidacy", "service": profile.tag_service_name, "policyType": 0,
+        "id": TAG_POLICY_ID_BASE + 91, "name": "t-candidacy",
+        "service": profile.tag_service_name, "policyType": 0,
         "isEnabled": true, "policyPriority": 0,
         "resources": {"tag": {"values": [name]}},
         "policyItems": [{
@@ -1650,6 +1707,128 @@ fn candidacy_duel(
     )
 }
 
+/// The RESTORE shape: a tag DENY, a deny-capable resource ALLOW above it, and a
+/// policy Ranger's trie provably does not return.
+///
+/// ⚠ **Added in fix round 1, RULING 1, and the reason is a measurement.** Reverting
+/// T3's fix — the skip that keeps a trie-excluded view out of the three-way
+/// arbitration — left the gate **GREEN at the recorded seed**. The corpus had a
+/// blind spot for it: the shape needs a conjunction the random draw does not
+/// produce, and the two refusals added after T3 (`EvalOrderAmbiguous` on a band,
+/// and the version split) intercept most of what comes close. So the fix was
+/// pinned by exactly one JVM-free unit test and by nothing the gate ran.
+///
+/// The three pieces, and why each is what it is:
+///
+/// * a tag DENY at priority 0, so the loop is in the `is_denied_by_tags` arm and
+///   the restore at offsets 599-632 is what decides the case;
+/// * a MATCHING resource ALLOW at priority 1 that is **deny-capable** (deny items
+///   naming nobody). Deny-capable so offset 553 cannot determine for it and the
+///   loop runs on; alone in its priority so T2's band refusal has no rival to
+///   find;
+/// * a NON-matching, NO-deny policy at priority 0 whose level value is a
+///   trie-exact LITERAL — so `trie_excludes` can prove absence. Note this is the
+///   OPPOSITE of what [`candidacy_duel`] needs, which wants a value
+///   `trie_excludes` CANNOT prove: one shape is about what the trie provably
+///   excludes and the other about what it cannot.
+///
+/// Expected: `Denied` by the tag policy, because nothing determines and the
+/// restore puts the tag verdict back. Without T3's skip the third policy trips
+/// offset 469, `determined` is set, the restore is skipped, and the answer is
+/// `Allowed` — which is the divergence the review could not reproduce.
+fn restore_duel(
+    rng: &mut Rng,
+    profile: &Profile,
+    shape: &Shape,
+    tag_def: &Value,
+) -> (Vec<Value>, TagLayer) {
+    let root = profile.hierarchy[0];
+    // ⚠ The ROOT level's request value is forced CONCRETE, and that is a held-out
+    // shape rather than a convenience. With an empty root value this duel lands on
+    // the one row where `level_excluded_by_trie` and Ranger's trie are measured to
+    // DISAGREE — see the ⚠ block on that function. The rule separating the rows is
+    // not established, so the gate must not carry a standing disagreement over it;
+    // the shape is recorded in `tests/ranger/README.md` with its measured rows
+    // instead.
+    let mut request_levels = shape.request_levels.clone();
+    if let Some((_, value)) = request_levels.first_mut() {
+        if value.is_empty() {
+            *value = "restore_root".to_string();
+        }
+    }
+    let exact: Value = Value::Object(
+        request_levels
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    json!({"values": [if value == "*" { "*" } else { value }]}),
+                )
+            })
+            .collect(),
+    );
+
+    let allower = json!({
+        "id": 1, "name": "restore-a-allow", "service": profile.service_name, "policyType": 0,
+        "isEnabled": true, "policyPriority": 1,
+        "resources": exact,
+        "policyItems": [{
+            "users": [shape.user], "groups": [], "roles": [],
+            "accesses": [{"type": shape.access_type, "isAllowed": true}],
+        }],
+        // Deny items matching nobody: `hasDeny()` is true, so offset 553 cannot
+        // determine and the loop must run out for the restore to happen.
+        "denyPolicyItems": [{
+            "users": ["nobody_at_all"], "groups": [], "roles": [],
+            "accesses": [{"type": shape.access_type, "isAllowed": true}],
+        }],
+    });
+    // A LITERAL the request's root level cannot be, so `trie_reproduces_matcher`
+    // classifies it `Equals` and `trie_excludes` proves the policy absent.
+    let excluded = json!({
+        "id": 2, "name": "restore-b-trie-excluded", "service": profile.service_name,
+        "policyType": 0, "isEnabled": true, "policyPriority": 0,
+        "resources": { root: {"values": ["no_such_value_at_all"]} },
+        "policyItems": [{
+            "users": [shape.user], "groups": [], "roles": [],
+            "accesses": [{"type": shape.access_type, "isAllowed": true}],
+        }],
+    });
+
+    let name = rng.pick(TAG_NAMES).to_string();
+    let match_type = *rng.pick(ADMITTED_TAG_MATCH_TYPES);
+    let tag = resolved_tag(rng, profile, &name, match_type);
+    let tag_policy = json!({
+        "id": TAG_POLICY_ID_BASE + 92, "name": "t-restore",
+        "service": profile.tag_service_name, "policyType": 0,
+        "isEnabled": true, "policyPriority": 0,
+        "resources": {"tag": {"values": [name]}},
+        "denyPolicyItems": [{
+            "users": [shape.user], "groups": [], "roles": [],
+            "accesses": [{"type": shape.access_type, "isAllowed": true}],
+        }],
+    });
+    (
+        vec![allower, excluded],
+        TagLayer {
+            block: tag_block(profile, tag_def, vec![tag_policy]),
+            tags: vec![tag],
+        },
+    )
+}
+
+/// The REQUEST a [`restore_duel`] is issued for, which differs from the shape's
+/// own in exactly one place — see the ⚠ note in `restore_duel`.
+fn restore_duel_request(shape: &Shape) -> Vec<(String, String)> {
+    let mut levels = shape.request_levels.clone();
+    if let Some((_, value)) = levels.first_mut() {
+        if value.is_empty() {
+            *value = "restore_root".to_string();
+        }
+    }
+    levels
+}
+
 fn generate_case(
     rng: &mut Rng,
     profile: &Profile,
@@ -1663,6 +1842,29 @@ fn generate_case(
         _ => 2,
     };
     let shape = build_shape(rng, profile, policy_type);
+
+    // One ACCESS case in ten is the deliberate RESTORE duel — the only shape that
+    // reaches T3's fix (RULING 1).
+    if policy_type == 0 && rng.chance(1, 10) {
+        let (policies, tags) = restore_duel(rng, profile, &shape, tag_def);
+        let shape = Shape {
+            request_levels: restore_duel_request(&shape),
+            ..shape
+        };
+        return finish_case(Finish {
+            profile,
+            service_def,
+            policies,
+            shape,
+            index,
+            policy_type,
+            duel: false,
+            composed_duel: false,
+            candidacy_duel: false,
+            restore_duel: true,
+            tags: Some(tags),
+        });
+    }
 
     // One ACCESS case in eight is the deliberate CANDIDACY duel — the only
     // shape that reaches offset 553's refusal at all.
@@ -1678,6 +1880,7 @@ fn generate_case(
             duel: false,
             composed_duel: false,
             candidacy_duel: true,
+            restore_duel: false,
             tags: Some(tags),
         });
     }
@@ -1698,6 +1901,7 @@ fn generate_case(
             duel: true,
             composed_duel: true,
             candidacy_duel: false,
+            restore_duel: false,
             tags: Some(tags),
         });
     }
@@ -1717,9 +1921,44 @@ fn generate_case(
             duel: true,
             composed_duel: false,
             candidacy_duel: false,
+            restore_duel: false,
             tags: None,
         });
     }
+
+    // Two cases in five carry a tag phase. Not more: the resource-path
+    // measurements this gate already reports — the `EvalOrderAmbiguous` rate
+    // above all — are rates over the cases that have NO tag phase, and
+    // shrinking that population would silently widen their error bars while
+    // the numbers still printed.
+    //
+    // ⚠ **Decided BEFORE the resource policies, because a tag-carrying case
+    // levels their priorities — a HELD-OUT shape with a measured reason (fix
+    // round 1, finding T7).** A tag verdict plus resource ACCESS policies at two
+    // priorities is a shape this crate answers WRONGLY, and the mechanism is the
+    // `accessTypeResults` map that T4's doc already refuses to model: Ranger's
+    // `updateAccessResult` writes into a FRESH per-access-type result whose
+    // `isAllowed` is false, so a resource allow lands there and raises the
+    // slot's priority even when the shared result was already allowed by a tag
+    // policy — and `getCompositeAccessResult` then copies that priority back,
+    // shutting out lower-priority evaluators this crate still runs. Measured at
+    // ranger 2.8.0, corpus case `2.8.0-0848` at seed `0x54d000007`: a tag ALLOW
+    // at priority 0, an `isDenyAllElse` resource policy at 1 that allows, and a
+    // resource policy at 0 that denies — Ranger answers `Allowed, policyId 2`
+    // and this crate answers `Denied by p1`.
+    //
+    // It is HELD OUT rather than refused because the refusal that covers it
+    // honestly ("a resource policy above the tag verdict's priority decides")
+    // would also refuse the four rows of T5's table that this crate reproduces
+    // exactly on 2.8.0, and the three unit tests that pin them. That is the
+    // modelling task `tests/ranger/README.md` names as follow-up item 2, and the
+    // audit it needs is exactly this: the map is live on the RESOURCE path too.
+    // The DELIBERATE duels keep their priorities, so every shape this gate was
+    // pointed at is still generated — what is held out is the random
+    // combination.
+    let tags = rng
+        .chance(2, 5)
+        .then(|| tag_layer(rng, profile, &shape, tag_def, policy_type));
 
     let policy_count = 1 + rng.below(4);
     let mut policies = Vec::new();
@@ -1731,17 +1970,22 @@ fn generate_case(
         } else {
             policy_type
         };
-        policies.push(policy(rng, profile, &shape, (n + 1) as i64, this_type));
+        // ⚠ ACCESS only. The mechanism held out below is the ACCESS loop's
+        // (offsets 452-535 and the restore at 599-632); `evaluate_sub` models a
+        // different walk, and levelling ITS priorities cost
+        // `TagSubResultSplitByResourcePolicy` all of its corpus coverage — 19
+        // cases became 0, measured. A held-out shape that silently takes a
+        // refusal's only coverage with it is the silent green this file exists to
+        // prevent.
+        policies.push(policy(
+            rng,
+            profile,
+            &shape,
+            (n + 1) as i64,
+            this_type,
+            tags.is_some() && this_type == 0,
+        ));
     }
-
-    // Two cases in five carry a tag phase. Not more: the resource-path
-    // measurements this gate already reports — the `EvalOrderAmbiguous` rate
-    // above all — are rates over the cases that have NO tag phase, and
-    // shrinking that population would silently widen their error bars while
-    // the numbers still printed.
-    let tags = rng
-        .chance(2, 5)
-        .then(|| tag_layer(rng, profile, &shape, tag_def, policy_type));
 
     finish_case(Finish {
         profile,
@@ -1753,6 +1997,7 @@ fn generate_case(
         duel: false,
         composed_duel: false,
         candidacy_duel: false,
+        restore_duel: false,
         tags,
     })
 }
@@ -1771,6 +2016,7 @@ struct Finish<'a> {
     duel: bool,
     composed_duel: bool,
     candidacy_duel: bool,
+    restore_duel: bool,
     tags: Option<TagLayer>,
 }
 
@@ -1802,6 +2048,7 @@ fn finish_case(f: Finish<'_>) -> Case {
         duel: f.duel,
         composed_duel: f.composed_duel,
         candidacy_duel: f.candidacy_duel,
+        restore_duel: f.restore_duel,
         service_policies,
         request: AccessRequest {
             user: f.shape.user,
@@ -1884,6 +2131,45 @@ impl Declined {
     }
 }
 
+/// Every [`Declined`] kind, in the order [`report_rates`] prints them and
+/// [`DECLINED_CEILINGS`] bounds them. The two lists are checked against each
+/// other at runtime for the same reason `AXES` and `axis_hits` are.
+const DECLINED_KINDS: &[Declined] = &[
+    Declined::EvalOrder,
+    Declined::ResourceCandidacy,
+    Declined::TagSubResultSplit,
+    Declined::TagPriorityArbitration,
+    Declined::TagDenyVersionSplit,
+];
+
+/// The CEILING on each refusal, in cases per thousand of the whole corpus.
+///
+/// ⚠ FIX ROUND 1, IMPORTANT 1. **This file had no upper bound on the refusal rate
+/// at all**, and the review proved it by injecting a 42% over-refusal: `compared`
+/// fell 3490 → 2314 and the gate stayed GREEN, exit 0. `report_rates` only prints.
+/// The degeneracy floors below measure against `compared`, which is right for what
+/// they are about (a refused case can neither agree nor disagree) and is exactly
+/// why they cannot see an over-refusal: the thing that shrinks is the denominator.
+///
+/// Over-refusal is the failure mode this crate is most likely to have and the one
+/// the brief says "produces no failing test", so it gets an assertion rather than
+/// a printed number. Each ceiling is ~2× the rate measured at the recorded seed,
+/// so ordinary seed variation cannot trip it while a doubling of any single
+/// refusal fails the run.
+const DECLINED_CEILINGS: &[(Declined, u32)] = &[
+    // measured 209/4000 = 52‰
+    (Declined::EvalOrder, 110),
+    // measured 253/4000 = 63‰, and bounded above by the candidacy-duel share of
+    // the corpus (~66‰) because it fires nowhere else.
+    (Declined::ResourceCandidacy, 140),
+    // measured 19/4000 = 5‰
+    (Declined::TagSubResultSplit, 20),
+    // measured 29/4000 = 7‰
+    (Declined::TagPriorityArbitration, 25),
+    // measured 0/4000, and 1/1600 at a smaller run. A ceiling of 10‰ is 40 cases.
+    (Declined::TagDenyVersionSplit, 10),
+];
+
 fn declined_kind(cause: &UndecidableCause) -> Option<Declined> {
     match cause {
         UndecidableCause::EvalOrderAmbiguous { .. } => Some(Declined::EvalOrder),
@@ -1959,6 +2245,136 @@ fn rust_outcome(
             },
         },
     }
+}
+
+/// The policy id this crate REPORTS for an ACCESS decision, or `None` for
+/// "no policy".
+///
+/// ⚠ FIX ROUND 1, RULING 3. [`Outcome::Access`] carries only `allowed`, so until
+/// now **a crate that reported the wrong policy id agreed with Ranger on all 4000
+/// cases** — and the id is precisely what distinguishes T4's and T5's measured
+/// rows from one another, and what `explain` puts in front of a steward. It is
+/// compared on its own axis rather than folded into `Outcome`, because two of the
+/// divergences are DECLARED and folding them in would either flood the gate or
+/// force the comparison to be weakened; see [`IdDivergence`].
+///
+/// Scoped to ACCESS, which is what the ruling asked for. The mask and row-filter
+/// paths already compare their DATA, and their ids are the subject of
+/// `EvalOrderAmbiguous` rather than of a separate axis.
+fn rust_access_policy_id(
+    case: &Case,
+    set: &ServicePolicySet,
+    def: &ServiceDef,
+    engine: &EngineConfig,
+) -> Option<Option<i64>> {
+    if case.policy_type != 0 {
+        return None;
+    }
+    match evaluate(set, &case.request, def, engine) {
+        Decision::Allowed { policy_id, .. } | Decision::Denied { policy_id, .. } => Some(policy_id),
+        Decision::Undecidable { .. } => None,
+    }
+}
+
+/// Ranger's reported ACCESS policy id, with its "none" spelling normalised.
+///
+/// `RangerAccessResult`'s `policyId` starts at **-1** and only a writing
+/// evaluator moves it, so -1 is Ranger's `None`. Reading it as an id would make
+/// every no-policy-matched case a mismatch against the crate's `None`.
+fn java_access_policy_id(verdict: &Value) -> Option<i64> {
+    match verdict.get("policyId").and_then(Value::as_i64) {
+        Some(id) if id >= 0 => Some(id),
+        _ => None,
+    }
+}
+
+/// One policy of a generated case, as the id comparison needs to see it.
+struct PolicyBand {
+    /// `id >= TAG_POLICY_ID_BASE`, i.e. the policy is in the `tagPolicies` block.
+    tag: bool,
+    priority: i64,
+    has_deny: bool,
+}
+
+/// Find a generated policy by id, in either list.
+///
+/// The id ranges are disjoint by construction ([`TAG_POLICY_ID_BASE`]) so a
+/// single lookup cannot confuse the two halves — which is the whole reason that
+/// constant exists.
+fn policy_band(case: &Case, id: i64) -> Option<PolicyBand> {
+    let lists = [
+        case.service_policies.get("policies"),
+        case.service_policies
+            .get("tagPolicies")
+            .and_then(|b| b.get("policies")),
+    ];
+    for list in lists.into_iter().flatten() {
+        for policy in list.as_array().into_iter().flatten() {
+            if policy["id"].as_i64() != Some(id) {
+                continue;
+            }
+            return Some(PolicyBand {
+                tag: id >= TAG_POLICY_ID_BASE,
+                priority: policy["policyPriority"].as_i64().unwrap_or(0),
+                has_deny: policy["isDenyAllElse"].as_bool() == Some(true)
+                    || policy["denyPolicyItems"]
+                        .as_array()
+                        .is_some_and(|b| !b.is_empty()),
+            });
+        }
+    }
+    None
+}
+
+/// The DECLARED reasons an ACCESS policy id may differ, each with the place it is
+/// documented.
+///
+/// ⚠ This is an ALLOW-LIST, not a relaxation: a mismatch that matches none of
+/// these FAILS the run with a reproducer. The ruling is explicit that the
+/// comparison must not be weakened to accommodate the known divergences, so each
+/// arm is a structural test on the two policies the two sides named, not a
+/// blanket "ids may differ".
+const ID_DIVERGENCES: &[(&str, &str)] = &[
+    (
+        "same (policyPriority, hasDeny) band — getEvalOrder() not reproduced",
+        "tests/ranger/README.md, \"Declared divergences\"; eval.rs's sort_eval_order",
+    ),
+    (
+        "tag deny restored over a resource allow — setIsAllowed(false) keeps the last writer's id",
+        "eval.rs's restore at offsets 599-632",
+    ),
+];
+
+/// Classify an ACCESS policy-id mismatch, or `None` if it is a NEW divergence.
+fn classify_id_divergence(
+    case: &Case,
+    mine: Option<i64>,
+    theirs: Option<i64>,
+) -> Option<&'static str> {
+    let (Some(mine), Some(theirs)) = (mine, theirs) else {
+        // One side named no policy at all and the other named one. That is not any
+        // of the declared shapes — both of them are two policies disagreeing about
+        // WHICH decided, not about WHETHER one did — so it fails.
+        return None;
+    };
+    let (Some(a), Some(b)) = (policy_band(case, mine), policy_band(case, theirs)) else {
+        // An id neither list carries: the gate cannot reason about it and must not
+        // pretend to.
+        return None;
+    };
+    // The cross-phase restore: the crate names the TAG policy that denied and
+    // Ranger names the resource policy that allowed and was then discarded.
+    // `setIsAllowed(false)` does not touch `policyId`, so Ranger's id points at a
+    // policy that ALLOWS — which is why this crate reports the other one.
+    if a.tag != b.tag {
+        return Some(ID_DIVERGENCES[1].0);
+    }
+    // One `(priority, hasDeny)` band, one list: `getEvalOrder()` decides which
+    // member Ranger reached first and this crate does not compute it.
+    if a.priority == b.priority && a.has_deny == b.has_deny {
+        return Some(ID_DIVERGENCES[0].0);
+    }
+    None
 }
 
 /// Ranger's answer, in the same shape.
@@ -2260,9 +2676,18 @@ const AXES: &[Axis] = &[
     // AND a policy of THIS case's kind whose `resources.tag` covers it, because
     // a tag nothing evaluates is not coverage of the tag phase. That
     // distinction has already produced a false green in this package.
+    //
+    // ⚠ FIX ROUND 1, IMPORTANT 3: six of these axes did NOT honour that
+    // sentence when it was written — the five match-type axes and the prune axis
+    // read the ingredient only. They now require a covering policy of the kind
+    // (and, for the prune, `isDenyAllElse`), and the floors below are re-measured
+    // against the narrowed predicates. The reach these floors guard is CANDIDACY,
+    // not "the answer would flip": the flip rate is lower (3‰ for DESCENDANT,
+    // measured by re-running Step 4's mutation) and is guarded by that mutation
+    // rather than by a floor, because `axis_hits` reads no decision.
     Axis {
         name: "tag: tagPolicies block present",
-        min_per_mille: 210,
+        min_per_mille: 220,
         only: None,
     },
     Axis {
@@ -2272,72 +2697,77 @@ const AXES: &[Axis] = &[
     },
     Axis {
         name: "tag: a tag the block's policies do NOT reach",
-        min_per_mille: 80,
+        min_per_mille: 83,
         only: None,
     },
     Axis {
         name: "tag: match SELF",
-        min_per_mille: 90,
+        min_per_mille: 70,
         only: None,
     },
     Axis {
         name: "tag: match SELF_AND_ALL_DESCENDANTS",
-        min_per_mille: 78,
+        min_per_mille: 67,
         only: None,
     },
     Axis {
         name: "tag: match ANCESTOR",
-        min_per_mille: 90,
+        min_per_mille: 73,
         only: None,
     },
     Axis {
         name: "tag: match DESCENDANT (NOT admitted)",
-        min_per_mille: 16,
+        min_per_mille: 14,
         only: None,
     },
     Axis {
         name: "tag: match NONE (NOT admitted)",
-        min_per_mille: 15,
+        min_per_mille: 12,
         only: None,
     },
     Axis {
         name: "tag: empty resolved set (the narrowing)",
-        min_per_mille: 10,
+        min_per_mille: 14,
         only: None,
     },
     Axis {
         name: "tag: same NAME at two match types",
-        min_per_mille: 45,
+        min_per_mille: 48,
         only: None,
     },
     Axis {
         name: "tag: attachment carrying attributes",
-        min_per_mille: 75,
+        min_per_mille: 78,
         only: None,
     },
     Axis {
         name: "tag: deny-capable ACCESS policy",
-        min_per_mille: 50,
+        min_per_mille: 55,
+        only: None,
+    },
+    Axis {
+        name: "tag: ACCESS policy with 2+ deny items",
+        min_per_mille: 6,
         only: None,
     },
     Axis {
         name: "tag: MASK policy of this kind",
-        min_per_mille: 45,
+        min_per_mille: 47,
         only: None,
     },
     Axis {
         name: "tag: ROW FILTER policy of this kind",
-        min_per_mille: 45,
+        min_per_mille: 48,
         only: None,
     },
     Axis {
         name: "tag: several policies of this kind at ONE priority",
-        min_per_mille: 68,
+        min_per_mille: 63,
         only: None,
     },
     Axis {
         name: "tag: policyPriority override",
-        min_per_mille: 50,
+        min_per_mille: 43,
         only: None,
     },
     Axis {
@@ -2347,17 +2777,17 @@ const AXES: &[Axis] = &[
     },
     Axis {
         name: "tag: policy value is a prefix wildcard",
-        min_per_mille: 90,
+        min_per_mille: 88,
         only: None,
     },
     Axis {
         name: "tag: value differing from a resolved tag only by CASE",
-        min_per_mille: 20,
+        min_per_mille: 21,
         only: None,
     },
     Axis {
         name: "tag: composed eval-order duel",
-        min_per_mille: 30,
+        min_per_mille: 33,
         only: None,
     },
     // The prune, and its asymmetry. Three axes rather than one: a corpus that
@@ -2365,23 +2795,28 @@ const AXES: &[Axis] = &[
     // produced the tag half would let a crate that pruned BOTH paths look
     // right.
     Axis {
+        name: "tag: restore duel (T3's skip reachable)",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
         name: "tag: candidacy duel (offset 553 reachable)",
-        min_per_mille: 28,
+        min_per_mille: 29,
         only: None,
     },
     Axis {
         name: "tag: audit-disabled policy with NO items (pruned)",
-        min_per_mille: 6,
+        min_per_mille: 11,
         only: None,
     },
     Axis {
         name: "tag: audit-disabled policy WITH items (kept)",
-        min_per_mille: 50,
+        min_per_mille: 43,
         only: None,
     },
     Axis {
         name: "resource policy audit-disabled with NO items (NOT pruned)",
-        min_per_mille: 22,
+        min_per_mille: 24,
         only: None,
     },
 ];
@@ -2435,6 +2870,22 @@ struct TagFacts {
     reached: bool,
     unreached: bool,
     /// Indexed by [`TAG_MATCH_TYPES`].
+    ///
+    /// ⚠ FIX ROUND 1, IMPORTANT 3. These used to be set from the resolved tag set
+    /// ALONE — the presence of the ingredient — while the header of the axis table
+    /// claims every floor counts cases that REACH the axis. They now require that
+    /// the tag's NAME is covered by an enabled policy of THIS case's kind, which
+    /// is `reached`'s predicate with the admitted-type filter removed. A tag no
+    /// tag policy addresses cannot exercise the admission rule, whichever match
+    /// type it carries.
+    ///
+    /// What this still is NOT is "the case where admitting this match type would
+    /// CHANGE the answer". That needs the policy's items to decide too, and
+    /// `axis_hits` reads no decision by design. The review measured the gap on the
+    /// sharpest one: the DESCENDANT mutation disagrees in **6 of 1743 compared
+    /// cases (3‰)** where this axis counts candidacy. So the floor guards
+    /// candidacy and the Step 4 mutation guards the flip; neither substitutes for
+    /// the other, and saying so is the point of this block.
     match_types: [bool; 5],
     empty_set: bool,
     repeated_name: bool,
@@ -2447,13 +2898,27 @@ struct TagFacts {
     other_type: bool,
     prefix_value: bool,
     case_only_value: bool,
-    /// `isAuditEnabled: false` with every item bucket empty — the shape the TAG
-    /// repository PRUNES and `policies` does not.
+    /// `isAuditEnabled: false` with every item bucket empty, `isDenyAllElse` set,
+    /// and a tag value that covers a resolved tag — the shape the TAG repository
+    /// PRUNES and `policies` does not.
+    ///
+    /// ⚠ FIX ROUND 1, IMPORTANT 3. This used to test the flag and the six empty
+    /// buckets only. Without `isDenyAllElse` the pruned policy decides nothing
+    /// either way and the prune is unobservable; without a covering value nothing
+    /// reaches it at all. Both are what make the axis about the prune rather than
+    /// about the flag.
     audit_pruned: bool,
     /// `isAuditEnabled: false` with items present — the shape it KEEPS. Counted
     /// apart so that "the flag appears" and "the prune fires" cannot be read off
     /// one number.
     audit_kept: bool,
+    /// A tag ACCESS policy of this kind with TWO OR MORE deny items.
+    ///
+    /// FIX ROUND 1, MINOR 8. The deny draw was cut to at most one item to stop the
+    /// tag layer starving the corpus of allows, which removed this shape with
+    /// nothing recording the removal. The draw now yields 0, 1 or 2 and this axis
+    /// is what stops it silently going back to 0-or-1.
+    multi_deny_access: bool,
 }
 
 fn tag_facts(case: &Case) -> TagFacts {
@@ -2466,9 +2931,6 @@ fn tag_facts(case: &Case) -> TagFacts {
     let tags = case.request.resolved_tags.as_deref().unwrap_or_default();
     facts.empty_set = tags.is_empty();
     for tag in tags {
-        if let Some(index) = TAG_MATCH_TYPES.iter().position(|m| *m == tag.match_type) {
-            facts.match_types[index] = true;
-        }
         if !tag.attributes.is_empty() {
             facts.attributes = true;
         }
@@ -2500,7 +2962,20 @@ fn tag_facts(case: &Case) -> TagFacts {
         priorities_of_kind.push(policy["policyPriority"].as_i64().unwrap_or(0));
         if policy["isAuditEnabled"].as_bool() == Some(false) {
             if all_item_buckets_empty(policy) {
-                facts.audit_pruned = true;
+                // `isDenyAllElse` and a covering value are both required — see the
+                // field's doc. Without the first the prune changes nothing;
+                // without the second nothing reaches the policy at all.
+                let covers_a_tag =
+                    policy["resources"]["tag"]["values"]
+                        .as_array()
+                        .is_some_and(|vs| {
+                            vs.iter()
+                                .filter_map(Value::as_str)
+                                .any(|v| tags.iter().any(|tag| tag_value_covers(v, &tag.name)))
+                        });
+                if policy["isDenyAllElse"].as_bool() == Some(true) && covers_a_tag {
+                    facts.audit_pruned = true;
+                }
             } else {
                 facts.audit_kept = true;
             }
@@ -2509,12 +2984,15 @@ fn tag_facts(case: &Case) -> TagFacts {
             1 => facts.mask_policy = true,
             2 => facts.row_filter_policy = true,
             _ => {
-                if policy["isDenyAllElse"].as_bool() == Some(true)
-                    || policy["denyPolicyItems"]
-                        .as_array()
-                        .is_some_and(|b| !b.is_empty())
-                {
+                let deny_items = policy["denyPolicyItems"]
+                    .as_array()
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                if policy["isDenyAllElse"].as_bool() == Some(true) || deny_items > 0 {
                     facts.deny_capable_access = true;
+                }
+                if deny_items >= 2 {
+                    facts.multi_deny_access = true;
                 }
             }
         }
@@ -2539,10 +3017,20 @@ fn tag_facts(case: &Case) -> TagFacts {
             }
         }
         for tag in tags {
+            let covered = values.iter().any(|v| tag_value_covers(v, &tag.name));
+            // The match-type axes, at CANDIDACY granularity — see the field's doc.
+            // Outside the `ADMITTED` filter deliberately: `DESCENDANT` and `NONE`
+            // exist as axes precisely because they are NOT admitted, so filtering
+            // them out here would leave them counting nothing.
+            if covered {
+                if let Some(index) = TAG_MATCH_TYPES.iter().position(|m| *m == tag.match_type) {
+                    facts.match_types[index] = true;
+                }
+            }
             if !ADMITTED_TAG_MATCH_TYPES.contains(&tag.match_type) {
                 continue;
             }
-            if values.iter().any(|v| tag_value_covers(v, &tag.name)) {
+            if covered {
                 facts.reached = true;
             } else {
                 facts.unreached = true;
@@ -2902,6 +3390,10 @@ fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
         ("tag: same NAME at two match types", tags.repeated_name),
         ("tag: attachment carrying attributes", tags.attributes),
         ("tag: deny-capable ACCESS policy", tags.deny_capable_access),
+        (
+            "tag: ACCESS policy with 2+ deny items",
+            tags.multi_deny_access,
+        ),
         ("tag: MASK policy of this kind", tags.mask_policy),
         (
             "tag: ROW FILTER policy of this kind",
@@ -2922,6 +3414,7 @@ fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
             tags.case_only_value,
         ),
         ("tag: composed eval-order duel", case.composed_duel),
+        ("tag: restore duel (T3's skip reachable)", case.restore_duel),
         (
             "tag: candidacy duel (offset 553 reachable)",
             case.candidacy_duel,
@@ -3014,6 +3507,67 @@ fn report_coverage(profile: &Profile, cases: &[Case]) {
 
 // ── the gate ─────────────────────────────────────────────────────────────
 
+/// Which population a case belongs to. **Every rate this file prints is over one
+/// of these, and never over their union.**
+///
+/// ⚠ FIX ROUND 1, IMPORTANT 2. Three of the five composed rates used to be
+/// divided by every tag-carrying case — a denominator 30% of which is cases
+/// CONSTRUCTED to hit the refusal being measured, or constructed so that they
+/// cannot. Re-measured over the random half the printed figures were wrong in
+/// BOTH directions (`EvalOrderAmbiguous` 6.50% printed against 2.60% actual,
+/// `TagPriorityArbitrationNotModelled` 1.65% against 2.36%), so it was not a bias
+/// a reader could correct by a factor — and the one a follow-up task has to budget
+/// for was the one understated.
+///
+/// The resource-path duels are split out for the same reason even though they
+/// contribute nothing to the ACCESS refusals today: a rate whose denominator
+/// silently contains a constructed shape is exactly the defect above, and
+/// "contributes nothing today" is a claim that needs re-checking every time
+/// something is added, not an invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Population {
+    /// No `tagPolicies` block, drawn at random.
+    Resource,
+    /// No tag block, and built by [`access_order_duel`].
+    ResourceDuel,
+    /// A tag block, drawn at random — **the population a real download is in**,
+    /// and therefore the rate to plan against.
+    Composed,
+    /// A tag block, and built by [`composed_duel`] or [`candidacy_duel`].
+    ComposedDuel,
+}
+
+impl Population {
+    fn of(case: &Case) -> Population {
+        let tagged = case.service_policies.get("tagPolicies").is_some();
+        match (
+            tagged,
+            case.duel || case.candidacy_duel || case.restore_duel,
+        ) {
+            (false, false) => Population::Resource,
+            (false, true) => Population::ResourceDuel,
+            (true, false) => Population::Composed,
+            (true, true) => Population::ComposedDuel,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Population::Resource => "resource, random",
+            Population::ResourceDuel => "resource, duel",
+            Population::Composed => "composed, random",
+            Population::ComposedDuel => "composed, duel",
+        }
+    }
+}
+
+const POPULATIONS: &[Population] = &[
+    Population::Resource,
+    Population::ResourceDuel,
+    Population::Composed,
+    Population::ComposedDuel,
+];
+
 #[derive(Default)]
 struct Tally {
     cases: usize,
@@ -3032,17 +3586,25 @@ struct Tally {
     /// times — and a rate of 0/800 measures the generator, not the refusal.
     candidacy_duels: usize,
     candidacy_duels_declined: usize,
-    /// Cases carrying a `tagPolicies` block. **The denominator of every
-    /// composed rate**, and the complement of the denominator of every
-    /// resource-path rate — which is why the two are counted rather than
-    /// derived from a percentage of the whole.
+    /// Deliberate RESTORE duels, and how many of them AGREED with the engine.
+    /// Unlike the other two shapes this one must ANSWER: reverting T3's skip turns
+    /// the agreement into a disagreement, which is the property it exists for.
+    restore_duels: usize,
+    restore_duels_agreeing: usize,
+    /// Cases carrying a `tagPolicies` block.
     tagged: usize,
-    /// Each admitted refusal, split by whether the case had a tag phase.
-    /// Reporting one number for both would answer neither of the two
-    /// questions this gate is asked: how often the RESOURCE path cannot order
-    /// a band, and how often COMPOSING the phases creates a tie that path
-    /// never had.
-    declined: BTreeMap<(Declined, bool), usize>,
+    /// How many cases fell in each [`Population`] — the denominators.
+    population: BTreeMap<Population, usize>,
+    /// Each admitted refusal, per population. Reporting one number across them
+    /// would answer none of the questions this gate is asked.
+    declined: BTreeMap<(Declined, Population), usize>,
+    /// ACCESS cases where both sides named a policy comparison was possible for,
+    /// and how many of those AGREED on the id (RULING 3).
+    ids_compared: usize,
+    ids_agreeing: usize,
+    /// Each DECLARED id divergence and how often it fired. A divergence that
+    /// matches none of them is not counted here — it fails the run.
+    id_divergences: BTreeMap<&'static str, usize>,
     allowed: usize,
     denied: usize,
     masked: usize,
@@ -3052,8 +3614,22 @@ struct Tally {
 }
 
 impl Tally {
-    fn declined_count(&self, kind: Declined, tagged: bool) -> usize {
-        self.declined.get(&(kind, tagged)).copied().unwrap_or(0)
+    fn declined_count(&self, kind: Declined, population: Population) -> usize {
+        self.declined.get(&(kind, population)).copied().unwrap_or(0)
+    }
+
+    /// Every firing of `kind`, across all four populations — the number the
+    /// per-kind CEILINGS are checked against.
+    fn declined_total(&self, kind: Declined) -> usize {
+        self.declined
+            .iter()
+            .filter(|((k, _), _)| *k == kind)
+            .map(|(_, n)| n)
+            .sum()
+    }
+
+    fn population_count(&self, population: Population) -> usize {
+        self.population.get(&population).copied().unwrap_or(0)
     }
 
     fn absorb(&mut self, other: &Tally) {
@@ -3065,9 +3641,19 @@ impl Tally {
         self.composed_duels_agreeing += other.composed_duels_agreeing;
         self.candidacy_duels += other.candidacy_duels;
         self.candidacy_duels_declined += other.candidacy_duels_declined;
+        self.restore_duels += other.restore_duels;
+        self.restore_duels_agreeing += other.restore_duels_agreeing;
         self.tagged += other.tagged;
+        for (key, count) in &other.population {
+            *self.population.entry(*key).or_default() += count;
+        }
         for (key, count) in &other.declined {
             *self.declined.entry(*key).or_default() += count;
+        }
+        self.ids_compared += other.ids_compared;
+        self.ids_agreeing += other.ids_agreeing;
+        for (key, count) in &other.id_divergences {
+            *self.id_divergences.entry(*key).or_default() += count;
         }
         self.allowed += other.allowed;
         self.denied += other.denied;
@@ -3078,56 +3664,97 @@ impl Tally {
     }
 }
 
-/// The three rates the package owes, each printed with the CASE COUNT behind
-/// it and each against the denominator it actually belongs to.
+/// The refusal rates the package owes, each over the POPULATION it belongs to.
 ///
 /// A percentage with no denominator is the shape in which "unmeasured" and
-/// "measured at zero" look alike, and this file has already been bitten by
-/// exactly that: `EvalOrderAmbiguous` was reported as one number over the whole
-/// corpus while the composed half of it did not exist.
+/// "measured at zero" look alike, and this file has been bitten by that twice:
+/// once when `EvalOrderAmbiguous` was reported as one number over the whole
+/// corpus while the composed half of it did not exist, and once — fix round 1,
+/// IMPORTANT 2 — when three composed rates were divided by a denominator 30% of
+/// which was cases CONSTRUCTED to hit the very refusal being measured. That
+/// second one was wrong in BOTH directions (`EvalOrderAmbiguous` printed 6.50%
+/// against 2.60% actual, `TagPriorityArbitrationNotModelled` 1.65% against
+/// 2.36%), so it was not a bias a reader could correct by a factor, and the rate
+/// a follow-up task has to budget for was the understated one.
+///
+/// So every number here carries its numerator, its denominator and the name of
+/// its population, and **`COMPOSED RANDOM` is the column a real download is in**.
 fn report_rates(label: &str, tally: &Tally) {
-    let untagged = tally.cases - tally.tagged;
     let pct = |n: usize, d: usize| -> String {
         if d == 0 {
-            "n/a (no cases in this population)".to_string()
+            "n/a (empty)".to_string()
         } else {
             format!("{n}/{d} = {:.2}%", 100.0 * n as f64 / d as f64)
         }
     };
     eprintln!("\nmeasured refusal rates — {label}");
     eprintln!(
-        "  population: {} cases, of which {} carry a tagPolicies block and {untagged} do not",
-        tally.cases, tally.tagged
+        "  populations: {}",
+        POPULATIONS
+            .iter()
+            .map(|p| format!("{} {}", tally.population_count(*p), p.label()))
+            .collect::<Vec<_>>()
+            .join(" · ")
     );
-    for kind in [
-        Declined::EvalOrder,
-        Declined::ResourceCandidacy,
-        Declined::TagSubResultSplit,
-        Declined::TagPriorityArbitration,
-        Declined::TagDenyVersionSplit,
-    ] {
+    eprintln!(
+        "  {:36} {:>20} {:>20} {:>20} {:>20}",
+        "refusal", "resource random", "resource duel", "COMPOSED RANDOM", "composed duel",
+    );
+    for kind in DECLINED_KINDS {
         eprintln!(
-            "  {:34}  resource path {:>26}   composed {:>26}",
+            "  {:36} {:>20} {:>20} {:>20} {:>20}",
             kind.label(),
-            pct(tally.declined_count(kind, false), untagged),
-            pct(tally.declined_count(kind, true), tally.tagged),
+            pct(
+                tally.declined_count(*kind, Population::Resource),
+                tally.population_count(Population::Resource)
+            ),
+            pct(
+                tally.declined_count(*kind, Population::ResourceDuel),
+                tally.population_count(Population::ResourceDuel)
+            ),
+            pct(
+                tally.declined_count(*kind, Population::Composed),
+                tally.population_count(Population::Composed)
+            ),
+            pct(
+                tally.declined_count(*kind, Population::ComposedDuel),
+                tally.population_count(Population::ComposedDuel)
+            ),
         );
     }
-    // The two rates whose shape a random draw does not produce, over the
-    // populations built to produce them. Reported separately and NEVER folded
-    // into the numbers above: a rate over a population that cannot reach the
-    // refusal reads as "this never happens", which is the opposite of what it
-    // measures.
+    // The two deliberate shapes against their OWN denominators, which is the only
+    // way their numbers mean anything.
     eprintln!(
-        "  {:34}  {} of the deliberate composed duels agreed with the engine",
+        "  {:36} {} of the deliberate composed duels agreed with the engine",
         "composed eval-order duels",
         pct(tally.composed_duels_agreeing, tally.composed_duels),
     );
     eprintln!(
-        "  {:34}  {} of the deliberate candidacy duels REFUSED",
+        "  {:36} {} of the deliberate candidacy duels REFUSED",
         "candidate-set (offset 553) refusals",
         pct(tally.candidacy_duels_declined, tally.candidacy_duels),
     );
+    eprintln!(
+        "  {:36} {} of the deliberate restore duels AGREED with the engine",
+        "trie-excluded view / restore (T3)",
+        pct(tally.restore_duels_agreeing, tally.restore_duels),
+    );
+    // The COMPARED fraction, which the ceiling at the bottom of this file asserts
+    // on: it is the one number that sees an over-refusal spread thinly across
+    // every kind.
+    eprintln!(
+        "  {:36} {} of all cases were compared at all",
+        "compared fraction",
+        pct(tally.compared, tally.cases),
+    );
+    eprintln!(
+        "  {:36} {} agreed on the reported policy id",
+        "ACCESS policy-id fidelity",
+        pct(tally.ids_agreeing, tally.ids_compared),
+    );
+    for (reason, count) in &tally.id_divergences {
+        eprintln!("  {:36} {count} × {reason}", "  …declared divergence:");
+    }
 }
 
 fn ranger_dir() -> PathBuf {
@@ -3201,6 +3828,7 @@ fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
                 duel: false,
                 composed_duel: false,
                 candidacy_duel: false,
+                restore_duel: false,
                 policy_type: 0,
                 service_policies: service_policies(json!([{
                     "id": 1, "name": "f1", "service": "trino_prod", "policyType": 0,
@@ -3264,6 +3892,7 @@ fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
                 duel: false,
                 composed_duel: false,
                 candidacy_duel: false,
+                restore_duel: false,
                 policy_type: 1,
                 service_policies: service_policies(json!([
                     {
@@ -3387,6 +4016,7 @@ fn check_measured_tag_crash(
         duel: false,
         composed_duel: false,
         candidacy_duel: false,
+        restore_duel: false,
         service_policies: json!({
             "serviceName": "trino_prod",
             "serviceId": 1,
@@ -3562,14 +4192,21 @@ fn load_engine(profile: &Profile) -> (Value, ServiceDef, EngineConfig) {
     // The real captured download (`tests/ranger/fixtures/service-policies.json`)
     // carries no `contextEnrichers`, and the only one either def declares is a
     // tag enricher that would try to poll a Ranger admin from the test JVM.
-    // Dropping it keeps the harness hermetic without changing any decision the
-    // corpus takes: the corpus never generates a `tagPolicies` block, so the
-    // one thing the key now feeds — `ServiceDef::has_tag_enricher`, which
-    // gates the SP4d-2a tag narrowing — is never consulted. Note the direction
-    // if that ever changes: removing the key yields `None` (unknown), which
-    // REFUSES rather than narrows, so a future corpus that did generate a tag
-    // block would get the conservative answer here, not a silently permissive
-    // one.
+    //
+    // ⚠ FIX ROUND 1, MINOR 6: this comment used to continue *"the corpus never
+    // generates a `tagPolicies` block, so the one thing the key now feeds —
+    // `ServiceDef::has_tag_enricher` — is never consulted"*. The corpus does
+    // generate one as of the commit that added the tag layer, so that sentence
+    // described the corpus as it had been. The ACTION is still right, and for a
+    // stronger reason spelled out in [`load_tag_def`]: an enricher on EITHER def
+    // would make the Java half poll a Ranger admin AND overwrite the tag set
+    // `EgretCaseRunner` seeds, while this crate read the seeded one — a
+    // disagreement the harness manufactured rather than one found in Ranger.
+    //
+    // `has_tag_enricher` IS consulted now, and the direction is the safe one:
+    // removing the key yields `None` (unknown), and `tag_policies_can_decide`
+    // needs an explicit `Some(false)` on BOTH defs to skip the phase, so the
+    // corpus gets the phase rather than a silent skip.
     if let Some(obj) = def_json.as_object_mut() {
         obj.remove("contextEnrichers");
     }
@@ -3645,6 +4282,10 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
     // Then Rust, so a generator escape (an `Undecidable` the corpus is not
     // supposed to contain) is reported before a JVM is ever started.
     let mut outcomes = Vec::with_capacity(cases.len());
+    // The reported ACCESS policy id per case, computed in the same pass so the
+    // `ServicePolicySet` is parsed once (RULING 3). `None` for a non-ACCESS case
+    // or a refusal.
+    let mut ids: Vec<Option<Option<i64>>> = Vec::with_capacity(cases.len());
     let mut escapes: Vec<String> = Vec::new();
     for case in &cases {
         let set: ServicePolicySet =
@@ -3656,6 +4297,7 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
                 case.id, case.policy_type
             ));
         }
+        ids.push(rust_access_policy_id(case, &set, &def, &engine));
         outcomes.push(outcome);
     }
     assert!(
@@ -3680,7 +4322,7 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
     };
     let mut mismatches: Vec<String> = Vec::new();
 
-    for ((case, mine), verdict) in cases.iter().zip(&outcomes).zip(&verdicts) {
+    for (((case, mine), mine_id), verdict) in cases.iter().zip(&outcomes).zip(&ids).zip(&verdicts) {
         assert_eq!(
             verdict.get("id").and_then(Value::as_str),
             Some(case.id.as_str()),
@@ -3704,13 +4346,17 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
         if case.candidacy_duel {
             tally.candidacy_duels += 1;
         }
-        let tagged = case.service_policies.get("tagPolicies").is_some();
-        if tagged {
+        if case.restore_duel {
+            tally.restore_duels += 1;
+        }
+        if case.service_policies.get("tagPolicies").is_some() {
             tally.tagged += 1;
         }
+        let population = Population::of(case);
+        *tally.population.entry(population).or_default() += 1;
 
         if let Outcome::Declined(kind) = mine {
-            *tally.declined.entry((*kind, tagged)).or_default() += 1;
+            *tally.declined.entry((*kind, population)).or_default() += 1;
             if case.candidacy_duel && *kind == Declined::ResourceCandidacy {
                 tally.candidacy_duels_declined += 1;
             }
@@ -3739,11 +4385,52 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
         }
         tally.compared += 1;
 
+        // ── the reported ACCESS policy id (RULING 3) ──────────────────────
+        //
+        // AFTER the verdict comparison and only when the verdicts AGREE. A case
+        // whose allow/deny already disagrees will usually name a different policy
+        // too, and reporting that as a second, undeclared id divergence turns one
+        // finding into two and sends the reader to the wrong question.
+        //
+        // Its own axis, not part of `Outcome`: two of the divergences are
+        // DECLARED, and folding them into the verdict comparison would either
+        // flood the gate or force the comparison to be weakened. A mismatch that
+        // matches none of the declared shapes lands in `mismatches` and fails the
+        // run, which is what makes this an allow-list and not a relaxation.
+        if let (Some(mine_id), true) = (*mine_id, *mine == theirs) {
+            let theirs_id = java_access_policy_id(verdict);
+            tally.ids_compared += 1;
+            if mine_id == theirs_id {
+                tally.ids_agreeing += 1;
+            } else if let Some(reason) = classify_id_divergence(case, mine_id, theirs_id) {
+                *tally.id_divergences.entry(reason).or_default() += 1;
+            } else {
+                mismatches.push(reproducer(
+                    case,
+                    seed,
+                    &format!(
+                        "the two sides agree on allow/deny and disagree on the reported \
+                         ACCESS policy id, for a reason that is not on the declared list: \
+                         egret named {mine_id:?}, ranger named {theirs_id:?}. The declared \
+                         reasons are: {}",
+                        ID_DIVERGENCES
+                            .iter()
+                            .map(|(what, where_)| format!("{what} (see {where_})"))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
+                ));
+            }
+        }
+
         if case.duel && *mine == theirs {
             tally.duels_agreeing += 1;
         }
         if case.composed_duel && *mine == theirs {
             tally.composed_duels_agreeing += 1;
+        }
+        if case.restore_duel && *mine == theirs {
+            tally.restore_duels_agreeing += 1;
         }
         if *mine != theirs {
             mismatches.push(reproducer(
@@ -3906,6 +4593,26 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
         total.candidacy_duels_declined,
         total.candidacy_duels
     );
+    // …and the restore duel, which is the ONLY shape that reaches T3's skip
+    // (RULING 1: reverting that fix left the gate green because nothing generated
+    // this). Two floors, for the same reason the candidacy duel has two: that it
+    // is still generated, and that it still ANSWERS — a restore duel that started
+    // REFUSING would stop testing the restore and the floor above would not say so.
+    assert!(
+        total.restore_duels * 100 >= total.cases,
+        "only {} deliberate restore duels in {} cases — the only shape that reaches the \
+         trie-excluded-view skip has stopped being generated, and reverting that fix would \
+         leave this gate green",
+        total.restore_duels,
+        total.cases
+    );
+    assert!(
+        total.restore_duels_agreeing * 10 >= total.restore_duels * 9,
+        "only {} of {} restore duels AGREED with the engine — they are supposed to be \
+         ANSWERED, and a duel that refuses is a duel that no longer tests the restore",
+        total.restore_duels_agreeing,
+        total.restore_duels
+    );
     // A corpus with no tag phase reports two composed rates of 0/0 and looks
     // exactly like one where the tag generator was deleted.
     assert!(
@@ -3913,6 +4620,79 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
         "only {} of {} cases carry a tagPolicies block — the tag phase has stopped being \
          generated and every composed measurement below is a rate over nothing",
         total.tagged,
+        total.cases
+    );
+
+    // ── the CEILING on refusal, which this file did not have (FIX ROUND 1) ──
+    //
+    // The review injected a 42% over-refusal and the gate stayed GREEN, because
+    // every floor in this file is a FLOOR and the thing an over-refusal shrinks is
+    // the denominator. Two assertions close it, and they answer different
+    // questions:
+    //
+    // * the per-kind ceilings catch a single refusal widening — which is what a
+    //   narrowing "fix" to the evaluator looks like from outside;
+    // * the compared FRACTION catches a refusal spread thinly across every kind,
+    //   which no per-kind ceiling can see.
+    //
+    // Both are deliberately loose against the measured values. A ceiling that
+    // flaps gets deleted by the next person, which is worse than no ceiling —
+    // which is what this file had.
+    assert_eq!(
+        DECLINED_KINDS.len(),
+        DECLINED_CEILINGS.len(),
+        "every Declined kind needs a ceiling, or a refusal can widen unbounded in \
+         whichever kind was left out"
+    );
+    let mut over: Vec<String> = Vec::new();
+    for (kind, ceiling) in DECLINED_CEILINGS {
+        assert!(
+            DECLINED_KINDS.contains(kind),
+            "DECLINED_CEILINGS names {} which is not in DECLINED_KINDS",
+            kind.label()
+        );
+        let count = total.declined_total(*kind);
+        let per_mille = 1000 * count / total.cases.max(1);
+        if per_mille > *ceiling as usize {
+            over.push(format!(
+                "  {} — {count} cases ({per_mille}‰), ceiling {ceiling}‰",
+                kind.label()
+            ));
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "{} refusal(s) fired far more often than when this ceiling was measured. An \
+         over-refusal costs every one of those cases an answer and produces no other \
+         failing test, which is why it has a ceiling and not just a printed rate. If the \
+         widening is intended, re-measure and move the ceiling in the same commit:\n{}",
+        over.len(),
+        over.join("\n")
+    );
+    // 75% of cases, against ~87% measured. The injected 42% over-refusal that
+    // exposed this gap left 58% and would be caught here even if it had been
+    // spread evenly across all five kinds.
+    assert!(
+        total.compared * 4 >= total.cases * 3,
+        "only {} of {} cases were compared at all ({:.1}%). The crate is refusing most of \
+         the corpus, so agreement on the rest says very little — and every floor below is \
+         measured against `compared`, so they CANNOT see this.",
+        total.compared,
+        total.cases,
+        100.0 * total.compared as f64 / total.cases as f64
+    );
+
+    // ── the ACCESS policy-id axis (RULING 3) ───────────────────────────────
+    //
+    // A floor, because the axis is only a gate while cases reach it, and the
+    // declared divergences are reported rather than asserted — a run in which
+    // neither fired would mean the shapes had stopped being generated, not that
+    // the crate had improved.
+    assert!(
+        total.ids_compared * 4 >= total.cases,
+        "only {} of {} cases compared a reported ACCESS policy id — the axis RULING 3 \
+         added is not reaching anything",
+        total.ids_compared,
         total.cases
     );
 

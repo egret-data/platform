@@ -166,6 +166,31 @@ async fn a_trino_tag_rule_lands_in_the_tag_service_and_is_reaped_from_it_on_dele
     assert_eq!(body["serviceType"], "tag");
     assert_eq!(body["service"], tag_service_name);
     assert_eq!(body["resources"]["tag"]["values"][0], "Route PII");
+    // ⚠ `policyPriority` MUST be 0 on every tag policy egret writes, and until
+    // SP4d-2b Task 5 fix round 1 (MINOR 9) nothing asserted it.
+    //
+    // The differential gate measured that Ranger arbitrates the tag phase by
+    // `policyPriority` through a per-access-type result map it does not model, so
+    // `egret-ranger-eval` REFUSES a tag block whose deciding policies sit at more
+    // than one priority
+    // (`UndecidableCause::TagPriorityArbitrationNotModelled`). That refusal was
+    // accepted on the strength of "it costs nothing, because egret never emits a
+    // non-zero priority on a tag policy" — a cost claim resting on three
+    // hard-coded `is_override: false`s (`clearance.rs`, and both arms of
+    // `rules.rs::build_tag_body`) with no test between them and the claim.
+    // `AccessPolicyInput.is_override` is a PUBLIC wire field (`isOverride`), so one
+    // flag flip makes egret author a multi-priority tag block and turns that
+    // refusal live on egret's own data.
+    //
+    // Asserted on the emitted `policyPriority` rather than on the flag: the
+    // invariant is about what the plugin downloads, and it survives a refactor
+    // that renames or reroutes `is_override`.
+    assert_eq!(
+        body["policyPriority"], 0,
+        "a tag policy at a non-zero priority makes egret's own downloads reach \
+         `TagPriorityArbitrationNotModelled`, and the zero-cost claim behind that \
+         refusal is exactly this value"
+    );
 
     // ── 1b. the tag service is CLAIMED, like the profile ─────────────────────
     // Whole-branch review, Important 5. Task 8 stamped `origin='generated'` on

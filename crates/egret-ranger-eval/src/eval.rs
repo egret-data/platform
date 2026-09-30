@@ -793,18 +793,44 @@ pub enum UndecidableCause {
     ///
     /// The table above is consistent with "the highest-priority deciding
     /// candidate wins, and at equal priority a deny beats an allow", and that
-    /// rule matched all thirteen measured rows. It is not modelled here anyway,
-    /// for two reasons:
+    /// rule matched all thirteen measured rows.
+    ///
+    /// ⚠ **FIX ROUND 1: one of the two reasons this doc gave for refusing was
+    /// FALSE, and it is removed rather than softened.** It claimed the five-armed
+    /// branch structure at offsets 366-573 "is not reliably readable from a
+    /// disassembly" because the operand order of the `if_icmplt` / `if_icmple`
+    /// arms is not recoverable. It is recoverable: `javap -c -p` prints the whole
+    /// instruction sequence and the operand order is fixed by the JVM spec
+    /// (value1 is pushed first). The review decoded all five arms in one pass:
+    ///
+    /// ```text
+    /// stored == null                       → put
+    /// stored ALLOWED, this DENIED          → put when thisPrio >= storedPrio
+    /// stored ALLOWED, this ALLOWED, ACCESS → put when thisPrio >  storedPrio
+    /// stored ALLOWED, this ALLOWED, other  → put when thisPrio >= storedPrio
+    /// stored DENIED                        → put when thisPrio >  storedPrio
+    ///                                        (or >= with an ANY access type)
+    /// ```
+    ///
+    /// **A refusal defended by a false reason is the thing this package has been
+    /// bitten by five times**, so the reason that holds is the only one left:
     ///
     /// * the same `accessTypeResults` map is live on the RESOURCE path, where
     ///   this crate models a DIFFERENT mechanism (the engine loop's offsets
     ///   469/505/529) and is green over 4000 corpus cases. The two coincide
     ///   there — the engine loop shuts out a lower-priority evaluator before it
     ///   can reach the map — but "green over 4000 cases" is not a proof, and a
-    ///   rule written here in terms of priority would need that audit to be
-    ///   done first or it would be two models of one mechanism;
-    /// * a wrong allow or deny derived from thirteen data points is a security
-    ///   defect, and a refusal whose cost is measured is not.
+    ///   rule written here in terms of priority would be a SECOND model of one
+    ///   mechanism until that audit is done.
+    ///
+    /// And a fact that STRENGTHENS it rather than weakening it, which the first
+    /// round missed: `evaluatePolicyItems` is near-identical between 2.5.0 and
+    /// 2.8.0 in the 366-573 region (the only deltas in the whole method are the
+    /// `ignoreDescendantDeny` arms and the `getCompositeAccessResult` signature).
+    /// So **this map cannot be what makes
+    /// [`UndecidableCause::TagDenyReopenedDiffersByPluginVersion`] a version
+    /// split** — there is a second unmodelled mechanism, and writing a priority
+    /// rule here would encode one of the two while the other stayed invisible.
     ///
     /// **The cost is measured and it is zero on egret's own data**:
     /// `egret-perm-compile` never emits `policyPriority` on a tag policy, and all
@@ -868,6 +894,21 @@ pub enum UndecidableCause {
     /// Modelling 2.5.0's arm is named as follow-up work in
     /// `tests/ranger/README.md`, with the table above to model it against.
     TagDenyReopenedDiffersByPluginVersion {
+        /// What [`EngineConfig::plugin_version`] said, verbatim.
+        ///
+        /// ⚠ FIX ROUND 1, IMPORTANT 4. The cause carries this because the two
+        /// states it can be in need DIFFERENT advice, and the wire shape without
+        /// it forced one sentence to cover both. `Some(Ranger2_5_0)` means the
+        /// running plugin is KNOWN and the refusal is that 2.5.0's arm is
+        /// unmodelled — there is nothing for an operator to record. `None` means
+        /// the caller did not say which plugin is running, and recording it WOULD
+        /// make half of these answerable. The frontend's sentence said the second
+        /// thing in both cases, which is unactionable advice in the only case
+        /// `explain` can now produce (it always declares the version).
+        ///
+        /// `Some(Ranger2_8_0)` is unrepresentable here by construction: that is
+        /// the version this crate reproduces, so the refusal is not raised for it.
+        plugin_version: Option<PluginVersion>,
         /// The tag policy that denied.
         tag_policy_id: Option<i64>,
         tag_policy_name: String,
@@ -1752,38 +1793,6 @@ pub fn evaluate(
                 outcome = Some(found);
                 determined = true;
             } else if !allowed {
-                // ⚠ THE VERSION SPLIT (SP4d-2b Task 5). A tag DENY reopened by a
-                // STRICTLY higher-priority resource allow is `Allowed` on 2.8.0
-                // and `Denied` on 2.5.0 — measured on both engines, see
-                // [`UndecidableCause::TagDenyReopenedDiffersByPluginVersion`].
-                // Two conditions narrow it to the row that was measured to
-                // differ, and each was measured NOT to differ:
-                //
-                // * `> priority`, not `>=` — at EQUAL priority both versions keep
-                //   the tag deny;
-                // * `!view.has_deny` — with deny items on the allowing policy both
-                //   versions answer `Denied` too, because offset 553 cannot
-                //   determine for it and the restore at 599-632 puts the tag deny
-                //   back. That is the row this crate already reproduces on both
-                //   versions, and refusing it would be a pure over-refusal.
-                if is_denied_by_tags
-                    && !view.has_deny
-                    && view.policy.policy_priority > priority
-                    && engine.plugin_version != Some(PluginVersion::Ranger2_8_0)
-                {
-                    let (tag_policy_id, tag_policy_name) = tag_verdict
-                        .as_ref()
-                        .map(|o| (o.policy_id, o.policy_name.clone()))
-                        .unwrap_or((None, String::new()));
-                    return Decision::Undecidable {
-                        why: vec![UndecidableCause::TagDenyReopenedDiffersByPluginVersion {
-                            tag_policy_id,
-                            tag_policy_name,
-                            resource_policy_id: view.policy.id,
-                            resource_policy_name: view.policy.name.clone(),
-                        }],
-                    };
-                }
                 allowed = true;
                 priority = found.priority;
                 outcome = Some(found);
@@ -1849,7 +1858,7 @@ pub fn evaluate(
             // strictly higher-priority DENY-CAPABLE resource policy that
             // allowed: offset 553 cannot determine for it, so the loop runs
             // out and the tag deny is restored over its allow.
-            outcome = tag_verdict;
+            outcome = tag_verdict.clone();
         } else if is_allowed_by_tags {
             // `setIsAllowed(true)`, a no-op BY CONSTRUCTION rather than by
             // accident: after a tag allow the only thing that can clear
@@ -1858,6 +1867,62 @@ pub fn evaluate(
             // the kind of claim a later change breaks quietly.
             debug_assert!(allowed && outcome.as_ref().is_some_and(|o| o.allowed));
         }
+    }
+
+    // ⚠ THE VERSION SPLIT, raised on the verdict this function would RETURN
+    // (SP4d-2b Task 5, widened and moved in fix round 1).
+    //
+    // MEASURED on both real engines, four shapes, one minimal download (tag ACCESS
+    // policy id 900 denying `select` to bob at priority 0; request `hive.sales`;
+    // tag `pii` at SELF):
+    //
+    // | resource policies above the tag deny | 2.5.0 | 2.8.0 |
+    // |---|---|---|
+    // | one deny-capable allower @1 | Denied, id 900 | Denied, id 1 |
+    // | TWO deny-capable allowers @5 | Denied, id 900 | **Allowed**, id 1 |
+    // | deny-capable allower @1 + a matching no-deny policy @0 | Denied, id 900 | **Allowed**, id 1 |
+    // | no-deny allower @1 + the same low policy | Denied, id 900 | **Allowed**, id 1 |
+    //
+    // **On 2.5.0 a tag DENY is never reopened.** On 2.8.0 it is reopened whenever
+    // anything sets `isAccessDetermined` before the restore at 599-632 can run —
+    // which is 553 for a non-deny-capable allower, and offset 469 for any later
+    // lower-priority evaluator once an allow has raised `policyPriority`. This
+    // crate reproduces 2.8.0 on all four rows.
+    //
+    // So the condition is exactly "this function is about to return an ALLOW while
+    // the tag phase denied", and not a property of any single view:
+    //
+    // * ⚠ FIX ROUND 1 widened it. The first version required
+    //   `!view.has_deny` on the allowing policy, on the strength of the first row —
+    //   where both versions answer Denied. That row agrees for a DIFFERENT reason
+    //   (the restore fires because nothing determined), and rows 2-4 all carry deny
+    //   items or reach the allow some other way. The corpus found row 3 as a real
+    //   `egret Allowed / ranger Denied` disagreement at 2.5.0.
+    // * ⚠ FIX ROUND 1 also MOVED it here from the allowing view, which was
+    //   MINOR 7: raised eagerly it refused shapes that the restore would have
+    //   brought back to a Denied both versions agree on. Row 1 is exactly that
+    //   shape, and it now answers instead of refusing.
+    if is_denied_by_tags
+        && outcome.as_ref().is_some_and(|o| o.allowed)
+        && engine.plugin_version != Some(PluginVersion::Ranger2_8_0)
+    {
+        let (tag_policy_id, tag_policy_name) = tag_verdict
+            .as_ref()
+            .map(|o| (o.policy_id, o.policy_name.clone()))
+            .unwrap_or((None, String::new()));
+        let (resource_policy_id, resource_policy_name) = outcome
+            .as_ref()
+            .map(|o| (o.policy_id, o.policy_name.clone()))
+            .unwrap_or((None, String::new()));
+        return Decision::Undecidable {
+            why: vec![UndecidableCause::TagDenyReopenedDiffersByPluginVersion {
+                plugin_version: engine.plugin_version,
+                tag_policy_id,
+                tag_policy_name,
+                resource_policy_id,
+                resource_policy_name,
+            }],
+        };
     }
 
     // ⚠ The candidate-set ruling, after the restore because the restore is part
@@ -3914,6 +3979,24 @@ fn evaluate_tag_sub(
 /// deciding test is the KIND's own (`decide` for access, `decide_sub` for a mask
 /// or a row filter), because a candidate that decides nothing cannot occupy the
 /// `accessTypeResults` slot and so cannot be arbitrated against anything.
+///
+/// # ⚠ It refuses a same-verdict set too, and that is REPORTED-ID fidelity
+///
+/// FIX ROUND 1, MINOR 5. The review is right that a deciding set whose members
+/// all ALLOW (or all DENY) cannot have its VERDICT changed by the arbitration —
+/// only the reported `policy_id` moves. The refusal is deliberately wider than
+/// the verdict requires, for the reason [`UndecidableCause::EvalOrderAmbiguous`]
+/// already gives on the mask path: *"a tie that all agree on is not a tie the
+/// caller can act wrongly on — but the reported policy id still differs, and this
+/// crate does not report a policy it cannot name."*
+///
+/// [`TagDecision`] carries `policy_id` and `policy_name`, the composed evaluator
+/// reports them, and `explain` puts them in front of a steward, so naming the
+/// wrong tag policy sends that steward to a policy that did not decide. The
+/// differential gate measures reported-id fidelity on its own axis as of fix
+/// round 1's RULING 3, which is what makes this a cost that is counted rather
+/// than assumed: the alternative — narrowing to disagreeing verdicts — would
+/// trade a measured refusal for an unmeasured wrong id.
 fn tag_priority_arbitration<'a>(
     kind: DecisionKind,
     candidates: &[TagCandidate<'a>],

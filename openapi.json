@@ -42186,6 +42186,17 @@
               "kind"
             ],
             "properties": {
+              "plugin_version": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/WirePluginVersion",
+                    "description": "The plugin version the caller declared, or `null` if it declared none.\n\nThe two states need DIFFERENT advice and the UI branches on it: a known\n2.5.0 means the running plugin is identified and the refusal is that\n2.5.0's arm is unmodelled — there is nothing to record. `null` means the\ncaller did not say, and recording it would make half of these\nanswerable. `2_8_0` never appears: that is the version the evaluator\nreproduces, so the refusal is not raised for it."
+                  }
+                ]
+              },
               "tag_policy_id": {
                 "type": [
                   "integer",

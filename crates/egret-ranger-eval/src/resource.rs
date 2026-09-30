@@ -310,6 +310,43 @@ pub fn level_excluded_by_trie(
     def: Option<&ResourceDef>,
     request_value: &str,
 ) -> bool {
+    // ⚠ **KNOWN GAP, measured and NOT closed: an EMPTY request value.**
+    //
+    // SP4d-2b Task 5, fix round 1. `RangerAbstractResourceMatcher.isAllValuesRequested`
+    // treats `""` and `*` alike and the MATCHER short-circuits on it before reading
+    // a policy value, so a policy value that is not match-any answers `false`
+    // below and this function reports the policy ABSENT. The trie does not treat
+    // the two alike, and it does not agree with the matcher for `""`.
+    //
+    // MEASURED on ranger 2.8.0, one fixture with only the request changed (a tag
+    // deny at priority 0, a deny-capable allower at priority 1, and a policy whose
+    // only level is the literal `no_such_value_at_all` at priority 0):
+    //
+    // | request | Ranger | what this function says |
+    // |---|---|---|
+    // | `{catalog: ""}` | reaches the literal policy → `Allowed` | absent ✗ |
+    // | `{catalog: "*"}` | does not → `Denied` (the restore runs) | absent ✓ |
+    // | `{catalog: "", database: …, table: …, column: …}` | does NOT → `Denied` | absent ✓ |
+    //
+    // So the first row is wrong and the third is right, and **the rule that
+    // separates them is not established**: `RangerResourceEvaluatorsRetriever`
+    // intersects over the request's keys and a policy declaring fewer levels is an
+    // *inherited* evaluator in the deeper ones, so the depth of the request is in
+    // it somewhere. A guard on "the request value is empty" fixes row 1 and breaks
+    // row 3 — measured, 7 disagreements at the recorded seed — so it is not
+    // written here. **A rule fitted to three rows would be a guess, and this
+    // function's whole job is to be a proof.**
+    //
+    // Why it is deferred rather than refused: the only direction measured is
+    // fail-CLOSED (the crate restores a tag deny where Ranger allows), and an
+    // empty REQUEST level is not something egret sends — `perm_compile`'s
+    // `request_resource` builds concrete values from the target and
+    // `scope_to_resources`' `Access` arm fills unnamed levels with `*`, not `""`.
+    // It is reachable from the corpus and from a hand-built request, which is why
+    // it is written down here and in `tests/ranger/README.md` rather than left in
+    // a report. `restore_duel` keeps its root value concrete so the gate does not
+    // carry a standing disagreement.
+
     if level.is_excludes || level.is_recursive {
         return false;
     }
