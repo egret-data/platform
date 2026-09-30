@@ -28,8 +28,10 @@
 //! - `notebook_runtime_token` (`POST /api/ws/{workspace}/notebook-runtime/token`)
 //! - `engine_token` (`POST /api/kernel/engine-token`, not workspace-scoped by
 //!   URL at all, so no catalog rule could match it)
+//! - `POST /api/apps/query` (Data Apps gateway) — no `/ws/{ws}` segment;
+//!   `egret-apps` checks `disabled_features` itself
 //!
-//! Both live in `egret-kernel`'s `routes.rs`. Auditing this feature by reading
+//! The first two live in `egret-kernel`'s `routes.rs`. Auditing this feature by reading
 //! the catalog alone would miss them, which is why they are named here. Anything
 //! else that mints a capability without a `WsContext` belongs on this list.
 //!
@@ -54,6 +56,7 @@ pub const FEATURE_KEYS: &[&str] = &[
     "charts",
     "dashboards",
     "notebooks",
+    "apps",
     "alerts",
     "data_api",
     "workflows",
@@ -242,6 +245,13 @@ pub const FEATURES: &[Feature] = &[
             prefix("notebook-runtime"),
             prefix("notebook-settings"),
         ],
+        default_enabled: true,
+    },
+    Feature {
+        key: "apps",
+        label: "Data Apps",
+        description: "Custom Python dashboards built with marimo, run with each viewer's permissions.",
+        rules: &[prefix("apps")],
         default_enabled: true,
     },
     Feature {

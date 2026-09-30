@@ -417,6 +417,24 @@ pub static PERMISSIONS: &[Permission] = &[
         Scope::Workspace
     ),
     perm!(
+        "app:read",
+        "Apps",
+        "Open published data apps",
+        Scope::Workspace
+    ),
+    perm!(
+        "app:write",
+        "Apps",
+        "Author, publish and restore data apps",
+        Scope::Workspace
+    ),
+    perm!(
+        "app:manage",
+        "Apps",
+        "Manage data-app shares",
+        Scope::Workspace
+    ),
+    perm!(
         "saved_query:read",
         "SQL Lab",
         "View saved queries",
