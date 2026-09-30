@@ -42023,6 +42023,32 @@
           },
           {
             "type": "object",
+            "description": "Whether Ranger's candidate filter (its resource trie) returns this policy\ndecides the request, and the evaluator cannot establish which way.",
+            "required": [
+              "policy_name",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "resource_candidacy_not_reproducible"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
             "required": [
               "declared",
               "service_def_name",

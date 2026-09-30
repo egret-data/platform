@@ -24,6 +24,10 @@
                  the real jar, so the Rust side's hard-coded copy of it has an
                  independent counterpart instead of asserting against itself. -->
             <include>EgretTagTrieAgreementTest.java</include>
+            <!-- SP4d-2b Task 3 fix round 2: measures which RESOURCE policies
+                 getLikelyMatchPolicyEvaluators returns, which offset 553 made
+                 outcome-relevant for the first time. -->
+            <include>EgretResourceTrieCandidacyTest.java</include>
           </includes>
         </configuration>
       </plugin>

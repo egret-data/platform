@@ -774,6 +774,11 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
                       policy_name: "mask-pii",
                     },
                     {
+                      kind: "resource_candidacy_not_reproducible",
+                      policy_id: 77,
+                      policy_name: "excludes-orders",
+                    },
+                    {
                       kind: "tag_sub_result_split_by_resource_policy",
                       tag_policy_id: 8799,
                       tag_policy_name: "mask-pii",
@@ -796,7 +801,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
 
     const result = await screen.findByTestId("explain-result");
     const causes = within(result).getAllByTestId("undecidable-cause");
-    expect(causes).toHaveLength(7);
+    expect(causes).toHaveLength(8);
 
     // Every arm renders SOMETHING — the failure an exhaustive switch cannot
     // catch is an arm that returns "".
@@ -827,12 +832,18 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     expect(causes[5]).toHaveTextContent("mask-pii");
     expect(causes[5]).toHaveTextContent(/deny items/i);
 
+    // The candidate-set refusal has to name the policy AND say that the filter
+    // is what egret cannot reproduce — "undecidable" alone sends a steward
+    // looking at the policy's ITEMS, which are not the problem.
+    expect(causes[6]).toHaveTextContent("excludes-orders");
+    expect(causes[6]).toHaveTextContent(/trie|filter/i);
+
     // The split names BOTH policies — a sentence naming only one of them is the
     // shape that sends a steward to the wrong policy, which is the whole reason
     // this cause refuses instead of answering.
-    expect(causes[6]).toHaveTextContent("mask-pii");
-    expect(causes[6]).toHaveTextContent("mask-ssn");
-    expect(causes[6]).toHaveTextContent(/higher-priority/i);
+    expect(causes[7]).toHaveTextContent("mask-pii");
+    expect(causes[7]).toHaveTextContent("mask-ssn");
+    expect(causes[7]).toHaveTextContent(/higher-priority/i);
   });
 
   test("tags render honestly when the target carries none", async () => {

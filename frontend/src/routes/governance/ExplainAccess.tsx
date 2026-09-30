@@ -255,6 +255,8 @@ function causeSentence(c: WireUndecidableCause): string {
       return `Tag policy ${policyRef(c.policy_name, c.policy_id)} ${tagResourceProblemPhrase(c.problem)}, so egret cannot tell which tags the engine would run it for.`;
     case "tag_sub_policy_is_deny_capable":
       return `Tag policy ${policyRef(c.policy_name, c.policy_id)} produced a mask or row filter and also carries deny items, and Ranger can then report this policy's id with a later policy's mask.`;
+    case "resource_candidacy_not_reproducible":
+      return `Whether Ranger's policy trie returns ${policyRef(c.policy_name, c.policy_id)} for this resource decides the answer, and egret cannot reproduce that filter for this policy's resource shape.`;
     case "tag_sub_result_split_by_resource_policy":
       return `Tag policy ${policyRef(c.tag_policy_name, c.tag_policy_id)} produced a mask or row filter and the higher-priority Ranger policy ${policyRef(c.resource_policy_name, c.resource_policy_id)} then produced one too, so Ranger reports the tag policy's id with the other policy's mask.`;
   }

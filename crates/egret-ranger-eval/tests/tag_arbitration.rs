@@ -173,6 +173,10 @@ fn select_for_alice() -> Value {
     json!([{ "users": ["alice"], "accesses": [{"type": "select", "isAllowed": true}] }])
 }
 
+fn select_for_dave() -> Value {
+    json!([{ "users": ["dave"], "accesses": [{"type": "select", "isAllowed": true}] }])
+}
+
 fn select_for_bob() -> Value {
     json!([{ "users": ["bob"], "accesses": [{"type": "select", "isAllowed": true}] }])
 }
@@ -1298,5 +1302,274 @@ fn the_determining_band_is_taken_whole_because_its_order_is_unknown() {
                 ))
         ),
         "`a-quiet` sorts first here, but Ranger's order is getEvalOrder(): {d:?}"
+    );
+}
+
+// ── offset 553 reads no matcher, so Ranger's candidate filter decides ────
+
+/// An unrelated resource policy on another table. Literal values, the request's
+/// own four keys, no `isExcludes`, no `isRecursive` — the shape
+/// `EgretResourceTrieCandidacyTest` measures as **absent** from
+/// `getLikelyMatchPolicyEvaluators`'s answer.
+fn unrelated_resource_policy(
+    id: i64,
+    name: &str,
+    priority: i32,
+    bucket: &str,
+    items: Value,
+) -> Value {
+    let mut p = json!({
+        "id": id, "name": name, "service": "trino", "policyType": 0,
+        "isEnabled": true, "policyPriority": priority,
+        "resources": {
+            "catalog": {"values": ["hive"]},
+            "schema":  {"values": ["otherdb"]},
+            "table":   {"values": ["othertable"]},
+            "column":  {"values": ["*"]},
+        },
+    });
+    p[bucket] = items;
+    p
+}
+
+/// **FIX ROUND 2, the CRITICAL the re-review measured.**
+///
+/// Offset 553 is in the ENGINE loop, after `evaluate` has returned, and reads
+/// only `hasDeny()` — never the matcher. So an evaluator that matched nothing
+/// still ends the evaluation, and with a tag ALLOW seeding `isAllowed` before
+/// the resource loop starts it can do so before any resource policy has matched
+/// anything at all.
+///
+/// The crate evaluates every enabled policy of the type; Ranger evaluates its
+/// trie's answer. A policy on another table is in the first list and not the
+/// second, so without a candidate-set rule this request answers `Allowed` where
+/// Ranger denies — a fail-open, and one this package's own composition created:
+/// before the phases were composed, `isAllowed` could only become true through a
+/// MATCHED policy.
+///
+/// `hive/otherdb/othertable/*` is measured absent from Ranger's list
+/// (`tests/ranger/src/test/java/EgretResourceTrieCandidacyTest.java`), so this
+/// case is not merely un-refused — it is ANSWERED, and answered Ranger's way.
+#[test]
+fn an_unrelated_policy_cannot_end_the_evaluation_at_553() {
+    let set = envelope(
+        json!([
+            unrelated_resource_policy(1, "res-unrelated", 5, "policyItems", select_for_dave()),
+            resource_policy(2, "res-deny", 1, "denyPolicyItems", select_for_alice()),
+        ]),
+        json!([tag_policy(
+            10,
+            "tag-allow",
+            0,
+            0,
+            "policyItems",
+            select_for_alice()
+        )]),
+    );
+
+    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(
+            &d,
+            Decision::Denied { policy_name, reason: DenyReason::DenyPolicyItem, .. }
+                if policy_name == "res-deny"
+        ),
+        "a policy Ranger's trie never returns must not end the evaluation: {}",
+        named(&d)
+    );
+
+    // The control: the SAME two policies, with the unrelated one moved onto the
+    // request's own table. Now it really is in Ranger's list, 553 really does
+    // fire, and the deny behind it really is shut out — so the assertion above
+    // is about candidacy and not about priority.
+    let mut on_target = resource_policy(1, "res-on-target", 5, "policyItems", select_for_dave());
+    on_target["policyItems"] = select_for_dave();
+    let set = envelope(
+        json!([
+            on_target,
+            resource_policy(2, "res-deny", 1, "denyPolicyItems", select_for_alice()),
+        ]),
+        json!([tag_policy(
+            10,
+            "tag-allow",
+            0,
+            0,
+            "policyItems",
+            select_for_alice()
+        )]),
+    );
+    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(&d, Decision::Allowed { policy_name, .. } if policy_name == "tag-allow"),
+        "a MATCHED non-deny policy does end the evaluation at 553: {}",
+        named(&d)
+    );
+}
+
+/// The other side of the rule: a policy whose candidacy the crate cannot
+/// establish, where it decides the request, refuses.
+///
+/// `hive/sales/*ders/*` is measured PRESENT in Ranger's list while
+/// `getMatchType` says `SELF`… so for the refusal the shape has to be one the
+/// matcher REJECTS and the trie may still hold. An `isExcludes` level is exactly
+/// that: measured present (it lands in `getInheritedEvaluators()`, unioned into
+/// every lookup) with `getMatchType` `NONE`.
+#[test]
+fn a_policy_whose_candidacy_is_unprovable_refuses_when_it_decides() {
+    let mut excludes = resource_policy(1, "res-excludes", 5, "policyItems", select_for_dave());
+    excludes["resources"]["table"] = json!({"values": ["orders"], "isExcludes": true});
+    let set = envelope(
+        json!([
+            excludes,
+            resource_policy(2, "res-deny", 1, "denyPolicyItems", select_for_alice()),
+        ]),
+        json!([tag_policy(
+            10,
+            "tag-allow",
+            0,
+            0,
+            "policyItems",
+            select_for_alice()
+        )]),
+    );
+
+    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(
+            &d,
+            Decision::Undecidable { why }
+                if why.iter().any(|c| matches!(
+                    c,
+                    UndecidableCause::ResourceCandidacyNotReproducible { policy_id: Some(1), .. }
+                ))
+        ),
+        "an isExcludes policy is in Ranger's list and not in the matcher's: {}",
+        named(&d)
+    );
+}
+
+/// …and it refuses ONLY when it decides. The same unprovable policy, with
+/// nothing behind it that could have answered differently, must still answer —
+/// otherwise the refusal is a blanket on every download carrying an `isExcludes`
+/// policy anywhere.
+#[test]
+fn an_unprovable_candidacy_that_changes_no_verdict_still_answers() {
+    let mut excludes = resource_policy(1, "res-excludes", 5, "policyItems", select_for_dave());
+    excludes["resources"]["table"] = json!({"values": ["orders"], "isExcludes": true});
+    let set = envelope(
+        json!([excludes]),
+        json!([tag_policy(
+            10,
+            "tag-allow",
+            0,
+            0,
+            "policyItems",
+            select_for_alice()
+        )]),
+    );
+
+    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(&d, Decision::Allowed { policy_name, .. } if policy_name == "tag-allow"),
+        "both branches of the unknown give the same verdict, so this answers: {}",
+        named(&d)
+    );
+}
+
+/// **The mask twin of the CRITICAL** — the defect fix round 1 introduced by
+/// latching `determining_band` on a candidate Ranger may never reach.
+///
+/// Ranger's data-mask trie returns only the priority-1 policy, which yields, so
+/// Ranger produces exactly the id/data split
+/// [`egret_ranger_eval::eval::UndecidableCause::TagSubResultSplitByResourcePolicy`]
+/// exists to refuse. Before the fix the crate answered `Masked(tag-mask)`
+/// instead, because the unrelated priority-5 policy shut the yielder out.
+#[test]
+fn an_unrelated_mask_policy_does_not_shut_out_a_yielder_ranger_reaches() {
+    let mut unrelated = unrelated_resource_policy(
+        1,
+        "res-unrelated",
+        5,
+        "dataMaskPolicyItems",
+        mask_items("HASH"),
+    );
+    unrelated["policyType"] = json!(1);
+    let mut low = resource_policy(
+        2,
+        "res-mask-low",
+        1,
+        "dataMaskPolicyItems",
+        mask_items("HASH"),
+    );
+    low["policyType"] = json!(1);
+
+    let set = envelope(
+        json!([unrelated, low]),
+        json!([tag_policy(
+            10,
+            "tag-mask",
+            0,
+            1,
+            "dataMaskPolicyItems",
+            mask_items("MASK")
+        )]),
+    );
+    let d = evaluate_data_mask(&set, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(
+            &d,
+            MaskDecision::Undecidable { why }
+                if why.iter().any(|c| matches!(
+                    c,
+                    UndecidableCause::TagSubResultSplitByResourcePolicy {
+                        resource_policy_id: Some(2), ..
+                    }
+                ))
+        ),
+        "a policy Ranger's trie never returns must not end the walk: {d:?}"
+    );
+}
+
+/// The row-filter twin, which the re-review noted was untested only because the
+/// defect was.
+#[test]
+fn an_unrelated_row_filter_policy_does_not_shut_out_a_yielder_ranger_reaches() {
+    let unrelated = json!({
+        "id": 1, "name": "res-unrelated", "service": "trino", "policyType": 2,
+        "isEnabled": true, "policyPriority": 5,
+        "resources": {
+            "catalog": {"values": ["hive"]},
+            "schema":  {"values": ["otherdb"]},
+            "table":   {"values": ["othertable"]},
+        },
+        "rowFilterPolicyItems": filter_items("id > 99"),
+    });
+    let set = envelope(
+        json!([
+            unrelated,
+            row_filter_resource_policy(2, "res-filter-low", 1, "id > 9")
+        ]),
+        json!([tag_policy(
+            10,
+            "tag-filter",
+            0,
+            2,
+            "rowFilterPolicyItems",
+            filter_items("id > 2")
+        )]),
+    );
+    let d = evaluate_row_filter(&set, &table_request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(
+            &d,
+            RowFilterDecision::Undecidable { why }
+                if why.iter().any(|c| matches!(
+                    c,
+                    UndecidableCause::TagSubResultSplitByResourcePolicy {
+                        resource_policy_id: Some(2), ..
+                    }
+                ))
+        ),
+        "the row-filter path has the same candidate-set rule: {d:?}"
     );
 }

@@ -95,6 +95,11 @@ export type WireUndecidableCause = {
   resource_policy_name: string;
   kind: 'tag_sub_result_split_by_resource_policy';
 } | {
+  /** @nullable */
+  policy_id?: number | null;
+  policy_name: string;
+  kind: 'resource_candidacy_not_reproducible';
+} | {
   declared: WireEngineType;
   service_def_name: string;
   kind: 'engine_mismatch';

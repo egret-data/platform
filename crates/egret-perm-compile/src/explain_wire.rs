@@ -578,6 +578,12 @@ pub enum WireUndecidableCause {
         resource_policy_id: Option<i64>,
         resource_policy_name: String,
     },
+    /// Whether Ranger's candidate filter (its resource trie) returns this policy
+    /// decides the request, and the evaluator cannot establish which way.
+    ResourceCandidacyNotReproducible {
+        policy_id: Option<i64>,
+        policy_name: String,
+    },
     EngineMismatch {
         declared: WireEngineType,
         service_def_name: String,
@@ -691,6 +697,13 @@ impl From<&UndecidableCause> for WireUndecidableCause {
                 tag_policy_name: tag_policy_name.clone(),
                 resource_policy_id: *resource_policy_id,
                 resource_policy_name: resource_policy_name.clone(),
+            },
+            UndecidableCause::ResourceCandidacyNotReproducible {
+                policy_id,
+                policy_name,
+            } => WireUndecidableCause::ResourceCandidacyNotReproducible {
+                policy_id: *policy_id,
+                policy_name: policy_name.clone(),
             },
             UndecidableCause::TagResourceNotReproducible {
                 policy_id,

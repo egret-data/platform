@@ -107,7 +107,8 @@ use crate::model::{
     ServicePolicySet, TagPolicyBlock, Unmodelled,
 };
 use crate::resource::{
-    match_policy_resources, trie_reproduces_matcher, MatchType, RequestResource,
+    match_policy_resources, match_resource_of_type, trie_reproduces_matcher, MatchType,
+    RequestResource,
 };
 use crate::servicedef::{PolicyType, ServiceDef, ServiceDefIssue};
 
@@ -469,9 +470,15 @@ pub enum UndecidableCause {
     /// Refusing the agreeing 33 costs 0.8% of the corpus and is the reason
     /// this variant's payload is a LIST of ids rather than one id.
     ///
-    /// For an ACCESS decision the same gap is harmless: within one band the
-    /// allow/deny outcome does not depend on order (see the sort in
-    /// [`evaluate`]). For a mask it is not, because the engine's
+    /// For an ACCESS decision the same gap is **almost** harmless, and the
+    /// exception is SP4d-2b Task 3's: within one band the allow/deny outcome
+    /// does not depend on order (see the sort in [`evaluate`]) **unless a tag
+    /// policy has DENIED**, in which case offset 469's `>=` reads a
+    /// `policyPriority` an allowing band member has just raised, and whichever
+    /// of an allowing and a denying member ran first decides the request. That
+    /// case raises this same variant from [`evaluate`]'s loop. Every other
+    /// ACCESS shape is still order-free for the verdict and differs only in the
+    /// reported id, which is a declared divergence. For a mask it is not, because the engine's
     /// arbitration for policy types 1 and 2 is `>=`, not `>`
     /// (`evaluatePoliciesForOneAccessTypeNoAudit`, `if_icmplt` at offset
     /// 529 versus `if_icmple` at 505) — the FIRST matching evaluator is
@@ -500,13 +507,28 @@ pub enum UndecidableCause {
     ///
     /// # Why candidacy is a separate question on the tag path
     ///
-    /// For a resource request the trie is a pre-filter and
+    /// For a `RangerTagAccessRequest` `evaluate` reads the TAG's match type and
+    /// never touches the policy's matcher, so the trie alone decides which tag
+    /// policies run — and where the trie is wider than the matcher, this crate
+    /// would skip a policy Ranger evaluates. For a DENY tag policy that is
+    /// fail-open.
+    ///
+    /// # ⚠ FIX ROUND 2: the resource-path half of this paragraph was FALSIFIED
+    ///
+    /// It used to open *"for a resource request the trie is a pre-filter and
     /// `RangerDefaultPolicyEvaluator.evaluate` re-asks the matcher, so an
-    /// over-returning trie changes nothing. For a `RangerTagAccessRequest`
-    /// `evaluate` reads the TAG's match type and never touches the policy's
-    /// matcher, so the trie alone decides which tag policies run — and where
-    /// the trie is wider than the matcher, this crate would skip a policy
-    /// Ranger evaluates. For a DENY tag policy that is fail-open.
+    /// over-returning trie changes nothing"* — true when written, and the
+    /// licence under which this crate takes every enabled policy as a candidate
+    /// on the resource path.
+    ///
+    /// Modelling offset 553 made it false. `if (result.getIsAllowed() &&
+    /// !evaluator.hasDeny()) setIsAccessDetermined(true)` is in the ENGINE loop,
+    /// after `evaluate` returns, and reads no matcher — so an over-returning
+    /// candidate list now DOES change the answer. The premise did not stop being
+    /// true because anything about the trie changed; it stopped being true
+    /// because a new mechanism was modelled beside it, and nothing re-checked
+    /// it. [`trie_excludes`] is the resource-path answer, and its doc carries
+    /// the jar measurement.
     TagResourceNotReproducible {
         policy_id: Option<i64>,
         policy_name: String,
@@ -582,6 +604,22 @@ pub enum UndecidableCause {
         tag_policy_name: String,
         resource_policy_id: Option<i64>,
         resource_policy_name: String,
+    },
+    /// Whether Ranger's candidate filter returns this policy decides the
+    /// request, and this crate cannot establish which way.
+    ///
+    /// Raised only where it changes the answer: at offset 553
+    /// (`if (result.getIsAllowed() && !evaluator.hasDeny())
+    /// setIsAccessDetermined(true)`), which is in the ENGINE loop and reads no
+    /// matcher, so a policy `RangerPolicyRepository.getLikelyMatchPolicyEvaluators`
+    /// never returns can end the evaluation here and not in Ranger. If Ranger's
+    /// trie holds this policy the verdict is the one the result already carried;
+    /// if not, the evaluators behind it still run. Those two verdicts differ, or
+    /// this cause is not raised — see [`trie_excludes`] for what the crate CAN
+    /// prove and the jar measurement behind it.
+    ResourceCandidacyNotReproducible {
+        policy_id: Option<i64>,
+        policy_name: String,
     },
     /// [`EngineConfig::plugin_version`] disagrees with the version measured
     /// for [`EngineConfig::engine`] ([`EngineType::plugin_version`]). The
@@ -810,7 +848,7 @@ pub enum Decision {
 /// | `policy.id`, `policy.name` | reporting only | |
 /// | `policy.policy_type`, `is_enabled` | **yes, upstream** | the candidate filter. `RangerPolicyRepository.init` keeps the three evaluator lists disjoint, so a mask policy can never arbitrate against an ACCESS tag verdict — the two arms live in two functions rather than behind a flag |
 /// | `unmodelled` | **yes → refuses** | `collect_causes`, before the loop |
-/// | `isApplicable` / `validitySchedules` | **not read, and measured unreachable** | offset 437 `continue`s a policy outside its validity window BEFORE the arbitration, and this crate has no clock. A MATCHED policy carrying `validitySchedules` already refuses (`construct_affects` ⇒ true), so only an UNMATCHED one can reach the loop — and an unmatched policy decides nothing, so the only thing it can do differently is set `determined` at offset 553. That needs `isAllowed` already true, and every candidate after it is at the same or lower priority, where both surviving arms determine anyway. The skip is therefore outcome-free, not unmodelled |
+/// | `isApplicable` / `validitySchedules` | **not read, and subsumed** | ⚠ **FIX ROUND 2 rewrote this row's reasoning.** Offset 437 `continue`s a policy outside its validity window before the arbitration, and this crate has no clock. Round 1 argued the skip was outcome-free because "an unmatched policy decides nothing"; offset 553 makes that false — an inapplicable unmatched evaluator latches here and is skipped in Ranger. The behaviour is nonetheless sound, by a DIFFERENT argument: a MATCHED policy carrying `validitySchedules` already refuses (`construct_affects` ⇒ true), and an UNMATCHED one now goes through the candidate-set rule below, whose two branches are exactly "Ranger ran it" and "Ranger did not" — which is what an inapplicable policy is. The wrong argument is recorded rather than deleted because it is the shape this round exists to catch |
 ///
 /// ## C — the shared `RangerAccessResult`, which IS the loop's state
 ///
@@ -830,6 +868,7 @@ pub enum Decision {
 /// | `policyType` (offset 489) | **yes** | `0` ⇒ `>`; `1`/`2` ⇒ `>=`. Split across this function and `evaluate_sub` so each has exactly ONE arm — a wrong argument cannot select the wrong comparison |
 /// | `hasResourcePolicies` (offset 337) | **no** | its `false` arm skips clear, loop and restore in one jump (350 → 715) and is measured indistinguishable from its `true` arm with an empty evaluator list. `tests/tag_arbitration.rs` pins the equivalence |
 /// | the candidate ORDER | **yes** | `sort_eval_order`'s `getEvalOrder()` stand-in. Order-free for the outcome on every arm except the tag-deny one — see the ⚠ block in the loop |
+/// | the candidate SET | **yes, at offset 553 and NOWHERE ELSE** | ⚠ **FIX ROUND 2, and the finding of this round.** Ranger's list is its resource trie's answer; this crate's is every enabled policy of the type. That gap is invisible to the arbitration — it only ever SETS `determined`, and on a priority-DESC list a firing at one candidate fires at every later one, so an extra candidate moves nothing — and invisible to `decide`, which re-asks the matcher. It is visible at 553, which reads `hasDeny()` alone. [`trie_excludes`] proves the ordinary case absent; what it cannot prove is ruled on after the loop |
 ///
 /// ## Not an input at all
 ///
@@ -981,6 +1020,14 @@ pub fn evaluate(
     // what lets a resource policy decide at all after the tag phase determined.
     let mut determined = false;
 
+    // Where Ranger MIGHT have stopped at offset 553 on an evaluator this crate
+    // cannot place in its candidate list, and the verdict it carried there.
+    // Resolved after the loop, because whether it matters depends on what the
+    // rest of the loop does.
+    let mut unknown_stop: Option<(Option<i64>, String, bool)> = None;
+    let request_shape_known =
+        request_shape_is_reproducible(&request.resource, service_def, PolicyType::Access);
+
     for view in &candidates {
         // ── the three-way arbitration, offsets 452-535 ─────────────────
         //
@@ -1082,8 +1129,29 @@ pub fn evaluate(
         // Offset 553: once allowed, the first evaluator with no deny items of
         // its own determines. (`setIsAllowed(false)` sets the flag itself, so
         // the deny above is already `determined`.)
+        //
+        // ⚠ FIX ROUND 2, CRITICAL. 553 reads `hasDeny()` and NOT the matcher, so
+        // it fires for an evaluator that matched nothing — which makes Ranger's
+        // candidate filter outcome-relevant here and nowhere else in this loop.
+        // `matched` is the crate's matcher, and trie ⊇ matcher (measured), so a
+        // matched view is in Ranger's list and may determine. An unmatched view
+        // is in it only if the trie says so; [`trie_excludes`] proves the
+        // ordinary "some other table's policy" absent, and anything it cannot
+        // prove is recorded here and ruled on after the loop.
         if allowed && !view.has_deny {
-            determined = true;
+            if view.matched {
+                determined = true;
+            } else if !(request_shape_known
+                && trie_excludes(
+                    view.policy,
+                    &request.resource,
+                    service_def,
+                    PolicyType::Access,
+                ))
+                && unknown_stop.is_none()
+            {
+                unknown_stop = Some((view.policy.id, view.policy.name.clone(), allowed));
+            }
         }
         if determined {
             break;
@@ -1127,6 +1195,29 @@ pub fn evaluate(
             // Asserted rather than assumed, because "provably idempotent" is
             // the kind of claim a later change breaks quietly.
             debug_assert!(allowed && outcome.as_ref().is_some_and(|o| o.allowed));
+        }
+    }
+
+    // ⚠ The candidate-set ruling, after the restore because the restore is part
+    // of the verdict being compared.
+    //
+    // Ranger either held that evaluator — in which case it stopped there and the
+    // verdict is the one the result carried at that point — or it did not, in
+    // which case everything after it ran and the verdict is the one below. When
+    // the two agree the crate answers, whichever way the trie went; when they
+    // disagree the trie decides the request and the crate cannot say which way.
+    //
+    // The comparison is on the VERDICT, not on the reported policy: a differing
+    // ACCESS policy id is already a declared divergence
+    // (`tests/ranger/README.md`) and nothing in this crate asserts one.
+    if let Some((policy_id, policy_name, allowed_at_stop)) = unknown_stop {
+        if allowed_at_stop != allowed {
+            return Decision::Undecidable {
+                why: vec![UndecidableCause::ResourceCandidacyNotReproducible {
+                    policy_id,
+                    policy_name,
+                }],
+            };
         }
     }
 
@@ -1305,6 +1396,157 @@ fn tag_policies_can_decide(
             true
         }
     }
+}
+
+/// Whether Ranger's candidate filter — `RangerPolicyRepository.getLikelyMatchPolicyEvaluators`,
+/// i.e. the `policyResourceTrie` — provably does **not** return `policy` for
+/// `request`.
+///
+/// # Why this question exists at all, and when it started mattering
+///
+/// FIX ROUND 2, CRITICAL. This crate evaluates every enabled policy of the
+/// requested type and lets `RangerDefaultPolicyEvaluator.evaluate`'s own matcher
+/// decide what each one does. The justification, written on
+/// [`crate::resource::trie_reproduces_matcher`] and true when it was written,
+/// was: *the trie is a pre-filter and `evaluate` re-asks the matcher, so an
+/// over-returning trie changes nothing.*
+///
+/// **Modelling offset 553 made that false.**
+/// `if (result.getIsAllowed() && !evaluator.hasDeny()) setIsAccessDetermined(true)`
+/// lives in the ENGINE loop, after `evaluate` has returned, and reads only
+/// `hasDeny()` — never the matcher. So a policy the trie never returns can end
+/// the evaluation here and not in Ranger, and with a tag ALLOW seeding
+/// `isAllowed` before the resource loop even starts, it does so before any
+/// resource policy has matched anything. That is a fail-open, and it is this
+/// task's, not an inherited one: before the phases were composed, `isAllowed`
+/// could only become true through a MATCHED policy, so an unmatched evaluator
+/// could never be the one that stopped the loop.
+///
+/// `RangerPolicyEngineOptions` reads
+/// `.policyengine.option.disable.trie.lookup.prefilter` with default `false`, so
+/// the trie is the live path on both plugins, not a configurable one.
+///
+/// # What is proved, and what is only "cannot tell"
+///
+/// `true` means PROVABLY ABSENT. `false` means present **or** not established —
+/// the two are the same to every caller, because both end in a refusal.
+///
+/// Measured from the real jar in
+/// `tests/ranger/src/test/java/EgretResourceTrieCandidacyTest.java`, against the
+/// Trino four-level hierarchy and the request `hive.sales.orders.id`:
+///
+/// | policy | in Ranger's list | `getMatchType` |
+/// |---|---|---|
+/// | `hive/sales/orders/id` | **yes** | `SELF` |
+/// | `hive/sales/orders/*` | **yes** | `SELF` |
+/// | `hive/sales/other/*` | **no** | `NONE` |
+/// | `hive/otherdb/othertable/*` | **no** | `NONE` |
+/// | `otherc/sales/orders/*` | **no** | `NONE` |
+/// | `hive/sales` (schema only) | **yes** | `ANCESTOR` |
+/// | `hive/sales/orders/id/sub` | **yes** | `NONE` |
+/// | `hive/sales/*ders/*` | **yes** | `SELF` |
+/// | `hive/sales/orders/*` with `isExcludes` | **yes** | `NONE` |
+///
+/// Three things that table settles, and the third is why this is not simply
+/// "skip what the matcher rejects":
+///
+/// 1. **trie ⊇ matcher**, so a `matched` view may determine at 553 without
+///    further argument.
+/// 2. **`NONE` with the request's own key set and literal values ⟹ absent**,
+///    which is what lets ordinary requests answer at all.
+/// 3. **ANCESTOR is PRESENT.** `RangerResourceTrie`'s build loop (2.5.0 offsets
+///    376-430) adds a policy that declares no value for a level as an
+///    *inherited* evaluator of that level `if (evaluator.isAncestorOf(
+///    resourceDef))`, and inherited evaluators are unioned into every lookup —
+///    that is the mechanism by which a schema-level policy is a candidate for a
+///    column request. An `isExcludes` level lands there too. So excluding
+///    everything the matcher rejects would be WRONG, in the direction that lets
+///    a later policy decide where Ranger had already stopped.
+///
+/// # The conditions, each traced to a line of that build loop
+///
+/// Every resource map of the policy must satisfy all of:
+///
+/// * **it declares exactly the request's resource keys.** Fewer, and the
+///   `isAncestorOf` branch can make it an inherited evaluator (row 6); more or
+///   different, and a key the def does not know sidesteps the intersection
+///   (row 7).
+/// * **no `isExcludes` and no `isRecursive` on any level.** Excludes is the
+///   other route into `addInheritedEvaluator` (row 9); recursive turns an exact
+///   value into a wildcard evaluator (`insert`'s `if (isWildcard ||
+///   isRecursive)`).
+/// * **every value is trie-prefix-exact** ([`crate::resource::trie_reproduces_matcher`]),
+///   so per level the trie's membership IS the matcher's (row 8 is the
+///   counter-example: `*ders` parks at `sales`'s child node for the empty
+///   prefix and comes back for `orders`).
+/// * **the matcher rejects it.** With the key sets equal, `getMatchType` has no
+///   ANCESTOR or DESCENDANT to return, so a non-match is a per-level
+///   value mismatch — and by the condition above, one the trie makes too.
+///
+/// The caller must additionally have established that the REQUEST's own key set
+/// is a gapless hierarchy prefix ([`request_shape_is_reproducible`]); without
+/// that, `getMatchType` can answer `NONE` because `init()` failed rather than
+/// because a level mismatched, and the trie does not care about hierarchies.
+fn trie_excludes(
+    policy: &RangerPolicy,
+    request: &RequestResource,
+    service_def: &ServiceDef,
+    policy_type: PolicyType,
+) -> bool {
+    let maps = std::iter::once(&policy.resources).chain(policy.additional_resources.iter());
+    for map in maps {
+        // Exactly the request's keys — see the ANCESTOR row.
+        if map.len() != request.len() || !request.keys().all(|k| map.contains_key(k)) {
+            return false;
+        }
+        for (name, level) in map {
+            if level.is_excludes || level.is_recursive {
+                return false;
+            }
+            let wild_card = service_def
+                .resource(policy_type, name)
+                .map(|r| r.matcher_options.wild_card)
+                .unwrap_or(true);
+            if !level
+                .values
+                .iter()
+                .all(|v| trie_reproduces_matcher(v, wild_card))
+            {
+                return false;
+            }
+        }
+        if match_resource_of_type(map, request, service_def, policy_type) != MatchType::None {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether the REQUEST's resource keys are a gapless prefix of one of the def's
+/// hierarchies for this policy type.
+///
+/// [`trie_excludes`]'s last condition reads `getMatchType`'s `NONE` as "a level
+/// mismatched". That reading is only available when `init()` cannot have failed
+/// for a policy carrying the request's own key set — and `init()` fails when
+/// those keys are not a gapless prefix of exactly one hierarchy. A request for
+/// `{catalog, table}` on Trino is the shape that breaks it: no hierarchy skips
+/// `schema`, so the matcher answers `NONE` for hierarchy reasons while the trie,
+/// which is per level and knows nothing of hierarchies, still returns the
+/// policy.
+///
+/// Computed once per request rather than per policy, because it is a property of
+/// the request.
+fn request_shape_is_reproducible(
+    request: &RequestResource,
+    service_def: &ServiceDef,
+    policy_type: PolicyType,
+) -> bool {
+    service_def.hierarchies(policy_type).iter().any(|h| {
+        h.len() >= request.len()
+            && h[..request.len()]
+                .iter()
+                .all(|lvl| request.get(lvl).is_some())
+    })
 }
 
 /// Phase 1's gate: the tag service-def to evaluate the `tagPolicies` block
@@ -2169,7 +2411,16 @@ fn evaluate_sub(
                 break;
             }
             reachable.push(view);
-            if !view.has_deny {
+            // ⚠ FIX ROUND 2. Only a MATCHED view is provably in Ranger's
+            // candidate list (trie ⊇ matcher, measured), so only a matched view
+            // may end the walk at 553. An unmatched one might not be there at
+            // all — and unlike the ACCESS path this needs no ruling of its own:
+            // if Ranger DID stop on it, nothing behind it wrote and the tag
+            // verdict stands, which is what this walk answers when nothing
+            // behind it yields; and if anything behind it DOES yield, the two
+            // possibilities disagree and the split refusal below is the honest
+            // answer either way.
+            if !view.has_deny && view.matched {
                 determining_band.get_or_insert(view.policy.policy_priority);
             }
         }
