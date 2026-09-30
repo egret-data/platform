@@ -4,7 +4,7 @@
 **Date:** 2026-09-30
 **Replaces:** the Jupyter notebook (`egret-notebook`, the Jupyter half of `egret-kernel`, `kernel-image/`,
 `frontend/src/components/notebook/`)
-**Delivered as:** one spike (S0) and six PRs (P1–P6), §9.
+**Delivered as:** two spikes (S0, S0b) and six PRs (P1–P6), §9.
 
 The notebook changes purpose. It is no longer where a user does ad-hoc analysis — SQL Lab is that. It
 becomes where an author builds a **highly custom dashboard in Python** (a *Data App*), in the style of
@@ -402,30 +402,32 @@ An axum service in egret, listening on the apps host:
   - **The single biggest removable cost** is marimo's `has_marimo_installed` check: before **every**
     kernel launch from a configured, non-writable interpreter (egret's `_get_venv_config` patch makes it
     one) marimo runs `<python> -c "import marimo, msgspec, zmq; …"` (`marimo/_session/_venv.py:128`), a
-    fresh interpreter importing marimo — 1.0 to 1.8 s. Skipping it cut pool spawn → ready from 1.03–1.27 s
-    to 0.11–0.23 s. **P3/P5 decides how:** (a) the launcher shim answers that exact command (what S0b
-    measured — a hack against private behaviour, needs a contract test that fails when the command
-    changes); (b) an upstream marimo change (e.g. cache the result per interpreter and version); or (c)
-    run the check once at image build or pod start and have the entrypoint patch return it (another
-    private patch, same contract-test rule).
-- **The launcher.** S0b built two pre-started launchers behind a shim at the configured interpreter
-  path: a **warm pool** (N single-use workers that have already imported marimo, polars, httpx and
+    fresh interpreter importing marimo. Spawn → worker claimed took 1.0 to 1.8 s in the pool run, mostly
+    this check (the span includes the shim start). Skipping it cut pool spawn → ready from 1.03–1.27 s to
+    0.11–0.23 s (one outlier 1.48 s). **P3/P5 decides how:** (a) the launcher shim answers that exact
+    command (what S0b measured — a hack against private behaviour, needs a contract test that fails when
+    the command changes); (b) an upstream marimo change (e.g. cache the result per interpreter and
+    version); or (c) run the check once at image build or pod start and have the entrypoint patch return
+    it (another private patch, same contract-test rule).
+- **The launcher.** S0b built two pre-started launchers behind a shim at the configured interpreter path:
+  a **warm pool** (N single-use workers that have already imported marimo, polars, httpx and
   `egret_marimo`; workers inherit the listening socket and one is armed at a time, because passing the
-  accepted socket with `send_fds` lost sessions on macOS for an unproven reason) and a **fork server**
-  (a single-threaded parent with the same imports that forks one child per kernel). Both run marimo's
-  own `marimo._ipc.launch_kernel.main()`, whose module path marimo's docstring declares "a public API
-  used by external consumers … Changing this path is a BREAKING CHANGE" (`marimo/_ipc/launch_kernel.py`);
-  the stdin `KernelArgs` payload and the `KERNEL_READY` / `KERNEL_INFO` lines are not covered by that
+  accepted socket with `send_fds` lost sessions on macOS for an unproven reason) and a **fork server** (a
+  single-threaded parent with the same imports that forks one child per kernel). Both run marimo's own
+  `marimo._ipc.launch_kernel.main()`, whose module path marimo's docstring declares "a public API used by
+  external consumers … Changing this path is a BREAKING CHANGE" (`marimo/_ipc/launch_kernel.py`); the
+  stdin `KernelArgs` payload and the `KERNEL_READY` / `KERNEL_INFO` lines are not covered by that
   sentence, so the P3 contract test covers them too. Both cut direct's sequential-p50 excess over thread
-  by more than half and kept isolation (distinct pids, single use, kernel killed when its client
-  disconnects, none alive after the session TTL, identity correct). **S0b cannot choose between them**:
-  in round 4 their sequential-p50 gap was ~0.5 s and flipped sign with the check skipped (pool 3.54 vs
-  fork server 3.03 s; with the skip 2.43 vs 2.95 s), single runs at load 5–22. They differ elsewhere: the pool's idle memory is
-  (N+1) × ~70 MB and it hung on shutdown when its kernels were killed first (open, marimo side
-  uninvestigated); the fork server is safe only while its parent never *uses* polars (only imports it),
-  which nothing enforces. **P5 chooses** after measuring on a quiet Linux node on kind: all variants
-  interleaved, ≥ 5 runs each, per-phase marks, PSS/USS per idle worker and per forked child, the
-  shutdown behaviour of both, with the `has_marimo_installed` fix P3/P5 adopted.
+  by more than half (the pool in rounds 3 and 4; the fork server in round 4, its only round) and kept
+  isolation (distinct pids, single use, kernel killed when its client disconnects, none alive after the
+  session TTL, identity correct). **S0b cannot choose between them**: in round 4 their sequential-p50 gap
+  was ~0.5 s and flipped sign with the check skipped (pool 3.54 vs fork server 3.03 s; with the skip 2.43
+  vs 2.95 s), single runs at load 5–22. They differ elsewhere: the pool's idle memory is (N+1) × ~70 MB
+  and it hung on shutdown when its kernels were killed first (open, marimo side uninvestigated); the fork
+  server is safe only while its parent never *uses* polars (only imports it), which nothing enforces. **P5
+  chooses** after measuring on a quiet Linux node on kind: all variants interleaved, ≥ 5 runs each,
+  per-phase marks, PSS/USS per idle worker and per forked child, the shutdown behaviour of both, with the
+  `has_marimo_installed` fix P3/P5 adopted.
 - **Session-start UX.** Every new viewer session waits for a kernel, not only a cold pod, and **a reload
   never reuses a kernel** (S0b: a host-page reload got a new pid; an iframe-only reload through the
   spike proxy stayed blank because the old WebSocket's close had revoked the token its cookie still
@@ -488,7 +490,7 @@ never merged; automated Playwright, single run per case, macOS dev laptop under 
 
 | # | Question | What happened |
 |---|---|---|
-| S0b | Where does a new viewer's start-up time go in the forced IPC mode, and do pre-started kernels (warm pool, fork server) help? | ≈ 1.75 s is page + frontend load in every mode (a floor); marimo's per-launch `has_marimo_installed` check costs 1.0–1.8 s and is removable; S0's 13.2 s not reproduced (4.82 s). Round 4 seq p50: thread 2.12, direct 6.09, pool 3.54, fork server 3.03 s; < 2 s / < 3 s concurrent met by no mode, thread included. Pool vs fork server not separated; P5 chooses on Linux (§6.3). Isolation held in every variant. |
+| S0b | Where does a new viewer's start-up time go in the forced IPC mode, and do pre-started kernels (warm pool, fork server) help? | ≈ 1.75 s is page + frontend load in every mode (a floor); marimo's per-launch `has_marimo_installed` check is most of a 1.0–1.8 s spawn → claimed span and is removable; S0's 13.2 s not reproduced (4.82 s). Round 4 seq p50: thread 2.12, direct 6.09, pool 3.54, fork server 3.03 s; < 2 s / < 3 s concurrent met by no mode, thread included. Pool vs fork server not separated; P5 chooses on Linux (§6.3). Isolation held in every variant. |
 
 ### PRs, in order
 

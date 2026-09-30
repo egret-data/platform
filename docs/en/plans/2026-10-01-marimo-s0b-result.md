@@ -50,21 +50,21 @@ Seconds are counted from navigation start. Each row is one session. Sources:
 | b1 | ipc | 0.11 | 1.98 | 1.99 | 3.79 | 4.10 | 4.25 |
 | b2 | ipc | 0.12 | 2.02 | 2.07 | 3.76 | 4.07 | 4.27 |
 
-- **The page-load floor is ≈ 1.75 s.** In every mode, navigation → `ws_open` takes 1.74 to 2.04 s in the
-  warm sessions (b1, b2). This is the browser loading egret's host page and marimo's frontend. The spike
+- **The page-load floor is ≈ 1.75 s.** In every mode, navigation → `ws_open` takes 1.74 to 2.02 s in the
+  warm sessions (b1, b2; b0 was 2.04 s in ipc and 3.35 s in thread). This is the browser loading egret's host page and marimo's frontend. The spike
   did not split it further. No launcher touches it. Warm thread mode renders at 1.98 to 2.00 s, so the
   plan's "< 2 s" target lies within ~0.25 s of this floor.
 - **The IPC delta.** In the warm sessions, IPC minus thread is ~2.3 s: `kernel_spawn_begin` →
   `kernel_ready` takes 1.69 to 1.80 s (wrapped `IPCKernelManagerImpl.start_kernel`,
   `marimo/_session/managers/ipc.py:311`), `kernel_ready` → first gateway request takes a further 0.25 to
   0.45 s (the first cells' imports plus the IPC round trip), and ~0.15 s is not attributed to any mark.
-- **What is inside `kernel_spawn_begin` → `kernel_ready`.** Task 3 found that before **every** launch
-  from a configured, non-writable venv, marimo runs
-  `<venv>/bin/python -c "import marimo, msgspec, zmq; print(marimo.__version__)"`
-  (`has_marimo_installed`, `marimo/_session/_venv.py:128`, called from `ipc.py:375`). That is a fresh
-  interpreter importing marimo, and it measured **1.0 to 1.8 s** per launch (pool run, round 3: spawn →
-  worker claimed). The kernel child then imports `marimo._ipc.launch_kernel`, ~0.7 s (next table),
-  before it prints `KERNEL_READY`.
+- **What is inside `kernel_spawn_begin` → `kernel_ready`.** Task 3 found that before **every** launch from
+  a configured, non-writable venv, marimo runs `<venv>/bin/python -c "import marimo, msgspec, zmq;
+  print(marimo.__version__)"` (`has_marimo_installed`, `marimo/_session/_venv.py:128`, called from
+  `ipc.py:375`). That is a fresh interpreter importing marimo. In the round-3 pool run, spawn → worker
+  claimed took **1.0 to 1.8 s** per launch, mostly this check (the span also includes the shim's start).
+  The kernel child then imports `marimo._ipc.launch_kernel`, ~0.7 s (next table), before it prints
+  `KERNEL_READY`.
 
 ### Imports (`python -X importtime`, cumulative, `results/s0b-importtime.txt`)
 
@@ -130,7 +130,9 @@ viewer is followed by 5 sequential and then 3 concurrent viewers, 9 sessions per
   sessions drifted from 4.61 to 9.33 s as load rose. The fork server was built after round 3, so it is not
   in it.
 - **What holds across rounds 3 and 4:** direct is clearly the slowest process-per-viewer launcher, and
-  both pre-started launchers cut its sequential-p50 excess over thread by more than half (round 4: +3.97 → +1.42 / +0.91 s; round 3: +5.52 → +2.17 s for pool). The ordering inside
+  the pool cut its sequential-p50 excess over thread by more than half in both rounds (round 4: +3.97 →
+  +1.42 s; round 3: +5.52 → +2.17 s), and so did the fork server in round 4, its only round (+3.97 →
+  +0.91 s). The ordering inside
   {pool, pool-skipcheck, forkserver, forkserver-skipcheck} is **not** separated by a single run at this
   load.
 
@@ -223,8 +225,9 @@ It held in every variant measured:
 
 1. **Page and frontend load (≈ 1.75 s warm) is a floor that no launcher changes.** A < 2 s target leaves
    ~0.25 s for everything else, on a laptop.
-2. **marimo's `has_marimo_installed` check is the single biggest removable cost:** 1.0 to 1.8 s
-   before every IPC kernel launch. It was measured in the pool and fork-server phase marks; by the code
+2. **marimo's `has_marimo_installed` check is the single biggest removable cost.** It runs before every
+   IPC kernel launch; spawn → claimed was 1.0 to 1.8 s in the round-3 pool marks, mostly this check
+   (the span includes the shim start). It was measured in the pool and fork-server phase marks; by the code
    (`ipc.py:375`) it also runs on the direct path, where the spike did not time it separately.
    - It runs because egret points `_get_venv_config` at a configured, non-writable interpreter (S0 patch).
    - Options for P3/P5:
@@ -236,7 +239,7 @@ It held in every variant measured:
    - None of the three was chosen here.
 3. **A pre-started kernel (pool or fork server) removes the child boot** (claimed → `kernel_ready`
    0.04–0.07 s in the round-3 pool marks) and cuts direct's sequential-p50 excess over thread by more
-   than half in both rounds.
+   than half: the pool in rounds 3 and 4, the fork server in round 4 (its only round).
    - The evidence **cannot choose between pool and fork server.** In round 4 their sequential-p50 gap
      was ~0.5 s and flipped sign with the check skipped (3.54 vs 3.03 s; skipped, 2.43 vs 2.95 s); the
      first viewer was faster on the pool both times (4.48 vs 5.90 s; skipped, 2.79 vs 4.98 s), and the

@@ -7,7 +7,7 @@
 **Ngày:** 2026-09-30
 **Thay thế:** notebook Jupyter (`egret-notebook`, nửa Jupyter của `egret-kernel`, `kernel-image/`,
 `frontend/src/components/notebook/`)
-**Triển khai thành:** một spike (S0) và sáu PR (P1–P6), §9.
+**Triển khai thành:** hai spike (S0, S0b) và sáu PR (P1–P6), §9.
 
 Notebook đổi mục đích. Nó không còn là nơi phân tích ad-hoc — việc đó thuộc về SQL Lab. Nó trở thành
 nơi tác giả xây **dashboard tuỳ biến cao bằng Python** (một *Data App*), theo kiểu marimo hay Streamlit,
@@ -398,15 +398,17 @@ Một service axum trong egret, lắng nghe trên host apps:
     chế độ nào, kể cả thread, đạt < 2 giây tuần tự hay < 3 giây cho ba người xem đồng thời trên laptop
     này; số đồng thời ở đó bị việc tải trang chi phối (5,7–11,8 giây từ ticket → WebSocket ở mọi chế độ)
     và không xếp hạng được gì.
-  - **Chi phí lớn nhất có thể bỏ** là bước kiểm `has_marimo_installed` của marimo: trước **mỗi** lần
-    khởi chạy kernel từ một interpreter đã cấu hình, không ghi được (patch `_get_venv_config` của egret
-    làm nó thành như vậy), marimo chạy `<python> -c "import marimo, msgspec, zmq; …"`
-    (`marimo/_session/_venv.py:128`), một interpreter mới import marimo — 1,0 tới 1,8 giây. Bỏ qua nó
-    làm spawn → ready của pool giảm từ 1,03–1,27 giây xuống 0,11–0,23 giây. **P3/P5 quyết định cách
-    làm:** (a) shim của launcher trả lời đúng lệnh đó (thứ S0b đã đo — một mẹo dựa vào hành vi nội bộ,
-    cần test hợp đồng sẽ fail khi lệnh đổi); (b) một thay đổi upstream ở marimo (vd. cache kết quả theo
-    interpreter và phiên bản); hoặc (c) chạy bước kiểm một lần lúc build image hay lúc pod khởi động và
-    để patch của entrypoint trả về kết quả đó (thêm một patch nội bộ, cùng quy tắc test hợp đồng).
+  - **Chi phí lớn nhất có thể bỏ** là bước kiểm `has_marimo_installed` của marimo: trước **mỗi** lần khởi
+    chạy kernel từ một interpreter đã cấu hình, không ghi được (patch `_get_venv_config` của egret làm nó
+    thành như vậy), marimo chạy `<python> -c "import marimo, msgspec, zmq; …"`
+    (`marimo/_session/_venv.py:128`), một interpreter mới import marimo. Ở lần chạy pool, spawn → worker
+    nhận việc mất 1,0 tới 1,8 giây, phần lớn là bước kiểm này (khoảng đó gồm cả lúc shim khởi động). Bỏ
+    qua nó làm spawn → ready của pool giảm từ 1,03–1,27 giây xuống 0,11–0,23 giây (một giá trị ngoại lai
+    1,48 giây). **P3/P5 quyết định cách làm:** (a) shim của launcher trả lời đúng lệnh đó (thứ S0b đã đo —
+    một mẹo dựa vào hành vi nội bộ, cần test hợp đồng sẽ fail khi lệnh đổi); (b) một thay đổi upstream ở
+    marimo (vd. cache kết quả theo interpreter và phiên bản); hoặc (c) chạy bước kiểm một lần lúc build
+    image hay lúc pod khởi động và để patch của entrypoint trả về kết quả đó (thêm một patch nội bộ, cùng
+    quy tắc test hợp đồng).
 - **Launcher.** S0b dựng hai launcher khởi động sẵn sau một shim ở đường dẫn interpreter đã cấu hình:
   một **warm pool** (N worker dùng một lần đã import sẵn marimo, polars, httpx và `egret_marimo`; các
   worker thừa kế socket đang listen và mỗi lúc chỉ một worker được "armed", vì truyền socket đã accept
@@ -416,7 +418,8 @@ Một service axum trong egret, lắng nghe trên host apps:
   "a public API used by external consumers … Changing this path is a BREAKING CHANGE"
   (`marimo/_ipc/launch_kernel.py`); payload `KernelArgs` qua stdin và các dòng `KERNEL_READY` /
   `KERNEL_INFO` không nằm trong câu đó, nên test hợp đồng ở P3 cũng phủ chúng. Cả hai cắt phần p50 tuần
-  tự vượt thread của direct đi hơn một nửa và giữ được cô lập (pid khác nhau, dùng một lần, kernel bị
+  tự vượt thread của direct đi hơn một nửa (pool ở vòng 3 và 4; fork server ở vòng 4, vòng duy nhất của
+  nó) và giữ được cô lập (pid khác nhau, dùng một lần, kernel bị
   giết khi client của nó ngắt, không còn sống sau session TTL, danh tính đúng). **S0b không chọn được
   giữa hai cái**: ở vòng 4 chênh lệch p50 tuần tự của chúng là ~0,5 giây và đổi chiều khi bỏ bước kiểm
   (pool 3,54 so với fork server 3,03 giây; khi bỏ bước kiểm 2,43 so với 2,95 giây), các lần chạy đơn ở
@@ -486,7 +489,7 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
 
 | # | Câu hỏi | Điều đã xảy ra |
 |---|---|---|
-| S0b | Thời gian khởi động của một người xem mới đi đâu ở chế độ ép IPC, và kernel khởi động sẵn (warm pool, fork server) có giúp không? | ≈ 1,75 giây là tải trang + frontend ở mọi chế độ (mức sàn); bước kiểm `has_marimo_installed` mỗi lần khởi chạy của marimo tốn 1,0–1,8 giây và có thể bỏ; 13,2 giây của S0 không tái hiện được (4,82 giây). p50 tuần tự vòng 4: thread 2,12, direct 6,09, pool 3,54, fork server 3,03 giây; < 2 giây / < 3 giây đồng thời không chế độ nào đạt, kể cả thread. Pool và fork server chưa tách được; P5 chọn trên Linux (§6.3). Cô lập giữ được ở mọi biến thể. |
+| S0b | Thời gian khởi động của một người xem mới đi đâu ở chế độ ép IPC, và kernel khởi động sẵn (warm pool, fork server) có giúp không? | ≈ 1,75 giây là tải trang + frontend ở mọi chế độ (mức sàn); bước kiểm `has_marimo_installed` mỗi lần khởi chạy của marimo chiếm phần lớn khoảng spawn → nhận việc 1,0–1,8 giây và có thể bỏ; 13,2 giây của S0 không tái hiện được (4,82 giây). p50 tuần tự vòng 4: thread 2,12, direct 6,09, pool 3,54, fork server 3,03 giây; < 2 giây / < 3 giây đồng thời không chế độ nào đạt, kể cả thread. Pool và fork server chưa tách được; P5 chọn trên Linux (§6.3). Cô lập giữ được ở mọi biến thể. |
 
 ### Các PR, theo thứ tự
 
@@ -496,9 +499,9 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
    revision/409, publish, khôi phục, quyền `app:*`, module tính năng `apps`.
 3. **P3 — Image `egret-apps` và `egret_marimo`.** Entrypoint, `EgretStorage`, DB-API, `egret.sql`, cấu hình
    marimo đã khoá, patch IPC cho chế độ run và cách xử lý bước kiểm `has_marimo_installed` mỗi lần khởi
-   chạy của marimo (§6.3: shim trả lời, upstream, hoặc kết quả tính sẵn); pytest với một egret giả, kể cả test hợp đồng
-   `StorageInterface` (có ca tải-lại-không-gắn-lại, §5.1) và test hợp đồng IPC (§6.3). Quyết định engine
-   mặc định của SQL cell (§4.4).
+   chạy của marimo (§6.3: shim trả lời, upstream, hoặc kết quả tính sẵn); pytest với một egret giả, kể
+   cả test hợp đồng `StorageInterface` (có ca tải-lại-không-gắn-lại, §5.1) và test hợp đồng IPC (§6.3).
+   Quyết định engine mặc định của SQL cell (§4.4).
 4. **P4 — Origin apps, proxy, chế độ edit.** Ticket → cookie, proxy (allow-list route hoặc block list của
    S0, kiểm và chuyển tiếp một đường dẫn thô, xoá hoặc ghim `X-Notebook-Id`), đổi tên cookie sang `__Host-`
    và kiểm qua HTTPS trên kind, kiểm toán phía egret rằng route `GET` không có tác dụng phụ và CSRF vẫn dựa
