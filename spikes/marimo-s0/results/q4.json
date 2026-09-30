@@ -1,0 +1,146 @@
+{
+  "login_ok": true,
+  "login_note": null,
+  "author_js_executed": true,
+  "author_js": {
+    "parentDoc": "blocked:SecurityError",
+    "cookieVisible": "",
+    "whoamiReadable": "blocked:TypeError",
+    "mutateWithHeader": "blocked:TypeError",
+    "cookieAfterToss": "egret_csrf=evil",
+    "mutateNoCors": "sent",
+    "editApiStatus": "status 401",
+    "editRoot": "status 401"
+  },
+  "mo_html_script": "HTMLSCRIPT pending",
+  "mo_html_onerror": "ONERROR pending",
+  "ticket_replay_status": 403,
+  "apps_without_cookie_status": 401,
+  "edit_from_run": {
+    "note": "run-mode apps_sid cookie hitting the /e (edit) upstream via the proxy; must be 401/403",
+    "api_status": 401,
+    "root": 401
+  },
+  "egret_saw_whoami": [
+    {
+      "t": 1790771878.4429598,
+      "kind": "whoami",
+      "user": "alice",
+      "origin": "http://apps.egret.localhost:8701",
+      "raw_cookie": "egret_session=Xd8TSx1a8Z9H0t5LqxVYCA; egret_csrf=fqNYyXY2DNYrCJCIzGOvKA"
+    }
+  ],
+  "egret_saw_mutate": [
+    {
+      "t": 1790771878.523381,
+      "kind": "mutate",
+      "ok": false,
+      "origin": "http://apps.egret.localhost:8701",
+      "raw_cookie": "egret_session=Xd8TSx1a8Z9H0t5LqxVYCA; egret_csrf=fqNYyXY2DNYrCJCIzGOvKA; egret_csrf=evil"
+    }
+  ],
+  "any_mutate_succeeded": false,
+  "console": [
+    {
+      "type": "debug",
+      "text": "Initializing runtime...",
+      "location": {
+        "url": "http://apps.egret.localhost:8701/r/assets/useEventListener-BdZUApHd.js",
+        "lineNumber": 0,
+        "columnNumber": 677
+      }
+    },
+    {
+      "type": "debug",
+      "text": "Reporting vitals",
+      "location": {
+        "url": "http://apps.egret.localhost:8701/r/assets/useEventListener-BdZUApHd.js",
+        "lineNumber": 0,
+        "columnNumber": 677
+      }
+    },
+    {
+      "type": "debug",
+      "text": "Runtime is healthy",
+      "location": {
+        "url": "http://apps.egret.localhost:8701/r/assets/useEventListener-BdZUApHd.js",
+        "lineNumber": 0,
+        "columnNumber": 677
+      }
+    },
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)",
+      "location": {
+        "url": "http://apps.egret.localhost:8701/r/x",
+        "lineNumber": 0,
+        "columnNumber": 0
+      }
+    },
+    {
+      "type": "error",
+      "text": "Access to fetch at 'http://egret.localhost:8700/api/whoami' from origin 'http://apps.egret.localhost:8701' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.",
+      "location": {
+        "url": "http://apps.egret.localhost:8701/r/",
+        "lineNumber": 0,
+        "columnNumber": 0
+      }
+    },
+    {
+      "type": "error",
+      "text": "Failed to load resource: net::ERR_FAILED",
+      "location": {
+        "url": "http://egret.localhost:8700/api/whoami",
+        "lineNumber": 0,
+        "columnNumber": 0
+      }
+    },
+    {
+      "type": "error",
+      "text": "Access to fetch at 'http://egret.localhost:8700/api/mutate' from origin 'http://apps.egret.localhost:8701' has been blocked by CORS policy: Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin' header is present on the requested resource.",
+      "location": {
+        "url": "http://apps.egret.localhost:8701/r/",
+        "lineNumber": 0,
+        "columnNumber": 0
+      }
+    },
+    {
+      "type": "error",
+      "text": "Failed to load resource: net::ERR_FAILED",
+      "location": {
+        "url": "http://egret.localhost:8700/api/mutate",
+        "lineNumber": 0,
+        "columnNumber": 0
+      }
+    },
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+      "location": {
+        "url": "http://egret.localhost:8700/api/mutate",
+        "lineNumber": 0,
+        "columnNumber": 0
+      }
+    },
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+      "location": {
+        "url": "http://apps.egret.localhost:8701/e/api/status",
+        "lineNumber": 0,
+        "columnNumber": 0
+      }
+    },
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+      "location": {
+        "url": "http://apps.egret.localhost:8701/e/",
+        "lineNumber": 0,
+        "columnNumber": 0
+      }
+    }
+  ],
+  "page_errors": [],
+  "frame_body_excerpt": "HTMLSCRIPT pending\nONERROR pending"
+}

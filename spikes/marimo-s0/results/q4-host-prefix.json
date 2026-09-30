@@ -1,0 +1,26 @@
+{
+  "login_ok": false,
+  "login_note": {
+    "reason": "no #app iframe on the egret host page",
+    "host_page_body": "login first",
+    "stored_cookies": [],
+    "interpretation": "Chromium refused to store the __Host- Secure cookie over http://egret.localhost, so login produced no session; this check must be repeated over HTTPS on kind in P4."
+  },
+  "author_js_executed": false,
+  "author_js": null,
+  "mo_html_script": null,
+  "mo_html_onerror": null,
+  "ticket_replay_status": null,
+  "apps_without_cookie_status": 401,
+  "edit_from_run": {
+    "note": "run-mode apps_sid cookie hitting the /e (edit) upstream via the proxy; must be 401/403",
+    "api_status": 401,
+    "root": 401
+  },
+  "egret_saw_whoami": [],
+  "egret_saw_mutate": [],
+  "any_mutate_succeeded": false,
+  "console": [],
+  "page_errors": [],
+  "frame_body_excerpt": ""
+}
