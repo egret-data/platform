@@ -90,54 +90,58 @@ fn check_statement(stmt: &Statement) -> Result<(), ReadOnlyError> {
     }
 }
 
-fn check_query(q: &Query) -> Result<(), ReadOnlyError> {
-    struct Guard;
-    impl Visitor for Guard {
-        type Break = ReadOnlyError;
+/// Walks every query, sub-query and table factor reachable from a query.
+/// Its layers overlap on purpose: with sqlparser 0.63 a statement can only nest
+/// inside a query as a data-modifying `SetExpr`, which `pre_visit_query` already
+/// refuses; `pre_visit_statement` keeps refusing if a later parser nests one elsewhere.
+struct Guard;
 
-        fn pre_visit_query(&mut self, q: &Query) -> ControlFlow<Self::Break> {
-            if !q.locks.is_empty() {
-                return ControlFlow::Break(ReadOnlyError::NotReadOnly("a locking clause"));
-            }
-            // Dialect-specific trailing clauses (MSSQL `FOR XML`, ClickHouse
-            // `SETTINGS` / `FORMAT`, BigQuery pipe syntax) are not Trino or
-            // StarRocks reads we need; reject rather than reason about them.
-            if q.for_clause.is_some()
-                || q.settings.is_some()
-                || q.format_clause.is_some()
-                || !q.pipe_operators.is_empty()
-            {
-                return ControlFlow::Break(ReadOnlyError::NotReadOnly(
-                    "an unsupported query clause",
-                ));
-            }
-            match &*q.body {
-                SetExpr::Select(s) if s.into.is_some() => {
-                    ControlFlow::Break(ReadOnlyError::NotReadOnly("SELECT … INTO"))
-                }
-                SetExpr::Select(_)
-                | SetExpr::Query(_)
-                | SetExpr::SetOperation { .. }
-                | SetExpr::Values(_)
-                | SetExpr::Table(_) => ControlFlow::Continue(()),
-                _ => ControlFlow::Break(ReadOnlyError::NotReadOnly("a data-modifying query body")),
-            }
+impl Visitor for Guard {
+    type Break = ReadOnlyError;
+
+    fn pre_visit_query(&mut self, q: &Query) -> ControlFlow<Self::Break> {
+        if !q.locks.is_empty() {
+            return ControlFlow::Break(ReadOnlyError::NotReadOnly("a locking clause"));
         }
-
-        fn pre_visit_table_factor(&mut self, t: &TableFactor) -> ControlFlow<Self::Break> {
-            match t {
-                TableFactor::Table { args: None, .. }
-                | TableFactor::Derived { .. }
-                | TableFactor::NestedJoin { .. }
-                | TableFactor::UNNEST { .. } => ControlFlow::Continue(()),
-                _ => ControlFlow::Break(ReadOnlyError::NotReadOnly("a table function")),
-            }
+        // Dialect-specific trailing clauses (MSSQL `FOR XML`, ClickHouse
+        // `SETTINGS` / `FORMAT`, BigQuery pipe syntax) are not Trino or
+        // StarRocks reads we need; reject rather than reason about them.
+        if q.for_clause.is_some()
+            || q.settings.is_some()
+            || q.format_clause.is_some()
+            || !q.pipe_operators.is_empty()
+        {
+            return ControlFlow::Break(ReadOnlyError::NotReadOnly("an unsupported query clause"));
         }
-
-        fn pre_visit_statement(&mut self, _: &Statement) -> ControlFlow<Self::Break> {
-            ControlFlow::Break(ReadOnlyError::NotReadOnly("a statement nested in a query"))
+        match &*q.body {
+            SetExpr::Select(s) if s.into.is_some() => {
+                ControlFlow::Break(ReadOnlyError::NotReadOnly("SELECT … INTO"))
+            }
+            SetExpr::Select(_)
+            | SetExpr::Query(_)
+            | SetExpr::SetOperation { .. }
+            | SetExpr::Values(_)
+            | SetExpr::Table(_) => ControlFlow::Continue(()),
+            _ => ControlFlow::Break(ReadOnlyError::NotReadOnly("a data-modifying query body")),
         }
     }
+
+    fn pre_visit_table_factor(&mut self, t: &TableFactor) -> ControlFlow<Self::Break> {
+        match t {
+            TableFactor::Table { args: None, .. }
+            | TableFactor::Derived { .. }
+            | TableFactor::NestedJoin { .. }
+            | TableFactor::UNNEST { .. } => ControlFlow::Continue(()),
+            _ => ControlFlow::Break(ReadOnlyError::NotReadOnly("a table function")),
+        }
+    }
+
+    fn pre_visit_statement(&mut self, _: &Statement) -> ControlFlow<Self::Break> {
+        ControlFlow::Break(ReadOnlyError::NotReadOnly("a statement nested in a query"))
+    }
+}
+
+fn check_query(q: &Query) -> Result<(), ReadOnlyError> {
     match q.visit(&mut Guard) {
         ControlFlow::Break(e) => Err(e),
         ControlFlow::Continue(()) => Ok(()),
@@ -249,6 +253,31 @@ mod tests {
         assert!(EngineDialect::from_engine("postgres").is_none());
     }
 
+    #[test]
+    fn each_guard_layer_refuses_on_its_own() {
+        // The query-body and nested-statement layers mask each other end to end,
+        // so pin each directly.
+        let del = Parser::parse_sql(&GenericDialect {}, "DELETE FROM t")
+            .unwrap()
+            .remove(0);
+        assert!(matches!(
+            Guard.pre_visit_statement(&del),
+            ControlFlow::Break(ReadOnlyError::NotReadOnly(_))
+        ));
+        let Statement::Query(q) = Parser::parse_sql(
+            &GenericDialect {},
+            "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x",
+        )
+        .unwrap()
+        .remove(0) else {
+            panic!("expected a query")
+        };
+        let cte_body = &q.with.as_ref().unwrap().cte_tables[0].query;
+        assert!(matches!(
+            Guard.pre_visit_query(cte_body),
+            ControlFlow::Break(ReadOnlyError::NotReadOnly(_))
+        ));
+    }
     #[test]
     fn rejections_come_from_the_gate_not_the_parser() {
         // Every write/smuggling case above parses in both dialects, so the gate
