@@ -4,18 +4,33 @@ import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Ban,
-  EyeOff,
-  Filter,
   HelpCircle,
+  KeyRound,
   Loader2,
   Search,
+  Server,
   ShieldCheck,
-  X,
 } from "lucide-react";
 
 import { usePermExplain } from "@/api/generated/perm/perm";
 import { policyAdminListPrincipals } from "@/api/generated/policy-admin/policy-admin";
-import type { Action, ExplainReason, ExplainResponse, Scope } from "@/api/generated/model";
+import type {
+  Action,
+  ExplainAccess as AccessVerdict,
+  ExplainAttribution,
+  ExplainProfile,
+  ExplainResponse,
+  Scope,
+  WireDecision,
+  WireEngineType,
+  WireGraphProblem,
+  WireItemBucket,
+  WirePluginVersion,
+  WirePolicyType,
+  WireServiceDefIssue,
+  WireUndecidableCause,
+  WireUnmodelled,
+} from "@/api/generated/model";
 import { ApiError } from "@/api/client";
 import { refFor } from "@/components/perm/PrincipalPicker";
 import { ScopePicker } from "@/components/perm/ScopePicker";
@@ -37,115 +52,454 @@ const EMPTY_SCOPE: Scope = { catalog_id: "" };
 
 type BadgeVariant = NonNullable<VariantProps<typeof badgeVariants>["variant"]>;
 
-/**
- * One reason KIND's rendering — the class is the deliverable (D9), not the
- * boolean. `no_grant_matched` and `explicit_deny` read deliberately
- * differently: the first means nobody said yes, the second means somebody
- * said no. Ranger's own Access audit collapses both into a single `-`, which
- * is exactly the blindness this page exists to fix.
- */
-const REASON_META: Record<
-  string,
-  { label: string; hint: string; variant: BadgeVariant; icon: typeof ShieldCheck }
-> = {
-  allowed_by_grant: {
-    label: "Allowed by grant",
-    hint: "A grant matches this subject and target.",
-    variant: "success",
-    icon: ShieldCheck,
-  },
-  // SP4c review. An allow the DATA PLANE will refuse: the grant matched only
-  // through a group principal, and no engine egret provisions can see a group
-  // (D7, measured live). It was previously reported as `allowed_by_grant` —
-  // the same wire string as an enforceable allow — so the warning below the
-  // field was the only signal, and a caller parsing `kind` never saw it.
-  allowed_by_group_only: {
-    label: "Allowed by group only — the engine will refuse",
-    hint: "A grant matches this subject ONLY through a group. egret runs no usersync and writes no group provider, so no engine can see that membership: the model allows this and Trino and StarRocks will both refuse it.",
-    variant: "warning",
-    icon: AlertTriangle,
-  },
-  explicit_deny: {
-    label: "Explicit deny",
-    hint: "Somebody forbade this — a deny grant matches. A different administrative problem than no grant matching at all.",
-    variant: "destructive",
-    icon: Ban,
-  },
-  no_grant_matched: {
-    label: "No grant matched",
-    hint: 'Nobody granted this — not the same as a deny. Ranger’s own audit shows "-" for exactly this case.',
-    variant: "warning",
-    icon: HelpCircle,
-  },
-  masked_by_rule: {
-    label: "Masked by rule",
-    hint: "A masking rule applies to this target.",
-    variant: "processing",
-    icon: EyeOff,
-  },
-  filtered_by_rule: {
-    label: "Filtered by rule",
-    hint: "A row-filter rule applies to this target.",
-    variant: "secondary",
-    icon: Filter,
-  },
+/** A decision that names a deciding policy — everything but `Undecidable`, which has none. */
+type DecidedDecision = Exclude<WireDecision, { kind: "undecidable" }>;
+
+/** One spelling of each engine per API surface (SP4d-2a Task 5 review, I3): the
+ *  wire says `trino` / `starrocks`, and only the DISPLAY differs. */
+const ENGINE_LABEL: Record<WireEngineType, string> = {
+  trino: "Trino",
+  starrocks: "StarRocks",
 };
 
-function reasonMeta(kind: string) {
+const PLUGIN_LABEL: Record<WirePluginVersion, string> = {
+  ranger_2_5_0: "Ranger 2.5.0",
+  ranger_2_8_0: "Ranger 2.8.0",
+};
+
+/** Ranger's five item buckets, named the way an operator reading the policy would. */
+const BUCKET_LABEL: Record<WireItemBucket, string> = {
+  policy_items: "allow item",
+  deny_policy_items: "deny item",
+  allow_exceptions: "allow exception",
+  deny_exceptions: "deny exception",
+  data_mask_policy_items: "masking item",
+  row_filter_policy_items: "row-filter item",
+};
+
+const POLICY_TYPE_LABEL: Record<WirePolicyType, string> = {
+  access: "access",
+  data_mask: "data-mask",
+  row_filter: "row-filter",
+};
+
+/** `“name” (policy id 7)`, or `(policy id unknown)` — a decision can name a
+ *  policy Ranger reported without an id at all (its `superuser`
+ *  short-circuit reports `-1`), and inventing one would be worse. */
+function policyRef(policyName: string, policyId?: number | null): string {
+  return `“${policyName}” (policy id ${policyId ?? "unknown"})`;
+}
+
+/**
+ * The construct a policy or envelope carries that `egret-ranger-eval` detected
+ * but does not model, as a PHRASE — the wire mirrors every variant
+ * exhaustively (`WireUnmodelled`) precisely so a page can say what it is
+ * instead of printing a Debug string. `TagPolicies` carries its count as a JSON
+ * number, so the count renders as a number inside a sentence.
+ */
+function unmodelledPhrase(u: WireUnmodelled): string {
+  switch (u.kind) {
+    case "validity_schedules":
+      return "a validity schedule — a time window egret does not evaluate";
+    case "policy_conditions":
+      return "a policy-level condition egret does not evaluate";
+    case "item_conditions":
+      return `a condition on ${BUCKET_LABEL[u.bucket]} ${u.index}`;
+    case "zone_name":
+      return `the security zone “${u.zone_name}”`;
+    case "security_zones":
+      return "security zones";
+    case "tag_policies":
+      return u.block.kind === "policies"
+        ? `${u.block.count} tag ${u.block.count === 1 ? "policy" : "policies"} that could decide this, which egret does not evaluate yet`
+        : "a tag-policy block egret could not read";
+    case "policy_deltas":
+      return "incremental policy deltas";
+    case "service_config":
+      return "a service-config map, which can carry a super-user list";
+    case "mask_expression_marker":
+      return `a mask expression with a Ranger macro in it (${BUCKET_LABEL[u.bucket]} ${u.item_index}: ${u.expr})`;
+    case "mask_condition_expr":
+      return `a masking condition (${BUCKET_LABEL[u.bucket]} ${u.item_index})`;
+    case "row_filter_expression_marker":
+      return `a row filter with a Ranger macro in it (${BUCKET_LABEL[u.bucket]} ${u.item_index}: ${u.expr})`;
+    case "resource_value_expression_marker":
+      return `a Ranger macro in the ${u.resource_type} resource value “${u.value}”`;
+    case "user_expression_marker":
+      return `a Ranger macro in the user “${u.user}” (${BUCKET_LABEL[u.bucket]} ${u.index})`;
+    case "explicit_deny":
+      return `an explicit deny of ${u.access_type} (${BUCKET_LABEL[u.bucket]} ${u.index})`;
+    case "delegate_admin":
+      return `a delegated-admin item (${BUCKET_LABEL[u.bucket]} ${u.index})`;
+  }
+  return "a construct this page does not recognise yet";
+}
+
+function graphProblemPhrase(p: WireGraphProblem): string {
+  switch (p.kind) {
+    case "no_sources_or_sinks":
+      return "it has no root and no leaf";
+    case "sink_is_not_a_valid_leaf":
+      return `“${p.resource}” is a leaf the definition does not accept as one`;
+    case "broken_parent_chain":
+      return `“${p.resource}” has a broken parent chain`;
+  }
+  return "the definition does not describe a usable hierarchy";
+}
+
+function serviceDefIssuePhrase(i: WireServiceDefIssue): string {
+  switch (i.kind) {
+    case "unmodelled_matcher_class":
+      return `resource “${i.resource}” uses the matcher class ${i.matcher}, which egret does not model`;
+    case "quoted_case_sensitive":
+      return `resource “${i.resource}” is quoted and case-sensitive`;
+    case "chained_implied_grants":
+      return `access type ${i.implying} implies ${i.implied}, which implies another in turn`;
+    case "invalid_resource_graph":
+      return `the ${POLICY_TYPE_LABEL[i.policy_type]} resource graph is invalid: ${graphProblemPhrase(i.reason)}`;
+  }
+  return "its definition carries something egret does not model";
+}
+
+/**
+ * One named cause, as a sentence a steward can act on.
+ *
+ * **Every cause is rendered, never just the first** — `why` is a list because
+ * one request can be blocked from a defensible answer by several independent
+ * things, and collapsing it discards exactly what the three-valued contract
+ * exists to say.
+ */
+function causeSentence(c: WireUndecidableCause): string {
+  switch (c.kind) {
+    case "envelope_construct":
+      return `The downloaded policy set carries ${unmodelledPhrase(c.construct)} — so this access cannot be decided.`;
+    case "policy_construct":
+      return `Ranger policy ${policyRef(c.policy_name, c.policy_id)} carries ${unmodelledPhrase(c.construct)} — so this access cannot be decided.`;
+    case "service_def":
+      return `This profile's service definition cannot be evaluated around: ${serviceDefIssuePhrase(c.issue)}.`;
+    case "resource_owner_unknown":
+      return `Ranger policy ${policyRef(c.policy_name, c.policy_id)} decides by the resource's owner, and egret does not record a table owner.`;
+    case "super_users_unknown":
+      return "The engine's super-user list is unknown, and Ranger checks super users before any policy at all, so no verdict here could be relied on.";
+    case "pseudo_access_type":
+      return `“${c.access_type}” is a pseudo access type Ranger expands internally, not one the downloaded policy set decides directly.`;
+    case "access_type_case_mismatch":
+      return `Ranger policy ${policyRef(c.policy_name, c.policy_id)} names the access type “${c.access_type}” in a different case than the service definition does.`;
+    case "mask_expression":
+      return `Ranger policy ${policyRef(c.policy_name, c.policy_id)} masks with the expression ${c.expr} (item ${c.item_index}), which egret does not evaluate.`;
+    case "row_filter_expression":
+      return `Ranger policy ${policyRef(c.policy_name, c.policy_id)} filters rows with the expression ${c.expr} (item ${c.item_index}), which egret does not evaluate.`;
+    case "row_filter_double_brackets":
+      return `Ranger policy ${policyRef(c.policy_name, c.policy_id)} has a row filter with doubled brackets (item ${c.item_index}: ${c.expr}), which Ranger itself reads ambiguously.`;
+    case "eval_order_ambiguous":
+      return `Several policies could decide this and their evaluation order is ambiguous: ${c.policy_names.join(", ")} (policy ids ${c.policy_ids.map((id) => id ?? "unknown").join(", ")}).`;
+    case "engine_mismatch":
+      return `This profile declares ${ENGINE_LABEL[c.declared]} but carries the service definition “${c.service_def_name}”, whose resource levels are a different vocabulary.`;
+    case "plugin_version_mismatch":
+      return `This profile declares ${PLUGIN_LABEL[c.declared]} but ${ENGINE_LABEL[c.engine]} is running ${PLUGIN_LABEL[c.measured]}, and the two evaluate differently.`;
+  }
+  return "The evaluator named a cause this page does not recognise yet.";
+}
+
+/**
+ * One decision's rendering. Three-valued, and the three are not shades of one
+ * another: `Undecidable` is neither an allow nor a refusal, and gets its own
+ * colour for that reason. `no_policy_matched` and the two denies stay apart
+ * the way `no_grant_matched` and `explicit_deny` did — nobody said yes is a
+ * different administrative problem from somebody saying no, and Ranger's own
+ * Access audit collapses both into a single `-`.
+ */
+function decisionMeta(d: WireDecision): {
+  label: string;
+  hint: string;
+  variant: BadgeVariant;
+  icon: typeof ShieldCheck;
+} {
+  if (d.kind === "allowed") {
+    return {
+      label: "Allowed",
+      hint: "The policy set this engine downloads allows this access.",
+      variant: "success",
+      icon: ShieldCheck,
+    };
+  }
+  if (d.kind === "undecidable") {
+    return {
+      label: "Undecidable",
+      hint: "Neither allowed nor refused: something stands between the evaluator and a defensible answer, and it is named below rather than guessed at in either direction.",
+      variant: "processing",
+      icon: AlertTriangle,
+    };
+  }
+  switch (d.reason) {
+    case "deny_policy_item":
+      return {
+        label: "Refused by a deny item",
+        hint: "Somebody forbade this: a deny item in the downloaded policy set matches this subject and resource.",
+        variant: "destructive",
+        icon: Ban,
+      };
+    case "deny_all_else":
+      return {
+        label: "Refused by deny-all-else",
+        hint: "The deciding policy refuses everything it does not explicitly allow, and nothing in it allowed this.",
+        variant: "destructive",
+        icon: Ban,
+      };
+    case "no_policy_matched":
+      return {
+        label: "No policy matched",
+        hint: "Nobody granted this — not the same as somebody forbidding it. Ranger’s own audit shows “-” for exactly this case.",
+        variant: "warning",
+        icon: HelpCircle,
+      };
+  }
+  return {
+    label: "Refused",
+    hint: "The downloaded policy set refuses this access.",
+    variant: "destructive",
+    icon: Ban,
+  };
+}
+
+/**
+ * A deciding policy egret's compiler does not own — and it is reported, never
+ * dropped. Four live categories reach here: the `egret-admin`/`all`
+ * admin-all-access hierarchies egret seeds onto every generated profile,
+ * `egret-engine-mgmt`'s delegator plumbing, operator-written raw JSON, and
+ * Ranger's own `superuser` short-circuit. Dropping any of them would recreate,
+ * inside the new mechanism, the blindness this package removes: the old page
+ * could not see a seeded admin policy at all and answered “no grant matched”
+ * while the engine allowed.
+ *
+ * There is no link, because there is no governance page for a policy the
+ * compiler did not mint.
+ */
+function RawPolicy({
+  policyName,
+  policyId,
+}: {
+  policyName: string;
+  policyId?: number | null;
+}) {
+  // `egret_policy::default_policies` mints exactly these two prefixes
+  // (`seed_admin_all_access` → `egret-admin - …`, `seed_default_trino_policies`
+  // → `all - …`). A seeded admin policy is the EXPECTED explanation for an
+  // administrator, so it must not be dressed as a finding.
+  const seeded = policyName.startsWith("egret-admin") || policyName.startsWith("all - ");
   return (
-    REASON_META[kind] ?? {
-      label: kind,
-      hint: "Unrecognized reason class.",
-      variant: "outline" as const,
-      icon: HelpCircle,
-    }
+    <div
+      data-testid="raw-policy"
+      data-kind={seeded ? "seeded-admin" : "unowned"}
+      className="space-y-1"
+    >
+      <Badge variant={seeded ? "secondary" : "outline"} className="gap-1">
+        {seeded ? <ShieldCheck className="h-3 w-3" /> : <Server className="h-3 w-3" />}
+        {seeded ? "Seeded admin policy" : "Outside the permission model"}
+      </Badge>
+      <p className="text-xs text-muted-foreground">
+        {seeded
+          ? "egret seeds this policy itself, outside the permission model: auto-bind puts thirteen admin-all-access hierarchies onto every generated profile, granting its platform admins all access. For an administrator this is the expected explanation."
+          : "egret’s compiler did not mint this policy, so it is outside the permission model and has no governance page to open. It is reported by its Ranger name and id, because it decided this access."}
+      </p>
+      <p className="text-xs text-muted-foreground">
+        Ranger policy <span className="font-mono">{policyName}</span>, id{" "}
+        <span className="font-mono">{policyId ?? "unknown"}</span>
+      </p>
+    </div>
   );
 }
 
-/** One `ExplainReason`, rendered so its class — not `allowed` — is legible on its own. */
-function ReasonRow({ reason }: { reason: ExplainReason }) {
-  const meta = reasonMeta(reason.kind);
+/**
+ * The `perm` object the deciding policy's Ranger NAME maps back to — a Grant, a
+ * Rule, or a classification Clearance — or, when the name carries no model
+ * attribution at all, the raw policy itself (see [`RawPolicy`]).
+ *
+ * The `?grant=` / `?rule=` deep links live here, per decision, because under
+ * the per-profile shape there is no page-level list of reasons to hang them on.
+ * SP4b-1's PATCH keeps a grant/rule id stable across an edit; these links would
+ * rot on a delete-and-recreate.
+ */
+function DecidedBy({
+  decision,
+  attribution,
+}: {
+  decision: DecidedDecision;
+  attribution?: ExplainAttribution | null;
+}) {
+  const ranger = (
+    <span className="text-muted-foreground">
+      Ranger policy <span className="font-mono">{decision.policy_name}</span>, id{" "}
+      <span className="font-mono">{decision.policy_id ?? "unknown"}</span>
+    </span>
+  );
+
+  if (!attribution) {
+    return <RawPolicy policyName={decision.policy_name} policyId={decision.policy_id} />;
+  }
+
+  if (attribution.kind === "grant") {
+    return (
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+        <Link
+          to={`/governance/data-permissions?grant=${encodeURIComponent(attribution.grant_id)}`}
+          className="text-primary hover:underline"
+        >
+          View grant {attribution.grant_id}
+        </Link>
+        {ranger}
+      </div>
+    );
+  }
+
+  if (attribution.kind === "rule") {
+    return (
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+        <Link
+          to={`/governance/mask-filter-rules?rule=${encodeURIComponent(attribution.rule_id)}`}
+          className="text-primary hover:underline"
+        >
+          View rule {attribution.rule_id}
+        </Link>
+        {/* A per-column StarRocks rule expands ONE `perm.rules` row into N
+            policies, so the locator is the only thing that says which of the N
+            decided this resource. */}
+        {attribution.locator && (
+          <span data-testid="rule-locator" className="text-muted-foreground">
+            expansion <span className="font-mono">{attribution.locator}</span>
+          </span>
+        )}
+        {ranger}
+      </div>
+    );
+  }
+
+  // A classification gate. D10's pre-existing defect was here: `clearance` had
+  // no entry in the reason map at all, so it rendered the raw wire string with
+  // "Unrecognized reason class." and dropped the gating tag and the clearing
+  // roles — the two facts a steward most needs. Both are on the wire, so both
+  // are rendered.
+  return (
+    <div data-testid="clearance-attribution" className="space-y-1">
+      <Badge variant="warning" className="gap-1">
+        <KeyRound className="h-3 w-3" />
+        Clearance required
+      </Badge>
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+        <span className="text-muted-foreground">
+          Gating tag{" "}
+          {attribution.tag ? (
+            <span className="font-mono">{attribution.tag}</span>
+          ) : (
+            <span className="italic">unknown — the tag row is gone until the next recompile</span>
+          )}
+        </span>
+        {attribution.locator && (
+          <span className="text-muted-foreground">
+            expansion <span className="font-mono">{attribution.locator}</span>
+          </span>
+        )}
+        {ranger}
+      </div>
+      {attribution.required_roles.length > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Cleared by holding any one of{" "}
+          {attribution.required_roles.map((r, i) => (
+            <span key={r}>
+              {i > 0 && ", "}
+              <span className="font-mono">{r}</span>
+            </span>
+          ))}
+          .
+        </p>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          No role clears this gate: it declares only groups, and no engine egret provisions
+          can see a group.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** One access type's verdict inside one profile. A `write` explain is several
+ *  of these and they are never collapsed: Ranger has no `write`, and an
+ *  operator who can insert but not delete has to be able to see that. */
+function AccessRow({ verdict }: { verdict: AccessVerdict }) {
+  const meta = decisionMeta(verdict.decision);
   const Icon = meta.icon;
   return (
-    <li className="flex flex-col gap-1.5 rounded-md border border-border p-3 sm:flex-row sm:items-start sm:gap-3">
-      <Badge variant={meta.variant} className="w-fit shrink-0 gap-1">
-        <Icon className="h-3 w-3" />
-        {meta.label}
-      </Badge>
-      <div className="min-w-0 flex-1 space-y-1">
+    <li
+      data-testid="explain-access"
+      className="flex flex-col gap-1.5 rounded-md border border-border p-3 sm:flex-row sm:items-start sm:gap-3"
+    >
+      <div className="flex w-fit shrink-0 items-center gap-2">
+        <span className="font-mono text-xs text-muted-foreground">{verdict.access_type}</span>
+        <Badge data-testid="decision-badge" variant={meta.variant} className="gap-1">
+          <Icon className="h-3 w-3" />
+          {meta.label}
+        </Badge>
+      </div>
+      <div className="min-w-0 flex-1 space-y-1.5">
         <p className="text-sm text-muted-foreground">{meta.hint}</p>
-        <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
-          {/* SP4b-1's PATCH keeps a grant/rule's id stable across an edit —
-              this link would rot on a delete-and-recreate. */}
-          {reason.grant_id && (
-            <Link
-              to={`/governance/data-permissions?grant=${encodeURIComponent(reason.grant_id)}`}
-              className="text-primary hover:underline"
-            >
-              View grant {reason.grant_id}
-            </Link>
-          )}
-          {reason.rule_id && (
-            <Link
-              to={`/governance/mask-filter-rules?rule=${encodeURIComponent(reason.rule_id)}`}
-              className="text-primary hover:underline"
-            >
-              View rule {reason.rule_id}
-            </Link>
-          )}
-          {reason.mask_type && (
-            <span className="text-muted-foreground">
-              mask type <span className="font-mono">{reason.mask_type}</span>
-            </span>
-          )}
-          {reason.filter_expr && (
-            <span className="text-muted-foreground">
-              filter <span className="font-mono">{reason.filter_expr}</span>
-            </span>
-          )}
-        </div>
+        {verdict.decision.kind === "undecidable" ? (
+          <ul data-testid="undecidable-causes" className="space-y-1">
+            {verdict.decision.why.map((cause, i) => (
+              <li
+                key={`${cause.kind}-${i}`}
+                data-testid="undecidable-cause"
+                className="text-xs text-muted-foreground"
+              >
+                {causeSentence(cause)}
+              </li>
+            ))}
+            {verdict.decision.why.length === 0 && (
+              <li className="text-xs text-muted-foreground">
+                No cause was named, which should not happen: an undecidable verdict exists to
+                say what it could not decide.
+              </li>
+            )}
+          </ul>
+        ) : (
+          <DecidedBy decision={verdict.decision} attribution={verdict.attribution} />
+        )}
       </div>
     </li>
+  );
+}
+
+/**
+ * One profile's block. Per profile rather than once overall because a single
+ * answer cannot be right for two: the same `perm` grant compiles into two
+ * different policy sets, the engines do not share the resource vocabulary the
+ * request is built from (`schema` vs `database`), and their access-type
+ * vocabularies only partly overlap.
+ */
+function ProfileBlock({ profile }: { profile: ExplainProfile }) {
+  return (
+    <section
+      data-testid="explain-profile"
+      aria-label={`Profile ${profile.service_name}`}
+      className="space-y-2 rounded-lg border border-border p-3 md:p-4"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <Server className="h-4 w-4 text-muted-foreground" />
+        <h3 className="text-sm font-semibold">{profile.service_name}</h3>
+        <Badge variant="outline">{ENGINE_LABEL[profile.engine]}</Badge>
+        <span className="text-xs text-muted-foreground">service id {profile.service_id}</span>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Evaluated over the policy set this profile’s plugin downloads.
+      </p>
+      <ul className="space-y-2">
+        {profile.accesses.map((verdict) => (
+          <AccessRow key={verdict.access_type} verdict={verdict} />
+        ))}
+        {profile.accesses.length === 0 && (
+          <li className="text-sm text-muted-foreground">No access type was evaluated.</li>
+        )}
+      </ul>
+    </section>
   );
 }
 
@@ -235,87 +589,22 @@ function SubjectUserField({
   );
 }
 
-/** Free-text chip list for `groups` — unlike `user`, explain accepts any string
- *  a caller asserts the subject belongs to; there is no allocated ref to
- *  resolve. `warning` is rendered once at least one value is present: a hazard
- *  belongs at the point of choice, which is how `PrincipalPicker` carries the
- *  same fact.
- *
- *  There is no ROLES chip list any more (SP4c Task 7). `ExplainSubject.roles`
- *  left the wire because a caller asserting a role the subject does not hold
- *  was believed: the live gate measured `{user: "analyst", roles:
- *  ["sp4c_cleared"]}` answering `allowed` for the user both engines refuse.
- *  `explain` reads the subject's roles from `access_grants` itself, exactly as
- *  SP4b-1 made it read their workspaces. */
-function ChipListField({
-  label,
-  values,
-  onChange,
-  placeholder,
-  warning,
-}: {
-  label: string;
-  values: string[];
-  onChange: (next: string[]) => void;
-  placeholder: string;
-  warning?: React.ReactNode;
-}) {
-  const [input, setInput] = useState("");
-  const inputId = `explain-${label.toLowerCase()}`;
-
-  function add() {
-    const t = input.trim();
-    if (t && !values.includes(t)) onChange([...values, t]);
-    setInput("");
-  }
-  function removeAt(i: number) {
-    onChange(values.filter((_, idx) => idx !== i));
-  }
-
-  return (
-    <div className="space-y-1.5">
-      <Label htmlFor={inputId}>{label}</Label>
-      {values.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {values.map((v, i) => (
-            <Badge key={`${v}-${i}`} variant="secondary" className="gap-1">
-              {v}
-              <button
-                type="button"
-                aria-label={`Remove ${v} from ${label.toLowerCase()}`}
-                onClick={() => removeAt(i)}
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </Badge>
-          ))}
-        </div>
-      )}
-      <Input
-        id={inputId}
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === ",") {
-            e.preventDefault();
-            add();
-          }
-        }}
-        placeholder={placeholder}
-      />
-      {values.length > 0 && warning}
-    </div>
-  );
-}
-
 /**
- * Governance → Explain access (D9, SP4b-2 Task 5).
+ * Governance → Explain access (D9; rerouted onto the served artifact by
+ * SP4d-2a).
  *
- * Admin-facing: subject + action + target in; the reason CLASS out, not just
- * `allowed`. Reuses `ScopePicker` for the target (Hardcoded facts live there,
- * not here) and `policyAdminListPrincipals` — `PrincipalPicker`'s own data
- * source — for the subject's user field, so the username-vs-email fact
- * (Hardcoded fact 5/5) is never re-derived here.
+ * Admin-facing: subject + action + target in; one verdict per POLICY PROFILE
+ * out, three-valued, over the policy set each engine actually downloads. There
+ * is deliberately no aggregate badge: no single word is honest over
+ * `{allowed, refused, undecidable}` × N profiles, and a summary reading
+ * "Allowed" above a profile that refuses would be the most misleading thing on
+ * the page.
+ *
+ * The subject is a user and nothing else. `workspaces` (SP4a), `roles` (SP4c)
+ * and `groups` (SP4d-2a) each left `ExplainSubject` for one version of one
+ * reason — a caller-supplied value cannot stand in for a fact only egret can
+ * verify — and roles and groups reach the evaluator EMPTY because no engine
+ * egret provisions can match either.
  *
  * Gated `policy:read` at the route (`App.tsx`), not `policy:update` — this is
  * the one route on this surface a read-only user can call, because `explain`
@@ -323,7 +612,6 @@ function ChipListField({
  */
 export default function ExplainAccess() {
   const [user, setUser] = useState("");
-  const [groups, setGroups] = useState<string[]>([]);
   const [action, setAction] = useState<Action>("read");
   const [target, setTarget] = useState<Scope>(EMPTY_SCOPE);
 
@@ -355,10 +643,8 @@ export default function ExplainAccess() {
     try {
       const res = await explainMutation.mutateAsync({
         data: {
-          subject: {
-            user: user.trim(),
-            groups: groups.length ? groups : undefined,
-          },
+          // A user and nothing else — see the component doc.
+          subject: { user: user.trim() },
           action,
           target,
         },
@@ -377,8 +663,8 @@ export default function ExplainAccess() {
       <div>
         <h1 className="text-2xl font-semibold leading-tight">Explain access</h1>
         <p className="text-sm text-muted-foreground">
-          Why a subject can or cannot reach a target — the reason class, not just
-          the boolean.
+          Why a subject can or cannot reach a target — answered per policy profile, over
+          the policy set each engine actually downloads.
         </p>
       </div>
 
@@ -389,33 +675,6 @@ export default function ExplainAccess() {
         <div className="space-y-4">
           <h2 className="text-sm font-semibold">Subject</h2>
           <SubjectUserField value={user} onChange={setUser} />
-          <ChipListField
-            label="Groups"
-            values={groups}
-            onChange={setGroups}
-            placeholder="Add a group…"
-            warning={
-              /* Hardcoded fact 2/5 (design spec D3, SP4a D7 measured live),
-                 carried HERE because this page's answer is about the engine.
-                 `explain` evaluates the STORED model, where a group principal
-                 matches; Trino has no group provider, egret writes none and
-                 there is no usersync, so the engine cannot see that
-                 membership. A grant that matches only through a group
-                 therefore reads `Allowed by grant` here for access the engine
-                 refuses — wrong in the PERMISSIVE direction, on the one page
-                 built to explain the engine. REMOVE once egret ships a group
-                 provider; that is the only thing that would make it stale. */
-              <Badge
-                variant="warning"
-                className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal"
-              >
-                <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-                Not enforced yet: no group provider or usersync, so the engine cannot see
-                this membership — an answer that depends on it can read Allowed while the
-                engine refuses.
-              </Badge>
-            }
-          />
 
           <div className="space-y-1.5">
             <Label htmlFor="explain-action">Action</Label>
@@ -428,6 +687,11 @@ export default function ExplainAccess() {
                 <SelectItem value="write">write</SelectItem>
               </SelectContent>
             </Select>
+            <p className="text-xs text-muted-foreground">
+              Ranger has no <span className="font-mono">write</span>: it is evaluated as
+              insert and delete on Trino, and insert, update and delete on StarRocks, each
+              answered separately below.
+            </p>
           </div>
         </div>
 
@@ -463,24 +727,42 @@ export default function ExplainAccess() {
       )}
 
       {result && (
-        <div data-testid="explain-result" className="space-y-4 rounded-lg border border-border p-4 md:p-6">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={result.allowed ? "success" : "destructive"}>
-              {result.allowed ? "Allowed" : "Not allowed"}
-            </Badge>
-            <span className="text-sm text-muted-foreground">
-              — the reason class below is the answer; this is only a summary.
-            </span>
-          </div>
-
-          <ul className="space-y-2">
-            {result.reasons.map((r, i) => (
-              <ReasonRow key={`${r.kind}-${r.grant_id ?? r.rule_id ?? i}`} reason={r} />
-            ))}
-            {result.reasons.length === 0 && (
-              <li className="text-sm text-muted-foreground">No reasons returned.</li>
-            )}
-          </ul>
+        <div
+          data-testid="explain-result"
+          className="space-y-4 rounded-lg border border-border p-4 md:p-6"
+        >
+          {result.outcome === "no_profile_serves_the_catalog" ? (
+            /* Its own state, and deliberately not a refusal's vocabulary or
+               colour: nothing is enforcing on this target, which is a
+               different fact from something refusing the access. Collapsing
+               the two would tell a steward the model is withholding an access
+               when in truth no plugin is ever consulted about the resource. */
+            <Alert data-testid="no-profile-state">
+              <AlertDescription className="space-y-1">
+                <Badge variant="outline" className="gap-1">
+                  <Server className="h-3 w-3" />
+                  Nothing is enforcing
+                </Badge>
+                <p className="text-sm">
+                  No policy profile serves this catalog, so no engine plugin is ever
+                  consulted about it. This is not a denial — nothing is enforcing here,
+                  which is a different fact from a policy refusing the access. Attach the
+                  catalog to a profile if it is meant to be governed.
+                </p>
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <div className="space-y-3">
+              {result.profiles.map((profile) => (
+                <ProfileBlock key={profile.service_id} profile={profile} />
+              ))}
+              {result.profiles.length === 0 && (
+                <p className="text-sm text-muted-foreground">
+                  The answer names no profile, which should not happen for this outcome.
+                </p>
+              )}
+            </div>
+          )}
 
           <div className="space-y-1.5">
             <Label>Tags considered</Label>
@@ -497,33 +779,40 @@ export default function ExplainAccess() {
             )}
           </div>
 
-          {/* D9's honest limits, stated where the answer is — not in a help
-              page. A tool that looks like a complete oracle while being
-              partial is worse than one that says what it does not know. The
-              first two are blind spots that make it too RESTRICTIVE; the third
-              (SP4b-2 review I-2) is the one that makes it too PERMISSIVE, and
-              is stated unconditionally for that reason — a limit shown only
-              when it has already bitten is not a stated limit. */}
-          <Alert>
+          {/* The honest limits, stated where the answer is read — not in a help
+              page. A tool that looks like a complete oracle while being partial
+              is worse than one that says what it does not know.
+
+              **The paragraph that used to lead this block is GONE, not
+              reworded.** It said this tool cannot see hand-written Ranger
+              policy, which was true of the retired model evaluator and is false
+              now: `explain` reads the artifact each plugin downloads, seeded
+              `egret-admin` hierarchies and operator-written JSON included. A
+              limit that no longer holds is worse than no limit, because it
+              teaches a reader to discount the ones that still do. */}
+          <Alert data-testid="honest-limits">
             <AlertDescription className="space-y-1 text-xs">
               <p>
-                This tool cannot see hand-written Ranger policy: it can answer &quot;not
-                allowed&quot; for a subject the engine actually allows through a seeded
-                admin policy.
+                Tags populate only when the target names both a schema and a table — a
+                catalog-only target always returns none. They are shown for information and
+                decide nothing here: the engine’s own enricher rolls tags up the resource
+                hierarchy and this list does not, so it is not the set the engine would
+                resolve.
               </p>
               <p>
-                Tags populate only when the target names both a schema and a table —
-                a catalog-only target always returns none.
+                A policy that grants through a role or a group matches nobody on these
+                engines: egret serves no roles download and runs no usersync, so explain
+                sends neither — the verdicts above are what the engine reaches for this
+                username alone.
               </p>
               <p>
-                A group in the subject is matched here but not by the engine: there is no
-                group provider or usersync, so an answer that depends on a group can read
-                &quot;allowed&quot; for access the engine refuses.
+                There is no field here to assert a role, a group or a workspace the subject
+                does not hold, so this answers why the subject is allowed or refused as they
+                are — not what would happen if they held something else.
               </p>
               <p>
-                The subject&apos;s roles are resolved here, not asserted: this answers why
-                a subject is allowed or refused as they are, not what would happen if they
-                held some other role.
+                Each plugin polls for its policy set on an interval, so an engine can still
+                be enforcing a slightly older download than the artifact evaluated here.
               </p>
             </AlertDescription>
           </Alert>
