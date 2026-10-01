@@ -266,8 +266,19 @@ pub fn trie_reproduces_matcher(policy_value: &str, wild_card: bool) -> bool {
         // `RangerAbstractResourceMatcher.init` drops an empty policy value
         // before any matcher is built, which can make a level match-ANY when
         // it was the only value. Whether the trie does the same was not
-        // measured, and egret emits no empty tag value, so it is refused
-        // rather than guessed at.
+        // measured, so it is refused rather than guessed at.
+        //
+        // ⚠ This used to add "and egret emits no empty tag value" as if that
+        // bounded the shape. It bounded the TAG path only, and said nothing
+        // about the resource path, where egret's own grant compiler DID emit
+        // one: `perm.grants` accepted `schema_name = ''` and
+        // `scope_to_resources` copied it through, which made the level
+        // `isMatchAny` and enforced the grant across the whole catalog. SP4d
+        // debt Task 12 closed that — `migrations/0167_perm_scope_levels_are_named.sql`
+        // plus `egret_perm_compile::grants::ensure_scope_levels_are_named`, which
+        // runs at the authoring boundary AND inside `compile_grant`. Stated by
+        // code path now, not by authorship; see
+        // `crate::eval::UndecidableCause::ResourceCandidacyNotReproducible`'s table.
         return false;
     }
     match ValueMatcher::classify(policy_value, wild_card) {

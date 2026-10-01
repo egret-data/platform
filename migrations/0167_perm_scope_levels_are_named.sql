@@ -72,9 +72,11 @@
 -- forbidding it would have broken the table-level attachment feature. `perm`
 -- has no such sentinel: `egret_perm::model::Scope` maps all three levels to
 -- `Option<String>`, NULL is the only "not named", and nothing reads `''`
--- specially. Measured: across the 23 databases on this host that have
--- `perm.grants` (including `egret_test` and `egret_test_template`), ZERO rows
--- carry `''` in any of the three columns, in either table.
+-- specially. Measured before this predicate was written: across the 23
+-- databases on this host that then had `perm.grants` (including `egret_test`
+-- and `egret_test_template`), ZERO rows carry `''` in any of the three
+-- columns, in either table. (A 24th has since been minted by `egret-test-db`
+-- from these very migrations, so it holds the constraint by construction.)
 --
 -- THE PREDICATE SHAPE. `<> ''` rather than `length(x) > 0`, `btrim(x) <> ''` or a
 -- regex, because `egret_perm_compile::grants::ensure_scope_levels_are_named` is
@@ -150,7 +152,8 @@ ALTER TABLE perm.grants
 -- whole job is to refuse a row-filter scope that is not exactly
 -- catalog+schema+table, counts `schema_name = ''` as a named schema and would
 -- otherwise keep accepting it. Measured the same way: zero violating rows in any
--- database on this host (three `perm.rules` rows exist in total, all literal).
+-- database on this host — `perm.grants` holds 4 rows in total and `perm.rules`
+-- 3, every level of every one of them either NULL or a literal name.
 ALTER TABLE perm.rules
     ADD CONSTRAINT rules_scope_levels_are_named
     CHECK (

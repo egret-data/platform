@@ -1271,14 +1271,19 @@ pub enum UndecidableCause {
     /// positioned where offset 553 would fire and where the verdict behind it
     /// differs.
     ///
-    /// The three shapes, and what does or does not keep egret's own compiler out
-    /// of each:
+    /// The shapes, and what does or does not keep egret's own compiler out of each.
+    /// **FIX ROUND 5 adds the fourth row and corrects the third**: the table said
+    /// three, and the fourth — an EMPTY policy value, which
+    /// [`crate::resource::trie_reproduces_matcher`] declines on explicitly — was a
+    /// shape egret's own grant compiler could emit, which is the finding SP4d debt
+    /// Task 12 closed.
     ///
     /// | shape | what the compiler does | enforced? |
     /// |---|---|---|
     /// | `isExcludes` | `egret-perm-compile`'s `grants::level()` hard-codes `is_excludes: false` on every level it builds, and it is the only constructor `scope_to_resources` uses | **yes**, by construction |
     /// | `isRecursive` | the same constructor hard-codes `is_recursive: false` | **yes**, by construction |
-    /// | a non-prefix wildcard in a VALUE (`*xyz`, `or?ers`) | `scope_to_resources` copies `scope.schema` / `scope.table` / `scope.column` into the policy **verbatim**, and `validate_grant_shape` checks principals only — nothing validates scope string CONTENT | **NO.** A grant scoped to a table named, or mistyped as, `ord*rs` compiles to exactly this shape |
+    /// | an EMPTY value (`""`) | `scope_to_resources` copies a scope level through verbatim, and `perm.grants` accepted `schema_name = ''` — so a `policy:update` caller could store one and the compiler emitted `{"values": [""]}`. **SP4d debt Task 12** closed it at three points keyed to one shape: `migrations/0167_perm_scope_levels_are_named.sql`'s CHECK, `grants::ensure_scope_levels_are_named` at the authoring boundary, and the same function inside `compile_grant` | **yes** since 0167 — and **NO** before it. The same empty value also made the LEVEL `isMatchAny`, so the grant was enforced catalog-wide; that half is the escalation, this row is only its trie consequence |
+    /// | a non-prefix wildcard in a VALUE (`*xyz`, `or?ers`) | `scope_to_resources` copies `scope.schema` / `scope.table` / `scope.column` into the policy **verbatim**. `validate_grant_shape` now refuses an EMPTY level (row above) and nothing else about the string: `*` and `?` are **deliberately** left legal, because a grant scoped to a whole catalog or schema is ordinary and `scope_to_resources` emits `*` itself for every unnamed level | **NO.** A grant scoped to a table named, or mistyped as, `ord*rs` compiles to exactly this shape |
     ///
     /// So the honest statement is: two of the three shapes cannot come from
     /// egret's compiler because one constructor forbids them; the third can, and
@@ -1289,8 +1294,14 @@ pub enum UndecidableCause {
     /// live plugin.
     ///
     /// **What would falsify this table:** `grants::level()` ceasing to pin the
-    /// two flags, or a scope-content validator arriving (which would move the
-    /// third row to "yes"). It is NOT `scope_to_resources`'s `Access` arm and its
+    /// two flags, or a scope-content validator refusing `*` and `?`. ⚠ An earlier
+    /// round wrote the second of those as "a scope-content validator arriving
+    /// (which would move the third row to yes)", and that prediction is now
+    /// MEASURABLY wrong: one has arrived (`ensure_scope_levels_are_named`, SP4d
+    /// debt Task 12) and it moved the EMPTY row rather than the wildcard row,
+    /// because it refuses `''` only. A validator is not one thing, and naming the
+    /// class rather than the predicate is the same imprecision this doc keeps
+    /// correcting. It is NOT `scope_to_resources`'s `Access` arm and its
     /// `*` fill — an earlier version of this cell said so, and that falsifier
     /// belonged to the key-count rule FIX ROUND 3 replaced: an egret ACCESS
     /// policy declaring fewer than four keys now matches at `ANCESTOR` and
