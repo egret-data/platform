@@ -347,6 +347,12 @@ divergence. Measure existing rows first and say what you found, as Task 3 did.
 - [ ] **Step 3: Check every level**, not only `schema`. And check the *compile* side too: if a `''`
 survives anywhere into `compile_grant`, the guard is in the wrong place.
 
+- [ ] **Step 4: Keep Task 4's control with its finding — the first row alone proves nothing.** The
+insert that makes this a measurement is the **second** one: `schema_name = NULL, table_name = 'orders'`
+**is** rejected by `grants_check`. That is what shows the first insert's FK-only rejection was not a
+probe that simply could not fail. Reproduce the **pair**; a single accepted row is the
+"a zero is unfalsifiable alone" shape.
+
 ---
 
 ### Task 13: a ws-scoped overlay can reach another workspace's WRITE routes
