@@ -92,7 +92,10 @@ impl S3Store {
                     .key(key)
                     .upload_id(upload_id)
                     .part_number(number)
-                    .body(aws_sdk_s3::primitives::ByteStream::from(buf.clone()))
+                    .body(aws_sdk_s3::primitives::ByteStream::from(std::mem::replace(
+                        buf,
+                        Vec::with_capacity(crate::PART_BYTES),
+                    )))
                     .send()
                     .await
                     .map_err(|e| err(&aws_sdk_s3::error::DisplayErrorContext(e)))?;

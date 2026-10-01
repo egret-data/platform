@@ -161,10 +161,11 @@ async fn resident_memory_does_not_grow_with_the_file() {
 
     // Control: the Vec path must be visible to this instrument.
     let ctl_uri = format!("s3://{}/{}vec.bin", c.bucket, prefix());
-    let before = max_rss_bytes();
     let v = vec![1u8; (128 * MIB) as usize];
     store.put(&ctl_uri, v).await.unwrap();
-    let grown = max_rss_bytes().saturating_sub(before);
+    // Against the pre-streaming baseline: RSS is a high-water mark, so growth is only
+    // visible above whatever the streaming phase already reached.
+    let grown = max_rss_bytes().saturating_sub(baseline);
     store.delete(&ctl_uri).await.unwrap();
     assert!(
         grown >= 128 * MIB,
@@ -206,6 +207,42 @@ async fn a_failing_body_aborts_the_multipart_upload() {
             .force_path_style(true)
             .build(),
     );
+    // Control: an upload that is NOT aborted is visible to this listing.
+    let ctl_key = format!("{p}control.bin");
+    let ctl = raw
+        .create_multipart_upload()
+        .bucket(&c.bucket)
+        .key(&ctl_key)
+        .send()
+        .await
+        .unwrap();
+    let seen = raw
+        .list_multipart_uploads()
+        .bucket(&c.bucket)
+        .prefix(&p)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        seen.uploads().len(),
+        1,
+        "instrument is blind to open uploads"
+    );
+    raw.abort_multipart_upload()
+        .bucket(&c.bucket)
+        .key(&ctl_key)
+        .upload_id(ctl.upload_id().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    let mut body = Gen {
+        pos: 0,
+        total: 30 * MIB,
+        fail_at: Some(9 * MIB),
+    };
+    let r = store.put_stream(&uri, &mut body, None).await;
+    assert!(r.is_err(), "a failing body must fail the upload");
     let ups = raw
         .list_multipart_uploads()
         .bucket(&c.bucket)
