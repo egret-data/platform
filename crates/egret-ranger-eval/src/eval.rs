@@ -2139,6 +2139,12 @@ enum SuperUser {
 /// [`crate::model::TagPolicyBlock`], [`ServiceDef::has_tag_enricher`] and
 /// [`AccessRequest::resolved_tags`].
 ///
+/// ⚠ **Both escapes are facts about what can RUN, and SP4d-2b Task 7 added the
+/// question that comes before them**: whether there is an engine at all.
+/// [`tag_block_fails_to_load`] is consulted first and overrides both — see that
+/// function for the measurement and for the surviving mutation that found the
+/// fail-open.
+///
 /// 1. **BOTH defs declare no tag enricher.** Nothing then writes the request's
 ///    tag context, so `getLikelyMatchPolicyEvaluators` returns
 ///    `Collections.EMPTY_LIST` at `isNotEmpty(tags)` and

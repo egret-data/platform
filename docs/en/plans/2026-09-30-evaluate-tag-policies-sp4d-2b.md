@@ -15,6 +15,48 @@ them.
 
 ## Open items — raised by Task 5, ranked
 
+### Item A (NEW, Task 7, and the only CRITICAL one here): egret's tag download names `schema` for every engine, so tag-selected masks and clearances cannot reach StarRocks
+
+`ServiceTags::from_assignments` (`egret-policy-api/src/dto.rs`) writes the
+`resourceElements` keys `catalog` / `schema` / `table` / `column`, hard-coded, and
+`download_tags` (`egret-policy/src/ranger/api/download.rs`) calls it with no engine
+argument. **StarRocks' service-def has no `schema` resource** — its middle level is
+`database` (`crates/egret-policy/src/service-defs/starrocks.json`). So every tag
+attachment a StarRocks plugin downloads names a level no hierarchy of its def
+carries, and `RangerTagEnricher.processServiceTags` drops the service resource and
+its tag links: `createRangerServiceResourceMatcher` returns null when no policy
+type validates the key set, which `EgretTagServiceResourceValidationTest` measures
+on the real jar (the mirror row, `catalog,database,table,column` against the Trino
+def, is `dropped`).
+
+**Consequence if a StarRocks profile is ever given a `tagService`: every tag
+policy in its block is inert, silently.** Nothing egret auto-binds reaches that
+state — `bind_trino_profile` is the only writer of `tagService` and
+`tag_assignments_for_service` resolves the owning profile with `tp.type = 'trino'`
+— so this is not a live production defect today. It is a landmine under the
+StarRocks clearance path (SP4c expands tag clearances per COLUMN into resource
+policies instead, which is why nothing has noticed).
+
+`explain` reports it correctly rather than hiding it: `attachment_for` writes the
+wire's literal keys, `enriched_tags` drops them, and the profile answers with its
+tag policies reported as reaching nothing. Fixing the WRITER is a separate change
+(per-engine level names in `from_assignments`, plus a decision about already-served
+tag versions).
+
+### Item B (NEW, Task 7): nothing constrains `explain`'s target strings
+
+`ExplainRequest`'s `schema` / `table` / `column` are plain `Option<String>`. The
+handler's 400 refuses a level SKIP (`{schema: None, table: Some(_)}`) and nothing
+refuses an EMPTY level, so `{"schema": "", "table": ""}` is accepted and
+`request_resource` inserts the empty values as resource levels — a resource no
+engine's plugin could ask about. Today the answer is safe either way (Task 7's
+gate declines the resolution for any catalog holding a matching `('', '')` row,
+and with no such row the empty set is the right answer because no attachment is an
+ancestor of such a request). It is listed because the same unvalidated strings are
+what make the `('', '')` ASSIGNMENT writable — `assign_resource_tag` validates
+nothing either — and one `CHECK` on `catalog_tag_assignments` would retire both
+this item and Task 7's gate. Unrepresentable beats unforgettable.
+
 ### Item 0 (top): model or refuse `accessTypeResults`, before any further corpus work
 
 `evaluatePolicyItems`' **`accessTypeResults` map lives in the request context and
@@ -416,12 +458,12 @@ distinguishes one of them properly and the other two honestly stay together.
 - Modify: `crates/egret-perm-compile/src/routes.rs`
 - Modify: `frontend/src/routes/governance/ExplainAccess.tsx` and its test
 
-- [ ] **Step 1: Pass the resolved tags.** The handler currently sends
+- [x] **Step 1: Pass the resolved tags.** The handler currently sends
 `resolved_tags: None` deliberately, because egret's resolution was not
 enricher-equivalent. Task 1 makes it equivalent for the two levels egret can
 express; pass it, and keep the shape refusal for anything else.
 
-- [ ] **Step 2: Write the failing test that matters most:** a profile whose tag
+- [x] **Step 2: Write the failing test that matters most:** a profile whose tag
 service carries a real policy now **answers** instead of refusing. Use the
 two-profile fixture.
 
@@ -448,7 +490,7 @@ means giving the crate a reader for the `/tags/download` payload; that is a
 feature package, not this step. Do not quietly widen scope to reach them, and do
 not write a green that implies coverage this code path does not have.
 
-- [ ] **Step 1b: The empty-string row is a property of the REQUEST, not the query.**
+- [x] **Step 1b: The empty-string row is a property of the REQUEST, not the query.**
 Task 4's re-review measured this and it is a trap for your mapping:
 `resolved_tags_for_resource_via(…, "", "", "")` **does** return a `('','')` row.
 Nothing in the SQL prevents it — the predicate is an exact
@@ -458,7 +500,7 @@ mechanism instead — which caller supplies the three values, and what constrain
 them there. If nothing constrains them, that is the finding, and the mapping is
 where it has to be handled.
 
-- [ ] **Step 2b: Carried from Task 4 — make enrichment-before-phase
+- [x] **Step 2b: Carried from Task 4 — make enrichment-before-phase
 unrepresentable, here rather than earlier.** Nothing structurally forces the tag
 enrichment to run before `tag_candidates`; it is a convention held at two call
 sites, and the two-guards-must-agree shape has produced a defect in this package
@@ -467,16 +509,50 @@ every construction site — including the mapping you are writing in Step 1. Tas
 deliberately left it rather than churn those sites twice. Do it with your mapping,
 in the same commit, or say why it is worse here than a convention.
 
-- [ ] **Step 3: The page's copy changes meaning.** SP4d-2a's blast-radius sentence
+- [x] **Step 3: The page's copy changes meaning.** SP4d-2a's blast-radius sentence
 said a tag policy anywhere makes every verdict `Undecidable` installation-wide.
 That stops being true for the cases this package handles. **Rewrite it to what is
 now true, do not delete it** — the shape refusal and the attribute refusal remain,
 and a reader needs to know which is which.
 
-- [ ] **Step 4: Confirm `explain_writes_nothing` and
+- [x] **Step 4: Confirm `explain_writes_nothing` and
 `policy_read_permits_the_reads_and_refuses_the_writes` still pass unchanged.**
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
+
+**DONE** — `14691ef2` (the wiring, the newtype, the page) and `9f42d820` (a
+fail-open a surviving mutation found). Four things a reader of the steps above
+should know, because two of them correct the steps:
+
+1. **Step 1's "keep the shape refusal for anything else" is not sufficient**, and
+   the insufficiency is a fail-open rather than an over-refusal. A row stored
+   `('sales', '')` ships as a `{catalog, schema}` service resource, which the
+   enricher treats as an ANCESTOR of `sales.orders` and Ranger ADMITS for a tag
+   request — while `resolved_tags_for_resource_via`'s exact `table_name = $3` can
+   never return it. The resolved set would be MISSING a tag the engine enforces,
+   and an empty set is a licence to skip the tag phase entirely. The shape refusal
+   cannot see it: the row is not in the mapping's input. So
+   `assignments_outside_rolled_up_levels_via` counts exactly those rows per
+   catalog and `resolved_tags_for_target` declines before resolving anything.
+2. **Step 1b, answered: nothing constrains them.** `explain`'s 400 tests for an
+   ABSENT level, not an empty one, and `ExplainRequest`'s `schema`/`table`/
+   `column` are plain `Option<String>` with no validator — `{"schema": "",
+   "table": ""}` reaches `request_resource`, which inserts the empty values as
+   resource levels. The `('', '')` row is therefore returned by the query for that
+   request, exactly as Task 4's re-review measured. What keeps it out of the
+   mapping is the gate in (1), not the query and not the schema.
+3. **The D9 drop is now LIVE, and reproduces a product defect.**
+   `ServiceTags::from_assignments` writes the keys `catalog`/`schema`/`table`/
+   `column` for every service type — `download_tags` takes no engine argument —
+   and StarRocks' service-def has no `schema` resource. So a StarRocks profile
+   carrying a `tagService` downloads attachments its own enricher drops, and the
+   mapping writes the wire's literal keys so that `enriched_tags` drops them too.
+   See the new open item below.
+4. **Step 2's end-to-end test is three tests**, and the strongest is the one the
+   brief did not ask for: a stored broad row putting the profile back to
+   `tags_unresolved`. All three are DB-gated and were not runnable in the Task 7
+   worktree (`egret_test_template` is at migration 0160 while this branch ends at
+   0159).
 
 ---
 
