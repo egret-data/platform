@@ -296,6 +296,75 @@ async fn data_api_endpoint_folders_are_a_known_kind() {
     );
 }
 
+/// `apps` is a valid `{kind}` on the generic folder router (`kind_perms`), the
+/// way `data_api_endpoints` is: data apps live in egret-apps and file into
+/// `analytics.folders` with `entity_type = 'app'`. A `ws_editor` (holds
+/// `app:write` from migration 0162), resolved by a real `CedarPdp`, can create
+/// one; without the arm the route 404s.
+#[tokio::test]
+async fn app_folders_are_a_known_kind() {
+    let Some(url) = egret_test_db::url().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let owner: Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(format!("owner_{}@egret.local", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .expect("insert owner");
+    let slug = format!("bi-app-folders-{}", Uuid::new_v4().simple());
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'App Folders Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let sessions = st.sessions.clone();
+    let editor = member_session(&db, &sessions, ws, "ws_editor").await;
+
+    let app = egret_bi::folder_router().with_state(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/ws/{slug}/folders/apps"))
+                .header("Cookie", format!("egret_session={editor}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name":"Sales apps"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a ws_editor creates an apps folder"
+    );
+
+    let entity_type: String = sqlx::query_scalar(
+        "SELECT entity_type FROM analytics.folders WHERE workspace_id = $1 AND name = 'Sales apps'",
+    )
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .expect("folder row");
+    assert_eq!(entity_type, "app");
+}
+
 /// PDP-backed workspace authz (this seam migrated onto
 /// `egret_core::authz::require`): a workspace member whose workspace role grants
 /// `dashboard:read` — resolved by a real `CedarPdp`, not the allow-all stub —

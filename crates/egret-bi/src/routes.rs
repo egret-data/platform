@@ -3399,6 +3399,10 @@ fn kind_perms(kind: &str) -> Option<(&'static str, &'static str, &'static str)> 
             "data_api_endpoint:read",
             "data_api_endpoint:manage",
         )),
+        // Data apps live in egret-apps and share this router the same way;
+        // `app:read`/`app:write` exist from migration 0162. Literal strings, again
+        // to avoid a cross-crate dependency.
+        "apps" => Some(("app", "app:read", "app:write")),
         _ => None,
     }
 }
