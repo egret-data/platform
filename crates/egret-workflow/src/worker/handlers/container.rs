@@ -134,7 +134,9 @@ pub(super) fn outcome_for(
 /// and re-collected for ever with no attempt spent. The runners refuse the
 /// one way an author can make it (`collect_directory`); this is the backstop
 /// for any runner, and it keeps the commit possible whatever reached it.
-fn distinct_files(result: &CommandsResult) -> (Vec<crate::storage::StoredFile>, Option<String>) {
+pub(super) fn distinct_files(
+    result: &CommandsResult,
+) -> (Vec<crate::storage::StoredFile>, Option<String>) {
     let mut by_uri: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
     let mut files = Vec::new();
     for (rel, f) in &result.output_files {

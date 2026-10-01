@@ -76,6 +76,11 @@
           <include>catalog.json</include>
         </includes>
       </testResource>
+      <!-- W9a Task 9: base-uri-cases.json, written by the Rust test
+           `kestra::tests::the_base_uri_fixture_is_what_egret_computes`. -->
+      <testResource>
+        <directory>${project.basedir}/src/test/resources</directory>
+      </testResource>
     </testResources>
     <plugins>
       <plugin>

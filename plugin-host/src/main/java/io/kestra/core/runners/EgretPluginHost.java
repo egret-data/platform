@@ -6,6 +6,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -43,10 +45,14 @@ import jakarta.validation.ConstraintViolationException;
  * <pre>
  * java -Xmx&lt;heap&gt; -cp '/opt/egret-plugin-host/lib/*:/opt/egret-plugin-host/plugins/*' \
  *      io.kestra.core.runners.EgretPluginHost run &lt;path-to-task.json&gt;
- * task.json = {"type": "&lt;FQCN without kestra.&gt;", "properties": {…rendered…}, "mask": ["…"]}
+ * task.json = {"type": "&lt;FQCN without kestra.&gt;", "properties": {…rendered…}, "mask": ["…"],
+ *              "storage": {"&lt;kestra:// uri&gt;": ".egret/storage/&lt;n&gt;"}, "baseUri": "kestra:///…/",
+ *              "maxTaskBytes": n, "context": {"namespace", "flowId", "executionId", "taskId", "taskRunId"}}
+ *             (the last four: W9a spec §5; a run with no internal storage has no baseUri)
  * stdout    = "&lt;LEVEL&gt; &lt;message&gt;" lines; one "::{"outputs": {…}}::" on success;
  *             one "::{"egretFailure": {"code": n, "message": "…"}}::" before a non-zero exit
- * exit      = 0 ok | 2 refused/invalid | 3 plugin threw | 4 needs W9
+ * exit      = 0 ok | 2 refused/invalid | 3 plugin threw | 4 needs what egret does not provide
+ *             (namespace files W9b, KV W9c, Kestra's secret key or services)
  * SIGTERM   = the shutdown hook calls task.kill(), waits for run() up to EGRET_KILL_WAIT_MS, exits
  *
  * java … EgretPluginHost describe &lt;plugins-dir&gt;   -&gt; catalog.json on stdout
@@ -93,15 +99,13 @@ public final class EgretPluginHost {
     );
 
     /**
-     * Task classes that cannot run without internal storage (W9), with the reason Task 1 measured or
-     * read from the schema ({@code oracle-exec/w5b-plugins.json}, {@code egret_expected.classes.*.needs_storage.class}).
+     * Task classes kept out of the catalog because they cannot run without something egret does not
+     * provide, with the reason. <b>Empty since W9a</b>: W5b excluded {@code postgresql.Batch},
+     * {@code mysql.Batch}, {@code postgresql.CopyIn} and {@code postgresql.CopyOut} for needing internal
+     * storage; {@link EgretStorage} provides it, and W9a Task 1 ran each one's storage part on the
+     * artifact ({@code oracle-exec/w9a-storage.json}, {@code plugin_storage.still_refused_values} is {}).
      */
-    static final Map<String, String> NEEDS_STORAGE = Map.of(
-        "io.kestra.plugin.jdbc.postgresql.Batch", "required `from` is a kestra:// URI (internal storage, W9; Task 1, schema)",
-        "io.kestra.plugin.jdbc.mysql.Batch", "required `from` is a kestra:// URI (internal storage, W9; Task 1, schema)",
-        "io.kestra.plugin.jdbc.postgresql.CopyIn", "required `from` is a kestra:// URI (internal storage, W9; Task 1, schema)",
-        "io.kestra.plugin.jdbc.postgresql.CopyOut", "always writes its result to internal storage, outputs.uri kestra:// (W9; Task 1, measured)"
-    );
+    static final Map<String, String> NEEDS_STORAGE = Map.of();
 
     private EgretPluginHost() {
     }
@@ -169,18 +173,19 @@ public final class EgretPluginHost {
 
     /** {@code outputs} carries the success marker only; everything else goes to {@code out}. */
     private static int execute(Path taskJson, PrintStream out, PrintStream outputs, Long killWaitMs) {
-        Task task;
+        Loaded loaded;
         try {
-            task = load(taskJson);
+            loaded = loadAll(taskJson);
         } catch (Refused e) {
             return fail(out, EXIT_REFUSED, e.getMessage(), null);
         }
+        Task task = loaded.task();
 
         String base = System.getenv("WORKING_DIR");
         Path workingDirBase = base == null || base.isBlank()
             ? Path.of(System.getProperty("java.io.tmpdir"))
             : Path.of(base);
-        ShimRunContext runContext = new ShimRunContext(workingDirBase, task);
+        ShimRunContext runContext = new ShimRunContext(workingDirBase, task, loaded.storage());
 
         try {
             runContext.validate(task);
@@ -236,7 +241,15 @@ public final class EgretPluginHost {
         }
     }
 
+    /** A task and what {@code task.json} says about its storage. */
+    record Loaded(Task task, ShimRunContext.StorageSpec storage) {
+    }
+
     static Task load(Path taskJson) throws Refused {
+        return loadAll(taskJson).task();
+    }
+
+    static Loaded loadAll(Path taskJson) throws Refused {
         Map<String, Object> doc;
         try {
             doc = MAPPER.readValue(Files.readAllBytes(taskJson), MAP);
@@ -293,7 +306,42 @@ public final class EgretPluginHost {
         if (!(task instanceof RunnableTask<?>)) {
             throw new Refused("type " + type + " is not a runnable task");
         }
-        return task;
+        return new Loaded(task, storageSpec(doc));
+    }
+
+    /** {@code task.json}'s storage keys (W9a spec §5); each one absent means "none". */
+    static ShimRunContext.StorageSpec storageSpec(Map<String, Object> doc) throws Refused {
+        Map<String, String> staged = new LinkedHashMap<>();
+        if (doc.get("storage") instanceof Map<?, ?> m) {
+            for (Map.Entry<?, ?> e : m.entrySet()) {
+                if (!(e.getKey() instanceof String uri) || !(e.getValue() instanceof String rel)) {
+                    throw new Refused("task.json \"storage\" maps a URI to a path, both strings");
+                }
+                staged.put(uri, rel);
+            }
+        } else if (doc.get("storage") != null) {
+            throw new Refused("task.json \"storage\" is not an object");
+        }
+        URI baseUri = null;
+        if (doc.get("baseUri") instanceof String b) {
+            try {
+                baseUri = new URI(b);
+            } catch (URISyntaxException e) {
+                throw new Refused("task.json \"baseUri\" is not a URI: " + e.getMessage());
+            }
+        }
+        long maxTaskBytes = doc.get("maxTaskBytes") instanceof Number n ? n.longValue() : 0;
+        Map<String, String> context = null;
+        if (doc.get("context") instanceof Map<?, ?> c) {
+            context = new LinkedHashMap<>();
+            for (String k : List.of("namespace", "flowId", "executionId", "taskId", "taskRunId")) {
+                if (!(c.get(k) instanceof String v)) {
+                    throw new Refused("task.json \"context\" has no string \"" + k + "\"");
+                }
+                context.put(k, v);
+            }
+        }
+        return new ShimRunContext.StorageSpec(staged, baseUri, maxTaskBytes, context);
     }
 
     /** The catalog's {@code classes} map: FQCN -> {properties, outputs}. */

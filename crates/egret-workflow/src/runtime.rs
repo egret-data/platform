@@ -747,6 +747,9 @@ pub async fn handlers_for(
             plugin_configurations: cfg.plugin_configurations.clone(),
             host: cfg.plugin_host.clone(),
             secrets,
+            // W9a Task 9: the plugin storage bridge stages from, and collects
+            // into, the installed store.
+            files: crate::storage::current(),
         }),
     );
     Ok((handlers.with_orphan_sweep(sweep), Some(kind)))

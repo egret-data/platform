@@ -18,21 +18,37 @@
 //!    workspace. It is handed the author's UNRENDERED properties: it renders
 //!    once (Kestra's `recursiveRendering=false`) and collects literal secret
 //!    names from that source text. A render error is already masked by it;
-//! 4. **build** the [`TaskCommands`] ([`KestraRuntime::commands`]): the
+//! 4. **bridge storage** ([`Kestra::bridge`], W9a spec §5, §9.1): every
+//!    rendered property value that is a WHOLE `kestra:///` string is resolved
+//!    through the run's render snapshot -- the one readability decision
+//!    (`storage::resolve_readable_many`, taken when the run was claimed) -- and
+//!    staged at `.egret/storage/<n>`; an unreadable one fails the task here,
+//!    naming it, before any container exists. With internal storage the run
+//!    collects `.egret/out/` ([`Naming::UnderPrefixVerbatim`]) under its own
+//!    prefix, and the host's `EgretStorage` writes there;
+//! 5. **build** the [`TaskCommands`] ([`KestraRuntime::commands`]): the
 //!    configured host image, `/bin/sh -c "exec java …"`, the one input file
 //!    `task.json` (`{"type": FQCN, "properties": {…rendered…}, "mask":
-//!    [values]}`), no output files, `host_protocol: true`;
-//! 5. **mask**, twice (fix round 1, I1): the host masks every line of its
+//!    [values], "storage": {uri: path}, "baseUri", "maxTaskBytes",
+//!    "context"}`), the staged files, `host_protocol: true`;
+//! 6. **mask**, twice (fix round 1, I1): the host masks every line of its
 //!    own stdout and stderr (but the outputs marker) with `task.json`'s
 //!    `mask` before it leaves the JVM -- which is what `kubectl logs`, a
 //!    node's log shipper and Docker's json-file driver keep -- and the
 //!    runner is handed a [`TaskInput`]
 //!    whose log is `task.log.masked(values)`, so egret masks again before
 //!    `RunLog`;
-//! 6. **run** -- or, when the gate refused, **adopt** a container or pod that
+//! 7. **run** -- or, when the gate refused, **adopt** a container or pod that
 //!    already exists for this (run, attempt), exactly as the script handler
 //!    does; `adopt` never creates;
-//! 7. **map** the exit code ([`outcome_of`]).
+//! 8. **map** the exit code ([`outcome_of`]), with the files collected and
+//!    the §5 check that no output names a file under this run's prefix that
+//!    was not collected.
+//!
+//! # Files a plugin writes are not masked
+//!
+//! As outputs are not (W5b §12, W9a §9.1): a `fetchType: STORE` of a query
+//! that selects a secret stores it in the file, exactly as Kestra does.
 //!
 //! # Where a secret's value goes, and where it does not
 //!
@@ -53,9 +69,10 @@
 //! `0` success, the `::{"outputs": …}::` marker's map as the outputs, as it
 //! is; `2` the host refused the task (unknown type, invalid properties);
 //! `3` the plugin threw; `4` the plugin asked for something egret does not
-//! provide yet -- internal storage, KV, namespace files (W9), and also
-//! `localPath`/`decrypt`/`sdk`/`services`, which is why the reason does not
-//! say "storage" alone. Any other code (137: the JVM was OOM-killed) is
+//! provide -- namespace files (W9b), the KV store (W9c), and also
+//! `localPath`/`decrypt`/`sdk`/`services`. Internal storage is provided
+//! (W9a): a refused storage call (a write outside the prefix, a file not
+//! staged) is the plugin's own failure, exit 3. Any other code (137: the JVM was OOM-killed) is
 //! `the plugin host exited with <n>`.
 //!
 //! # A timeout is the budget's outcome, whatever the host printed
@@ -82,14 +99,18 @@ use egret_config::{PluginConfigurations, PluginHostConfig};
 use egret_core::Result;
 use serde_json::{Map, Value};
 
-use super::super::commands::{CommandsResult, TaskCommands, TaskRunner, DEFAULT_INTERPRETER};
+use super::super::commands::{
+    CollectTo, CommandsResult, Naming, StoredInput, TaskCommands, TaskRunner, DEFAULT_INTERPRETER,
+};
 use super::super::{Handlers, Outcome, TaskHandler, TaskInput};
 use super::container::mapped;
 use super::script::FeatureState;
 use crate::logs::mask;
 use crate::plugins::{self, gate};
+use crate::runners::render_str;
 use crate::runners::secrets::{render_with_secrets, SecretSource};
 use crate::scripts::{RunnerKind, RunnerSpec};
+use crate::storage::uri::SCHEME_PREFIX;
 use crate::worker::commands::NoObserver;
 
 /// The one input file: what the host reads (`EgretPluginHost run <file>`).
@@ -107,6 +128,32 @@ pub const HOST_MAIN: &str = "io.kestra.core.runners.EgretPluginHost";
 /// to return after calling `kill()`.
 pub const ENV_KILL_WAIT_MS: &str = "EGRET_KILL_WAIT_MS";
 
+/// Where staged files go, relative to the working directory: the `n`th
+/// distinct URI at `.egret/storage/<n>` (W9a spec §5).
+pub const STAGED_DIR: &str = ".egret/storage";
+
+/// What one run's storage looks like to the host (W9a spec §5, §9.1): the
+/// `task.json` keys and the files the runner moves.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Bridge {
+    /// `task.json`'s `storage`: `kestra://` URI -> `.egret/storage/<n>`.
+    pub storage: BTreeMap<String, String>,
+    /// `.egret/storage/<n>` -> the file the runner streams in.
+    pub stored_inputs: BTreeMap<String, StoredInput>,
+    /// Where `.egret/out/` is collected to; its `task_prefix` is `task.json`'s
+    /// `baseUri`. `None`: egret has no internal storage, and the host refuses
+    /// every write naming `[storage]`.
+    pub collect_to: Option<CollectTo>,
+    /// `task.json`'s `maxTaskBytes`: `workflow.storage.max_task_bytes`.
+    pub max_task_bytes: u64,
+    /// `task.json`'s `context`: `namespace`, `flowId`, `executionId` (the
+    /// run's own execution, an iteration's id inside a `Loop`), `taskId`,
+    /// `taskRunId` -- what Kestra's `StorageContext.forTask` is built from,
+    /// whose context URI equals `baseUri` (`plugin-host`'s
+    /// `EgretStorageTest`, over `base-uri-cases.json`).
+    pub context: Option<Value>,
+}
+
 /// Everything a [`Kestra`] handler needs besides the task: built once per
 /// process (`runtime::handlers_for`) and shared by every catalog type.
 pub struct KestraRuntime {
@@ -123,6 +170,10 @@ pub struct KestraRuntime {
     pub host: PluginHostConfig,
     /// Where `secret()` reads, in the execution's workspace.
     pub secrets: Arc<dyn SecretSource>,
+    /// Internal storage (`[storage]`): where staged `kestra://` values are
+    /// read from and `.egret/out/` is collected to (W9a spec §9.1). `None`: a
+    /// `kestra://` value fails the task, and the host refuses every write.
+    pub files: Option<Arc<crate::storage::FileStore>>,
 }
 
 impl std::fmt::Debug for KestraRuntime {
@@ -157,22 +208,33 @@ impl KestraRuntime {
         self.host.kill_grace_s.saturating_sub(2) * 1000
     }
 
-    /// Step 4 of the module doc. `properties` is the RENDERED map; it goes
+    /// Step 5 of the module doc. `properties` is the RENDERED map; it goes
     /// into `task.json` and nowhere else. `mask` is every secret value the
     /// render handed out: the host replaces each by `******` on its own
     /// stdout and stderr (fix round 1, I1). The file already holds them in
     /// `properties`, so listing them again adds no place a value is.
+    /// `bridge` is step 4's: `task.json`'s storage keys, the staged files,
+    /// and -- with internal storage -- `.egret/out/` collected verbatim.
     pub fn commands(
         &self,
         fqcn: &str,
         properties: Map<String, Value>,
         mask: &[String],
+        bridge: Bridge,
     ) -> TaskCommands {
-        let task_json = serde_json::json!({
+        let mut task_json = serde_json::json!({
             "type": fqcn,
             "properties": Value::Object(properties),
             "mask": mask,
+            "storage": bridge.storage,
         });
+        if let Some(to) = &bridge.collect_to {
+            task_json["baseUri"] = Value::String(to.task_prefix.clone());
+            task_json["maxTaskBytes"] = Value::from(bridge.max_task_bytes);
+        }
+        if let Some(context) = bridge.context {
+            task_json["context"] = context;
+        }
         TaskCommands {
             container_image: self.host.image.clone().unwrap_or_default(),
             interpreter: DEFAULT_INTERPRETER.iter().map(|s| s.to_string()).collect(),
@@ -183,12 +245,12 @@ impl KestraRuntime {
                 self.kill_wait_ms().to_string(),
             )]),
             input_files: BTreeMap::from([(TASK_JSON.to_string(), task_json.to_string())]),
-            // Task 9 (the plugin storage bridge) stages a plugin's URIs.
-            stored_inputs: BTreeMap::new(),
+            stored_inputs: bridge.stored_inputs,
             output_files: Vec::new(),
-            // Task 9 collects `.egret/out/` with `Naming::UnderPrefixVerbatim`.
-            output_directory: false,
-            collect_to: None,
+            // The host's `EgretStorage` writes `.egret/out/<path under baseUri>`;
+            // the runner collects it as `{baseUri}{path}`.
+            output_directory: bridge.collect_to.is_some(),
+            collect_to: bridge.collect_to,
             host_protocol: true,
         }
     }
@@ -217,14 +279,31 @@ pub struct Kestra {
     rt: Arc<KestraRuntime>,
 }
 
-/// Step 7: what a finished host means. Every message is masked with
-/// `secrets`; the outputs are not (spec §12).
-pub fn outcome_of(type_id: &str, result: &CommandsResult, secrets: &[String]) -> Outcome {
-    let failed = |why: String| Outcome::failed_with(format!("{type_id}: {}", mask(&why, secrets)));
+/// Step 8: what a finished host means. Every message is masked with
+/// `secrets`; the outputs are not (spec §12), nor are the files the plugin
+/// wrote (W9a §9.1).
+///
+/// **The collected files ride along whatever the state** (as the script
+/// handler's, `container::outcome_for`): they are indexed with the outcome.
+/// `task_prefix` is this run's own prefix: on exit 0, an output naming a URI
+/// under it that was never collected fails the task (W9a spec §5) -- a host
+/// that returned a URI it did not write points at nothing.
+pub fn outcome_of(
+    type_id: &str,
+    result: &CommandsResult,
+    secrets: &[String],
+    task_prefix: Option<&str>,
+) -> Outcome {
+    let (files, shared) = super::container::distinct_files(result);
+    let failed = |why: String| Outcome {
+        files: files.clone(),
+        ..Outcome::failed_with(format!("{type_id}: {}", mask(&why, secrets)))
+    };
     // A problem egret found after the host ran (the outputs over W5a's
-    // 1 MiB cap) fails the task whatever the exit code.
-    if let Some(why) = &result.failure {
-        return failed(why.clone());
+    // 1 MiB cap, a file over a storage cap, two outputs at one URI) fails
+    // the task whatever the exit code.
+    if let Some(why) = result.failure.clone().or(shared) {
+        return failed(why);
     }
     let said = || {
         result
@@ -234,15 +313,146 @@ pub fn outcome_of(type_id: &str, result: &CommandsResult, secrets: &[String]) ->
             .unwrap_or_else(|| "(the host printed no reason)".to_string())
     };
     match result.exit_code {
-        0 => Outcome::succeeded_with(Value::Object(result.vars.clone())),
+        0 => {
+            let outputs = Value::Object(result.vars.clone());
+            let unbacked = task_prefix.and_then(|prefix| {
+                crate::storage::collect::check_outputs_collected(&outputs, prefix, &files).err()
+            });
+            match unbacked {
+                Some(why) => Outcome {
+                    outputs: Some(outputs),
+                    ..failed(why)
+                },
+                None => Outcome {
+                    files,
+                    ..Outcome::succeeded_with(outputs)
+                },
+            }
+        }
         2 => failed(format!("the plugin host refused the task: {}", said())),
         3 => failed(format!("the plugin failed: {}", said())),
         4 => failed(format!(
-            "the plugin needs something egret does not provide yet (internal storage, KV, \
-             namespace files — W9): {}",
+            "the plugin needs something egret does not provide yet (namespace files — W9b, \
+             the KV store — W9c, or another Kestra service): {}",
             said()
         )),
         n => failed(format!("the plugin host exited with {n}")),
+    }
+}
+
+impl Kestra {
+    /// Step 4 of the module doc (W9a spec §5, §9.1). `Err` is the task's
+    /// failure, decided before the gate's runner call and before any
+    /// container exists.
+    ///
+    /// **Whole string leaves only.** A property value that IS a `kestra:///`
+    /// URI is a file the plugin reads (`from:`, `inputFile:`); a URI quoted
+    /// inside SQL text is not a file read and is not staged -- a spec
+    /// ambiguity resolved this way, and reported (W9a Task 9). Each distinct
+    /// URI is staged once, at `.egret/storage/<n>` in first-seen order.
+    ///
+    /// Readability is the run's render snapshot's ([`RenderFiles::lookup`]),
+    /// i.e. `storage::resolve_readable_many` -- never a second predicate.
+    ///
+    /// [`RenderFiles::lookup`]: crate::runners::RenderFiles::lookup
+    pub(crate) fn bridge(
+        &self,
+        task: &TaskInput,
+        rendered: &Map<String, Value>,
+    ) -> std::result::Result<Bridge, String> {
+        let mut leaves = Vec::new();
+        for (key, value) in rendered {
+            whole_uri_leaves(key.clone(), value, &mut leaves);
+        }
+        let mut bridge = Bridge::default();
+        for (path, uri) in leaves {
+            if bridge.storage.contains_key(&uri) {
+                continue;
+            }
+            let why = |reason: &str| format!("property `{path}`: {reason}");
+            let Some(scope) = task.render.files() else {
+                return Err(why(&format!(
+                    "{uri} cannot be read: this render has no file scope"
+                )));
+            };
+            let meta = scope.0.lookup(&uri).map_err(|u| why(u.message()))?;
+            let Some(files) = &self.rt.files else {
+                return Err(why(&format!(
+                    "{uri} cannot be read: egret has no internal storage configured (the \
+                     `[storage]` section of its configuration)"
+                )));
+            };
+            let object_uri = files
+                .object_uri(task.workspace_id, &uri)
+                .map_err(|e| why(&e))?;
+            let rel = format!("{STAGED_DIR}/{}", bridge.storage.len());
+            bridge.storage.insert(uri.clone(), rel.clone());
+            bridge.stored_inputs.insert(
+                rel,
+                StoredInput {
+                    uri,
+                    object_uri,
+                    size: meta.size,
+                },
+            );
+        }
+        let Some(files) = &self.rt.files else {
+            return Ok(bridge);
+        };
+        let flow = (
+            render_str("{{ flow.namespace }}", &task.render),
+            render_str("{{ flow.id }}", &task.render),
+        );
+        let (Ok(namespace), Ok(flow_id)) = flow else {
+            return Err(
+                "this run has no storage prefix for the files a plugin writes: it is not a task \
+                 run of a flow's execution"
+                    .to_string(),
+            );
+        };
+        let prefix = match task.render.files().and_then(|f| f.0.task_prefix()) {
+            Some(p) => p.to_string(),
+            None => crate::storage::uri::task_prefix(
+                &namespace,
+                &flow_id,
+                task.execution_id,
+                &task.task_id,
+                task.run_id,
+            )?,
+        };
+        bridge.collect_to = Some(CollectTo {
+            workspace: task.workspace_id,
+            task_prefix: prefix,
+            naming: Naming::UnderPrefixVerbatim,
+        });
+        bridge.max_task_bytes = files.caps.max_task_bytes;
+        bridge.context = Some(serde_json::json!({
+            "namespace": namespace,
+            "flowId": flow_id,
+            "executionId": task.execution_id.hyphenated().to_string(),
+            "taskId": task.task_id,
+            "taskRunId": task.run_id.hyphenated().to_string(),
+        }));
+        Ok(bridge)
+    }
+}
+
+/// Every string leaf of `value` that is WHOLE a `kestra:///` URI, with its
+/// property path (`from`, `parameters.a`, `list[1]`), in document order.
+fn whole_uri_leaves(path: String, value: &Value, out: &mut Vec<(String, String)>) {
+    match value {
+        Value::String(s) if s.starts_with(SCHEME_PREFIX) => out.push((path, s.clone())),
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                whole_uri_leaves(format!("{path}[{i}]"), item, out);
+            }
+        }
+        Value::Object(map) => {
+            for (k, v) in map {
+                whole_uri_leaves(format!("{path}.{k}"), v, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -314,15 +524,38 @@ impl TaskHandler for Kestra {
         };
         let secrets = resolved.values;
 
-        // 4. the commands; 5. the masked log.
-        let cmds = self.rt.commands(parsed.fqcn, rendered, &secrets);
+        // 4. the storage bridge: stage the whole `kestra://` values, and
+        //    collect `.egret/out/`. A refusal fails here, before any runner.
+        let bridge = match self.bridge(task, &rendered) {
+            Ok(b) => b,
+            Err(why) => {
+                return Ok(Outcome::failed_with(format!(
+                    "{type_id}: {}",
+                    mask(&why, &secrets)
+                )))
+            }
+        };
+        // The run's own prefix, for the §5 check whether or not it collects.
+        let task_prefix = bridge
+            .collect_to
+            .as_ref()
+            .map(|c| c.task_prefix.clone())
+            .or_else(|| {
+                task.render
+                    .files()
+                    .and_then(|f| f.0.task_prefix())
+                    .map(str::to_string)
+            });
+
+        // 5. the commands; 6. the masked log.
+        let cmds = self.rt.commands(parsed.fqcn, rendered, &secrets, bridge);
         let masked = TaskInput {
             log: task.log.masked(&secrets),
             ..task.clone()
         };
         let spec = RunnerSpec::defaults(self.rt.runner_kind);
 
-        // 6. run, or adopt what already exists.
+        // 7. run, or adopt what already exists.
         let ran = match refused {
             Some(refusal) => match self
                 .rt
@@ -337,9 +570,14 @@ impl TaskHandler for Kestra {
             None => self.rt.runner.run(&masked, &cmds, &spec, &NoObserver).await,
         };
 
-        // 7. map.
+        // 8. map.
         match ran {
-            Ok(result) => Ok(outcome_of(type_id, &result, &secrets)),
+            Ok(result) => Ok(outcome_of(
+                type_id,
+                &result,
+                &secrets,
+                task_prefix.as_deref(),
+            )),
             Err(e) => match mapped(type_id, e) {
                 Ok(o) => Ok(Outcome {
                     message: o.message.map(|m| mask(&m, &secrets).into_owned()),
@@ -433,6 +671,7 @@ mod tests {
                 ..PluginHostConfig::default()
             },
             secrets: Arc::new(OneSecret::default()),
+            files: None,
         })
     }
 
@@ -642,15 +881,20 @@ mod tests {
 
     /// A property publish refuses is refused at run, by name, before any
     /// secret is read or any runner called (a draft that skipped publish).
+    ///
+    /// W9a Task 9: this used `fetchType: STORE`, which publish no longer
+    /// refuses; the replacement proving STORE runs is
+    /// [`fetch_type_store_runs_and_its_file_is_indexed`]. An unknown property
+    /// keeps the run-time refusal tested.
     #[tokio::test]
     async fn a_property_publish_refuses_is_refused_at_run() {
         let spy = Spy::ok(ok(serde_json::json!({})));
         let h = handler(spy.clone());
         let mut s = spec();
-        s["fetchType"] = serde_json::json!("STORE");
+        s["sqll"] = serde_json::json!("SELECT 2");
         let out = h.run(&input(QUERY, s)).await.expect("no worker error");
         assert_eq!(out.state, RunState::Failed);
-        assert!(message(&out).contains("W9"), "{:?}", out.message);
+        assert!(message(&out).contains("'sqll'"), "{:?}", out.message);
         assert!(spy.seen.lock().unwrap().is_empty());
         assert_eq!(*spy.adopt_calls.lock().unwrap(), 0);
     }
@@ -717,7 +961,13 @@ mod tests {
         assert_eq!(doc["type"], FQCN);
         let mut keys: Vec<&String> = doc.as_object().expect("a map").keys().collect();
         keys.sort();
-        assert_eq!(keys, vec!["mask", "properties", "type"]);
+        // No internal storage in this runtime: nothing staged, no `baseUri`,
+        // nothing collected (W9a Task 9).
+        assert_eq!(keys, vec!["mask", "properties", "storage", "type"]);
+        assert_eq!(doc["storage"], serde_json::json!({}));
+        assert!(!cmds.output_directory);
+        assert_eq!(cmds.collect_to, None);
+        assert!(cmds.stored_inputs.is_empty());
         assert_eq!(
             doc["properties"],
             serde_json::json!({
@@ -853,10 +1103,11 @@ mod tests {
             ),
             (
                 4,
-                Some("storage() needs internal storage (W9)"),
+                Some("namespaceKv() needs the KV store, which egret does not provide yet (W9c)"),
                 format!(
-                    "{QUERY}: the plugin needs something egret does not provide yet (internal \
-                     storage, KV, namespace files — W9): storage() needs internal storage (W9)"
+                    "{QUERY}: the plugin needs something egret does not provide yet (namespace \
+                     files — W9b, the KV store — W9c, or another Kestra service): namespaceKv() \
+                     needs the KV store, which egret does not provide yet (W9c)"
                 ),
             ),
             (
@@ -991,7 +1242,11 @@ mod tests {
             .keys()
             .map(|fqcn| format!("kestra.{fqcn}"))
             .collect();
-        assert_eq!(want.len(), 5, "the three jars' five runnable classes");
+        assert_eq!(
+            want.len(),
+            9,
+            "the three jars' nine runnable classes (W9a Task 9 re-admitted Batch ×2, CopyIn, CopyOut)"
+        );
         assert_eq!(
             reg.type_ids(),
             want.iter().map(String::as_str).collect::<Vec<_>>()
@@ -999,6 +1254,457 @@ mod tests {
         for id in reg.type_ids() {
             assert_eq!(reg.get(id).expect("served").type_id(), id);
             assert!(crate::spec::registry::known_type(id).is_none());
+        }
+    }
+
+    // ---- the storage bridge (W9a Task 9) -------------------------------------
+
+    const COPY_IN: &str = "kestra.io.kestra.plugin.jdbc.postgresql.CopyIn";
+    const WS: uuid::Uuid = uuid::Uuid::from_u128(0x5eed);
+    const EXEC: uuid::Uuid = uuid::Uuid::from_u128(0xe8ec);
+    const RUN: uuid::Uuid = uuid::Uuid::from_u128(0x7a5c);
+
+    fn mem_files() -> Arc<crate::storage::FileStore> {
+        Arc::new(crate::storage::FileStore {
+            store: Arc::new(egret_storage::MemStore::new()),
+            bucket: "egret-test".into(),
+            prefix: "workflow/".into(),
+            caps: crate::storage::Caps::default(),
+            retention_days: 30,
+        })
+    }
+
+    /// The handler for `type_id` over `spy`, with internal storage `files`.
+    fn stored(
+        type_id: &'static str,
+        spy: Arc<Spy>,
+        files: Option<Arc<crate::storage::FileStore>>,
+    ) -> Kestra {
+        let mut rt = runtime(spy, true, PluginConfigurations::default());
+        Arc::get_mut(&mut rt).expect("unshared").files = files;
+        Kestra { type_id, rt }
+    }
+
+    /// This run's own prefix: execution [`EXEC`], task `load`, run [`RUN`].
+    fn prefix() -> String {
+        crate::storage::uri::task_prefix("w9a.plugins", "pg-storage", EXEC, "load", RUN)
+            .expect("a prefix")
+    }
+
+    /// A file another task of this execution wrote.
+    fn upstream(name: &str) -> String {
+        format!(
+            "kestra:///w9a/plugins/pg-storage/executions/{EXEC}/tasks/q/{}/{name}",
+            uuid::Uuid::from_u128(0xabc)
+        )
+    }
+
+    fn indexed(uri: &str, size: u64) -> crate::storage::IndexedFile {
+        crate::storage::IndexedFile {
+            uri: uri.to_string(),
+            execution_id: EXEC,
+            task_run_id: Some(uuid::Uuid::from_u128(0xabc)),
+            size,
+        }
+    }
+
+    /// A run of `type_id` with `spec`, whose render has `outputs.q.{a,b}` =
+    /// the upstream files `a.ion` and `b.ion`, the flow, and a snapshot
+    /// resolving `a.ion` to `a` and `b.ion` to `b`.
+    fn stored_task(
+        files: &Arc<crate::storage::FileStore>,
+        type_id: &str,
+        spec: Value,
+        a: std::result::Result<crate::storage::IndexedFile, crate::storage::Unreadable>,
+        b: std::result::Result<crate::storage::IndexedFile, crate::storage::Unreadable>,
+    ) -> TaskInput {
+        let snapshot = crate::storage::scope::Snapshot::from_parts(
+            BTreeMap::from([(upstream("a.ion"), a), (upstream("b.ion"), b)]),
+            files.clone(),
+            WS,
+            Some(prefix()),
+        );
+        let mut cx = crate::runners::RenderContext::from_json_object(&serde_json::json!({
+            "inputs": {"n": 1},
+            "outputs": {"q": {"a": upstream("a.ion"), "b": upstream("b.ion")}},
+        }))
+        .expect("an object")
+        .with_files(snapshot.into_scope());
+        cx.insert(
+            "flow",
+            serde_json::json!({"namespace": "w9a.plugins", "id": "pg-storage"}),
+        );
+        TaskInput {
+            workspace_id: WS,
+            execution_id: EXEC,
+            run_id: RUN,
+            task_id: "load".into(),
+            render: cx,
+            ..input(type_id, spec)
+        }
+    }
+
+    /// **Only WHOLE `kestra:///` string leaves are staged**, each distinct
+    /// URI once, at `.egret/storage/<n>`: `parameters.a` and
+    /// `parameters.b[1]` name `a.ion` (staged once); `sql` QUOTES `b.ion`
+    /// inside its text, which is not a file read and is not staged (W9a spec
+    /// §5's ambiguity, resolved and reported) -- though `b.ion` is readable.
+    /// Mutation (b) stages substrings: `sql` is then looked up whole and the
+    /// run fails, killing this test.
+    #[tokio::test]
+    async fn the_staged_set_is_exactly_the_whole_kestra_leaves() {
+        let files = mem_files();
+        let spy = Spy::ok(ok(serde_json::json!({"size": 1})));
+        let t = stored_task(
+            &files,
+            QUERY,
+            serde_json::json!({
+                "url": "jdbc:postgresql://pg:5432/w9a",
+                "sql": "SELECT '{{ outputs.q.b }}' AS u",
+                "parameters": {"a": "{{ outputs.q.a }}", "b": ["x", "{{ outputs.q.a }}"]},
+                "fetchType": "FETCH_ONE",
+            }),
+            Ok(indexed(&upstream("a.ion"), 7)),
+            Ok(indexed(&upstream("b.ion"), 9)),
+        );
+        let out = stored(QUERY, spy.clone(), Some(files.clone()))
+            .run(&t)
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        let cmds = spy.only();
+        assert_eq!(
+            cmds.stored_inputs,
+            BTreeMap::from([(
+                ".egret/storage/0".to_string(),
+                StoredInput {
+                    uri: upstream("a.ion"),
+                    object_uri: files.object_uri(WS, &upstream("a.ion")).unwrap(),
+                    size: 7,
+                }
+            )])
+        );
+        let doc = task_json(&cmds);
+        assert_eq!(
+            doc["storage"],
+            serde_json::json!({ upstream("a.ion"): ".egret/storage/0" })
+        );
+        assert_eq!(
+            doc["properties"]["sql"],
+            format!("SELECT '{}' AS u", upstream("b.ion")),
+            "the quoted URI reaches the plugin as text"
+        );
+    }
+
+    /// **`task.json` holds `storage`, `baseUri`, `maxTaskBytes` and
+    /// `context`**, the context's `executionId` the run's OWN execution;
+    /// and the runner collects `.egret/out` verbatim under `baseUri`.
+    #[tokio::test]
+    async fn task_json_holds_the_storage_keys_and_the_runner_collects_egret_out() {
+        let files = mem_files();
+        let spy = Spy::ok(ok(serde_json::json!({"rowCount": 2})));
+        let t = stored_task(
+            &files,
+            COPY_IN,
+            serde_json::json!({
+                "url": "jdbc:postgresql://pg:5432/w9a",
+                "table": "dst",
+                "from": "{{ outputs.q.a }}",
+            }),
+            Ok(indexed(&upstream("a.ion"), 7)),
+            Ok(indexed(&upstream("b.ion"), 9)),
+        );
+        let out = stored(COPY_IN, spy.clone(), Some(files.clone()))
+            .run(&t)
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        let cmds = spy.only();
+        let doc = task_json(&cmds);
+        let mut keys: Vec<&String> = doc.as_object().expect("a map").keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "baseUri",
+                "context",
+                "mask",
+                "maxTaskBytes",
+                "properties",
+                "storage",
+                "type"
+            ]
+        );
+        assert_eq!(doc["baseUri"], prefix());
+        assert_eq!(
+            doc["maxTaskBytes"],
+            crate::storage::Caps::default().max_task_bytes
+        );
+        assert_eq!(
+            doc["context"],
+            serde_json::json!({
+                "namespace": "w9a.plugins",
+                "flowId": "pg-storage",
+                "executionId": EXEC.hyphenated().to_string(),
+                "taskId": "load",
+                "taskRunId": RUN.hyphenated().to_string(),
+            })
+        );
+        assert_eq!(doc["properties"]["from"], upstream("a.ion"));
+        assert_eq!(
+            cmds.collect_to,
+            Some(CollectTo {
+                workspace: WS,
+                task_prefix: prefix(),
+                naming: Naming::UnderPrefixVerbatim,
+            })
+        );
+        assert!(cmds.output_directory, "the runner collects `.egret/out`");
+        assert_eq!(crate::worker::commands::OUTPUT_DIR_REL, ".egret/out");
+        assert!(cmds.output_files.is_empty());
+        // The staged file and the output directory do not collide.
+        let tar = cmds.tar_sources().expect("no clash");
+        assert!(tar.contains_key(".egret/storage/0"));
+        assert!(tar.contains_key(".egret/out"));
+    }
+
+    /// **An unreadable URI fails the task at render, naming it and the
+    /// property, and calls no runner** -- for each way the snapshot refuses.
+    #[tokio::test]
+    async fn an_unreadable_uri_fails_at_render_and_calls_no_runner() {
+        let files = mem_files();
+        let a = upstream("a.ion");
+        for (resolution, needle) in [
+            (
+                Err(crate::storage::Unreadable::NotReadable { uri: a.clone() }),
+                "may not read",
+            ),
+            (
+                Err(crate::storage::Unreadable::Missing { uri: a.clone() }),
+                "does not exist",
+            ),
+        ] {
+            let spy = Spy::ok(ok(serde_json::json!({})));
+            let t = stored_task(
+                &files,
+                COPY_IN,
+                serde_json::json!({
+                    "url": "jdbc:postgresql://pg:5432/w9a",
+                    "table": "dst",
+                    "from": "{{ outputs.q.a }}",
+                }),
+                resolution,
+                Ok(indexed(&upstream("b.ion"), 9)),
+            );
+            let out = stored(COPY_IN, spy.clone(), Some(files.clone()))
+                .run(&t)
+                .await
+                .expect("the author's error, not a worker error");
+            assert_eq!(out.state, RunState::Failed);
+            let m = message(&out);
+            assert!(m.starts_with(COPY_IN), "{m}");
+            assert!(m.contains("property `from`"), "{m}");
+            assert!(m.contains(&a), "{m}");
+            assert!(m.contains(needle), "{m}");
+            assert!(spy.seen.lock().unwrap().is_empty(), "no runner was called");
+            assert_eq!(*spy.adopt_calls.lock().unwrap(), 0);
+        }
+        // A URI the snapshot never looked up (assembled by the render).
+        let spy = Spy::ok(ok(serde_json::json!({})));
+        let t = stored_task(
+            &files,
+            COPY_IN,
+            serde_json::json!({
+                "url": "jdbc:postgresql://pg:5432/w9a",
+                "table": "dst",
+                "from": "{{ outputs.q.a ~ '.x' }}",
+            }),
+            Ok(indexed(&upstream("a.ion"), 7)),
+            Ok(indexed(&upstream("b.ion"), 9)),
+        );
+        let out = stored(COPY_IN, spy.clone(), Some(files.clone()))
+            .run(&t)
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Failed);
+        assert!(
+            message(&out).contains("was not looked up"),
+            "{:?}",
+            out.message
+        );
+        assert!(spy.seen.lock().unwrap().is_empty());
+        // And with no internal storage at all, naming `[storage]`.
+        let spy = Spy::ok(ok(serde_json::json!({})));
+        let t = stored_task(
+            &files,
+            COPY_IN,
+            serde_json::json!({
+                "url": "jdbc:postgresql://pg:5432/w9a",
+                "table": "dst",
+                "from": "{{ outputs.q.a }}",
+            }),
+            Ok(indexed(&upstream("a.ion"), 7)),
+            Ok(indexed(&upstream("b.ion"), 9)),
+        );
+        let out = stored(COPY_IN, spy.clone(), None)
+            .run(&t)
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Failed);
+        assert!(message(&out).contains("[storage]"), "{:?}", out.message);
+        assert!(spy.seen.lock().unwrap().is_empty());
+    }
+
+    /// **`fetchType: STORE` runs** (the replacement for W5b's refusal): the
+    /// host's outputs name the file it wrote under `baseUri`, the runner
+    /// collected it, and it rides on the outcome to be indexed.
+    #[tokio::test]
+    async fn fetch_type_store_runs_and_its_file_is_indexed() {
+        let files = mem_files();
+        let uri = format!("{}3654590194353406031.ion", prefix());
+        let spy = Spy::ok(CommandsResult {
+            exit_code: 0,
+            vars: serde_json::json!({"uri": uri, "size": 3})
+                .as_object()
+                .cloned()
+                .unwrap(),
+            output_files: BTreeMap::from([(
+                "3654590194353406031.ion".to_string(),
+                crate::storage::StoredFile {
+                    uri: uri.clone(),
+                    size: 96,
+                },
+            )]),
+            ..CommandsResult::default()
+        });
+        let mut s = spec();
+        s["fetchType"] = serde_json::json!("STORE");
+        let t = stored_task(
+            &files,
+            QUERY,
+            s,
+            Ok(indexed(&upstream("a.ion"), 7)),
+            Ok(indexed(&upstream("b.ion"), 9)),
+        );
+        let out = stored(QUERY, spy.clone(), Some(files))
+            .run(&t)
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        assert_eq!(
+            out.outputs,
+            Some(serde_json::json!({"uri": uri, "size": 3}))
+        );
+        assert_eq!(
+            out.files,
+            vec![crate::storage::StoredFile { uri, size: 96 }]
+        );
+        assert_eq!(spy.seen.lock().unwrap().len(), 1, "the runner ran it");
+    }
+
+    /// **A host that returns a URI under this run's prefix that it never
+    /// wrote fails the task** (W9a spec §5); a URI outside the prefix -- the
+    /// staged input echoed back -- is not this run's to check. Mutation (c)
+    /// bypasses the check for plugins.
+    #[tokio::test]
+    async fn an_output_naming_an_uncollected_file_fails_the_task() {
+        let files = mem_files();
+        let forged = format!("{}never-written.ion", prefix());
+        for (vars, fails) in [
+            (serde_json::json!({"uri": forged.clone(), "size": 1}), true),
+            (serde_json::json!({"rows": [{"u": forged.clone()}]}), true),
+            (serde_json::json!({"uri": upstream("a.ion")}), false),
+        ] {
+            let spy = Spy::ok(ok(vars.clone()));
+            let t = stored_task(
+                &files,
+                QUERY,
+                spec(),
+                Ok(indexed(&upstream("a.ion"), 7)),
+                Ok(indexed(&upstream("b.ion"), 9)),
+            );
+            let out = stored(QUERY, spy, Some(files.clone()))
+                .run(&t)
+                .await
+                .expect("no worker error");
+            if fails {
+                assert_eq!(out.state, RunState::Failed, "{vars}");
+                assert!(message(&out).contains(&forged), "{:?}", out.message);
+                assert!(
+                    message(&out).contains("never collected"),
+                    "{:?}",
+                    out.message
+                );
+            } else {
+                assert_eq!(out.state, RunState::Success, "{vars}: {:?}", out.message);
+            }
+        }
+        // Without internal storage the run's prefix still comes from the
+        // render's scope, and the check still holds.
+        let spy = Spy::ok(ok(serde_json::json!({"uri": forged.clone()})));
+        let t = stored_task(
+            &files,
+            QUERY,
+            spec(),
+            Ok(indexed(&upstream("a.ion"), 7)),
+            Ok(indexed(&upstream("b.ion"), 9)),
+        );
+        let out = stored(QUERY, spy, None)
+            .run(&t)
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Failed, "{:?}", out.message);
+    }
+
+    /// **`base-uri-cases.json`, read by `plugin-host`'s
+    /// `EgretStorageTest.storage_context_for_task_is_the_base_uri_egret_computes`**:
+    /// egret's `uri::task_prefix` for five values per case, which Kestra's
+    /// `StorageContext.forTask(...).getContextStorageURI()` must equal. This
+    /// test WRITES the file when it differs and then fails, so a change to
+    /// `task_prefix` cannot leave the Java side checking a stale copy.
+    #[test]
+    fn the_base_uri_fixture_is_what_egret_computes() {
+        let cases = [
+            ("w9a.plugins", "pg-storage", 0x1u128, "copy_out", 0x2u128),
+            (
+                "company.team.sub",
+                "My_Flow.v2",
+                0x3,
+                "Task.With-Dots_1",
+                0x4,
+            ),
+            ("a", "UPPER", 0x5, "UPPER_task", 0x6),
+            ("w5b", "f", 0x7, "q", 0x8),
+            ("x", "a__b--c..d", 0x9, "t-_-.x", 0xa),
+            ("io.kestra.tests", "loop-iteration", 0xb, "store", 0xc),
+        ];
+        let rows: Vec<Value> = cases
+            .iter()
+            .map(|(ns, flow, exec, task, run)| {
+                let (exec, run) = (uuid::Uuid::from_u128(*exec), uuid::Uuid::from_u128(*run));
+                serde_json::json!({
+                    "namespace": ns,
+                    "flowId": flow,
+                    "executionId": exec.hyphenated().to_string(),
+                    "taskId": task,
+                    "taskRunId": run.hyphenated().to_string(),
+                    "baseUri": crate::storage::uri::task_prefix(ns, flow, exec, task, run)
+                        .expect("a prefix"),
+                })
+            })
+            .collect();
+        let want = serde_json::to_string_pretty(&rows).expect("json") + "\n";
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugin-host/src/test/resources/base-uri-cases.json");
+        let have = std::fs::read_to_string(&path).unwrap_or_default();
+        if have != want {
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+            std::fs::write(&path, &want).expect("write the fixture");
+            panic!(
+                "{} was stale and has been rewritten; run `mvn -f plugin-host/pom.xml test` and \
+                 commit it",
+                path.display()
+            );
         }
     }
 }

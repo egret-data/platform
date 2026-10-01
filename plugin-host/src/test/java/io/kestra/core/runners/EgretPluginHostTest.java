@@ -102,17 +102,25 @@ class EgretPluginHostTest {
 
     // --- the shim -----------------------------------------------------------------------
 
+    /**
+     * W9a Task 9 flips W5b's {@code storage_on_the_shim_is_exit_4_naming_w9}: storage() is Kestra's
+     * InternalStorage over EgretStorage. The replacement proving it runs is
+     * {@code EgretStorageTest.a_plugin_reads_and_writes_through_kestras_internal_storage}; with no
+     * storage context in task.json it says so rather than naming W9.
+     */
     @Test
-    void storage_on_the_shim_is_exit_4_naming_w9() {
+    void storage_on_the_shim_is_internal_storage_and_needs_the_context() {
         var shim = new ShimRunContext(tmp);
-        var e = assertThrows(EgretUnsupported.class, shim::storage);
-        assertTrue(e.getMessage().contains("W9"), e.getMessage());
+        var e = assertThrows(IllegalStateException.class, shim::storage);
+        assertTrue(e.getMessage().contains("context"), e.getMessage());
+        assertFalse(e.getMessage().contains("W9"), e.getMessage());
     }
 
     @Test
-    void every_w9_collaborator_throws_egret_unsupported() {
+    void every_unprovided_collaborator_throws_egret_unsupported() {
         var shim = new ShimRunContext(tmp);
-        assertThrows(EgretUnsupported.class, () -> shim.namespaceKv("ns"));
+        var kv = assertThrows(EgretUnsupported.class, () -> shim.namespaceKv("ns"));
+        assertTrue(kv.getMessage().contains("W9c"), kv.getMessage());
         assertThrows(EgretUnsupported.class, shim::logFileURI);
         assertThrows(EgretUnsupported.class, () -> shim.decrypt("x"));
         assertThrows(EgretUnsupported.class, () -> shim.encrypt("x"));
@@ -366,9 +374,14 @@ class EgretPluginHostTest {
         assertEquals(64, ((String) catalog.get("lockSha256")).length());
         var classes = (Map<String, Map<String, Object>>) catalog.get("classes");
         assertEquals(
+            // W9a Task 9: the four W5b excluded as needing storage are back.
             List.of(
+                "io.kestra.plugin.jdbc.mysql.Batch",
                 "io.kestra.plugin.jdbc.mysql.Queries",
                 "io.kestra.plugin.jdbc.mysql.Query",
+                "io.kestra.plugin.jdbc.postgresql.Batch",
+                "io.kestra.plugin.jdbc.postgresql.CopyIn",
+                "io.kestra.plugin.jdbc.postgresql.CopyOut",
                 "io.kestra.plugin.jdbc.postgresql.Queries",
                 "io.kestra.plugin.jdbc.postgresql.Query",
                 "io.kestra.plugin.jdbc.trino.Query"
