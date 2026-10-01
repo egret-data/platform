@@ -493,6 +493,62 @@ pub struct ExplainProfile {
     pub service_name: String,
     pub engine: WireEngineType,
     pub accesses: Vec<ExplainAccess>,
+    /// The tag set **this profile's** verdicts could have been decided by.
+    ///
+    /// # ⚠ This lives on the PROFILE, and the move is the fix for three defects at once
+    ///
+    /// **Whole-branch review, H1 / H2 / H3 — one defect in three costumes: a
+    /// value computed once per REQUEST, presented as though it were per-verdict.**
+    /// It was `ExplainResponse::tags`, one list for the whole response, and the
+    /// page rendered one heading under all profiles. Each costume was measured:
+    ///
+    /// * **H3, and reachable with no StarRocks, no second profile and no tag
+    ///   service at all.** The list was returned even when `profiles` is EMPTY,
+    ///   so a catalog nothing serves rendered "Nothing is enforcing" and "Tags
+    ///   that decide this request — pii" on one screen, with no verdicts in
+    ///   existence. `catalog_tag_assignments` has no catalog column, so a sibling
+    ///   catalog's assignment on the same warehouse resolves for this target too.
+    /// * **H1.** A catalog served by one profile with a tag service and one
+    ///   without made the page say, once, that these tags decide this request —
+    ///   false for the second, where nothing tag-related decided anything.
+    /// * **H2.** A StarRocks profile given a `tagService` would list tags as
+    ///   deciding while `enriched_tags` discards every one of them.
+    ///
+    /// Fixing the three sentences would have left a fourth instance free to
+    /// appear. **With the set on the profile there is nowhere to put a tag list
+    /// except beside a verdict**, so `no_profile_serves_the_catalog` cannot carry
+    /// one — the payload the H3 probe rendered is now unrepresentable.
+    ///
+    /// **The F4/F5 property is kept, not traded.** This is still ONE resolution,
+    /// `resolved_tags_for_target`'s, computed once before the loop and the same
+    /// object every verdict was evaluated against — not a second query. What
+    /// differs per profile is only the ONE narrowing this crate can apply
+    /// soundly: see below.
+    ///
+    /// # What the narrowing is, and why it cannot drift from the evaluator
+    ///
+    /// Empty when [`ExplainProfile::tag_policies_in_download`] is `0`. That is a
+    /// ONE-WAY implication, not a reimplementation: with no tag policy of any
+    /// kind in the download, the evaluator's `of_kind` is empty for every policy
+    /// type and no tag can reach any verdict, so an empty list here cannot
+    /// disagree with it. The evaluator's actual per-access-type rule stays the
+    /// evaluator's; reproducing it here would be the second-copy shape this
+    /// package has refused four times.
+    ///
+    /// ⚠ **A non-empty list does NOT claim the tags were evaluated** — H2's drop
+    /// happens inside `enriched_tags`, against this profile's own service-def,
+    /// and is not visible from here. The page's wording is held to that: the set
+    /// is what this profile's plugin resolves, and which verdict a tag decided is
+    /// on the verdict's own attribution.
+    pub tags: Vec<ExplainResolvedTag>,
+    /// How many tag policies **this profile's download** carries —
+    /// `tagPolicies.policies.len()`, or `0` when there is no tag block at all
+    /// because the profile has no bound tag service.
+    ///
+    /// Carried so the page can say WHY a profile's tag set is empty while the
+    /// column is tagged — the question H1's steward is left with otherwise — and
+    /// it is the predicate [`ExplainProfile::tags`] is narrowed by.
+    pub tag_policies_in_download: usize,
 }
 
 /// One tag egret resolved for the target, and **where the attachment that
@@ -534,39 +590,21 @@ pub struct ExplainResponse {
     pub outcome: ExplainOutcome,
     /// Empty exactly when `outcome` is `no_profile_serves_the_catalog`.
     pub profiles: Vec<ExplainProfile>,
-    /// **The tag set the evaluator was handed** — the same
-    /// [`AccessRequest::resolved_tags`] every verdict below was computed from,
-    /// read back out of it.
-    ///
-    /// # ⚠ This field used to be a different query, and the browser measured the
-    /// difference as a defect
-    ///
-    /// **Task 8's live gate, F4 and F5.** It was
-    /// `tag_keys_for_resource_via` — `tags.key`, matched on
-    /// `(schema, table, column)` by exact equality with no roll-up — while the
-    /// evaluator's set came from [`resolved_tags_for_target`], which rolls the
-    /// table level up and returns `tags.name`. Two queries, two vocabularies, one
-    /// heading. Measured on a real Trino: a target denied **by a tag policy,
-    /// through a tag attached to the table above it**, rendered the deciding
-    /// policy's name directly above "Tags egret has recorded on this resource —
-    /// None."; and a target the page called `Allowed` with "None." was one no
-    /// query could read, because the table-level tag masked every column. The
-    /// steward's question is *which tag, attached where*, and the handler already
-    /// held the answer.
-    ///
-    /// So the field is now **derived from the resolution itself**, which is what
-    /// removes the drift class rather than narrowing it: "what the page shows" and
-    /// "what was evaluated" are the same object, so they cannot disagree. The
-    /// exact-match query is no longer called from here.
-    ///
-    /// Empty means one of three things, and the response says which: the target
-    /// named no schema-and-table (nothing can be attached), the resolution
-    /// returned the empty set (an ANSWER — nothing is attached), or
-    /// [`ExplainResponse::tag_resolution_declined`] is `Some`, in which case
-    /// egret did not resolve at all and this list is empty because there is
-    /// nothing to report, not because nothing is attached. A client that renders
-    /// "none" for the third case is making the mistake F4 records.
-    pub tags: Vec<ExplainResolvedTag>,
+    // ⚠ **There is no response-level tag set, and its absence is a FIX**
+    // (whole-branch review H1/H2/H3). `tags` used to live here, computed once per
+    // request, and the page rendered one heading under every profile. All three
+    // review Importants were that one fact presented as though it were
+    // per-verdict — including a catalog nothing serves rendering "Nothing is
+    // enforcing" and a tag list on the same screen, with no verdicts in
+    // existence. The set now lives on `ExplainProfile::tags`, where a verdict is,
+    // so there is nowhere to put a tag list when nothing was evaluated. The whole
+    // argument is on that field.
+    //
+    // `tag_resolution_declined` STAYS here, and the asymmetry is deliberate: a
+    // decline is a property of the TARGET and of egret's storage (fix round 3's
+    // ruling), true exactly once per request, whereas the set that could decide
+    // is per profile. The page renders the decline only inside a profile block,
+    // so a response with no profiles shows nothing tag-related either way.
     /// Why `explain` declined to resolve this target's tags — absent when it
     /// resolved them.
     ///
@@ -1596,16 +1634,20 @@ async fn explain(
     // also removes any way for two profiles to be answered from two tag sets.
     let (resolved_tags, tag_resolution_declined) =
         explain_tag_inputs(resolved_tags_for_target(&mut *conn, &body.target).await?);
-    // `ExplainResponse::tags`, derived from the set above and from nothing else
-    // — Task 8's F4/F5. It was a second query (`tag_keys_for_resource_via`,
-    // `tags.key`, exact-match) and the browser measured the two disagreeing on a
-    // real engine: a tag-driven deny rendered beside "None". Reading the
-    // evaluator's own input back is what makes "what the page shows" and "what
-    // was evaluated" one object instead of two that must agree.
+    // The tag set as the steward reads it, derived from the resolution above and
+    // from nothing else — Task 8's F4/F5. It was a second query
+    // (`tag_keys_for_resource_via`, `tags.key`, exact-match) and the browser
+    // measured the two disagreeing on a real engine: a tag-driven deny rendered
+    // beside "None". Reading the evaluator's own input back is what makes "what
+    // the page shows" and "what was evaluated" one object instead of two that
+    // must agree.
     //
-    // `None` ⇒ empty, and the response's `tag_resolution_declined` is what says
-    // why; see that field's doc for the three ways this can be empty.
-    let tags = resolved_tags
+    // ⚠ Computed once because the RESOLUTION is per request, and then handed to
+    // each profile below rather than to the response — review H1/H2/H3. A list on
+    // the response is a claim about verdicts that may not exist (H3) or that could
+    // not have used it (H1). `None` ⇒ empty, and `tag_resolution_declined` is what
+    // says why.
+    let resolved_for_display = resolved_tags
         .as_ref()
         .map(resolved_tags_for_display)
         .unwrap_or_default();
@@ -1728,11 +1770,20 @@ async fn explain(
             });
         }
 
+        // Read off the artifact THIS profile's plugin downloads — the same
+        // `artifact_for` the verdicts above were computed from, so the count and
+        // the answers cannot be about different downloads. A profile with no
+        // bound tag service has no tag block and counts `0`, and so does one
+        // whose block is present but empty (`bind_trino_profile` creates exactly
+        // that): in both cases no tag policy of any kind can decide here.
+        let tag_policies_in_download = artifact.tag_policies.len();
         profiles.push(ExplainProfile {
             service_id,
             service_name: svc.name,
             engine: WireEngineType::from(ranger_engine(engine)),
             accesses,
+            tags: tags_for_profile(&resolved_for_display, tag_policies_in_download),
+            tag_policies_in_download,
         });
     }
 
@@ -1744,7 +1795,6 @@ async fn explain(
     Ok(Json(ExplainResponse {
         outcome,
         profiles,
-        tags,
         tag_resolution_declined,
     }))
 }
@@ -2457,6 +2507,38 @@ fn resolved_tags_for_display(tags: &UnenrichedTags) -> Vec<ExplainResolvedTag> {
         .collect()
 }
 
+/// The resolved set as it reaches ONE profile — the only narrowing this crate can
+/// apply to it without reimplementing the evaluator.
+///
+/// # ⚠ Three lines in a function because the mutation survived, for the fourth time
+///
+/// This was inline in the handler, and removing the narrowing entirely — handing
+/// every profile the full set — **passed the whole suite, 27/0.** The handler body
+/// is reachable only from DB-gated tests, which do not run on this branch, so the
+/// fix for review H1 could have been undone by deleting four lines. That is the
+/// same finding Task 6 made about `attribution_for`, Task 7's fix round 3 made
+/// about `explain_tag_inputs`, and the one that moved `stored_value_problem` out of
+/// SQL: **where a mutation cannot reach, the code is in the wrong shape.**
+///
+/// # Why zero is the whole predicate
+///
+/// With no tag policy of ANY kind in this profile's download, the evaluator's
+/// `of_kind` is empty for every policy type, so no tag can reach any verdict here
+/// and the empty list cannot disagree with it. It is a ONE-WAY implication, not a
+/// reimplementation: anything finer — per access type, or the `enriched_tags` drop
+/// review H2 names — is the evaluator's own rule and stays there, because a second
+/// copy of it is the shape this package has refused four times.
+fn tags_for_profile(
+    resolved: &[ExplainResolvedTag],
+    tag_policies_in_download: usize,
+) -> Vec<ExplainResolvedTag> {
+    if tag_policies_in_download == 0 {
+        Vec::new()
+    } else {
+        resolved.to_vec()
+    }
+}
+
 /// The two reads [`resolved_tags_for_target`] needs, behind a trait so that the
 /// GATE, the mapping and the wiring between them are testable with no database.
 ///
@@ -3164,6 +3246,39 @@ mod tag_resolution_tests {
             ],
             "the column-level attachment reports true, the table-level one false, \
              and the resolution's ORDER is preserved rather than re-sorted"
+        );
+    }
+
+    /// **Whole-branch review H1, and the seam exists because the mutation
+    /// survived.** Removing the narrowing — handing every profile the full
+    /// resolved set — passed the whole suite 27/0 while it was inline in the
+    /// handler. Both arms are asserted here with no database, which is what makes
+    /// the fix mutable; `0` is the load-bearing one, because that is the profile
+    /// the page must say "none, and here is why" about rather than listing tags
+    /// nothing there could consult.
+    #[test]
+    fn a_profile_with_no_tag_policies_is_handed_no_tags() {
+        let resolved = vec![
+            ExplainResolvedTag {
+                name: "pii".to_string(),
+                attached_at_column: true,
+            },
+            ExplainResolvedTag {
+                name: "ancdeny".to_string(),
+                attached_at_column: false,
+            },
+        ];
+        assert!(
+            super::tags_for_profile(&resolved, 0).is_empty(),
+            "a download with no tag policy of any kind cannot have consulted a tag, \
+             so the profile is handed none — the H1 claim that was false"
+        );
+        assert_eq!(
+            super::tags_for_profile(&resolved, 1),
+            resolved,
+            "and with a tag policy present the profile gets the resolution verbatim, \
+             in its order, neither re-sorted nor filtered further — anything finer is \
+             the evaluator's rule, not this one's"
         );
     }
 

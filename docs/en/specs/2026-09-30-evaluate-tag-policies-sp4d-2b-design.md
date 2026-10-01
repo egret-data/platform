@@ -195,9 +195,26 @@ document and one client regeneration.
 
 - **Schema- and catalog-level tag assignment.** Its own package: migration,
   writer, UI. The MatchType rule for it is measured and implemented here.
-- **Tag evaluation on StarRocks.** Its service-def declares no enricher, so no
-  tag reaches the engine — and the gate stays on the def, never on the engine
-  type, because that is what makes it correct the day the def changes.
+- **Tag evaluation on StarRocks.** ⚠ **CORRECTED by this branch's own
+  measurement (whole-branch review).** This non-goal was justified with "its
+  service-def declares no enricher, so no tag reaches the engine" — and that is
+  the **single-def reasoning this branch proved fail-open**. A download carries
+  **two** defs (the resource service's and the tag block's),
+  `RangerPolicyEngineImpl.<init>` builds context enrichers from both and
+  **unions the two lists**, and Apache's stock tag def declares
+  `RangerTagEnricher`. So a StarRocks profile given a `tagService` DOES get an
+  enricher and tags DO reach the plugin; what stops them is one level further
+  on — `from_assignments` writes the literal keys
+  `catalog`/`schema`/`table`/`column` for every engine, the StarRocks def has no
+  `schema` resource (its middle level is `database`), and
+  `RangerTagEnricher.processServiceTags` DROPS a service resource whose key set no
+  hierarchy of any policy type contains. Measured on the real jar by
+  `EgretTagServiceResourceValidationTest`, and the same mechanism the plan's
+  Item A describes.
+  The non-goal stands; only its reason changes, and the reason matters because
+  the old one would have licensed skipping the tag phase for a StarRocks profile
+  — a fail-open. The gate stays on what the DOWNLOAD carries (both defs, and the
+  attachment's own key set), never on the engine type and never on one def.
 - Changing what the compiler emits into the tag service.
 - The `explain` mask and row-filter surface. The wire mirrors stay unregistered
   until a field returns one.

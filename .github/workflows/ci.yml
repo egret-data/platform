@@ -137,6 +137,21 @@ jobs:
       # daemon — zero of the 345 corpus flows declare a script or container task
       # type — so it FAILS without one instead of self-skipping. This runner has
       # no daemon with those images pulled, so the green says so in the command.
+      # ⚠ **This step's green does NOT cover the two Ranger gates** — the
+      # `ranger-differential` job below does. They are in this run (they are
+      # workspace tests) and they SELF-SKIP without `EGRET_TEST_RANGER_E2E=1`,
+      # reporting `1 passed … 0.00s` each, so their contribution to this green is
+      # zero. Whole-branch review, item 0b: a gate that is absent is visibly
+      # absent, and a gate that is present and vacuously green is worse, because
+      # its presence is the argument against adding another.
+      #
+      # The RIGHT fix is the one the two steps above already use —
+      # `EGRET_ALLOW_ENGINE_SKIP` / `EGRET_ALLOW_DOCKER_SKIP`: fail without the
+      # instrument unless an explicit opt-out is typed, so the skip is visible in
+      # the command that produced the green. Those two test files were outside the
+      # scope of the change that added this comment; inverting them to
+      # `EGRET_ALLOW_RANGER_E2E_SKIP` is open item 0b and would let this step
+      # carry the flag like the other two axes.
       - name: Test
         run: EGRET_ALLOW_ENGINE_SKIP=1 EGRET_ALLOW_DOCKER_SKIP=1 cargo test --workspace --no-fail-fast
       # Prints on failure too, so a future disk exhaustion is a number in the log rather than a
@@ -144,6 +159,43 @@ jobs:
       - name: Disk after build
         if: always()
         run: df -h / && du -sh target 2>/dev/null || true
+
+  # The two gates whose other side is Apache Ranger itself rather than this
+  # repository's reading of the jars. Their own job because they need a JDK and
+  # Maven (preinstalled on the GitHub runner image) and because a failure here
+  # must be attributable to them rather than lost in a workspace run.
+  #
+  # ⚠ **Item 0b, measured 2026-10-01:** `cargo test --workspace` in the `rust` job
+  # already RUNS both of these and they self-skip to `1 passed … 0.00s` without
+  # `EGRET_TEST_RANGER_E2E=1`. So that green covered nothing, and this job is what
+  # makes the instrument that found SEVEN defects in reviewed code run on an
+  # automated path.
+  #
+  # `continue-on-error` is deliberately NOT set: a gate allowed to fail is the
+  # vacuous green again, one level up.
+  ranger-differential:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # `mvn` resolves `org.apache.ranger:ranger-plugins-common` from Maven
+      # Central for each version the harness asks for (2.5.0 and 2.8.0 — the two
+      # versions the live Trino and StarRocks plugins run). Cached by the pom so
+      # the second run does not re-download.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - uses: Swatinem/rust-cache@v2
+      # The differential corpus (~4000 cases at two plugin versions) plus the
+      # enforcement gate. Both assert the per-class surefire summary BY NAME, so a
+      # `mvn` that exits 0 having run nothing fails them — which is why no `-q`
+      # appears anywhere in this job.
+      - name: Ranger engine gate
+        run: EGRET_TEST_RANGER_E2E=1 cargo test -p egret-policy --test ranger_engine_gate --no-fail-fast
+      - name: Ranger differential corpus
+        run: EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture
 
   frontend:
     runs-on: ubuntu-latest

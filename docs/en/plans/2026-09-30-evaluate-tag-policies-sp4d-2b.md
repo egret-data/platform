@@ -51,7 +51,7 @@ gives the ranking instead. Read it in this order:
 | 2 | **Item C** (in the scope-finding section above) | a supported API call makes a whole table unreadable, `count(*)` included. One assignment away from live. |
 | 3 | **Item 0** | model or refuse `accessTypeResults` — two defects trace to it, and nothing executable in the gate can report the mechanism. |
 | 4 | **Item B** / **Item B2** | nothing constrains what `catalog_tag_assignments` stores, nor what `explain`'s target strings contain; a gate enumerating three classes compensates. One `CHECK` retires it. |
-| 5 | **Item 0b** | the differential gate — the instrument that found **seven** defects — runs on no automated path. |
+| 5 | **Item 0b** | the differential gate — the instrument that found **seven** defects — **is in CI and vacuously green**: `cargo test --workspace` runs it, `EGRET_TEST_RANGER_E2E` is set nowhere, so it reports `1 passed … 0.00s`. Wired by Task 8's fix round (unverified on a runner); the fail-by-default inversion is still open. |
 | 6 | **Item 1** | is the composed ACCESS path finished? On the evidence, no. |
 | 7 | **Item 2** | the `required_roles` 3→2 residual; one `SELECT EXISTS`. |
 
@@ -78,11 +78,34 @@ state — `bind_trino_profile` is the only writer of `tagService` and
 StarRocks clearance path (SP4c expands tag clearances per COLUMN into resource
 policies instead, which is why nothing has noticed).
 
-`explain` reports it correctly rather than hiding it: `attachment_for` writes the
-wire's literal keys, `enriched_tags` drops them, and the profile answers with its
-tag policies reported as reaching nothing. Fixing the WRITER is a separate change
-(per-engine level names in `from_assignments`, plus a decision about already-served
-tag versions).
+⚠ **CORRECTED (whole-branch review H2). The sentence that stood here — "`explain`
+reports it correctly rather than hiding it" — was FALSE of the tag list, and it was
+mine.** What is true: the VERDICT is correct, because `enriched_tags` drops the
+attachments inside the evaluator before any tag policy runs, so a StarRocks profile
+with a `tagService` answers with its tag policies reaching nothing. What was wrong is
+the list the page shows beside it: `ExplainResponse::tags` came from the **unenriched**
+resolution, computed once per request before any profile's service-def was consulted,
+so the page would have listed those tags as able to decide while every one of them is
+discarded.
+
+**Why the fix is this wording and not per-profile data.** The review offered both. The
+enriched set is not available outside `egret-ranger-eval` — `EnrichedTags` and
+`enriched_tags` are crate-private, deliberately, so that "the phase reads the
+un-enriched set" is unrepresentable — so reporting the drop per profile means either
+(a) the evaluator reports the set it actually used, which is a change in that crate
+and is the same feature as reporting mask and row-filter verdicts (open item 0), or
+(b) `egret-perm-compile` reproduces `processServiceTags`' key-set rule, which is the
+second-copy shape this package has refused four times and which `attachment_for`'s own
+doc refuses by name.
+
+What Task 8's fix round DID do, and it bounds the damage: the tag list moved onto
+`ExplainProfile`, and its wording claims only that these are the tags this profile's
+plugin resolves — **never that they were evaluated** — with which verdict a tag decided
+left to the verdict's own attribution. So the page no longer asserts what this item is
+about. Fixing the WRITER is still a separate change (per-engine level names in
+`from_assignments`, plus a decision about already-served tag versions), and until then
+the honest statement is: the verdict is right, the list is pre-enrichment, and the page
+says so.
 
 
 **Three things this duplicate section carried that are worth keeping.** `download_tags`
@@ -164,6 +187,30 @@ what make the `('', '')` ASSIGNMENT writable — `assign_resource_tag` validates
 nothing either — and one `CHECK` on `catalog_tag_assignments` would retire both
 this item and Task 7's gate. Unrepresentable beats unforgettable.
 
+**WIDENED by the whole-branch review: the `catalog_id` is not constrained either, and
+that is one level up from the strings.** `explain` requires `policy:read` and validates
+exactly ONE thing about `target` — the level skip. It does **not** check that the
+catalog exists, that it belongs to the caller's workspace, or that any profile serves
+it; `no_profile_serves_the_catalog` is an ANSWER, not a refusal, and a uuid naming
+nothing reaches it. For a read-only surface behind a platform permission that is
+defensible, and it is listed because nobody decided it: the surface answers about any
+catalog id a `policy:read` holder can type, including one in another workspace, and
+that is a decision this programme should make on purpose rather than inherit. Note the
+interaction with H3: `catalog_tag_assignments` has no catalog column, so a *sibling*
+catalog on the same warehouse resolves the same tags — which is how a catalog nothing
+serves came to render a tag list at all.
+
+**And one coincidence to retire while here.** The review established that the
+resolver/writer divergence recorded elsewhere is **not** reachable as a wrong verdict
+today — but only because `catalogs_for_service_via` happens to apply the same join with
+the same predicate the download writer (`tag_assignments_for_service`) uses, so the two
+catalog sets coincide. **Nothing compares them**: no test, no `CHECK`, no shared helper,
+and a comment in the file already notes the two binds differ in intent (the writer
+resolves the owning trino profile through `COALESCE(tp.id, s.id)`; the reader binds the
+service directly). One shared helper, or one set-equality test over a fixture with a tag
+service and two catalogs, retires it. Recorded here rather than left as a coincidence,
+because a coincidence that nothing asserts is a defect waiting for an unrelated edit.
+
 ### Item 0 (top): model or refuse `accessTypeResults`, before any further corpus work
 
 `evaluatePolicyItems`' **`accessTypeResults` map lives in the request context and
@@ -187,12 +234,20 @@ implementer and the reviewer independently concluded that no further corpus
 extension should precede this. Tasks 6-8 do not extend the corpus, so they are not
 blocked; anything that does, is.
 
-### Item 0b: the differential gate never runs automatically
+### Item 0b: the differential gate IS in CI, green, and measures nothing
 
-Measured 2026-10-01: `EGRET_TEST_RANGER_E2E` appears **nowhere** in CI config or the
-Justfile. A plain `cargo test -p egret-ranger-eval` reports the gate as
-`ok … finished in 0.00s` and exits 0 — it prints a skip line to stderr, but the test
-result is a pass. With the flag set it takes **136 s** and really runs.
+⚠ **The earlier wording of this item — "runs on no automated path" — was wrong, and
+the truth is worse.** `.github/workflows/ci.yml` runs `cargo test --workspace
+--no-fail-fast` in the `rust` job, so the gate **is** on an automated path and **is**
+reported green on every push. What is absent is `EGRET_TEST_RANGER_E2E`, which appears
+in no workflow and no Justfile recipe — so the gate self-skips, prints a line to
+stderr that nothing reads, and contributes `1 passed` to a green suite. With the flag
+set it takes **136 s** and really runs.
+
+**A gate that is absent is visibly absent; a gate that is present and vacuously green
+is worse**, because its presence is the argument against adding another. Two tests have
+this shape: `crates/egret-ranger-eval/tests/differential.rs` (the one that found seven
+defects) and `crates/egret-policy/tests/ranger_engine_gate.rs`.
 
 This is the instrument that found **seven** defects across two rounds, in code that
 127 unit tests and three review rounds had already passed. It is also the only test
@@ -201,9 +256,20 @@ the jars. Leaving it off every automated path means the next regression is found
 whoever next remembers the variable.
 
 It legitimately needs a JVM, Maven and the jars, so it cannot be a plain unit test.
-Wire it into a job that has those — or, at minimum, make a plain run print something
-a human will not read as a pass. A gate that is not on the list is a gate nobody
-runs, and this one has the best hit rate in the package.
+**Task 8's fix round wired it: `.github/workflows/ci.yml` gains a `ranger-differential`
+job** that sets `EGRET_TEST_RANGER_E2E=1` and runs both gates on a runner with Maven
+and a JDK, with the `~/.m2` cache — and the `rust` job's Test step now says in the log
+that its green does NOT cover them. ⚠ **Unverified on a real runner**: no GitHub
+Actions run can be executed from this worktree, so what is proven is the COMMAND (run
+locally, green) and not the job. First CI run is the gate on the gate.
+
+The better fix, and it is NOT done because it is outside the fix round's file scope:
+**invert the default the way `EGRET_ALLOW_ENGINE_SKIP` and `EGRET_ALLOW_DOCKER_SKIP`
+already do in this repo** — fail without the instrument unless an explicit
+`EGRET_ALLOW_RANGER_E2E_SKIP=1` is passed, so the skip is visible in the command line
+that produced the green. That is two lines in each of the two test files and it is the
+pattern this repository already settled on; see the comment above `ci.yml`'s Test step,
+which argues for exactly it.
 
 ### Item 2: the 3→2 residual on `required_roles` — one `SELECT EXISTS`
 

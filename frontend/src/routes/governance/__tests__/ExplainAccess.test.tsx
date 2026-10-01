@@ -49,6 +49,8 @@ const TWO_PROFILES: ExplainResponse = {
       service_id: 11,
       service_name: "egret-trino-prod",
       engine: "trino",
+      tags: [{ name: "pii", attached_at_column: true }],
+      tag_policies_in_download: 1,
       accesses: [
         {
           access_type: "select",
@@ -65,6 +67,8 @@ const TWO_PROFILES: ExplainResponse = {
       service_id: 12,
       service_name: "egret-starrocks-prod",
       engine: "starrocks",
+      tags: [{ name: "pii", attached_at_column: true }],
+      tag_policies_in_download: 1,
       accesses: [
         {
           access_type: "insert",
@@ -90,7 +94,6 @@ const TWO_PROFILES: ExplainResponse = {
       ],
     },
   ],
-  tags: [{ name: "pii", attached_at_column: true }],
 };
 
 let mutateAsync: ReturnType<typeof vi.fn>;
@@ -192,7 +195,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
   test("a catalog no profile serves is its own state, not a denial", async () => {
     mutateAsync.mockResolvedValueOnce({
       status: 200,
-      data: { outcome: "no_profile_serves_the_catalog", profiles: [], tags: [] },
+      data: { outcome: "no_profile_serves_the_catalog", profiles: [] },
     });
     const user = userEvent.setup();
     renderPage();
@@ -225,6 +228,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -249,7 +254,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -301,6 +305,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -310,7 +316,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -342,6 +347,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -355,7 +362,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -390,6 +396,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [{ name: "pii", attached_at_column: true }],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -410,7 +418,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [{ name: "pii", attached_at_column: true }],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -479,6 +486,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 12,
             service_name: "egret-starrocks-prod",
             engine: "starrocks",
+            tags: [],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -494,7 +503,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -541,6 +549,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -562,7 +572,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -596,6 +605,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -616,7 +627,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -656,6 +666,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -676,7 +688,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -718,6 +729,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -741,7 +754,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -831,6 +843,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
               service_id: 11,
               service_name: "egret-trino-prod",
               engine: "trino",
+              tags: [],
+              tag_policies_in_download: 1,
               accesses: [
                 {
                   access_type: "select",
@@ -840,7 +854,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
               ],
             },
           ],
-          tags: [],
           tag_resolution_declined: row.declined,
         } satisfies ExplainResponse,
       });
@@ -902,6 +915,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -920,7 +935,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -970,6 +984,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -987,7 +1003,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -1000,6 +1015,85 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     expect(causes[0]).not.toHaveTextContent(/1 tag policies/);
   });
 
+  /**
+   * **The composite refusal the concurrent Critical added, split out of the
+   * tag-priority sentence.** It first rode `tag_priority_arbitration_not_modelled`
+   * as a documented alias, which made that sentence's opening noun — "Several TAG
+   * policies" — false for this shape, where one of the two is a RESOURCE policy.
+   *
+   * `tsc` proves the switch is exhaustive and says NOTHING about what a branch
+   * renders, so this is the assertion that the new sentence names which policy is
+   * which, carries both priorities (the thing a steward changes), and does not imply
+   * the state is common — measured at 0 of 1148 composed-random cases and 10 of 4000
+   * overall.
+   */
+  test("the composite priority refusal names which policy is the tag one", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            tags: [{ name: "pii", attached_at_column: true }],
+            tag_policies_in_download: 1,
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "undecidable",
+                  why: [
+                    {
+                      kind: "access_priority_composite_not_modelled",
+                      tag_policy_id: 8799,
+                      tag_policy_name: "perm-rule-pii-mask",
+                      tag_priority: 0,
+                      resource_policy_id: 320,
+                      resource_policy_name: "perm-grant-analyst",
+                      resource_priority: 7,
+                    },
+                  ],
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const sentence = within(result).getByTestId("undecidable-cause-sentence");
+    // Which is which — the half the positional lists could not say.
+    expect(sentence).toHaveTextContent(/the tag policy “perm-rule-pii-mask”/);
+    expect(sentence).toHaveTextContent(/the resource policy “perm-grant-analyst”/);
+    // Both priorities, because equalising them is the remedy.
+    expect(sentence).toHaveTextContent(/at priority 0/);
+    expect(sentence).toHaveTextContent(/higher priority 7/);
+    expect(sentence).toHaveTextContent(/same priority makes this decidable/i);
+    // And it must not read as a widespread misconfiguration.
+    expect(sentence).toHaveTextContent(/rarely/i);
+    // ⚠ It must NOT borrow the tag-only sentence, which is the defect it was split
+    // out of: that one calls both policies tag policies.
+    expect(sentence).not.toHaveTextContent(/several tag policies/i);
+  });
+
+  /**
+   * ⚠ **L3 (whole-branch review): two of the five causes below are states
+   * `explain` CANNOT produce.** `tag_sub_policy_is_deny_capable` and
+   * `tag_sub_result_split_by_resource_policy` are raised only from the evaluator's
+   * `decide_sub` / `evaluate_sub` — the mask and row-filter entry points — and
+   * `explain` calls neither, so this fixture asserts a sentence no live response
+   * can carry. It is kept, not deleted: `explain_wire.rs` mirrors every variant by
+   * build break, and these are the sentences the page will need the day `explain`
+   * reports a mask verdict. Until then they are coverage of the MIRROR, not of a
+   * reachable state — the concrete form of this branch's scope finding.
+   */
   /**
    * **SP4d-2b Task 3, fix round 1 (review Minor 4).** Task 2 and Task 3 added
    * four `WireUndecidableCause` variants and a four-armed
@@ -1023,6 +1117,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [{ name: "pii", attached_at_column: true }],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -1078,7 +1174,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [{ name: "pii", attached_at_column: true }],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -1163,6 +1258,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [{ name: "pii", attached_at_column: true }],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -1216,7 +1313,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [{ name: "pii", attached_at_column: true }],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -1251,6 +1347,11 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     expect(causes[3]).toHaveTextContent("clearance-high");
     expect(causes[3]).toHaveTextContent(/priority 0/);
     expect(causes[3]).toHaveTextContent(/priority 3/);
+    // ⚠ "tag policies" is correct HERE, and the sibling test below is why: the
+    // composite shape — where one of the two is a RESOURCE policy — has its own
+    // cause and its own sentence, so this one is raised only where both are tag
+    // policies. It briefly said "Several policies" while the two shared a wire tag.
+    expect(causes[3]).toHaveTextContent(/several tag policies at different priorities/i);
 
     // ⚠ FIX ROUND 1, IMPORTANT 4. The version split renders DIFFERENTLY depending
     // on whether the plugin version is known, and the two sentences give different
@@ -1293,6 +1394,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [{ name: "pii", attached_at_column: true }],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -1336,7 +1439,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [{ name: "pii", attached_at_column: true }],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -1413,6 +1515,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
               service_id: 11,
               service_name: "egret-trino-prod",
               engine: "trino",
+              tags: [],
+              tag_policies_in_download: 1,
               accesses: [
                 {
                   access_type: "select",
@@ -1422,7 +1526,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
               ],
             },
           ],
-          tags: [],
           tag_resolution_declined: row.declined,
         } satisfies ExplainResponse,
       });
@@ -1459,6 +1562,11 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [
+          { name: "ancdeny", attached_at_column: false },
+          { name: "pii", attached_at_column: true },
+        ],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -1473,10 +1581,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [
-          { name: "ancdeny", attached_at_column: false },
-          { name: "pii", attached_at_column: true },
-        ],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -1484,11 +1588,17 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     await submit(user);
 
     const result = await screen.findByTestId("explain-result");
-    // The tag that decided it is NAMED, which is what "None." used to withhold.
-    expect(result).toHaveTextContent(/ancdeny/);
-    expect(result).toHaveTextContent(/on the table/i);
-    expect(result).toHaveTextContent(/pii/);
-    expect(result).toHaveTextContent(/on this column/i);
+    // ⚠ **Scoped to the badge, review M1.** These used to be asserted against the
+    // whole `explain-result`, where the limits paragraph already contains "a tag
+    // marked on the table reaches this column" — so BOTH regexes matched whatever
+    // the ternary did, and swapping `attached_at_column ? … : …` was 31/31 green.
+    // Inverted, that label sends a steward to edit the wrong
+    // `catalog_tag_assignments` row, which is the one thing the field exists to
+    // prevent. Per badge, the pairing is pinned.
+    const tags = within(result).getAllByTestId("profile-tag");
+    expect(tags).toHaveLength(2);
+    expect(tags[0]).toHaveTextContent(/^ancdeny\s*on the table$/);
+    expect(tags[1]).toHaveTextContent(/^pii\s*on this column$/);
     // And the old heading's claim is gone: this list IS what the verdict used.
     expect(result).not.toHaveTextContent(/decide nothing here/i);
     expect(result).not.toHaveTextContent(/not the set the engine would resolve/i);
@@ -1519,7 +1629,11 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
 
     // The label: the REQUEST, not "this resource" and not anything that reads as
     // every tag on the target.
-    expect(result).toHaveTextContent(/Tags that decide this request/i);
+    // ⚠ Narrowed again by review H1/H2/H3: the heading is per PROFILE now, and
+    // "this request" was still one level wider than the data — a request can be
+    // answered by two profiles of which only one consults tags.
+    expect(result).toHaveTextContent(/Tags that could decide here/i);
+    expect(result).not.toHaveTextContent(/Tags that decide this request/i);
     expect(result).not.toHaveTextContent(/Tags the engine resolves for this resource/i);
     expect(result).not.toHaveTextContent(/Tags egret has recorded on this resource/i);
 
@@ -1548,6 +1662,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             service_id: 11,
             service_name: "egret-trino-prod",
             engine: "trino",
+            tags: [],
+            tag_policies_in_download: 1,
             accesses: [
               {
                 access_type: "select",
@@ -1557,7 +1673,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: [],
         tag_resolution_declined: {
           kind: "stored_wildcard",
           schema: "sales",
@@ -1573,7 +1688,16 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     const result = await screen.findByTestId("explain-result");
     expect(result).toHaveTextContent(/not resolved/i);
     expect(result).toHaveTextContent(/not the same as there being\s+none/i);
-    expect(result).not.toHaveTextContent(/^None\.$/m);
+    // ⚠ **Review M2: the guard this replaces could not fail.**
+    // `not.toHaveTextContent(/^None\.$/m)` never matched, because jest-dom
+    // normalises whitespace across the whole element — rendering "None." BESIDE
+    // the decline note was 31/31 green, so the test's stated subject was
+    // unguarded. The three branches now have their own test ids, and the
+    // assertion is the ABSENCE OF THE ELEMENT, which a mutation cannot satisfy by
+    // adding text somewhere else.
+    expect(within(result).queryByTestId("profile-tags-none")).not.toBeInTheDocument();
+    expect(within(result).queryByTestId("profile-tag")).not.toBeInTheDocument();
+    expect(within(result).getByTestId("profile-tags-declined")).toBeInTheDocument();
   });
 
   /**
@@ -1600,17 +1724,118 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     expect(limits).toHaveTextContent(/can still return masked values/i);
   });
 
-  test("tags render honestly when the target carries none", async () => {
+  /**
+   * **⚠ Whole-branch review H3, and this test used to be the correlated oracle.**
+   * It asserted `"None."` for `no_profile_serves_the_catalog` with an EMPTY tag
+   * list — the one case where the defect is invisible. The defect was that the
+   * response carried a tag set at all when nothing was evaluated: with a sibling
+   * catalog's assignment on the same warehouse (`catalog_tag_assignments` has no
+   * catalog column), the resolution returns `pii`, and the page rendered "Nothing
+   * is enforcing" and "Tags that decide this request — pii" on one screen, with no
+   * verdicts in existence. A reviewer's probe asserting exactly that payload
+   * passed 32/32.
+   *
+   * It is fixed at the LEVEL rather than in the renderer: the tag set lives on
+   * `ExplainProfile`, so a response with no profiles has nowhere to carry one and
+   * the probe's payload no longer type-checks. This test therefore pins the thing
+   * that was wrong — that nothing tag-related renders for this outcome — rather
+   * than the empty case that could never have caught it.
+   */
+  test("a catalog nothing serves renders no tag block at all", async () => {
     mutateAsync.mockResolvedValueOnce({
       status: 200,
-      data: { outcome: "no_profile_serves_the_catalog", profiles: [], tags: [] },
+      data: { outcome: "no_profile_serves_the_catalog", profiles: [] },
     });
     const user = userEvent.setup();
     renderPage();
     await submit(user);
 
     const result = await screen.findByTestId("explain-result");
-    expect(result).toHaveTextContent("None.");
+    expect(within(result).getByTestId("no-profile-state")).toBeInTheDocument();
+    // No heading, no badge, no "none" — there are no verdicts for a tag to decide,
+    // so there is nothing honest to say about tags here.
+    expect(result).not.toHaveTextContent(/tags that could decide/i);
+    expect(within(result).queryByTestId("profile-tag")).not.toBeInTheDocument();
+    expect(within(result).queryByTestId("profile-tags-none")).not.toBeInTheDocument();
+    expect(within(result).queryByTestId("profile-tags-declined")).not.toBeInTheDocument();
+    expect(within(result).queryByTestId("profile-tags-no-policies")).not.toBeInTheDocument();
+    // ⚠ And neither do the LIMITS paragraphs that talk about per-profile tag lists
+    // — found in the browser after the structural fix, the same class one notch
+    // further down: prose about "each profile's tag list" and "those sets" under
+    // "Nothing is enforcing", where there are no profiles and no lists. The limits
+    // that still hold stay (they are about the page, not about the answer).
+    const limits = within(result).getByTestId("honest-limits");
+    expect(limits).not.toHaveTextContent(/each profile’s tag list/i);
+    expect(limits).not.toHaveTextContent(/those sets are for the resource/i);
+    expect(limits).toHaveTextContent(/answers about ACCESS only/i);
+  });
+
+  /**
+   * **Whole-branch review H1.** A catalog served by two profiles — one whose
+   * download carries tag policies and one whose does not — used to render ONE tag
+   * list below both, so the page said these tags decide this request for a profile
+   * where nothing tag-related decided anything. The resolution is the same set for
+   * both (it is a property of the target); what differs is whether the profile
+   * could consult it, and that is now carried per profile.
+   *
+   * Both halves are asserted in ONE render, because the defect was exactly that
+   * the two profiles shared a claim: the first must say so, the second must not.
+   */
+  test("a profile whose download carries no tag policies says so instead of listing tags", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "with-tag-service",
+            engine: "trino",
+            tags: [{ name: "pii", attached_at_column: true }],
+            tag_policies_in_download: 2,
+            accesses: [
+              {
+                access_type: "select",
+                decision: { kind: "allowed", policy_id: 7, policy_name: "grant-a" },
+                attribution: null,
+              },
+            ],
+          },
+          {
+            service_id: 12,
+            service_name: "no-tag-service",
+            engine: "starrocks",
+            tags: [],
+            tag_policies_in_download: 0,
+            accesses: [
+              {
+                access_type: "select",
+                decision: { kind: "allowed", policy_id: 8, policy_name: "grant-b" },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const blocks = within(result).getAllByTestId("explain-profile");
+    expect(blocks).toHaveLength(2);
+
+    // The profile that CAN consult tags lists them.
+    expect(within(blocks[0]).getAllByTestId("profile-tag")).toHaveLength(1);
+    expect(within(blocks[0]).queryByTestId("profile-tags-no-policies")).not.toBeInTheDocument();
+
+    // The profile that cannot says why, and lists nothing — the claim that was
+    // false before this field existed.
+    expect(within(blocks[1]).queryByTestId("profile-tag")).not.toBeInTheDocument();
+    expect(within(blocks[1]).getByTestId("profile-tags-no-policies")).toHaveTextContent(
+      /carries no tag policies, so no tag decided anything here/i,
+    );
   });
 
   test("a 403 renders as a forbidden message, not a bare error", async () => {

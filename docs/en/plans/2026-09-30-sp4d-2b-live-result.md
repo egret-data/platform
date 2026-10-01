@@ -640,6 +640,16 @@ decline) and `.playwright-mcp/sp4d2b-p8-allowed-on-an-unreadable-table.png` (F5)
 
 ## 10. The gates, with exit codes
 
+> ⚠ **SNAPSHOT, and read it as one.** The numbers below are what the gates reported
+> **at this document's commit** (`7691dae9`). They are not a running tally and they
+> will not be updated: later rounds on this branch added tests, so at the tip the
+> same suites report MORE — Task 8's fix rounds took perm-compile `--lib` from 25 to
+> 27 and `ExplainAccess.test.tsx` from 26 to 31. Chasing the figures through a
+> document that records a measurement is how a measurement stops being one; the
+> authority for the current totals is `task-8-report.md` and the branch, and the
+> authority for what was true when the live gate ran is here. (Whole-branch review,
+> L2.)
+
 | gate | command | result |
 |---|---|---|
 | ranger-eval suites | `cargo test -p egret-ranger-eval --no-fail-fast` | **259 passed / 0 failed across 10 binaries**, rc 0 — the baseline exactly. The tenth binary is the differential at `0 passed … 0.00s`, which is the opt-in gate being silently green, as documented |

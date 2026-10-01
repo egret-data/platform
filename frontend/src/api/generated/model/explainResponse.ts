@@ -7,7 +7,6 @@
  */
 import type { ExplainOutcome } from './explainOutcome';
 import type { ExplainProfile } from './explainProfile';
-import type { ExplainResolvedTag } from './explainResolvedTag';
 import type { ExplainTagDecline } from './explainTagDecline';
 
 /**
@@ -18,40 +17,5 @@ export interface ExplainResponse {
   outcome: ExplainOutcome;
   /** Empty exactly when `outcome` is `no_profile_serves_the_catalog`. */
   profiles: ExplainProfile[];
-  /**
-     * **The tag set the evaluator was handed** — the same
-     * [`AccessRequest::resolved_tags`] every verdict below was computed from,
-     * read back out of it.
-     *
-     * # ⚠ This field used to be a different query, and the browser measured the
-     * difference as a defect
-     *
-     * **Task 8's live gate, F4 and F5.** It was
-     * `tag_keys_for_resource_via` — `tags.key`, matched on
-     * `(schema, table, column)` by exact equality with no roll-up — while the
-     * evaluator's set came from [`resolved_tags_for_target`], which rolls the
-     * table level up and returns `tags.name`. Two queries, two vocabularies, one
-     * heading. Measured on a real Trino: a target denied **by a tag policy,
-     * through a tag attached to the table above it**, rendered the deciding
-     * policy's name directly above "Tags egret has recorded on this resource —
-     * None."; and a target the page called `Allowed` with "None." was one no
-     * query could read, because the table-level tag masked every column. The
-     * steward's question is *which tag, attached where*, and the handler already
-     * held the answer.
-     *
-     * So the field is now **derived from the resolution itself**, which is what
-     * removes the drift class rather than narrowing it: "what the page shows" and
-     * "what was evaluated" are the same object, so they cannot disagree. The
-     * exact-match query is no longer called from here.
-     *
-     * Empty means one of three things, and the response says which: the target
-     * named no schema-and-table (nothing can be attached), the resolution
-     * returned the empty set (an ANSWER — nothing is attached), or
-     * [`ExplainResponse::tag_resolution_declined`] is `Some`, in which case
-     * egret did not resolve at all and this list is empty because there is
-     * nothing to report, not because nothing is attached. A client that renders
-     * "none" for the third case is making the mistake F4 records.
-     */
-  tags: ExplainResolvedTag[];
   tag_resolution_declined?: null | ExplainTagDecline;
 }

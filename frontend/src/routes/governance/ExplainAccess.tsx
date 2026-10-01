@@ -448,6 +448,17 @@ function causeSentence(c: WireUndecidableCause, declined?: ExplainTagDecline): s
     }
     case "tag_resource_not_reproducible":
       return `Tag policy ${policyRef(c.policy_name, c.policy_id)} ${tagResourceProblemPhrase(c.problem)}, so egret cannot tell which tags the engine would run it for.`;
+    // ⚠ **This cause and `tag_sub_result_split_by_resource_policy` below are raised
+    // ONLY from the evaluator's `decide_sub` / `evaluate_sub` — the MASK and
+    // ROW-FILTER entry points — and `explain` calls neither** (whole-branch review,
+    // L3; `evaluate_sub` has no caller in `egret-perm-compile`). So these two
+    // sentences, and the tests asserting them, describe states this page cannot
+    // currently be shown. They stay for the reason `explain_wire.rs` mirrors every
+    // variant: an arm added to the wire enum and not here must break the build, and
+    // the day `explain` reports a mask verdict these are the two sentences it will
+    // need. The concrete form of the scope finding at the top of the plan — the
+    // whole tag mask / row-filter half of this package is reachable from no product
+    // surface.
     case "tag_sub_policy_is_deny_capable":
       return `Tag policy ${policyRef(c.policy_name, c.policy_id)} produced a mask or row filter and also carries deny items, and Ranger can then report this policy's id with a later policy's mask.`;
     case "resource_candidacy_not_reproducible":
@@ -466,10 +477,31 @@ function causeSentence(c: WireUndecidableCause, declined?: ExplainTagDecline): s
         ? `${shape}. This engine runs ${PLUGIN_LABEL[c.plugin_version]}, which keeps the tag deny here where 2.8.0 would reopen it — egret does not yet reproduce 2.5.0's side of that split, so it will not guess. Levelling the two priorities, or removing one of the two policies, makes this decidable.`
         : `${shape}, so it cannot be answered until this profile records which plugin version its engine is running.`;
     }
+    // ⚠ **"tag policies" is correct again, and the round trip is the lesson.** The
+    // concurrent Critical first rode this wire tag as a documented ALIAS, which made
+    // this noun false for half the states the sentence was shown for — so it was
+    // briefly widened to "Several policies". The cause has its own variant and its
+    // own sentence now (below), so this one is once more raised ONLY where both
+    // policies are tag policies, and the specific word is the honest one. Widening
+    // a sentence to cover a state that should have been split is a different defect
+    // from leaving it narrow: it costs every OTHER reader precision.
     case "tag_priority_arbitration_not_modelled":
       return `Several tag policies at different priorities each decide this, and which one the engine keeps depends on an arbitration egret does not reproduce: ${c.policy_names
         .map((name, i) => `${policyRef(name, c.policy_ids[i] ?? null)} at priority ${c.priorities[i]}`)
         .join(", ")}. Giving them the same priority makes this decidable.`;
+    // ⚠ **Its own sentence, and the facts in it are PROVED rather than sampled.**
+    // The refusal fires when a tag ALLOW is in force and a RESOURCE policy at a
+    // strictly higher priority also allows. That the tag side is the allow is not an
+    // assumption: `allowed` becomes true at exactly one site, which also sets
+    // `priority`, and evaluation is priority-DESCENDING, so any later candidate has
+    // `found.priority <= priority`. So the sentence can name which policy is which,
+    // which `tag_priority_arbitration_not_modelled`'s positional lists cannot.
+    //
+    // It says "rarely" because that is measured: 0 of 1148 composed-random cases and
+    // 10 of 4000 overall. A sentence that implied this was common would send a
+    // steward looking for a widespread misconfiguration.
+    case "access_priority_composite_not_modelled":
+      return `Two policies allow this — the tag policy ${policyRef(c.tag_policy_name, c.tag_policy_id)} at priority ${c.tag_priority}, and the resource policy ${policyRef(c.resource_policy_name, c.resource_policy_id)} at the higher priority ${c.resource_priority} — and Ranger composes the two through a priority rule egret does not reproduce, so egret will not tell you which one the engine reports as the decider. Rarely reached. Giving the two the same priority makes this decidable.`;
     case "tag_policy_not_normalisable":
       return c.problem.kind === "mask_type_absent"
         ? `Tag policy ${policyRef(c.policy_name, c.policy_id)} ${tagNormalisationProblemPhrase(c.problem)} — so the engine is serving no decisions from this download at all, and this one cannot be answered either.`
@@ -860,7 +892,79 @@ function ProfileBlock({
           <li className="text-sm text-muted-foreground">No access type was evaluated.</li>
         )}
       </ul>
+      <ProfileTags profile={profile} declined={declined} />
     </section>
+  );
+}
+
+/**
+ * The tag set THIS profile's verdicts could have been decided by.
+ *
+ * **⚠ Whole-branch review H1 / H2 / H3 — this block used to render ONCE, below
+ * every profile, from a response-level field.** All three Importants were that
+ * one arrangement, and each was measured:
+ *
+ * - **H3**, reachable with no StarRocks, no second profile and no tag service: a
+ *   catalog nothing serves rendered "Nothing is enforcing" and "Tags that decide
+ *   this request — pii" on one screen, with no verdicts in existence at all. A
+ *   sibling catalog's assignment on the same warehouse resolves for the target
+ *   because `catalog_tag_assignments` has no catalog column.
+ * - **H1**: a catalog served by one profile with a tag service and one without
+ *   made the page claim, once, that these tags decide this request — false for
+ *   the second.
+ * - **H2**: a StarRocks profile given a `tagService` would list tags as deciding
+ *   while the engine's enricher discards all of them.
+ *
+ * Rendering it per profile is the LEVEL fix: the server has no response-level tag
+ * set any more, so `no_profile_serves_the_catalog` cannot carry one and a fourth
+ * instance of the class has nowhere to appear. Three sentence edits would have
+ * left that open.
+ *
+ * `tag_policies_in_download === 0` is why a set can be empty while the column is
+ * tagged — the question H1's steward is otherwise left holding — and it is the
+ * server's own narrowing predicate, not a second rule invented here.
+ */
+function ProfileTags({
+  profile,
+  declined,
+}: {
+  profile: ExplainProfile;
+  declined?: ExplainTagDecline;
+}) {
+  const noTagPolicies = profile.tag_policies_in_download === 0;
+  return (
+    <div className="space-y-1.5 border-t border-border pt-2">
+      <Label className="text-xs">Tags that could decide here</Label>
+      {declined ? (
+        <p data-testid="profile-tags-declined" className="text-xs text-muted-foreground">
+          Not resolved — see the reason above. This is not the same as there being none.
+        </p>
+      ) : noTagPolicies ? (
+        <p data-testid="profile-tags-no-policies" className="text-xs text-muted-foreground">
+          None: this profile’s download carries no tag policies, so no tag decided anything
+          here — whatever is stored on the resource.
+        </p>
+      ) : profile.tags.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {profile.tags.map((t) => (
+            <Badge
+              key={`${t.name}-${String(t.attached_at_column)}`}
+              data-testid="profile-tag"
+              variant="outline"
+            >
+              {t.name}
+              <span className="ml-1 font-normal text-muted-foreground">
+                {t.attached_at_column ? "on this column" : "on the table"}
+              </span>
+            </Badge>
+          ))}
+        </div>
+      ) : (
+        <p data-testid="profile-tags-none" className="text-xs text-muted-foreground">
+          None.
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -1136,54 +1240,6 @@ export default function ExplainAccess() {
             </div>
           )}
 
-          {/* ⚠ **Task 8's browser gate, F4 and F5 — this block used to say the
-              opposite of the truth.** It rendered `tag_keys_for_resource_via`'s
-              exact-match list under the heading a steward reads as "the tags that
-              decide this", and the browser caught it twice on a real Trino: a
-              request DENIED by a tag policy through a tag attached to the table
-              above it showed "None.", and a target shown `Allowed` with "None." was
-              one no query could read, because that table-level tag masked every
-              column. The server now sends the set the evaluator was handed, and
-              `attached_at_column` is the half that makes it actionable — it says
-              whether the row to change is this column's or the table's.
-
-              A decline is NOT "none": `tag_resolution_declined` means egret did not
-              resolve at all, and rendering "None." there is the F4 mistake in a
-              second place. It gets its own line, and the reason is already stated
-              beside the verdict above. */}
-          <div className="space-y-1.5">
-            {/* ⚠ **The HEADING, narrowed — Task 8's fix round, the open question.**
-                "Tags the engine resolves for this resource" over-claimed, and the
-                measurement is in this fixture: a table-level target answers `[]`
-                while a column beneath it carries a tag, because a DESCENDANT
-                attachment is not one the enricher rolls up. The list is right —
-                it is what decides the request asked — and the label was wider than
-                the list, which is F3's defect class and round 3's. Naming the
-                request rather than "this resource" is the whole fix; the
-                alternative was a second query and a second list, which is what
-                F4/F5 were fixed to stop. */}
-            <Label>Tags that decide this request</Label>
-            {result.tag_resolution_declined ? (
-              <p className="text-xs text-muted-foreground">
-                Not resolved — see the reason above. This is not the same as there being
-                none.
-              </p>
-            ) : result.tags.length > 0 ? (
-              <div className="flex flex-wrap gap-1">
-                {result.tags.map((t) => (
-                  <Badge key={`${t.name}-${String(t.attached_at_column)}`} variant="outline">
-                    {t.name}
-                    <span className="ml-1 font-normal text-muted-foreground">
-                      {t.attached_at_column ? "on this column" : "on the table"}
-                    </span>
-                  </Badge>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-muted-foreground">None.</p>
-            )}
-          </div>
-
           {/* The honest limits, stated where the answer is read — not in a help
               page. A tool that looks like a complete oracle while being partial
               is worse than one that says what it does not know.
@@ -1204,31 +1260,50 @@ export default function ExplainAccess() {
                   evaluator's input, rolled up the hierarchy, and every verdict above
                   was computed from it. The limit that survives is the one that still
                   holds — a target naming no table can carry none. */}
-              <p>
-                The tags above are the set every verdict here was computed from, rolled up
-                the resource hierarchy the way the engine’s own enricher rolls it: a tag
-                marked <span className="italic">on the table</span> reaches this column
-                because the assignment names the table. They populate only when the target
-                names both a schema and a table — a catalog-only target carries none,
-                because assignments attach to tables and columns.
-              </p>
-              {/* ⚠ The asymmetry a steward auditing a table would otherwise learn
-                  the hard way, and it is MEASURED rather than reasoned: asking
-                  about `sp4d1.t2` with no column answers an empty list while
-                  `sp4d1.t2.item` answers `pii`, because the enricher admits SELF and
-                  ANCESTOR attachments and not DESCENDANT ones. The engine behaves
-                  the same way — the live gate measured a tag-addressed row filter
-                  NOT firing at table granularity for a column-level tag — so this
-                  is the engine's rule showing through, not egret's gap. Said here
-                  because the list cannot say it: it is a true statement about what
-                  is ABSENT. */}
-              <p>
-                It is the set for the resource you asked about, and that cuts downwards:
-                a tag attached to a column does <span className="font-medium">not</span>{" "}
-                appear when you ask about its table, because the engine’s enricher reaches
-                up the hierarchy and never down. Auditing a table is therefore not the same
-                as auditing its columns — ask about the column to see a tag stored on it.
-              </p>
+              {/* ⚠ **Gated on there BEING a profile — found in the browser, and it is
+                  the same class one notch further down.** These two paragraphs talk
+                  about "each profile's tag list" and "those sets"; under
+                  `no_profile_serves_the_catalog` there are no profiles and no lists,
+                  so they described nothing on screen. Prose about an absent thing is
+                  how a reader learns to discount the limits that do hold — the
+                  argument this whole block is introduced with. */}
+              {result.profiles.length > 0 && (
+                <>
+              {/* ⚠ Narrowed with the block itself (review H1/H2/H3). This said
+                      "the set every verdict HERE was computed from" under a single
+                      list below every profile — which asserted per verdict what was
+                      true per request, and said it even when there were no verdicts.
+                      Each profile now carries its own set, so this says what is true
+                      of all of them and claims nothing about any one. */}
+                  <p>
+                    Each profile’s tag list is the set egret resolved for this target, rolled up
+                    the resource hierarchy the way the engine’s own enricher rolls it: a tag
+                    marked <span className="italic">on the table</span> reaches this column
+                    because the assignment names the table. A profile whose download carries no
+                    tag policies shows none, because nothing there could consult them. Tags
+                    populate only when the target names both a schema and a table — a
+                    catalog-only target carries none, because assignments attach to tables and
+                    columns.
+                  </p>
+                  {/* ⚠ The asymmetry a steward auditing a table would otherwise learn
+                      the hard way, and it is MEASURED rather than reasoned: asking
+                      about `sp4d1.t2` with no column answers an empty list while
+                      `sp4d1.t2.item` answers `pii`, because the enricher admits SELF and
+                      ANCESTOR attachments and not DESCENDANT ones. The engine behaves
+                      the same way — the live gate measured a tag-addressed row filter
+                      NOT firing at table granularity for a column-level tag — so this
+                      is the engine's rule showing through, not egret's gap. Said here
+                      because the list cannot say it: it is a true statement about what
+                      is ABSENT. */}
+                  <p>
+                    Those sets are for the resource you asked about, and that cuts downwards:
+                    a tag attached to a column does <span className="font-medium">not</span>{" "}
+                    appear when you ask about its table, because the engine’s enricher reaches
+                    up the hierarchy and never down. Auditing a table is therefore not the same
+                    as auditing its columns — ask about the column to see a tag stored on it.
+                  </p>
+                </>
+              )}
               <p>
                 A policy that grants through a role, or through any group except{" "}
                 <span className="font-mono">public</span>, matches nobody on these engines:

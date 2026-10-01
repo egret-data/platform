@@ -676,6 +676,38 @@ pub enum WireUndecidableCause {
         policy_names: Vec<String>,
         priorities: Vec<i32>,
     },
+    /// A tag ALLOW in force and a **resource** policy at a strictly higher
+    /// priority that also allows — Ranger settles the composite through
+    /// `accessTypeResults`, which the evaluator does not reproduce.
+    ///
+    /// # ⚠ Its own variant, because the alias put a wrong NOUN in front of a steward
+    ///
+    /// The evaluator's `AccessPriorityCompositeNotModelled` first rode
+    /// [`WireUndecidableCause::TagPriorityArbitrationNotModelled`] as a documented
+    /// alias — same arbitration, same three positional lists, no new schema — so
+    /// that the Critical could land without racing the three files this split
+    /// needs. The cost was one word: that sentence opens "Several **tag** policies
+    /// …", and here one of the two is a RESOURCE policy. Names, ids, priorities and
+    /// the remedy were all correct; the noun was not, which is this branch's
+    /// recurring defect class (a label true of some of the states it is shown for).
+    ///
+    /// So the two fields are NAMED rather than positional: the steward-facing fact
+    /// is *which* policy is the tag one, and a `Vec` cannot say that. Measured
+    /// rarity, for the copy's sake: **0 of 1148** composed-random cases and 10 of
+    /// 4000 overall, so the sentence must not imply it is common.
+    AccessPriorityCompositeNotModelled {
+        /// The tag policy whose ALLOW was in force. It can only be the tag
+        /// phase's: `allowed` becomes true at one site, which also sets
+        /// `priority`, and evaluation is priority-DESCENDING, so any later
+        /// candidate has `found.priority <= priority` — proved, not sampled.
+        tag_policy_id: Option<i64>,
+        tag_policy_name: String,
+        tag_priority: i32,
+        /// The resource policy at a strictly higher priority that also allowed.
+        resource_policy_id: Option<i64>,
+        resource_policy_name: String,
+        resource_priority: i32,
+    },
     /// A tag DENY and a strictly higher-priority resource policy that allows —
     /// a shape Ranger 2.5.0 and 2.8.0 answer DIFFERENTLY, so it can only be
     /// decided once the running plugin version is known.
@@ -878,33 +910,14 @@ impl From<&UndecidableCause> for WireUndecidableCause {
                 resource_policy_id: *resource_policy_id,
                 resource_policy_name: resource_policy_name.clone(),
             },
-            // ⚠ **A DELIBERATE wire ALIAS, and the only one in this mirror.**
-            //
-            // `AccessPriorityCompositeNotModelled` is the whole-branch review's
-            // CRITICAL: the tag phase allowed and a strictly higher-priority
-            // RESOURCE policy allowed too, which Ranger arbitrates through the
-            // `accessTypeResults` map. That is the SAME map and the SAME unmodelled
-            // arbitration as `TagPriorityArbitrationNotModelled`, seen on the
-            // resource path instead of inside the tag phase, and the payload is the
-            // same three parallel lists — so it is carried on that wire shape
-            // rather than adding a schema.
-            //
-            // It is an alias and not a merge: the evaluator keeps the two causes
-            // APART, because they are refused for different reasons and only one of
-            // them is a measured over-deny.
-            //
-            // ⚠ **REQUIRED HAND-OFF, and it is a wrong word in front of a
-            // steward.** `ExplainAccess.tsx`'s sentence for this wire tag opens
-            // "Several tag policies at different priorities each decide this",
-            // which is false for this shape: one of the two policies is a RESOURCE
-            // policy. The names, the ids, the priorities and the remedy ("giving
-            // them the same priority makes this decidable") are all correct — the
-            // noun is not. Splitting the sentence needs `ExplainAccess.tsx`, the
-            // generated client and `openapi.json`, all of which were being edited
-            // concurrently when this landed, so it is handed off rather than raced.
-            // Until then the page understates WHICH policies are in contention; it
-            // does not misstate the decision, and before this it gave a confident
-            // wrong `Denied` with no refusal at all.
+            // ⚠ **No longer an alias — SPLIT, and the reason is one word.** This
+            // rode `TagPriorityArbitrationNotModelled` when the Critical landed, to
+            // avoid racing `openapi.json`, the generated client and the exhaustive
+            // TSX switch while they were uncommitted elsewhere. That was the right
+            // call and it cost one noun: the other sentence says "Several TAG
+            // policies", and here one of the two is a RESOURCE policy. Its own
+            // variant now, with the two policies NAMED rather than positional,
+            // because which is which is the steward-facing fact.
             UndecidableCause::AccessPriorityCompositeNotModelled {
                 tag_policy_id,
                 tag_policy_name,
@@ -912,10 +925,13 @@ impl From<&UndecidableCause> for WireUndecidableCause {
                 resource_policy_id,
                 resource_policy_name,
                 resource_priority,
-            } => WireUndecidableCause::TagPriorityArbitrationNotModelled {
-                policy_ids: vec![*tag_policy_id, *resource_policy_id],
-                policy_names: vec![tag_policy_name.clone(), resource_policy_name.clone()],
-                priorities: vec![*tag_priority, *resource_priority],
+            } => WireUndecidableCause::AccessPriorityCompositeNotModelled {
+                tag_policy_id: *tag_policy_id,
+                tag_policy_name: tag_policy_name.clone(),
+                tag_priority: *tag_priority,
+                resource_policy_id: *resource_policy_id,
+                resource_policy_name: resource_policy_name.clone(),
+                resource_priority: *resource_priority,
             },
             UndecidableCause::TagAttachmentNotReproducible { tag, problem } => {
                 WireUndecidableCause::TagAttachmentNotReproducible {

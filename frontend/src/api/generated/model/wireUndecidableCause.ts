@@ -100,6 +100,25 @@ export type WireUndecidableCause = {
   priorities: number[];
   kind: 'tag_priority_arbitration_not_modelled';
 } | {
+  /**
+     * The tag policy whose ALLOW was in force. It can only be the tag
+     * phase's: `allowed` becomes true at one site, which also sets
+     * `priority`, and evaluation is priority-DESCENDING, so any later
+     * candidate has `found.priority <= priority` — proved, not sampled.
+     * @nullable
+     */
+  tag_policy_id?: number | null;
+  tag_policy_name: string;
+  tag_priority: number;
+  /**
+     * The resource policy at a strictly higher priority that also allowed.
+     * @nullable
+     */
+  resource_policy_id?: number | null;
+  resource_policy_name: string;
+  resource_priority: number;
+  kind: 'access_priority_composite_not_modelled';
+} | {
   plugin_version?: null | WirePluginVersion;
   /** @nullable */
   tag_policy_id?: number | null;

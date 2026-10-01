@@ -34697,7 +34697,9 @@
           "service_id",
           "service_name",
           "engine",
-          "accesses"
+          "accesses",
+          "tags",
+          "tag_policies_in_download"
         ],
         "properties": {
           "service_id": {
@@ -34717,6 +34719,18 @@
             "items": {
               "$ref": "#/components/schemas/ExplainAccess"
             }
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExplainResolvedTag"
+            },
+            "description": "The tag set **this profile's** verdicts could have been decided by.\n\n# ⚠ This lives on the PROFILE, and the move is the fix for three defects at once\n\n**Whole-branch review, H1 / H2 / H3 — one defect in three costumes: a\nvalue computed once per REQUEST, presented as though it were per-verdict.**\nIt was `ExplainResponse::tags`, one list for the whole response, and the\npage rendered one heading under all profiles. Each costume was measured:\n\n* **H3, and reachable with no StarRocks, no second profile and no tag\n  service at all.** The list was returned even when `profiles` is EMPTY,\n  so a catalog nothing serves rendered \"Nothing is enforcing\" and \"Tags\n  that decide this request — pii\" on one screen, with no verdicts in\n  existence. `catalog_tag_assignments` has no catalog column, so a sibling\n  catalog's assignment on the same warehouse resolves for this target too.\n* **H1.** A catalog served by one profile with a tag service and one\n  without made the page say, once, that these tags decide this request —\n  false for the second, where nothing tag-related decided anything.\n* **H2.** A StarRocks profile given a `tagService` would list tags as\n  deciding while `enriched_tags` discards every one of them.\n\nFixing the three sentences would have left a fourth instance free to\nappear. **With the set on the profile there is nowhere to put a tag list\nexcept beside a verdict**, so `no_profile_serves_the_catalog` cannot carry\none — the payload the H3 probe rendered is now unrepresentable.\n\n**The F4/F5 property is kept, not traded.** This is still ONE resolution,\n`resolved_tags_for_target`'s, computed once before the loop and the same\nobject every verdict was evaluated against — not a second query. What\ndiffers per profile is only the ONE narrowing this crate can apply\nsoundly: see below.\n\n# What the narrowing is, and why it cannot drift from the evaluator\n\nEmpty when [`ExplainProfile::tag_policies_in_download`] is `0`. That is a\nONE-WAY implication, not a reimplementation: with no tag policy of any\nkind in the download, the evaluator's `of_kind` is empty for every policy\ntype and no tag can reach any verdict, so an empty list here cannot\ndisagree with it. The evaluator's actual per-access-type rule stays the\nevaluator's; reproducing it here would be the second-copy shape this\npackage has refused four times.\n\n⚠ **A non-empty list does NOT claim the tags were evaluated** — H2's drop\nhappens inside `enriched_tags`, against this profile's own service-def,\nand is not visible from here. The page's wording is held to that: the set\nis what this profile's plugin resolves, and which verdict a tag decided is\non the verdict's own attribution."
+          },
+          "tag_policies_in_download": {
+            "type": "integer",
+            "description": "How many tag policies **this profile's download** carries —\n`tagPolicies.policies.len()`, or `0` when there is no tag block at all\nbecause the profile has no bound tag service.\n\nCarried so the page can say WHY a profile's tag set is empty while the\ncolumn is tagged — the question H1's steward is left with otherwise — and\nit is the predicate [`ExplainProfile::tags`] is narrowed by.",
+            "minimum": 0
           }
         }
       },
@@ -34762,8 +34776,7 @@
         "description": "What `explain` answers with: one verdict block per profile serving the\ntarget's catalog, over the SERVED ARTIFACT.",
         "required": [
           "outcome",
-          "profiles",
-          "tags"
+          "profiles"
         ],
         "properties": {
           "outcome": {
@@ -34775,13 +34788,6 @@
               "$ref": "#/components/schemas/ExplainProfile"
             },
             "description": "Empty exactly when `outcome` is `no_profile_serves_the_catalog`."
-          },
-          "tags": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ExplainResolvedTag"
-            },
-            "description": "**The tag set the evaluator was handed** — the same\n[`AccessRequest::resolved_tags`] every verdict below was computed from,\nread back out of it.\n\n# ⚠ This field used to be a different query, and the browser measured the\ndifference as a defect\n\n**Task 8's live gate, F4 and F5.** It was\n`tag_keys_for_resource_via` — `tags.key`, matched on\n`(schema, table, column)` by exact equality with no roll-up — while the\nevaluator's set came from [`resolved_tags_for_target`], which rolls the\ntable level up and returns `tags.name`. Two queries, two vocabularies, one\nheading. Measured on a real Trino: a target denied **by a tag policy,\nthrough a tag attached to the table above it**, rendered the deciding\npolicy's name directly above \"Tags egret has recorded on this resource —\nNone.\"; and a target the page called `Allowed` with \"None.\" was one no\nquery could read, because the table-level tag masked every column. The\nsteward's question is *which tag, attached where*, and the handler already\nheld the answer.\n\nSo the field is now **derived from the resolution itself**, which is what\nremoves the drift class rather than narrowing it: \"what the page shows\" and\n\"what was evaluated\" are the same object, so they cannot disagree. The\nexact-match query is no longer called from here.\n\nEmpty means one of three things, and the response says which: the target\nnamed no schema-and-table (nothing can be attached), the resolution\nreturned the empty set (an ANSWER — nothing is attached), or\n[`ExplainResponse::tag_resolution_declined`] is `Some`, in which case\negret did not resolve at all and this list is empty because there is\nnothing to report, not because nothing is attached. A client that renders\n\"none\" for the third case is making the mistake F4 records."
           },
           "tag_resolution_declined": {
             "oneOf": [
@@ -42323,6 +42329,55 @@
                 "type": "string",
                 "enum": [
                   "tag_priority_arbitration_not_modelled"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A tag ALLOW in force and a **resource** policy at a strictly higher\npriority that also allows — Ranger settles the composite through\n`accessTypeResults`, which the evaluator does not reproduce.\n\n# ⚠ Its own variant, because the alias put a wrong NOUN in front of a steward\n\nThe evaluator's `AccessPriorityCompositeNotModelled` first rode\n[`WireUndecidableCause::TagPriorityArbitrationNotModelled`] as a documented\nalias — same arbitration, same three positional lists, no new schema — so\nthat the Critical could land without racing the three files this split\nneeds. The cost was one word: that sentence opens \"Several **tag** policies\n…\", and here one of the two is a RESOURCE policy. Names, ids, priorities and\nthe remedy were all correct; the noun was not, which is this branch's\nrecurring defect class (a label true of some of the states it is shown for).\n\nSo the two fields are NAMED rather than positional: the steward-facing fact\nis *which* policy is the tag one, and a `Vec` cannot say that. Measured\nrarity, for the copy's sake: **0 of 1148** composed-random cases and 10 of\n4000 overall, so the sentence must not imply it is common.",
+            "required": [
+              "tag_policy_name",
+              "tag_priority",
+              "resource_policy_name",
+              "resource_priority",
+              "kind"
+            ],
+            "properties": {
+              "tag_policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "The tag policy whose ALLOW was in force. It can only be the tag\nphase's: `allowed` becomes true at one site, which also sets\n`priority`, and evaluation is priority-DESCENDING, so any later\ncandidate has `found.priority <= priority` — proved, not sampled."
+              },
+              "tag_policy_name": {
+                "type": "string"
+              },
+              "tag_priority": {
+                "type": "integer",
+                "format": "int32"
+              },
+              "resource_policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "The resource policy at a strictly higher priority that also allowed."
+              },
+              "resource_policy_name": {
+                "type": "string"
+              },
+              "resource_priority": {
+                "type": "integer",
+                "format": "int32"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "access_priority_composite_not_modelled"
                 ]
               }
             }
