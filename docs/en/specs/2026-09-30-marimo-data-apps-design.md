@@ -281,6 +281,31 @@ pod-scoped token that can read only that version, writes it to local disk, and n
 version gets a new pod; sessions opened before the publish keep running on the old version until they
 close, and the old pod stops when idle.
 
+### 5.3 Pod API contract (defined in P3, served by egret in P4)
+
+These are the only egret endpoints a marimo pod calls besides the query gateway (§4.2). Each one takes a
+**pod token** (`Authorization: Bearer <pod token>`) that egret mints when it launches the pod. P4 mints
+it and serves these routes; P3 builds the client and tests it against a fake egret.
+
+| Pod | Endpoint | Behaviour |
+|---|---|---|
+| edit (author × workspace) | `GET /api/apps/pod/apps/{app_id}/draft` | `{source, revision}`. egret re-checks `app:write` for the token's author on every call. |
+| edit | `PUT /api/apps/pod/apps/{app_id}/draft` with `If-Match: "<rev>"`, body `{source}` | 200 `{revision}` · 409 `{error, current_revision}` · 413 · 428, the same contract as the cookie API (§5) |
+| run (one version) | `GET /api/apps/pod/apps/{app_id}/versions/{version_id}` | `{source, version_no}`. The token is bound to exactly that version. |
+
+Pod-side rules, from S0:
+- **One base revision per app for the pod's lifetime.** marimo calls `NotebookWorkspace.load` more than
+  once per editor open (twice at minimum). Re-fetching and rebinding on every load would silently reset
+  the revision of an editor that is already open, and its next save would overwrite another author's
+  work. So the pod fetches a draft only when it holds no base revision for that app. A successful save
+  advances the base. A **409 marks the app stale**, and only the next load after that re-fetches and
+  rebinds. The author gets there by following the "reload" in marimo's toast.
+- **The pod refuses to start** if a `.marimo.toml` exists in its working directory, any parent of it, or
+  `$HOME`. marimo prefers those files over the locked-down `XDG_CONFIG_HOME` config.
+- **No default-engine API exists** in marimo 0.25.0. A new SQL cell uses the most recently defined
+  connection the user hasn't overridden, so the new-app template's `db = egret.connect(...)` cell (P2) is
+  what makes the egret engine the default (D13).
+
 ## 6. Runtime, proxy and the security boundary
 
 ### 6.1 marimo must not share egret's origin
@@ -526,7 +551,7 @@ never merged; automated Playwright, single run per case, macOS dev laptop under 
    marimo changes the command); pytest against
    a fake egret, including the
    `StorageInterface` contract test (with the reload-does-not-rebind case, §5.1) and the IPC contract
-   test (§6.3). Decides the SQL-cell default engine (§4.4).
+   test (§6.3). The pod API client follows §5.3. Plan: `docs/en/plans/2026-10-01-data-apps-p3-image-and-client.md`.
 4. **P4 — Apps origin, proxy, edit mode.** Ticket → cookie, proxy (route allow-list or the S0 block
    list, one raw path checked and forwarded, `X-Notebook-Id` stripped or pinned), `__Host-` cookie rename
    verified over HTTPS on kind, the egret-side audit that `GET` routes have no side effects and CSRF stays

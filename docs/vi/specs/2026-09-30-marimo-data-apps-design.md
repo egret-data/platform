@@ -278,6 +278,31 @@ bằng token theo pod chỉ đọc được đúng phiên bản đó, ghi ra đ�
 bản mới có pod mới; session mở trước khi publish tiếp tục chạy trên phiên bản cũ cho tới khi đóng, và pod
 cũ dừng khi rảnh.
 
+### 5.3 Hợp đồng API phía pod (định nghĩa ở P3, egret phục vụ ở P4)
+
+Đây là các endpoint egret duy nhất mà pod marimo gọi, ngoài query gateway (§4.2). Mỗi endpoint nhận một
+**token pod** (`Authorization: Bearer <token pod>`) do egret tạo khi khởi chạy pod. P4 tạo token và
+phục vụ các route này; P3 xây client và test nó với một egret giả.
+
+| Pod | Endpoint | Hành vi |
+|---|---|---|
+| edit (tác giả × workspace) | `GET /api/apps/pod/apps/{app_id}/draft` | `{source, revision}`. egret kiểm lại `app:write` của tác giả trong token ở mỗi lần gọi. |
+| edit | `PUT /api/apps/pod/apps/{app_id}/draft` kèm `If-Match: "<rev>"`, body `{source}` | 200 `{revision}` · 409 `{error, current_revision}` · 413 · 428, cùng hợp đồng với API cookie (§5) |
+| run (một phiên bản) | `GET /api/apps/pod/apps/{app_id}/versions/{version_id}` | `{source, version_no}`. Token gắn với đúng phiên bản đó. |
+
+Quy tắc phía pod, rút ra từ S0:
+- **Một revision gốc cho mỗi app trong suốt vòng đời pod.** marimo gọi `NotebookWorkspace.load` hơn một
+  lần mỗi lần mở editor (ít nhất hai lần). Nếu mỗi lần nạp đều tải lại và gắn lại revision thì revision
+  của một editor đang mở sẽ âm thầm bị đặt lại, và lần lưu kế tiếp sẽ ghi đè bản của tác giả khác. Vì vậy
+  pod chỉ tải draft khi chưa giữ revision gốc nào cho app đó. Mỗi lần lưu thành công thì revision gốc
+  tăng theo. **Một lần 409 đánh dấu app là cũ**, và chỉ lần nạp kế tiếp sau đó mới tải lại và gắn lại
+  revision. Tác giả đi tới bước này bằng cách làm theo chữ "reload" trong toast của marimo.
+- **Pod từ chối khởi động** nếu có `.marimo.toml` trong thư mục làm việc, bất kỳ thư mục cha nào của nó,
+  hoặc `$HOME`. marimo ưu tiên các file đó hơn cấu hình đã khoá trong `XDG_CONFIG_HOME`.
+- **marimo 0.25.0 không có API đặt engine mặc định.** SQL cell mới dùng kết nối được định nghĩa gần nhất
+  mà người dùng chưa chọn khác, nên chính cell `db = egret.connect(...)` của mẫu app mới (P2) là thứ
+  khiến engine egret trở thành mặc định (D13).
+
 ## 6. Runtime, proxy và ranh giới bảo mật
 
 ### 6.1 marimo không được chung origin với egret
@@ -523,7 +548,7 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
    chạy của marimo (D14: shim của launcher trả lời, với test hợp đồng sẽ fail khi marimo đổi lệnh); pytest
    với một egret giả, kể
    cả test hợp đồng `StorageInterface` (có ca tải-lại-không-gắn-lại, §5.1) và test hợp đồng IPC (§6.3).
-   Quyết định engine mặc định của SQL cell (§4.4).
+   Client API phía pod theo §5.3. Plan: `docs/en/plans/2026-10-01-data-apps-p3-image-and-client.md`.
 4. **P4 — Origin apps, proxy, chế độ edit.** Ticket → cookie, proxy (allow-list route hoặc block list của
    S0, kiểm và chuyển tiếp một đường dẫn thô, xoá hoặc ghim `X-Notebook-Id`), đổi tên cookie sang `__Host-`
    và kiểm qua HTTPS trên kind, kiểm toán phía egret rằng route `GET` không có tác dụng phụ và CSRF vẫn dựa
