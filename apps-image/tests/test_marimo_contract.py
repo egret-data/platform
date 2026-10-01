@@ -185,3 +185,18 @@ def test_cli_entry_accepts_args_and_standalone_mode():
     common = {"host", "port", "headless", "base_url", "token_password", "watch"}
     assert common <= edit and common <= run
     assert "skip_update_check" in edit and "skip_update_check" not in run
+
+
+def test_security_config_partials_are_merged_last():
+    from marimo._config import manager
+
+    assert callable(manager.SecurityConfigManager.get_config)
+    assert "SecurityConfigManager()" in inspect.getsource(manager.get_default_config_manager)
+    init = inspect.getsource(manager.MarimoConfigManager.__init__)
+    assert "isinstance(p, SecurityConfigManager)" in init
+    overrides = inspect.getsource(manager.MarimoConfigManager.get_config_overrides)
+    assert "(*self.partials, *self.security_partials)" in overrides
+    with_partial = inspect.getsource(manager.MarimoConfigManager.with_partial)
+    assert "partial,\n            *self.security_partials," in with_partial
+    session_create = inspect.getsource(__import__("marimo._session.session", fromlist=["x"]).SessionImpl.create)
+    assert "config_manager.with_partial(" in session_create

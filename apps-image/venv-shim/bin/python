@@ -4,4 +4,4 @@
 if [ "$1" = "-c" ] && [ "$2" = "import marimo, msgspec, zmq; print(marimo.__version__)" ]; then
   echo "$EGRET_MARIMO_VERSION"; exit 0
 fi
-exec "$EGRET_REAL_PYTHON" "$@"
+exec "${EGRET_REAL_PYTHON:?EGRET_REAL_PYTHON unset}" "$@"

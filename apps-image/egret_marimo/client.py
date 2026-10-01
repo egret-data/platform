@@ -63,7 +63,7 @@ def _session_token() -> str:
 
 def _query(database: str, sql: str, params=()) -> dict:
     body = {"database": database, "sql": sql, "params": list(params)}
-    if os.environ.get("EGRET_TEST_INCLUDE_PID"):
+    if os.environ.get("EGRET_TEST_INCLUDE_PID") and os.environ.get("PYTEST_CURRENT_TEST"):
         body["pid"] = os.getpid()
     try:
         r = httpx.post(

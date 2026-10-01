@@ -8,7 +8,7 @@ import time
 import httpx
 import pytest
 
-from harness import APPS, POD_TOKEN, ROOT, viewer_page, wait_until
+from harness import APPS, MARIMO_TOKEN, POD_TOKEN, ROOT, assert_env_has_no_secrets, viewer_page, wait_until
 
 pytestmark = pytest.mark.e2e
 
@@ -56,6 +56,11 @@ def test_run_mode_one_kernel_process_and_token_per_viewer(egret, launch, proxy, 
         assert server.proc.pid not in pids.values(), f"kernel ran in the server process {server.proc.pid}"
         # The kernels were launched through the D14 shim venv, not a uv sandbox or a thread.
         assert f"Using configured venv: {ROOT / 'venv-shim' / 'bin' / 'python'}" in server.output()
+        # Neither the server (re-exec'd with a clean env) nor a viewer's kernel can read the secrets.
+        server_ps = assert_env_has_no_secrets(server.proc.pid, POD_TOKEN, MARIMO_TOKEN)
+        assert "egret_marimo.launcher --internal run" in server_ps
+        for pid in pids.values():
+            assert_env_has_no_secrets(pid, POD_TOKEN, MARIMO_TOKEN)
 
         # A reactive re-run: move each viewer's slider and wait for the dependent cell.
         for user, page in pages.items():
@@ -101,6 +106,8 @@ def test_edit_mode_save_conflict_reload_recover(egret, launch, proxy, browser):
     t_ready = time.monotonic() - t0
     base = proxy(server.port, TOKENS)
     draft = egret.drafts[APP]
+    server_ps = assert_env_has_no_secrets(server.proc.pid, POD_TOKEN, MARIMO_TOKEN)
+    assert "egret_marimo.launcher --internal edit" in server_ps
 
     with viewer_page(browser, base, "alice") as page:
         page.goto(f"{base}/e/pod-1/?file={APP}.py")

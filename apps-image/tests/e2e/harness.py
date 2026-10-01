@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -43,3 +44,20 @@ def viewer_page(browser, base: str, viewer: str):
         yield context.new_page()
     finally:
         context.close()
+
+
+def assert_env_has_no_secrets(pid: int, *secrets: str) -> str:
+    """Read a live process's environment block as another same-uid process can.
+
+    macOS has no /proc; `ps eww` prints the command line followed by the process's
+    environment as the kernel holds it (KERN_PROCARGS2), i.e. the block set at exec,
+    which os.environ.pop does not change. A known variable must be visible, so an
+    empty read cannot pass as "no secrets".
+    """
+    out = subprocess.run(
+        ["ps", "eww", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=10, check=True
+    ).stdout
+    assert "EGRET_URL=http://127.0.0.1:" in out, f"ps could not read pid {pid}'s environment: {out!r}"
+    for secret in secrets:
+        assert secret not in out, f"secret visible in pid {pid}'s environment"
+    return out

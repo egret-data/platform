@@ -31,6 +31,14 @@ def test_pid_only_when_test_flag(egret, monkeypatch):
     assert egret.queries[-1]["pid"] is not None
 
 
+def test_pid_flag_ignored_outside_pytest(egret, monkeypatch):
+    monkeypatch.setenv("EGRET_TEST_INCLUDE_PID", "1")
+    monkeypatch.setattr(client, "_session_token", lambda: "tok")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    sql("select 1", "db")
+    assert egret.queries[-1]["pid"] is None
+
+
 def test_sql_returns_polars(egret):
     df = sql("select 1", "db")
     assert isinstance(df, pl.DataFrame)

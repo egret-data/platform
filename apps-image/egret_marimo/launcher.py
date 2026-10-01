@@ -5,17 +5,27 @@ Everything else comes from the environment (set by egret's launcher, P4):
 | Variable             | Mode | Meaning                                     |
 |----------------------|------|---------------------------------------------|
 | ``EGRET_URL``        | both | egret's base URL                            |
-| ``EGRET_POD_TOKEN``  | both | the pod token (pod API)                     |
-| ``EGRET_MARIMO_TOKEN`` | both | marimo's ``--token-password``             |
+| ``EGRET_POD_TOKEN``  | both | the pod token (pod API) — secret            |
+| ``EGRET_MARIMO_TOKEN`` | both | marimo's ``--token-password`` — secret    |
 | ``EGRET_BASE_URL``   | both | ``/e/<pod>`` or ``/r/<version>``            |
 | ``APPS_WORKDIR``     | both | working directory (the image sets ``/work``) |
 | ``EGRET_APP_ID``     | run  | the app                                     |
 | ``EGRET_VERSION_ID`` | run  | the pinned version                          |
 
-Image paths, overridable for tests: ``EGRET_APPS_CONFIG`` (the locked marimo
-config, default ``/opt/egret-apps/config``), ``EGRET_VENV_SHIM`` (default
-``/opt/egret-apps/venv-shim``) and ``EGRET_MARIMO_PORT`` (default 2718 for
-edit, 2719 for run).
+Two phases. The first checks the environment, then re-``execve``s this same
+process (``python -m egret_marimo.launcher --internal <mode>``) with the secrets
+removed from the environment and handed over an inherited pipe instead. Popping
+them from ``os.environ`` is not enough: the process's ORIGINAL environment block
+stays readable (``/proc/<pid>/environ``, ``ps eww``) by any same-uid process, and
+every kernel runs app code as the same uid. The internal phase reads and closes
+the pipe, then starts marimo in-process. (The real isolation is a kernel uid that
+differs from the server's; that is P4/P5.)
+
+Test-only overrides, honoured only under pytest (``PYTEST_CURRENT_TEST``):
+``EGRET_APPS_CONFIG`` (the locked marimo config, default
+``/opt/egret-apps/config``), ``EGRET_VENV_SHIM`` (default
+``/opt/egret-apps/venv-shim``) — outside pytest both must lie under
+``/opt/egret-apps`` — and ``EGRET_MARIMO_PORT`` (default 2718 edit, 2719 run).
 
 Exit codes: 64 bad usage or a missing/invalid variable; 65 the locked
 configuration could be shadowed or is missing; 69 egret could not serve the
@@ -24,13 +34,14 @@ version source.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
 from pathlib import Path
 
 from .client import GatewayError
-from .patches import install_run_mode_ipc_patch
+from .patches import install_config_lock, install_run_mode_ipc_patch
 from .podapi import PodApi
 from .storage import install_storage_patch
 
@@ -38,9 +49,13 @@ EX_USAGE = 64
 EX_DATAERR = 65
 EX_UNAVAILABLE = 69
 
-DEFAULT_CONFIG = "/opt/egret-apps/config"
-DEFAULT_VENV_SHIM = "/opt/egret-apps/venv-shim"
+IMAGE_ROOT = Path("/opt/egret-apps")
+DEFAULT_CONFIG = IMAGE_ROOT / "config"
+DEFAULT_VENV_SHIM = IMAGE_ROOT / "venv-shim"
 PORTS = {"edit": "2718", "run": "2719"}
+INTERNAL = "--internal"
+SECRETS_FD = "EGRET_SECRETS_FD"
+SECRETS = ("EGRET_POD_TOKEN", "EGRET_MARIMO_TOKEN")
 
 REQUIRED = {
     "edit": ["EGRET_URL", "EGRET_POD_TOKEN", "EGRET_MARIMO_TOKEN", "EGRET_BASE_URL", "APPS_WORKDIR"],
@@ -49,8 +64,6 @@ REQUIRED = {
         "EGRET_APP_ID", "EGRET_VERSION_ID",
     ],
 }
-# Secrets the kernels must not inherit: kernels copy os.environ, and they run app code.
-SCRUBBED = ("EGRET_POD_TOKEN", "EGRET_MARIMO_TOKEN")
 
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
@@ -61,42 +74,66 @@ class LaunchError(Exception):
         self.code = code
 
 
+def _under_pytest() -> bool:
+    return bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
 def shadowing_config(workdir: Path) -> Path | None:
-    """A ``.marimo.toml`` marimo would read instead of the locked config, if any.
+    """A config file marimo would layer over the locked config, if any.
 
     marimo takes the first ``.marimo.toml`` walking up from the cwd (the
-    launcher chdirs to the workdir), then ``$HOME``, before ``XDG_CONFIG_HOME``.
+    launcher chdirs to the workdir), then ``$HOME``, before ``XDG_CONFIG_HOME``;
+    and the nearest ``pyproject.toml`` walking up from the notebook or workdir
+    is the project layer, merged OVER the user config. The security-layer lock
+    (patches.install_config_lock) holds regardless; refusing here keeps the
+    project layer empty at startup.
     """
-    for directory in (workdir, *workdir.parents, Path.home()):
-        candidate = directory / ".marimo.toml"
-        if candidate.exists():
-            return candidate
-    return None
+    for directory in (workdir, *workdir.parents):
+        for name in (".marimo.toml", "pyproject.toml"):
+            if (directory / name).exists():
+                return directory / name
+    home = Path.home() / ".marimo.toml"
+    return home if home.exists() else None
 
 
-def _check_env(mode: str) -> dict[str, str]:
-    missing = [name for name in REQUIRED[mode] if not os.environ.get(name)]
+def _check_env(mode: str, secrets: dict[str, str]) -> dict[str, str]:
+    env = {name: os.environ.get(name, "") for name in REQUIRED[mode]} | secrets
+    missing = [name for name in REQUIRED[mode] if not env.get(name)]
     if missing:
         raise LaunchError(EX_USAGE, f"missing required environment variable(s): {', '.join(missing)}")
-    env = {name: os.environ[name] for name in REQUIRED[mode]}
     if mode == "run" and not _UUID.match(env["EGRET_APP_ID"]):
         raise LaunchError(EX_USAGE, f"EGRET_APP_ID is not an app id: {env['EGRET_APP_ID']!r}")
     return env
+
+
+def _image_path(var: str, default: Path) -> Path:
+    path = Path(os.environ.get(var, str(default)))
+    if not _under_pytest() and not path.resolve().is_relative_to(IMAGE_ROOT):
+        raise LaunchError(EX_DATAERR, f"{var}={path} is outside {IMAGE_ROOT} (test-only override)")
+    return path
+
+
+def _port(mode: str) -> str:
+    override = os.environ.get("EGRET_MARIMO_PORT")
+    if override and not _under_pytest():
+        raise LaunchError(EX_USAGE, "EGRET_MARIMO_PORT is a test-only override")
+    return override or PORTS[mode]
 
 
 def _lock_config(workdir: Path) -> None:
     shadow = shadowing_config(workdir)
     if shadow is not None:
         raise LaunchError(EX_DATAERR, f"refusing to start: {shadow} would override the locked marimo config")
-    config = Path(os.environ.get("EGRET_APPS_CONFIG", DEFAULT_CONFIG))
+    config = _image_path("EGRET_APPS_CONFIG", DEFAULT_CONFIG)
     if not (config / "marimo" / "marimo.toml").is_file():
         raise LaunchError(EX_DATAERR, f"locked marimo config not found: {config / 'marimo' / 'marimo.toml'}")
     os.environ["XDG_CONFIG_HOME"] = str(config)
     os.environ["MARIMO_SKIP_UPDATE_CHECK"] = "1"
+    install_config_lock()
 
 
 def _venv_shim() -> Path:
-    shim = Path(os.environ.get("EGRET_VENV_SHIM", DEFAULT_VENV_SHIM))
+    shim = _image_path("EGRET_VENV_SHIM", DEFAULT_VENV_SHIM)
     if not os.access(shim / "bin" / "python", os.X_OK):
         raise LaunchError(EX_DATAERR, f"venv shim not executable: {shim / 'bin' / 'python'}")
     # The shim answers marimo's install probe with this version and execs this interpreter.
@@ -107,9 +144,10 @@ def _venv_shim() -> Path:
     return shim
 
 
-def build(mode: str) -> list[str]:
-    """Validate, lock the config, install this mode's patch, and return marimo's argv."""
-    env = _check_env(mode)
+def build(mode: str, secrets: dict[str, str]) -> list[str]:
+    """Internal phase: validate, lock the config, install this mode's patch, return marimo's argv."""
+    env = _check_env(mode, secrets)
+    port = _port(mode)
     workdir = Path(env["APPS_WORKDIR"]).resolve()
     workdir.mkdir(parents=True, exist_ok=True)
     _lock_config(workdir)
@@ -131,14 +169,11 @@ def build(mode: str) -> list[str]:
         install_run_mode_ipc_patch(shim)
         target = str(app_file)
 
-    for name in SCRUBBED:
-        os.environ.pop(name, None)
-
     # Never --watch: in edit mode every load rewrites the app file from egret's draft.
     argv = [
         mode, target,
         "--host", "0.0.0.0",
-        "--port", os.environ.get("EGRET_MARIMO_PORT", PORTS[mode]),
+        "--port", port,
         "--headless",
         "--base-url", env["EGRET_BASE_URL"],
         "--token-password", env["EGRET_MARIMO_TOKEN"],
@@ -160,15 +195,63 @@ def run_marimo(argv: list[str]) -> int:
     return 0
 
 
+def _exec(path: str, argv: list[str], env: dict[str, str]) -> int:
+    os.execve(path, argv, env)  # does not return
+    return 0  # pragma: no cover
+
+
+def _reexec(mode: str) -> int:
+    """First phase: hand the secrets to a re-exec of this process whose environment lacks them."""
+    secrets = {name: os.environ[name] for name in SECRETS}
+    read_fd, write_fd = os.pipe()
+    payload = json.dumps(secrets).encode()
+    os.write(write_fd, payload)  # tokens are far below the pipe buffer, so this cannot block
+    os.close(write_fd)
+    os.set_inheritable(read_fd, True)
+    env = {k: v for k, v in os.environ.items() if k not in SECRETS}
+    env[SECRETS_FD] = str(read_fd)
+    return _exec(sys.executable, [sys.executable, "-m", "egret_marimo.launcher", INTERNAL, mode], env)
+
+
+def _read_secrets() -> dict[str, str]:
+    fd_text = os.environ.pop(SECRETS_FD, "")
+    if not fd_text.isdigit():
+        raise LaunchError(EX_USAGE, f"{INTERNAL} needs {SECRETS_FD}; run `egret-apps edit|run`")
+    fd = int(fd_text)
+    chunks = []
+    try:
+        while chunk := os.read(fd, 65536):
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    secrets = json.loads(b"".join(chunks) or b"{}")
+    return {name: str(secrets.get(name, "")) for name in SECRETS}
+
+
+def _internal(mode: str) -> int:
+    try:
+        marimo_argv = build(mode, _read_secrets())
+    except LaunchError as e:
+        print(f"egret-apps: {e}", file=sys.stderr)
+        return e.code
+    print(f"egret-apps: marimo {mode} on port {marimo_argv[marimo_argv.index('--port') + 1]}", flush=True)
+    return run_marimo(marimo_argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
+    if len(args) == 2 and args[0] == INTERNAL and args[1] in REQUIRED:
+        return _internal(args[1])
     if len(args) != 1 or args[0] not in REQUIRED:
         print("usage: egret-apps edit|run", file=sys.stderr)
         return EX_USAGE
     try:
-        marimo_argv = build(args[0])
+        _check_env(args[0], {})
     except LaunchError as e:
         print(f"egret-apps: {e}", file=sys.stderr)
         return e.code
-    print(f"egret-apps: marimo {args[0]} on port {marimo_argv[marimo_argv.index('--port') + 1]}", flush=True)
-    return run_marimo(marimo_argv)
+    return _reexec(args[0])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

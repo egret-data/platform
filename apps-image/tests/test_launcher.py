@@ -45,11 +45,25 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher, "install_storage_patch", lambda *a: calls["storage"].append(a))
     monkeypatch.setattr(launcher, "install_run_mode_ipc_patch", lambda *a: calls["ipc"].append(a))
 
+    calls["exec"] = []
+    calls["marimo_env"] = []
+
     def fake_marimo(argv):
         calls["marimo"].append(list(argv))
+        calls["marimo_env"].append(dict(os.environ))
         return 0
 
+    def fake_exec(path, argv, child_env):
+        """Stand-in for os.execve: run the internal phase in-process with the child's env."""
+        calls["exec"].append((path, list(argv), dict(child_env)))
+        for name in launcher.SECRETS:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(launcher.SECRETS_FD, child_env[launcher.SECRETS_FD])
+        return launcher.main(argv[3:])
+
     monkeypatch.setattr(launcher, "run_marimo", fake_marimo)
+    monkeypatch.setattr(launcher, "_exec", fake_exec)
+    monkeypatch.setattr(launcher, "install_config_lock", lambda: None)
     return {"home": home, "workdir": workdir, "calls": calls}
 
 
@@ -96,7 +110,26 @@ def test_a_marimo_toml_that_could_shadow_the_locked_config_exits_65(env, capsys,
     (target / ".marimo.toml").write_text("[ai]\nenabled = true\n")
     assert launcher.main(["edit"]) == 65
     assert str(target / ".marimo.toml") in capsys.readouterr().err
-    assert env["calls"] == {"storage": [], "ipc": [], "marimo": []}
+    assert (env["calls"]["storage"], env["calls"]["ipc"], env["calls"]["marimo"]) == ([], [], [])
+
+
+@pytest.mark.parametrize("where", ["workdir", "parent"])
+def test_a_pyproject_toml_in_the_workdir_or_a_parent_exits_65(env, capsys, where):
+    """marimo's project layer reads the nearest pyproject.toml over the user config."""
+    env["workdir"].mkdir()
+    target = {"workdir": env["workdir"], "parent": env["workdir"].parent}[where]
+    (target / "pyproject.toml").write_text("[tool.marimo.ai]\nenabled = true\n")
+    assert launcher.main(["edit"]) == 65
+    assert str(target / "pyproject.toml") in capsys.readouterr().err
+
+
+def test_a_pyproject_toml_beside_the_workdir_is_not_refused(env):
+    """The image's own /opt/egret-apps/pyproject.toml is not on the workdir's path."""
+    env["workdir"].mkdir()
+    sibling = env["workdir"].parent / "opt"
+    sibling.mkdir()
+    (sibling / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    assert launcher.main(["edit"]) == 0
 
 
 def test_a_missing_locked_config_exits_65(env, monkeypatch, tmp_path, capsys):
@@ -210,11 +243,43 @@ def test_locks_xdg_config_and_skips_update_check(env, monkeypatch):
     assert os.environ["MARIMO_SKIP_UPDATE_CHECK"] == "1"
 
 
-def test_secrets_are_not_inherited_by_kernels(env, monkeypatch):
+def test_reexec_hands_secrets_over_a_pipe_not_the_environment(env):
     assert launcher.main(["edit"]) == 0
-    assert "EGRET_POD_TOKEN" not in os.environ
-    assert "EGRET_MARIMO_TOKEN" not in os.environ
-    assert os.environ["EGRET_URL"]  # kernels still need egret's URL
+    ((path, argv, child_env),) = env["calls"]["exec"]
+    assert (path, argv) == (sys.executable, [sys.executable, "-m", "egret_marimo.launcher", "--internal", "edit"])
+    assert not set(launcher.SECRETS) & set(child_env)
+    assert not any(v in ("pod-tok", "marimo-secret") for v in child_env.values())
+    assert child_env["EGRET_URL"]  # kernels still need egret's URL
+    # The internal phase got the tokens from the pipe and closed it.
+    fd = int(child_env[launcher.SECRETS_FD])
+    with pytest.raises(OSError):
+        os.fstat(fd)
+    (marimo_env,) = env["calls"]["marimo_env"]
+    assert not (set(launcher.SECRETS) | {launcher.SECRETS_FD}) & set(marimo_env)
+    (argv,) = env["calls"]["marimo"]
+    assert argv[argv.index("--token-password") + 1] == "marimo-secret"
+
+
+def test_internal_phase_without_the_pipe_exits_64(env, monkeypatch, capsys):
+    monkeypatch.delenv(launcher.SECRETS_FD, raising=False)
+    assert launcher.main(["--internal", "edit"]) == 64
+    assert launcher.SECRETS_FD in capsys.readouterr().err
+
+
+def test_overrides_are_test_only(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    monkeypatch.setenv("EGRET_APPS_CONFIG", str(CONFIG))
+    with pytest.raises(launcher.LaunchError) as e:
+        launcher._image_path("EGRET_APPS_CONFIG", launcher.DEFAULT_CONFIG)
+    assert e.value.code == 65 and "EGRET_APPS_CONFIG" in str(e.value)
+    monkeypatch.setenv("EGRET_APPS_CONFIG", "/opt/egret-apps/config")
+    assert launcher._image_path("EGRET_APPS_CONFIG", launcher.DEFAULT_CONFIG) == Path("/opt/egret-apps/config")
+    monkeypatch.setenv("EGRET_MARIMO_PORT", "1234")
+    with pytest.raises(launcher.LaunchError) as e:
+        launcher._port("edit")
+    assert e.value.code == 64
+    monkeypatch.delenv("EGRET_MARIMO_PORT")
+    assert launcher._port("edit") == "2718"
 
 
 def test_run_points_the_shim_at_this_interpreter_and_marimo(env, egret, monkeypatch):
@@ -326,3 +391,55 @@ def test_locked_config_as_marimo_reads_it(tmp_path):
     assert Path(path) == CONFIG / "marimo" / "marimo.toml"
     assert rtc is False
     assert ai is False
+
+
+# --- the security-layer lock: holds against project and script layers ------------
+
+
+def test_security_layer_lock_beats_project_and_script_config(tmp_path):
+    """Read with marimo's own config manager; the pyproject guard is bypassed on purpose."""
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "pyproject.toml").write_text("[tool.marimo.ai]\nenabled = true\n")
+    app = work / "app.py"
+    app.write_text(
+        "# /// script\n# [tool.marimo.experimental]\n# rtc_v2 = true\n# ///\n"
+        "import marimo\napp = marimo.App()\n"
+    )
+    code = (
+        "import json, sys\n"
+        "from marimo._config.manager import get_default_config_manager\n"
+        "from marimo._config.manager import ScriptConfigManager\n"
+        "def read():\n"
+        "    m = get_default_config_manager(current_path=sys.argv[1]).with_partial(ScriptConfigManager(sys.argv[1]))\n"
+        "    c = m.get_config()\n"
+        "    return [c['experimental'].get('rtc_v2'), c['ai'].get('enabled')]\n"
+        "before = read()\n"
+        "from egret_marimo.patches import install_config_lock\n"
+        "install_config_lock()\n"
+        "print(json.dumps([before, read()]))\n"
+    )
+    clean = {k: v for k, v in os.environ.items() if not k.startswith(("MARIMO_", "XDG_"))}
+    r = subprocess.run(
+        [sys.executable, "-c", code, str(app)],
+        env={**clean, "HOME": str(tmp_path), "XDG_CONFIG_HOME": str(CONFIG)},
+        cwd=work, capture_output=True, text=True, timeout=60, check=True,
+    )
+    before, after = json.loads(r.stdout.strip().splitlines()[-1])
+    assert before == [True, True], "control: the header and pyproject DO override the user layer"
+    assert after == [False, False]
+
+
+def test_config_lock_is_installed_in_both_modes(env, egret, monkeypatch):
+    installed = []
+    monkeypatch.setattr(launcher, "install_config_lock", lambda: installed.append(1))
+    monkeypatch.setenv("EGRET_URL", egret.base_url)
+    monkeypatch.setenv("EGRET_APP_ID", APP)
+    monkeypatch.setenv("EGRET_VERSION_ID", VERSION)
+    egret.pod_tokens["pod-tok"] = {}
+    egret.versions[(APP, VERSION)] = {"source": "", "version_no": 1}
+    assert launcher.main(["edit"]) == 0
+    monkeypatch.setenv("EGRET_POD_TOKEN", "pod-tok")  # the fake exec removed them, as execve would
+    monkeypatch.setenv("EGRET_MARIMO_TOKEN", "marimo-secret")
+    assert launcher.main(["run"]) == 0
+    assert installed == [1, 1]

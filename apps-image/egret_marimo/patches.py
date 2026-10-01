@@ -49,3 +49,33 @@ def install_run_mode_ipc_patch(venv_shim: Path) -> None:
 
     ipc_mod._egret_original_get_venv_config = original_get_venv_config  # type: ignore[attr-defined]
     ipc_mod._get_venv_config = get_venv_config
+
+
+# Keys no config layer may turn back on. The image's marimo.toml sets them too, but
+# that is only the USER layer: a project pyproject.toml ([tool.marimo]) or the app's
+# own PEP 723 header ([tool.marimo] in the script) merges over it. marimo merges
+# SecurityConfigManager partials after every other layer (marimo/_config/manager.py,
+# MarimoConfigManager.__init__ / with_partial), so values returned there always win.
+# - ai.enabled: AI panels and actions (a project could otherwise point them at any
+#   provider URL).
+# - experimental.rtc_v2: with RTC an edit-mode reconnect reattaches to the orphaned
+#   session before resume runs, bypassing the conflicted-session close in storage.py.
+# Not locked: runtime.serve_cached_sessions_in_apps is header-settable but harmless
+# here: in run mode the session cache is read-only (CacheMode.READ, session.py), and
+# nothing writes `__marimo__/session/` into a run pod's fresh workdir.
+LOCKED_CONFIG = {"ai": {"enabled": False}, "experimental": {"rtc_v2": False}}
+
+
+def install_config_lock() -> None:
+    from marimo._config.manager import SecurityConfigManager
+
+    original = getattr(SecurityConfigManager, "_egret_original_get_config", SecurityConfigManager.get_config)
+
+    def get_config(self, *, hide_secrets: bool = True):
+        config = dict(original(self, hide_secrets=hide_secrets))
+        for section, values in LOCKED_CONFIG.items():
+            config[section] = {**config.get(section, {}), **values}
+        return config
+
+    SecurityConfigManager._egret_original_get_config = original  # type: ignore[attr-defined]
+    SecurityConfigManager.get_config = get_config  # type: ignore[method-assign]
