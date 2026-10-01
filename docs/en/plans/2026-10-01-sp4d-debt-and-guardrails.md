@@ -295,6 +295,36 @@ restore by checksum. A gate nobody has seen fail is what this plan keeps finding
 
 ---
 
+### Task 11: a mutation whose failure the user never sees, and how many siblings it has
+
+**Files:**
+- Modify: `frontend/src/components/access/CatalogTagEditor.tsx` (the `unassign` half)
+- Survey: `frontend/src/api/**` hand-written mutation call sites
+
+**Found by Task 3, whose own fix is the precedent.** Task 3 closed the *assign* half: the backend's
+400 was invisible, so a steward tagging `ord*ers` saw a Select snap back to its placeholder and
+nothing else. **`unassign_catalog` in the same component still fails silently**, by the same
+mechanism and with the same three-line remedy. It carries no new guard, so nothing Task 3 added made
+it worse — but it is the same defect in the same file, and leaving it is leaving half a fix.
+
+And Task 3 flagged that **roughly forty hand-written mutation call sites are unaudited for the same
+discard-the-result pattern**, which `client.ts`'s own comment already hints at.
+
+- [ ] **Step 1: Fix the sibling.** Same `role="alert"` treatment, showing the backend's own sentence
+rather than a frontend copy — a second copy of the wording is a place for it to drift.
+- [ ] **Step 2: Assert it the way Task 3 did, and for its measured reason.** Two tests, because the
+chain has three links and the middle one is otherwise uncovered: one mocking the hook to pin the
+render, one driving the real hook over a stubbed `fetch`. Task 3 proved the split is necessary rather
+than cautious — a mutant that swallows the error in the `mutationFn` kills the api test and leaves
+the component test green.
+- [ ] **Step 3: SURVEY the other sites; do not fix them.** Produce a count and a list of call sites
+that discard a mutation result, and say which of them a user can reach. Fixing forty sites is its own
+package; converting "unaudited" into a number with a list is this task. **A survey that reports a
+zero is not evidence** — say how you looked.
+- [ ] **Step 4: Commit.**
+
+---
+
 ## Pre-merge steps
 
 1. **Run migration 0166's own listing query** (`migrations/0166_…sql:124`) against any cluster that
