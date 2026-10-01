@@ -166,8 +166,10 @@ Các bước, theo thứ tự, mỗi bước fail-closed:
 
 1. Tra token theo hash; từ chối nếu không có, đã thu hồi hoặc hết hạn (401). Cập nhật `last_used_at`.
 2. Kiểm quyền của người dùng trong workspace của token: workspace bật tính năng `apps` (đường dẫn không
-   chứa `/ws/{ws}` nên cổng tính năng không tự suy ra được — handler phải tự kiểm), `app:read` (run) hoặc
-   `app:write` (edit) trên app của token, và `query:run` trên database.
+   chứa `/ws/{ws}` nên cổng tính năng không tự suy ra được — handler phải tự kiểm), `app:read`
+   trên app của token ở chế độ run; `app:write` **và** `query:run` ở chế độ edit. Chế độ run không đòi
+   `query:run`: `ws_viewer` không có quyền này, người xem không tự viết được SQL (token không bao giờ tới
+   trình duyệt; chỉ code của tác giả gửi truy vấn), và Ranger vẫn quyết định theo từng người xem.
 3. Tra `database` **theo tên** trong workspace của token (404 nếu không có — giống như bị từ chối).
 4. Kiểm chỉ đọc (§4.3); từ chối với 400 kèm lý do.
 5. `QueryExecPort::execute_as` (hoặc `execute_as_with_params`) bằng người dùng của token, với
@@ -179,7 +181,8 @@ Phản hồi: `TabularResult` dạng JSON (cột, dòng, `truncated`). Arrow là
 Mã lỗi giữ các phân biệt của port: `Forbidden` → 403 kèm thông báo của engine (người xem thiếu grant —
 điều được chờ đợi theo D3); `NotFound` → 404; `InvalidInput` → 400; `Internal` → 500 không lộ địa chỉ
 engine; token hết hạn → 401, helper đổi thành "phiên hết hạn — tải lại app". Mỗi session có rate limit
-(cấu hình được, mặc định 10 query/giây, burst 20).
+(cấu hình được; như P1 đã làm: 20 lời gọi mỗi cửa sổ 2 giây, và một lời gọi vượt giới hạn giữ token thêm
+một cửa sổ).
 
 ### 4.3 Kiểm tra chỉ đọc
 
@@ -469,7 +472,9 @@ Một service axum trong egret, lắng nghe trên host apps:
 ## 8. Quyền và cổng tính năng
 
 - Quyền mới: `app:read` (mở app đã publish), `app:write` (sửa draft, publish, khôi phục), `app:manage`
-  (quản lý share). Share dùng hệ object-shares chung với loại object `app`.
+  (quản lý share). Share dùng hệ object-shares chung với loại object `app`. **P1 chỉ có `app:read` và
+  `app:write`**; `app:manage` đến cùng share ở P2, vì test catalog-drift từ chối một quyền được khai báo mà
+  không có chỗ nào thực thi.
 - Module tính năng workspace `notebooks` được thay bằng `apps`, phủ `apps`, `apps-runtime`.
 - `notebook:read` / `notebook:write` bị gỡ ở P6.
 
@@ -502,10 +507,16 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
 
 ### Các PR, theo thứ tự
 
-1. **P1 — Query gateway.** `app_sessions`, bộ kiểm chỉ đọc, `POST /api/apps/query`, audit, rate limit.
-   Chỉ backend; test được bằng token seed sẵn, không cần marimo.
-2. **P2 — Lưu trữ và vòng đời.** `apps`, `app_drafts`, `app_versions` (+ trigger), API draft với
-   revision/409, publish, khôi phục, quyền `app:*`, module tính năng `apps`.
+1. **P1 — Query gateway.** `app_sessions` (`login_sid` cascade từ bảng `sessions` của egret, nên logout
+   thu hồi nó theo cấu trúc), bộ kiểm chỉ đọc, `POST /api/apps/query`, audit, rate limit — cộng những thứ
+   gateway cần để phân quyền: bảng định danh `analytics.apps`, quyền `app:*` và module tính năng `apps`.
+   Chỉ backend; test được bằng token seed sẵn, không cần marimo. Plan:
+   `docs/en/plans/2026-10-01-data-apps-p1-query-gateway.md`.
+2. **P2 — Lưu trữ và vòng đời.** `app_drafts`, `app_versions` (+ trigger, và FK từ
+   `app_sessions.version_id`, phức hợp với `app_id` để phiên bản thuộc đúng app), API draft với
+   revision/409, publish, khôi phục, CRUD app và share với `app:manage`; gateway kiểm phiên bản của token
+   run vẫn tồn tại và đang publish; FK `apps.folder_id` (dùng cho tổ tiên PDP); `ALL_FEATURE_KEYS` ở
+   frontend thêm `apps`.
 3. **P3 — Image `egret-apps` và `egret_marimo`.** Entrypoint, `EgretStorage`, DB-API, `egret.sql`, cấu hình
    marimo đã khoá, patch IPC cho chế độ run và cách xử lý bước kiểm `has_marimo_installed` mỗi lần khởi
    chạy của marimo (D14: shim của launcher trả lời, với test hợp đồng sẽ fail khi marimo đổi lệnh); pytest
@@ -515,7 +526,11 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
 4. **P4 — Origin apps, proxy, chế độ edit.** Ticket → cookie, proxy (allow-list route hoặc block list của
    S0, kiểm và chuyển tiếp một đường dẫn thô, xoá hoặc ghim `X-Notebook-Id`), đổi tên cookie sang `__Host-`
    và kiểm qua HTTPS trên kind, kiểm toán phía egret rằng route `GET` không có tác dụng phụ và CSRF vẫn dựa
-   trên header (§6.1), launcher edit, trang danh sách Apps và trang Edit.
+   trên header (§6.1), launcher edit, trang danh sách Apps và trang Edit. Từ review cuối của P1: thu hồi
+   token theo id / phiên đăng nhập (không chỉ theo plaintext) và dọn các dòng hết hạn; quyết định phiên
+   đăng nhập egret đã hết hạn nhưng chưa xoá có phải chặn token app không; cột `impersonator` trên
+   `app_sessions` trước khi mint token khi đang impersonate; kiểm `session_idle_secs <=
+   session_absolute_secs` lúc khởi động; chỉ audit lời gọi bắt đầu khoá rate limit, không audit mọi 429.
 5. **P5 — Chế độ run.** Launcher theo phiên bản, UI publish/versions/khôi phục, trang xem app; launcher
    kernel (warm pool hoặc fork server), mức trần session mỗi pod, giới hạn bộ nhớ và UX lúc mở session
    đặt theo số đo trên kind (§6.3). **Mục tiêu khởi động (D15):** tiêu chí nghiệm thu = người xem mới trên
