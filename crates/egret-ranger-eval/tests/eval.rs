@@ -937,31 +937,31 @@ fn a_validity_schedule_forces_undecidable() {
     );
 }
 
-/// An envelope-level construct — here `tagPolicies`, a whole second,
-/// DENY-capable policy set — forces it too, and is reported as an envelope
+/// An envelope-level construct forces it too, and is reported as an envelope
 /// cause rather than pinned on some policy.
 ///
-/// The block needs a policy in it: SP4d-2a Task 1 measured an EMPTY
-/// `tagPolicies` block inert (`RangerPolicyEngineImpl.evaluateTagPolicies`
-/// returns at `CollectionUtils.isNotEmpty(evaluators)`), so an empty one no
-/// longer refuses. `tests/tag_tiers.rs` owns the tier boundaries and the real
-/// captured block.
+/// The construct is `policyDeltas` — an INCREMENTAL download, so `policies` is
+/// partial or absent. `tagPolicies` used to be the illustration here and no
+/// longer can be: SP4d-2b Task 3 made the composed evaluator EVALUATE that
+/// block rather than refuse it, so it is no longer an envelope cause at all.
+/// The second half below keeps a foot in that door — a tag block still forces
+/// `Undecidable` for this request, now through the tag phase's own refusal,
+/// because `resolved_tags` is `None`. `tests/tag_tiers.rs` owns the tier
+/// boundaries and `tests/tag_arbitration.rs` owns the composition.
 #[test]
 fn an_envelope_construct_forces_undecidable() {
+    let allow_alice = json!([{
+        "id": 1, "name": "p", "service": "trino", "policyType": 0,
+        "resources": full_resources(),
+        "policyItems": [item(&["alice"], &["select"])],
+    }]);
+
     let set: ServicePolicySet = serde_json::from_value(json!({
         "serviceName": "trino",
-        "tagPolicies": {
-            "serviceName": "tag",
-            "policies": [{"id": 70, "name": "pii", "policyType": 0}],
-        },
-        "policies": [{
-            "id": 1, "name": "p", "service": "trino", "policyType": 0,
-            "resources": full_resources(),
-            "policyItems": [item(&["alice"], &["select"])],
-        }],
+        "policyDeltas": [{"id": 9}],
+        "policies": allow_alice.clone(),
     }))
     .expect("parse");
-
     let d = evaluate(
         &set,
         &full_request("alice", "select"),
@@ -971,9 +971,29 @@ fn an_envelope_construct_forces_undecidable() {
     assert!(
         causes(&d).iter().any(|c| matches!(
             c,
-            UndecidableCause::EnvelopeConstruct(Unmodelled::TagPolicies(_))
+            UndecidableCause::EnvelopeConstruct(Unmodelled::PolicyDeltas)
         )),
         "{d:?}"
+    );
+
+    let set: ServicePolicySet = serde_json::from_value(json!({
+        "serviceName": "trino",
+        "tagPolicies": {
+            "serviceName": "tag",
+            "policies": [{"id": 70, "name": "pii", "policyType": 0}],
+        },
+        "policies": allow_alice,
+    }))
+    .expect("parse");
+    let d = evaluate(
+        &set,
+        &full_request("alice", "select"),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        causes(&d).contains(&UndecidableCause::TagsUnresolved),
+        "a tag block still refuses for an unresolved tag set: {d:?}"
     );
 }
 

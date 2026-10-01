@@ -30,12 +30,14 @@
 use egret_perm_compile::explain_wire::{
     WireDecision, WireDenyReason, WireEngineType, WireGraphProblem, WireItemBucket,
     WireMaskDecision, WireMaskResult, WirePluginVersion, WirePolicyType, WireRowFilterDecision,
-    WireRowFilterResult, WireServiceDefIssue, WireTagPolicyBlock, WireUndecidableCause,
+    WireRowFilterResult, WireServiceDefIssue, WireTagAttachmentProblem,
+    WireTagNormalisationProblem, WireTagPolicyBlock, WireTagResourceProblem, WireUndecidableCause,
     WireUnmodelled,
 };
 use egret_ranger_eval::eval::{
     Decision, DenyReason, EngineType, MaskDecision, MaskResult, PluginVersion, RowFilterDecision,
-    RowFilterResult, UndecidableCause,
+    RowFilterResult, TagAttachmentProblem, TagNormalisationProblem, TagResourceProblem,
+    UndecidableCause,
 };
 use egret_ranger_eval::model::{ItemBucket, TagPolicyBlock, Unmodelled};
 use egret_ranger_eval::servicedef::{GraphProblem, PolicyType, ServiceDefIssue};
@@ -138,7 +140,7 @@ fn plugin_version_both_variants() {
     );
 }
 
-// ── UndecidableCause (13 variants) ───────────────────────────────────────
+// ── UndecidableCause (19 variants) ───────────────────────────────────────
 
 #[test]
 fn cause_envelope_construct_carries_the_full_typed_construct() {
@@ -353,6 +355,290 @@ fn cause_plugin_version_mismatch() {
             declared: WirePluginVersion::Ranger2_5_0,
             measured: WirePluginVersion::Ranger2_8_0,
         }
+    );
+}
+
+#[test]
+fn cause_tags_unresolved() {
+    let wire = WireUndecidableCause::from(&UndecidableCause::TagsUnresolved);
+    assert_eq!(wire, WireUndecidableCause::TagsUnresolved);
+    assert_eq!(
+        serde_json::to_value(wire).unwrap(),
+        serde_json::json!({"kind": "tags_unresolved"})
+    );
+}
+
+/// SP4d-2b Task 4. All three `TagAttachmentProblem` arms. Each carries a
+/// DIFFERENT payload shape (a list of keys, a count, a list of levels) and the
+/// three would be indistinguishable on the wire if any two collapsed — the
+/// remedies are "drop the tag's validity construct", "the same", and "this
+/// payload did not come from egret's own writer", which is not a remedy at all
+/// but a provenance question.
+#[test]
+fn cause_tag_attachment_not_reproducible_every_problem() {
+    let cases = [
+        (
+            TagAttachmentProblem::Options(vec!["TAG_VALIDITY_PERIODS".to_string()]),
+            WireTagAttachmentProblem::Options {
+                keys: vec!["TAG_VALIDITY_PERIODS".to_string()],
+            },
+            serde_json::json!({"kind": "options", "keys": ["TAG_VALIDITY_PERIODS"]}),
+        ),
+        (
+            TagAttachmentProblem::ValidityPeriods(2),
+            WireTagAttachmentProblem::ValidityPeriods { count: 2 },
+            serde_json::json!({"kind": "validity_periods", "count": 2}),
+        ),
+        (
+            TagAttachmentProblem::ResourceLevels(vec!["catalog".to_string(), "schema".to_string()]),
+            WireTagAttachmentProblem::ResourceLevels {
+                levels: vec!["catalog".to_string(), "schema".to_string()],
+            },
+            serde_json::json!({"kind": "resource_levels", "levels": ["catalog", "schema"]}),
+        ),
+    ];
+    for (problem, expected, expected_json) in cases {
+        assert_eq!(WireTagAttachmentProblem::from(&problem), expected);
+        assert_eq!(
+            serde_json::to_value(WireTagAttachmentProblem::from(&problem)).unwrap(),
+            expected_json
+        );
+        let cause = UndecidableCause::TagAttachmentNotReproducible {
+            tag: "pii".to_string(),
+            problem: problem.clone(),
+        };
+        assert_eq!(
+            WireUndecidableCause::from(&cause),
+            WireUndecidableCause::TagAttachmentNotReproducible {
+                tag: "pii".to_string(),
+                problem: expected,
+            }
+        );
+    }
+}
+
+/// SP4d-2b Task 2. All three `TagResourceProblem` arms, because each names a
+/// different remedy for the steward: drop the extra resource level, drop the
+/// `isExcludes`, or spell the tag value out.
+#[test]
+fn cause_tag_resource_not_reproducible_every_problem() {
+    let cases = [
+        (
+            TagResourceProblem::NotOnlyTheTagResource,
+            WireTagResourceProblem::NotOnlyTheTagResource,
+            serde_json::json!({"kind": "not_only_the_tag_resource"}),
+        ),
+        (
+            TagResourceProblem::Excludes,
+            WireTagResourceProblem::Excludes,
+            serde_json::json!({"kind": "excludes"}),
+        ),
+        (
+            TagResourceProblem::ValueNotTriePrefixExact("p*x".to_string()),
+            WireTagResourceProblem::ValueNotTriePrefixExact {
+                value: "p*x".to_string(),
+            },
+            serde_json::json!({"kind": "value_not_trie_prefix_exact", "value": "p*x"}),
+        ),
+        (
+            TagResourceProblem::Recursive,
+            WireTagResourceProblem::Recursive,
+            serde_json::json!({"kind": "recursive"}),
+        ),
+    ];
+    for (problem, expected, expected_json) in cases {
+        assert_eq!(WireTagResourceProblem::from(&problem), expected);
+        assert_eq!(
+            serde_json::to_value(WireTagResourceProblem::from(&problem)).unwrap(),
+            expected_json
+        );
+        let cause = UndecidableCause::TagResourceNotReproducible {
+            policy_id: Some(8839),
+            policy_name: "clearance".to_string(),
+            problem: problem.clone(),
+        };
+        assert_eq!(
+            WireUndecidableCause::from(&cause),
+            WireUndecidableCause::TagResourceNotReproducible {
+                policy_id: Some(8839),
+                policy_name: "clearance".to_string(),
+                problem: expected,
+            }
+        );
+    }
+}
+
+/// SP4d-2b fix round 1, review question 3.
+#[test]
+fn cause_tag_sub_policy_is_deny_capable() {
+    let cause = UndecidableCause::TagSubPolicyIsDenyCapable {
+        policy_id: Some(8799),
+        policy_name: "mask-with-deny".to_string(),
+    };
+    let wire = WireUndecidableCause::from(&cause);
+    assert_eq!(
+        wire,
+        WireUndecidableCause::TagSubPolicyIsDenyCapable {
+            policy_id: Some(8799),
+            policy_name: "mask-with-deny".to_string(),
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(wire).unwrap(),
+        serde_json::json!({
+            "kind": "tag_sub_policy_is_deny_capable",
+            "policy_id": 8799,
+            "policy_name": "mask-with-deny"
+        })
+    );
+}
+
+/// **SP4d-2b Task 5.** The three shapes of `TagNormalisationProblem`, each on the
+/// wire as its own `kind`.
+///
+/// `mask_type_absent` carries no payload and is the one that matters most: it is
+/// not "egret cannot decide this", it is "the engine's plugin throws while
+/// loading this download". A wire shape that folded it onto the other two would
+/// leave the UI nothing to distinguish an editable name from an incident.
+#[test]
+fn cause_tag_policy_not_normalisable_every_problem() {
+    let cases = [
+        (
+            TagNormalisationProblem::NamespacedAccessType("trino:select".to_string()),
+            WireTagNormalisationProblem::NamespacedAccessType {
+                access_type: "trino:select".to_string(),
+            },
+            serde_json::json!({"kind": "namespaced_access_type", "access_type": "trino:select"}),
+        ),
+        (
+            TagNormalisationProblem::NamespacedMaskType("hive:MASK_HASH".to_string()),
+            WireTagNormalisationProblem::NamespacedMaskType {
+                mask_type: "hive:MASK_HASH".to_string(),
+            },
+            serde_json::json!({"kind": "namespaced_mask_type", "mask_type": "hive:MASK_HASH"}),
+        ),
+        (
+            TagNormalisationProblem::MaskTypeAbsent,
+            WireTagNormalisationProblem::MaskTypeAbsent,
+            serde_json::json!({"kind": "mask_type_absent"}),
+        ),
+    ];
+    for (problem, expected, expected_json) in cases {
+        assert_eq!(WireTagNormalisationProblem::from(&problem), expected);
+        assert_eq!(
+            serde_json::to_value(WireTagNormalisationProblem::from(&problem)).unwrap(),
+            expected_json
+        );
+        let cause = UndecidableCause::TagPolicyNotNormalisable {
+            policy_id: Some(8901),
+            policy_name: "clearance".to_string(),
+            problem: problem.clone(),
+        };
+        assert_eq!(
+            WireUndecidableCause::from(&cause),
+            WireUndecidableCause::TagPolicyNotNormalisable {
+                policy_id: Some(8901),
+                policy_name: "clearance".to_string(),
+                problem: expected,
+            }
+        );
+    }
+}
+
+/// The priority arbitration keeps the three lists POSITIONAL.
+///
+/// A steward acts on the PRIORITIES, so losing them — or letting them drift out
+/// of step with the names — would leave nothing to change. Asserted on the JSON
+/// as well as on the enum, because the positional contract is a property of the
+/// serialisation and not of the Rust type.
+#[test]
+fn cause_tag_priority_arbitration_keeps_names_and_priorities_in_step() {
+    let cause = UndecidableCause::TagPriorityArbitrationNotModelled {
+        policy_ids: vec![Some(8910), None],
+        policy_names: vec!["low".to_string(), "high".to_string()],
+        priorities: vec![0, 3],
+    };
+    assert_eq!(
+        serde_json::to_value(WireUndecidableCause::from(&cause)).unwrap(),
+        serde_json::json!({
+            "kind": "tag_priority_arbitration_not_modelled",
+            "policy_ids": [8910, null],
+            "policy_names": ["low", "high"],
+            "priorities": [0, 3],
+        })
+    );
+}
+
+/// The whole-branch review's CRITICAL rides the arbitration wire shape as a
+/// DELIBERATE ALIAS, and this pins the mapping so it cannot drift silently.
+///
+/// The tag policy comes FIRST and the resource policy SECOND, in all three
+/// parallel lists. That order is what makes the page's sentence readable at all,
+/// and a swap would pair each name with the other's priority — the exact defect
+/// the three-list shape exists to avoid.
+///
+/// ⚠ The wire tag is `tag_priority_arbitration_not_modelled`, so the page's
+/// sentence calls the resource policy a tag policy. See the ⚠ hand-off note on
+/// the `From` arm in `explain_wire.rs`.
+#[test]
+fn cause_access_priority_composite_rides_the_arbitration_wire_shape() {
+    let cause = UndecidableCause::AccessPriorityCompositeNotModelled {
+        tag_policy_id: Some(901),
+        tag_policy_name: "clearance-allow".to_string(),
+        tag_priority: 0,
+        resource_policy_id: Some(1),
+        resource_policy_name: "override-grant".to_string(),
+        resource_priority: 1,
+    };
+    assert_eq!(
+        serde_json::to_value(WireUndecidableCause::from(&cause)).unwrap(),
+        serde_json::json!({
+            "kind": "tag_priority_arbitration_not_modelled",
+            "policy_ids": [901, 1],
+            "policy_names": ["clearance-allow", "override-grant"],
+            "priorities": [0, 1],
+        })
+    );
+}
+
+/// The version split names BOTH policies, and they are not interchangeable: one
+/// is the TAG policy that denies and one is the RESOURCE policy that allows, and
+/// a UI that swapped them would send a steward to the wrong service entirely.
+///
+/// It also carries the plugin version, in BOTH of its states (fix round 1,
+/// IMPORTANT 4). The UI branches on it because the two need different advice —
+/// a known 2.5.0 has nothing to record, and a `null` does — so a wire shape that
+/// dropped it would force one sentence to cover both, which is the defect that
+/// finding names.
+#[test]
+fn cause_tag_deny_reopened_carries_both_policies_and_the_plugin_version() {
+    let cause = |plugin_version| UndecidableCause::TagDenyReopenedDiffersByPluginVersion {
+        plugin_version,
+        tag_policy_id: Some(8920),
+        tag_policy_name: "clearance-deny".to_string(),
+        resource_policy_id: Some(55),
+        resource_policy_name: "grant-orders".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_value(WireUndecidableCause::from(&cause(Some(
+            PluginVersion::Ranger2_5_0
+        ))))
+        .unwrap(),
+        serde_json::json!({
+            "kind": "tag_deny_reopened_differs_by_plugin_version",
+            "plugin_version": "ranger_2_5_0",
+            "tag_policy_id": 8920,
+            "tag_policy_name": "clearance-deny",
+            "resource_policy_id": 55,
+            "resource_policy_name": "grant-orders",
+        })
+    );
+    // The `None` arm is the one the UI's other branch renders, and a `Serialize`
+    // that skipped the key instead of emitting `null` would make the TypeScript
+    // field optional-and-absent rather than nullable — a different discriminant.
+    assert_eq!(
+        serde_json::to_value(WireUndecidableCause::from(&cause(None))).unwrap()["plugin_version"],
+        serde_json::Value::Null
     );
 }
 

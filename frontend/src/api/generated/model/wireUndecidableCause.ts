@@ -8,6 +8,9 @@
 import type { WireEngineType } from './wireEngineType';
 import type { WirePluginVersion } from './wirePluginVersion';
 import type { WireServiceDefIssue } from './wireServiceDefIssue';
+import type { WireTagAttachmentProblem } from './wireTagAttachmentProblem';
+import type { WireTagNormalisationProblem } from './wireTagNormalisationProblem';
+import type { WireTagResourceProblem } from './wireTagResourceProblem';
 import type { WireUnmodelled } from './wireUnmodelled';
 
 /**
@@ -72,6 +75,75 @@ export type WireUndecidableCause = {
   policy_ids: (number | null)[];
   policy_names: string[];
   kind: 'eval_order_ambiguous';
+} | {
+  kind: 'tags_unresolved';
+} | {
+  /** @nullable */
+  policy_id?: number | null;
+  policy_name: string;
+  problem: WireTagResourceProblem;
+  kind: 'tag_resource_not_reproducible';
+} | {
+  /** @nullable */
+  policy_id?: number | null;
+  policy_name: string;
+  kind: 'tag_sub_policy_is_deny_capable';
+} | {
+  /** @nullable */
+  policy_id?: number | null;
+  policy_name: string;
+  problem: WireTagNormalisationProblem;
+  kind: 'tag_policy_not_normalisable';
+} | {
+  policy_ids: (number | null)[];
+  policy_names: string[];
+  priorities: number[];
+  kind: 'tag_priority_arbitration_not_modelled';
+} | {
+  /**
+     * The tag policy whose ALLOW was in force. It can only be the tag
+     * phase's: `allowed` becomes true at one site, which also sets
+     * `priority`, and evaluation is priority-DESCENDING, so any later
+     * candidate has `found.priority <= priority` — proved, not sampled.
+     * @nullable
+     */
+  tag_policy_id?: number | null;
+  tag_policy_name: string;
+  tag_priority: number;
+  /**
+     * The resource policy at a strictly higher priority that also allowed.
+     * @nullable
+     */
+  resource_policy_id?: number | null;
+  resource_policy_name: string;
+  resource_priority: number;
+  kind: 'access_priority_composite_not_modelled';
+} | {
+  plugin_version?: null | WirePluginVersion;
+  /** @nullable */
+  tag_policy_id?: number | null;
+  tag_policy_name: string;
+  /** @nullable */
+  resource_policy_id?: number | null;
+  resource_policy_name: string;
+  kind: 'tag_deny_reopened_differs_by_plugin_version';
+} | {
+  /** @nullable */
+  tag_policy_id?: number | null;
+  tag_policy_name: string;
+  /** @nullable */
+  resource_policy_id?: number | null;
+  resource_policy_name: string;
+  kind: 'tag_sub_result_split_by_resource_policy';
+} | {
+  /** @nullable */
+  policy_id?: number | null;
+  policy_name: string;
+  kind: 'resource_candidacy_not_reproducible';
+} | {
+  tag: string;
+  problem: WireTagAttachmentProblem;
+  kind: 'tag_attachment_not_reproducible';
 } | {
   declared: WireEngineType;
   service_def_name: string;

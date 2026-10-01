@@ -123,13 +123,39 @@
 //!   `ranger-servicedef-tag.json` — shipped in both jars — declares the tag
 //!   enricher.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use egret_ranger_eval::eval::{evaluate, AccessRequest, Decision, EngineConfig, UndecidableCause};
+use egret_ranger_eval::eval::{
+    evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, EngineConfig,
+    MaskDecision, ResolvedTag, RowFilterDecision, TagServiceResource, UndecidableCause,
+    UnenrichedTags,
+};
 use egret_ranger_eval::model::{ServicePolicySet, TagPolicyBlock, Unmodelled};
-use egret_ranger_eval::resource::RequestResource;
+use egret_ranger_eval::resource::{MatchType, RequestResource};
 use egret_ranger_eval::servicedef::ServiceDef;
 use serde_json::{json, Value};
+
+/// One attachment shaped the way `ServiceTags::from_assignments` writes a
+/// COLUMN-level one: four `resourceElements` levels, an enabled service
+/// resource, and none of `attributes` / `options` / `validityPeriods` — the
+/// payload egret itself emits, so every attachment refusal SP4d-2b Task 4 added
+/// is inert for it.
+fn column_tag(name: &str, match_type: MatchType) -> ResolvedTag {
+    ResolvedTag {
+        name: name.to_string(),
+        match_type,
+        attributes: BTreeMap::new(),
+        options: BTreeSet::new(),
+        validity_periods: 0,
+        attached_through: TagServiceResource {
+            levels: ["catalog", "schema", "table", "column"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            is_enabled: true,
+        },
+    }
+}
 
 // ── fixtures and helpers ─────────────────────────────────────────────────
 
@@ -262,14 +288,26 @@ fn causes(d: &Decision) -> Vec<UndecidableCause> {
     }
 }
 
-fn tag_causes(d: &Decision) -> Vec<TagPolicyBlock> {
-    causes(d)
-        .into_iter()
-        .filter_map(|c| match c {
-            UndecidableCause::EnvelopeConstruct(Unmodelled::TagPolicies(b)) => Some(b),
-            _ => None,
-        })
-        .collect()
+/// **The instrument, and what SP4d-2b Task 3 changed about it.**
+///
+/// Until Task 3 the composed evaluator REFUSED a `tagPolicies` block it could
+/// not show inert, and every test below asserted that refusal by naming the
+/// block's policy count. Task 3 EVALUATES the block instead, so that refusal is
+/// gone and "the gate let the tag phase through" needs a different observable.
+///
+/// It has one, and a sharper one: every test below hands the evaluator
+/// `request()`, whose `resolved_tags` is `None`. `tag_candidates` refuses that
+/// with [`UndecidableCause::TagsUnresolved`] — "the caller did not resolve",
+/// which is never the empty set. So a `TagsUnresolved` and nothing else means
+/// the phase RAN, and an answer means the gate narrowed. Each test's claim is
+/// unchanged; what it now proves is that the phase ran, rather than that a
+/// construct was reported.
+fn assert_tag_phase_ran(d: &Decision, label: &str) {
+    assert_eq!(
+        causes(d),
+        vec![UndecidableCause::TagsUnresolved],
+        "{label}: the tag phase must run against this envelope: {d:?}"
+    );
 }
 
 // ── tier (a): the block is absent ────────────────────────────────────────
@@ -359,11 +397,45 @@ fn a_block_this_reader_cannot_count_still_refuses() {
             set.unmodelled
         );
 
+        // This is the ONE tier whose refusal is still the envelope construct
+        // itself after SP4d-2b Task 3: `ServicePolicySet::tag_policies` is
+        // empty for a block whose `policies` array did not bind, so silence
+        // would read as "the policies decided nothing". `tag_candidates`
+        // raises it, before every other return in the phase.
         let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
-        assert!(
-            !tag_causes(&d).is_empty(),
-            "{block} must force Undecidable: {d:?}"
+        assert_eq!(
+            causes(&d),
+            vec![UndecidableCause::EnvelopeConstruct(
+                Unmodelled::TagPolicies(TagPolicyBlock::Unreadable)
+            )],
+            "{block} must force Undecidable naming the unreadable block: {d:?}"
         );
+    }
+}
+
+/// **FIX ROUND 1, MINOR 2.** The `Unreadable` refusal was asserted only through
+/// `evaluate`. It reaches a MASK and a ROW-FILTER decision by the same two
+/// routes — `request_preamble`'s envelope sweep and `tag_candidates`'s, which
+/// since this round skip the same thing — and `evaluateTagPolicies` runs for
+/// policy types 1 and 2 as well, so an unreadable block can hide a tag mask
+/// exactly as it can hide a tag deny.
+///
+/// Asserted as an EXACT cause vector on both, which is also what pins that the
+/// two sweeps' overlap is deduplicated rather than reported twice.
+#[test]
+fn a_block_this_reader_cannot_count_refuses_a_mask_and_a_row_filter_too() {
+    let set = envelope(json!({"tagPolicies": json!("tagPolicies-as-a-string")}));
+    let expected = vec![UndecidableCause::EnvelopeConstruct(
+        Unmodelled::TagPolicies(TagPolicyBlock::Unreadable),
+    )];
+
+    match evaluate_data_mask(&set, &request(), &trino_def(), &no_superusers()) {
+        MaskDecision::Undecidable { why } => assert_eq!(why, expected),
+        other => panic!("an unreadable tag block must refuse a mask: {other:?}"),
+    }
+    match evaluate_row_filter(&set, &request(), &trino_def(), &no_superusers()) {
+        RowFilterDecision::Undecidable { why } => assert_eq!(why, expected),
+        other => panic!("an unreadable tag block must refuse a row filter: {other:?}"),
     }
 }
 
@@ -390,11 +462,7 @@ fn tier_c_live_block_refuses_and_names_the_count() {
     );
 
     let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
-    assert_eq!(
-        tag_causes(&d),
-        vec![TagPolicyBlock::Policies(3)],
-        "the live tag block must force Undecidable naming its 3 policies: {d:?}"
-    );
+    assert_tag_phase_ran(&d, "the live tag block's 3 policies must be evaluated");
 }
 
 /// The fixture's own envelope, parsed whole rather than spliced — the same
@@ -423,7 +491,7 @@ fn the_captured_download_refuses_as_itself() {
 fn an_empty_resolved_tag_set_is_decidable() {
     let set = envelope(json!({"tagPolicies": live_tag_policies()}));
     let req = AccessRequest {
-        resolved_tags: Some(BTreeSet::new()),
+        resolved_tags: Some(UnenrichedTags::new(Vec::new())),
         ..request()
     };
     let d = evaluate(&set, &req, &trino_def(), &no_superusers());
@@ -449,24 +517,54 @@ fn an_empty_resolved_tag_set_is_decidable() {
 fn an_unresolved_tag_set_must_not_take_the_narrowing() {
     let set = envelope(json!({"tagPolicies": live_tag_policies()}));
     let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
-    assert_eq!(
-        tag_causes(&d),
-        vec![TagPolicyBlock::Policies(3)],
-        "resolved_tags: None must NOT be read as an empty tag set: {d:?}"
+    assert_tag_phase_ran(
+        &d,
+        "resolved_tags: None must NOT be read as an empty tag set",
     );
 }
 
 /// A non-empty resolved tag set is no narrowing at all — those tags are
-/// exactly what the tag policies would be evaluated against.
+/// exactly what the tag policies are evaluated against, and since SP4d-2b
+/// Task 3 that sentence is MEASURABLE rather than a reason to refuse.
+///
+/// Both halves are asserted against the live block, whose only ACCESS policy
+/// (8839, a clearance deny for `public` with an exception for `admin`) covers
+/// the tag value `"tag"`:
+///
+/// * a request tagged `pii` reaches no ACCESS tag candidate, so the tag phase
+///   determines nothing and the envelope's resource policy answers;
+/// * the same request tagged `tag` reaches 8839, which denies.
+///
+/// One fixture, one changed tag name, opposite answers — which is what "the
+/// tags are what the policies are evaluated against" actually claims.
 #[test]
-fn a_non_empty_resolved_tag_set_still_refuses() {
+fn a_non_empty_resolved_tag_set_is_what_the_tag_policies_see() {
     let set = envelope(json!({"tagPolicies": live_tag_policies()}));
-    let req = AccessRequest {
-        resolved_tags: Some(BTreeSet::from(["pii".to_string()])),
+    let tagged = |name: &str| AccessRequest {
+        resolved_tags: Some(UnenrichedTags::new(vec![column_tag(
+            name,
+            MatchType::Self_,
+        )])),
         ..request()
     };
-    let d = evaluate(&set, &req, &trino_def(), &no_superusers());
-    assert_eq!(tag_causes(&d), vec![TagPolicyBlock::Policies(3)], "{d:?}");
+
+    let d = evaluate(&set, &tagged("pii"), &trino_def(), &no_superusers());
+    assert!(
+        matches!(&d, Decision::Allowed { policy_name, .. } if policy_name == "p"),
+        "no ACCESS tag policy covers `pii`, so the resource policy answers: {d:?}"
+    );
+
+    let d = evaluate(&set, &tagged("tag"), &trino_def(), &no_superusers());
+    assert!(
+        matches!(
+            &d,
+            Decision::Denied {
+                policy_id: Some(8839),
+                ..
+            }
+        ),
+        "the live clearance policy covers the tag `tag` and denies: {d:?}"
+    );
 }
 
 // ── the enricher gate is the service-def, never the engine type ──────────
@@ -579,11 +677,7 @@ fn the_block_s_own_service_def_can_supply_the_enricher() {
     assert_eq!(def.has_tag_enricher(), Some(false));
 
     let d = evaluate(&set, &request(), &def, &no_superusers());
-    assert_eq!(
-        tag_causes(&d),
-        vec![TagPolicyBlock::Policies(3)],
-        "the tag def's own enricher must still force Undecidable: {d:?}"
-    );
+    assert_tag_phase_ran(&d, "the tag def's own enricher must still admit the phase");
 }
 
 /// The same refusal with the stock def dropped in whole, rather than only its
@@ -596,7 +690,7 @@ fn a_block_carrying_the_whole_stock_tag_def_refuses() {
     let set = envelope(json!({"tagPolicies": block}));
 
     let d = evaluate(&set, &request(), &def_without_enrichers(), &no_superusers());
-    assert_eq!(tag_causes(&d), vec![TagPolicyBlock::Policies(3)], "{d:?}");
+    assert_tag_phase_ran(&d, "a block carrying the whole stock tag def");
 }
 
 /// A tag `serviceDef` whose `contextEnrichers` key is ABSENT is unknown, not
@@ -618,10 +712,9 @@ fn an_absent_tag_def_enricher_key_is_unknown_not_absent() {
 
     let set = envelope(json!({"tagPolicies": live}));
     let d = evaluate(&set, &request(), &def_without_enrichers(), &no_superusers());
-    assert_eq!(
-        tag_causes(&d),
-        vec![TagPolicyBlock::Policies(3)],
-        "an unknown tag-def enricher must not take the narrowing: {d:?}"
+    assert_tag_phase_ran(
+        &d,
+        "an unknown tag-def enricher must not take the narrowing",
     );
 }
 
@@ -644,11 +737,7 @@ fn either_def_declaring_an_enricher_blocks_the_narrowing() {
             "tagPolicies": live_tag_policies_with_enrichers(tag_enrichers),
         }));
         let d = evaluate(&set, &request(), &def, &no_superusers());
-        assert_eq!(
-            tag_causes(&d),
-            vec![TagPolicyBlock::Policies(3)],
-            "{label} must refuse: {d:?}"
-        );
+        assert_tag_phase_ran(&d, label);
     }
 }
 
@@ -663,7 +752,7 @@ fn an_empty_resolved_tag_set_narrows_even_with_both_enrichers() {
         ),
     }));
     let req = AccessRequest {
-        resolved_tags: Some(BTreeSet::new()),
+        resolved_tags: Some(UnenrichedTags::new(Vec::new())),
         ..request()
     };
     let d = evaluate(&set, &req, &trino_def(), &no_superusers());
@@ -710,10 +799,9 @@ fn an_absent_context_enrichers_key_is_unknown_not_absent() {
 
     let set = envelope(json!({"tagPolicies": live_tag_policies()}));
     let d = evaluate(&set, &request(), &def, &no_superusers());
-    assert_eq!(
-        tag_causes(&d),
-        vec![TagPolicyBlock::Policies(3)],
-        "an unknown enricher must not take the narrowing: {d:?}"
+    assert_tag_phase_ran(
+        &d,
+        "an unknown resource-def enricher must not take the narrowing",
     );
 
     // The shapes that produced this measurement, asserted rather than
@@ -766,7 +854,7 @@ fn a_tag_service_def_that_is_not_an_object_is_unknown() {
     block["serviceDef"] = json!("not a def");
     let set = envelope(json!({"tagPolicies": block}));
     let d = evaluate(&set, &request(), &def_without_enrichers(), &no_superusers());
-    assert_eq!(tag_causes(&d), vec![TagPolicyBlock::Policies(3)], "{d:?}");
+    assert_tag_phase_ran(&d, "a tag service-def that is not an object");
 }
 
 /// Tier (a) and tier (b) leave `tag_service_def` as `Value::Null`, and both

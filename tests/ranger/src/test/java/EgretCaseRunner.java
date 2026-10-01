@@ -6,13 +6,17 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.apache.ranger.authorization.hadoop.config.RangerPluginConfig;
 import org.apache.ranger.authorization.utils.JsonUtils;
+import org.apache.ranger.plugin.contextenricher.RangerTagForEval;
 import org.apache.ranger.plugin.model.RangerPolicy;
+import org.apache.ranger.plugin.model.RangerTag;
 import org.apache.ranger.plugin.policyengine.RangerAccessRequestImpl;
 import org.apache.ranger.plugin.policyengine.RangerAccessResourceImpl;
 import org.apache.ranger.plugin.policyengine.RangerAccessResult;
 import org.apache.ranger.plugin.policyengine.RangerPluginContext;
 import org.apache.ranger.plugin.policyengine.RangerPolicyEngineImpl;
 import org.apache.ranger.plugin.policyengine.RangerPolicyEngineOptions;
+import org.apache.ranger.plugin.policyresourcematcher.RangerPolicyResourceMatcher;
+import org.apache.ranger.plugin.util.RangerAccessRequestUtil;
 import org.apache.ranger.plugin.util.ServicePolicies;
 import org.junit.Assume;
 import org.junit.Test;
@@ -50,10 +54,15 @@ import java.util.Set;
  * [ { "id": "…",
  *     "serviceType": "trino" | "starrocks",
  *     "policyType": 0 | 1 | 2,
- *     "servicePolicies": { … a whole ServicePolicies download … },
+ *     "servicePolicies": { … a whole ServicePolicies download, tagPolicies included … },
  *     "request": { "user": "…", "groups": […], "roles": […],
- *                  "accessType": "…", "resource": { "catalog": "…", … } } }, … ]
+ *                  "accessType": "…", "resource": { "catalog": "…", … },
+ *                  "tags": [ { "type": "pii", "matchType": "SELF",
+ *                              "attributes": { … } }, … ] } }, … ]
  * </pre>
+ *
+ * <p>{@code request.tags} is OPTIONAL and is the enricher's OUTPUT, handed in
+ * directly — see {@link #tagsFrom}.
  *
  * <p>verdicts.json (output): one object per case, in the same order —
  * {@code { id, error, isAllowed, isAccessDetermined, policyId, maskType,
@@ -140,7 +149,19 @@ public class EgretCaseRunner {
             verdict.addProperty("maskCondition", res.getMaskCondition());
             verdict.addProperty("filterExpr", res.getFilterExpr());
         } catch (Throwable t) {
-            verdict.addProperty("error", t.getClass().getName() + ": " + t.getMessage());
+            // WITH the top frames. "the Ranger engine threw NullPointerException"
+            // names a class and a message and says nothing about WHICH of the
+            // engine's several hundred methods produced it, which turned an
+            // afternoon into a jar-wide disassembly once. Four frames is enough
+            // to name the method and its caller, and short enough to stay
+            // readable inside a failure message that also carries the policy
+            // JSON.
+            StringBuilder where = new StringBuilder();
+            StackTraceElement[] frames = t.getStackTrace();
+            for (int i = 0; i < frames.length && i < 4; i++) {
+                where.append("\n      at ").append(frames[i]);
+            }
+            verdict.addProperty("error", t.getClass().getName() + ": " + t.getMessage() + where);
         }
         return verdict;
     }
@@ -176,7 +197,86 @@ public class EgretCaseRunner {
         // setAccessType rewrites null/empty to ANY_ACCESS; the generator never
         // emits either, so what is set here is what is evaluated.
         r.setAccessType(req.get("accessType").getAsString());
+        if (req.has("tags")) {
+            // AFTER setResource, which is the only setter on this class that
+            // touches the context (it clears ISREQUESTPREPROCESSED). Nothing
+            // between here and evaluatePolicies writes the TAGS key — see
+            // tagsFrom.
+            RangerAccessRequestUtil.setRequestTagsInContext(
+                    r.getContext(), tagsFrom(req.getAsJsonArray("tags")));
+        }
         return r;
+    }
+
+    /**
+     * The request's resolved tag set, built as {@code RangerTagEnricher.enrich}
+     * would have left it.
+     *
+     * <p><b>The enricher is bypassed on BOTH sides, deliberately and
+     * symmetrically.</b> {@code egret-ranger-eval} takes the resolved tag set as
+     * an INPUT ({@code AccessRequest::resolved_tags}) rather than deriving it —
+     * whether the set is the one an enricher would have produced is documented
+     * there as the CALLER's obligation. So the differential question is what
+     * {@code evaluateTagPolicies} does with a given set, and the honest way to
+     * ask it is to hand the same set to both implementations. Running a real
+     * {@link org.apache.ranger.plugin.contextenricher.RangerTagEnricher} here
+     * would need a tag store and a poll against a Ranger admin, and would test
+     * the enricher rather than the phase.
+     *
+     * <p>Two consequences are load-bearing and are honoured by the generator
+     * (`crates/egret-ranger-eval/tests/differential.rs`):
+     *
+     * <ul>
+     *   <li>Neither service-def in a generated case declares
+     *       {@code contextEnrichers} (the Rust side strips the key), so
+     *       {@code RangerDefaultRequestProcessor.enrich} iterates an EMPTY
+     *       enricher list and cannot overwrite what is put here. Measured with
+     *       {@code javap -c} on 2.5.0 and 2.8.0: the only writer of
+     *       {@code RangerAccessRequestUtil.KEY_CONTEXT_TAGS} on the
+     *       {@code evaluatePolicies → preProcess} path is
+     *       {@code RangerContextEnricher.enrich}; {@code preProcess} itself
+     *       writes only CURRENT_USER, CURRENT_USER_ROLES, OWNER, ZONE_NAMES and
+     *       ISREQUESTPREPROCESSED.</li>
+     *   <li>The enricher's own DROP of a service resource whose key set no
+     *       hierarchy admits ({@code processServiceTags}) therefore does not run
+     *       here, so the generator never emits an attachment that would be
+     *       dropped — it would be a divergence manufactured by the harness
+     *       rather than one found in Ranger.</li>
+     * </ul>
+     *
+     * <p>A {@link java.util.LinkedHashSet} rather than a {@code HashSet}: the
+     * order the generator listed the tags in is the order the Rust side's
+     * {@code Vec} carries, so the one thing neither implementation's comparator
+     * can break a tie on is at least the SAME on both sides.
+     * {@code RangerTagForEval.equals} — type, attributes, matchType, options,
+     * validityPeriods — still does the de-duplication, exactly as the Rust
+     * {@code ResolvedTag::identity} does.
+     */
+    private Set<RangerTagForEval> tagsFrom(JsonArray tags) {
+        Set<RangerTagForEval> out = new LinkedHashSet<>();
+        for (JsonElement element : tags) {
+            JsonObject t = element.getAsJsonObject();
+            Map<String, String> attributes = new LinkedHashMap<>();
+            if (t.has("attributes") && !t.get("attributes").isJsonNull()) {
+                for (Map.Entry<String, JsonElement> e : t.getAsJsonObject("attributes").entrySet()) {
+                    attributes.put(e.getKey(), e.getValue().getAsString());
+                }
+            }
+            // The 2-arg constructor, which is `RangerTag(type, attributes)`.
+            // `owner`, `options` and `validityPeriods` stay null — and
+            // RangerTagForEval's constructor substitutes emptyMap()/emptyList()
+            // for the two it reads, which is the shape the generator emits
+            // (it never produces a tag carrying options or validity periods,
+            // because egret-ranger-eval REFUSES those rather than modelling
+            // them).
+            RangerTag tag = new RangerTag(t.get("type").getAsString(), attributes);
+            // valueOf, not a lookup table: an unknown match type must THROW and
+            // surface as this case's `error`, not silently become NONE.
+            RangerPolicyResourceMatcher.MatchType matchType =
+                    RangerPolicyResourceMatcher.MatchType.valueOf(t.get("matchType").getAsString());
+            out.add(new RangerTagForEval(tag, matchType));
+        }
+        return out;
     }
 
     private Set<String> stringSet(JsonObject o, String field) {

@@ -197,6 +197,170 @@ pub fn match_policy_resources(
     out
 }
 
+/// Whether Ranger's `RangerResourceTrie` — for a **tag** request, the ONLY
+/// filter that decides which policies are evaluated — returns the same
+/// evaluator set that [`match_resource_of_type`] does for `policy_value`.
+///
+/// # Why a tag request needs this and a resource request does not
+///
+/// For a resource request the trie is a pre-filter and
+/// `RangerDefaultPolicyEvaluator.evaluate` then asks the matcher itself
+/// (offsets 222-258 in 2.5.0, 207-243 in 2.8.0), so an over-returning trie
+/// costs nothing. For a `RangerTagAccessRequest` that branch is **not taken**:
+/// `evaluate` reads `((RangerTagAccessRequest) request).getMatchType()` and the
+/// policy's own matcher is never consulted. **The trie IS the filter**, so
+/// anywhere it disagrees with the matcher, the matcher is the wrong instrument.
+///
+/// # Measured, not reasoned about
+///
+/// Against the real `ranger-plugins-common` 2.5.0 on the `tag` service-def
+/// (`wildCard: true`, `ignoreCase: false`), building a real
+/// `RangerResourceTrie` over one `RangerDefaultPolicyResourceMatcher` per
+/// policy value and comparing `getEvaluatorsForResource` with `getMatchType`:
+///
+/// | policy value | compiled shape | trie == matcher |
+/// |---|---|---|
+/// | `pii` | [`ValueMatcher::Equals`] | yes |
+/// | `*`, `**` | match-any | yes |
+/// | `p*`, `p**` | [`ValueMatcher::StartsWith`] | yes |
+/// | `*i`, `*ii` | [`ValueMatcher::EndsWith`] | **no** — returned for `p`, `pi`, `pix`, `PII` and `""` |
+/// | `p*x`, `pi?`, `pi*i`, `p?i` | [`ValueMatcher::Wildcard`] | **no** — `p*x` and `pi*i` are returned for `pii` |
+///
+/// The mechanism is one line of `RangerResourceTrie.insert`: a value is keyed
+/// by its literal prefix up to the FIRST wildcard character and parked there as
+/// a wildcard evaluator, collected for every resource whose path runs through
+/// that node. For `Equals` that prefix is the whole value; for `StartsWith` it
+/// is exactly the prefix `starts_with` tests; for a leading `*` it is the empty
+/// string, i.e. the root, i.e. everything.
+///
+/// The direction is the reason this is a refusal and not a footnote: the trie
+/// is WIDER, so a tag policy Ranger evaluates is one this crate would not —
+/// and for a DENY policy that is fail-open.
+///
+/// # This classifies a VALUE; the two flags are the caller's
+///
+/// `isExcludes` and `isRecursive` sit on the `RangerPolicyResource`, not on any
+/// one value, and each widens the trie on its own —
+/// `RangerResourceTrie.insert` ends
+/// `if (isWildcard || isRecursive) addWildcardEvaluator(...)`, and an excludes
+/// resource lands in `getInheritedEvaluators()`. They are refused by
+/// [`crate::eval::TagResourceProblem`], which is where the whole resource map
+/// is in view. Reading this function as "the resource is reproducible" rather
+/// than "this value is" is exactly the mistake that let `isRecursive` through
+/// the first time.
+///
+/// # No `ignore_case` parameter, and why that is not an omission
+///
+/// The trie lower-cases both the inserted key and the looked-up value when the
+/// resource's `optIgnoreCase` is set, and the matcher folds both sides too — so
+/// the two move together and the AGREEMENT classification above is the same
+/// either way. (The `tag` def sets `ignoreCase: false`, so on the tag path the
+/// question does not arise at all.) The one place that reasoning could break is
+/// a character whose lowercase form is longer than one code point, where a
+/// folded trie key and a folded request value can disagree on length; no
+/// identifier on either engine admits one — see [`fold`].
+pub fn trie_reproduces_matcher(policy_value: &str, wild_card: bool) -> bool {
+    if policy_value.is_empty() {
+        // `RangerAbstractResourceMatcher.init` drops an empty policy value
+        // before any matcher is built, which can make a level match-ANY when
+        // it was the only value. Whether the trie does the same was not
+        // measured, and egret emits no empty tag value, so it is refused
+        // rather than guessed at.
+        return false;
+    }
+    match ValueMatcher::classify(policy_value, wild_card) {
+        // Match-any: the trie parks it at the root and returns it for every
+        // resource, which is exactly `is_match_any`.
+        None => true,
+        Some(ValueMatcher::Equals(_)) | Some(ValueMatcher::StartsWith(_)) => true,
+        Some(ValueMatcher::EndsWith(_)) | Some(ValueMatcher::Wildcard(_)) => false,
+    }
+}
+
+/// Whether ONE resource level's trie provably does not return a policy carrying
+/// `level`, for the request value at that level.
+///
+/// The per-level half of Ranger's candidate filter.
+/// `RangerResourceEvaluatorsRetriever.getEvaluators` intersects, over the keys
+/// the REQUEST carries, the evaluator set each level's trie returns — so one
+/// level answering "not in this trie" removes the policy from the whole answer,
+/// whatever the other levels say. That makes absence provable locally, which is
+/// the only way it is provable at all: a policy that declares FEWER levels than
+/// the request is added to the missing levels' tries as an *inherited*
+/// evaluator (`isAncestorOf`) and is unioned into every lookup there, so nothing
+/// can be concluded from a level the policy does not declare.
+///
+/// Three conditions, and all three are about this level only:
+///
+/// * **no `isExcludes`** — `RangerResourceTrie`'s build loop sends an excludes
+///   resource to `addInheritedEvaluator` for THIS level, i.e. it is returned for
+///   every value of it;
+/// * **no `isRecursive`** — `insert` ends
+///   `if (isWildcard || isRecursive) addWildcardEvaluator(...)`, so the value
+///   becomes a prefix match in the trie while the matcher still reads it exactly;
+/// * **every value trie-prefix-exact** ([`trie_reproduces_matcher`]) — otherwise
+///   the trie parks the value at a shorter prefix than the matcher tests, and a
+///   matcher non-match is not a trie non-match.
+///
+/// With those, this level's trie membership IS [`LevelMatcher::is_match`], and a
+/// non-match is a proof of absence. Measured per row in
+/// `tests/ranger/src/test/java/EgretResourceTrieCandidacyTest.java`.
+pub fn level_excluded_by_trie(
+    level: &ResourceLevel,
+    def: Option<&ResourceDef>,
+    request_value: &str,
+) -> bool {
+    // ⚠ **KNOWN GAP, measured and NOT closed: an EMPTY request value.**
+    //
+    // SP4d-2b Task 5, fix round 1. `RangerAbstractResourceMatcher.isAllValuesRequested`
+    // treats `""` and `*` alike and the MATCHER short-circuits on it before reading
+    // a policy value, so a policy value that is not match-any answers `false`
+    // below and this function reports the policy ABSENT. The trie does not treat
+    // the two alike, and it does not agree with the matcher for `""`.
+    //
+    // MEASURED on ranger 2.8.0, one fixture with only the request changed (a tag
+    // deny at priority 0, a deny-capable allower at priority 1, and a policy whose
+    // only level is the literal `no_such_value_at_all` at priority 0):
+    //
+    // | request | Ranger | what this function says |
+    // |---|---|---|
+    // | `{catalog: ""}` | reaches the literal policy → `Allowed` | absent ✗ |
+    // | `{catalog: "*"}` | does not → `Denied` (the restore runs) | absent ✓ |
+    // | `{catalog: "", database: …, table: …, column: …}` | does NOT → `Denied` | absent ✓ |
+    //
+    // So the first row is wrong and the third is right, and **the rule that
+    // separates them is not established**: `RangerResourceEvaluatorsRetriever`
+    // intersects over the request's keys and a policy declaring fewer levels is an
+    // *inherited* evaluator in the deeper ones, so the depth of the request is in
+    // it somewhere. A guard on "the request value is empty" fixes row 1 and breaks
+    // row 3 — measured, 7 disagreements at the recorded seed — so it is not
+    // written here. **A rule fitted to three rows would be a guess, and this
+    // function's whole job is to be a proof.**
+    //
+    // Why it is deferred rather than refused: the only direction measured is
+    // fail-CLOSED (the crate restores a tag deny where Ranger allows), and an
+    // empty REQUEST level is not something egret sends — `perm_compile`'s
+    // `request_resource` builds concrete values from the target and
+    // `scope_to_resources`' `Access` arm fills unnamed levels with `*`, not `""`.
+    // It is reachable from the corpus and from a hand-built request, which is why
+    // it is written down here and in `tests/ranger/README.md` rather than left in
+    // a report. `restore_duel` keeps its root value concrete so the gate does not
+    // carry a standing disagreement.
+
+    if level.is_excludes || level.is_recursive {
+        return false;
+    }
+    let wild_card = def.map(|d| d.matcher_options.wild_card).unwrap_or(true);
+    if !level
+        .values
+        .iter()
+        .all(|v| trie_reproduces_matcher(v, wild_card))
+    {
+        return false;
+    }
+    !LevelMatcher::build(level, def).is_match(Some(request_value))
+}
+
 // ── The matcher itself ───────────────────────────────────────────────────
 
 /// One initialised `RangerDefaultPolicyResourceMatcher`.
@@ -1282,6 +1446,62 @@ mod tests {
         assert_eq!(split("?*?"), vec![Token::One, Token::Any, Token::One]);
         // `?` never collapses.
         assert_eq!(split("??"), vec![Token::One, Token::One]);
+    }
+
+    /// [`trie_reproduces_matcher`]'s table.
+    ///
+    /// # This is HALF of the claim, and the other half is in Java
+    ///
+    /// FIX ROUND 1, IMPORTANT 4: on its own this test asserts a hard-coded
+    /// table against the function that implements that same table, which is a
+    /// correlated oracle — it cannot fail unless someone edits both. The table
+    /// is MEASURED from the real jar by
+    /// `tests/ranger/src/test/java/EgretTagTrieAgreementTest.java`, which
+    /// builds a real `RangerResourceTrie` and a real
+    /// `RangerDefaultPolicyResourceMatcher` per value and compares them over
+    /// the same request list. That one breaks on a `ranger.version` bump; this
+    /// one breaks when the Rust classifier drifts from it. Neither is
+    /// sufficient alone, and they must be edited together.
+    ///
+    /// Measured on 2.5.0 **and** 2.8.0, identically. Each row is a policy
+    /// value; `true` means the trie returned exactly the evaluators
+    /// `getMatchType` accepted, over the request values `pii`, `PII`, `p`,
+    /// `pix`, `pi`, `xii`, `ii`, `""`, `piix` and `pii_x`.
+    #[test]
+    fn trie_agreement_matches_the_measured_table() {
+        let table: &[(&str, bool)] = &[
+            ("pii", true),
+            ("PII", true),
+            ("*", true),
+            ("**", true),
+            ("p*", true),
+            ("p**", true),
+            // The trie parks a leading-`*` value at the ROOT and returns it
+            // for every resource; the matcher tests `ends_with`.
+            ("*i", false),
+            ("*ii", false),
+            // ...and a value with an interior wildcard at its literal prefix:
+            // `p*x` came back for `pii`, which `wildcardMatch` rejects.
+            ("p*x", false),
+            ("pi?", false),
+            ("pi*i", false),
+            ("p?i", false),
+            // An empty value is dropped by the matcher before any matcher is
+            // built; what the trie does with it was not measured.
+            ("", false),
+        ];
+        for (value, expected) in table {
+            assert_eq!(
+                trie_reproduces_matcher(value, true),
+                *expected,
+                "trie_reproduces_matcher({value:?})"
+            );
+        }
+        // With wildcards DISABLED every non-empty value is a literal, so the
+        // trie keys on the whole string and the two always agree.
+        for (value, _) in table {
+            assert_eq!(trie_reproduces_matcher(value, false), !value.is_empty());
+        }
     }
 
     #[test]

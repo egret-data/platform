@@ -91,7 +91,8 @@
 
 use egret_ranger_eval::eval::{
     Decision, DenyReason, EngineType, MaskDecision, MaskResult, PluginVersion, RowFilterDecision,
-    RowFilterResult, UndecidableCause,
+    RowFilterResult, TagAttachmentProblem, TagNormalisationProblem, TagResourceProblem,
+    UndecidableCause,
 };
 use egret_ranger_eval::model::{ItemBucket, TagPolicyBlock, Unmodelled};
 use egret_ranger_eval::servicedef::{GraphProblem, PolicyType, ServiceDefIssue};
@@ -216,6 +217,117 @@ impl From<&TagPolicyBlock> for WireTagPolicyBlock {
                 count: *count as u32,
             },
             TagPolicyBlock::Unreadable => WireTagPolicyBlock::Unreadable,
+        }
+    }
+}
+
+/// Wire mirror of [`TagResourceProblem`]: why a tag policy's resource map is
+/// one the evaluator cannot filter the way Ranger's `RangerResourceTrie` does
+/// (SP4d-2b Task 2).
+///
+/// Carried as its own `kind`, not a formatted string, for the same reason
+/// [`WireTagPolicyBlock`] carries a `count`: a steward has to be able to tell
+/// "this policy names a second resource level" from "this policy's tag value is
+/// a wildcard", and the remedies differ.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireTagResourceProblem {
+    NotOnlyTheTagResource,
+    Excludes,
+    ValueNotTriePrefixExact { value: String },
+    Recursive,
+}
+
+impl From<&TagResourceProblem> for WireTagResourceProblem {
+    fn from(problem: &TagResourceProblem) -> Self {
+        // NO wildcard arm — see `WireUndecidableCause::from`'s doc.
+        match problem {
+            TagResourceProblem::NotOnlyTheTagResource => {
+                WireTagResourceProblem::NotOnlyTheTagResource
+            }
+            TagResourceProblem::Excludes => WireTagResourceProblem::Excludes,
+            TagResourceProblem::ValueNotTriePrefixExact(value) => {
+                WireTagResourceProblem::ValueNotTriePrefixExact {
+                    value: value.clone(),
+                }
+            }
+            TagResourceProblem::Recursive => WireTagResourceProblem::Recursive,
+        }
+    }
+}
+
+/// Wire mirror of [`TagNormalisationProblem`]: what a tag policy carries that
+/// the TAG policy repository's `normalizeAndPrunePolicies` would rewrite or
+/// reject (SP4d-2b Task 5).
+///
+/// Three `kind`s, and the third is not a variation on the first two: the two
+/// namespaced arms are a WRONG ANSWER this crate declines to give, and
+/// `mask_type_absent` is a CRASH — the plugin cannot build a policy engine from
+/// that download, so nothing it serves is answered. A steward reading
+/// "unsupported tag policy" would have no way to tell "rename the access type"
+/// from "this download breaks the plugin outright", and the second is an
+/// incident.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireTagNormalisationProblem {
+    NamespacedAccessType { access_type: String },
+    NamespacedMaskType { mask_type: String },
+    MaskTypeAbsent,
+}
+
+impl From<&TagNormalisationProblem> for WireTagNormalisationProblem {
+    fn from(problem: &TagNormalisationProblem) -> Self {
+        // NO wildcard arm — see `WireUndecidableCause::from`'s doc.
+        match problem {
+            TagNormalisationProblem::NamespacedAccessType(access_type) => {
+                WireTagNormalisationProblem::NamespacedAccessType {
+                    access_type: access_type.clone(),
+                }
+            }
+            TagNormalisationProblem::NamespacedMaskType(mask_type) => {
+                WireTagNormalisationProblem::NamespacedMaskType {
+                    mask_type: mask_type.clone(),
+                }
+            }
+            TagNormalisationProblem::MaskTypeAbsent => WireTagNormalisationProblem::MaskTypeAbsent,
+        }
+    }
+}
+
+/// Wire mirror of [`TagAttachmentProblem`]: what one resolved tag ATTACHMENT
+/// carries that the evaluator cannot reproduce (SP4d-2b Task 4).
+///
+/// Three `kind`s rather than one sentence, for the same reason
+/// [`WireTagResourceProblem`] has four: the remedies differ and do not overlap.
+/// `options` and `validity_periods` say the tag download carries a validity
+/// construct egret neither emits nor evaluates; `resource_levels` says the
+/// download's service resource is not a shape egret's own writer can produce at
+/// all, which is a question about where the payload came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireTagAttachmentProblem {
+    Options { keys: Vec<String> },
+    ValidityPeriods { count: u32 },
+    ResourceLevels { levels: Vec<String> },
+}
+
+impl From<&TagAttachmentProblem> for WireTagAttachmentProblem {
+    fn from(problem: &TagAttachmentProblem) -> Self {
+        // NO wildcard arm — see `WireUndecidableCause::from`'s doc.
+        match problem {
+            TagAttachmentProblem::Options(keys) => {
+                WireTagAttachmentProblem::Options { keys: keys.clone() }
+            }
+            TagAttachmentProblem::ValidityPeriods(count) => {
+                WireTagAttachmentProblem::ValidityPeriods {
+                    count: *count as u32,
+                }
+            }
+            TagAttachmentProblem::ResourceLevels(levels) => {
+                WireTagAttachmentProblem::ResourceLevels {
+                    levels: levels.clone(),
+                }
+            }
         }
     }
 }
@@ -460,7 +572,13 @@ impl From<&ServiceDefIssue> for WireServiceDefIssue {
     }
 }
 
-// ── UndecidableCause (13 variants as of this task; see the module doc) ──
+// ── UndecidableCause (19 variants; see the module doc) ──────────────────
+//
+// ⚠ This count read `13` until SP4d-2b Task 4 and had been wrong since Task 2
+// added the first tag cause — five variants stale, with nothing to catch it,
+// because the exhaustiveness guard below is on the MATCH and not on any number
+// written beside it. Recount when you add one; a number nobody checks is worse
+// than no number.
 
 /// Wire mirror of [`UndecidableCause`]. `kind` is the discriminator a
 /// frontend switches on; see the module doc for how the constructs each
@@ -517,6 +635,119 @@ pub enum WireUndecidableCause {
     EvalOrderAmbiguous {
         policy_ids: Vec<Option<i64>>,
         policy_names: Vec<String>,
+    },
+    /// The `tagPolicies` block carries policies this decision's type would
+    /// evaluate and the caller resolved no tag set. Not reachable through
+    /// `explain` yet: the tag phase is not composed with the resource phase
+    /// until SP4d-2b Task 3.
+    TagsUnresolved,
+    TagResourceNotReproducible {
+        policy_id: Option<i64>,
+        policy_name: String,
+        problem: WireTagResourceProblem,
+    },
+    /// A tag mask or row-filter policy that produced a result is also
+    /// deny-capable, so Ranger can report its id with a later policy's mask.
+    TagSubPolicyIsDenyCapable {
+        policy_id: Option<i64>,
+        policy_name: String,
+    },
+    /// A tag policy the TAG policy repository would rewrite or remove on the way
+    /// in, in a way the evaluator does not reproduce — or, for
+    /// `mask_type_absent`, one that makes the plugin throw while building its
+    /// repository so that it serves nothing at all.
+    TagPolicyNotNormalisable {
+        policy_id: Option<i64>,
+        policy_name: String,
+        problem: WireTagNormalisationProblem,
+    },
+    /// Two or more tag policies at DIFFERENT `policyPriority` each decide, and
+    /// the engine settles which survives with an arbitration the evaluator does
+    /// not model.
+    ///
+    /// The three lists are POSITIONAL — `policy_ids[i]`, `policy_names[i]` and
+    /// `priorities[i]` describe one policy — for the same reason
+    /// [`WireUndecidableCause::EvalOrderAmbiguous`] carries two: a steward needs
+    /// to see which policies are in contention and at what priority, and
+    /// flattening that into a sentence would lose the priorities, which are the
+    /// thing to change.
+    TagPriorityArbitrationNotModelled {
+        policy_ids: Vec<Option<i64>>,
+        policy_names: Vec<String>,
+        priorities: Vec<i32>,
+    },
+    /// A tag ALLOW in force and a **resource** policy at a strictly higher
+    /// priority that also allows — Ranger settles the composite through
+    /// `accessTypeResults`, which the evaluator does not reproduce.
+    ///
+    /// # ⚠ Its own variant, because the alias put a wrong NOUN in front of a steward
+    ///
+    /// The evaluator's `AccessPriorityCompositeNotModelled` first rode
+    /// [`WireUndecidableCause::TagPriorityArbitrationNotModelled`] as a documented
+    /// alias — same arbitration, same three positional lists, no new schema — so
+    /// that the Critical could land without racing the three files this split
+    /// needs. The cost was one word: that sentence opens "Several **tag** policies
+    /// …", and here one of the two is a RESOURCE policy. Names, ids, priorities and
+    /// the remedy were all correct; the noun was not, which is this branch's
+    /// recurring defect class (a label true of some of the states it is shown for).
+    ///
+    /// So the two fields are NAMED rather than positional: the steward-facing fact
+    /// is *which* policy is the tag one, and a `Vec` cannot say that. Measured
+    /// rarity, for the copy's sake: **0 of 1148** composed-random cases and 10 of
+    /// 4000 overall, so the sentence must not imply it is common.
+    AccessPriorityCompositeNotModelled {
+        /// The tag policy whose ALLOW was in force. It can only be the tag
+        /// phase's: `allowed` becomes true at one site, which also sets
+        /// `priority`, and evaluation is priority-DESCENDING, so any later
+        /// candidate has `found.priority <= priority` — proved, not sampled.
+        tag_policy_id: Option<i64>,
+        tag_policy_name: String,
+        tag_priority: i32,
+        /// The resource policy at a strictly higher priority that also allowed.
+        resource_policy_id: Option<i64>,
+        resource_policy_name: String,
+        resource_priority: i32,
+    },
+    /// A tag DENY and a strictly higher-priority resource policy that allows —
+    /// a shape Ranger 2.5.0 and 2.8.0 answer DIFFERENTLY, so it can only be
+    /// decided once the running plugin version is known.
+    TagDenyReopenedDiffersByPluginVersion {
+        /// The plugin version the caller declared, or `null` if it declared none.
+        ///
+        /// The two states need DIFFERENT advice and the UI branches on it: a known
+        /// 2.5.0 means the running plugin is identified and the refusal is that
+        /// 2.5.0's arm is unmodelled — there is nothing to record. `null` means the
+        /// caller did not say, and recording it would make half of these
+        /// answerable. `2_8_0` never appears: that is the version the evaluator
+        /// reproduces, so the refusal is not raised for it.
+        plugin_version: Option<WirePluginVersion>,
+        tag_policy_id: Option<i64>,
+        tag_policy_name: String,
+        resource_policy_id: Option<i64>,
+        resource_policy_name: String,
+    },
+    /// A tag mask or row filter was displaced in part by a strictly
+    /// higher-priority resource policy: Ranger reports the tag policy's id with
+    /// the resource policy's mask.
+    TagSubResultSplitByResourcePolicy {
+        tag_policy_id: Option<i64>,
+        tag_policy_name: String,
+        resource_policy_id: Option<i64>,
+        resource_policy_name: String,
+    },
+    /// Whether Ranger's candidate filter (its resource trie) returns this policy
+    /// decides the request, and the evaluator cannot establish which way.
+    ResourceCandidacyNotReproducible {
+        policy_id: Option<i64>,
+        policy_name: String,
+    },
+    /// One tag ATTACHMENT in this request's resolved set carries something the
+    /// evaluator cannot reproduce. Named by TAG rather than by policy: the
+    /// construct is on the tag download, and it changes every tag policy's
+    /// candidacy at once.
+    TagAttachmentNotReproducible {
+        tag: String,
+        problem: WireTagAttachmentProblem,
     },
     EngineMismatch {
         declared: WireEngineType,
@@ -613,6 +844,101 @@ impl From<&UndecidableCause> for WireUndecidableCause {
                 policy_ids: policy_ids.clone(),
                 policy_names: policy_names.clone(),
             },
+            UndecidableCause::TagsUnresolved => WireUndecidableCause::TagsUnresolved,
+            UndecidableCause::TagSubPolicyIsDenyCapable {
+                policy_id,
+                policy_name,
+            } => WireUndecidableCause::TagSubPolicyIsDenyCapable {
+                policy_id: *policy_id,
+                policy_name: policy_name.clone(),
+            },
+            UndecidableCause::TagSubResultSplitByResourcePolicy {
+                tag_policy_id,
+                tag_policy_name,
+                resource_policy_id,
+                resource_policy_name,
+            } => WireUndecidableCause::TagSubResultSplitByResourcePolicy {
+                tag_policy_id: *tag_policy_id,
+                tag_policy_name: tag_policy_name.clone(),
+                resource_policy_id: *resource_policy_id,
+                resource_policy_name: resource_policy_name.clone(),
+            },
+            UndecidableCause::ResourceCandidacyNotReproducible {
+                policy_id,
+                policy_name,
+            } => WireUndecidableCause::ResourceCandidacyNotReproducible {
+                policy_id: *policy_id,
+                policy_name: policy_name.clone(),
+            },
+            UndecidableCause::TagResourceNotReproducible {
+                policy_id,
+                policy_name,
+                problem,
+            } => WireUndecidableCause::TagResourceNotReproducible {
+                policy_id: *policy_id,
+                policy_name: policy_name.clone(),
+                problem: WireTagResourceProblem::from(problem),
+            },
+            UndecidableCause::TagPolicyNotNormalisable {
+                policy_id,
+                policy_name,
+                problem,
+            } => WireUndecidableCause::TagPolicyNotNormalisable {
+                policy_id: *policy_id,
+                policy_name: policy_name.clone(),
+                problem: WireTagNormalisationProblem::from(problem),
+            },
+            UndecidableCause::TagPriorityArbitrationNotModelled {
+                policy_ids,
+                policy_names,
+                priorities,
+            } => WireUndecidableCause::TagPriorityArbitrationNotModelled {
+                policy_ids: policy_ids.clone(),
+                policy_names: policy_names.clone(),
+                priorities: priorities.clone(),
+            },
+            UndecidableCause::TagDenyReopenedDiffersByPluginVersion {
+                plugin_version,
+                tag_policy_id,
+                tag_policy_name,
+                resource_policy_id,
+                resource_policy_name,
+            } => WireUndecidableCause::TagDenyReopenedDiffersByPluginVersion {
+                plugin_version: plugin_version.map(WirePluginVersion::from),
+                tag_policy_id: *tag_policy_id,
+                tag_policy_name: tag_policy_name.clone(),
+                resource_policy_id: *resource_policy_id,
+                resource_policy_name: resource_policy_name.clone(),
+            },
+            // ⚠ **No longer an alias — SPLIT, and the reason is one word.** This
+            // rode `TagPriorityArbitrationNotModelled` when the Critical landed, to
+            // avoid racing `openapi.json`, the generated client and the exhaustive
+            // TSX switch while they were uncommitted elsewhere. That was the right
+            // call and it cost one noun: the other sentence says "Several TAG
+            // policies", and here one of the two is a RESOURCE policy. Its own
+            // variant now, with the two policies NAMED rather than positional,
+            // because which is which is the steward-facing fact.
+            UndecidableCause::AccessPriorityCompositeNotModelled {
+                tag_policy_id,
+                tag_policy_name,
+                tag_priority,
+                resource_policy_id,
+                resource_policy_name,
+                resource_priority,
+            } => WireUndecidableCause::AccessPriorityCompositeNotModelled {
+                tag_policy_id: *tag_policy_id,
+                tag_policy_name: tag_policy_name.clone(),
+                tag_priority: *tag_priority,
+                resource_policy_id: *resource_policy_id,
+                resource_policy_name: resource_policy_name.clone(),
+                resource_priority: *resource_priority,
+            },
+            UndecidableCause::TagAttachmentNotReproducible { tag, problem } => {
+                WireUndecidableCause::TagAttachmentNotReproducible {
+                    tag: tag.clone(),
+                    problem: WireTagAttachmentProblem::from(problem),
+                }
+            }
             UndecidableCause::EngineMismatch {
                 declared,
                 service_def_name,

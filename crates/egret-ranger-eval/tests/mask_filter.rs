@@ -1181,26 +1181,27 @@ fn a_disabled_mask_policy_is_dropped() {
 }
 
 /// An envelope-level construct poisons a mask decision exactly as it
-/// poisons an access one: `evaluateTagPolicies` runs for policy types 1 and
-/// 2 too (offset 168, before the type is branched on), so a tag policy can
-/// decide a mask.
+/// poisons an access one: everything before the policy-type split runs for
+/// policy types 1 and 2 too.
 ///
-/// The block needs a policy in it — SP4d-2a Task 1 measured an EMPTY block
-/// inert for every policy type, since the `isNotEmpty(evaluators)` branch it
-/// exits at precedes the type split. `tests/tag_tiers.rs` owns the tiers.
+/// `tagPolicies` used to be the illustration and no longer can be — SP4d-2b
+/// Task 3 EVALUATES that block for every policy type instead of refusing it.
+/// The second half keeps the tag claim alive in its new form: the tag phase
+/// runs for a MASK request as well, and refuses this one because
+/// `resolved_tags` is `None`. `tests/tag_arbitration.rs` owns what happens
+/// when it does not.
 #[test]
 fn envelope_constructs_poison_a_mask_decision() {
+    let mask = json!([mask_policy(
+        1,
+        "mask ssn",
+        json!([mask_item("alice", json!({"dataMaskType": "MASK_HASH"}))])
+    )]);
+
     let set: ServicePolicySet = serde_json::from_value(json!({
         "serviceName": "trino",
-        "tagPolicies": {
-            "serviceName": "tag",
-            "policies": [{"id": 70, "name": "pii", "policyType": 1}],
-        },
-        "policies": [mask_policy(
-            1,
-            "mask ssn",
-            json!([mask_item("alice", json!({"dataMaskType": "MASK_HASH"}))])
-        )],
+        "policyDeltas": [{"id": 9}],
+        "policies": mask.clone(),
     }))
     .expect("parse policy set");
     let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine());
@@ -1209,6 +1210,22 @@ fn envelope_constructs_poison_a_mask_decision() {
             .iter()
             .any(|c| matches!(c, UndecidableCause::EnvelopeConstruct(_))),
         "{:?}",
+        mask_causes(&d)
+    );
+
+    let set: ServicePolicySet = serde_json::from_value(json!({
+        "serviceName": "trino",
+        "tagPolicies": {
+            "serviceName": "tag",
+            "policies": [{"id": 70, "name": "pii", "policyType": 1}],
+        },
+        "policies": mask,
+    }))
+    .expect("parse policy set");
+    let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine());
+    assert!(
+        mask_causes(&d).contains(&UndecidableCause::TagsUnresolved),
+        "the tag phase runs for a MASK request too: {:?}",
         mask_causes(&d)
     );
 }

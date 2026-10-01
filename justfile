@@ -58,6 +58,42 @@ check:
     cargo clippy --workspace --all-targets -- -D warnings
     just test-shipping-resolution
     {{ no_db_skip }} {{ no_engine }} {{ no_docker }} DATABASE_URL={{ test_database_url }} cargo test --workspace
+    # ⚠ LAST, and it is in `check` rather than beside it ON PURPOSE — open item 0b.
+    # The line above RUNS both Ranger gates and they SELF-SKIP without the flag,
+    # reporting `1 passed … 0.00s` each, so their contribution to that green was
+    # zero. The instrument with the best hit rate in the package — seven defects in
+    # code that 127 unit tests and three review rounds had passed — was reached by
+    # nothing that actually runs: GitHub CI is out of quota on this project, so
+    # `just check` IS the pre-merge gate, and the flag appeared nowhere in it.
+    # Expensive (~2-3 min) so it runs after everything cheap, and it is a named
+    # recipe so a failure is attributable to it rather than lost in a workspace run.
+    just test-ranger-gates
+
+# The two gates whose other side is Apache Ranger ITSELF rather than this repository's
+# reading of the jars: the enforcement gate (`crates/egret-policy`) and the differential
+# corpus (`crates/egret-ranger-eval`, ~4000 generated cases at plugin versions 2.5.0 and
+# 2.8.0 — the two the live Trino and StarRocks plugins run).
+#
+# **A FAILURE HERE ON A MACHINE WITH NO JVM OR MAVEN IS THE CORRECT OUTCOME**, and it is
+# why this is not another `EGRET_ALLOW_*_SKIP` axis. Those exist because a contributor can
+# honestly have a Postgres and no StarRocks, and a verdict about SQL handlers is not what
+# they are changing. This is different: these two are the only instruments on the branch
+# whose other side is the real engine, and somebody about to merge needs to know whether
+# they ran. A green `just check` that silently did not run them is the vacuous green item
+# 0b is about.
+#
+# `EGRET_TEST_RANGER_E2E=1` is what makes them real; without it both self-skip to
+# `1 passed … 0.00s`. No `-q` anywhere: both assert the per-class surefire summary BY NAME,
+# because `mvn` exits 0 having run nothing when a test class is not on the pom's
+# allow-list, and `-q` suppresses the very lines they read.
+#
+# The jars come from Maven Central on first run and live in `~/.m2` after that.
+# `tests/ranger/README.md` is the runbook, including how to re-run a single seed.
+test-ranger-gates:
+    @echo "── Ranger gates (real jars, 2.5.0 + 2.8.0). Needs a JVM and Maven; a failure"
+    @echo "   here means the differential did NOT run, which is the thing to know."
+    EGRET_TEST_RANGER_E2E=1 cargo test -p egret-policy --test ranger_engine_gate --no-fail-fast
+    EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture
 
 # egret-workflow's tests, compiled under the resolution the BINARY ships.
 #

@@ -245,11 +245,13 @@ export const getPermExplainUrl = () => {
  *    route uses, not `list_policies`.** "What explain evaluated" and "what the
  *    engine received" must not be able to drift.
  * 2. **`roles` and `groups` are empty** — see [`ExplainSubject`].
- * 3. **`resolved_tags` is `None`, deliberately.** See the block at the call
- *    site: egret cannot establish the antecedent the narrowing needs, so a
- *    profile whose `tagPolicies` block could decide comes back `Undecidable`
- *    naming that block, rather than answering confidently from a tag set
- *    narrower than `RangerTagEnricher`'s.
+ * 3. **`resolved_tags` carries egret's own resolution, and
+ *    [`resolved_tags_for_target`] is what decides whether it may.** Until
+ *    SP4d-2b Task 7 this was `None` unconditionally, which made every verdict on
+ *    every catalog a profile serves `Undecidable` while that profile's tag block
+ *    held any policy at all. It is now a real tag set for the one resolution
+ *    shown enricher-equivalent, and still `None` — so still a refusal — for
+ *    every state where it is not. The whole argument is on that function.
  * 4. **A `write` explain is several evaluations**, one per Ranger access type
  *    the action maps to on that engine, reported separately.
  * @summary POST because the request carries a subject, an action and a whole target

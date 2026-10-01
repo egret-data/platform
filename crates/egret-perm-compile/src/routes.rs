@@ -42,7 +42,7 @@
 //! family rather than adding a key: SP4c may fold the hand-written policy
 //! editor away entirely, and a key added now would have to be retired twice.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use axum::extract::{FromRef, Path, State};
@@ -62,11 +62,14 @@ use egret_perm::{
 };
 use egret_policy::{
     catalog_names_for_ids_via, catalogs_for_service_via, clearance_gates_for_tags_via,
-    get_service_by_id_via, services_for_catalog_via, tag_keys_by_ids_via,
-    tag_keys_for_resource_via, tag_names_for_keys_via, PolicyStore, ServiceRow,
+    get_service_by_id_via, resolved_tags_for_resource_via, services_for_catalog_via,
+    tag_assignment_coordinates_via, tag_keys_by_ids_via, tag_names_for_keys_via, PolicyStore,
+    ServiceRow,
 };
 use egret_policy_api::ServicePolicies;
-use egret_ranger_eval::eval::{AccessRequest, Decision, EngineConfig};
+use egret_ranger_eval::eval::{
+    AccessRequest, Decision, EngineConfig, TagServiceResource, UnenrichedTags,
+};
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::RequestResource;
 use egret_ranger_eval::servicedef::ServiceDef;
@@ -159,6 +162,11 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         ExplainProfile,
         ExplainAccess,
         ExplainAttribution,
+        // SP4d-2b Task 7 fix round 3: reachable from `ExplainResponse::
+        // tag_resolution_declined`, which is why they are registered — see the
+        // note above about registered-but-unreachable schemas.
+        ExplainTagDecline,
+        ExplainTargetLevel,
         // SP4d-2a Task 5: the Task 4 wire mirrors `ExplainResponse` can
         // actually carry, registered here (the route crate owns the document)
         // rather than in `explain_wire` itself. Every one of these is reachable
@@ -413,21 +421,34 @@ pub enum ExplainAttribution {
     /// the next recompile, and inventing a name for it would be worse than
     /// saying none is known.
     ///
-    /// **`required_roles` is empty under THREE different facts, and the wire
-    /// cannot tell them apart.** (1) The `tags` row is gone, so `tag` is
-    /// `None` and there was no key to look a gate up by. (2) The gate declares
-    /// only `required_groups`, which compiles to no engine deny at all
-    /// (D2/D7). (3) There is no `classification_policies` row for the tag at
-    /// all — `clearance_gates_for_tags_via` filters on
-    /// `cardinality(cp.required_roles) > 0` and the lookup here
-    /// `.unwrap_or_default()`s, so a DELETED gate whose compiled clearance
-    /// policy is still being served reads exactly like an empty one. The page
-    /// states all three; this doc is the only place a Rust reader learns the
-    /// field is ambiguous, so it has to state them too.
+    /// **`required_roles` is `None` when no gate could be looked up, and that
+    /// is why it is an `Option` rather than a list.** The gate is keyed by
+    /// `tags.key`, so when the `tags` row is gone there is no key to look one
+    /// up by and nothing is known about the clearing roles. An empty list
+    /// would state the opposite — that the gate names no role — which SP4d-2a
+    /// measured live and found false: the gate declared `['sp4d2a_cleared']`
+    /// and the page said it declared only groups. `None` makes "we could not
+    /// look" unrepresentable as "there is nothing to find".
+    ///
+    /// **This is an honest 3→2, not 3→3.** `Some([])` still carries two facts
+    /// this wire cannot separate: (1) the gate declares only
+    /// `required_groups`, which compiles to no engine deny at all (D2/D7), and
+    /// (2) there is no `classification_policies` row for the tag at all —
+    /// `clearance_gates_for_tags_via` filters on
+    /// `cardinality(cp.required_roles) > 0` and `clearing_roles` turns a miss
+    /// into an empty list, so a DELETED gate whose compiled clearance
+    /// policy is still being served reads exactly like a groups-only one.
+    /// Separating those two needs a second query that distinguishes "no row"
+    /// from "row with no roles"; until something asks for it, the page says
+    /// both out loud.
     Clearance {
         tag_id: Uuid,
         tag: Option<String>,
-        required_roles: Vec<String>,
+        /// `None` = no gate was looked up because `tag` is `None`.
+        /// `Some(roles)` = the lookup ran, and an empty `roles` is a fact
+        /// about the gate rather than about the lookup. `attribution_for` is
+        /// its only producer, via `clearing_roles`.
+        required_roles: Option<Vec<String>>,
         locator: Option<String>,
     },
 }
@@ -472,6 +493,94 @@ pub struct ExplainProfile {
     pub service_name: String,
     pub engine: WireEngineType,
     pub accesses: Vec<ExplainAccess>,
+    /// The tag set **this profile's** verdicts could have been decided by.
+    ///
+    /// # ⚠ This lives on the PROFILE, and the move is the fix for three defects at once
+    ///
+    /// **Whole-branch review, H1 / H2 / H3 — one defect in three costumes: a
+    /// value computed once per REQUEST, presented as though it were per-verdict.**
+    /// It was `ExplainResponse::tags`, one list for the whole response, and the
+    /// page rendered one heading under all profiles. Each costume was measured:
+    ///
+    /// * **H3, and reachable with no StarRocks, no second profile and no tag
+    ///   service at all.** The list was returned even when `profiles` is EMPTY,
+    ///   so a catalog nothing serves rendered "Nothing is enforcing" and "Tags
+    ///   that decide this request — pii" on one screen, with no verdicts in
+    ///   existence. `catalog_tag_assignments` has no catalog column, so a sibling
+    ///   catalog's assignment on the same warehouse resolves for this target too.
+    /// * **H1.** A catalog served by one profile with a tag service and one
+    ///   without made the page say, once, that these tags decide this request —
+    ///   false for the second, where nothing tag-related decided anything.
+    /// * **H2.** A StarRocks profile given a `tagService` would list tags as
+    ///   deciding while `enriched_tags` discards every one of them.
+    ///
+    /// Fixing the three sentences would have left a fourth instance free to
+    /// appear. **With the set on the profile there is nowhere to put a tag list
+    /// except beside a verdict**, so `no_profile_serves_the_catalog` cannot carry
+    /// one — the payload the H3 probe rendered is now unrepresentable.
+    ///
+    /// **The F4/F5 property is kept, not traded.** This is still ONE resolution,
+    /// `resolved_tags_for_target`'s, computed once before the loop and the same
+    /// object every verdict was evaluated against — not a second query. What
+    /// differs per profile is only the ONE narrowing this crate can apply
+    /// soundly: see below.
+    ///
+    /// # What the narrowing is, and why it cannot drift from the evaluator
+    ///
+    /// Empty when [`ExplainProfile::tag_policies_in_download`] is `0`. That is a
+    /// ONE-WAY implication, not a reimplementation: with no tag policy of any
+    /// kind in the download, the evaluator's `of_kind` is empty for every policy
+    /// type and no tag can reach any verdict, so an empty list here cannot
+    /// disagree with it. The evaluator's actual per-access-type rule stays the
+    /// evaluator's; reproducing it here would be the second-copy shape this
+    /// package has refused four times.
+    ///
+    /// ⚠ **A non-empty list does NOT claim the tags were evaluated** — H2's drop
+    /// happens inside `enriched_tags`, against this profile's own service-def,
+    /// and is not visible from here. The page's wording is held to that: the set
+    /// is what this profile's plugin resolves, and which verdict a tag decided is
+    /// on the verdict's own attribution.
+    pub tags: Vec<ExplainResolvedTag>,
+    /// How many tag policies **this profile's download** carries —
+    /// `tagPolicies.policies.len()`, or `0` when there is no tag block at all
+    /// because the profile has no bound tag service.
+    ///
+    /// Carried so the page can say WHY a profile's tag set is empty while the
+    /// column is tagged — the question H1's steward is left with otherwise — and
+    /// it is the predicate [`ExplainProfile::tags`] is narrowed by.
+    pub tag_policies_in_download: usize,
+}
+
+/// One tag egret resolved for the target, and **where the attachment that
+/// produced it lives** — which is the half of the answer F4 measured missing.
+///
+/// # ⚠ Why this is a bool and not the evaluator's `MatchType`
+///
+/// `MatchType` has five variants and `attachment_for` can produce only two:
+/// `Self_` for an attachment naming the column, `Ancestor` for one that stops at
+/// the table. Putting the enum on the wire would need a word for three states
+/// this path cannot reach — and inventing wire vocabulary for an unreachable
+/// state is how the `clearance_required` string got rendered raw for two
+/// releases.
+///
+/// So this reads back the field the mapping actually WROTE:
+/// `attached_through.levels` is exactly what `attachment_for` built from
+/// `from_assignments`' rule, and `column` is in it iff the attachment names the
+/// column. One datum, read once — not a second derivation from a parallel
+/// source, which is the two-comparisons defect this package has hit four times.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainResolvedTag {
+    /// `tags.name` — the identifier the tag download carries as the tag's `type`
+    /// and therefore the one the engine matches tag policies on. **Not
+    /// `tags.key`**, which is what this field used to report and which can
+    /// differ: live, the key and the name differ for one of three tags.
+    pub name: String,
+    /// `true` ⇒ the assignment names this column (Ranger `SELF`). `false` ⇒ it
+    /// stops at the table and reaches this resource as an `ANCESTOR`, so the row
+    /// to change is the TABLE's, not this column's. For a target that names no
+    /// column this is always `false` and says nothing extra — the attachment and
+    /// the target are the same resource.
+    pub attached_at_column: bool,
 }
 
 /// What `explain` answers with: one verdict block per profile serving the
@@ -481,20 +590,128 @@ pub struct ExplainResponse {
     pub outcome: ExplainOutcome,
     /// Empty exactly when `outcome` is `no_profile_serves_the_catalog`.
     pub profiles: Vec<ExplainProfile>,
-    /// The tag keys **egret** resolved as attached to `target`, for the
-    /// steward's information only.
+    // ⚠ **There is no response-level tag set, and its absence is a FIX**
+    // (whole-branch review H1/H2/H3). `tags` used to live here, computed once per
+    // request, and the page rendered one heading under every profile. All three
+    // review Importants were that one fact presented as though it were
+    // per-verdict — including a catalog nothing serves rendering "Nothing is
+    // enforcing" and a tag list on the same screen, with no verdicts in
+    // existence. The set now lives on `ExplainProfile::tags`, where a verdict is,
+    // so there is nowhere to put a tag list when nothing was evaluated. The whole
+    // argument is on that field.
+    //
+    // `tag_resolution_declined` STAYS here, and the asymmetry is deliberate: a
+    // decline is a property of the TARGET and of egret's storage (fix round 3's
+    // ruling), true exactly once per request, whereas the set that could decide
+    // is per profile. The page renders the decline only inside a profile block,
+    // so a response with no profiles shows nothing tag-related either way.
+    /// Why `explain` declined to resolve this target's tags — absent when it
+    /// resolved them.
     ///
-    /// **This is no longer an input to anything, and it is not a complete tag
-    /// set.** It used to be what the retired model evaluator matched rule
-    /// selectors against. Today the engine's own tags come from
-    /// `RangerTagEnricher`, which walks the resource hierarchy and emits
-    /// ANCESTOR tags, while `tag_keys_for_resource_via` matches
-    /// schema/table/column by exact equality with no roll-up. So this field
-    /// answers "what has egret got recorded on exactly this resource" — useful
-    /// when asking why a mask did or did not apply — and deliberately does NOT
-    /// reach `AccessRequest::resolved_tags`, whose narrowing would be unsound
-    /// given a set narrower than the enricher's. See the handler.
-    pub tags: Vec<String>,
+    /// **This exists because the REASON was unreachable (fix round 3, IMPORTANT 1
+    /// / LOW 3).** The evaluator's `UndecidableCause::TagsUnresolved` is a unit
+    /// variant and says only "the caller did not resolve", which is all the
+    /// evaluator can know; `resolved_tags_for_target` declines for four different
+    /// states with four different remedies, and `.is_some()` at the call site threw
+    /// the distinction away. The page then rendered round 1's single sentence for
+    /// all four — naming a stored row that does not exist, and claiming a
+    /// per-catalog reach for the one state that is per-REQUEST.
+    ///
+    /// **Carried here rather than as a payload on `TagsUnresolved`**, which was
+    /// the other option: `egret-ranger-eval` is a pure crate that knows nothing of
+    /// `catalog_tag_assignments`, and the reason is a property of egret's STORAGE
+    /// and of this REQUEST, not of the evaluator's input. It is also per
+    /// target-and-catalog rather than per access, so the response is where it is
+    /// true exactly once. The 1:1 pairing is a property of one function: this is
+    /// `Some` exactly when the handler passed `resolved_tags: None`, which is the
+    /// only production state in which the evaluator raises `TagsUnresolved`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag_resolution_declined: Option<ExplainTagDecline>,
+}
+
+/// Split one tag resolution into the two things `explain` does with it: the
+/// evaluator's `resolved_tags`, and the response's
+/// [`ExplainResponse::tag_resolution_declined`].
+///
+/// # ⚠ Three lines in a function because a mutation survived at this exact spot
+///
+/// **Fix round 3.** This was inline in the handler, and a mutant that threw the
+/// decline away (`Err(_) => (None, None)`) **survived the whole suite** — the
+/// handler body is reachable only from DB-gated tests, which do not run on this
+/// branch. That is the same finding Task 6 made about `attribution_for` and the
+/// same one that moved `stored_value_problem` out of SQL: where a mutation cannot
+/// reach, the code is in the wrong shape. Pulling the pairing out makes both arms
+/// assertable with no database, which is what
+/// `the_decline_reason_reaches_the_response_and_the_tags_do_not` does.
+///
+/// The two outputs are mutually exclusive by construction — a `Result` in, one
+/// `Some` out — which is the invariant the page depends on: it renders the reason
+/// only beside `UndecidableCause::TagsUnresolved`, and that cause is raised only
+/// when `resolved_tags` is `None`.
+fn explain_tag_inputs(
+    resolution: Result<UnenrichedTags, ExplainTagDecline>,
+) -> (Option<UnenrichedTags>, Option<ExplainTagDecline>) {
+    match resolution {
+        Ok(tags) => (Some(tags), None),
+        Err(decline) => (None, Some(decline)),
+    }
+}
+
+/// Which of the four states made `explain` decline to resolve the target's tags
+/// — see [`ExplainResponse::tag_resolution_declined`] and
+/// [`stored_value_problem`].
+///
+/// The four have four different remedies and two different REACHES, which is the
+/// whole reason they are carried apart: three are properties of stored data and
+/// hold for every target in the catalog until it changes; the fourth is a property
+/// of the request and holds for nothing else.
+///
+/// Each stored variant carries the offending coordinate so the page can name the
+/// row to fix. That is a `policy:read` surface already — the response's `tags`
+/// field reports attachments on the target — and naming no row is what produced
+/// the measured defect: a sentence telling a steward to re-store an assignment
+/// that was already stored on a table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExplainTagDecline {
+    /// A stored assignment has an empty `schema_name` or `table_name`, so
+    /// `from_assignments` omits that level and the engine resolves the shorter
+    /// resource as an ANCESTOR of everything beneath it.
+    StoredLevelEmpty {
+        schema: String,
+        table: String,
+        column: String,
+    },
+    /// A stored assignment value carries `*` or `?`, which the engine matches with
+    /// `FilenameUtils.wildcardMatch` and no SQL predicate reproduces.
+    StoredWildcard {
+        schema: String,
+        table: String,
+        column: String,
+    },
+    /// A stored assignment value carries one of the characters on which the two
+    /// case folds can disagree — see [`FOLD_DIVERGENT`].
+    StoredFoldDivergent {
+        schema: String,
+        table: String,
+        column: String,
+    },
+    /// The TARGET carries one of those characters. **Per request, not per
+    /// catalog** — nothing is stored wrongly and every other target in the catalog
+    /// answers normally.
+    TargetFoldDivergent {
+        level: ExplainTargetLevel,
+        value: String,
+    },
+}
+
+/// Which level of the target [`ExplainTagDecline::TargetFoldDivergent`] is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExplainTargetLevel {
+    Schema,
+    Table,
+    Column,
 }
 
 /// What `preview` is asked to try — SP4b D2.
@@ -1352,11 +1569,13 @@ async fn preview(
 ///    route uses, not `list_policies`.** "What explain evaluated" and "what the
 ///    engine received" must not be able to drift.
 /// 2. **`roles` and `groups` are empty** — see [`ExplainSubject`].
-/// 3. **`resolved_tags` is `None`, deliberately.** See the block at the call
-///    site: egret cannot establish the antecedent the narrowing needs, so a
-///    profile whose `tagPolicies` block could decide comes back `Undecidable`
-///    naming that block, rather than answering confidently from a tag set
-///    narrower than `RangerTagEnricher`'s.
+/// 3. **`resolved_tags` carries egret's own resolution, and
+///    [`resolved_tags_for_target`] is what decides whether it may.** Until
+///    SP4d-2b Task 7 this was `None` unconditionally, which made every verdict on
+///    every catalog a profile serves `Undecidable` while that profile's tag block
+///    held any policy at all. It is now a real tag set for the one resolution
+///    shown enricher-equivalent, and still `None` — so still a refusal — for
+///    every state where it is not. The whole argument is on that function.
 /// 4. **A `write` explain is several evaluations**, one per Ranger access type
 ///    the action maps to on that engine, reported separately.
 #[utoipa::path(
@@ -1406,24 +1625,32 @@ async fn explain(
     }
     let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
 
-    // Reported for the steward, and NOT passed to the evaluator — see
-    // `ExplainResponse::tags` and the `resolved_tags` block below. Tags attach
-    // to tables and columns only, keyed `(warehouse_id, schema, table, column)`
-    // with `column = ''` meaning the table itself, so a target that names no
-    // table can carry none.
-    let tags = match (&body.target.schema, &body.target.table) {
-        (Some(schema), Some(table)) => {
-            tag_keys_for_resource_via(
-                &mut conn,
-                body.target.catalog_id,
-                schema,
-                table,
-                body.target.column.as_deref().unwrap_or(""),
-            )
-            .await?
-        }
-        _ => Vec::new(),
-    };
+    // ONE resolution for the whole response, not one per profile: the levels it
+    // synthesises are the literal `catalog`/`schema`/`table`/`column` keys
+    // `ServiceTags::from_assignments` writes, which do not vary by engine (that
+    // is a defect in the WRITER, ruled on in `attachment_for` — it is why a
+    // StarRocks profile's attachments are dropped by the enricher rather than
+    // renamed). The resolution is a property of the target, so computing it once
+    // also removes any way for two profiles to be answered from two tag sets.
+    let (resolved_tags, tag_resolution_declined) =
+        explain_tag_inputs(resolved_tags_for_target(&mut *conn, &body.target).await?);
+    // The tag set as the steward reads it, derived from the resolution above and
+    // from nothing else — Task 8's F4/F5. It was a second query
+    // (`tag_keys_for_resource_via`, `tags.key`, exact-match) and the browser
+    // measured the two disagreeing on a real engine: a tag-driven deny rendered
+    // beside "None". Reading the evaluator's own input back is what makes "what
+    // the page shows" and "what was evaluated" one object instead of two that
+    // must agree.
+    //
+    // ⚠ Computed once because the RESOLUTION is per request, and then handed to
+    // each profile below rather than to the response — review H1/H2/H3. A list on
+    // the response is a claim about verdicts that may not exist (H3) or that could
+    // not have used it (H1). `None` ⇒ empty, and `tag_resolution_declined` is what
+    // says why.
+    let resolved_for_display = resolved_tags
+        .as_ref()
+        .map(resolved_tags_for_display)
+        .unwrap_or_default();
 
     let mut profiles: Vec<ExplainProfile> = Vec::new();
     for service_id in services_for_catalog_via(&mut conn, body.target.catalog_id).await? {
@@ -1482,11 +1709,25 @@ async fn explain(
         // `database`, so pairing the wrong def with an engine answers "nothing
         // matched" with full confidence, and declaring the engine turns that
         // silent wrong answer into `UndecidableCause::EngineMismatch`.
-        // `plugin_version` stays `None` — `EngineType::plugin_version` is
-        // already the measured value, so declaring it would only cross-check it
-        // against itself.
+        // ⚠ `plugin_version` is DECLARED, and this comment used to say the
+        // opposite: *"stays `None` — `EngineType::plugin_version` is already the
+        // measured value, so declaring it would only cross-check it against
+        // itself."* That was true while the field's only reader was the
+        // cross-check. It is not any more.
+        //
+        // SP4d-2b Task 5 measured a shape the two plugin versions answer
+        // DIFFERENTLY — a tag DENY plus a strictly higher-priority resource ALLOW
+        // with no deny items is `Allowed` on 2.8.0 and `Denied` on 2.5.0 — so
+        // `evaluate` now reads `plugin_version`, and `None` there costs an ACCESS
+        // answer (`UndecidableCause::TagDenyReopenedDiffersByPluginVersion`).
+        // Leaving it unset would refuse that shape on BOTH engines, including the
+        // one whose answer this crate reproduces exactly. The value is
+        // `EngineType::plugin_version`, which is the measured version per engine,
+        // so the cross-check still passes trivially — that was never the point of
+        // setting it.
         let config = EngineConfig {
             engine: Some(ranger_engine(engine)),
+            plugin_version: Some(ranger_engine(engine).plugin_version()),
             ..EngineConfig::without_super_users()
         };
 
@@ -1506,31 +1747,22 @@ async fn explain(
                 // a decision that depends on one `Undecidable` rather than a
                 // guess in either direction.
                 owner: None,
-                // ⚠ **`None`, and it must stay `None` until egret's tag
-                // resolution is hierarchy-complete.** `Some(empty)` is a
-                // licence for `egret-ranger-eval` to skip its `tagPolicies`
-                // refusal, and that licence is sound only if the caller's tag
-                // resolution is at least as broad as
-                // `RangerTagEnricher`'s. egret's is not:
-                // `tag_keys_for_resource_via` matches schema/table/column by
-                // exact equality with no hierarchy roll-up, while the enricher
-                // walks the hierarchy and emits ancestor tags Ranger ADMITS for
-                // a tag request. So egret can report "no tags" for a column the
-                // engine is masking through a TABLE-level attachment. Every
-                // live tag assignment today is column-level, which is exactly
-                // how passing `tags` here would ship green and fail open. The
-                // cost of refusing is bounded and visible: a profile whose tag
-                // block carries a policy comes back `Undecidable` with the
-                // block and its policy COUNT named
-                // (`tests/routes.rs::a_tag_policy_block_that_could_decide_makes_the_profile_undecidable`
-                // pins it), which a steward can act on. Passing the existing
-                // resolution's result as if it were complete is the one thing
-                // that is not an option.
-                resolved_tags: None,
+                // egret's own resolution, or `None` where
+                // `resolved_tags_for_target` declined — never
+                // `tag_keys_for_resource_via`'s `tags`, which is the
+                // attribution list and is both the wrong identifier
+                // (`tags.key`) and the wrong breadth (no roll-up). `None` here
+                // still means "the caller did not resolve", which the evaluator
+                // refuses with `TagsUnresolved`; it is never the empty set,
+                // which is the measured narrowing.
+                resolved_tags: resolved_tags.clone(),
             };
             let decision =
                 egret_ranger_eval::eval::evaluate(&artifact, &request, &service_def, &config);
-            let attribution = attribution_for(&mut conn, &decision).await?;
+            // `&mut *conn` and not `&mut conn`: `attribution_for` is generic
+            // over `ClearanceLookups`, which `sqlx::PgConnection` implements,
+            // and a `PoolConnection` does not — inference needs the deref.
+            let attribution = attribution_for(&mut *conn, &decision).await?;
             accesses.push(ExplainAccess {
                 access_type: access_type.to_string(),
                 decision: WireDecision::from(&decision),
@@ -1538,11 +1770,20 @@ async fn explain(
             });
         }
 
+        // Read off the artifact THIS profile's plugin downloads — the same
+        // `artifact_for` the verdicts above were computed from, so the count and
+        // the answers cannot be about different downloads. A profile with no
+        // bound tag service has no tag block and counts `0`, and so does one
+        // whose block is present but empty (`bind_trino_profile` creates exactly
+        // that): in both cases no tag policy of any kind can decide here.
+        let tag_policies_in_download = artifact.tag_policies.len();
         profiles.push(ExplainProfile {
             service_id,
             service_name: svc.name,
             engine: WireEngineType::from(ranger_engine(engine)),
             accesses,
+            tags: tags_for_profile(&resolved_for_display, tag_policies_in_download),
+            tag_policies_in_download,
         });
     }
 
@@ -1554,7 +1795,7 @@ async fn explain(
     Ok(Json(ExplainResponse {
         outcome,
         profiles,
-        tags,
+        tag_resolution_declined,
     }))
 }
 
@@ -1679,8 +1920,16 @@ async fn artifact_for(
 /// the causes in `why` name the policies they are about themselves. And a
 /// policy egret's compiler does not own attributes to nothing either, which is
 /// a real answer: see [`ExplainAttribution`].
-async fn attribution_for(
-    conn: &mut sqlx::PgConnection,
+///
+/// **Generic over its lookups so this function — the WIRING — is testable with
+/// no database.** A pure `clearing_roles` covers the decision, but fix round 1
+/// measured that it left the call site uncovered: substituting
+/// `clearing_roles(None, &gates)` here passed 10/0, because the only test that
+/// reached this function was DB-gated. `ClearanceLookups` is the seam that
+/// closes it; `sqlx::PgConnection` is the production implementation and the
+/// tests at the bottom of this file hand it a fake that records what was asked.
+async fn attribution_for<L: ClearanceLookups + Send>(
+    conn: &mut L,
     decision: &Decision,
 ) -> Result<Option<ExplainAttribution>, PermHttpError> {
     let name = match decision {
@@ -1699,28 +1948,674 @@ async fn attribution_for(
         // the wire the engine sees, so both are reconstructed here — `tags.key`
         // (not `tags.name`), and the gate's roles keyed by that same key.
         Some(PolicyAttribution::Clearance { tag_id, locator }) => {
-            let tag = tag_keys_by_ids_via(conn, &[tag_id])
-                .await?
-                .into_iter()
-                .find(|(id, _)| *id == tag_id)
-                .map(|(_, key)| key);
-            let required_roles = match &tag {
-                Some(key) => clearance_gates_for_tags_via(conn, std::slice::from_ref(key))
-                    .await?
-                    .into_iter()
-                    .find(|(gated, _)| gated == key)
-                    .map(|(_, roles)| roles)
-                    .unwrap_or_default(),
+            let tag = conn.tag_key(tag_id).await?;
+            // The gate is keyed by `tags.key`, so with no key there is no
+            // lookup to run. What the result MEANS is `clearing_roles`' job.
+            let gates = match &tag {
+                Some(key) => conn.gates_for(key).await?,
                 None => Vec::new(),
             };
             Some(ExplainAttribution::Clearance {
                 tag_id,
+                required_roles: clearing_roles(tag.as_deref(), &gates),
                 tag,
-                required_roles,
                 locator,
             })
         }
     })
+}
+
+/// The two reads a clearance attribution needs, behind a trait so that
+/// [`attribution_for`] can be driven with no database.
+///
+/// Both methods are `-> impl Future + Send` rather than `async fn` because the
+/// caller is an axum handler: an `async fn` in a trait yields a future with no
+/// `Send` bound, and the handler would stop compiling.
+trait ClearanceLookups {
+    /// `tags.key` for this `tags.id`, or `None` when the row is gone — a
+    /// compiled clearance outlives its tag until the next recompile.
+    fn tag_key(
+        &mut self,
+        tag_id: Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<String>, PermHttpError>> + Send;
+
+    /// The clearance gates for one `tags.key`, exactly as
+    /// `clearance_gates_for_tags_via` returns them — `(tag key, roles)` pairs,
+    /// and empty when the tag has no gate with roles.
+    fn gates_for(
+        &mut self,
+        tag_key: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<(String, Vec<String>)>, PermHttpError>> + Send;
+}
+
+/// The production implementation: the two store queries, unchanged. `tags.key`
+/// (never `tags.name`) is what a gate is keyed by, which is why the first read
+/// returns a key rather than a display name.
+impl ClearanceLookups for sqlx::PgConnection {
+    async fn tag_key(&mut self, tag_id: Uuid) -> Result<Option<String>, PermHttpError> {
+        Ok(tag_keys_by_ids_via(self, &[tag_id])
+            .await?
+            .into_iter()
+            .find(|(id, _)| *id == tag_id)
+            .map(|(_, key)| key))
+    }
+
+    async fn gates_for(
+        &mut self,
+        tag_key: &str,
+    ) -> Result<Vec<(String, Vec<String>)>, PermHttpError> {
+        Ok(clearance_gates_for_tags_via(self, &[tag_key.to_string()]).await?)
+    }
+}
+
+/// The tag set `explain` may hand
+/// [`egret_ranger_eval::eval::AccessRequest::resolved_tags`] for one target, or
+/// `None` where egret's resolution cannot be shown equivalent to
+/// `RangerTagEnricher`'s and the narrowing must therefore not be offered.
+///
+/// `None` costs an answer: the evaluator raises
+/// `UndecidableCause::TagsUnresolved` for any profile whose tag block holds a
+/// policy of the kind being decided. That is the price of the one thing that is
+/// not an option — handing the evaluator a set NARROWER than the enricher's,
+/// since `Some(empty)` is a licence to skip the tag phase outright
+/// (`getLikelyMatchPolicyEvaluators` returns `Collections.EMPTY_LIST` at its
+/// `isNotEmpty(tags)` branch).
+///
+/// # The equivalence, and the one precondition it rests on
+///
+/// `resolved_tags_for_resource_via` (SP4d-2b Task 1) reproduces
+/// `RangerTagEnricher.findMatchingTags` for the two levels egret's storage was
+/// designed to express: a COLUMN attachment is `SELF` for the request that names
+/// that column, and a TABLE attachment (`column_name = ''`) is `ANCESTOR` for a
+/// request naming any of its columns and `SELF` for the request naming the table.
+/// Its predicate is `schema_name = $2 AND table_name = $3 AND (column_name = $4 OR
+/// column_name = '')`.
+///
+/// Its comparison is case-folded (fix round 1), which reproduces the matcher's
+/// `ignoreCase: true`; what it cannot reproduce is a stored value that is not a
+/// LITERAL. So the set it returns is exactly the enricher's **provided every
+/// stored coordinate in the catalog is one this predicate reproduces** — which is
+/// three conditions, not one, and [`stored_value_problem`] is where each is ruled
+/// on. [`TagLookups::assignment_coordinates`] reads them and this function checks
+/// them FIRST, for the whole catalog, before any resolution; see the ⚠ block on
+/// `egret_policy::tag_assignment_coordinates_via` for the fail-open that closes
+/// and why no mapping over the resolver's RESULT could close it instead.
+///
+/// ⚠ **The earlier version of this paragraph named ONE condition** ("provided
+/// every stored row is at one of those two levels"), and the review measured two
+/// more of the same shape — a `('sales','*','')` row and a `('SALES','ORDERS','')`
+/// row are both `ANCESTOR`-admitted on the real jar and neither was returned or
+/// counted. A proviso is only worth what its enumeration covers, which is why the
+/// enumeration now lives in one function with a test per class rather than in a
+/// SQL `WHERE` clause nothing here can run.
+///
+/// With the precondition holding, a target that names no schema or no table is
+/// `Some(empty)` rather than a refusal, and that is an argument rather than a
+/// convenience: the request resource is then `{catalog}` or `{catalog, schema}`,
+/// every stored attachment is at `{catalog, schema, table[, column]}`, and a
+/// deeper attachment is a `DESCENDANT` — which `findMatchingTags` records and
+/// `RangerDefaultPolicyEvaluator.evaluate` then does NOT admit for a tag request
+/// at `ResourceMatchingScope.SELF` (see `tag_match_is_admitted`). The enricher
+/// resolves nothing for such a request either.
+///
+/// # ⚠ Enumerated: every input this reads, and every input it could read
+///
+/// A new field on any of these is a new row here, and the ruling belongs at this
+/// site rather than in a plan.
+///
+/// | input | read | ruling |
+/// |---|---|---|
+/// | `target.catalog_id` | **yes** | scopes both reads, and scopes them identically (`a.warehouse_id = c.warehouse_id` for `c.id = $1`), so a row the gate counts is a row the resolver could return |
+/// | `target.schema` / `target.table` — PRESENCE | **yes** | `None` on either ⇒ `Some(empty)`, argued above. `Some("")` is NOT special-cased: with the gate clear no stored coordinate has an empty `schema_name` or `table_name`, so an empty request value matches nothing and the empty set is the right answer — the one shape that could arrive, a `('', '')` row, is exactly what [`StoredValueProblem::EmptyLevel`] refuses on |
+/// | `target.schema` / `target.table` / `target.column` — the VALUES' CASE | **yes, and ruled on since fix round 1** | the resolver folds both sides, so `SALES` against a row stored `sales` resolves. ⚠ This row did not exist, and its absence was the review's Critical: the values reach `request_resource` verbatim from `ScopePicker`'s free-text inputs, so differing case is what ORDINARY use produces — more reachable than the empty-string class that was gated |
+/// | `target.*` — the VALUES' SYNTAX | **no, and that is a ruling** | a `*` or `?` the OPERATOR types is a request value, and Ranger matches a request value literally: the wildcard lives on the POLICY side of `getMatchType`, never the request side. So a typed `*` names a resource called `*` and resolves nothing, which is correct. The syntax that matters is the STORED side's, ruled on in [`stored_value_problem`] |
+/// | `target.*` — a [`FOLD_DIVERGENT`] character | **yes, since fix round 2** | ⚠ the divergence is a property of the PAIR, not of the stored side: `("ſ", "s")` is measured disagreeing, so an ASCII stored value and an odd REQUEST value are the same fail-open. Checked with the same `fold_divergent` the stored side uses |
+/// | `target.column` | **yes** | `None` ⇒ `""`, which is migration 0081's "the table itself" convention in the REQUEST position, and is the value `resolved_tags_for_resource_via` is documented against |
+/// | `assignment_coordinates` + [`stored_value_problem`] | **yes, first** | any problem ⇒ `None`. Per CATALOG and not per request: the coordinate that breaks the equivalence is one the resolver cannot return, so there is nothing per-request to test it against |
+/// | `egret_policy::ResolvedTag::name` | **yes** | `tags.name`, which is what `from_assignments` puts in the wire tag's `type` and therefore what the engine matches. Never `tags.key` — live they differ for one of three tags |
+/// | `egret_policy::ResolvedTag::match_type` | **yes** | both the evaluator's admission test AND, here, the only surviving record of WHICH level the attachment was at — see [`attachment_for`] |
+/// | the engine (Trino / StarRocks) | **no** | and that is the ruling, not an omission: `ServiceTags::from_assignments` writes the keys `catalog`/`schema`/`table`/`column` for every service type. See [`attachment_for`] |
+/// | `tag_keys_for_resource_via`'s result | **no** | the attribution list: `tags.key`, exact-match only. Reusing it here is the fail-open D3 names |
+/// | `catalog_tag_assignments.warehouse_id`, `tags.id`, `tags.key` | **no** | not on the tag wire the plugin matches against |
+/// | the profile, its service def, its `tagService` | **no** | one resolution per TARGET answers every profile; nothing about a profile changes what the enricher would resolve for a resource. The def-dependent half — the enricher's DROP — is the evaluator's `enriched_tags`, which holds the resource def this function does not |
+async fn resolved_tags_for_target<L: TagLookups + Send>(
+    conn: &mut L,
+    target: &Scope,
+) -> Result<Result<UnenrichedTags, ExplainTagDecline>, PermHttpError> {
+    // THE GATE, first and before anything can return a set. Nothing below may
+    // move above it: every argument on this function for why the resolution is
+    // enricher-equivalent assumes it passed.
+    //
+    // ── the REQUEST side of the fold, first ────────────────────────────────
+    //
+    // ⚠ **Fix round 2.** The gate used to ask only about STORED values, and that
+    // is not where the fold's divergence lives: the pair `("ſ", "s")` is measured
+    // DISAGREEING, so the stored value can be ordinary ASCII while the request
+    // carries the odd character. `fold_divergent` is the same predicate
+    // `stored_value_problem` applies, asked of the target's own three values.
+    //
+    // Checked BEFORE the `Some(empty)` shortcut below, which is strictly
+    // conservative: with no schema or table named, no stored attachment is
+    // SELF-or-ANCESTOR of the request whatever either fold does, so this costs an
+    // answer in a state that was already safe. Ordered this way on purpose — the
+    // alternative is an argument per branch, and a gate that has to be re-argued
+    // per branch is the shape that lost two classes in round 1.
+    //
+    // ⚠ The REASON is returned, not discarded. Fix round 3 measured that
+    // `.is_some()` here threw away the only thing that could tell the four
+    // decline states apart, and the page then rendered round 1's single sentence
+    // for all four — naming a stored row that did not exist and claiming a
+    // per-catalog reach for this per-REQUEST one.
+    for (level, value) in [
+        (ExplainTargetLevel::Schema, target.schema.as_deref()),
+        (ExplainTargetLevel::Table, target.table.as_deref()),
+        (ExplainTargetLevel::Column, target.column.as_deref()),
+    ] {
+        if value.is_some_and(fold_divergent) {
+            return Ok(Err(ExplainTagDecline::TargetFoldDivergent {
+                level,
+                value: value.unwrap_or_default().to_string(),
+            }));
+        }
+    }
+    // `find_map`, not `any`: one offending coordinate anywhere in the catalog is
+    // enough — the resolver's predicate is the same predicate for every target in
+    // it — and the one that offends is the one the page has to name.
+    //
+    // ⚠ **WHICH one, when several offend: the FIRST in
+    // `tag_assignment_coordinates_via`'s order**, which is
+    // `ORDER BY schema_name, table_name, column_name`. Task 8 reported this as
+    // unpinned and was half wrong — the SQL has always carried that `ORDER BY`;
+    // what nothing pinned was the rule on THIS side, so `the_first_offending_
+    // coordinate_is_the_one_named` now asserts it with the same two offenders in
+    // both orders. The order is the database's collation's, so it is deterministic
+    // within a deployment rather than universal; a catalog with two broken
+    // assignments reports one of them and fixing it reveals the next.
+    if let Some(decline) = conn
+        .assignment_coordinates(target.catalog_id)
+        .await?
+        .into_iter()
+        .find_map(|(schema, table, column)| {
+            stored_value_problem(&schema, &table, &column).map(|problem| match problem {
+                StoredValueProblem::EmptyLevel => ExplainTagDecline::StoredLevelEmpty {
+                    schema,
+                    table,
+                    column,
+                },
+                StoredValueProblem::WildcardMetacharacter => ExplainTagDecline::StoredWildcard {
+                    schema,
+                    table,
+                    column,
+                },
+                StoredValueProblem::FoldDivergentCharacter => {
+                    ExplainTagDecline::StoredFoldDivergent {
+                        schema,
+                        table,
+                        column,
+                    }
+                }
+            })
+        })
+    {
+        return Ok(Err(decline));
+    }
+    let (Some(schema), Some(table)) = (target.schema.as_deref(), target.table.as_deref()) else {
+        // Not a shortcut — see the DESCENDANT argument in the doc above.
+        return Ok(Ok(UnenrichedTags::new(Vec::new())));
+    };
+    let column = target.column.as_deref().unwrap_or("");
+    let resolved = conn
+        .resolved_tags(target.catalog_id, schema, table, column)
+        .await?;
+    // `collect::<Option<Vec<_>>>` so that ONE unmappable attachment declines the
+    // whole resolution rather than silently shipping a set with a hole in it.
+    //
+    // ⚠ The decline it produces is reported as `StoredFoldDivergent` on the
+    // target's own coordinate, and that is an approximation stated rather than
+    // hidden: `attachment_for` returns `None` only for a match type no arm of
+    // `resolved_tags_for_resource_via` produces, which no caller can reach today
+    // (its two arms are `Self_` and `Ancestor`). If a producer ever reaches it,
+    // the page will name the right resource and the wrong reason — which is why
+    // the arm is also a refusal in the evaluator rather than only here.
+    Ok(resolved
+        .iter()
+        .map(|tag| attachment_for(tag, schema, table, column))
+        .collect::<Option<Vec<_>>>()
+        .map(UnenrichedTags::new)
+        .ok_or(ExplainTagDecline::StoredFoldDivergent {
+            schema: schema.to_string(),
+            table: table.to_string(),
+            column: column.to_string(),
+        }))
+}
+
+/// Why one stored `catalog_tag_assignments` coordinate is outside the population
+/// `resolved_tags_for_resource_via` reproduces — see [`stored_value_problem`].
+///
+/// Each variant is a shape `ServiceTags::from_assignments` would put on the tag
+/// wire and `RangerTagEnricher.findMatchingTags` would ADMIT for a request the
+/// resolver's predicate does not return it for. They are kept apart because they
+/// have different remedies and because collapsing them into "malformed" would
+/// hide which test covers which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoredValueProblem {
+    /// An empty `schema_name` or `table_name`.
+    ///
+    /// `from_assignments` OMITS an empty level, so `('sales','','')` ships as
+    /// `resourceElements = {catalog, schema}` — measured `ANCESTOR` of
+    /// `hive.sales.orders.email` on the real jar — while the resolver's equality
+    /// on `table_name` can never return it. (`column_name = ''` is NOT this: it
+    /// is migration 0081's documented table-level sentinel and the resolver's own
+    /// second arm handles it.)
+    EmptyLevel,
+    /// A `*` or `?` anywhere in a stored value.
+    ///
+    /// `trino.json`'s four resources declare `{"wildCard": true}`, so the
+    /// enricher's matcher runs `FilenameUtils.wildcardMatch` and `('sales','*','')`
+    /// is `ANCESTOR` of `hive.sales.orders.email`, `('sales','ord*','')` likewise,
+    /// `('sales','orders','ema*')` is `SELF` — all measured, none returned by an
+    /// equality predicate.
+    ///
+    /// **This one DECLINES rather than being reproduced, and that is the trade.**
+    /// `wildcardMatch` is a token-based backtracking algorithm over `*`/`?`;
+    /// SQL `LIKE` is not that algorithm (`%`/`_`, no `?`, different escaping), and
+    /// standing up a second matcher implementation is the trade this package has
+    /// declined three times — the tag trie, the candidate rule, T4. So the state
+    /// is detected and refused, fail-closed, with the page naming it.
+    WildcardMetacharacter,
+    /// One of the 25 code points in [`FOLD_DIVERGENT`] — the characters on which
+    /// the resolver's fold and the matcher's fold can disagree.
+    ///
+    /// The resolver folds with Postgres `lower()`, a FULL-STRING Unicode lowercase;
+    /// the matcher folds with `StringUtils.equalsIgnoreCase`, a PER-CHARACTER
+    /// `toUpperCase`/`toLowerCase` pair after a length check. Two different
+    /// algorithms, so "the query reproduces the matcher" is a claim about where
+    /// they agree — and neither direction of a disagreement is safe: too wide
+    /// invents a tag the engine does not apply, too narrow misses one it does.
+    ///
+    /// # ⚠ Fix round 2 narrowed this from "any non-ASCII value" by MEASURING
+    ///
+    /// Round 1 declined every non-ASCII stored value, on the un-measured premise
+    /// that the two folds "are not provably identical outside ASCII". In a
+    /// Vietnamese-language deployment that is a recurring over-refusal: one tag on
+    /// a table named `người` would have made every `explain` in that catalog answer
+    /// `TagsUnresolved`.
+    ///
+    /// The premise was much narrower than the gate.
+    /// `tests/ranger/src/test/java/EgretCaseFoldAgreementTest.java` sweeps **every
+    /// defined code point in Unicode** against three criteria (asymmetric 1:1
+    /// mapping, length-changing full lowercase, context-dependent full lowercase)
+    /// and finds **25**: the Turkish `İ`/`ı`, the long `ſ`, the Greek final sigma
+    /// and `Σ` itself, the Greek and Cyrillic variant letters, the micro sign, and
+    /// the Greek ypogegrammeni pair. **No Vietnamese letter is in it** — that test
+    /// asserts so directly, over both the precomposed letters and the whole
+    /// `U+1EA0..U+1EF9` tone-mark range — and neither is German `ß`, Cyrillic, or
+    /// the Kelvin sign. Named pairs in that table, measured: `("I","ı")`,
+    /// `("İ","i")`, `("ſ","s")`, `("Σ","ς")`, `("ΑΣ","ασ")` and `("µ","μ")`
+    /// DISAGREE; `("Tiếng","TIẾNG")`, `("người","NGƯỜI")`, `("ß","ẞ")`, `("Д","д")`
+    /// and `("K","k")` AGREE.
+    ///
+    /// # ⚠ One side of that measurement is a STAND-IN, and it is unverified
+    ///
+    /// The matcher's side is exact (`String.equalsIgnoreCase` is what
+    /// `StringUtils.equalsIgnoreCase` delegates to). The query's side is Java
+    /// `String.toLowerCase(Locale.ROOT)` standing in for Postgres `lower()`: both
+    /// implement Unicode's full `Lowercase_Mapping`, `SpecialCasing` entries and
+    /// the `Final_Sigma` rule included, and `Locale.ROOT` excludes the
+    /// locale-tailored mappings. **No Postgres runs in that harness**, so the set
+    /// is unverified on the database side exactly as the SQL half of the fold is.
+    /// **Falsified by** a collation that tailors case (`tr_TR` would move `I`/`i`
+    /// into the divergent set and is the one deployment where this gate would be
+    /// too narrow), or by an ICU/glibc difference on one of the 25.
+    FoldDivergentCharacter,
+}
+
+/// The 25 code points on which Postgres `lower()` and Java `equalsIgnoreCase` can
+/// disagree, DERIVED by a sweep over every defined code point in Unicode and
+/// asserted verbatim by
+/// `tests/ranger/src/test/java/EgretCaseFoldAgreementTest.java::theDisagreementSetIsExactlyTheOneTheGateEncodes`.
+///
+/// **This list is the SINGLE SOURCE OF TRUTH, and the test reads it** — ⚠ fix
+/// round 3, MINOR 1. The Java test used to hold its own copy of the set and assert
+/// the sweep against THAT, so this constant was compared to nothing: deleting
+/// U+1C85 (a fail-open) or mistyping U+03F1 (an over-refusal) failed no test, since
+/// `[char; 25]` pins only the length and the Rust tests name 7 of the 25. The test
+/// now parses this very declaration out of this file, so a code point the sweep
+/// finds and this lacks is a fail-open, one this has and the sweep does not find is
+/// an over-refusal, and it fails on either.
+///
+/// # ⚠ Measured on a real database, and TWO entries are stand-in-only
+///
+/// The sweep's `lower()` side is Java's `String.toLowerCase(Locale.ROOT)` standing
+/// in for Postgres. Fix round 3 also ran the real thing — PostgreSQL 16.15,
+/// `en_US.utf8`, read-only `SELECT lower(…)`, no template touched — over the 53
+/// single-character pairs this set is derived from: **51 still disagree there, 2 do
+/// not.** Both of the two are U+0130's.
+///
+/// * **U+0130 is therefore a MEASURED OVER-REFUSAL on `en_US.utf8`**: glibc's
+///   `lower('İ')` is `'i'`, length 1, not the two-code-point full mapping the
+///   stand-in produces, so the folds agree there and this declines anyway. It stays
+///   because the direction is conservative and because **`tr_TR` is the collation
+///   where it earns its place** — and `tr_TR` is also where this set as a whole
+///   becomes too NARROW, since it would move `I`/`i` in.
+/// * **U+03A3 stays load-bearing on both oracles, for different reasons.** On the
+///   stand-in it is criterion 3 (the context-dependent `Final_Sigma`); on glibc,
+///   which has no `Final_Sigma`, the string pair `("ΑΣ","ασ")` AGREES and what
+///   catches it is its single-character pair with U+03C2, which disagrees there.
+///   The criterion stays because an ICU collation does implement `Final_Sigma`.
+///
+/// Everything else behaves on the real database exactly as the sweep says,
+/// Vietnamese included. **Falsified by** a case-tailoring collation, or an
+/// ICU/glibc difference on one of the 25.
+const FOLD_DIVERGENT: [char; 25] = [
+    '\u{00B5}', // MICRO SIGN — uppercases to Greek Mu, which lowercases to Greek mu
+    '\u{0130}', // LATIN CAPITAL LETTER I WITH DOT ABOVE — full lowercase is TWO code points
+    '\u{0131}', // LATIN SMALL LETTER DOTLESS I — uppercases to ASCII `I`
+    '\u{017F}', // LATIN SMALL LETTER LONG S — uppercases to ASCII `S`
+    '\u{0345}', // COMBINING GREEK YPOGEGRAMMENI
+    '\u{03A3}', // GREEK CAPITAL LETTER SIGMA — lowercase depends on the NEXT character
+    '\u{03C2}', // GREEK SMALL LETTER FINAL SIGMA
+    '\u{03D0}', // GREEK BETA SYMBOL
+    '\u{03D1}', // GREEK THETA SYMBOL
+    '\u{03D5}', // GREEK PHI SYMBOL
+    '\u{03D6}', // GREEK PI SYMBOL
+    '\u{03F0}', // GREEK KAPPA SYMBOL
+    '\u{03F1}', // GREEK RHO SYMBOL
+    '\u{03F5}', // GREEK LUNATE EPSILON SYMBOL
+    '\u{1C80}', // CYRILLIC SMALL LETTER ROUNDED VE
+    '\u{1C81}', // CYRILLIC SMALL LETTER LONG-LEGGED DE
+    '\u{1C82}', // CYRILLIC SMALL LETTER NARROW O
+    '\u{1C83}', // CYRILLIC SMALL LETTER WIDE ES
+    '\u{1C84}', // CYRILLIC SMALL LETTER TALL TE
+    '\u{1C85}', // CYRILLIC SMALL LETTER THREE-LEGGED TE
+    '\u{1C86}', // CYRILLIC SMALL LETTER TALL HARD SIGN
+    '\u{1C87}', // CYRILLIC SMALL LETTER TALL YAT
+    '\u{1C88}', // CYRILLIC SMALL LETTER UNBLENDED UK
+    '\u{1E9B}', // LATIN SMALL LETTER LONG S WITH DOT ABOVE
+    '\u{1FBE}', // GREEK PROSGEGRAMMENI
+];
+
+/// Whether `value` carries a character from [`FOLD_DIVERGENT`].
+///
+/// **Asked of BOTH sides of the comparison**, and that is a measurement rather
+/// than caution: the pair `("ſ", "s")` DISAGREES, so a stored value can be pure
+/// ASCII while the REQUEST is the odd one — gating only the stored side would have
+/// left exactly that pair open. `resolved_tags_for_target` checks the target's
+/// three values and `stored_value_problem` checks each stored coordinate; one
+/// predicate, two call sites, so they cannot drift.
+fn fold_divergent(value: &str) -> bool {
+    value.chars().any(|c| FOLD_DIVERGENT.contains(&c))
+}
+
+/// The ruling on ONE stored coordinate: `None` when
+/// `resolved_tags_for_resource_via`'s predicate reproduces the enricher for it,
+/// and the reason otherwise.
+///
+/// # ⚠ Enumerated: every property of a stored value that reaches the comparison
+///
+/// A predicate the enricher applies and this list does not rule on is a
+/// fail-open, which is exactly how fix round 1 arrived: the first version of this
+/// gate ruled on emptiness alone and the review measured two more classes. **A
+/// new matcher option in `trino.json` or `starrocks.json`, or a new level in
+/// `from_assignments`, is a new row here.**
+///
+/// | property of the stored value | the matcher's rule | here |
+/// |---|---|---|
+/// | emptiness of `schema` / `table` | `from_assignments` omits the level; the shorter resource is an ANCESTOR the enricher admits | [`StoredValueProblem::EmptyLevel`] |
+/// | emptiness of `column` | the same omission, but it is migration 0081's documented table-level sentinel and the resolver's second arm IS that ANCESTOR case | **ruled fine** — the one emptiness that is reproduced |
+/// | `*` / `?` | `{"wildCard": true}` ⇒ `FilenameUtils.wildcardMatch` | [`StoredValueProblem::WildcardMetacharacter`] |
+/// | letter case | `{"ignoreCase": true}` ⇒ `equalsIgnoreCase` | **reproduced, not refused** — the resolver folds both sides, measured on the Ranger side by `EgretTagAttachmentMatchTypeTest` |
+/// | a character from [`FOLD_DIVERGENT`] | `equalsIgnoreCase`'s PER-CHARACTER fold versus `lower()`'s FULL-STRING one — the 25 code points on which the two can disagree, derived by a sweep over all of Unicode | [`StoredValueProblem::FoldDivergentCharacter`] |
+/// | any other non-ASCII character | the two folds AGREE on it — measured over every defined code point by the Java sweep against a `lower()` STAND-IN, and over the derived pairs against a real PostgreSQL 16.15 `en_US.utf8`; the caveats for U+0130 and U+03A3 are on [`FOLD_DIVERGENT`] | **ruled fine** — ⚠ fix round 2 narrowed this from "all non-ASCII declines", which was an over-refusal on an un-measured premise in a Vietnamese-language deployment |
+/// | leading / trailing whitespace | none: the matcher compares the value as given, and so does the predicate — `' sales'` matches `' sales'` and nothing else on BOTH sides | **ruled fine**, and it is a ruling rather than an omission |
+/// | length, `NULL` | `NOT NULL` on all three columns (migration 0081); the matcher has no length rule | **ruled fine** |
+/// | `isExcludes` / `isRecursive` | not expressible: `from_assignments` writes `{"values": [v]}` and no flag, so the matcher's defaults (`false`) are what the enricher gets | **ruled fine**, and `ServiceTags::from_assignments` is what makes it so |
+///
+/// The REQUEST side is not this function's: see the `target.*` rows on
+/// [`resolved_tags_for_target`]. A `*` an operator types is a literal there,
+/// because `getMatchType` takes the wildcard from the POLICY position only.
+fn stored_value_problem(schema: &str, table: &str, column: &str) -> Option<StoredValueProblem> {
+    if schema.is_empty() || table.is_empty() {
+        return Some(StoredValueProblem::EmptyLevel);
+    }
+    for value in [schema, table, column] {
+        if value.contains(['*', '?']) {
+            return Some(StoredValueProblem::WildcardMetacharacter);
+        }
+        if fold_divergent(value) {
+            return Some(StoredValueProblem::FoldDivergentCharacter);
+        }
+    }
+    None
+}
+
+/// `egret_policy::ResolvedTag` → `egret_ranger_eval::eval::ResolvedTag`: two
+/// fields in, six out, and every one of the four synthesised fields is a claim
+/// about what `ServiceTags::from_assignments` puts on the wire.
+///
+/// `None` means this attachment is not one this mapping models, which declines
+/// the whole resolution in [`resolved_tags_for_target`]. It is not reachable from
+/// `resolved_tags_for_resource_via`, whose two arms are `Self_` and `Ancestor`;
+/// it exists so that a third arm is a refusal and not a guess.
+///
+/// # Where the ATTACHMENT's own levels come from
+///
+/// The levels are a property of the attachment, and
+/// `egret_policy::ResolvedTag` carries only `name` and `match_type` — so the
+/// match type is where the level survives, and that is sound in exactly one
+/// direction:
+///
+/// | `match_type` | the attachment's stored coordinates | levels |
+/// |---|---|---|
+/// | `Self_` | the request's own `(schema, table, column)` — the `column_name = $4` arm matched | `catalog` + each of `schema` / `table` / `column` that is non-empty |
+/// | `Ancestor` | `(schema, table, '')` — the only other row the query can return is the TABLE-level one | `catalog`, `schema`, `table` |
+/// | `Descendant` / `SelfAndAllDescendants` / `None` | — | `None`: no arm of `resolved_tags_for_resource_via` produces one, and a producer that did would be one this mapping has not been measured against |
+///
+/// # ⚠ The keys are LITERAL, and for StarRocks that is a defect this mapping reproduces rather than hides
+///
+/// `from_assignments` writes `catalog` / `schema` / `table` / `column` for every
+/// service type (`egret-policy-api/src/dto.rs`, and `download_tags` calls it with
+/// no engine argument at all). StarRocks' service-def has no `schema` resource —
+/// its middle level is `database` — so a StarRocks profile carrying a
+/// `tagService` downloads attachments naming a level its own def does not know,
+/// and `RangerTagEnricher.processServiceTags` DROPS them:
+/// `createRangerServiceResourceMatcher` returns null when no hierarchy of any
+/// policy type contains every key, which
+/// `EgretTagServiceResourceValidationTest` measures on the real jar (the mirror
+/// row, `catalog,database,table,column` against the Trino def, is `dropped`).
+///
+/// So synthesising `resource_level_names(engine)` here would be a FAIL-OPEN: it
+/// would tell a steward the engine evaluates a tag policy that the engine's own
+/// enricher has thrown away. The mapping writes what the wire carries, the
+/// evaluator's `enriched_tags` drops it against the resource def, and a StarRocks
+/// profile therefore answers with its tag policies correctly reported as reaching
+/// nothing. **The defect is in the writer** — tag-selected masks and clearances
+/// cannot reach a StarRocks engine at all — and it is recorded in Task 7's report,
+/// not papered over here. (Nothing egret auto-binds puts a `tagService` on a
+/// StarRocks profile: `bind_trino_profile` is the only writer and
+/// `tag_assignments_for_service` resolves the owning profile with
+/// `tp.type = 'trino'`. An operator can still set the config by hand, which is
+/// why this path has to be right rather than merely unused.)
+///
+/// # ⚠ Enumerated: the four fields with no column to come from
+///
+/// | field | value | ruling |
+/// |---|---|---|
+/// | `attributes` | empty | `from_assignments` writes each tag as `{"type": name, "owner": 0}`. There is no attribute on the wire, so an empty map is the payload and not a default |
+/// | `options` | empty | likewise absent from the wire. Non-empty would REFUSE in `tag_candidates`, so inventing one would be an over-refusal |
+/// | `validity_periods` | `0` | likewise absent |
+/// | `attached_through.is_enabled` | `true` | `from_assignments` writes `"isEnabled": true` unconditionally. The field reaches no decision (`processServiceTags` never reads it, SP4d-2b D9); it is set to the wire's value so the inertness stays assertable |
+///
+/// A field added to `egret_ranger_eval::eval::ResolvedTag` is a compile error
+/// here — there is no `Default` — and a new row in the table above.
+fn attachment_for(
+    tag: &egret_policy::ResolvedTag,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Option<egret_ranger_eval::eval::ResolvedTag> {
+    use egret_ranger_eval::resource::MatchType;
+
+    let attached_column = match tag.match_type {
+        MatchType::Self_ => column,
+        MatchType::Ancestor => "",
+        MatchType::Descendant | MatchType::SelfAndAllDescendants | MatchType::None => return None,
+    };
+    // Exactly `from_assignments`' rule: `catalog` unconditionally, and each of
+    // the other three only when non-empty.
+    let levels: BTreeSet<String> = std::iter::once("catalog")
+        .chain((!schema.is_empty()).then_some("schema"))
+        .chain((!table.is_empty()).then_some("table"))
+        .chain((!attached_column.is_empty()).then_some("column"))
+        .map(str::to_owned)
+        .collect();
+    Some(egret_ranger_eval::eval::ResolvedTag {
+        name: tag.name.clone(),
+        match_type: tag.match_type,
+        attributes: BTreeMap::new(),
+        options: BTreeSet::new(),
+        validity_periods: 0,
+        attached_through: TagServiceResource {
+            levels,
+            is_enabled: true,
+        },
+    })
+}
+
+/// The evaluator's own tag set, as the steward reads it —
+/// [`ExplainResponse::tags`].
+///
+/// **Task 8's F4/F5 fix, and the direction matters.** This maps the set the
+/// evaluator was handed; it does not re-query, re-derive or re-order anything. So
+/// the page cannot show a tag the evaluator did not see, nor miss one it did,
+/// which is the whole class of defect the two-query arrangement produced.
+///
+/// `attached_at_column` is `attached_through.levels.contains("column")`, the
+/// field [`attachment_for`] wrote from `from_assignments`' rule — see
+/// [`ExplainResolvedTag`] for why that, and not `MatchType`, is on the wire.
+///
+/// Order is the resolution's order, which is
+/// `resolved_tags_for_resource_via`'s `ORDER BY`; nothing here sorts, because a
+/// second ordering rule is a second thing that can drift from the first.
+fn resolved_tags_for_display(tags: &UnenrichedTags) -> Vec<ExplainResolvedTag> {
+    tags.as_slice()
+        .iter()
+        .map(|t| ExplainResolvedTag {
+            name: t.name.clone(),
+            attached_at_column: t.attached_through.levels.iter().any(|l| l == "column"),
+        })
+        .collect()
+}
+
+/// The resolved set as it reaches ONE profile — the only narrowing this crate can
+/// apply to it without reimplementing the evaluator.
+///
+/// # ⚠ Three lines in a function because the mutation survived, for the fourth time
+///
+/// This was inline in the handler, and removing the narrowing entirely — handing
+/// every profile the full set — **passed the whole suite, 27/0.** The handler body
+/// is reachable only from DB-gated tests, which do not run on this branch, so the
+/// fix for review H1 could have been undone by deleting four lines. That is the
+/// same finding Task 6 made about `attribution_for`, Task 7's fix round 3 made
+/// about `explain_tag_inputs`, and the one that moved `stored_value_problem` out of
+/// SQL: **where a mutation cannot reach, the code is in the wrong shape.**
+///
+/// # Why zero is the whole predicate
+///
+/// With no tag policy of ANY kind in this profile's download, the evaluator's
+/// `of_kind` is empty for every policy type, so no tag can reach any verdict here
+/// and the empty list cannot disagree with it. It is a ONE-WAY implication, not a
+/// reimplementation: anything finer — per access type, or the `enriched_tags` drop
+/// review H2 names — is the evaluator's own rule and stays there, because a second
+/// copy of it is the shape this package has refused four times.
+fn tags_for_profile(
+    resolved: &[ExplainResolvedTag],
+    tag_policies_in_download: usize,
+) -> Vec<ExplainResolvedTag> {
+    if tag_policies_in_download == 0 {
+        Vec::new()
+    } else {
+        resolved.to_vec()
+    }
+}
+
+/// The two reads [`resolved_tags_for_target`] needs, behind a trait so that the
+/// GATE, the mapping and the wiring between them are testable with no database.
+///
+/// Same seam and same reason as [`ClearanceLookups`]: fix round 1 of Task 6
+/// measured that a `&mut PgConnection` parameter makes its call site reachable
+/// only from a DB-gated test, where a mutation that drops a call survives in
+/// silence. Dropping the gate call here would be a fail-open, so it is the first
+/// thing that had to be coverable.
+///
+/// Both methods are `-> impl Future + Send` rather than `async fn` for the reason
+/// on [`ClearanceLookups`]: the caller is an axum handler.
+trait TagLookups {
+    /// `tag_assignment_coordinates_via` — every distinct
+    /// `(schema_name, table_name, column_name)` this catalog's tag assignments
+    /// carry. The RULING on them is [`stored_value_problem`]'s, in Rust, so that
+    /// it is testable and mutable; this is the fact.
+    fn assignment_coordinates(
+        &mut self,
+        catalog_id: Uuid,
+    ) -> impl std::future::Future<Output = Result<Vec<(String, String, String)>, PermHttpError>> + Send;
+
+    /// `resolved_tags_for_resource_via` — the enricher-equivalent set for ONE
+    /// resource, as `(tags.name, MatchType)` pairs.
+    fn resolved_tags(
+        &mut self,
+        catalog_id: Uuid,
+        schema: &str,
+        table: &str,
+        column: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<egret_policy::ResolvedTag>, PermHttpError>> + Send;
+}
+
+/// The production implementation: the two store queries, unchanged.
+impl TagLookups for sqlx::PgConnection {
+    async fn assignment_coordinates(
+        &mut self,
+        catalog_id: Uuid,
+    ) -> Result<Vec<(String, String, String)>, PermHttpError> {
+        Ok(tag_assignment_coordinates_via(self, catalog_id).await?)
+    }
+
+    async fn resolved_tags(
+        &mut self,
+        catalog_id: Uuid,
+        schema: &str,
+        table: &str,
+        column: &str,
+    ) -> Result<Vec<egret_policy::ResolvedTag>, PermHttpError> {
+        Ok(resolved_tags_for_resource_via(self, catalog_id, schema, table, column).await?)
+    }
+}
+
+/// What [`ExplainAttribution::Clearance`]'s `required_roles` carries, given the
+/// `tags.key` the policy name resolved to (if any) and whatever
+/// [`ClearanceLookups::gates_for`] returned.
+///
+/// **`None` if and only if `tag` is `None`.** That is the guarantee the
+/// `Option` exists for, pinned here directly and again through
+/// [`attribution_for`], which is where the call site lives.
+///
+/// `gates` is ignored entirely when `tag` is `None`: a clearance whose tag row
+/// is gone must not borrow another tag's gate, which is the one way a wrong
+/// `Some([...])` could be invented rather than merely conflated.
+fn clearing_roles(tag: Option<&str>, gates: &[(String, Vec<String>)]) -> Option<Vec<String>> {
+    let key = tag?;
+    // The lookup ran, so an empty result is a fact about the gate rather than
+    // about the lookup — either it declares only `required_groups` (which
+    // `clearance_gates_for_tags_via` filters out) or its row is already
+    // deleted. `ExplainAttribution::Clearance` states that those two stay
+    // conflated; what they no longer collide with is "nothing was looked up".
+    Some(
+        gates
+            .iter()
+            .find(|(gated, _)| gated == key)
+            .map(|(_, roles)| roles.clone())
+            .unwrap_or_default(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1766,4 +2661,960 @@ async fn compile(
         vec![service_id],
         std::slice::from_ref(&summary),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clearing_roles;
+
+    fn gate(key: &str, roles: &[&str]) -> (String, Vec<String>) {
+        (
+            key.to_string(),
+            roles.iter().map(|r| r.to_string()).collect(),
+        )
+    }
+
+    /// The whole point of the `Option`. SP4d-2a's browser gate deleted a `tags`
+    /// row while the compiled clearance policy kept being served; the gate had
+    /// declared `['sp4d2a_cleared']`, and the page reported that it declared
+    /// only groups — because an empty list was all the wire could say. `None`
+    /// is now the only thing a missing key can produce.
+    #[test]
+    fn no_tag_key_means_the_roles_are_unknown_not_empty() {
+        assert_eq!(clearing_roles(None, &[]), None);
+    }
+
+    /// `gates` is ignored when there is no key, so a key-less clearance cannot
+    /// be handed somebody else's gate. Without this, "looked nothing up" and
+    /// "found another tag's roles" are the same code path.
+    #[test]
+    fn no_tag_key_borrows_no_other_tags_gate() {
+        assert_eq!(clearing_roles(None, &[gate("pii", &["pii_cleared"])]), None);
+    }
+
+    /// The lookup ran and found the gate: the roles are the answer, verbatim
+    /// and in order, and `Some` says the list may be read as a fact.
+    #[test]
+    fn a_resolved_gate_reports_its_roles() {
+        assert_eq!(
+            clearing_roles(
+                Some("pii"),
+                &[
+                    gate("other", &["nope"]),
+                    gate("pii", &["pii_cleared", "auditor"])
+                ]
+            ),
+            Some(vec!["pii_cleared".to_string(), "auditor".to_string()])
+        );
+    }
+
+    /// The honest 3→2. The lookup ran and missed, which happens for a
+    /// groups-only gate (`clearance_gates_for_tags_via` filters on
+    /// `cardinality(required_roles) > 0`) and for a gate row already deleted.
+    /// Those two stay conflated in `Some([])` — what matters is that neither
+    /// can be confused with `None`.
+    #[test]
+    fn a_resolved_tag_with_no_matching_gate_reports_an_empty_list_not_none() {
+        assert_eq!(clearing_roles(Some("pii"), &[]), Some(Vec::new()));
+        assert_eq!(
+            clearing_roles(Some("pii"), &[gate("other", &["nope"])]),
+            Some(Vec::new())
+        );
+    }
+}
+
+// ── the wiring, with no database ─────────────────────────────────────────
+//
+// Fix round 1. The four tests above pin the DECISION; these pin the CALL
+// SITE, which is the part a surviving mutant found uncovered. `attribution_for`
+// is generic over `ClearanceLookups`, so the fake below stands in for the two
+// store queries and also RECORDS them — "no key, so no second query" is a
+// claim about behaviour, and a test that only looked at the return value could
+// not tell a skipped query from one whose result was thrown away.
+
+#[cfg(test)]
+mod wiring_tests {
+    use super::{attribution_for, ClearanceLookups, ExplainAttribution, PermHttpError};
+    use egret_ranger_eval::eval::{Decision, DenyReason};
+    use uuid::Uuid;
+
+    /// Stands in for the two store queries, and records what it was asked.
+    struct FakeLookups {
+        tag: Option<String>,
+        gates: Vec<(String, Vec<String>)>,
+        tags_asked: Vec<Uuid>,
+        gates_asked: Vec<String>,
+    }
+
+    impl FakeLookups {
+        fn new(tag: Option<&str>, gates: &[(&str, &[&str])]) -> Self {
+            Self {
+                tag: tag.map(str::to_string),
+                gates: gates
+                    .iter()
+                    .map(|(k, roles)| {
+                        (
+                            (*k).to_string(),
+                            roles.iter().map(|r| (*r).to_string()).collect(),
+                        )
+                    })
+                    .collect(),
+                tags_asked: Vec::new(),
+                gates_asked: Vec::new(),
+            }
+        }
+    }
+
+    impl ClearanceLookups for FakeLookups {
+        async fn tag_key(&mut self, tag_id: Uuid) -> Result<Option<String>, PermHttpError> {
+            self.tags_asked.push(tag_id);
+            Ok(self.tag.clone())
+        }
+
+        async fn gates_for(
+            &mut self,
+            tag_key: &str,
+        ) -> Result<Vec<(String, Vec<String>)>, PermHttpError> {
+            self.gates_asked.push(tag_key.to_string());
+            // The real query filters by key in SQL; the fake filters here, so a
+            // caller that passed the wrong key gets the same empty answer it
+            // would get from Postgres rather than a convenient one.
+            Ok(self
+                .gates
+                .iter()
+                .filter(|(k, _)| k == tag_key)
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn denied(policy_name: &str) -> Decision {
+        Decision::Denied {
+            policy_id: Some(30),
+            policy_name: policy_name.to_string(),
+            reason: DenyReason::DenyPolicyItem,
+        }
+    }
+
+    const TAG_ID: &str = "88888888-8888-4888-8888-888888888888";
+
+    fn clearance_name(locator: Option<&str>) -> String {
+        match locator {
+            Some(l) => format!("perm-clearance-{TAG_ID}-{l}"),
+            None => format!("perm-clearance-{TAG_ID}"),
+        }
+    }
+
+    /// **This is the test that kills the fix-round-1 survivor.** Substituting
+    /// `clearing_roles(None, &gates)` at the call site makes `required_roles`
+    /// `null` here while the gate plainly declares a role, so this assertion
+    /// fails — with no `DATABASE_URL`, in 0.00s.
+    #[tokio::test]
+    async fn a_resolved_clearance_carries_the_gates_roles_onto_the_wire() {
+        let mut lookups =
+            FakeLookups::new(Some("sp4d2a_ssn"), &[("sp4d2a_ssn", &["sp4d2a_cleared"])]);
+        let got = attribution_for(&mut lookups, &denied(&clearance_name(None)))
+            .await
+            .expect("no error");
+        assert_eq!(
+            got,
+            Some(ExplainAttribution::Clearance {
+                tag_id: Uuid::parse_str(TAG_ID).unwrap(),
+                tag: Some("sp4d2a_ssn".to_string()),
+                required_roles: Some(vec!["sp4d2a_cleared".to_string()]),
+                locator: None,
+            })
+        );
+        assert_eq!(
+            lookups.gates_asked,
+            vec!["sp4d2a_ssn".to_string()],
+            "the gate must be looked up BY THE KEY the tag resolved to"
+        );
+    }
+
+    /// The browser-gate state: the `tags` row is gone and the compiled policy is
+    /// still served. `required_roles` is `None` — not `[]` — and the second
+    /// query is never issued, because there is no key to issue it with.
+    #[tokio::test]
+    async fn an_unresolved_clearance_sends_null_roles_and_asks_no_gate() {
+        let mut lookups = FakeLookups::new(None, &[("sp4d2a_ssn", &["sp4d2a_cleared"])]);
+        let got = attribution_for(&mut lookups, &denied(&clearance_name(Some("wh.s.t.ssn"))))
+            .await
+            .expect("no error");
+        assert_eq!(
+            got,
+            Some(ExplainAttribution::Clearance {
+                tag_id: Uuid::parse_str(TAG_ID).unwrap(),
+                tag: None,
+                required_roles: None,
+                locator: Some("wh.s.t.ssn".to_string()),
+            })
+        );
+        assert!(
+            lookups.gates_asked.is_empty(),
+            "no key means no gate query, not a query with a borrowed key"
+        );
+    }
+
+    /// The other half of the honest 3→2: the key resolved, the gate query ran
+    /// and matched nothing. `Some([])` is a fact about the gate, and it must not
+    /// become `None` just because the list is empty.
+    #[tokio::test]
+    async fn a_resolved_clearance_with_no_gate_sends_an_empty_list() {
+        let mut lookups = FakeLookups::new(Some("sp4d2a_ssn"), &[]);
+        let got = attribution_for(&mut lookups, &denied(&clearance_name(None)))
+            .await
+            .expect("no error");
+        assert_eq!(
+            got,
+            Some(ExplainAttribution::Clearance {
+                tag_id: Uuid::parse_str(TAG_ID).unwrap(),
+                tag: Some("sp4d2a_ssn".to_string()),
+                required_roles: Some(Vec::new()),
+                locator: None,
+            })
+        );
+        assert_eq!(lookups.gates_asked, vec!["sp4d2a_ssn".to_string()]);
+    }
+
+    /// A grant, a rule and an `Undecidable` all reach this function too, and
+    /// none of them may touch the clearance lookups — a tag read per verdict on
+    /// a profile that has no clearance at all would be pure cost.
+    #[tokio::test]
+    async fn the_other_attributions_issue_no_clearance_lookups() {
+        let grant = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        let rule = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        for (decision, want) in [
+            (
+                denied(&format!("perm-grant-{grant}")),
+                Some(ExplainAttribution::Grant { grant_id: grant }),
+            ),
+            (
+                denied(&format!("perm-rule-{rule}-wh.s.t.c")),
+                Some(ExplainAttribution::Rule {
+                    rule_id: rule,
+                    locator: Some("wh.s.t.c".to_string()),
+                }),
+            ),
+            // Ranger's own super-user short-circuit: a real decider with no
+            // model object, reported by name on the decision itself.
+            (denied("superuser"), None),
+            (Decision::Undecidable { why: Vec::new() }, None),
+        ] {
+            let mut lookups = FakeLookups::new(Some("sp4d2a_ssn"), &[("sp4d2a_ssn", &["r"])]);
+            let got = attribution_for(&mut lookups, &decision).await.expect("ok");
+            assert_eq!(got, want, "for {decision:?}");
+            assert_eq!(lookups.tags_asked, Vec::<Uuid>::new(), "for {decision:?}");
+            assert!(lookups.gates_asked.is_empty(), "for {decision:?}");
+        }
+    }
+}
+
+// ── the tag resolution, with no database ─────────────────────────────────
+//
+// SP4d-2b Task 7. Two things needed covering and neither could be reached from
+// a DB-gated test: that the GATE runs before any resolution (dropping that call
+// is a fail-open), and the `egret_policy::ResolvedTag` →
+// `egret_ranger_eval::eval::ResolvedTag` mapping, which synthesises four fields
+// out of nothing but a measurement of what `ServiceTags::from_assignments`
+// writes. `TagLookups` is the seam; the fake records what it was asked, because
+// "the resolver was never called" is a claim about behaviour that a test reading
+// only the return value cannot make.
+
+#[cfg(test)]
+mod tag_resolution_tests {
+    use super::{
+        attachment_for, resolved_tags_for_display, resolved_tags_for_target, stored_value_problem,
+        ExplainResolvedTag, ExplainTagDecline, ExplainTargetLevel, PermHttpError, Scope,
+        StoredValueProblem, TagLookups, UnenrichedTags,
+    };
+    use egret_ranger_eval::resource::MatchType;
+    use uuid::Uuid;
+
+    const CATALOG: &str = "33333333-3333-4333-8333-333333333333";
+
+    /// Stands in for the two store reads, and records both.
+    struct FakeTagLookups {
+        coordinates: Vec<(String, String, String)>,
+        resolved: Vec<egret_policy::ResolvedTag>,
+        gate_asked: Vec<Uuid>,
+        resolved_asked: Vec<(Uuid, String, String, String)>,
+    }
+
+    impl FakeTagLookups {
+        fn new(coordinates: &[(&str, &str, &str)], resolved: &[(&str, MatchType)]) -> Self {
+            Self {
+                coordinates: coordinates
+                    .iter()
+                    .map(|(s, t, c)| ((*s).to_string(), (*t).to_string(), (*c).to_string()))
+                    .collect(),
+                resolved: resolved
+                    .iter()
+                    .map(|(name, match_type)| egret_policy::ResolvedTag {
+                        name: (*name).to_string(),
+                        match_type: *match_type,
+                    })
+                    .collect(),
+                gate_asked: Vec::new(),
+                resolved_asked: Vec::new(),
+            }
+        }
+
+        /// One ordinary column-level assignment: the coordinate every test that
+        /// is not about the gate wants, so that "the gate let it through" is not
+        /// the vacuous case of there being nothing stored.
+        fn clean(resolved: &[(&str, MatchType)]) -> Self {
+            Self::new(&[("sales", "orders", "email")], resolved)
+        }
+    }
+
+    impl TagLookups for FakeTagLookups {
+        async fn assignment_coordinates(
+            &mut self,
+            catalog_id: Uuid,
+        ) -> Result<Vec<(String, String, String)>, PermHttpError> {
+            self.gate_asked.push(catalog_id);
+            Ok(self.coordinates.clone())
+        }
+
+        async fn resolved_tags(
+            &mut self,
+            catalog_id: Uuid,
+            schema: &str,
+            table: &str,
+            column: &str,
+        ) -> Result<Vec<egret_policy::ResolvedTag>, PermHttpError> {
+            self.resolved_asked.push((
+                catalog_id,
+                schema.to_string(),
+                table.to_string(),
+                column.to_string(),
+            ));
+            Ok(self.resolved.clone())
+        }
+    }
+
+    fn target(schema: Option<&str>, table: Option<&str>, column: Option<&str>) -> Scope {
+        Scope {
+            catalog_id: Uuid::parse_str(CATALOG).unwrap(),
+            schema: schema.map(str::to_string),
+            table: table.map(str::to_string),
+            column: column.map(str::to_string),
+        }
+    }
+
+    fn levels(tag: &egret_ranger_eval::eval::ResolvedTag) -> Vec<&str> {
+        tag.attached_through
+            .levels
+            .iter()
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// **The fail-open this seam exists for — all three classes of it.**
+    ///
+    /// Each row below is a stored coordinate the enricher's matcher ADMITS for the
+    /// target `catalog/sales/orders/email` and the resolver's equality predicate
+    /// can never return, so passing the resolved set would pass a set MISSING a tag
+    /// the engine enforces — and an empty set is the licence to skip the tag phase
+    /// entirely. Every one of them is measured on the real jar: the first by Task
+    /// 7's own probe, the wildcards and the mixed case by fix round 1's review and
+    /// now by `tests/ranger/.../EgretTagAttachmentMatchTypeTest.java`.
+    ///
+    /// ⚠ **Fix round 1 added the wildcard and non-ASCII rows.** The first version
+    /// of this gate ruled on emptiness alone, which is the LESS reachable class
+    /// (`ScopePicker` sends `undefined` for an empty input, so the form cannot
+    /// produce it), while a `*` in a stored value is one `PUT …/resource-tags`
+    /// away. Deleting a class from `stored_value_problem`, or dropping the gate
+    /// call, makes this test report a tag set where it must report "did not
+    /// resolve".
+    #[tokio::test]
+    async fn every_unreproducible_stored_coordinate_declines_the_whole_resolution() {
+        // ⚠ The variant each row must REPORT, written out per coordinate rather
+        // than derived from `stored_value_problem` (fix round 3). Deriving it would
+        // be a correlated oracle — the function under test would be asked to grade
+        // its own answer — and the `other =>` arm means a row added without an
+        // expectation fails loudly instead of being graded by nothing.
+        let coord = |(schema, table, column): (&str, &str, &str)| {
+            (schema.to_string(), table.to_string(), column.to_string())
+        };
+        let expected_for = |c: (&str, &str, &str)| {
+            let (schema, table, column) = coord(c);
+            match c {
+                ("sales", "", "") | ("", "", "") => ExplainTagDecline::StoredLevelEmpty {
+                    schema,
+                    table,
+                    column,
+                },
+                ("sales", "*", "")
+                | ("sales", "ord*", "")
+                | ("*", "*", "")
+                | ("sales", "order?", "")
+                | ("sales", "orders", "ema*") => ExplainTagDecline::StoredWildcard {
+                    schema,
+                    table,
+                    column,
+                },
+                ("sales", "orders", "ema\u{0131}l") => ExplainTagDecline::StoredFoldDivergent {
+                    schema,
+                    table,
+                    column,
+                },
+                other => panic!("no expected decline written for {other:?}"),
+            }
+        };
+        for (coordinate, why) in [
+            (
+                ("sales", "", ""),
+                "a schema-level row ships as {catalog, schema}: ANCESTOR",
+            ),
+            (
+                ("", "", ""),
+                "a catalog-level row ships as {catalog}: ANCESTOR",
+            ),
+            (
+                ("sales", "*", ""),
+                "wildCard: true makes `*` match `orders`: ANCESTOR",
+            ),
+            (
+                ("sales", "ord*", ""),
+                "a wildcard PREFIX matches too: ANCESTOR",
+            ),
+            (("*", "*", ""), "both levels wildcarded: ANCESTOR"),
+            (
+                ("sales", "order?", ""),
+                "`?` is the other metacharacter: ANCESTOR",
+            ),
+            (
+                ("sales", "orders", "ema*"),
+                "a wildcarded COLUMN is SELF, not ancestor",
+            ),
+            // ⚠ Fix round 2 replaced this row. It used to be
+            // `("sales","orders","e\u{0301}mail")` — `e` plus a combining acute —
+            // on the round-1 rule that ANY non-ASCII value declines. The two folds
+            // AGREE on a combining mark, so that row now asserts the opposite of
+            // what it says; what diverges is the measured set, and `\u{0131}` (the
+            // Turkish dotless i, which uppercases to ASCII `I`) is a member.
+            (
+                ("sales", "orders", "ema\u{0131}l"),
+                "a character the two folds disagree on",
+            ),
+        ] {
+            let mut lookups = FakeTagLookups::new(&[coordinate], &[("pii", MatchType::Self_)]);
+            let got = resolved_tags_for_target(
+                &mut lookups,
+                &target(Some("sales"), Some("orders"), Some("email")),
+            )
+            .await
+            .expect("no error");
+            // ⚠ The VARIANT and the COORDINATE, not merely "declined" (fix round
+            // 3). Three states with three different remedies were collapsed by an
+            // `.is_some()` at the call site, and the page then named a stored row
+            // that did not exist and offered a remedy already satisfied. An
+            // assertion that only checked for a decline could not have caught
+            // that — and did not.
+            assert_eq!(
+                got.as_ref().err(),
+                Some(&expected_for(coordinate)),
+                "{coordinate:?} must decline and name itself ({why}), got {got:?}"
+            );
+            assert_eq!(
+                lookups.gate_asked,
+                vec![Uuid::parse_str(CATALOG).unwrap()],
+                "the gate is asked, and asked about the target's catalog"
+            );
+            assert!(
+                lookups.resolved_asked.is_empty(),
+                "nothing may be resolved once the equivalence is known not to hold: {coordinate:?}"
+            );
+        }
+    }
+
+    /// **The class that must NOT be gated, and this is the test that keeps it
+    /// that way.** The matcher's `ignoreCase: true` is REPRODUCED — the resolver
+    /// folds both sides — so a row stored `SALES`/`ORDERS`/`EMAIL` is a coordinate
+    /// the predicate handles, not one it declines.
+    ///
+    /// Gating it instead would have been the obvious fourth class and it would be
+    /// wrong in a way no fail-open test catches: `ScopePicker` renders the three
+    /// levels as free-text inputs and `request_resource` inserts them verbatim, so
+    /// differing case is what ORDINARY use produces. A steward who typed `SALES`
+    /// would get "cannot decide" for a question egret can answer.
+    #[tokio::test]
+    async fn differing_case_is_reproduced_rather_than_declined() {
+        let mut lookups = FakeTagLookups::new(
+            &[("SALES", "ORDERS", "EMAIL")],
+            &[("pii", MatchType::Self_)],
+        );
+        let got = resolved_tags_for_target(
+            &mut lookups,
+            &target(Some("sales"), Some("orders"), Some("email")),
+        )
+        .await
+        .expect("no error")
+        .expect("a case difference is not a reason to decline");
+        assert_eq!(got.as_slice().len(), 1, "and the tag still comes through");
+        assert_eq!(
+            lookups.resolved_asked.len(),
+            1,
+            "the resolver is asked — the fold is ITS job, not the gate's"
+        );
+    }
+
+    /// **The wiring a surviving mutation found (fix round 3).** Dropping the
+    /// decline on its way to the response — `Err(_) => (None, None)` — passed the
+    /// entire suite, because the handler body is reachable only from DB-gated
+    /// tests. Both arms are asserted here, and the second assertion is the one that
+    /// matters: a reason that does not reach the response is a page that renders
+    /// round 1's sentence for all four states, which is the defect this round
+    /// exists to fix.
+    #[test]
+    fn the_decline_reason_reaches_the_response_and_the_tags_do_not() {
+        let decline = ExplainTagDecline::StoredWildcard {
+            schema: "sales".to_string(),
+            table: "*".to_string(),
+            column: String::new(),
+        };
+        let (tags, declined) = super::explain_tag_inputs(Err(decline.clone()));
+        assert!(
+            tags.is_none(),
+            "a decline must not hand the evaluator a tag set"
+        );
+        assert_eq!(
+            declined,
+            Some(decline),
+            "and the REASON must reach the response, verbatim"
+        );
+
+        let (tags, declined) = super::explain_tag_inputs(Ok(UnenrichedTags::new(Vec::new())));
+        assert_eq!(
+            tags.map(|t| t.as_slice().len()),
+            Some(0),
+            "a resolution hands the evaluator its set, empty or not"
+        );
+        assert!(
+            declined.is_none(),
+            "and reports no decline — the page keys the reason on this being present"
+        );
+    }
+
+    /// **Task 8's F4/F5.** `ExplainResponse::tags` is the evaluator's own set now,
+    /// and the field a steward acts on is `attached_at_column`: `true` says
+    /// "change this column's assignment", `false` says "change the TABLE's". The
+    /// browser measured the old field reporting "None." next to a deny driven by a
+    /// table-level attachment, so the ANCESTOR row here is the one that matters.
+    ///
+    /// Asserted through `attachment_for`, not by hand-building a `ResolvedTag`:
+    /// the bool reads back `attached_through.levels`, and building that literal
+    /// here would assert the mapping against itself.
+    #[test]
+    fn the_reported_tag_set_says_whether_the_attachment_names_the_column() {
+        let on_the_column = attachment_for(
+            &egret_policy::ResolvedTag {
+                name: "pii".to_string(),
+                match_type: MatchType::Self_,
+            },
+            "sales",
+            "orders",
+            "email",
+        )
+        .expect("SELF maps");
+        let on_the_table = attachment_for(
+            &egret_policy::ResolvedTag {
+                name: "ancdeny".to_string(),
+                match_type: MatchType::Ancestor,
+            },
+            "sales",
+            "orders",
+            "email",
+        )
+        .expect("ANCESTOR maps");
+
+        let reported =
+            resolved_tags_for_display(&UnenrichedTags::new(vec![on_the_column, on_the_table]));
+        assert_eq!(
+            reported,
+            vec![
+                ExplainResolvedTag {
+                    name: "pii".to_string(),
+                    attached_at_column: true,
+                },
+                ExplainResolvedTag {
+                    name: "ancdeny".to_string(),
+                    attached_at_column: false,
+                },
+            ],
+            "the column-level attachment reports true, the table-level one false, \
+             and the resolution's ORDER is preserved rather than re-sorted"
+        );
+    }
+
+    /// **Whole-branch review H1, and the seam exists because the mutation
+    /// survived.** Removing the narrowing — handing every profile the full
+    /// resolved set — passed the whole suite 27/0 while it was inline in the
+    /// handler. Both arms are asserted here with no database, which is what makes
+    /// the fix mutable; `0` is the load-bearing one, because that is the profile
+    /// the page must say "none, and here is why" about rather than listing tags
+    /// nothing there could consult.
+    #[test]
+    fn a_profile_with_no_tag_policies_is_handed_no_tags() {
+        let resolved = vec![
+            ExplainResolvedTag {
+                name: "pii".to_string(),
+                attached_at_column: true,
+            },
+            ExplainResolvedTag {
+                name: "ancdeny".to_string(),
+                attached_at_column: false,
+            },
+        ];
+        assert!(
+            super::tags_for_profile(&resolved, 0).is_empty(),
+            "a download with no tag policy of any kind cannot have consulted a tag, \
+             so the profile is handed none — the H1 claim that was false"
+        );
+        assert_eq!(
+            super::tags_for_profile(&resolved, 1),
+            resolved,
+            "and with a tag policy present the profile gets the resolution verbatim, \
+             in its order, neither re-sorted nor filtered further — anything finer is \
+             the evaluator's rule, not this one's"
+        );
+    }
+
+    /// **Task 8, concern 4 — and the concern was half wrong, which is why this
+    /// test exists in this shape.**
+    ///
+    /// I reported that `assignment_coordinates`' row order was unpinned, so a
+    /// catalog with two differently-broken assignments would name one of them
+    /// arbitrarily. `tag_assignment_coordinates_via` has carried
+    /// `ORDER BY a.schema_name, a.table_name, a.column_name` all along, so the
+    /// SQL side was pinned before I said it was not. What was genuinely unpinned
+    /// is the RULE on this side: `find_map` takes the first offender, and nothing
+    /// said so or would have failed if it had become the last.
+    ///
+    /// Both orders are asserted, which is what makes this a test of the rule
+    /// rather than of the fixture: the SAME pair of offenders handed over in the
+    /// opposite order must name the OTHER row. A `find_map` changed to `.last()`
+    /// or to a per-class precedence fails one of the two.
+    #[tokio::test]
+    async fn the_first_offending_coordinate_is_the_one_named() {
+        // Two offenders of DIFFERENT classes, so the assertion cannot be satisfied
+        // by a rule that happens to prefer one class.
+        let wildcard_first = [("sales", "ord*", "email"), ("sales", "orders", "emaıl")];
+        let fold_first = [("sales", "orders", "emaıl"), ("sales", "ord*", "email")];
+
+        let mut lookups = FakeTagLookups::new(&wildcard_first, &[]);
+        let got = resolved_tags_for_target(
+            &mut lookups,
+            &target(Some("sales"), Some("orders"), Some("email")),
+        )
+        .await
+        .expect("no error");
+        assert_eq!(
+            got,
+            Err(ExplainTagDecline::StoredWildcard {
+                schema: "sales".to_string(),
+                table: "ord*".to_string(),
+                column: "email".to_string(),
+            }),
+            "the FIRST offender in the ordered list is the one the page names"
+        );
+
+        let mut lookups = FakeTagLookups::new(&fold_first, &[]);
+        let got = resolved_tags_for_target(
+            &mut lookups,
+            &target(Some("sales"), Some("orders"), Some("email")),
+        )
+        .await
+        .expect("no error");
+        assert_eq!(
+            got,
+            Err(ExplainTagDecline::StoredFoldDivergent {
+                schema: "sales".to_string(),
+                table: "orders".to_string(),
+                column: "emaıl".to_string(),
+            }),
+            "and with the same two rows in the other order it is the other one — \
+             so this pins first-wins, not a preference between the classes"
+        );
+    }
+
+    /// The ruling, per class, on the function that owns it. The end-to-end tests
+    /// above drive it through `resolved_tags_for_target`; these name the class, so
+    /// that a mutation which collapses two classes into one is visible as such.
+    #[test]
+    fn stored_value_problem_rules_on_each_class_by_name() {
+        use StoredValueProblem::*;
+        assert_eq!(stored_value_problem("sales", "orders", "email"), None);
+        // `column_name = ''` is migration 0081's table-level sentinel and the
+        // resolver's own second arm — the one emptiness that is REPRODUCED.
+        assert_eq!(stored_value_problem("sales", "orders", ""), None);
+        assert_eq!(stored_value_problem("", "orders", ""), Some(EmptyLevel));
+        assert_eq!(stored_value_problem("sales", "", ""), Some(EmptyLevel));
+        assert_eq!(
+            stored_value_problem("sal*s", "orders", ""),
+            Some(WildcardMetacharacter)
+        );
+        assert_eq!(
+            stored_value_problem("sales", "orders", "ema?l"),
+            Some(WildcardMetacharacter)
+        );
+        // ⚠ Fix round 2: an ordinary non-ASCII value is NOT a problem. The two
+        // folds AGREE on every Vietnamese letter — measured over the precomposed
+        // letters and the whole U+1EA0..U+1EF9 tone range by
+        // `EgretCaseFoldAgreementTest::noVietnameseLetterIsInTheDivergentSet` — and
+        // round 1 declined all of them, which in this deployment is a tag on
+        // `người` refusing the whole catalog.
+        assert_eq!(
+            stored_value_problem("b\u{00e1}n_h\u{00e0}ng", "ng\u{01b0}\u{1edd}i", ""),
+            None
+        );
+        assert_eq!(
+            stored_value_problem("Ti\u{1ebf}ng", "TI\u{1ebe}NG", ""),
+            None
+        );
+        // The 25 that do diverge, one per mechanism.
+        for divergent in [
+            "\u{0130}", // full lowercase is TWO code points
+            "\u{0131}", // uppercases to ASCII `I`
+            "\u{017f}", // uppercases to ASCII `S`
+            "\u{03c2}", // final sigma
+            "\u{03a3}", // lowercase depends on the NEXT character
+            "\u{00b5}", // micro sign
+            "\u{1c80}", // Cyrillic rounded ve
+        ] {
+            assert_eq!(
+                stored_value_problem(&format!("sa{divergent}les"), "orders", ""),
+                Some(FoldDivergentCharacter),
+                "{divergent:?} is in FOLD_DIVERGENT"
+            );
+        }
+        // Case is NOT a problem: it is reproduced by the resolver's fold.
+        assert_eq!(stored_value_problem("SALES", "ORDERS", "EMAIL"), None);
+        // Whitespace is NOT a problem: both sides compare the value as given.
+        assert_eq!(stored_value_problem(" sales", "orders ", ""), None);
+    }
+
+    /// **The REQUEST side of the fold, which round 2 added and round 1 did not
+    /// have.** The divergence is a property of the PAIR: `("\u{017f}", "s")` is
+    /// measured DISAGREEING, so a catalog whose every stored coordinate is ordinary
+    /// ASCII is still unsafe for a target that carries one of the 25 — the stored
+    /// side cannot see it, and nothing else would have declined.
+    #[tokio::test]
+    async fn a_fold_divergent_character_in_the_target_declines_the_resolution() {
+        for value in ["\u{017f}ales", "\u{0131}", "\u{03a3}igma"] {
+            for (level, t) in [
+                (
+                    ExplainTargetLevel::Schema,
+                    target(Some(value), Some("orders"), Some("email")),
+                ),
+                (
+                    ExplainTargetLevel::Table,
+                    target(Some("sales"), Some(value), Some("email")),
+                ),
+                (
+                    ExplainTargetLevel::Column,
+                    target(Some("sales"), Some("orders"), Some(value)),
+                ),
+            ] {
+                let mut lookups = FakeTagLookups::clean(&[("pii", MatchType::Self_)]);
+                let got = resolved_tags_for_target(&mut lookups, &t)
+                    .await
+                    .expect("no error");
+                // The LEVEL is part of the answer: the page names the box the
+                // steward typed it in, and this is the one decline whose reach is
+                // the REQUEST rather than the whole catalog.
+                assert_eq!(
+                    got.as_ref().err(),
+                    Some(&ExplainTagDecline::TargetFoldDivergent {
+                        level,
+                        value: value.to_string(),
+                    }),
+                    "a divergent target value must decline and name its level: {t:?}"
+                );
+                assert!(
+                    lookups.resolved_asked.is_empty(),
+                    "and decline before resolving: {t:?}"
+                );
+            }
+        }
+    }
+
+    /// …and the other half of that, which is the whole point of round 2: an
+    /// ORDINARY non-ASCII target resolves. Without this the request-side check is
+    /// indistinguishable from "decline anything with a diacritic", which is what
+    /// round 1 did and what this deployment cannot afford.
+    #[tokio::test]
+    async fn an_ordinary_vietnamese_target_still_resolves() {
+        let mut lookups = FakeTagLookups::new(
+            &[("b\u{00e1}n_h\u{00e0}ng", "ng\u{01b0}\u{1edd}i", "")],
+            &[("pii", MatchType::Self_)],
+        );
+        let got = resolved_tags_for_target(
+            &mut lookups,
+            &target(
+                Some("B\u{00c1}N_H\u{00c0}NG"),
+                Some("NG\u{01af}\u{1edc}I"),
+                None,
+            ),
+        )
+        .await
+        .expect("no error")
+        .expect("Vietnamese is not a reason to decline, in either case");
+        assert_eq!(got.as_slice().len(), 1);
+    }
+
+    /// The gate is the FIRST read, not a second opinion on a set already
+    /// fetched: with every coordinate reproducible the resolver is asked exactly
+    /// once, with the target's own four values and `column = ""` for a
+    /// table-level target.
+    #[tokio::test]
+    async fn a_clear_gate_resolves_once_with_the_targets_own_levels() {
+        let mut lookups = FakeTagLookups::clean(&[]);
+        let got = resolved_tags_for_target(&mut lookups, &target(Some("s"), Some("t"), None))
+            .await
+            .expect("no error");
+        assert_eq!(got.map(|t| t.as_slice().len()), Ok(0));
+        assert_eq!(
+            lookups.resolved_asked,
+            vec![(
+                Uuid::parse_str(CATALOG).unwrap(),
+                "s".to_string(),
+                "t".to_string(),
+                String::new()
+            )]
+        );
+    }
+
+    /// A COLUMN attachment and a TABLE attachment on one request, which is the
+    /// shape `resolved_tags_for_resource_via` returns for a column target, and
+    /// the two level sets `ServiceTags::from_assignments` writes for them. The
+    /// match type is the only record of which level the attachment was at, so
+    /// mapping `Ancestor` onto four levels (or `Self_` onto three) would ship a
+    /// provenance claim that is false — and the four synthesised fields are the
+    /// wire's values, not a `Default`.
+    #[tokio::test]
+    async fn self_maps_to_four_levels_and_ancestor_to_three() {
+        let mut lookups =
+            FakeTagLookups::clean(&[("pii", MatchType::Self_), ("ssn", MatchType::Ancestor)]);
+        let got = resolved_tags_for_target(&mut lookups, &target(Some("s"), Some("t"), Some("c")))
+            .await
+            .expect("no error")
+            .expect("the gate is clear, so a set is offered");
+        let tags = got.as_slice();
+        assert_eq!(tags.len(), 2);
+
+        assert_eq!(tags[0].name, "pii");
+        assert_eq!(tags[0].match_type, MatchType::Self_);
+        assert_eq!(
+            levels(&tags[0]),
+            vec!["catalog", "column", "schema", "table"]
+        );
+
+        assert_eq!(tags[1].name, "ssn");
+        assert_eq!(tags[1].match_type, MatchType::Ancestor);
+        assert_eq!(levels(&tags[1]), vec!["catalog", "schema", "table"]);
+
+        for tag in tags {
+            assert!(tag.attributes.is_empty(), "no attribute is on the tag wire");
+            assert!(tag.options.is_empty(), "no option is on the tag wire");
+            assert_eq!(tag.validity_periods, 0, "no validity period is on the wire");
+            assert!(
+                tag.attached_through.is_enabled,
+                "`from_assignments` writes `isEnabled: true` unconditionally"
+            );
+        }
+    }
+
+    /// A target naming no table carries no attachment the enricher would admit —
+    /// every stored one is then `{catalog, schema, table[, column]}`, i.e. a
+    /// DESCENDANT of the request, which a tag request at
+    /// `ResourceMatchingScope.SELF` does not admit. So this is `Some(empty)`
+    /// (the measured narrowing: the tag phase is skipped) and NOT `None` (a
+    /// refusal), and the resolver is not asked at all.
+    #[tokio::test]
+    async fn a_target_above_the_table_narrows_to_the_empty_set() {
+        for t in [target(None, None, None), target(Some("s"), None, None)] {
+            let mut lookups = FakeTagLookups::clean(&[("pii", MatchType::Self_)]);
+            let got = resolved_tags_for_target(&mut lookups, &t)
+                .await
+                .expect("no error")
+                .expect("the narrowing is offered, not refused");
+            assert!(got.as_slice().is_empty(), "for {t:?}");
+            assert!(lookups.resolved_asked.is_empty(), "for {t:?}");
+        }
+    }
+
+    /// **This input cannot arise from the live path today, and the test says so
+    /// rather than implying coverage that does not exist.** A `('', '')`
+    /// assignment row IS storable (`PUT …/resource-tags {"schema": "",
+    /// "table": ""}` — `assign_resource_tag` validates nothing and migration
+    /// 0081 has no `CHECK`) and `resolved_tags_for_resource_via(…, "", "", "")`
+    /// DOES return it — the predicate is an exact `schema_name = $2 AND
+    /// table_name = $3`, so an empty request matches a row written empty. What
+    /// keeps it out of the mapping is neither the query nor the schema: it is
+    /// `stored_value_problem`, which rules on exactly that coordinate
+    /// (`EmptyLevel`) and declines the whole resolution before any mapping
+    /// happens. Nothing
+    /// constrains `explain`'s own `schema`/`table` strings — the handler's 400
+    /// tests for an absent level, not an empty one — so this is reached by
+    /// calling the mapping directly.
+    ///
+    /// The mapping is still written to be right for it: the levels follow
+    /// `from_assignments`' own rule (skip an empty level), so a `('', '')` row
+    /// becomes the one-level `{catalog}` attachment, and
+    /// `TagAttachmentProblem::ResourceLevels` is what answers in the evaluator
+    /// (pinned at `egret-ranger-eval/tests/tag_refusals.rs`). A mapping that
+    /// padded the levels out to four instead would turn a refusal into a
+    /// confident verdict.
+    #[test]
+    fn an_empty_schema_and_table_map_to_the_one_level_attachment_the_evaluator_refuses() {
+        let stored = egret_policy::ResolvedTag {
+            name: "pii".to_string(),
+            match_type: MatchType::Self_,
+        };
+        let got = attachment_for(&stored, "", "", "").expect("Self_ maps");
+        assert_eq!(levels(&got), vec!["catalog"]);
+        assert!(
+            got.attached_through.levels.len() < 3,
+            "fewer than three levels is what `tag_candidates` refuses on"
+        );
+    }
+
+    /// The three match types no arm of `resolved_tags_for_resource_via`
+    /// produces. They are a REFUSAL rather than a guess, and one of them
+    /// declines the whole set — a producer this mapping has not been measured
+    /// against must not have two of its tags trusted and one dropped.
+    #[tokio::test]
+    async fn an_unmodelled_match_type_declines_the_set_rather_than_being_dropped() {
+        for mt in [
+            MatchType::Descendant,
+            MatchType::SelfAndAllDescendants,
+            MatchType::None,
+        ] {
+            let stored = egret_policy::ResolvedTag {
+                name: "pii".to_string(),
+                match_type: mt,
+            };
+            assert!(attachment_for(&stored, "s", "t", "c").is_none(), "{mt:?}");
+
+            let mut lookups = FakeTagLookups::clean(&[("ok", MatchType::Self_), ("bad", mt)]);
+            let got =
+                resolved_tags_for_target(&mut lookups, &target(Some("s"), Some("t"), Some("c")))
+                    .await
+                    .expect("no error");
+            assert_eq!(
+                got.as_ref().err(),
+                Some(&ExplainTagDecline::StoredFoldDivergent {
+                    schema: "s".to_string(),
+                    table: "t".to_string(),
+                    column: "c".to_string(),
+                }),
+                "one unmappable attachment must decline the whole set, not be skipped — and the \
+                 reason it reports is the APPROXIMATION documented at the call site, because this \
+                 arm is unreachable from `resolved_tags_for_resource_via`: {mt:?}"
+            );
+        }
+    }
 }

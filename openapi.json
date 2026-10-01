@@ -6156,7 +6156,7 @@
           "perm"
         ],
         "summary": "POST because the request carries a subject, an action and a whole target\nscope — a body, not a query string. **It is nonetheless read-only**: it\nopens no transaction and issues no write. It gates on `policy:read`, not\n`policy:update`, precisely so the method does not decide the permission.",
-        "description": "# What this answers with, and why it changed (SP4d-2a)\n\nUntil SP4d-2a this handler evaluated egret's OWN permission model\n(`egret_perm::eval::evaluate`) and never read `policy.authz_policies` at\nall. The engine evaluates the compiled artifact it downloads from egret.\nThose were two implementations of one question, and they had already been\nmeasured disagreeing in production — a predecessor package caught `explain`\nreporting a decision the engine did not make. So there is now ONE answer\nand it is the engine's: the disagreement class disappears instead of\nbecoming visible.\n\nIt also removes a real blindness. Auto-bind seeds thirteen `egret-admin`\nhierarchies granting `*` on everything onto every generated profile\n(`egret_policy::default_policies`), and the model-only evaluator could not\nsee one of them: an operator asking \"why can this person read that?\" got\n`no_grant_matched` while the engine allowed.\n\nFour properties of the implementation below are load-bearing:\n\n1. **The artifact is assembled by [`artifact_for`], which mirrors\n   `download_policies` field for field and loads each profile's policy set\n   through `enabled_policies_for_service` — the same assembler the download\n   route uses, not `list_policies`.** \"What explain evaluated\" and \"what the\n   engine received\" must not be able to drift.\n2. **`roles` and `groups` are empty** — see [`ExplainSubject`].\n3. **`resolved_tags` is `None`, deliberately.** See the block at the call\n   site: egret cannot establish the antecedent the narrowing needs, so a\n   profile whose `tagPolicies` block could decide comes back `Undecidable`\n   naming that block, rather than answering confidently from a tag set\n   narrower than `RangerTagEnricher`'s.\n4. **A `write` explain is several evaluations**, one per Ranger access type\n   the action maps to on that engine, reported separately.",
+        "description": "# What this answers with, and why it changed (SP4d-2a)\n\nUntil SP4d-2a this handler evaluated egret's OWN permission model\n(`egret_perm::eval::evaluate`) and never read `policy.authz_policies` at\nall. The engine evaluates the compiled artifact it downloads from egret.\nThose were two implementations of one question, and they had already been\nmeasured disagreeing in production — a predecessor package caught `explain`\nreporting a decision the engine did not make. So there is now ONE answer\nand it is the engine's: the disagreement class disappears instead of\nbecoming visible.\n\nIt also removes a real blindness. Auto-bind seeds thirteen `egret-admin`\nhierarchies granting `*` on everything onto every generated profile\n(`egret_policy::default_policies`), and the model-only evaluator could not\nsee one of them: an operator asking \"why can this person read that?\" got\n`no_grant_matched` while the engine allowed.\n\nFour properties of the implementation below are load-bearing:\n\n1. **The artifact is assembled by [`artifact_for`], which mirrors\n   `download_policies` field for field and loads each profile's policy set\n   through `enabled_policies_for_service` — the same assembler the download\n   route uses, not `list_policies`.** \"What explain evaluated\" and \"what the\n   engine received\" must not be able to drift.\n2. **`roles` and `groups` are empty** — see [`ExplainSubject`].\n3. **`resolved_tags` carries egret's own resolution, and\n   [`resolved_tags_for_target`] is what decides whether it may.** Until\n   SP4d-2b Task 7 this was `None` unconditionally, which made every verdict on\n   every catalog a profile serves `Undecidable` while that profile's tag block\n   held any policy at all. It is now a real tag set for the one resolution\n   shown enricher-equivalent, and still `None` — so still a refusal — for\n   every state where it is not. The whole argument is on that function.\n4. **A `write` explain is several evaluations**, one per Ranger access type\n   the action maps to on that engine, reported separately.",
         "operationId": "explain",
         "requestBody": {
           "content": {
@@ -34639,10 +34639,9 @@
           },
           {
             "type": "object",
-            "description": "`perm-clearance-{tag_id}[-{locator}]`. A clearance has no Ranger\nanalogue on the wire, so `tag` and `required_roles` are reconstructed\nhere from the `tags` row the name points at (`tags.key`, not\n`tags.name`) and from `classification_policies`. `tag` is `None` when\nthe tag row is gone — a compiled clearance can outlive its gate until\nthe next recompile, and inventing a name for it would be worse than\nsaying none is known.\n\n**`required_roles` is empty under THREE different facts, and the wire\ncannot tell them apart.** (1) The `tags` row is gone, so `tag` is\n`None` and there was no key to look a gate up by. (2) The gate declares\nonly `required_groups`, which compiles to no engine deny at all\n(D2/D7). (3) There is no `classification_policies` row for the tag at\nall — `clearance_gates_for_tags_via` filters on\n`cardinality(cp.required_roles) > 0` and the lookup here\n`.unwrap_or_default()`s, so a DELETED gate whose compiled clearance\npolicy is still being served reads exactly like an empty one. The page\nstates all three; this doc is the only place a Rust reader learns the\nfield is ambiguous, so it has to state them too.",
+            "description": "`perm-clearance-{tag_id}[-{locator}]`. A clearance has no Ranger\nanalogue on the wire, so `tag` and `required_roles` are reconstructed\nhere from the `tags` row the name points at (`tags.key`, not\n`tags.name`) and from `classification_policies`. `tag` is `None` when\nthe tag row is gone — a compiled clearance can outlive its gate until\nthe next recompile, and inventing a name for it would be worse than\nsaying none is known.\n\n**`required_roles` is `None` when no gate could be looked up, and that\nis why it is an `Option` rather than a list.** The gate is keyed by\n`tags.key`, so when the `tags` row is gone there is no key to look one\nup by and nothing is known about the clearing roles. An empty list\nwould state the opposite — that the gate names no role — which SP4d-2a\nmeasured live and found false: the gate declared `['sp4d2a_cleared']`\nand the page said it declared only groups. `None` makes \"we could not\nlook\" unrepresentable as \"there is nothing to find\".\n\n**This is an honest 3→2, not 3→3.** `Some([])` still carries two facts\nthis wire cannot separate: (1) the gate declares only\n`required_groups`, which compiles to no engine deny at all (D2/D7), and\n(2) there is no `classification_policies` row for the tag at all —\n`clearance_gates_for_tags_via` filters on\n`cardinality(cp.required_roles) > 0` and `clearing_roles` turns a miss\ninto an empty list, so a DELETED gate whose compiled clearance\npolicy is still being served reads exactly like a groups-only one.\nSeparating those two needs a second query that distinguishes \"no row\"\nfrom \"row with no roles\"; until something asks for it, the page says\nboth out loud.",
             "required": [
               "tag_id",
-              "required_roles",
               "kind"
             ],
             "properties": {
@@ -34657,10 +34656,14 @@
                 ]
               },
               "required_roles": {
-                "type": "array",
+                "type": [
+                  "array",
+                  "null"
+                ],
                 "items": {
                   "type": "string"
-                }
+                },
+                "description": "`None` = no gate was looked up because `tag` is `None`.\n`Some(roles)` = the lookup ran, and an empty `roles` is a fact\nabout the gate rather than about the lookup. `attribution_for` is\nits only producer, via `clearing_roles`."
               },
               "locator": {
                 "type": [
@@ -34694,7 +34697,9 @@
           "service_id",
           "service_name",
           "engine",
-          "accesses"
+          "accesses",
+          "tags",
+          "tag_policies_in_download"
         ],
         "properties": {
           "service_id": {
@@ -34714,6 +34719,18 @@
             "items": {
               "$ref": "#/components/schemas/ExplainAccess"
             }
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExplainResolvedTag"
+            },
+            "description": "The tag set **this profile's** verdicts could have been decided by.\n\n# ⚠ This lives on the PROFILE, and the move is the fix for three defects at once\n\n**Whole-branch review, H1 / H2 / H3 — one defect in three costumes: a\nvalue computed once per REQUEST, presented as though it were per-verdict.**\nIt was `ExplainResponse::tags`, one list for the whole response, and the\npage rendered one heading under all profiles. Each costume was measured:\n\n* **H3, and reachable with no StarRocks, no second profile and no tag\n  service at all.** The list was returned even when `profiles` is EMPTY,\n  so a catalog nothing serves rendered \"Nothing is enforcing\" and \"Tags\n  that decide this request — pii\" on one screen, with no verdicts in\n  existence. `catalog_tag_assignments` has no catalog column, so a sibling\n  catalog's assignment on the same warehouse resolves for this target too.\n* **H1.** A catalog served by one profile with a tag service and one\n  without made the page say, once, that these tags decide this request —\n  false for the second, where nothing tag-related decided anything.\n* **H2.** A StarRocks profile given a `tagService` would list tags as\n  deciding while `enriched_tags` discards every one of them.\n\nFixing the three sentences would have left a fourth instance free to\nappear. **With the set on the profile there is nowhere to put a tag list\nexcept beside a verdict**, so `no_profile_serves_the_catalog` cannot carry\none — the payload the H3 probe rendered is now unrepresentable.\n\n**The F4/F5 property is kept, not traded.** This is still ONE resolution,\n`resolved_tags_for_target`'s, computed once before the loop and the same\nobject every verdict was evaluated against — not a second query. What\ndiffers per profile is only the ONE narrowing this crate can apply\nsoundly: see below.\n\n# What the narrowing is, and why it cannot drift from the evaluator\n\nEmpty when [`ExplainProfile::tag_policies_in_download`] is `0`. That is a\nONE-WAY implication, not a reimplementation: with no tag policy of any\nkind in the download, the evaluator's `of_kind` is empty for every policy\ntype and no tag can reach any verdict, so an empty list here cannot\ndisagree with it. The evaluator's actual per-access-type rule stays the\nevaluator's; reproducing it here would be the second-copy shape this\npackage has refused four times.\n\n⚠ **A non-empty list does NOT claim the tags were evaluated** — H2's drop\nhappens inside `enriched_tags`, against this profile's own service-def,\nand is not visible from here. The page's wording is held to that: the set\nis what this profile's plugin resolves, and which verdict a tag decided is\non the verdict's own attribution."
+          },
+          "tag_policies_in_download": {
+            "type": "integer",
+            "description": "How many tag policies **this profile's download** carries —\n`tagPolicies.policies.len()`, or `0` when there is no tag block at all\nbecause the profile has no bound tag service.\n\nCarried so the page can say WHY a profile's tag set is empty while the\ncolumn is tagged — the question H1's steward is left with otherwise — and\nit is the predicate [`ExplainProfile::tags`] is narrowed by.",
+            "minimum": 0
           }
         }
       },
@@ -34736,13 +34753,30 @@
           }
         }
       },
+      "ExplainResolvedTag": {
+        "type": "object",
+        "description": "One tag egret resolved for the target, and **where the attachment that\nproduced it lives** — which is the half of the answer F4 measured missing.\n\n# ⚠ Why this is a bool and not the evaluator's `MatchType`\n\n`MatchType` has five variants and `attachment_for` can produce only two:\n`Self_` for an attachment naming the column, `Ancestor` for one that stops at\nthe table. Putting the enum on the wire would need a word for three states\nthis path cannot reach — and inventing wire vocabulary for an unreachable\nstate is how the `clearance_required` string got rendered raw for two\nreleases.\n\nSo this reads back the field the mapping actually WROTE:\n`attached_through.levels` is exactly what `attachment_for` built from\n`from_assignments`' rule, and `column` is in it iff the attachment names the\ncolumn. One datum, read once — not a second derivation from a parallel\nsource, which is the two-comparisons defect this package has hit four times.",
+        "required": [
+          "name",
+          "attached_at_column"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "`tags.name` — the identifier the tag download carries as the tag's `type`\nand therefore the one the engine matches tag policies on. **Not\n`tags.key`**, which is what this field used to report and which can\ndiffer: live, the key and the name differ for one of three tags."
+          },
+          "attached_at_column": {
+            "type": "boolean",
+            "description": "`true` ⇒ the assignment names this column (Ranger `SELF`). `false` ⇒ it\nstops at the table and reaches this resource as an `ANCESTOR`, so the row\nto change is the TABLE's, not this column's. For a target that names no\ncolumn this is always `false` and says nothing extra — the attachment and\nthe target are the same resource."
+          }
+        }
+      },
       "ExplainResponse": {
         "type": "object",
         "description": "What `explain` answers with: one verdict block per profile serving the\ntarget's catalog, over the SERVED ARTIFACT.",
         "required": [
           "outcome",
-          "profiles",
-          "tags"
+          "profiles"
         ],
         "properties": {
           "outcome": {
@@ -34755,12 +34789,16 @@
             },
             "description": "Empty exactly when `outcome` is `no_profile_serves_the_catalog`."
           },
-          "tags": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "The tag keys **egret** resolved as attached to `target`, for the\nsteward's information only.\n\n**This is no longer an input to anything, and it is not a complete tag\nset.** It used to be what the retired model evaluator matched rule\nselectors against. Today the engine's own tags come from\n`RangerTagEnricher`, which walks the resource hierarchy and emits\nANCESTOR tags, while `tag_keys_for_resource_via` matches\nschema/table/column by exact equality with no roll-up. So this field\nanswers \"what has egret got recorded on exactly this resource\" — useful\nwhen asking why a mask did or did not apply — and deliberately does NOT\nreach `AccessRequest::resolved_tags`, whose narrowing would be unsound\ngiven a set narrower than the enricher's. See the handler."
+          "tag_resolution_declined": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainTagDecline",
+                "description": "Why `explain` declined to resolve this target's tags — absent when it\nresolved them.\n\n**This exists because the REASON was unreachable (fix round 3, IMPORTANT 1\n/ LOW 3).** The evaluator's `UndecidableCause::TagsUnresolved` is a unit\nvariant and says only \"the caller did not resolve\", which is all the\nevaluator can know; `resolved_tags_for_target` declines for four different\nstates with four different remedies, and `.is_some()` at the call site threw\nthe distinction away. The page then rendered round 1's single sentence for\nall four — naming a stored row that does not exist, and claiming a\nper-catalog reach for the one state that is per-REQUEST.\n\n**Carried here rather than as a payload on `TagsUnresolved`**, which was\nthe other option: `egret-ranger-eval` is a pure crate that knows nothing of\n`catalog_tag_assignments`, and the reason is a property of egret's STORAGE\nand of this REQUEST, not of the evaluator's input. It is also per\ntarget-and-catalog rather than per access, so the response is where it is\ntrue exactly once. The 1:1 pairing is a property of one function: this is\n`Some` exactly when the handler passed `resolved_tags: None`, which is the\nonly production state in which the evaluator raises `TagsUnresolved`."
+              }
+            ]
           }
         }
       },
@@ -34775,6 +34813,124 @@
             "type": "string"
           }
         }
+      },
+      "ExplainTagDecline": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A stored assignment has an empty `schema_name` or `table_name`, so\n`from_assignments` omits that level and the engine resolves the shorter\nresource as an ANCESTOR of everything beneath it.",
+            "required": [
+              "schema",
+              "table",
+              "column",
+              "kind"
+            ],
+            "properties": {
+              "schema": {
+                "type": "string"
+              },
+              "table": {
+                "type": "string"
+              },
+              "column": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "stored_level_empty"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A stored assignment value carries `*` or `?`, which the engine matches with\n`FilenameUtils.wildcardMatch` and no SQL predicate reproduces.",
+            "required": [
+              "schema",
+              "table",
+              "column",
+              "kind"
+            ],
+            "properties": {
+              "schema": {
+                "type": "string"
+              },
+              "table": {
+                "type": "string"
+              },
+              "column": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "stored_wildcard"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A stored assignment value carries one of the characters on which the two\ncase folds can disagree — see [`FOLD_DIVERGENT`].",
+            "required": [
+              "schema",
+              "table",
+              "column",
+              "kind"
+            ],
+            "properties": {
+              "schema": {
+                "type": "string"
+              },
+              "table": {
+                "type": "string"
+              },
+              "column": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "stored_fold_divergent"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The TARGET carries one of those characters. **Per request, not per\ncatalog** — nothing is stored wrongly and every other target in the catalog\nanswers normally.",
+            "required": [
+              "level",
+              "value",
+              "kind"
+            ],
+            "properties": {
+              "level": {
+                "$ref": "#/components/schemas/ExplainTargetLevel"
+              },
+              "value": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "target_fold_divergent"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Which of the four states made `explain` decline to resolve the target's tags\n— see [`ExplainResponse::tag_resolution_declined`] and\n[`stored_value_problem`].\n\nThe four have four different remedies and two different REACHES, which is the\nwhole reason they are carried apart: three are properties of stored data and\nhold for every target in the catalog until it changes; the fourth is a property\nof the request and holds for nothing else.\n\nEach stored variant carries the offending coordinate so the page can name the\nrow to fix. That is a `policy:read` surface already — the response's `tags`\nfield reports attachments on the target — and naming no row is what produced\nthe measured defect: a sentence telling a steward to re-store an assignment\nthat was already stored on a table."
+      },
+      "ExplainTargetLevel": {
+        "type": "string",
+        "description": "Which level of the target [`ExplainTagDecline::TargetFoldDivergent`] is about.",
+        "enum": [
+          "schema",
+          "table",
+          "column"
+        ]
       },
       "FeatureDto": {
         "type": "object",
@@ -41519,6 +41675,128 @@
         ],
         "description": "Wire mirror of [`ServiceDefIssue`]."
       },
+      "WireTagAttachmentProblem": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "keys",
+              "kind"
+            ],
+            "properties": {
+              "keys": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "options"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "count",
+              "kind"
+            ],
+            "properties": {
+              "count": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "validity_periods"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "levels",
+              "kind"
+            ],
+            "properties": {
+              "levels": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "resource_levels"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`TagAttachmentProblem`]: what one resolved tag ATTACHMENT\ncarries that the evaluator cannot reproduce (SP4d-2b Task 4).\n\nThree `kind`s rather than one sentence, for the same reason\n[`WireTagResourceProblem`] has four: the remedies differ and do not overlap.\n`options` and `validity_periods` say the tag download carries a validity\nconstruct egret neither emits nor evaluates; `resource_levels` says the\ndownload's service resource is not a shape egret's own writer can produce at\nall, which is a question about where the payload came from."
+      },
+      "WireTagNormalisationProblem": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "access_type",
+              "kind"
+            ],
+            "properties": {
+              "access_type": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "namespaced_access_type"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "mask_type",
+              "kind"
+            ],
+            "properties": {
+              "mask_type": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "namespaced_mask_type"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "mask_type_absent"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`TagNormalisationProblem`]: what a tag policy carries that\nthe TAG policy repository's `normalizeAndPrunePolicies` would rewrite or\nreject (SP4d-2b Task 5).\n\nThree `kind`s, and the third is not a variation on the first two: the two\nnamespaced arms are a WRONG ANSWER this crate declines to give, and\n`mask_type_absent` is a CRASH — the plugin cannot build a policy engine from\nthat download, so nothing it serves is answered. A steward reading\n\"unsupported tag policy\" would have no way to tell \"rename the access type\"\nfrom \"this download breaks the plugin outright\", and the second is an\nincident."
+      },
       "WireTagPolicyBlock": {
         "oneOf": [
           {
@@ -41557,6 +41835,71 @@
           }
         ],
         "description": "Wire mirror of [`TagPolicyBlock`]. `Policies` carries its count as a\nJSON number (`count`), never folded into a formatted string — Task 8's\nsteward UI renders it, and SP4d-2b changes what it means."
+      },
+      "WireTagResourceProblem": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "not_only_the_tag_resource"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "excludes"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "value",
+              "kind"
+            ],
+            "properties": {
+              "value": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "value_not_trie_prefix_exact"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "recursive"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`TagResourceProblem`]: why a tag policy's resource map is\none the evaluator cannot filter the way Ranger's `RangerResourceTrie` does\n(SP4d-2b Task 2).\n\nCarried as its own `kind`, not a formatted string, for the same reason\n[`WireTagPolicyBlock`] carries a `count`: a steward has to be able to tell\n\"this policy names a second resource level\" from \"this policy's tag value is\na wildcard\", and the remedies differ."
       },
       "WireUndecidableCause": {
         "oneOf": [
@@ -41845,6 +42188,330 @@
                 "type": "string",
                 "enum": [
                   "eval_order_ambiguous"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The `tagPolicies` block carries policies this decision's type would\nevaluate and the caller resolved no tag set. Not reachable through\n`explain` yet: the tag phase is not composed with the resource phase\nuntil SP4d-2b Task 3.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tags_unresolved"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "policy_name",
+              "problem",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "problem": {
+                "$ref": "#/components/schemas/WireTagResourceProblem"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_resource_not_reproducible"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A tag mask or row-filter policy that produced a result is also\ndeny-capable, so Ranger can report its id with a later policy's mask.",
+            "required": [
+              "policy_name",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_sub_policy_is_deny_capable"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A tag policy the TAG policy repository would rewrite or remove on the way\nin, in a way the evaluator does not reproduce — or, for\n`mask_type_absent`, one that makes the plugin throw while building its\nrepository so that it serves nothing at all.",
+            "required": [
+              "policy_name",
+              "problem",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "problem": {
+                "$ref": "#/components/schemas/WireTagNormalisationProblem"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_policy_not_normalisable"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Two or more tag policies at DIFFERENT `policyPriority` each decide, and\nthe engine settles which survives with an arbitration the evaluator does\nnot model.\n\nThe three lists are POSITIONAL — `policy_ids[i]`, `policy_names[i]` and\n`priorities[i]` describe one policy — for the same reason\n[`WireUndecidableCause::EvalOrderAmbiguous`] carries two: a steward needs\nto see which policies are in contention and at what priority, and\nflattening that into a sentence would lose the priorities, which are the\nthing to change.",
+            "required": [
+              "policy_ids",
+              "policy_names",
+              "priorities",
+              "kind"
+            ],
+            "properties": {
+              "policy_ids": {
+                "type": "array",
+                "items": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64"
+                }
+              },
+              "policy_names": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "priorities": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_priority_arbitration_not_modelled"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A tag ALLOW in force and a **resource** policy at a strictly higher\npriority that also allows — Ranger settles the composite through\n`accessTypeResults`, which the evaluator does not reproduce.\n\n# ⚠ Its own variant, because the alias put a wrong NOUN in front of a steward\n\nThe evaluator's `AccessPriorityCompositeNotModelled` first rode\n[`WireUndecidableCause::TagPriorityArbitrationNotModelled`] as a documented\nalias — same arbitration, same three positional lists, no new schema — so\nthat the Critical could land without racing the three files this split\nneeds. The cost was one word: that sentence opens \"Several **tag** policies\n…\", and here one of the two is a RESOURCE policy. Names, ids, priorities and\nthe remedy were all correct; the noun was not, which is this branch's\nrecurring defect class (a label true of some of the states it is shown for).\n\nSo the two fields are NAMED rather than positional: the steward-facing fact\nis *which* policy is the tag one, and a `Vec` cannot say that. Measured\nrarity, for the copy's sake: **0 of 1148** composed-random cases and 10 of\n4000 overall, so the sentence must not imply it is common.",
+            "required": [
+              "tag_policy_name",
+              "tag_priority",
+              "resource_policy_name",
+              "resource_priority",
+              "kind"
+            ],
+            "properties": {
+              "tag_policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "The tag policy whose ALLOW was in force. It can only be the tag\nphase's: `allowed` becomes true at one site, which also sets\n`priority`, and evaluation is priority-DESCENDING, so any later\ncandidate has `found.priority <= priority` — proved, not sampled."
+              },
+              "tag_policy_name": {
+                "type": "string"
+              },
+              "tag_priority": {
+                "type": "integer",
+                "format": "int32"
+              },
+              "resource_policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "The resource policy at a strictly higher priority that also allowed."
+              },
+              "resource_policy_name": {
+                "type": "string"
+              },
+              "resource_priority": {
+                "type": "integer",
+                "format": "int32"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "access_priority_composite_not_modelled"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A tag DENY and a strictly higher-priority resource policy that allows —\na shape Ranger 2.5.0 and 2.8.0 answer DIFFERENTLY, so it can only be\ndecided once the running plugin version is known.",
+            "required": [
+              "tag_policy_name",
+              "resource_policy_name",
+              "kind"
+            ],
+            "properties": {
+              "plugin_version": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/WirePluginVersion",
+                    "description": "The plugin version the caller declared, or `null` if it declared none.\n\nThe two states need DIFFERENT advice and the UI branches on it: a known\n2.5.0 means the running plugin is identified and the refusal is that\n2.5.0's arm is unmodelled — there is nothing to record. `null` means the\ncaller did not say, and recording it would make half of these\nanswerable. `2_8_0` never appears: that is the version the evaluator\nreproduces, so the refusal is not raised for it."
+                  }
+                ]
+              },
+              "tag_policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "tag_policy_name": {
+                "type": "string"
+              },
+              "resource_policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "resource_policy_name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_deny_reopened_differs_by_plugin_version"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A tag mask or row filter was displaced in part by a strictly\nhigher-priority resource policy: Ranger reports the tag policy's id with\nthe resource policy's mask.",
+            "required": [
+              "tag_policy_name",
+              "resource_policy_name",
+              "kind"
+            ],
+            "properties": {
+              "tag_policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "tag_policy_name": {
+                "type": "string"
+              },
+              "resource_policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "resource_policy_name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_sub_result_split_by_resource_policy"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Whether Ranger's candidate filter (its resource trie) returns this policy\ndecides the request, and the evaluator cannot establish which way.",
+            "required": [
+              "policy_name",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "resource_candidacy_not_reproducible"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "One tag ATTACHMENT in this request's resolved set carries something the\nevaluator cannot reproduce. Named by TAG rather than by policy: the\nconstruct is on the tag download, and it changes every tag policy's\ncandidacy at once.",
+            "required": [
+              "tag",
+              "problem",
+              "kind"
+            ],
+            "properties": {
+              "tag": {
+                "type": "string"
+              },
+              "problem": {
+                "$ref": "#/components/schemas/WireTagAttachmentProblem"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_attachment_not_reproducible"
                 ]
               }
             }

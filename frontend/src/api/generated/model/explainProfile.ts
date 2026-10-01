@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ExplainAccess } from './explainAccess';
+import type { ExplainResolvedTag } from './explainResolvedTag';
 import type { WireEngineType } from './wireEngineType';
 
 /**
@@ -28,4 +29,65 @@ export interface ExplainProfile {
   service_name: string;
   engine: WireEngineType;
   accesses: ExplainAccess[];
+  /**
+     * The tag set **this profile's** verdicts could have been decided by.
+     *
+     * # ⚠ This lives on the PROFILE, and the move is the fix for three defects at once
+     *
+     * **Whole-branch review, H1 / H2 / H3 — one defect in three costumes: a
+     * value computed once per REQUEST, presented as though it were per-verdict.**
+     * It was `ExplainResponse::tags`, one list for the whole response, and the
+     * page rendered one heading under all profiles. Each costume was measured:
+     *
+     * * **H3, and reachable with no StarRocks, no second profile and no tag
+     *   service at all.** The list was returned even when `profiles` is EMPTY,
+     *   so a catalog nothing serves rendered "Nothing is enforcing" and "Tags
+     *   that decide this request — pii" on one screen, with no verdicts in
+     *   existence. `catalog_tag_assignments` has no catalog column, so a sibling
+     *   catalog's assignment on the same warehouse resolves for this target too.
+     * * **H1.** A catalog served by one profile with a tag service and one
+     *   without made the page say, once, that these tags decide this request —
+     *   false for the second, where nothing tag-related decided anything.
+     * * **H2.** A StarRocks profile given a `tagService` would list tags as
+     *   deciding while `enriched_tags` discards every one of them.
+     *
+     * Fixing the three sentences would have left a fourth instance free to
+     * appear. **With the set on the profile there is nowhere to put a tag list
+     * except beside a verdict**, so `no_profile_serves_the_catalog` cannot carry
+     * one — the payload the H3 probe rendered is now unrepresentable.
+     *
+     * **The F4/F5 property is kept, not traded.** This is still ONE resolution,
+     * `resolved_tags_for_target`'s, computed once before the loop and the same
+     * object every verdict was evaluated against — not a second query. What
+     * differs per profile is only the ONE narrowing this crate can apply
+     * soundly: see below.
+     *
+     * # What the narrowing is, and why it cannot drift from the evaluator
+     *
+     * Empty when [`ExplainProfile::tag_policies_in_download`] is `0`. That is a
+     * ONE-WAY implication, not a reimplementation: with no tag policy of any
+     * kind in the download, the evaluator's `of_kind` is empty for every policy
+     * type and no tag can reach any verdict, so an empty list here cannot
+     * disagree with it. The evaluator's actual per-access-type rule stays the
+     * evaluator's; reproducing it here would be the second-copy shape this
+     * package has refused four times.
+     *
+     * ⚠ **A non-empty list does NOT claim the tags were evaluated** — H2's drop
+     * happens inside `enriched_tags`, against this profile's own service-def,
+     * and is not visible from here. The page's wording is held to that: the set
+     * is what this profile's plugin resolves, and which verdict a tag decided is
+     * on the verdict's own attribution.
+     */
+  tags: ExplainResolvedTag[];
+  /**
+     * How many tag policies **this profile's download** carries —
+     * `tagPolicies.policies.len()`, or `0` when there is no tag block at all
+     * because the profile has no bound tag service.
+     *
+     * Carried so the page can say WHY a profile's tag set is empty while the
+     * column is tagged — the question H1's steward is left with otherwise — and
+     * it is the predicate [`ExplainProfile::tags`] is narrowed by.
+     * @minimum 0
+     */
+  tag_policies_in_download: number;
 }

@@ -20,6 +20,35 @@
           <includes>
             <include>EgretRangerEnforcementTest.java</include>
             <include>EgretCaseRunner.java</include>
+            <!-- SP4d-2b Task 2: measures the trie/matcher agreement table from
+                 the real jar, so the Rust side's hard-coded copy of it has an
+                 independent counterpart instead of asserting against itself. -->
+            <include>EgretTagTrieAgreementTest.java</include>
+            <!-- SP4d-2b Task 3 fix round 2: measures which RESOURCE policies
+                 getLikelyMatchPolicyEvaluators returns, which offset 553 made
+                 outcome-relevant for the first time. -->
+            <include>EgretResourceTrieCandidacyTest.java</include>
+            <!-- SP4d-2b Task 4: measures which tag service resources
+                 RangerTagEnricher KEEPS, by running the real
+                 createRangerServiceResourceMatcher. The Rust side's
+                 `service_resource_validates` reproduces this table. -->
+            <include>EgretTagServiceResourceValidationTest.java</include>
+            <!-- SP4d-2b Task 7 fix round 1: measures the MatchType the enricher's
+                 matcher produces for one STORED assignment row, including the
+                 wildcard and differing-case rows whose absence from the resolver's
+                 predicate was the round's Critical. ⚠ This list is an allow-list,
+                 not a pattern: a new *Test.java that is not named here COMPILES AND
+                 NEVER RUNS, and the suite stays green — which is how this entry came
+                 to be added one run late. -->
+            <include>EgretTagAttachmentMatchTypeTest.java</include>
+            <!-- SP4d-2b Task 7 fix round 2: measures WHERE Postgres `lower()` and Java
+                 `equalsIgnoreCase` can disagree, so the resolver's fold declines 25 code
+                 points instead of every non-ASCII value. Measures the JDK, not the jar. -->
+            <include>EgretCaseFoldAgreementTest.java</include>
+            <!-- …and the guard that makes the omission above impossible to repeat: it
+                 asserts this list names every .java in src/test/java, in both
+                 directions. -->
+            <include>EgretSurefireIncludesTest.java</include>
           </includes>
         </configuration>
       </plugin>
