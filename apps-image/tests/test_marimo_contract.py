@@ -82,3 +82,40 @@ def test_http_exception_shape():
         "status_code",
         "detail",
     ]
+
+
+def test_notebook_file_lock_is_what_save_takes():
+    from marimo._environments import script_metadata
+    from marimo._session.notebook import file_manager
+
+    assert file_manager.notebook_file_lock is script_metadata.notebook_file_lock
+    assert "notebook_file_lock(str(path))" in inspect.getsource(AppFileManager._save_file)
+
+
+def test_resume_path_shape(tmp_path):
+    from marimo._config.manager import get_default_config_manager
+    from marimo._server.lsp import NoopLspServer
+    from marimo._server.resume_strategies import EditModeResumeStrategy
+    from marimo._server.session_manager import SessionManager
+    from marimo._session.model import ConnectionState, SessionMode
+    from marimo._session.session_repository import SessionRepository
+
+    sig = inspect.signature(SessionManager.maybe_resume_session).parameters
+    assert list(sig) == ["self", "new_session_id", "file_key"]
+    assert list(inspect.signature(SessionManager.close_session).parameters) == ["self", "session_id"]
+    assert callable(SessionManager._resolve_file_key)
+    for name in ("get_all_by_file_key", "get_session_id", "add_sync", "remove_sync"):
+        assert callable(getattr(SessionRepository, name))
+    assert ConnectionState.ORPHANED
+    sm = SessionManager(
+        workspace=DirectoryWorkspace(str(tmp_path), include_markdown=False),
+        mode=SessionMode.EDIT, quiet=True, include_code=True, lsp_server=NoopLspServer(),
+        config_manager=get_default_config_manager(current_path=None), cli_args={}, argv=None,
+        auth_token=None, redirect_console_to_browser=False, ttl_seconds=None,
+    )
+    assert isinstance(sm._repository, SessionRepository)
+    assert isinstance(sm._resume_strategy, EditModeResumeStrategy)
+    # The edit-mode reconnect resumes through maybe_resume_session (ws_session_connector step 4).
+    from marimo._server.api.endpoints.ws import ws_session_connector
+
+    assert "self.manager.maybe_resume_session(" in inspect.getsource(ws_session_connector)

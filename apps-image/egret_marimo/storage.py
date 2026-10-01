@@ -11,6 +11,11 @@ revision; the storage advances it only on its own successful save. A 409 does
 NOT move it, so a stale session stays stale until its author reloads (which
 loads a new manager). The S0 spike shared one revision that any load could
 advance, letting an editor holding an old copy save over another author's work.
+
+A reload does not by itself give a new manager: in edit mode marimo resumes the
+orphaned session for the file (``SessionManager.maybe_resume_session``), keeping
+its ``AppFileManager``. So a session whose storage has hit a conflict is closed
+instead of resumed, and the reconnect creates a new session on the latest draft.
 """
 
 from __future__ import annotations
@@ -18,7 +23,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from marimo._environments.script_metadata import notebook_file_lock
+from marimo._server.session_manager import SessionManager
 from marimo._server.workspace._base import NotebookWorkspace
+from marimo._session.model import ConnectionState
 from marimo._session.notebook.file_manager import AppFileManager
 from marimo._session.notebook.storage import FilesystemStorage
 from marimo._utils.http import HTTPException
@@ -34,8 +42,8 @@ _APP_FILE = re.compile(
 
 
 def _gateway_to_http(e: GatewayError) -> HTTPException:
-    if e.status == 413:
-        return HTTPException(413, e.detail)
+    if e.status in (404, 413):  # 404: the app was deleted in egret
+        return HTTPException(e.status, e.detail)
     return HTTPException(502, f"egret: {e.detail}")
 
 
@@ -47,6 +55,8 @@ class EgretStorage(FilesystemStorage):
         self.app_id = app_id
         self.api = api
         self.base_revision = base_revision
+        # Set on the first 409; the session is then closed rather than resumed on reconnect.
+        self.conflicted = False
 
     def write(self, path: Path, content: str) -> None:
         try:
@@ -54,6 +64,7 @@ class EgretStorage(FilesystemStorage):
         except DraftConflict:
             # Deliberately leave base_revision alone: this session's copy is stale
             # and must never be saved over the newer draft.
+            self.conflicted = True
             raise HTTPException(409, CONFLICT_MESSAGE) from None
         except GatewayError as e:
             raise _gateway_to_http(e) from e
@@ -92,16 +103,44 @@ def install_storage_patch(workdir: Path, api: PodApi) -> None:
         if app_id is None:
             return original_load(self, key, defaults)
 
-        try:
-            draft = api.get_draft(app_id)
-        except GatewayError as e:
-            raise _gateway_to_http(e) from e
-        Path(resolved).write_text(draft.source, encoding="utf-8")
+        # The same lock marimo's save holds around storage.write, so a load that
+        # fetched revision N cannot write the file after a concurrent save of N+1.
+        with notebook_file_lock(str(resolved)):
+            try:
+                draft = api.get_draft(app_id)
+            except GatewayError as e:
+                raise _gateway_to_http(e) from e
+            Path(resolved).write_text(draft.source, encoding="utf-8")
 
         manager = original_load(self, key, defaults)
         manager.storage = EgretStorage(app_id, api, draft.revision)
         return manager
 
-    load._egret_patched = True  # type: ignore[attr-defined]
     NotebookWorkspace._egret_original_load = original_load  # type: ignore[attr-defined]
     NotebookWorkspace.load = load  # type: ignore[method-assign]
+    _install_resume_patch()
+
+
+def _is_conflicted(session) -> bool:
+    storage = getattr(session.app_file_manager, "storage", None)
+    return isinstance(storage, EgretStorage) and storage.conflicted
+
+
+def _install_resume_patch() -> None:
+    """Close, rather than resume, an orphaned session whose save hit a conflict."""
+    original_resume = getattr(
+        SessionManager, "_egret_original_resume", SessionManager.maybe_resume_session
+    )
+
+    def maybe_resume_session(self: SessionManager, new_session_id, file_key):
+        for session in self._repository.get_all_by_file_key(
+            file_key, resolved_path=self._resolve_file_key(file_key)
+        ):
+            if session.connection_state() == ConnectionState.ORPHANED and _is_conflicted(session):
+                session_id = self._repository.get_session_id(session)
+                if session_id is not None:
+                    self.close_session(session_id)
+        return original_resume(self, new_session_id, file_key)
+
+    SessionManager._egret_original_resume = original_resume  # type: ignore[attr-defined]
+    SessionManager.maybe_resume_session = maybe_resume_session  # type: ignore[method-assign]

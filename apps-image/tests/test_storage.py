@@ -1,9 +1,17 @@
 """EgretStorage against marimo's real workspace and file manager (Task 2)."""
 
+import threading
+
 import pytest
 from marimo._ast.cell import CellConfig
 from marimo._server.models.models import SaveNotebookRequest
+from marimo._config.manager import get_default_config_manager
+from marimo._environments.script_metadata import notebook_file_lock
+from marimo._server.lsp import NoopLspServer
+from marimo._server.session_manager import SessionManager
 from marimo._server.workspace import DirectoryWorkspace, NotebookWorkspace
+from marimo._session.model import ConnectionState, SessionMode
+from marimo._session.types import KernelState
 from marimo._utils.http import HTTPException
 
 from egret_marimo.podapi import PodApi
@@ -39,10 +47,11 @@ def setup(egret, tmp_path):
     workdir = tmp_path / "apps"
     workdir.mkdir()
     api = PodApi(egret.base_url, "pod-t")
-    original = NotebookWorkspace.load
+    original_load, original_resume = NotebookWorkspace.load, SessionManager.maybe_resume_session
     install_storage_patch(workdir, api)
     yield egret, workdir, api, DirectoryWorkspace(str(workdir), include_markdown=False)
-    NotebookWorkspace.load = original
+    NotebookWorkspace.load = original_load
+    SessionManager.maybe_resume_session = original_resume
 
 
 def other_author_saves(egret, code: str) -> None:
@@ -65,7 +74,9 @@ def test_2_stale_session_never_overwrites_and_fresh_session_saves(setup):
     egret, workdir, _, ws = setup
     m1 = ws.load(f"{APP}.py")
     other_author_saves(egret, "x = 'theirs'")
-    m2 = ws.load(f"{APP}.py")  # a later request / reload: new manager on the latest draft
+    # Storage unit: a second manager built by a later load, on the latest draft. (In marimo a
+    # browser reload RESUMES the session; see test_reload_after_conflict_* for that path.)
+    m2 = ws.load(f"{APP}.py")
     assert m2.storage.base_revision == 2
     assert (workdir / f"{APP}.py").read_text() == notebook("x = 'theirs'")
     theirs = {"source": notebook("x = 'theirs'"), "revision": 2}
@@ -82,20 +93,23 @@ def test_2_stale_session_never_overwrites_and_fresh_session_saves(setup):
     assert m2.storage.base_revision == 3
 
 
-def test_3_two_tabs_same_author_second_save_conflicts(setup):
+def test_3_two_managers_same_base_second_save_conflicts(setup):
+    """Storage unit: two managers loaded at the same revision. (A second browser tab in marimo
+    edit mode shares the session — kiosk/RTC, ws_session_connector.py:108-122 — so this is not
+    "two tabs"; it pins that bases are per manager, never shared.)"""
     egret, workdir, _, ws = setup
-    t1 = ws.load(f"{APP}.py")
-    t2 = ws.load(f"{APP}.py")
-    assert t1.storage is not t2.storage
-    assert t1.storage.base_revision == t2.storage.base_revision == 1
-    save(t1, "x = 't1'")
+    m_a = ws.load(f"{APP}.py")
+    m_b = ws.load(f"{APP}.py")
+    assert m_a.storage is not m_b.storage
+    assert m_a.storage.base_revision == m_b.storage.base_revision == 1
+    save(m_a, "x = 'm_a'")
     assert egret.drafts[APP]["revision"] == 2
     with pytest.raises(HTTPException) as e:
-        save(t2, "x = 't2'")
+        save(m_b, "x = 'm_b'")
     assert e.value.status_code == 409
     assert egret.drafts[APP]["revision"] == 2
-    assert "x = 't1'" in egret.drafts[APP]["source"]
-    assert "t2" not in egret.drafts[APP]["source"]
+    assert "x = 'm_a'" in egret.drafts[APP]["source"]
+    assert "m_b" not in egret.drafts[APP]["source"]
 
 
 def test_4_consecutive_saves_advance_the_base(setup):
@@ -158,3 +172,102 @@ def test_other_gateway_error_on_save_is_502(setup, monkeypatch):
         save(m, "x = 2")
     assert e.value.status_code == 502
     assert m.storage.base_revision == 1
+
+
+class OrphanedSession:
+    """A stand-in for marimo's SessionImpl (which needs a kernel), with the members the
+    real SessionRepository, EditModeResumeStrategy and SessionManager.close_session use."""
+
+    def __init__(self, file_key: str, app_file_manager) -> None:
+        self.initialization_id = file_key
+        self.app_file_manager = app_file_manager
+        self.closed = False
+
+    def connection_state(self) -> ConnectionState:
+        return ConnectionState.ORPHANED
+
+    def kernel_state(self) -> KernelState:
+        return KernelState.RUNNING
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def session_manager(ws) -> SessionManager:
+    return SessionManager(
+        workspace=ws,
+        mode=SessionMode.EDIT,
+        quiet=True,
+        include_code=True,
+        lsp_server=NoopLspServer(),
+        config_manager=get_default_config_manager(current_path=None),
+        cli_args={},
+        argv=None,
+        auth_token=None,
+        redirect_console_to_browser=False,
+        ttl_seconds=None,
+    )
+
+
+def test_reload_after_conflict_closes_the_stale_session_and_recovers(setup):
+    egret, workdir, _, ws = setup
+    key = f"{APP}.py"
+    sm = session_manager(ws)
+    stale = OrphanedSession(key, sm.app_manager(key))
+    sm._repository.add_sync("old-sid", stale)
+    other_author_saves(egret, "x = 'theirs'")
+    with pytest.raises(HTTPException) as e:
+        save(stale.app_file_manager, "x = 'mine'")
+    assert e.value.status_code == 409
+
+    # The browser reloads: ws_session_connector step 4 asks to resume for the file.
+    assert sm.maybe_resume_session("new-sid", key) is None
+    assert stale.closed
+    assert sm.get_session_by_file_key(key) is None
+
+    # Step 5 then creates a new session, whose manager comes from workspace.load.
+    fresh = sm.app_manager(key)
+    assert fresh.storage.base_revision == 2
+    save(fresh, "x = 'mine, on top of theirs'")
+    assert egret.drafts[APP]["revision"] == 3
+
+
+def test_reload_without_conflict_still_resumes(setup):
+    egret, workdir, _, ws = setup
+    key = f"{APP}.py"
+    sm = session_manager(ws)
+    session = OrphanedSession(key, sm.app_manager(key))
+    sm._repository.add_sync("old-sid", session)
+    save(session.app_file_manager, "x = 2")
+    assert sm.maybe_resume_session("new-sid", key) is session
+    assert not session.closed
+    assert sm._repository.get_session_id(session) == "new-sid"
+
+
+def test_fetch_of_deleted_app_is_404(setup):
+    egret, workdir, _, ws = setup
+    del egret.drafts[APP]
+    with pytest.raises(HTTPException) as e:
+        ws.load(f"{APP}.py")
+    assert e.value.status_code == 404
+
+
+def test_load_waits_for_the_notebook_file_lock(setup):
+    egret, workdir, _, ws = setup
+    path = workdir / f"{APP}.py"
+    path.write_text("old")
+    held, release, done = threading.Event(), threading.Event(), threading.Event()
+
+    def holder() -> None:  # stands in for a save in progress (file_manager.py:227-266)
+        with notebook_file_lock(str(path)):
+            held.set()
+            release.wait(5)
+
+    threading.Thread(target=holder).start()
+    held.wait(5)
+    threading.Thread(target=lambda: (ws.load(path.name), done.set())).start()
+    assert not done.wait(0.5)
+    assert path.read_text() == "old"
+    release.set()
+    assert done.wait(5)
+    assert path.read_text() == notebook("x = 1")
