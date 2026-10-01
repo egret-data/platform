@@ -127,7 +127,9 @@ pub struct PodConfig {
     /// first, with a message that names the setting.
     pub run_as_user: i64,
     /// egret's helper image (`deploy/docker/task-helper.Dockerfile`): needs
-    /// `sh`, `sleep`, `tar`, `touch` and `wc`.
+    /// `sh`, `sleep`, `tail`, `tar`, `touch`, `wc` and `cat` -- `cat` drains
+    /// the rest of an upload when `tar -x` dies part-way (W9a Task 5 fix
+    /// round 1), so its exit status arrives.
     pub helper_image: String,
     /// Filled in where the author's `taskRunner.resources` says nothing.
     pub default_resources: Resources,

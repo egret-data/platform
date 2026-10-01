@@ -964,6 +964,7 @@ impl KubernetesRunner {
             stdout: out,
             stderr,
             success,
+            reason: status.as_ref().and_then(|s| s.reason.clone()),
         })
     }
 }
@@ -1172,6 +1173,9 @@ struct ExecOut {
     stdout: Vec<u8>,
     stderr: String,
     success: bool,
+    /// The exec status's `reason`, `None` when no status arrived (fix round
+    /// 2, N1): only `NonZeroExitCode` is the process's own exit.
+    reason: Option<String>,
 }
 
 /// Read to EOF, keeping at most `cap` bytes. `drain`: keep reading (and
@@ -1532,18 +1536,23 @@ async fn until_idle<F: std::future::Future>(
     }
 }
 
+/// The exec status `reason` the API server gives a process that EXITED
+/// non-zero -- the only failure that is the process's own (fix round 2, N1).
+const EXITED: &str = "NonZeroExitCode";
+
 /// What a failed write of the archive means, given how the exec ended (fix
 /// round 1, I2). Our own side stopping is [`staging_error`]'s split. A WRITE
-/// failure with a `Failure` status is the process in the pod ending (a
-/// `tar -x` that died): `Ok`, and its exit status decides, as for any
-/// command. Without a status the connection itself broke: egret's outage.
+/// failure whose status says the process EXITED non-zero ([`EXITED`]) is the
+/// process in the pod ending (a `tar -x` that died): `Ok`, and its exit
+/// decides, as for any command. No status, or any other reason (a
+/// kubelet-side `InternalError`), is egret's outage (fix round 2, N1).
 fn judge_write(
     wrote: std::result::Result<(), TarError>,
     status: Option<&k8s_openapi::apimachinery::pkg::apis::meta::v1::Status>,
 ) -> Result<()> {
     match wrote {
         Ok(()) => Ok(()),
-        Err(TarError::Write(_)) if status.and_then(|s| s.status.as_deref()) == Some("Failure") => {
+        Err(TarError::Write(_)) if status.and_then(|s| s.reason.as_deref()) == Some(EXITED) => {
             Ok(())
         }
         Err(TarError::Write(e)) => Err(internal("writing to the exec's stdin", e)),
@@ -1578,6 +1587,19 @@ fn extract_command() -> Vec<String> {
 fn extract_verdict(out: &ExecOut) -> Result<()> {
     if out.success {
         return Ok(());
+    }
+    // Fix round 2, N1: only the process's own exit is the task's. A lost
+    // status (the connection dropped after the write) or a kubelet-side
+    // failure is egret's: `upload` retries it, then the run is re-claimed.
+    if out.reason.as_deref() != Some(EXITED) {
+        return Err(internal(
+            "extracting the input files in files-in",
+            format!(
+                "no exit status from tar -x ({}): {}",
+                out.reason.as_deref().unwrap_or("the status was lost"),
+                out.stderr.trim()
+            ),
+        ));
     }
     Err(Error::InvalidInput(format!(
         "the input files could not be extracted in the task pod ({FILES_IN}: tar -x failed): {}",
@@ -2053,28 +2075,40 @@ mod tests {
 
     // ---- W9a Task 5 fix round 1, I2 ----------------------------------------
 
-    fn exec_status(status: &str) -> k8s_openapi::apimachinery::pkg::apis::meta::v1::Status {
+    fn exec_status(
+        status: &str,
+        reason: Option<&str>,
+    ) -> k8s_openapi::apimachinery::pkg::apis::meta::v1::Status {
         k8s_openapi::apimachinery::pkg::apis::meta::v1::Status {
             status: Some(status.to_string()),
+            reason: reason.map(str::to_string),
             ..Default::default()
         }
     }
 
-    /// A `tar -x` that died in the pod (the write broke because the process
-    /// ended, and the API server reported its Failure) is the TASK's error;
-    /// only a write with no status -- the connection broke -- is an outage.
-    #[test]
-    fn a_container_side_extract_failure_is_the_tasks_not_an_outage() {
-        let broke = || TarError::Write(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
-        // The write broke and the process FAILED: its exit decides...
-        judge_write(Err(broke()), Some(&exec_status("Failure"))).expect("the exit decides");
-        // ... and a failed extract is the task's failure, naming tar's words.
-        let out = ExecOut {
+    fn failed_out(reason: Option<&str>) -> ExecOut {
+        ExecOut {
             stdout: Vec::new(),
             stderr: "tar: write error: No space left on device".into(),
             success: false,
-        };
-        let err = extract_verdict(&out).expect_err("tar -x failed");
+            reason: reason.map(str::to_string),
+        }
+    }
+
+    /// A `tar -x` that died in the pod -- its own non-zero exit, reason
+    /// `NonZeroExitCode` -- is the TASK's error (fix round 1, I2). Fix round
+    /// 2, N1: a LOST status (the connection dropped) and a kubelet-side
+    /// Failure (`InternalError`) are not the process's exit: egret's outage,
+    /// retried, never a permanently failed task.
+    #[test]
+    fn only_tars_own_non_zero_exit_is_the_tasks_failure() {
+        let broke = || TarError::Write(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        let nonzero = exec_status("Failure", Some("NonZeroExitCode"));
+        let internal_error = exec_status("Failure", Some("InternalError"));
+
+        // The process's own exit decides.
+        judge_write(Err(broke()), Some(&nonzero)).expect("the exit decides");
+        let err = extract_verdict(&failed_out(Some("NonZeroExitCode"))).expect_err("tar failed");
         assert!(
             matches!(&err, Error::InvalidInput(m) if m.contains("No space left on device")),
             "{err:?}"
@@ -2083,19 +2117,34 @@ mod tests {
             stdout: Vec::new(),
             stderr: String::new(),
             success: true,
+            reason: None,
         })
         .expect("a successful extract");
-        // No status: the connection broke, egret's outage.
+
+        // No status, or a kubelet-side failure: egret's.
         assert!(matches!(
             judge_write(Err(broke()), None),
             Err(Error::Internal(_))
         ));
+        assert!(matches!(
+            judge_write(Err(broke()), Some(&internal_error)),
+            Err(Error::Internal(_))
+        ));
+        assert!(
+            matches!(extract_verdict(&failed_out(None)), Err(Error::Internal(_))),
+            "a lost status is not tar failing"
+        );
+        assert!(
+            matches!(
+                extract_verdict(&failed_out(Some("InternalError"))),
+                Err(Error::Internal(_))
+            ),
+            "a kubelet error is not tar failing"
+        );
+
         // Our own side stopping keeps staging_error's split.
         assert!(matches!(
-            judge_write(
-                Err(TarError::Author("x".into())),
-                Some(&exec_status("Failure"))
-            ),
+            judge_write(Err(TarError::Author("x".into())), Some(&nonzero)),
             Err(Error::InvalidInput(_))
         ));
         assert!(matches!(
