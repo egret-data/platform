@@ -517,6 +517,7 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
    revision/409, publish, khôi phục, CRUD app và share với `app:manage`; gateway kiểm phiên bản của token
    run vẫn tồn tại và đang publish; FK `apps.folder_id` (dùng cho tổ tiên PDP); `ALL_FEATURE_KEYS` ở
    frontend thêm `apps`.
+   Plan: `docs/en/plans/2026-10-01-data-apps-p2-storage-lifecycle.md`.
 3. **P3 — Image `egret-apps` và `egret_marimo`.** Entrypoint, `EgretStorage`, DB-API, `egret.sql`, cấu hình
    marimo đã khoá, patch IPC cho chế độ run và cách xử lý bước kiểm `has_marimo_installed` mỗi lần khởi
    chạy của marimo (D14: shim của launcher trả lời, với test hợp đồng sẽ fail khi marimo đổi lệnh); pytest

@@ -519,6 +519,7 @@ never merged; automated Playwright, single run per case, macOS dev laptop under 
    revision/409, publish, restore, app CRUD and shares with `app:manage`; the gateway checks that a run
    token's version still exists and is published; `apps.folder_id` FK (used for PDP ancestry); the
    frontend `ALL_FEATURE_KEYS` gains `apps`.
+   Plan: `docs/en/plans/2026-10-01-data-apps-p2-storage-lifecycle.md`.
 3. **P3 — `egret-apps` image and `egret_marimo`.** Entrypoints, `EgretStorage`, DB-API, `egret.sql`,
    locked-down marimo configuration, the run-mode IPC patch and the fix for marimo's per-launch
    `has_marimo_installed` check (D14: the launcher shim answers it, with a contract test that fails when
