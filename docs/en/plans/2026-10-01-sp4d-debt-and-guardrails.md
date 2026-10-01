@@ -17,6 +17,12 @@
 - Drift gate: `cargo test -p egret-server --lib committed_openapi_json_is_current` — the `--lib` matters, or the test filters itself out and exits 0. Client regeneration is `npm run gen:api`, never bare `orval`.
 - `just check` must stay green, and it now reaches `just test-ranger-gates` (measured 16.6 s + 105.6 s — the vacuous form of those two is `0.00 s`).
 - Never run tests against the dev DB `egret`. Never use `git stash` (the stack is shared across worktrees).
+- **Clippy has a trap that will cost you an hour.** `clippy -p <pkg> -- -D warnings` **without
+  `--no-deps`** applies `-D warnings` to path dependencies, so naming a crate that depends on a
+  dirty one reproduces that crate's failure as if it were yours. Use `--no-deps`. And there are
+  **three** pre-existing clippy-dirty crates, not one: `egret-workspace`
+  (`src/members.rs:191,196`) and `egret-engine-mgmt` (`tests/routes.rs:113,168`,
+  `src/engines.rs:6964+`) are both byte-identical to `origin/main` on those lines.
 - Mutations: `assert count == 1`, confirm each mutant COMPILES, restore by a plain write plus a SHA-256 compare. `cp -f` does **not** defeat the `cp -i` alias — it sits at the overwrite prompt, is auto-backgrounded, and the file stays mutated.
 
 ## Decided, not open
@@ -234,8 +240,26 @@ mutation-tested.
 - [ ] **Step 2: Measure whether anything relies on the `{profile}_tag` fallback** before removing
 it. If something does, that is the finding and it changes the fix.
 
-- [ ] **Step 3: Make the two readers agree.** The root is the fallback: one reader invents a
-default the other does not. Removing it makes the editor **refuse** rather than mis-file.
+- [ ] **Step 3: Make the readers agree — and note the measurement CORRECTED MY LEAN.** I wrote
+"remove the fallback". Task 2 measured that there are **two** fallbacks and they are different
+things, and removing both fails exactly one test:
+  * `admin/mod.rs:605` (`list_profiles`, **read** side) — **pinned behaviour**, and it checks
+    existence (`names.contains`) before offering the name, so it **cannot invent a target**. This
+    is the stranded-`p_tag` discovery convenience for the Tags tab. **Keep it.**
+  * `admin/mod.rs:1037` (the tag-editor **write** target) — **no test**, removing it alone keeps
+    the suite green, and it picks the name and only then 404s. **This is the mis-filing half and
+    the one to remove.**
+
+- [ ] **Step 3b: There is a THIRD mechanism, and it survives both of the other fixes.**
+`list_profiles` and `download_policies` read the field with **identical code** (`as_str()`, no
+filter, no fallback) and reach different conclusions, because one checks membership in a name list
+while the other does a lookup it **swallows on error** (`if let Ok(tsvc)`). That swallow is what
+makes the download silently omit the `tagPolicies` block, and it will survive the fallback removal
+**and** a value-shape guard. Fix it here, or this task closes two of three doors.
+
+**For scale, measured:** `tagService: ""` produces **four distinct behaviours across five
+readers** — mis-files (editor write), silently omits the block (download), hides the Tags tab
+(`list_profiles`), and correctly refuses (`trigger.rs`, and `usable_tag_service`'s SQL join).
 
 - [ ] **Step 4: Guard the value shape at the write path** so an empty `tagService` cannot be
 stored at all — presence is the right test for the type rule, and it is not the right test for
