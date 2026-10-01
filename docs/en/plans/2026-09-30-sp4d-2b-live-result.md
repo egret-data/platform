@@ -46,7 +46,7 @@ curl -s localhost:8090/api-docs/openapi.json | grep -c resource_candidacy_not_re
 |---|---|---|
 | backend | `target/debug/egret serve`, built from this worktree at 2026-10-01 13:15 | **:8090**, `0.0.0.0` so the kind pod can reach it |
 | database | **`egret_sp4d2b`**, created for this task as `CREATE DATABASE … TEMPLATE egret_sp4d2a`, then migrated by this branch's binary to **159** (= `0159_workflow_task_logs.sql`) | local docker `egret-dev-postgres-1` |
-| frontend | `npx vite --config frontend/vite.config.sp4d2b.mts` (a scratch config, port + proxy target only; deleted after the run) | **:5290** → :8090 |
+| frontend | `npx vite --config frontend/vite.config.sp4d2b.mts` (differs from `vite.config.ts` in the port and the proxy target only, and is **committed** rather than deleted, so this gate is re-runnable; `npm run lint` and `tsc` are clean with it present) | **:5290** → :8090 |
 | engine | a **private, additive** Trino coordinator pod `sp4d2b-gate-trino`, `trinodb/trino:470` (hence `ranger-plugins-common-2.5.0`, the version Task 1 measured), HTTP with no authentication so the session user is chosen freely | `egret-engines` |
 
 **Not touched, and checked rather than assumed:** `egret_test` and the shared
@@ -327,3 +327,325 @@ place, in the same italic style, and both begin "This…". I expect to find that
 but want to see it.
 
 ---
+
+## 7. OBSERVATION — the engine
+
+Run through the private coordinator, `trino --user <subject> --execute`. The plugin's
+cache at the time of the run: `policyVersion 4 → 7`, `tagVersion 3 → 4` (the later bumps
+added `acc-t5b`/`tp-clearance-ancdeny`, then `tp-mask-tblmask`, then two
+`information_schema` grants — **none of them touches a case table already measured**, and
+the predictions were re-computed on the version the plugin held and came out identical,
+case for case). Final cache, after the last query:
+
+```text
+trino_sp4d2b-gate.json      {"serviceName":"sp4d2b-gate","serviceId":8,"policyVersion":7,…
+trino_sp4d2b-gate_tag.json  {"op":"add","serviceName":"sp4d2b-gate","tagVersion":4,
+                             "tags":{"1":{"type":"pii"},"2":{"type":"clr"},
+                                     "3":{"type":"ancdeny"},"4":{"type":"tblwide"},
+                                     "5":{"type":"tblmask"}},…
+store: sp4d2b-gate 7/4, sp4d2b-gate_tag 4/4   — the plugin and the store agree
+```
+
+| # | query | engine said | agrees? |
+|---|---|---|---|
+| 1 | `SELECT id,item,country FROM t2` (analyst) | `1,xxxx,US  2,xxx,VN  3,xxxx,US  4,xxxx,VN` | **YES** |
+| 2 | `SELECT id,item,country FROM t3` (analyst) | the same four rows | **YES** |
+| 3a | `SELECT id,item FROM t5a` (analyst) | `Access Denied: Cannot select from columns [item, id] in table or view t5a` | **YES** |
+| 3b | `SELECT id FROM t5a` (analyst) | `1 2 3 4` | **YES** |
+| 3c | `SELECT id,item FROM t5a` (admin) | `1,book  2,pen  3,lamp  4,desk` | **YES** |
+| 4a | `SELECT item FROM t4` (analyst) | **`Invalid column mask for 'sp4a10_wh.sp4d1.t4.id': Unexpected parameters (bigint, varchar(7), varchar(1)) for function regexp_replace`** | **NO — my prediction was wrong, see F1** |
+| 4a2 | `SELECT count(*) FROM t4` (analyst) | the same failure | **NO**, same cause |
+| 4b | `SELECT item FROM t5b` (analyst) | `Access Denied: Cannot select from columns [item] in table or view t5b` | **YES — the ANCESTOR arm** |
+| 4c | `SELECT id,item FROM t5b` (admin) | `1,book  2,pen  3,lamp  4,desk` | **YES** |
+| 4d | `SELECT id,item,country FROM t4` (analyst) | the same `Invalid column mask` failure | **YES**, and it was the prediction I flagged as least certain |
+| 5 | `SELECT id,item,country FROM t6` (analyst) | `"","xxxx",""` ×4 — i.e. `id` and `country` NULL, `item` masked `xxxx / xxx / xxxx / xxxx` | **YES — the comparator ordering holds** |
+| F-B | `SELECT count(*),count(id),count(country) FROM t6` | `4, 0, 0` | **YES** — the MASK_NULL columns are genuinely NULL, not empty strings |
+
+**Ten of twelve agree. The two that do not are the same finding, and it is not the
+evaluator's.** Both halves of what the evaluator predicted for `t4` were right — `MASK`
+via a `pii:ANCESTOR` attachment, `id > 2` via a `pii:SELF` one — and that is exactly what
+Trino tried to do and could not.
+
+### Case 4 is the arm the package existed to measure, and it is confirmed twice
+
+The brief called the table-level `ANCESTOR` attachment "derived from bytecode and never
+observed … the single most valuable measurement in the package". It is now observed, on
+the real engine, in two independent ways:
+
+- **through the access decision** (4b): a tag attached to `sp4d1.t5b` with **no column at
+  all** produced `Access Denied` for a request on `sp4d1.t5b.item`. The engine resolved
+  the shorter resource as an ANCESTOR of the column exactly as Task 1 derived, and the
+  deny-capable clearance fired through it. `admin`, named in the policy's
+  `denyExceptions`, read the table (4c), so the arm is measured in both directions and the
+  deny is not a blanket refusal.
+- **through the mask** (4a/4d): the same shape produced `MASK` on every column of `t4`.
+
+And egret's own resolution produced it: `POST /api/control-plane/perm/explain` for
+`sp4d1.t5b.item` answers `denied, policy 60, deny_policy_item` — which it can only do if
+`resolved_tags_for_target` returned `ancdeny` with `MatchType::Ancestor`. The ANCESTOR arm
+is live, end to end, from `catalog_tag_assignments` through `from_assignments`, the
+plugin's enricher, the engine's decision, and this crate's prediction of it.
+
+### Case 5: the `MATCH_TYPE_COMPARATOR` ordering, measured
+
+`sp4d1.t6` carries `pii` on the column `item` (SELF for a request on that column) and
+`tblwide` on the table (ANCESTOR for the same request). `pii`'s mask is `MASK`;
+`tblwide`'s is `MASK_NULL`. One query decides it:
+
+```text
+SELECT id, item, country FROM sp4a10_wh.sp4d1.t6   →   "","xxxx",""   ×4
+```
+
+`item` came back `xxxx`, **not NULL** — the SELF attachment's tag policy won, and the
+ANCESTOR one decided the two columns where it was the only attachment. Had Ranger ordered
+ANCESTOR first, `item` would have been NULL. The same tag at two levels is **not deduped**
+and the match type **is** the ordering, on the real engine, as the comparator implies.
+
+### F1 (NEW, Major) — a table-level tag + a MASK rule makes the table unreadable, and the mask is applied to columns the query never names
+
+My prediction for 4a was "2 rows, both `item` = `xxxx`". The engine refused the query, and
+the reason is not the one I predicted for 4d either. Two measurements separate the causes:
+
+```text
+-- F-A: a NEW table-level tag `tblmask` (MASK), on sp4d1.t7, with NO row-filter policy
+SELECT item     FROM t7  →  Invalid column mask for '…t7.id'   -- PREDICTED: would SUCCEED
+SELECT id       FROM t7  →  Invalid column mask for '…t7.id'
+SELECT count(*) FROM t7  →  Invalid column mask for '…t7.id'
+```
+
+**My F-A prediction was WRONG and the truth is worse than it.** I predicted Trino masks
+only the columns a query needs, so that `SELECT item` would survive. It does not: Trino
+builds the column masks for **every column of the scanned table**, so one table-level tag
+assignment whose tag carries a `MASK` rule makes the whole table unreadable — `count(*)`
+included — as soon as any column is not a `varchar`. No row filter is needed; `t4`'s
+filter was a red herring in my reading.
+
+The mechanism, and each half is measured:
+
+1. egret's `trino` service-def defines `MASK` as
+   `cast(regexp_replace(regexp_replace(regexp_replace({col},…),…),…) as {type})`, which is
+   **varchar-only**;
+2. a tag-addressed mask rule applies to a *tag*, and a table-level assignment puts that
+   tag on **every column beneath the table** as an ANCESTOR match — which is precisely
+   what case 4 proves the engine honours;
+3. Trino type-checks every column mask on the scanned table before running anything.
+
+**It is reachable by two ordinary, supported product actions.**
+`PUT /api/control-plane/warehouses/{id}/resource-tags` with `column` **absent** writes
+`column_name = ''` (migration 0081: "`''` = table-level tag"), and
+`POST /api/control-plane/perm/rules` with a tag selector is how the live cluster's own
+mask policy 8799 came to exist. Neither surface warns.
+
+**The live cluster is not in this state today, and that is measured rather than assumed.**
+Every live tag assignment is column-level, and every tagged column is a `varchar`
+(`report.item`, `report.country`, `sibling.v`, `srcases.item`, `srcases.country`,
+`gate.secret` — read from `information_schema.columns`); every table's `id` is a `bigint`
+and **none is tagged**. So the live deployment is exactly one table-level tag assignment
+away from an unreadable table.
+
+**Whose defect it is.** Not `egret-ranger-eval`'s: it predicted `Masked{MASK}` for
+`t4.id`, which is what the engine attempted. Not the tag resolution's. It belongs to the
+**writer and the UI** — egret can store a combination its own engine cannot execute — and
+the remedy is one of: refuse a tag-addressed `MASK`/`MASK_SHOW_*`/`MASK_HASH` rule when
+the tag reaches a non-text column; refuse (or warn on) a table-level assignment for a tag
+carrying such a rule; or emit a type-aware transformer. That is a decision for the
+programme, not for this task, and it is recorded as an open item.
+
+### F2 (minor, an observation about the live data) — the only deny-capable clearance in the cluster is inert
+
+Live tag policy 8839 denies on tag `tag`, and the tag named `tag` (id
+`3205756d-…`, `key='tag'`) is attached to **no resource at all**. So the clearance that
+made this package worth building cannot fire on live data as it stands; measuring it
+required a copy on an attached tag. Worth a look by whoever created that tag — a
+clearance on an unattached tag reads, on the Classifications page, exactly like one that
+is protecting something.
+
+---
+
+## 8. OBSERVATION — the page, in a browser
+
+`http://localhost:5290/governance/explain-access`, signed in as `admin@egret.local`,
+Chromium via Playwright. The subject for the decline cases is **`cleared_person`** rather
+than `analyst`: the subject is a user PICKER over `users`, and `analyst` is a Ranger-side
+username with no egret row, so it cannot be typed. The substitution is policy-neutral —
+neither name appears in any `denyExceptions` — and it is the first thing the browser
+showed that the API did not.
+
+### The four decline states: all four sentences are TRUE of the data
+
+| # | rendered sentence (verbatim from the DOM) | as predicted? |
+|---|---|---|
+| P1 | "…egret declined to resolve them: a tag assignment in this catalog is stored at **(none) / orders / (the table itself)**, and a level left empty there is one the engine applies to every resource beneath it while egret cannot match it to any. Re-store that assignment on a table or a column." | **YES, exactly** |
+| P2 | "…stored at **sales / ord\* / email**, whose "\*" or "?" the engine matches against many resources by a rule egret's database cannot reproduce. Re-store that assignment on the exact table or column it is meant for." | **YES, exactly** |
+| P3 | "…stored at **sales / orders / emaıl**, which carries a character whose upper- and lower-case forms egret's database and the engine's matcher need not agree on. Rename that resource, or re-store the assignment without it." | **YES, exactly** (U+0131 confirmed present in the rendered node) |
+| P4 | "…the **column** you asked about, "**ıtem**", carries a character whose upper- and lower-case forms … **Nothing is stored wrongly — re-ask for the resource's exact name.**" | **YES, exactly** |
+
+Each names a coordinate that **exists in the data**, and in each case the catalog also
+held a perfectly ordinary sibling row (`sales.orders.email`) which the page correctly did
+*not* name. The defect round 3 fixed is fixed, measured against the data rather than
+against a string: the thing that was broken (a sentence naming a row that did not exist
+and offering a remedy already satisfied) cannot now happen for any of the four.
+
+The head sentence keeps the distinction in all four — *"Declined to resolve" is not the
+same as there being none, so no verdict here could be relied on* — and the badge reads
+**Undecidable**, next to the standing explanation that this is "neither allowed nor
+refused". **The product proposition holds in the browser:** "the engine will deny" (P5,
+below: *Refused by a deny item · Somebody forbade this*) and "egret cannot tell you"
+(Undecidable · declined to resolve) are visibly different answers, worded differently,
+badged differently.
+
+### P7 — the two reaches are legible, better than I predicted
+
+Predicted: distinguishable only by careful reading. Observed: the per-request note opens
+"**This one IS specific to what you asked**" against the per-catalog "This is **not**
+specific to your target", and the capitalised `IS` carries it at a glance. Nothing to fix.
+
+### P6 — `(none)` is right; the REMEDY beside it is the weak half
+
+`(none) / orders / (the table itself)` renders as predicted, and the two kinds of nothing
+are distinguishable — `(none)` for a level that is missing, `(the table itself)` for a
+tag that is on the table rather than a column. Keep both.
+
+What does not hold up is the sentence's end: **"Re-store that assignment on a table or a
+column"** — while the level that is empty is the **schema**, and the assignment *is*
+already on a table (`orders`). A steward follows that instruction, re-stores on
+`orders`, and nothing changes. It is a weaker version of exactly the defect round 3 fixed:
+the coordinate is now right and the remedy still is not, for the one state where the empty
+level is not the column. **Recorded as an open item** rather than fixed here, because
+fixing copy during a gate run is how a gate stops measuring.
+
+### F3 (NEW, Major) — the page promises mask verdicts "with SP4d-2b", and this IS SP4d-2b
+
+Rendered on every single result, in the `honest-limits` block:
+
+> "This answers about ACCESS only. … The previous version of this page named the masking
+> or filtering rule; evaluating the served artifact answers access, and **mask and
+> row-filter verdicts arrive with SP4d-2b**."
+
+This branch *is* SP4d-2b. They do not arrive: `ExplainAccess` carries `decision`,
+`attribution` and `access_type`, and nothing else; `explain` never calls
+`evaluate_data_mask` or `evaluate_row_filter`, though both work — §4 and §7 are built out
+of them. So the page tells a steward that the thing they are looking for ships in the
+version they are looking at.
+
+The irony is in the same component: the comment immediately above that Alert says a limit
+that no longer holds "is worse than no limit, because it teaches a reader to discount the
+ones that still do". **Twenty-six green tests cannot see this**, because a test asserts the
+string, not whether the string is true. Only `ExplainAccess.tsx:1167` has to change, and
+the honest version is a sentence that states the limit without dating it.
+
+### F4 (NEW, Major) — a tag-driven decision beside "Tags … None."
+
+`sp4a10_wh / sp4d1 / t5b / item`, subject `cleared_person` — the ANCESTOR deny the engine
+confirmed in 4b:
+
+```text
+select   Refused by a deny item
+         Somebody forbade this: a deny item in the downloaded policy set matches this
+         subject and resource.
+         Ranger policy tp-clearance-ancdeny, id 60
+Tags egret has recorded on this resource
+         None.
+```
+
+The decision was made **by a tag policy, through a tag attached to the table**, and the
+page's tag list says **None**. Nothing on the page names `ancdeny`, or the assignment on
+`sp4d1.t5b` that carries it. The limits block explains the mechanism correctly three
+paragraphs lower ("the engine's own enricher rolls tags up the resource hierarchy and this
+list does not"), so the page does not *lie* — but the steward's actual question, *which
+tag, attached where, caused this*, is unanswered while the handler **already holds the
+answer**: `resolved_tags_for_target` returned `ancdeny:Ancestor` for this very request and
+the response reports only the exact-match list. A steward who trusts "None." looks for a
+column-level assignment that does not exist.
+
+That is Major for the same reason SP4d-2a's two were: the page is the product, and this is
+the shape where tag governance is now most likely to be used.
+
+### F5 (NEW, the composite, and the one I would fix first)
+
+`sp4a10_wh / sp4d1 / t4 / item`, subject `admin`:
+
+```text
+select   Allowed
+         The policy set this engine downloads allows this access.
+         Ranger policy acc-t4, id 49
+Tags egret has recorded on this resource
+         None.
+```
+
+Measured four minutes earlier, on the engine this page is describing, with the same
+subject and the same resource:
+
+```text
+SELECT item FROM sp4a10_wh.sp4d1.t4
+  → Query failed: Invalid column mask for 'sp4a10_wh.sp4d1.t4.id': Unexpected parameters …
+```
+
+**Allowed · no tags · and no query against that table can run at all.** Each of the three
+statements on the page is defensible on its own terms (the access *is* allowed; the
+exact-match tag list *is* empty; masks are *documented* as out of scope) and together they
+leave a steward with the opposite of the truth. F3, F4 and F1 meet here, which is why this
+is the composite rather than a fourth finding: report the resolved tag set (F4), report
+the mask verdict the evaluator can already compute (F3), and the page would say what the
+engine does.
+
+### One false finding this pass produced, recorded because the method produced it
+
+Mid-run the page appeared to report `tags: ["pii"]` for `t4.item` and `None` for
+`t5b.item`, two table-level attachments — an inconsistency that would have been a real
+defect. It was mine: the `ScopePicker` **clears the column when the table changes**, so
+the request had gone out as the *table* `t4` with no column, where an exact match on
+`column_name = ''` does return `pii`. Caught by reading the inputs back out of the DOM
+after the fact. A browser pass can manufacture a finding as easily as it can find one, and
+the guard is to read the request back, not the form.
+
+---
+
+## 9. What this gate changes, and what it leaves open
+
+**Confirmed, on the engine that is actually enforcing:** the tag mask (case 1), the
+row-filter asymmetry between a column-level and a table-level attachment (cases 2 and 4a),
+the deny-capable clearance in both directions (cases 3, 4b, 4c), **the table-level
+`ANCESTOR` match that no live data exercises** (case 4b, through the access decision, and
+4a/4d through the mask), and **the `MATCH_TYPE_COMPARATOR` mask ordering with the same tag
+at two levels, not deduped** (case 5). Twelve measurements, ten agreeing, and the two
+disagreements are one product finding that the evaluator got *right*.
+
+**Open items this gate adds** (none of them in `egret-ranger-eval`):
+
+1. **F1** — a tag-addressed `MASK` rule plus a table-level tag assignment makes a table
+   unreadable on Trino. Reachable from two supported APIs; not live today; needs a refusal
+   or a type-aware transformer.
+2. **F3** — `ExplainAccess.tsx:1167` promises mask verdicts "with SP4d-2b" on the SP4d-2b
+   branch.
+3. **F4** — `explain` reports the exact-match tag list and not the resolved one, so a
+   tag-driven decision renders beside "Tags … None."
+4. **P6** — `stored_level_empty`'s remedy says "on a table or a column" when the empty
+   level is the schema.
+5. **F2** — the live clearance on tag `tag` is attached to nothing.
+
+**Cleanup.** The private coordinator pod and its ConfigMap are deleted. The fixture stays
+in `egret_sp4d2b` so the gate can be re-run; nothing in the kind cluster, in `egret`, in
+`egret_test` or in the shared template was written at any point.
+
+---
+
+## 10. The gates, with exit codes
+
+| gate | command | result |
+|---|---|---|
+| ranger-eval suites | `cargo test -p egret-ranger-eval --no-fail-fast` | **259 passed / 0 failed across 10 binaries**, rc 0 — the baseline exactly. The tenth binary is the differential at `0 passed … 0.00s`, which is the opt-in gate being silently green, as documented |
+| perm-compile | `env -u DATABASE_URL cargo test -p egret-perm-compile --lib` | **25 passed / 0**, rc 0 |
+| the page's own suite | `npx vitest run src/routes/governance/__tests__/ExplainAccess.test.tsx` | **26 passed**, rc 0 (the path with `__tests__/`; without it vitest exits 0 on "No test files found") |
+| workspace | `cargo check --workspace --all-targets` | rc 0 |
+| fmt | `cargo fmt --all -- --check` | rc 0, empty output (the example needed one `cargo fmt` pass first — the first `--check` run DID report a diff, and the `echo $?` after a pipe reported the *tail*'s status, which is how a false green is manufactured) |
+| clippy | `cargo clippy -p egret-ranger-eval -p egret-perm-compile --all-targets -- -D warnings` | rc 0 |
+| clippy, workspace | `cargo clippy --workspace --all-targets -- -D warnings` | **rc 101 — two `explicit_auto_deref` errors in `crates/egret-workspace/src/members.rs:191,196`.** Not this task's: `git show origin/main:…/members.rs` is **byte-identical** to the branch's at those lines (diffed, not assumed), last touched by the merged SP4c commit `ce21e167`. Reported, not fixed |
+| types / lint | `npx tsc --noEmit` ; `npm run lint` | rc 0 ; rc 0 (0 errors, 177 pre-existing warnings — `eslint .` and `eslint src` give the same 177, so the new config file contributes none) |
+| OpenAPI drift | `cargo test -p egret-server --lib committed_openapi_json_is_current` | **1 passed**, 5 filtered out, rc 0 — run WITH `--lib`, or it reports "0 passed, 1 filtered out" and exits 0 |
+| differential | **not run, and the reason is a code path rather than a judgement** | `git diff --name-only 20f4febc..HEAD` is exactly `examples/live_gate.rs`, this doc and the Vite config: **no file under `crates/egret-ranger-eval/src/` or `crates/egret-perm-compile/src/` changed** (`git diff --name-only 20f4febc -- <both src dirs> \| wc -l` → 0). `tests/differential.rs` links the library, which is byte-identical, and an `examples/` target is linked into neither the lib nor any test. Nothing this task changed can alter what the evaluator returns |
+
+**No product code changed in this task.** The only Rust edit is the prediction tool
+(`examples/live_gate.rs`), which gained a resolved-tag spec. Every finding above is
+recorded, not fixed: fixing copy or a writer during a gate run is how a gate stops
+measuring.

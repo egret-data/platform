@@ -296,7 +296,10 @@ fn main() {
                 Some(t) if t.is_empty() => "Some([]) — the measured narrowing".to_string(),
                 Some(t) => t
                     .iter()
-                    .map(|x| format!("{}:{:?}{:?}", x.name, x.match_type, x.attached_through.levels))
+                    .map(|x| format!(
+                        "{}:{:?}{:?}",
+                        x.name, x.match_type, x.attached_through.levels
+                    ))
                     .collect::<Vec<_>>()
                     .join(" "),
             }
