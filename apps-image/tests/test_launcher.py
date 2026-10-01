@@ -59,7 +59,7 @@ def env(tmp_path, monkeypatch):
         for name in launcher.SECRETS:
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv(launcher.SECRETS_FD, child_env[launcher.SECRETS_FD])
-        return launcher.main(argv[3:])
+        return launcher.main(argv[argv.index("-m") + 2:])
 
     monkeypatch.setattr(launcher, "run_marimo", fake_marimo)
     monkeypatch.setattr(launcher, "_exec", fake_exec)
@@ -246,7 +246,9 @@ def test_locks_xdg_config_and_skips_update_check(env, monkeypatch):
 def test_reexec_hands_secrets_over_a_pipe_not_the_environment(env):
     assert launcher.main(["edit"]) == 0
     ((path, argv, child_env),) = env["calls"]["exec"]
-    assert (path, argv) == (sys.executable, [sys.executable, "-m", "egret_marimo.launcher", "--internal", "edit"])
+    assert (path, argv) == (
+        sys.executable, [sys.executable, "-I", "-m", "egret_marimo.launcher", "--internal", "edit"]
+    )
     assert not set(launcher.SECRETS) & set(child_env)
     assert not any(v in ("pod-tok", "marimo-secret") for v in child_env.values())
     assert child_env["EGRET_URL"]  # kernels still need egret's URL
@@ -258,6 +260,51 @@ def test_reexec_hands_secrets_over_a_pipe_not_the_environment(env):
     assert not (set(launcher.SECRETS) | {launcher.SECRETS_FD}) & set(marimo_env)
     (argv,) = env["calls"]["marimo"]
     assert argv[argv.index("--token-password") + 1] == "marimo-secret"
+
+
+def test_oversized_secrets_are_refused_before_writing_the_pipe(env, monkeypatch, capsys):
+    monkeypatch.setenv("EGRET_POD_TOKEN", "x" * launcher.MAX_SECRETS_BYTES)
+    opened = []
+    monkeypatch.setattr(launcher.os, "pipe", lambda: opened.append(1) or (_ for _ in ()).throw(AssertionError))
+    assert launcher.main(["edit"]) == 64
+    assert "exceed" in capsys.readouterr().err
+    assert opened == [] and env["calls"]["exec"] == []
+
+
+@pytest.mark.parametrize("payload", [b"not json", b"[1, 2]", b'{"EGRET_POD_TOKEN": 5}', b"", b"\xff"])
+def test_malformed_secrets_on_the_pipe_exit_64(env, monkeypatch, capsys, payload):
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, payload)
+    os.close(write_fd)
+    monkeypatch.setenv(launcher.SECRETS_FD, str(read_fd))
+    assert launcher.main(["--internal", "edit"]) == 64
+    assert "malformed secrets" in capsys.readouterr().err
+    with pytest.raises(OSError):
+        os.fstat(read_fd)  # closed even when malformed
+
+
+def test_phase_two_ignores_modules_planted_in_the_cwd(tmp_path):
+    """A real re-exec: egret_marimo/launcher.py and json.py in the cwd must not be imported."""
+    planted = tmp_path / "cwd"
+    (planted / "egret_marimo").mkdir(parents=True)
+    shout = "import sys; sys.stderr.write('SHADOWED ' + __name__ + '\\n'); sys.stderr.flush()\n"
+    (planted / "egret_marimo" / "__init__.py").write_text(shout)
+    (planted / "egret_marimo" / "launcher.py").write_text(shout)
+    (planted / "json.py").write_text(shout + "from importlib import import_module\n")
+    env = {
+        "PATH": os.environ["PATH"], "HOME": str(tmp_path), "PYTEST_CURRENT_TEST": "planted",
+        "EGRET_URL": "http://127.0.0.1:9", "EGRET_POD_TOKEN": "p", "EGRET_MARIMO_TOKEN": "m",
+        "EGRET_BASE_URL": "/e/x", "APPS_WORKDIR": str(tmp_path / "work"),
+        # Phase 2 stops at the config check (65), after importing the launcher and json.
+        "EGRET_APPS_CONFIG": str(tmp_path / "no-config"),
+    }
+    r = subprocess.run(
+        [str(ROOT / ".venv" / "bin" / "egret-apps"), "edit"],
+        cwd=planted, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert "SHADOWED" not in r.stderr, r.stderr
+    assert r.returncode == 65, r.stderr
+    assert "locked marimo config not found" in r.stderr
 
 
 def test_internal_phase_without_the_pipe_exits_64(env, monkeypatch, capsys):

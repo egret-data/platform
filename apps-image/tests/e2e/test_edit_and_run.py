@@ -112,6 +112,8 @@ def test_edit_mode_save_conflict_reload_recover(egret, launch, proxy, browser):
     with viewer_page(browser, base, "alice") as page:
         page.goto(f"{base}/e/pod-1/?file={APP}.py")
         page.locator(".cm-content", has_text='egret.connect("db")').first.wait_for()
+        # The edit kernel (spawned by marimo from the -I server) ran the cells: markdown rendered.
+        page.locator("h1", has_text="New data app").first.wait_for()
 
         # 1. A save goes to egret as revision 2.
         _edit_connect_cell(page, "edited-1")

@@ -56,6 +56,15 @@ PORTS = {"edit": "2718", "run": "2719"}
 INTERNAL = "--internal"
 SECRETS_FD = "EGRET_SECRETS_FD"
 SECRETS = ("EGRET_POD_TOKEN", "EGRET_MARIMO_TOKEN")
+# Written to our own pipe before exec, so it must fit the pipe buffer (16 KiB on macOS,
+# 64 KiB on Linux) or the write blocks forever. Real tokens are a few hundred bytes.
+MAX_SECRETS_BYTES = 4096
+# -I (isolated): no cwd/script dir on sys.path (implies -P), no user site-packages
+# (implies -s; ~/.local is writable by the same uid as the kernels), and no PYTHON*
+# variables (implies -E). With `-m`, plain `python` would put the cwd first on
+# sys.path, so a planted `json.py` or `egret_marimo/` there would run in phase 2
+# while the secrets pipe is open. Nothing in the image relies on PYTHON* variables.
+REEXEC_FLAGS = ["-I"]
 
 REQUIRED = {
     "edit": ["EGRET_URL", "EGRET_POD_TOKEN", "EGRET_MARIMO_TOKEN", "EGRET_BASE_URL", "APPS_WORKDIR"],
@@ -203,14 +212,17 @@ def _exec(path: str, argv: list[str], env: dict[str, str]) -> int:
 def _reexec(mode: str) -> int:
     """First phase: hand the secrets to a re-exec of this process whose environment lacks them."""
     secrets = {name: os.environ[name] for name in SECRETS}
-    read_fd, write_fd = os.pipe()
     payload = json.dumps(secrets).encode()
+    if len(payload) > MAX_SECRETS_BYTES:
+        raise LaunchError(EX_USAGE, f"{' and '.join(SECRETS)} exceed {MAX_SECRETS_BYTES} bytes together")
+    read_fd, write_fd = os.pipe()
     os.write(write_fd, payload)  # tokens are far below the pipe buffer, so this cannot block
     os.close(write_fd)
     os.set_inheritable(read_fd, True)
     env = {k: v for k, v in os.environ.items() if k not in SECRETS}
     env[SECRETS_FD] = str(read_fd)
-    return _exec(sys.executable, [sys.executable, "-m", "egret_marimo.launcher", INTERNAL, mode], env)
+    argv = [sys.executable, *REEXEC_FLAGS, "-m", "egret_marimo.launcher", INTERNAL, mode]
+    return _exec(sys.executable, argv, env)
 
 
 def _read_secrets() -> dict[str, str]:
@@ -224,8 +236,13 @@ def _read_secrets() -> dict[str, str]:
             chunks.append(chunk)
     finally:
         os.close(fd)
-    secrets = json.loads(b"".join(chunks) or b"{}")
-    return {name: str(secrets.get(name, "")) for name in SECRETS}
+    try:
+        secrets = json.loads(b"".join(chunks))
+    except ValueError:  # includes JSONDecodeError and bad UTF-8
+        secrets = None
+    if not isinstance(secrets, dict) or not all(isinstance(secrets.get(n, ""), str) for n in SECRETS):
+        raise LaunchError(EX_USAGE, f"malformed secrets on {SECRETS_FD}: expected a JSON object of strings")
+    return {name: secrets.get(name, "") for name in SECRETS}
 
 
 def _internal(mode: str) -> int:
@@ -247,10 +264,10 @@ def main(argv: list[str] | None = None) -> int:
         return EX_USAGE
     try:
         _check_env(args[0], {})
+        return _reexec(args[0])
     except LaunchError as e:
         print(f"egret-apps: {e}", file=sys.stderr)
         return e.code
-    return _reexec(args[0])
 
 
 if __name__ == "__main__":
