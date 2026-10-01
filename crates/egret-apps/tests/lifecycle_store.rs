@@ -444,6 +444,46 @@ async fn concurrent_publishes_get_distinct_numbers() {
     }
 }
 
+/// A restore and a publish of the same app both append a version; restore must take
+/// the same draft-row lock, or both read the same max and one dies on
+/// `app_versions_app_no_key`. Narrow race, so repeat it.
+#[tokio::test]
+async fn concurrent_publish_and_restore_get_distinct_numbers() {
+    let fx = Fixture::new().await;
+    let st = fx.store();
+    for i in 0..20 {
+        let app = fx.store_app("a").await;
+        let v1 = published(st.publish(app, fx.uid(), None).await.unwrap());
+        let (a, b) = tokio::join!(
+            st.publish(app, fx.uid(), None),
+            st.restore_version(app, v1.id, fx.uid())
+        );
+        let mut nos = vec![
+            published(a.unwrap_or_else(|e| panic!("iteration {i}: publish {e:?}"))).version_no,
+            b.unwrap_or_else(|e| panic!("iteration {i}: restore {e:?}"))
+                .expect("v1 belongs to the app")
+                .version_no,
+        ];
+        nos.sort();
+        assert_eq!(nos, [2, 3], "iteration {i}");
+    }
+}
+
+/// No draft row means no lock to take: restore refuses (as publish does) rather
+/// than append a version unserialised.
+#[tokio::test]
+async fn restore_without_a_draft_row_is_not_found() {
+    let fx = Fixture::new().await;
+    // `fx.app` was inserted raw, so it has no draft row.
+    let v = fx.version(fx.app, 1).await;
+    let err = fx
+        .store()
+        .restore_version(fx.app, v, fx.uid())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::NotFound(_)), "{err:?}");
+}
+
 #[tokio::test]
 async fn restore_republishes_old_source_as_a_new_version() {
     let fx = Fixture::new().await;

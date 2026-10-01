@@ -409,6 +409,10 @@ impl AppStore {
     /// Called only after the handler resolved the app in the workspace; the old
     /// version is read scoped to the app. Republishes its source as a NEW version
     /// (`restored_from` set, `from_revision` NULL); the draft is untouched.
+    ///
+    /// Takes the same draft-row lock as [`Self::publish`], and requires it: with no
+    /// draft row there is nothing to serialise on, so that is `NotFound` (as in
+    /// publish), never an unlocked insert racing a concurrent publish.
     pub async fn restore_version(
         &self,
         id: Uuid,
@@ -420,7 +424,8 @@ impl AppStore {
             .bind(id)
             .fetch_optional(&mut *tx)
             .await
-            .map_err(db_err)?;
+            .map_err(db_err)?
+            .ok_or_else(|| Error::NotFound(format!("draft of app {id}")))?;
         let Some(source) = sqlx::query_scalar::<_, String>(
             "SELECT source FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
         )
