@@ -52,7 +52,7 @@ import org.junit.Test;
  * <p>What would still falsify the set: a collation that tailors case ({@code tr_TR} would move
  * {@code I}/{@code i} INTO it), or an ICU/glibc difference on one of the 25. The direction of the
  * residual is named on {@code egret_perm_compile::routes::FOLD_DIVERGENT} and on
- * {@code StoredValueProblem::FoldDivergentCharacter}.
+ * {@code stored_coordinate_is_fold_divergent}.
  *
  * <p>This class measures the JDK's Unicode tables, not Ranger — the jar is irrelevant to it. It
  * lives here because this is where the Java-side oracles live, and because the claim it settles is
@@ -161,7 +161,7 @@ public class EgretCaseFoldAgreementTest {
      *
      * <p>The Vietnamese rows are the point of the whole round: five letter pairs and a whole word in
      * both cases, all AGREEING, so the fold reproduces the matcher for them and
-     * {@code stored_value_problem} must not decline them.
+     * {@code stored_coordinate_is_fold_divergent} must not decline them.
      */
     private static Map<String, String> expectedPairs() {
         Map<String, String> t = new LinkedHashMap<>();
@@ -219,7 +219,7 @@ public class EgretCaseFoldAgreementTest {
         }
         assertEquals(
                 "the two folds must behave exactly as this table says — it is what "
-                        + "`stored_value_problem`'s divergent-character set is derived from, and what "
+                        + "`FOLD_DIVERGENT`, the gate's divergent-character set, is derived from, and what "
                         + "makes 'the fold reproduces ignoreCase' a claim with a population",
                 expectedPairs(),
                 measured);

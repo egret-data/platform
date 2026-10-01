@@ -641,7 +641,7 @@ pub struct ExplainResponse {
 /// decline away (`Err(_) => (None, None)`) **survived the whole suite** — the
 /// handler body is reachable only from DB-gated tests, which do not run on this
 /// branch. That is the same finding Task 6 made about `attribution_for` and the
-/// same one that moved `stored_value_problem` out of SQL: where a mutation cannot
+/// same one that moved the stored-coordinate ruling out of SQL: where a mutation cannot
 /// reach, the code is in the wrong shape. Pulling the pairing out makes both arms
 /// assertable with no database, which is what
 /// `the_decline_reason_reaches_the_response_and_the_tags_do_not` does.
@@ -2102,7 +2102,8 @@ async fn resolved_tags_for_target<L: TagLookups + Send>(
     // is not where the fold's divergence lives: the pair `("ſ", "s")` is measured
     // DISAGREEING, so the stored value can be ordinary ASCII while the request
     // carries the odd character. `fold_divergent` is the same predicate
-    // `stored_value_problem` applies, asked of the target's own three values.
+    // `stored_coordinate_is_fold_divergent` applies, asked of the target's own
+    // three values.
     //
     // Checked BEFORE the `Some(empty)` shortcut below, which is strictly
     // conservative: with no schema or table named, no stored attachment is
@@ -2265,8 +2266,8 @@ const FOLD_DIVERGENT: [char; 25] = [
 /// than caution: the pair `("ſ", "s")` DISAGREES, so a stored value can be pure
 /// ASCII while the REQUEST is the odd one — gating only the stored side would have
 /// left exactly that pair open. `resolved_tags_for_target` checks the target's
-/// three values and `stored_value_problem` checks each stored coordinate; one
-/// predicate, two call sites, so they cannot drift.
+/// three values and `stored_coordinate_is_fold_divergent` checks each stored
+/// coordinate; one predicate, two call sites, so they cannot drift.
 fn fold_divergent(value: &str) -> bool {
     value.chars().any(|c| FOLD_DIVERGENT.contains(&c))
 }
@@ -2499,8 +2500,8 @@ fn resolved_tags_for_display(tags: &UnenrichedTags) -> Vec<ExplainResolvedTag> {
 /// is reachable only from DB-gated tests, which do not run on this branch, so the
 /// fix for review H1 could have been undone by deleting four lines. That is the
 /// same finding Task 6 made about `attribution_for`, Task 7's fix round 3 made
-/// about `explain_tag_inputs`, and the one that moved `stored_value_problem` out of
-/// SQL: **where a mutation cannot reach, the code is in the wrong shape.**
+/// about `explain_tag_inputs`, and the one that moved the stored-coordinate ruling
+/// out of SQL: **where a mutation cannot reach, the code is in the wrong shape.**
 ///
 /// # Why zero is the whole predicate
 ///
@@ -2535,8 +2536,10 @@ fn tags_for_profile(
 trait TagLookups {
     /// `tag_assignment_coordinates_via` — every distinct
     /// `(schema_name, table_name, column_name)` this catalog's tag assignments
-    /// carry. The RULING on them is [`stored_value_problem`]'s, in Rust, so that
-    /// it is testable and mutable; this is the fact.
+    /// carry. The RULING on them is [`stored_coordinate_is_fold_divergent`]'s, in
+    /// Rust, so that it is testable and mutable; this is the fact. ⚠ It used to be a
+    /// three-class ruling; migration 0166 took two of the three into a `CHECK`, and
+    /// the read survives for the one a `CHECK` must not take.
     fn assignment_coordinates(
         &mut self,
         catalog_id: Uuid,
@@ -3513,20 +3516,24 @@ mod tag_resolution_tests {
         }
     }
 
-    /// **This input cannot arise from the live path today, and the test says so
-    /// rather than implying coverage that does not exist.** A `('', '')`
-    /// assignment row IS storable (`PUT …/resource-tags {"schema": "",
-    /// "table": ""}` — `assign_resource_tag` validates nothing and migration
-    /// 0081 has no `CHECK`) and `resolved_tags_for_resource_via(…, "", "", "")`
-    /// DOES return it — the predicate is an exact `schema_name = $2 AND
-    /// table_name = $3`, so an empty request matches a row written empty. What
-    /// keeps it out of the mapping is neither the query nor the schema: it is
-    /// `stored_value_problem`, which rules on exactly that coordinate
-    /// (`EmptyLevel`) and declines the whole resolution before any mapping
-    /// happens. Nothing
-    /// constrains `explain`'s own `schema`/`table` strings — the handler's 400
-    /// tests for an absent level, not an empty one — so this is reached by
-    /// calling the mapping directly.
+    /// **This input cannot arise from the live path, and the test says so rather
+    /// than implying coverage that does not exist.** ⚠ **The reason CHANGED with
+    /// SP4d debt Task 3, and the old reason is the point of this note.** It used to
+    /// be: a `('', '')` assignment row IS storable (`PUT …/resource-tags
+    /// {"schema": "", "table": ""}` — `assign_resource_tag` validated nothing and
+    /// migration 0081 had no `CHECK`), `resolved_tags_for_resource_via(…, "", "",
+    /// "")` DOES return it — the predicate is an exact `schema_name = $2 AND
+    /// table_name = $3`, so an empty request matches a row written empty — and what
+    /// kept it out of the mapping was neither the query nor the schema but the
+    /// gate's `EmptyLevel` class.
+    ///
+    /// It is now the SCHEMA: migration 0166's
+    /// `catalog_tag_assignments_levels_are_present_and_literal` means no such row
+    /// can exist to be returned, and `egret_bi::catalog_tags` refuses that `PUT`
+    /// with a 400. Nothing constrains `explain`'s own `schema`/`table` strings —
+    /// the handler's 400 tests for an absent level, not an empty one — so an empty
+    /// REQUEST still reaches `resolved_tags_for_resource_via`, which now matches
+    /// nothing. This test is reached by calling the mapping directly.
     ///
     /// The mapping is still written to be right for it: the levels follow
     /// `from_assignments`' own rule (skip an empty level), so a `('', '')` row

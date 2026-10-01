@@ -39,10 +39,13 @@ import org.junit.Test;
  *   <li><b>case is REPRODUCED</b> — the query now folds both sides ({@code lower(…) = lower($n)}),
  *       because declining instead would refuse a question egret can answer, and the page's own form
  *       produces mixed case from ordinary typing;
- *   <li><b>wildcards are DECLINED</b> — {@code FilenameUtils.wildcardMatch} is a backtracking
- *       token matcher and SQL {@code LIKE} is not that algorithm, so
- *       {@code egret_perm_compile::routes::stored_value_problem} refuses the resolution while any
- *       stored value carries {@code *} or {@code ?}.
+ *   <li><b>wildcards are UNSTORABLE</b> — {@code FilenameUtils.wildcardMatch} is a backtracking
+ *       token matcher and SQL {@code LIKE} is not that algorithm. Until SP4d debt Task 3 the Rust
+ *       gate refused the resolution while any stored value carried {@code *} or {@code ?}; migration
+ *       0166's {@code catalog_tag_assignments_levels_are_present_and_literal} now forbids storing
+ *       such a value at all, together with an empty schema or table. The rows below stay, because
+ *       they are the MEASUREMENT of what the matcher would do and therefore the reason the
+ *       constraint exists;
  * </ul>
  *
  * <p>Every row is the matcher's own answer. {@code findMatchingTags} (2.5.0 offsets 348-377) admits
@@ -66,8 +69,9 @@ public class EgretTagAttachmentMatchTypeTest {
      * {@code resolved_tags_for_resource_via} returns it.
      *
      * <p>The second column is the whole point: every {@code ADMITTED|not-returned} row is a
-     * fail-open unless something declines the resolution, and the Rust side asserts which mechanism
-     * does — the fold for case, {@code stored_value_problem} for the rest.
+     * fail-open unless something stops it, and the Rust side asserts which mechanism does — the fold
+     * for case, migration 0166's {@code CHECK} for the empty-level and wildcard rows, and
+     * {@code stored_coordinate_is_fold_divergent} for a fold-divergent value.
      */
     private static Map<String, String> expected() {
         Map<String, String> t = new LinkedHashMap<>();
@@ -78,13 +82,13 @@ public class EgretTagAttachmentMatchTypeTest {
         t.put("SALES|ORDERS|EMAIL", "SELF");
         t.put("SALES|ORDERS|", "ANCESTOR");
         t.put("Sales|Orders|Email", "SELF");
-        // Wildcards: the matcher matches, the query cannot, `stored_value_problem` declines.
+        // Wildcards: the matcher matches, the query cannot, migration 0166 refuses the write.
         t.put("sales|*|", "ANCESTOR");
         t.put("sales|ord*|", "ANCESTOR");
         t.put("*|*|", "ANCESTOR");
         t.put("sales|order?|", "ANCESTOR");
         t.put("sales|orders|ema*", "SELF");
-        // The empty-level class, which was the only one the first gate covered.
+        // The empty-level class, the only one the first gate covered — now also 0166's.
         t.put("sales||", "ANCESTOR");
         t.put("||", "ANCESTOR");
         // The control: a row that genuinely does not apply must be NONE, or every row above
@@ -150,8 +154,8 @@ public class EgretTagAttachmentMatchTypeTest {
 
         assertEquals(
                 "the MatchType per stored row must be exactly this table — it is what "
-                        + "`resolved_tags_for_resource_via`'s fold and `stored_value_problem`'s "
-                        + "three classes are each measured against",
+                        + "`resolved_tags_for_resource_via`'s fold, migration 0166's CHECK and "
+                        + "`stored_coordinate_is_fold_divergent` are each measured against",
                 expected(),
                 measured);
     }

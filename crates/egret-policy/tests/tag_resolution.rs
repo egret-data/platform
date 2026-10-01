@@ -165,10 +165,10 @@ async fn column_attachment_against_a_column_request_is_self() {
 /// **And this is what ORDINARY use produces**, not malformed data: `ScopePicker`
 /// renders the three levels as free-text inputs and `request_resource` inserts them
 /// verbatim, so a steward typing `SALES` reached it with nothing wrong anywhere.
-/// That is why case is REPRODUCED here rather than refused by
-/// `egret_perm_compile::routes::stored_value_problem`, which is where the two
-/// classes the fold cannot reproduce — a wildcard metacharacter and a non-ASCII
-/// value — decline instead.
+/// That is why case is REPRODUCED here rather than refused. The other classes the
+/// fold cannot reproduce are elsewhere now: a wildcard metacharacter and an empty
+/// level are UNSTORABLE (migration 0166), and a fold-divergent value declines in
+/// `egret_perm_compile::routes::stored_coordinate_is_fold_divergent`.
 ///
 /// The two entries also prove the fold did not collapse the LEVELS: one tag at two
 /// case-shifted levels is still `SELF` + `ANCESTOR`, two members of Ranger's set.

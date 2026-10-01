@@ -932,7 +932,7 @@ pub async fn compiler_targeted_services_via(
 /// hands the evaluator comes from [`resolved_tags_for_resource_via`] — which
 /// rolls the hierarchy up and returns `tags.name` — gated on
 /// [`tag_assignment_coordinates_via`] and `egret_perm_compile`'s
-/// `stored_value_problem`. What `explain` uses THIS for is
+/// `stored_coordinate_is_fold_divergent`. What `explain` uses THIS for is
 /// the response's informational `tags` list — "what has egret got recorded on
 /// exactly this resource" — and nothing else. The two must not be merged: this
 /// one returns `tags.key`, which is a different value (live they differ for one
