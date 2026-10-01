@@ -376,11 +376,13 @@ async fn admin_session(f: &Fixture) -> String {
         .token
 }
 
-/// A NON-admin session holding exactly one fine-grained permission key. The
-/// PDP snapshots the role catalog at build time, so the role is seeded and
-/// then the fixture's PDP is rebuilt.
-async fn session_with_permission(f: &mut Fixture, permission: &str) -> String {
-    let uid = new_user(f, "perm_scoped").await;
+/// Give `uid` exactly one fine-grained permission key, at PLATFORM scope —
+/// the only scope that can satisfy it, since `egret_core::rbac` declares the
+/// `policy:*` family `Scope::Platform` and the PDP loads `Resource::Platform`
+/// with no workspace, so `egret_auth::grants::grants_for` admits only
+/// `scope_type = 'platform'` rows. The PDP snapshots the role catalog at build
+/// time, so it is rebuilt here.
+async fn grant_platform_permission(f: &mut Fixture, uid: Uuid, permission: &str) {
     let (role_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO roles (scope, name, description) VALUES ('platform', $1, 'test-only role') \
          RETURNING id",
@@ -409,11 +411,91 @@ async fn session_with_permission(f: &mut Fixture, permission: &str) -> String {
             .await
             .expect("rebuild CedarPdp"),
     );
+}
+
+/// A NON-admin session holding exactly one fine-grained permission key.
+async fn session_with_permission(f: &mut Fixture, permission: &str) -> String {
+    let uid = new_user(f, "perm_scoped").await;
+    grant_platform_permission(f, uid, permission).await;
     f.sessions
         .create(egret_core::UserId(uid), "test", "127.0.0.1")
         .await
         .expect("create session")
         .token
+}
+
+/// A session token whose `Principal` is a platform `policy:read` holder reached
+/// **through a `ws_admin`'s workspace-scoped impersonation overlay** — the only
+/// way a workspace id reaches a `/api/control-plane` handler at all.
+///
+/// Built the way production builds it: the overlay row hangs off the
+/// IMPERSONATOR's own session (`SessionService::validate` consults
+/// `active_for_session(row.session_id)`), and resolving that session yields the
+/// target's principal plus `Impersonator { workspace_scope: Some(scope) }`.
+///
+/// The target holds `policy:read` and is NOT a `platform_admin`, which is
+/// exactly what `egret_auth::impersonation::validate_impersonation_target`
+/// permits: it refuses a `platform_admin` target and nothing else, and migration
+/// 0059 seeds the platform `data_steward` role with `policy:read`. So this
+/// principal is reachable from the real `POST /api/ws/{workspace}/impersonate`
+/// flow, not only from this helper.
+async fn ws_scoped_overlay_session(f: &mut Fixture, scope: Uuid) -> String {
+    let steward = new_user(f, "perm_overlay_steward").await;
+    grant_platform_permission(f, steward, "policy:read").await;
+    let ws_admin = new_user(f, "perm_overlay_wsadmin").await;
+    let issued = f
+        .sessions
+        .create(egret_core::UserId(ws_admin), "test", "127.0.0.1")
+        .await
+        .expect("create ws_admin session");
+    let session_id = f
+        .sessions
+        .session_id_for_token(&issued.token)
+        .await
+        .expect("resolve session id")
+        .expect("the session exists");
+    egret_auth::impersonation::ImpersonationRepo::new(f.db.clone())
+        .start(egret_auth::impersonation::NewImpersonation {
+            admin_session_id: session_id,
+            impersonator_id: egret_core::UserId(ws_admin),
+            target_user_id: egret_core::UserId(steward),
+            workspace_scope: Some(egret_core::WorkspaceId(scope)),
+            reason: "SP4d debt Task 4 containment test".to_string(),
+            ttl_minutes: 10,
+        })
+        .await
+        .expect("start overlay");
+    issued.token
+}
+
+/// A fresh workspace with no catalogs of its own.
+async fn new_workspace(f: &Fixture, tag: &str) -> Uuid {
+    sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
+        .bind(unique(tag))
+        .bind("Perm Task4 WS")
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("workspace")
+}
+
+/// Assign `catalog_id` to `workspace_id` — `registry.catalog_workspaces`, the
+/// relation the `perm` model derives its implicit `workspace_assignment` grants
+/// from, and the one the overlay containment is keyed to.
+///
+/// Written with raw SQL on purpose: production's only writer is
+/// `egret_catalog_registry::RegistryStore::set_catalog_workspaces_in_tx`, which
+/// this crate does not depend on, and whose point is that it composes the grant
+/// sync — nothing here needs the grant, and reaching for a convenience wrapper is
+/// exactly what that crate removed.
+async fn assign_catalog_to_workspace(f: &Fixture, catalog_id: Uuid, workspace_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO registry.catalog_workspaces (catalog_id, workspace_id) VALUES ($1,$2)",
+    )
+    .bind(catalog_id)
+    .bind(workspace_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("assign catalog to workspace");
 }
 
 fn grant_body(catalog_id: Uuid, user: &str) -> Value {
@@ -4165,6 +4247,320 @@ async fn a_target_that_skips_a_level_is_refused() {
             "{label} is a resource an engine request can carry; body: {body}"
         );
     }
+}
+
+/// **A level present as `""` or `"*"` is refused, and this is the HTTP half.**
+/// `validate_explain_target`'s own matrix lives in `src/routes.rs`; what this
+/// adds is that the handler CALLS it — delete the call and every row below turns
+/// 200 while the lib tests stay green.
+///
+/// Both forms are Ranger's `isAllValuesRequested` ("every value at this level"),
+/// not a resource name, and the reasons they must not be answered differ:
+///
+/// * `""` is the one request shape where **egret's own evaluator is measured
+///   disagreeing with the engine**. `egret_ranger_eval::resource::level_excluded_by_trie`
+///   records it: on ranger 2.8.0 a request `{catalog: ""}` reaches a policy whose
+///   only level is a literal and answers `Allowed`, while the trie candidacy
+///   filter reports that policy absent. That gap is deliberately left open there
+///   (the rule separating it from the shapes the trie gets right is not
+///   established, and that function's job is to be a proof) — so the honest place
+///   to close it is the surface that lets a caller choose the request.
+///   ⚠ The same comment used to say an empty request level "is not something
+///   egret sends", bounding the shape by AUTHORSHIP. `request_resource` copies
+///   the body through verbatim, so it was false; this test is what makes it true.
+/// * `"*"` the trie and the matcher agree about, and the answer is still about
+///   another question: `isAllValuesRequested && !isMatchAny` short-circuits to
+///   NONE without reading one policy value, so `{schema: "*"}` reports "nothing
+///   matched" for every policy naming a real schema. `ScopePicker`'s Schema /
+///   Table / Column are free text and `*` is exactly what a steward sees in a
+///   compiled grant's resources, so this is a shape ORDINARY use produces — the
+///   empty one it cannot, because the picker maps its own empty input to
+///   `undefined`.
+#[tokio::test]
+async fn a_target_level_naming_every_value_is_refused() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+
+    for value in ["", "*"] {
+        for (label, target) in [
+            (
+                "schema",
+                json!({ "catalog_id": f.catalog_id, "schema": value, "table": null, "column": null }),
+            ),
+            (
+                "table",
+                json!({ "catalog_id": f.catalog_id, "schema": "sales", "table": value, "column": null }),
+            ),
+            (
+                "column",
+                json!({ "catalog_id": f.catalog_id, "schema": "sales", "table": "orders", "column": value }),
+            ),
+        ] {
+            let mut ask = explain_body(f.catalog_id, "alice-doe");
+            ask["target"] = target;
+            let (status, body) = into_json(
+                f.app()
+                    .oneshot(req("POST", "/perm/explain", &token, Some(ask)))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{label} = {value:?} is Ranger's every-value form, not a resource name, \
+                 and no engine request carries it; body: {body}"
+            );
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(&format!("`{label}`")),
+                "the refusal has to name WHICH level: {body}"
+            );
+        }
+    }
+
+    // A `*` INSIDE a name, and whitespace, are literal values the matcher
+    // compares literally — so they stay answerable, and the guard cannot be
+    // satisfied by refusing anything that merely contains a star.
+    for target in [
+        json!({ "catalog_id": f.catalog_id, "schema": "a*b", "table": null, "column": null }),
+        json!({ "catalog_id": f.catalog_id, "schema": " ", "table": null, "column": null }),
+    ] {
+        let mut ask = explain_body(f.catalog_id, "alice-doe");
+        ask["target"] = target.clone();
+        let (status, body) = into_json(
+            f.app()
+                .oneshot(req("POST", "/perm/explain", &token, Some(ask)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{target} is a literal resource value, not the all-values form; body: {body}"
+        );
+    }
+}
+
+/// **A catalog id naming no row is refused — and that is NOT the same thing as a
+/// catalog no profile serves.**
+///
+/// `services_for_catalog_via` joins on `ea.catalog_id = $1`, so a uuid naming
+/// nothing returns the empty profile set, which the handler reported as
+/// `no_profile_serves_the_catalog` — a steward reading that for a typo believes
+/// they have learned something about enforcement.
+///
+/// ⚠ **The unserved outcome is deliberately kept.** "Nothing is enforcing here"
+/// is a real answer a steward asks for on purpose
+/// (`a_catalog_no_engine_serves_is_its_own_outcome_not_a_denial`), so both halves
+/// are asserted in ONE test: a uuid naming nothing is a 400, and in the same
+/// breath a catalog that EXISTS and that no engine serves still answers 200 with
+/// that outcome. Anyone who later "tidies" the unserved case into a refusal has
+/// to delete a line of this test to do it.
+#[tokio::test]
+async fn a_catalog_id_naming_no_catalog_is_refused_while_an_unserved_one_is_answered() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+
+    let nowhere = Uuid::new_v4();
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain_body(nowhere, "nobody")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a uuid no registered catalog has names no resource at all; body: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&nowhere.to_string()),
+        "and the refusal names the id, so the steward can see it was the typo: {body}"
+    );
+
+    // The distinction this guard exists to make, asserted here so it cannot be
+    // removed silently.
+    let real_but_unserved = orphan_catalog(&f, "explain-exists-unserved").await;
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain_body(real_but_unserved, "nobody")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a catalog that EXISTS and that no profile serves is a legitimate question \
+         and must keep its own outcome; body: {body}"
+    );
+    assert_eq!(
+        body["outcome"], "no_profile_serves_the_catalog",
+        "which is the answer, not an error; body: {body}"
+    );
+}
+
+/// **The decision this task recorded: a platform steward may explain a catalog of
+/// ANY workspace, and that is by construction, not by oversight.**
+///
+/// `explain` is mounted under `/api/control-plane` with the bare `Auth`
+/// extractor, so no workspace id reaches it; `egret_core::Principal` has no
+/// workspace field; `policy:read` is `Scope::Platform` in `egret_core::rbac` and
+/// is gated on `Resource::Platform`, which `egret_auth::grants::grants_for` loads
+/// with `ws = None` — admitting only `scope_type = 'platform'` rows. **A
+/// workspace-confined caller holding `policy:read` is not representable.** And
+/// `registry.catalogs` has no `workspace_id`: a workspace is *assigned* a
+/// catalog, many to many, so "the catalog's workspace" is not a function.
+///
+/// So this asserts the positive: a `policy:read` holder — not a platform_admin,
+/// whose PDP bypass would make the measurement vacuous — gets an answer about a
+/// catalog assigned to a workspace it has nothing to do with.
+#[tokio::test]
+async fn a_platform_steward_may_explain_a_catalog_of_any_workspace() {
+    let Some(mut f) = setup().await else { return };
+    let other_ws = new_workspace(&f, "perm-task4-foreign").await;
+    assign_catalog_to_workspace(&f, f.catalog_id, other_ws).await;
+    let token = session_with_permission(&mut f, "policy:read").await;
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain_body(f.catalog_id, "nobody")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a platform steward's remit is the installation: refusing this would break \
+         the Explain access page for every catalog, since the caller has no \
+         workspace to compare against; body: {body}"
+    );
+    assert_eq!(body["outcome"], "per_profile", "body: {body}");
+}
+
+/// **The workspace boundary that DOES reach this handler, and it arrives by
+/// impersonation.**
+///
+/// `egret_workspace::context::WsContext` calls its own containment "the airtight
+/// choke point for the ws-scoped isolation boundary: no route can reach another
+/// workspace under a scoped overlay". That conclusion is false for every
+/// `/api/control-plane` route — none of them resolves a `{workspace}`, so none
+/// builds a `WsContext`. Measured reachable path:
+/// `validate_impersonation_target` refuses only a `platform_admin` target, so a
+/// `ws_admin` of workspace A may impersonate a member of A holding the platform
+/// `data_steward` role (migration 0059 seeds it with `policy:read`) and ask about
+/// a catalog of workspace B.
+///
+/// Three rows, because a guard that refused everything under an overlay would
+/// pass the first alone:
+/// 1. the overlay's OWN workspace's catalog is answered;
+/// 2. a catalog that workspace is not assigned is `403`;
+/// 3. the same catalog, same steward, with NO overlay, is answered — so the
+///    refusal is the containment and not the permission.
+#[tokio::test]
+async fn a_workspace_scoped_overlay_is_confined_to_that_workspaces_catalogs() {
+    let Some(mut f) = setup().await else { return };
+    let scope = new_workspace(&f, "perm-task4-scope").await;
+    assign_catalog_to_workspace(&f, f.catalog_id, scope).await;
+    // A second catalog the overlay's workspace is NOT assigned — and it is
+    // deliberately assigned to a DIFFERENT workspace rather than to none.
+    //
+    // ⚠ **It used to have no assignment at all, and a mutation proved that
+    // worthless.** With `registry.catalog_workspaces` empty for it, an `EXISTS`
+    // that dropped `AND workspace_id = $2` — i.e. "is this catalog assigned to
+    // ANY workspace" — still produced the 403 and the test passed. That mutant is
+    // the real leak: a catalog of workspace B IS assigned to B, so a containment
+    // keyed to the wrong half of the relation would answer it for an overlay
+    // scoped to A. The row below is what makes the two distinguishable.
+    let foreign = orphan_catalog(&f, "perm-task4-foreign-cat").await;
+    let foreign_ws = new_workspace(&f, "perm-task4-foreign-ws").await;
+    assign_catalog_to_workspace(&f, foreign, foreign_ws).await;
+
+    let overlay = ws_scoped_overlay_session(&mut f, scope).await;
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &overlay,
+                Some(explain_body(f.catalog_id, "nobody")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the overlay's own workspace is assigned this catalog, so the support flow \
+         the overlay exists for still works; body: {body}"
+    );
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &overlay,
+                Some(explain_body(foreign, "nobody")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a ws-scoped overlay must not be able to read another workspace's \
+         enforcement through a platform route; body: {body}"
+    );
+
+    // Same target, same steward permission, no overlay: answered. So row 2 is the
+    // containment and not a missing permission — and a guard keyed to the
+    // PERMISSION instead of the overlay would fail here.
+    let plain = session_with_permission(&mut f, "policy:read").await;
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &plain,
+                Some(explain_body(foreign, "nobody")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "without an overlay the same question is a platform steward's to ask; body: {body}"
+    );
 }
 
 /// **SP4d-2b Task 7: the refusal lifts, and this is where it is pinned.**

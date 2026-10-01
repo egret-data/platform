@@ -61,10 +61,10 @@ use egret_perm::{
     PrincipalSet, Rule, RuleKind, Scope, Selector,
 };
 use egret_policy::{
-    catalog_names_for_ids_via, catalogs_for_service_via, clearance_gates_for_tags_via,
-    get_service_by_id_via, resolved_tags_for_resource_via, services_for_catalog_via,
-    tag_assignment_coordinates_via, tag_keys_by_ids_via, tag_names_for_keys_via, PolicyStore,
-    ServiceRow,
+    catalog_is_assigned_to_workspace_via, catalog_names_for_ids_via, catalogs_for_service_via,
+    clearance_gates_for_tags_via, get_service_by_id_via, resolved_tags_for_resource_via,
+    services_for_catalog_via, tag_assignment_coordinates_via, tag_keys_by_ids_via,
+    tag_names_for_keys_via, PolicyStore, ServiceRow,
 };
 use egret_policy_api::ServicePolicies;
 use egret_ranger_eval::eval::{
@@ -1581,10 +1581,10 @@ async fn preview(
     tag = "perm",
     request_body = ExplainRequest,
     responses(
-        (status = 200, description = "One verdict per profile over the artifact each engine downloads", body = ExplainResponse),
-        (status = 400, description = "The target skips a resource level (a column implies a table implies a schema)", body = ErrorBody),
+        (status = 200, description = "One verdict per profile over the artifact each engine downloads — including the `no_profile_serves_the_catalog` outcome for a catalog that exists and that no profile serves, which is an answer and not an error", body = ExplainResponse),
+        (status = 400, description = "The target skips a resource level (a column implies a table implies a schema), names a level as \"\" or \"*\" (Ranger's \"every value\", not a resource name), or names a catalog id no registered catalog has", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission, or a workspace-scoped impersonation overlay asking about a catalog that workspace is not assigned", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1594,33 +1594,42 @@ async fn explain(
     Json(body): Json<ExplainRequest>,
 ) -> Result<Json<ExplainResponse>, PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
-    // **A target that skips a level is refused here, and it has to be refused
-    // rather than answered** (whole-branch review, I-4 — fail-open).
-    // `request_resource` stops at the first absent level, so
-    // `{schema: None, table: Some(_)}` builds the resource `{catalog}` alone:
-    // the caller asks about a table and the evaluator answers about its
-    // catalog. That is not a harmless approximation — a catalog-wide grant
-    // matches `{catalog}` as `SELF_AND_ALL_DESCENDANTS` (an allow) while the
-    // table-level clearance deny that would have decided the real target is
-    // only a `DESCENDANT` match, which the allow test does not admit. So the
-    // silently-substituted answer is **Allowed, with full confidence**.
-    //
-    // Nothing upstream stops it: `ScopePicker` narrows progressively so the
-    // page cannot send this, but the level-skip rule lives in a CHECK on the
-    // STORED `perm.grants`/`perm.rules` rows and an `explain` body is never
-    // stored.
-    if body.target.schema.is_none() && (body.target.table.is_some() || body.target.column.is_some())
-        || body.target.table.is_none() && body.target.column.is_some()
-    {
-        return Err(PermHttpError::BadRequest(
-            "a target cannot skip a level: a column implies a table implies a schema. \
-             An engine request names exactly the levels the query touched, so a gap \
-             names no resource any engine could ask about — and answering it would \
-             answer about the nearest named ancestor instead"
-                .into(),
-        ));
-    }
+    validate_explain_target(&body.target)?;
     let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
+    confine_to_overlay_workspace(&mut conn, &p, body.target.catalog_id).await?;
+    // **The catalog has to EXIST, and that is a different refusal from the one
+    // below it.** `services_for_catalog_via` answers "which profiles bind this
+    // catalog" with a `WHERE ea.catalog_id = $1` join, so a uuid naming no
+    // `registry.catalogs` row returns the empty set — indistinguishable, in the
+    // response, from a catalog that is real and that no profile serves. The
+    // steward then reads `no_profile_serves_the_catalog` for a typo and believes
+    // they have learned something about enforcement.
+    //
+    // ⚠ **`no_profile_serves_the_catalog` is NOT what this guard refuses, and it
+    // must not be "tidied" into one.** "Nothing is enforcing here" is a real,
+    // useful answer a steward asks for on purpose — it is pinned at
+    // `a_catalog_no_engine_serves_is_its_own_outcome_not_a_denial`, and the whole
+    // point of separating the two is that an EXISTING unserved catalog keeps
+    // answering 200 with that outcome while a uuid naming nothing is refused.
+    // The guard narrows the input, never the outcome vocabulary.
+    //
+    // A separate round trip rather than reusing the per-profile name lookup: that
+    // one (`catalogs_for_service_via`) is the COMPILER's reachability test and is
+    // deliberately scoped to one profile's engines, so it cannot answer "does this
+    // row exist at all" — and making it do so would re-merge the two questions
+    // this guard exists to separate.
+    if catalog_names_for_ids_via(&mut conn, &[body.target.catalog_id])
+        .await?
+        .is_empty()
+    {
+        return Err(PermHttpError::BadRequest(format!(
+            "no registered catalog has id {}: nothing can be explained about a \
+             resource that does not exist. (A catalog that DOES exist but that no \
+             engine profile serves is a different thing, and is answered with the \
+             `no_profile_serves_the_catalog` outcome rather than refused.)",
+            body.target.catalog_id
+        )));
+    }
 
     // ONE resolution for the whole response, not one per profile: the levels it
     // synthesises are the literal `catalog`/`schema`/`table`/`column` keys
@@ -1794,6 +1803,176 @@ async fn explain(
         profiles,
         tag_resolution_declined,
     }))
+}
+
+/// Is this level value Ranger's **"every value at this level"** rather than a
+/// name?
+///
+/// `RangerAbstractResourceMatcher.isAllValuesRequested` is `null || "" || "*"`,
+/// and [`egret_ranger_eval::resource`]'s `LevelMatcher::is_match` reproduces it
+/// verbatim — `match resource_value { None => true, Some(v) => v.is_empty() || v
+/// == "*" }`. **This predicate is keyed to that one on purpose**: the absent case
+/// is the level-skip rule's business (and a legitimately absent TAIL level), so
+/// what is left for a value that is PRESENT is exactly the other two arms. If
+/// either side of this pairing changes, the other is wrong — the pairing is
+/// asserted directly in `all_values_requested_matches_the_evaluators_own_predicate`.
+///
+/// Whitespace is deliberately NOT included. `" "` is a literal value: the matcher
+/// compares it literally, so the verdict really is about a resource with that
+/// name, and refusing it would be a taste judgement rather than this rule.
+fn level_requests_all_values(value: &str) -> bool {
+    value.is_empty() || value == "*"
+}
+
+/// Everything `explain` refuses about its target's SHAPE, in one pure function
+/// so the rules sit together and can be exercised without a router.
+///
+/// # 1. A level the target skips
+///
+/// **Refused, and it has to be refused rather than answered** (whole-branch
+/// review, I-4 — fail-open). `request_resource` stops at the first absent level,
+/// so `{schema: None, table: Some(_)}` builds the resource `{catalog}` alone: the
+/// caller asks about a table and the evaluator answers about its catalog. That is
+/// not a harmless approximation — a catalog-wide grant matches `{catalog}` as
+/// `SELF_AND_ALL_DESCENDANTS` (an allow) while the table-level clearance deny
+/// that would have decided the real target is only a `DESCENDANT` match, which
+/// the allow test does not admit. So the silently-substituted answer is
+/// **Allowed, with full confidence**.
+///
+/// Nothing upstream stops it: `ScopePicker` narrows progressively so the page
+/// cannot send this, but the level-skip rule lives in a CHECK on the STORED
+/// `perm.grants`/`perm.rules` rows and an `explain` body is never stored.
+///
+/// # 2. A level present as `""` or `"*"`
+///
+/// Both are [`level_requests_all_values`] — Ranger's "every value at this
+/// level", not a name — and the measured consequences differ, which is why
+/// neither may be answered:
+///
+/// * `""` is where **egret's evaluator and the engine are known to
+///   disagree**. `egret_ranger_eval::resource::level_excluded_by_trie` carries a
+///   measured, deliberately-unclosed gap: on ranger 2.8.0 a request
+///   `{catalog: ""}` reaches a policy whose only level is a literal and answers
+///   `Allowed`, while the trie candidacy filter reports that policy absent. The
+///   rule that separates it from the request shapes the trie gets right is not
+///   established, so the gap stays open in the evaluator — and the honest place
+///   to close it is here, at the only surface that lets a caller choose the
+///   request.
+///
+///   ⚠ **That comment used to bound the shape by authorship**: *"an empty
+///   REQUEST level is not something egret sends — `perm_compile`'s
+///   `request_resource` builds concrete values from the target"*. It was wrong,
+///   and this is the function that makes it true: `request_resource` copies
+///   `target.schema`/`table`/`column` through verbatim, so until this guard
+///   existed any `policy:read` caller sent `""` by putting it in the body.
+///   `ScopePicker` maps its own empty input to `undefined`, which is why nothing
+///   in the browser ever produced it — authorship, not reach.
+///
+/// * `"*"` the trie and the matcher agree about, and the answer is still about a
+///   different question than the one asked. `isAllValuesRequested && !isMatchAny`
+///   short-circuits to NONE *without reading a single policy value*, so a target
+///   of `{schema: "*"}` reports "nothing matched" for every policy naming a real
+///   schema, and matches only the match-any ones. A steward typing `*` into the
+///   free-text Schema field — which `ScopePicker` passes through, and `*` is
+///   exactly what they see in compiled GRANT resources — gets a verdict that is
+///   neither "the schema named `*`" nor "all schemas".
+///
+/// Returning them as a 400 is the same argument the level skip already won: there
+/// is no engine request this shape corresponds to.
+fn validate_explain_target(target: &Scope) -> Result<(), PermHttpError> {
+    if target.schema.is_none() && (target.table.is_some() || target.column.is_some())
+        || target.table.is_none() && target.column.is_some()
+    {
+        return Err(PermHttpError::BadRequest(
+            "a target cannot skip a level: a column implies a table implies a schema. \
+             An engine request names exactly the levels the query touched, so a gap \
+             names no resource any engine could ask about — and answering it would \
+             answer about the nearest named ancestor instead"
+                .into(),
+        ));
+    }
+    for (level, value) in [
+        ("schema", target.schema.as_deref()),
+        ("table", target.table.as_deref()),
+        ("column", target.column.as_deref()),
+    ] {
+        if value.is_some_and(level_requests_all_values) {
+            return Err(PermHttpError::BadRequest(format!(
+                "a target's `{level}` is a resource NAME, and {:?} is Ranger's \
+                 \"every value at this level\" (`isAllValuesRequested` is null, \"\" or \
+                 \"*\"). No engine request carries it: the plugin names the schema, table \
+                 and column the query actually touched. Omit the level to ask about its \
+                 parent instead — the verdict for \"all values\" is not the verdict for \
+                 any one of them, and for \"\" egret's own evaluator is measured \
+                 disagreeing with the engine",
+                value.unwrap_or_default()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// **The one workspace boundary that reaches this handler, and it arrives by
+/// impersonation — not by the caller having a workspace.**
+///
+/// ⚠ Read this before adding or removing a workspace check here, because the
+/// obvious reading of "scope `explain` to the caller's workspace" is not
+/// implementable and must not be faked:
+///
+/// * `explain` is mounted under `/api/control-plane` with the bare [`Auth`]
+///   extractor, never `WsContext`, so **no workspace id reaches it**.
+///   `egret_core::Principal` has no workspace field at all.
+/// * `policy:read` is `Scope::Platform` in `egret_core::rbac`, and
+///   `egret_core::authz::require` gates it on `Resource::Platform`. The PDP loads
+///   `Resource::Platform` with `ws = None`, and `egret_auth::grants::grants_for`
+///   then admits only `scope_type = 'platform'` rows (`scope_id = $2` can never
+///   match a NULL). **A workspace-confined caller holding `policy:read` is not
+///   representable.**
+/// * `registry.catalogs` is a platform resource with no `workspace_id`; a
+///   workspace is *assigned* a catalog (`registry.catalog_workspaces`, many to
+///   many). "The catalog's workspace" is not a function.
+///
+/// So a platform steward explaining any catalog is the designed behaviour, pinned
+/// by `a_platform_steward_may_explain_a_catalog_of_any_workspace`.
+///
+/// What IS a boundary: an impersonation overlay started by a `ws_admin` carries
+/// `Impersonator::workspace_scope = Some(ws)`, and
+/// `egret_workspace::context::WsContext` calls itself "the airtight choke point
+/// for the ws-scoped isolation boundary: no route can reach another workspace
+/// under a scoped overlay". That conclusion is **false for every
+/// `/api/control-plane` route**, because none of them resolves a `{workspace}` and
+/// so none builds a `WsContext`. The reachable path, measured:
+/// `validate_impersonation_target` refuses only a target who is a
+/// `platform_admin`, so a `ws_admin` of workspace A may impersonate a member of A
+/// who holds the platform `data_steward` role — which migration 0059 seeds with
+/// `policy:read` — and ask about a catalog of workspace B.
+///
+/// This confines that overlay to catalogs assigned to the workspace it was
+/// started in, which is the same containment `WsContext` applies (`scope != ws →
+/// Forbidden`) expressed over the relation the `perm` model itself uses for
+/// catalog↔workspace: `registry.catalog_workspaces`, the table
+/// `egret_perm::sync_assignment_grants_in_tx` derives its implicit grants from.
+/// A catalog the overlay's workspace is not assigned is `Forbidden`, which is also
+/// what a uuid naming no catalog gets — so a contained caller cannot use this
+/// route to probe which uuids are real.
+///
+/// **An unscoped overlay (`workspace_scope == None`, a platform_admin acting as
+/// someone) is unrestricted here, exactly as it is in `WsContext`.** The same gap
+/// exists on this router's WRITE routes and on the rest of
+/// `/api/control-plane`; the cross-cutting fix belongs in a shared extractor, not
+/// in six copies of this function.
+async fn confine_to_overlay_workspace(
+    conn: &mut sqlx::pool::PoolConnection<Postgres>,
+    p: &egret_core::Principal,
+    catalog_id: Uuid,
+) -> Result<(), PermHttpError> {
+    let Some(scope) = p.impersonator.as_ref().and_then(|i| i.workspace_scope) else {
+        return Ok(());
+    };
+    if catalog_is_assigned_to_workspace_via(&mut *conn, catalog_id, scope.0).await? {
+        return Ok(());
+    }
+    Err(PermHttpError::Forbidden)
 }
 
 /// `egret_perm::EngineType` → the evaluator's own. Two enums for one fact
@@ -2725,6 +2904,139 @@ mod tests {
 // store queries and also RECORDS them — "no key, so no second query" is a
 // claim about behaviour, and a test that only looked at the return value could
 // not tell a skipped query from one whose result was thrown away.
+
+/// `validate_explain_target` is pure, so the whole refusal matrix is exercised
+/// here rather than one row per HTTP round trip. **The HTTP tests still exist**
+/// (`tests/routes.rs`): a `--lib` green says the function refuses, not that the
+/// handler calls it, and a guard nobody wired in is the defect this split is most
+/// likely to hide.
+#[cfg(test)]
+mod explain_target_tests {
+    use super::{level_requests_all_values, validate_explain_target, PermHttpError, Scope};
+    use uuid::Uuid;
+
+    fn target(schema: Option<&str>, table: Option<&str>, column: Option<&str>) -> Scope {
+        Scope {
+            catalog_id: Uuid::nil(),
+            schema: schema.map(str::to_string),
+            table: table.map(str::to_string),
+            column: column.map(str::to_string),
+        }
+    }
+
+    fn refusal(t: &Scope) -> String {
+        match validate_explain_target(t) {
+            Err(PermHttpError::BadRequest(m)) => m,
+            other => panic!("expected a 400 for {t:?}, got {other:?}"),
+        }
+    }
+
+    /// Ranger's own three forms, and nothing else. Both arms are load-bearing:
+    /// delete either from `level_requests_all_values` and a row here dies.
+    #[test]
+    fn all_values_requested_is_the_empty_string_and_the_star() {
+        assert!(level_requests_all_values(""));
+        assert!(level_requests_all_values("*"));
+        // Everything else is a NAME, including the shapes that look like one of
+        // the two but are not: Ranger's `isAllValuesRequested` is an equality
+        // test, not a wildcard test.
+        for name in ["sales", " ", "**", "*a", "a*", "\t", "0"] {
+            assert!(
+                !level_requests_all_values(name),
+                "{name:?} is a literal value the matcher compares literally"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_level_is_refused_at_every_level_that_can_carry_one() {
+        for (label, t) in [
+            ("schema", target(Some(""), None, None)),
+            ("table", target(Some("sales"), Some(""), None)),
+            ("column", target(Some("sales"), Some("orders"), Some(""))),
+        ] {
+            let msg = refusal(&t);
+            assert!(
+                msg.contains(&format!("`{label}`")),
+                "the refusal has to name WHICH level: {msg}"
+            );
+            assert!(
+                msg.contains("isAllValuesRequested"),
+                "and why, by naming the Ranger predicate it is keyed to: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_star_level_is_refused_at_every_level_that_can_carry_one() {
+        for (label, t) in [
+            ("schema", target(Some("*"), None, None)),
+            ("table", target(Some("sales"), Some("*"), None)),
+            ("column", target(Some("sales"), Some("orders"), Some("*"))),
+        ] {
+            assert!(
+                refusal(&t).contains(&format!("`{label}`")),
+                "{label} named as `*` is Ranger's every-value, not a resource name"
+            );
+        }
+    }
+
+    /// The deepest level is checked too — a loop that stopped at the first
+    /// `None` would pass every other row here and still let `{schema: "sales",
+    /// table: "orders", column: ""}` through.
+    #[test]
+    fn a_deep_level_is_not_skipped_because_the_shallower_ones_are_fine() {
+        assert!(
+            validate_explain_target(&target(Some("sales"), Some("orders"), Some("amount"))).is_ok()
+        );
+        refusal(&target(Some("sales"), Some("orders"), Some("")));
+        refusal(&target(Some("sales"), Some("orders"), Some("*")));
+    }
+
+    /// The level-skip rule, moved into this function unchanged. Its own HTTP test
+    /// (`a_target_that_skips_a_level_is_refused`) stays where it is; this pins that
+    /// moving it did not drop a row.
+    #[test]
+    fn a_skipped_level_is_still_refused_and_says_so_differently() {
+        for t in [
+            target(None, Some("orders"), None),
+            target(Some("sales"), None, Some("amount")),
+            target(None, None, Some("amount")),
+        ] {
+            assert!(
+                refusal(&t).contains("cannot skip a level"),
+                "a gap and an all-values level are different refusals and must read \
+                 differently — a steward fixes them differently"
+            );
+        }
+    }
+
+    /// **The guard cannot be satisfied by refusing everything.** Each of these is a
+    /// resource an engine request really carries, and one of them is the only
+    /// shape the `Explain access` page sends for a catalog-wide question.
+    #[test]
+    fn every_shape_an_engine_request_can_carry_is_still_answerable() {
+        for t in [
+            target(None, None, None),
+            target(Some("sales"), None, None),
+            target(Some("sales"), Some("orders"), None),
+            target(Some("sales"), Some("orders"), Some("amount")),
+            // Case is NOT normalised and NOT refused: the tag resolver folds both
+            // sides, and `request_resource` hands the value to a matcher whose
+            // `ignore_case` comes from the service-def. Refusing it here would be
+            // a second, divergent opinion about case.
+            target(Some("SALES"), Some("Orders"), Some("AMOUNT")),
+            // Whitespace and a `*` INSIDE a name are literals, not the all-values
+            // form — see `level_requests_all_values`.
+            target(Some(" "), Some("a*b"), Some("**")),
+        ] {
+            assert!(
+                validate_explain_target(&t).is_ok(),
+                "{t:?} names a resource an engine request can carry"
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod wiring_tests {

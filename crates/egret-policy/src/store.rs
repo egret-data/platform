@@ -1371,6 +1371,40 @@ pub async fn catalog_names_for_ids_via(
     .await?)
 }
 
+/// Is `catalog_id` assigned to `workspace_id` in `registry.catalog_workspaces`?
+///
+/// **This is the relation the `perm` model itself treats as "this catalog
+/// belongs to that workspace".** `registry.catalogs` has no `workspace_id`
+/// column — a catalog is a platform resource (migration 0147) that workspaces
+/// are *assigned* — and `perm.grants`' implicit `workspace_assignment` rows are
+/// derived from exactly this table by
+/// `egret_perm::sync_assignment_grants_in_tx`. The other candidate shape,
+/// `catalog.warehouses.workspace_id`, answers a different question (which
+/// workspace OWNS the warehouse a catalog mirrors) and is `NULL` for every
+/// catalog that is not an egret-metastore one, so a guard keyed to it would
+/// read "belongs to no workspace" for most of the registry.
+///
+/// Read-only, connection-generic, and `EXISTS` rather than a row fetch: the one
+/// caller ([`egret_perm_compile`]'s `explain`) needs the boolean and nothing
+/// else. **Writing this table is deliberately NOT possible from here** — see
+/// `egret_catalog_registry::RegistryStore::set_catalog_workspaces_in_tx`, which
+/// is the only writer precisely so no path can assign a catalog without
+/// syncing the implicit grant.
+pub async fn catalog_is_assigned_to_workspace_via(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+) -> Result<bool, PolicyStoreError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        r#"SELECT EXISTS (SELECT 1 FROM registry.catalog_workspaces
+                           WHERE catalog_id = $1 AND workspace_id = $2)"#,
+    )
+    .bind(catalog_id)
+    .bind(workspace_id)
+    .fetch_one(&mut *conn)
+    .await?)
+}
+
 /// The `(key, name)` of each tag in `keys` that exists — the batch form of
 /// [`tag_name_for_key_via`], for the same reason
 /// [`catalog_names_for_ids_via`] exists. `tags.name` is the display name;

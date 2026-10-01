@@ -441,8 +441,16 @@ The depth of the request is in the rule somewhere (`RangerResourceEvaluatorsRetr
 intersects over the request's keys and a shallower policy is an *inherited*
 evaluator in the deeper ones), but three rows do not determine it, and this
 function's job is to be a proof. Deferred rather than refused because the only
-direction measured is fail-CLOSED and **an empty request level is not something
-egret sends** — `perm_compile`'s `request_resource` builds concrete values and
+direction measured is fail-CLOSED and **no egret caller can hand the function an
+empty level any more**.
+
+⚠ That bound used to read "an empty request level is not something egret sends —
+`perm_compile`'s `request_resource` builds concrete values", which was a claim
+about authorship, not reach, and it was **false**: `request_resource` copies the
+`explain` body's `schema`/`table`/`column` through verbatim, so any `policy:read`
+caller sent one by typing it. The bound is now a named function —
+`egret_perm_compile::routes::validate_explain_target` 400s a level present as
+`""` or `"*"`, keyed to `isAllValuesRequested` itself — and
 `scope_to_resources`' `Access` arm fills unnamed levels with `*`. `restore_duel`
 forces a concrete root value so the gate carries no standing disagreement.
 
