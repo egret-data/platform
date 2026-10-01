@@ -99,10 +99,16 @@ pub async fn loop_family(
 /// Spec §4.4: loop_family(execution) (which holds `execution` and its root R)
 /// ∪ the replay chain from R — (parent_execution_id WHERE loop_index IS NULL) or replayed_from_execution_id,
 ///   transitively (a replay copies its source's inputs verbatim, replay.rs:254-257, routes.rs:1943)
-/// ∪ trigger_execution_id of `execution`, of R and of every link of the chain (one level each).
+/// ∪ trigger_execution_id of `execution`, of R and of every link of the chain (one level each)
+/// ∪ the LOOP FAMILY of each such trigger execution: its loop root and every
+///   iteration under that root (the user's ruling of 2026-10-01, Task 7
+///   concern 1) -- so a `Subflow` child started inside a `Loop` iteration
+///   reads the loop root's FILE inputs and its sibling iterations' files, as
+///   Kestra OSS allows. Still one trigger level: the trigger's own trigger is
+///   never in the set.
 ///
 /// The chain's own loop iterations are NOT in the set: the family is taken
-/// of R only. Empty when `execution` is not in `workspace`.
+/// of R (and of each trigger) only. Empty when `execution` is not in `workspace`.
 pub async fn readable_executions(
     conn: &mut PgConnection,
     workspace: Uuid,
@@ -127,8 +133,24 @@ pub async fn readable_executions(
            SELECT e.trigger_execution_id FROM workflow.executions e \
             WHERE e.workspace_id = $1 AND e.trigger_execution_id IS NOT NULL \
               AND (e.id = $2 OR e.id IN (SELECT id FROM chain)) \
+         ), \
+         trigger_up(id, parent, loop_index) AS ( \
+           SELECT id, parent_execution_id, loop_index FROM workflow.executions \
+            WHERE workspace_id = $1 AND id IN (SELECT id FROM triggers) \
+           UNION \
+           SELECT e.id, e.parent_execution_id, e.loop_index \
+             FROM workflow.executions e JOIN trigger_up u ON e.id = u.parent \
+            WHERE u.loop_index IS NOT NULL AND e.workspace_id = $1 \
+         ), \
+         trigger_family(id) AS ( \
+           SELECT id FROM trigger_up WHERE loop_index IS NULL \
+           UNION \
+           SELECT e.id FROM workflow.executions e JOIN trigger_family f \
+               ON e.parent_execution_id = f.id \
+            WHERE e.loop_index IS NOT NULL AND e.workspace_id = $1 \
          ) \
-         SELECT id FROM family UNION SELECT id FROM chain UNION SELECT id FROM triggers"
+         SELECT id FROM family UNION SELECT id FROM chain UNION SELECT id FROM triggers \
+         UNION SELECT id FROM trigger_family"
     ))
     .bind(workspace)
     .bind(execution)

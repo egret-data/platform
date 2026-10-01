@@ -281,6 +281,95 @@ async fn readable_covers_own_root_trigger_retry_replay_and_manual_replay_chain()
         .is_empty());
 }
 
+/// **The user's ruling of 2026-10-01 on Task 7's concern 1**: the readable
+/// set also holds the LOOP FAMILY of each trigger execution -- its loop root
+/// and every iteration under that root -- still one trigger level. A child
+/// started from inside iteration `it0` (a `Subflow` there names `it0` as its
+/// trigger) reads the loop root's files and a sibling iteration's; the
+/// trigger's own trigger `t0` and an unrelated execution stay unreadable.
+#[tokio::test]
+async fn a_triggers_loop_family_is_readable_and_the_triggers_trigger_is_not() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let t0 = root(&db, ws).await;
+    let tr = exec(
+        &db,
+        ws,
+        Link {
+            trigger: Some(t0),
+            ..Link::default()
+        },
+    )
+    .await;
+    let it0 = exec(
+        &db,
+        ws,
+        Link {
+            iteration_of: Some((tr, 0)),
+            ..Link::default()
+        },
+    )
+    .await;
+    let it1 = exec(
+        &db,
+        ws,
+        Link {
+            iteration_of: Some((tr, 1)),
+            ..Link::default()
+        },
+    )
+    .await;
+    // A nested loop under the sibling: still the trigger's loop family.
+    let it1a = exec(
+        &db,
+        ws,
+        Link {
+            iteration_of: Some((it1, 0)),
+            ..Link::default()
+        },
+    )
+    .await;
+    let child = exec(
+        &db,
+        ws,
+        Link {
+            trigger: Some(it0),
+            ..Link::default()
+        },
+    )
+    .await;
+    let u = root(&db, ws).await;
+    let mut conn = db.pool.acquire().await.unwrap();
+
+    let got = sorted(readable_executions(&mut conn, ws, child).await.unwrap());
+    assert_eq!(got, sorted(vec![child, it0, it1, it1a, tr]));
+    assert!(
+        !got.contains(&t0),
+        "the trigger's own trigger: one level only"
+    );
+    assert!(!got.contains(&u));
+
+    let sibling = write_file(&db, ws, it1, "sibling.txt", 3).await;
+    let of_root = write_file(&db, ws, tr, "root.txt", 4).await;
+    let of_t0 = write_file(&db, ws, t0, "t0.txt", 5).await;
+    for (uri, size) in [(&sibling, 3), (&of_root, 4)] {
+        let got = resolve_readable(&mut conn, ws, child, uri).await.unwrap();
+        assert_eq!(got.map(|f| f.size), Ok(size), "{uri}");
+    }
+    assert_eq!(
+        resolve_readable(&mut conn, ws, child, &of_t0)
+            .await
+            .unwrap(),
+        Err(Unreadable::NotReadable { uri: of_t0.clone() })
+    );
+    // A trigger that is NOT an iteration contributes itself only (its family
+    // is its own iterations, of which `t0` has none).
+    assert_eq!(
+        sorted(readable_executions(&mut conn, ws, tr).await.unwrap()),
+        sorted(vec![tr, it0, it1, it1a, t0])
+    );
+}
+
 /// The user's ruling (spec §3): a file written in iteration I carries I's id.
 /// It is readable from the root (a task after the loop) and from a sibling.
 #[tokio::test]

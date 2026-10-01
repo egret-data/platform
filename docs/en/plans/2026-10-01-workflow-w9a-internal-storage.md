@@ -23,7 +23,7 @@
   - W9 is split: **W9a** internal storage (this plan), **W9b** namespace files, **W9c** the KV store.
   - **egret moves files for the pod.** A task pod holds no storage credential and opens no connection to the object store.
   - Streamed, with large configurable caps; **no file is ever held whole in egret's memory.**
-  - A running flow reads its own execution's files, its loop family's (its loop root and every iteration under it), its trigger execution's, and a replay reads its source chain's (§4.4).
+  - A running flow reads its own execution's files, its loop family's (its loop root and every iteration under it), its trigger execution's **and that trigger's loop family's** (the user's ruling of 2026-10-01 on Task 7's concern 1; still one trigger level, never the trigger's trigger), and a replay reads its source chain's (§4.4).
   - **(User ruling, 2026-10-01, on Task 1's concern 1.)** A file written inside a `Loop` iteration carries the **iteration's** execution id, as Kestra does; no URI is mapped to the loop root (spec §3). Never another workspace's; never an unrelated execution's in the same workspace.
   - Retention of its own, **30 days** by default, `0` keeps forever (§10).
   - `outputs.<task>.outputFiles` becomes `{relative path → kestra:// URI}` — **breaking** (§6.2).

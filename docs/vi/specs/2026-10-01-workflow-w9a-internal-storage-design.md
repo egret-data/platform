@@ -8,6 +8,7 @@
 **Đã quyết với người dùng, 2026-10-01:**
 - **(Thêm ngày 2026-10-01, phán quyết của người dùng về mục 1 của plan.) File được tra trong một snapshot chụp trước khi render; không có lần tra thứ hai lúc render.** Một URI được ghép lúc render (nối chuỗi) mà không có trong snapshot là một lỗi nêu URI đó (§4.4, §7.2).
 - **(Thêm ngày 2026-10-01, phán quyết của người dùng về mối lo 1 của Task 1.) Một file ghi bên trong một vòng lặp `Loop` mang execution id của chính vòng lặp đó, như Kestra; không có ánh xạ URI về loop root.** Vì vậy tập đọc được bao gồm mọi vòng lặp dưới cùng loop root, và API file phục vụ cả họ vòng lặp (§3, §4.2, §4.4, §8).
+- **(Thêm ngày 2026-10-01, phán quyết của người dùng về concern 1 của Task 7.) Tập đọc được còn chứa họ vòng lặp của mỗi trigger execution** — loop root của nó và mọi vòng lặp dưới root đó — vẫn chỉ một cấp trigger, không bao giờ là trigger của trigger. Vì vậy một execution con của `Subflow` được khởi chạy từ bên trong một vòng lặp `Loop` đọc được FILE input của loop root và file của các vòng lặp anh em, như Kestra OSS cho phép (§2, §4.4, §15).
 - **W9 được tách thành ba gói:** W9a internal storage (spec này), rồi W9b namespace files, rồi W9c KV store.
 - **egret chuyển file cho pod.** Một task pod không giữ credential storage nào và không mở kết nối nào tới object store. egret đưa mọi file task có thể đọc vào thư mục làm việc của nó và thu mọi file nó ghi, qua cơ chế chuyển file sẵn có của W5a (§5).
 - **Streamed, với trần lớn cấu hình được.** `egret-storage` có thêm streaming; không file nào được giữ nguyên vẹn trong bộ nhớ của egret (§4.1).
@@ -46,7 +47,7 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 
 | Kestra | egret W9a | vì sao |
 |---|---|---|
-| một flow có thể đọc file task của mọi execution trong OSS (`isAllowedNamespace` luôn true) | chỉ execution của chính nó, loop root của nó và mọi vòng lặp dưới root đó, trigger execution của nó, và chuỗi replay của nó (§4.4) | egret có ranh giới người đọc (`workflow:read`) mà Kestra OSS không có; một tác giả flow có `workflow:manage` không được đọc output của một flow họ không thấy. **Một flow Kestra chuyển một URI cho một flow không liên quan thì chạy trên Kestra và thất bại trên egret** |
+| một flow có thể đọc file task của mọi execution trong OSS (`isAllowedNamespace` luôn true) | chỉ execution của chính nó, loop root của nó và mọi vòng lặp dưới root đó, trigger execution của nó **và họ vòng lặp của trigger đó** (loop root của nó và mọi vòng lặp dưới nó; một cấp trigger), và chuỗi replay của nó (§4.4) | egret có ranh giới người đọc (`workflow:read`) mà Kestra OSS không có; một tác giả flow có `workflow:manage` không được đọc output của một flow họ không thấy. **Một flow Kestra chuyển một URI cho một flow không liên quan thì chạy trên Kestra và thất bại trên egret** |
 | một plugin đọc mọi URI nó tính ra lúc chạy | một plugin đọc các URI có mặt trong thuộc tính đã render của nó | pod không giữ credential (§5). Plugin JDBC không bị ảnh hưởng; một plugin tương lai tính URI lúc chạy sẽ thất bại, có tên |
 | file được giữ mãi mãi | được prune 30 ngày sau khi execution kết thúc (cấu hình được, 0 = mãi mãi) | lựa chọn của người dùng (§10). Một flow đọc file của execution cũ hơn cửa sổ này thì thất bại, nêu URI và cửa sổ |
 | `read()` không có trần | `workflow.storage.max_read_bytes`, mặc định 10 MiB | kết quả được ghép vào một chuỗi đã render |
@@ -89,7 +90,8 @@ Một hàm duy nhất, `storage::resolve_readable_many(conn, workspace, readable
 1. execution đang chạy `E` và loop root `R` của nó (cách đi lên ở §3);
 2. mọi vòng lặp dưới `R`, ở mọi độ sâu (mọi dòng mà cách đi lên ở §3 tới được `R`) — nên một task sau vòng lặp, một vòng lặp anh em và một vòng lặp lồng đọc được file của nhau (phán quyết của người dùng, đầu tài liệu). Mục 1 và 2 là **họ vòng lặp** của `E`;
 3. chuỗi replay từ `R`: nguồn của mỗi replay, bắc cầu — `parent_execution_id` của một replay do retry (`loop_index` NULL) hoặc `replayed_from_execution_id` của một replay thủ công; và
-4. `trigger_execution_id` của `E`, của `R` và của mọi execution ở 3 (mỗi cái một cấp, quy tắc `trigger` của Kestra; một replay sao chép inputs của nguồn và, trong Kestra, cả trigger của nó).
+4. `trigger_execution_id` của `E`, của `R` và của mọi execution ở 3 (mỗi cái một cấp, quy tắc `trigger` của Kestra; một replay sao chép inputs của nguồn và, trong Kestra, cả trigger của nó); và
+5. **họ vòng lặp của mỗi execution ở 4** — loop root của nó và mọi vòng lặp dưới root đó (phán quyết của người dùng ngày 2026-10-01 về concern 1 của Task 7). Một `Subflow` bên trong một vòng lặp `Loop` đặt chính vòng lặp làm trigger của execution con, nên nếu thiếu mục này execution con không đọc được `{{ inputs.f }}` (một FILE input của loop root) hay file của một vòng lặp anh em, điều mà Kestra OSS cho phép. Vẫn chỉ một cấp trigger: trigger của chính trigger, và họ vòng lặp của các mắt xích trong chuỗi replay, không nằm trong tập.
 
 Kestra OSS cho phép gì ở đây (Task 1): một vòng lặp đọc file của root và một vòng lặp đọc file của chính nó đã được **đo** là đọc được (`file_functions.loop_root_from_iteration`, `file_functions_extra.iteration_own_write`). Một task sau vòng lặp, hay một vòng lặp anh em, đọc file của một vòng lặp thì **chưa đo**; theo mã nguồn, OSS cho đọc qua nhánh namespace (`AbstractFileFunction.java:137-171`, `isAllowedNamespace` luôn true trong OSS), nên mục 2 khớp OSS ở đó. Các vòng lặp của chính chuỗi replay không nằm trong tập.
 
@@ -238,7 +240,7 @@ Namespace files, `nsfile://` và `fileURI` (W9b); KV store (W9c); `PurgeStorage`
 
 ## 15. Giới hạn đã biết
 
-- Một flow chỉ đọc file của execution của chính nó, của họ vòng lặp của nó (loop root và mọi vòng lặp dưới nó) và của trigger execution của nó, và một replay đọc file của chuỗi nguồn của nó (§2, §4.4).
+- Một flow chỉ đọc file của execution của chính nó, của họ vòng lặp của nó (loop root và mọi vòng lặp dưới nó), của trigger execution của nó và của họ vòng lặp của trigger đó, và một replay đọc file của chuỗi nguồn của nó (§2, §4.4). Chỉ một cấp trigger: file của trigger của chính trigger bị từ chối (phán quyết 2026-10-01).
 - Một file ghi bên trong một vòng lặp `Loop` mang id của chính vòng lặp, như trong Kestra (§3, phán quyết của người dùng); API file phục vụ nó qua bất kỳ id nào của họ vòng lặp, không redirect (§8).
 - `allowedFileExtensions` được thực thi; artifact Kestra không thực thi nó (Task 1), nên một flow như vậy chạy được trên Kestra và thất bại trên egret (§2).
 - Plugin của Kestra ghi Ion nhị phân; mọi bộ đọc của egret phải nhận nó. STORE của `egret.sql` ghi Ion text, thứ mà bộ đọc của Kestra nhận như đã đo với output của `Write`; byte do chính `ionfmt` ghi chưa được đo trên Kestra (§2, §9.2).

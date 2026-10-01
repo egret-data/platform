@@ -677,27 +677,6 @@ async fn a_json_start_with_no_file_input_is_unchanged() {
     let ex = id_of(res).await;
     assert_eq!(fx.inputs_of(ex).await, json!({ "who": "world", "n": 3 }));
 
-    // A body with no Content-Type is refused, not read as "no body": the
-    // client orval generates for this route's two content types sends none,
-    // and `Option<Json>` would have started it with `{}`.
-    let res = common::send_raw(
-        &fx.app,
-        "POST",
-        &path,
-        fx.user,
-        "",
-        json!({ "inputs": { "who": "lost" } })
-            .to_string()
-            .into_bytes(),
-    )
-    .await;
-    assert_eq!(res.status(), 415);
-    assert_eq!(
-        fx.executions().await,
-        4,
-        "the refused start created nothing"
-    );
-
     // A FILE input left out is not checked (the render decides).
     let files = fx.flow(&reader_flow("no-value", NS, "")).await;
     assert_eq!(
@@ -934,4 +913,85 @@ async fn the_first_settle_reads_the_uploaded_file_in_the_starting_transaction() 
     let (state, _, msg) = fx.run(ex, "r").await;
     assert_eq!(state, "RUNNING", "runIf saw the 6-byte file: {msg:?}");
     fx.drain().await;
+}
+
+/// **The user's ruling of 2026-10-01 (Task 7 concern 1), end to end**: a
+/// `Subflow` inside a `Loop` iteration passes `{{ inputs.f }}` -- a FILE input
+/// of the LOOP ROOT -- and the child reads it. The child's trigger is the
+/// iteration; the root is in that trigger's loop family.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subflow_in_a_loop_iteration_reads_the_loop_roots_file_input() {
+    let Some(fx) = fx().await else { return };
+    let child = fx.flow(&child_flow()).await;
+    let src = format!(
+        "id: loop-parent\nnamespace: {NS}\ninputs:\n  - id: f\n    type: FILE\n\
+         tasks:\n  - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\"]'\n    tasks:\n\
+         \x20     - id: call\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+         namespace: {NS}\n        flowId: child\n        inputs:\n          f: \"{{{{ inputs.f }}}}\"\n"
+    );
+    let flow = fx.flow(&src).await;
+    let res = fx
+        .upload(flow, &[Part::File("f", "root.txt", b"the root's file")])
+        .await;
+    assert_eq!(res.status(), 201);
+    let root = id_of(res).await;
+    let uri = fx.inputs_of(root).await["f"].as_str().unwrap().to_string();
+    fx.drain().await;
+
+    let kids = children(&fx, child).await;
+    assert_eq!(kids.len(), 1, "{kids:?}");
+    assert_eq!(kids[0].1["f"], json!(uri), "the root's URI, verbatim");
+    let (state, outputs, msg) = fx.run(kids[0].0, "r").await;
+    assert_eq!(state, "SUCCESS", "{msg:?}");
+    assert_eq!(outputs.unwrap()["value"], json!("the root's file"));
+    assert_eq!(fx.state_of(root).await, "SUCCESS");
+}
+
+/// **Concern 2's ruling: no `Content-Type` is JSON**, as before Task 7 -- the
+/// client orval generates for this route sends none. An absent or empty body
+/// is `{}`; a body is parsed as JSON (and refused if it is not). An explicit
+/// unsupported type is still 415.
+#[tokio::test]
+async fn a_start_with_no_content_type_is_json_and_an_unsupported_type_is_415() {
+    let Some(fx) = fx().await else { return };
+    let src = format!(
+        "id: no-ct\nnamespace: {NS}\ninputs:\n  - id: who\n    type: STRING\n\
+         tasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    );
+    let flow = fx.flow(&src).await;
+    let path = fx.start_path(flow);
+    let send = |ct: &'static str, body: Vec<u8>| {
+        let (app, path, user) = (&fx.app, path.clone(), fx.user);
+        async move { common::send_raw(app, "POST", &path, user, ct, body).await }
+    };
+
+    let res = send(
+        "",
+        json!({ "inputs": { "who": "headerless" } })
+            .to_string()
+            .into_bytes(),
+    )
+    .await;
+    assert_eq!(res.status(), 201);
+    let ex = id_of(res).await;
+    assert_eq!(fx.inputs_of(ex).await, json!({ "who": "headerless" }));
+
+    let res = send("", Vec::new()).await;
+    assert_eq!(res.status(), 201);
+    let ex = id_of(res).await;
+    assert_eq!(fx.inputs_of(ex).await, json!({}));
+
+    // Headerless and not JSON: refused, not started with `{}`.
+    let res = send("", b"who=x".to_vec()).await;
+    assert!(res.status().is_client_error(), "{}", res.status());
+    // Headerless and not an object: `start_inputs`' refusal.
+    assert_eq!(send("", b"{\"inputs\": [1]}".to_vec()).await.status(), 400);
+
+    let res = send(
+        "text/plain",
+        json!({ "inputs": { "who": "x" } }).to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(res.status(), 415);
+    assert_eq!(fx.executions().await, 2, "only the two accepted starts");
 }

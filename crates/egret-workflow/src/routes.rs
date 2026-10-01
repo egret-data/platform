@@ -1786,7 +1786,7 @@ fn core_refusal(e: Error) -> axum::response::Response {
         (status = 404, description = "No such flow in this workspace, or it is in the trash. **A flow belonging to another workspace answers exactly this**, indistinguishably from one that never existed.", body = egret_core::http::ErrorBody),
         (status = 409, description = "The flow is disabled — by its `state` column or by its own YAML's `disabled: true`", body = egret_core::http::ErrorBody),
         (status = 413, description = "An uploaded file is over `workflow.storage.max_file_bytes` (the message names the input and the cap), a text part is over 1 MiB, or the JSON body is over 2 MiB. Nothing is created.", body = egret_core::http::ErrorBody),
-        (status = 415, description = "A body with no `Content-Type`, or one that is neither `application/json` nor `multipart/form-data`. A body is never read as \"no body\".", body = egret_core::http::ErrorBody),
+        (status = 415, description = "A `Content-Type` that is neither `application/json` nor `multipart/form-data`. A request with no `Content-Type` is read as JSON (an empty body is `{}`).", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
         (status = 503, description = "Internal storage failed while an uploaded file was being stored. Nothing is created; the request can be retried.", body = egret_core::http::ErrorBody),
     ),
@@ -1818,16 +1818,17 @@ async fn start_flow_execution(
         let req = req.map(|b| {
             axum::body::Body::new(http_body_util::Limited::new(b, MAX_JSON_START_BODY_BYTES))
         });
-        // **A body with no `Content-Type` is refused, not ignored** (W9a Task
-        // 7). `Option<Json>` reads "no Content-Type" as "no body" and starts
-        // with `{}` -- harmless while every client sent the header, and a
-        // silent empty start once one does not: the client orval generates
-        // for this route's TWO content types sends no `Content-Type` at all.
-        // A bodiless `POST` (no header, no bytes) still starts with `{}`.
+        // **No `Content-Type` is JSON** (controller decision on W9a Task 7's
+        // concern 2). `Option<Json>` alone reads a headerless request as "no
+        // body" and would start a headerless JSON body with `{}` -- and the
+        // client orval generates for this route's two content types sends no
+        // `Content-Type`. So a headerless body is read as JSON: empty is `{}`
+        // as before, anything else is parsed (and refused if it is not JSON).
+        // An explicit type that is neither JSON nor multipart stays 415.
         let req = if req.headers().contains_key(axum::http::header::CONTENT_TYPE) {
             req
         } else {
-            let (parts, body) = req.into_parts();
+            let (mut parts, body) = req.into_parts();
             let bytes = axum::body::to_bytes(body, usize::MAX).await.map_err(|_| {
                 refuse(
                     StatusCode::PAYLOAD_TOO_LARGE,
@@ -1835,14 +1836,12 @@ async fn start_flow_execution(
                 )
             })?;
             if !bytes.is_empty() {
-                return Err(refuse(
-                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    "a start's body needs a Content-Type: application/json or \
-                     multipart/form-data"
-                        .into(),
-                ));
+                parts.headers.insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("application/json"),
+                );
             }
-            axum::extract::Request::from_parts(parts, axum::body::Body::empty())
+            axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))
         };
         let body = Option::<Json<StartExecutionRequest>>::from_request(req, &st)
             .await

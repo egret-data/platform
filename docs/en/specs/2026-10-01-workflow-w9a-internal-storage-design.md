@@ -6,6 +6,7 @@
 **Decided with the user, 2026-10-01:**
 - **(Added 2026-10-01, the user's ruling on the plan's item 1.) Files are looked up in a snapshot taken before the render; there is no second lookup at render.** A URI assembled at render (string concatenation) that is not in the snapshot is an error naming it (§4.4, §7.2).
 - **(Added 2026-10-01, the user's ruling on Task 1's concern 1.) A file written inside a `Loop` iteration carries the iteration's execution id, as Kestra does; there is no loop-root mapping for URIs.** The readable set therefore covers every iteration under the same loop root, and the file API serves the whole loop family (§3, §4.2, §4.4, §8).
+- **(Added 2026-10-01, the user's ruling on Task 7's concern 1.) The readable set also holds the loop family of each trigger execution** — its loop root and every iteration under that root — still one trigger level, never the trigger's trigger. A `Subflow` child started from inside a `Loop` iteration therefore reads the loop root's FILE inputs and its sibling iterations' files, as Kestra OSS allows (§2, §4.4, §15).
 - **W9 is split into three packages:** W9a internal storage (this spec), then W9b namespace files, then W9c the KV store.
 - **egret moves files for the pod.** A task pod holds no storage credential and opens no connection to the object store. egret stages every file a task may read into its working directory and collects every file it writes, through W5a's existing transfer (§5).
 - **Streamed, with large configurable caps.** `egret-storage` gains streaming; no file is ever held whole in egret's memory (§4.1).
@@ -44,7 +45,7 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 
 | Kestra | egret W9a | why |
 |---|---|---|
-| a flow may read any execution's task file in OSS (`isAllowedNamespace` is always true) | its own execution, its loop root and every loop iteration under that root, its trigger execution, and its replay chain only (§4.4) | egret has a reader boundary (`workflow:read`) Kestra OSS does not; a flow author with `workflow:manage` must not read outputs of a flow they cannot see. **A Kestra flow that hands a URI to an unrelated flow runs on Kestra and fails on egret** |
+| a flow may read any execution's task file in OSS (`isAllowedNamespace` is always true) | its own execution, its loop root and every loop iteration under that root, its trigger execution **and that trigger's loop family** (its loop root and every iteration under it; one trigger level), and its replay chain only (§4.4) | egret has a reader boundary (`workflow:read`) Kestra OSS does not; a flow author with `workflow:manage` must not read outputs of a flow they cannot see. **A Kestra flow that hands a URI to an unrelated flow runs on Kestra and fails on egret** |
 | a plugin reads any URI it computes at run | a plugin reads the URIs present in its rendered properties | the pod holds no credential (§5). JDBC plugins are unaffected; a future plugin that computes URIs at run would fail, by name |
 | files are kept forever | pruned 30 days after the execution ends (configurable, 0 = forever) | the user's choice (§10). A flow that reads a file of an execution older than the window fails, naming the URI and the window |
 | `read()` has no cap | `workflow.storage.max_read_bytes`, default 10 MiB | the result is spliced into a rendered string |
@@ -87,7 +88,8 @@ One function, `storage::resolve_readable_many(conn, workspace, readable, uris)`,
 1. the running execution `E` and its loop root `R` (the walk of §3);
 2. every loop iteration under `R`, at any depth (every row whose walk of §3 reaches `R`) — so a task after the loop, a sibling iteration and a nested iteration read each other's files (the user's ruling, header). Items 1 and 2 are `E`'s **loop family**;
 3. the replay chain from `R`: the source of each replay, transitively — a retry replay's `parent_execution_id` (`loop_index` NULL) or a manual replay's `replayed_from_execution_id`; and
-4. the `trigger_execution_id` of `E`, of `R` and of every execution in 3 (one level each, Kestra's `trigger` rule; a replay copies its source's inputs and, in Kestra, its trigger).
+4. the `trigger_execution_id` of `E`, of `R` and of every execution in 3 (one level each, Kestra's `trigger` rule; a replay copies its source's inputs and, in Kestra, its trigger); and
+5. the **loop family of each execution in 4** — its loop root and every iteration under that root (the user's ruling of 2026-10-01 on Task 7's concern 1). A `Subflow` inside a `Loop` iteration names the iteration as its child's trigger, so without this the child could not read `{{ inputs.f }}` (a FILE input of the loop root) or a sibling iteration's file, which Kestra OSS allows. Still one trigger level: the trigger's own trigger, and the loop families of the replay chain's links, are not in the set.
 
 What Kestra OSS allows here (Task 1): an iteration reading its root's file and an iteration reading its own file were **measured** readable (`file_functions.loop_root_from_iteration`, `file_functions_extra.iteration_own_write`). A task after the loop, or a sibling, reading an iteration's file was **not measured**; by the code it is readable in OSS through the namespace fallback (`AbstractFileFunction.java:137-171`, `isAllowedNamespace` always true in OSS), so item 2 matches OSS there. The replay chain's own loop iterations are not in the set.
 
@@ -236,7 +238,7 @@ Namespace files, `nsfile://` and `fileURI` (W9b); the KV store (W9c); `PurgeStor
 
 ## 15. Known limits
 
-- A flow reads only its own execution's, its loop family's (its loop root and every iteration under it) and its trigger execution's files, and a replay its source chain's (§2, §4.4).
+- A flow reads only its own execution's, its loop family's (its loop root and every iteration under it) and its trigger execution's files and that trigger's loop family's, and a replay its source chain's (§2, §4.4). One trigger level only: a file of the trigger's own trigger is refused (2026-10-01 ruling).
 - A file written inside a `Loop` iteration carries the iteration's id, as in Kestra (§3, the user's ruling); the file API serves it through any id of the loop family, with no redirect (§8).
 - `allowedFileExtensions` is enforced; the Kestra artifact does not enforce it (Task 1), so such a flow passes on Kestra and fails on egret (§2).
 - Kestra's plugins write binary Ion; every egret reader must accept it. `egret.sql` STORE writes Ion text, which Kestra's readers accept as measured for `Write` output; `ionfmt`'s own bytes were not measured on Kestra (§2, §9.2).

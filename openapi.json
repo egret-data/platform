@@ -27932,7 +27932,7 @@
             }
           },
           "415": {
-            "description": "A body with no `Content-Type`, or one that is neither `application/json` nor `multipart/form-data`. A body is never read as \"no body\".",
+            "description": "A `Content-Type` that is neither `application/json` nor `multipart/form-data`. A request with no `Content-Type` is read as JSON (an empty body is `{}`).",
             "content": {
               "application/json": {
                 "schema": {
