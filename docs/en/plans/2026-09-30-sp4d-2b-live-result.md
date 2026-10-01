@@ -624,9 +624,17 @@ disagreements are one product finding that the evaluator got *right*.
    level is the schema.
 5. **F2** — the live clearance on tag `tag` is attached to nothing.
 
-**Cleanup.** The private coordinator pod and its ConfigMap are deleted. The fixture stays
-in `egret_sp4d2b` so the gate can be re-run; nothing in the kind cluster, in `egret`, in
+**Cleanup.** The private coordinator pod and its ConfigMap are deleted, and **this gate's
+own backend (:8090) and Vite (:5290) are stopped** — a left-running stack is exactly the
+hazard this task had to work around on arrival, and leaving mine up would have handed the
+same trap to the next one. The two stacks that were already on :8080 and :5173 belong to
+other sessions and are still running, untouched. The fixture stays in `egret_sp4d2b` so
+the gate can be re-run from §1's commands; nothing in the kind cluster, in `egret`, in
 `egret_test` or in the shared template was written at any point.
+
+Screenshots of the two page states that matter are at
+`.playwright-mcp/sp4d2b-p1-empty-level.png` (the `(none) / orders / (the table itself)`
+decline) and `.playwright-mcp/sp4d2b-p8-allowed-on-an-unreadable-table.png` (F5).
 
 ---
 
