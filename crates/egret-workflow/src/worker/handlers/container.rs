@@ -80,7 +80,10 @@ pub(super) fn outputs_for(result: &CommandsResult) -> serde_json::Value {
 /// run's `task_prefix`, [`check_outputs_collected`] runs over the final
 /// outputs -- a `::{"outputs": …}::` marker naming a URI under this run's
 /// prefix that was never collected fails the task (spec §5: no output points
-/// at nothing).
+/// at nothing). The script handler passes the run's prefix whether or not it
+/// declared an output (fix round 1, I2); `None` is a run with no prefix at
+/// all. Two outputs stored at one URI also fail the task, and the URI rides
+/// once ([`distinct_files`], fix round 1, I1).
 ///
 /// [`check_outputs_collected`]: crate::storage::collect::check_outputs_collected
 pub(super) fn outcome_for(
@@ -89,13 +92,13 @@ pub(super) fn outcome_for(
     task_prefix: Option<&str>,
 ) -> Outcome {
     let outputs = outputs_for(result);
-    let files: Vec<crate::storage::StoredFile> = result.output_files.values().cloned().collect();
+    let (files, shared) = distinct_files(result);
     // **[`CommandsResult::failure`] first**, and it carries the outputs too:
     // fix round 1's Important 1 was that an output-file problem discarded the
     // exit code and the marker vars, contradicting fact 7 which this very file
     // quotes as its principle. `RunnableTaskException(e, ScriptOutput)` is an
     // exception CARRYING an output; so is this.
-    let failure = result.failure.clone().or_else(|| {
+    let failure = result.failure.clone().or(shared).or_else(|| {
         task_prefix.and_then(|prefix| {
             crate::storage::collect::check_outputs_collected(&outputs, prefix, &files).err()
         })
@@ -120,6 +123,40 @@ pub(super) fn outcome_for(
         message: Some(format!("{type_id}: {}", command_failed(result.exit_code))),
         files,
     }
+}
+
+/// The collected files, each URI ONCE, and -- when two outputs share one --
+/// the author's failure naming them (W9a Task 6 fix round 1, I1).
+///
+/// The commit indexes `Outcome::files` with one `INSERT … ON CONFLICT DO
+/// UPDATE`, which cannot affect one row twice: a URI listed twice would be an
+/// `Internal` error at every commit, the lease lapsing and the run re-claimed
+/// and re-collected for ever with no attempt spent. The runners refuse the
+/// one way an author can make it (`collect_directory`); this is the backstop
+/// for any runner, and it keeps the commit possible whatever reached it.
+fn distinct_files(result: &CommandsResult) -> (Vec<crate::storage::StoredFile>, Option<String>) {
+    let mut by_uri: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    let mut files = Vec::new();
+    for (rel, f) in &result.output_files {
+        let keys = by_uri.entry(f.uri.as_str()).or_default();
+        if keys.is_empty() {
+            files.push(f.clone());
+        }
+        keys.push(rel.as_str());
+    }
+    let shared = by_uri
+        .iter()
+        .find(|(_, keys)| keys.len() > 1)
+        .map(|(uri, keys)| {
+            format!(
+                "the outputs {} are all stored at {uri}: two outputs cannot share one file",
+                keys.iter()
+                    .map(|k| format!("{k:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        });
+    (files, shared)
 }
 
 /// Kestra's own words for a non-zero exit, measured (`w5a-scripts.json`
@@ -469,7 +506,39 @@ mod tests {
         assert!(o.message.as_deref().unwrap().contains("never.txt"), "{o:?}");
         assert_eq!(o.files.len(), 1);
         assert!(o.outputs.is_some());
+        // Fix round 1, I2: `None` is a run with no prefix at all (no flow, no
+        // storage) -- nothing under a prefix can exist to be checked. The
+        // script handler passes the run's prefix whether or not it declared
+        // an output (`script::tests::a_ghost_uri_under_the_runs_prefix_fails_a_task_that_declares_no_output`).
         let o = outcome_for("t", &result, None);
         assert_eq!(o.state, crate::executor::RunState::Success);
+    }
+
+    /// **Fix round 1, I1: two outputs naming ONE URI fail the task, and the
+    /// URI rides with the outcome once.** Whatever runner produced them, the
+    /// commit's single `INSERT … ON CONFLICT DO UPDATE` cannot affect one row
+    /// twice: that would be an `Internal` error at every commit, the lease
+    /// lapsing and the run re-claimed for ever with no attempt spent. Here it
+    /// is the author's failed task, naming the URI and both outputs.
+    #[test]
+    fn two_outputs_naming_one_uri_fail_the_task_and_carry_the_uri_once() {
+        let result = result_with(&[("a.txt", "h-a.txt"), ("h-a.txt", "h-a.txt"), ("b", "b")]);
+        let o = outcome_for("t", &result, Some(PREFIX));
+        assert_eq!(o.state, crate::executor::RunState::Failed, "{o:?}");
+        let msg = o.message.as_deref().unwrap();
+        assert!(
+            msg.contains(&format!("{PREFIX}h-a.txt"))
+                && msg.contains("\"a.txt\"")
+                && msg.contains("\"h-a.txt\""),
+            "{msg}"
+        );
+        let mut uris: Vec<&str> = o.files.iter().map(|f| f.uri.as_str()).collect();
+        uris.sort();
+        assert_eq!(
+            uris,
+            [format!("{PREFIX}b"), format!("{PREFIX}h-a.txt")],
+            "each URI once"
+        );
+        assert!(o.outputs.is_some(), "the outputs are kept");
     }
 }

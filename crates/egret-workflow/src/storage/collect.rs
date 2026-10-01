@@ -260,6 +260,32 @@ fn not_a_file(said: &str, rel: &str, kind: &EntryKind) -> String {
     }
 }
 
+/// The archive's next entry, counted (fix round 1, M1): EVERY entry of the
+/// output directory -- the root, a directory, a link, a file -- counts
+/// against [`MAX_OUTPUT_DIR_ENTRIES`], so an archive of endless empty
+/// directories ends by name rather than keeping the worker reading headers
+/// with no byte or name cap ever crossed.
+///
+/// [`MAX_OUTPUT_DIR_ENTRIES`]: crate::worker::commands::MAX_OUTPUT_DIR_ENTRIES
+async fn counted_next(
+    reader: &mut TarReader<'_>,
+    entries: &mut usize,
+) -> Result<Option<super::transfer::TarEntry>, CollectError> {
+    use crate::worker::commands::{MAX_OUTPUT_DIR_ENTRIES, OUTPUT_DIR};
+    let entry = reader.next_entry().await?;
+    if entry.is_some() {
+        *entries += 1;
+        if *entries > MAX_OUTPUT_DIR_ENTRIES {
+            return Err(CollectError::Author(format!(
+                "`outputDirectory`: {OUTPUT_DIR} holds more than {MAX_OUTPUT_DIR_ENTRIES} \
+                 entries (files, directories and links together); one task may produce at \
+                 most {MAX_OUTPUT_DIR_ENTRIES}"
+            )));
+        }
+    }
+    Ok(entry)
+}
+
 /// Every regular file of an archive of the output directory, keyed by its
 /// path relative to that directory (`deep/d.txt`), each stored verbatim
 /// under the task prefix -- Kestra's measured keying and URI
@@ -278,7 +304,11 @@ pub async fn collect_directory(
     out: &mut BTreeMap<String, StoredFile>,
 ) -> Result<(), CollectError> {
     use crate::worker::commands::{MAX_OUTPUT_NAMES, OUTPUT_DIR};
-    let Some(root) = reader.next_entry().await? else {
+    // Fix round 1, M1: EVERY entry counts -- the root, a directory, a link --
+    // so an archive of endless empty directories ends here by name rather
+    // than keeping the worker reading headers with no cap ever crossed.
+    let mut entries = 0usize;
+    let Some(root) = counted_next(reader, &mut entries).await? else {
         return Ok(());
     };
     if root.kind != EntryKind::Directory {
@@ -293,7 +323,7 @@ pub async fn collect_directory(
         naming: Naming::UnderPrefixVerbatim,
         ..to.clone()
     };
-    while let Some(entry) = reader.next_entry().await? {
+    while let Some(entry) = counted_next(reader, &mut entries).await? {
         let Some(rel) = entry.name.strip_prefix(&under) else {
             return Err(CollectError::Source(format!(
                 "the archive of {OUTPUT_DIR} holds {:?}, outside it",
@@ -320,6 +350,20 @@ pub async fn collect_directory(
                     )));
                 }
                 *names_left -= 1;
+                // Fix round 1, I1: a declared output's URI is public
+                // (`{prefix}{IdUtils.from(path)}-{name}`), and this file's is
+                // `{prefix}{rel}`: the author can make them one. Refused
+                // BEFORE the upload, which would overwrite the declared
+                // file's object, and as the author's error -- two outputs on
+                // one URI would otherwise fail every commit as egret's.
+                let uri = uri_for(&verbatim, &rel).map_err(CollectError::Author)?;
+                if let Some((other, _)) = out.iter().find(|(_, f)| f.uri == uri) {
+                    return Err(CollectError::Author(format!(
+                        "`outputDirectory` holds {rel:?}, whose URI {uri} is the declared \
+                         output {other:?}'s: two outputs cannot share one file; rename the \
+                         one in the output directory"
+                    )));
+                }
                 let file = collect_one(
                     fs,
                     &verbatim,
@@ -837,6 +881,108 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("1000"), "{err}");
+    }
+
+    /// **Fix round 1, I1: a directory file at a declared output's URI is the
+    /// author's error, refused before its upload.** A declared output is
+    /// stored at `{prefix}{IdUtils.from("/egret/working-dir/<rel>")}-<name>`,
+    /// a name anyone can compute; an output-directory file is stored
+    /// verbatim at `{prefix}{rel}`. Writing `$OUTPUT_DIR/<that hash>-a.txt`
+    /// beside a declared `a.txt` would give two outputs ONE URI -- the second
+    /// upload overwriting the first, and the commit's index insert failing
+    /// as egret's error, re-claiming the run for ever.
+    #[tokio::test]
+    async fn a_directory_file_at_a_declared_outputs_uri_is_refused_before_its_upload() {
+        let fs = mem(Caps::default());
+        let declared_to = to(Naming::KestraOutputName);
+        let declared = uri_for(&declared_to, "a.txt").unwrap();
+        let mut out = BTreeMap::from([(
+            "a.txt".to_string(),
+            StoredFile {
+                uri: declared.clone(),
+                size: 9,
+            },
+        )]);
+        let clash = declared.strip_prefix(&prefix()).unwrap().to_string();
+        let mut archive = Vec::new();
+        entry(&mut archive, "out/", b'5', b"", "");
+        entry(
+            &mut archive,
+            &format!("out/{clash}"),
+            b'0',
+            b"overwrite",
+            "",
+        );
+        end(&mut archive);
+        let mut src = &archive[..];
+        let mut reader = TarReader::new(&mut src);
+        let err = collect_directory(&fs, &declared_to, &mut reader, &mut 9, &mut 10, &mut out)
+            .await
+            .unwrap_err();
+        let CollectError::Author(msg) = &err else {
+            panic!("the author's, never egret's: {err:?}")
+        };
+        assert!(
+            msg.contains(&clash) && msg.contains("a.txt") && msg.contains(&declared),
+            "{msg}"
+        );
+        assert!(
+            fs.store.list("", None).await.unwrap().objects.is_empty(),
+            "refused before the upload: nothing overwrote the declared file's object"
+        );
+        assert_eq!(out.len(), 1);
+    }
+
+    /// **Fix round 1, M1: every entry of the output directory counts**, an
+    /// empty directory as much as a file: an archive of a million empty
+    /// directories must not keep the worker reading headers with no file
+    /// ever crossing a cap.
+    #[tokio::test]
+    async fn every_entry_of_the_output_directory_counts_against_its_entry_budget() {
+        use crate::worker::commands::MAX_OUTPUT_DIR_ENTRIES;
+        let fs = mem(Caps::default());
+        let mut archive = Vec::new();
+        entry(&mut archive, "out/", b'5', b"", "");
+        for i in 0..MAX_OUTPUT_DIR_ENTRIES {
+            entry(&mut archive, &format!("out/d{i}/"), b'5', b"", "");
+        }
+        end(&mut archive);
+        let mut src = &archive[..];
+        let mut reader = TarReader::new(&mut src);
+        let err = collect_directory(
+            &fs,
+            &to(Naming::KestraOutputName),
+            &mut reader,
+            &mut 0,
+            &mut 10,
+            &mut BTreeMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, CollectError::Author(m)
+                if m.contains(&MAX_OUTPUT_DIR_ENTRIES.to_string()) && m.contains("entries")),
+            "{err:?}"
+        );
+        // The control: one entry fewer (the root counts) is collected.
+        let mut archive = Vec::new();
+        entry(&mut archive, "out/", b'5', b"", "");
+        for i in 0..MAX_OUTPUT_DIR_ENTRIES - 1 {
+            entry(&mut archive, &format!("out/d{i}/"), b'5', b"", "");
+        }
+        end(&mut archive);
+        let mut src = &archive[..];
+        let mut reader = TarReader::new(&mut src);
+        collect_directory(
+            &fs,
+            &to(Naming::KestraOutputName),
+            &mut reader,
+            &mut 0,
+            &mut 10,
+            &mut BTreeMap::new(),
+        )
+        .await
+        .expect("at the budget");
     }
 
     fn stored(uri: &str) -> StoredFile {

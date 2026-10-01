@@ -227,6 +227,11 @@ pub async fn index_task_files(
     task_run: Uuid,
     files: &[StoredFile],
 ) -> Result<()> {
+    // Fix round 1, M5: every outcome commit comes here, almost always with
+    // nothing; nothing to index costs no statement on its transaction.
+    if files.is_empty() {
+        return Ok(());
+    }
     let execution: Option<Uuid> = sqlx::query_scalar(
         "SELECT tr.execution_id FROM workflow.task_runs tr \
            JOIN workflow.executions e ON e.id = tr.execution_id \

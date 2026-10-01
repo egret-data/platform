@@ -1144,6 +1144,85 @@ async fn output_files_are_streamed_out_of_the_pod_byte_identical() {
     assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
 }
 
+/// An object store that answers nothing (W9a Task 6 fix round 1, I3).
+struct Down;
+
+#[async_trait::async_trait]
+impl egret_storage::ObjectStore for Down {
+    async fn put(&self, _: &str, _: Vec<u8>) -> Result<(), egret_storage::StorageError> {
+        Err(egret_storage::StorageError::S3("connection refused".into()))
+    }
+    async fn get(&self, _: &str) -> Result<Vec<u8>, egret_storage::StorageError> {
+        Err(egret_storage::StorageError::S3("connection refused".into()))
+    }
+    async fn delete(&self, _: &str) -> Result<(), egret_storage::StorageError> {
+        Err(egret_storage::StorageError::S3("connection refused".into()))
+    }
+    async fn copy(&self, _: &str, _: &str) -> Result<(), egret_storage::StorageError> {
+        Err(egret_storage::StorageError::S3("connection refused".into()))
+    }
+    async fn list(
+        &self,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<egret_storage::Listing, egret_storage::StorageError> {
+        Err(egret_storage::StorageError::S3("connection refused".into()))
+    }
+    async fn put_stream(
+        &self,
+        uri: &str,
+        _: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+        _: Option<u64>,
+    ) -> Result<u64, egret_storage::StorageError> {
+        Err(egret_storage::StorageError::S3(format!(
+            "{uri}: connection refused"
+        )))
+    }
+}
+
+/// **Fix round 1, I3: the store unreachable while the pod's files are
+/// collected is egret's outage** (spec §11) -- both `download` arms, a
+/// declared file and the output directory, answer `Error::Internal` naming
+/// the URI, never `result.failure` (which would spend an attempt).
+async fn an_unreachable_store_while_collecting_is_a_worker_error() {
+    let c = client().await;
+    let down = Arc::new(egret_workflow::storage::FileStore {
+        store: Arc::new(Down),
+        bucket: "egret-test".into(),
+        prefix: "workflow/".into(),
+        caps: egret_workflow::storage::Caps::default(),
+        retention_days: 30,
+    });
+    let r = KubernetesRunner::new(
+        runner_client().await,
+        pod_config(),
+        LogRepo::new(pool().await),
+    )
+    .with_files(down);
+    for (declared, want) in [(true, "a.txt"), (false, "od.txt")] {
+        let (t, _rec) = task();
+        let mut cmds = shell(&["echo a > a.txt", "printf od > \"$OUTPUT_DIR/od.txt\""]);
+        if declared {
+            cmds.output_files = vec!["a.txt".into()];
+        } else {
+            cmds.output_directory = true;
+        }
+        let cmds = collecting(&t, cmds);
+        let err = r
+            .run(&t, &cmds, &k8s_spec(), &NoObserver)
+            .await
+            .expect_err("the store is egret's outage, not the task's failure");
+        assert!(
+            matches!(err, egret_core::Error::Internal(_)),
+            "{declared}: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("kestra:///") && msg.contains(want), "{msg}");
+        r.release(&t, &k8s_spec()).await.expect("release");
+        assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
+    }
+}
+
 /// **A re-attached pod is collected under the same URIs** (spec §5
 /// "Re-attach"): the first holder is dropped while `main` runs, the second
 /// re-attaches and collects, a third re-attaches to the finished pod and
@@ -1891,6 +1970,7 @@ fn cases() -> Vec<(&'static str, Case)> {
         case!(input_and_output_files_round_trip),
         case!(output_files_are_streamed_out_of_the_pod_byte_identical),
         case!(a_reattached_pod_is_collected_under_the_same_uris),
+        case!(an_unreachable_store_while_collecting_is_a_worker_error),
         case!(a_stored_input_file_streams_into_the_pod),
         case!(a_tar_x_that_dies_in_the_pod_fails_the_task),
         case!(a_short_stored_object_aborts_the_upload_and_fails_the_task),

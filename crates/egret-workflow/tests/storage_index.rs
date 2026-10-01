@@ -858,3 +858,35 @@ async fn the_process_wide_store_is_installed_once() {
     assert!(storage::install(other).is_err());
     assert_eq!(storage::current().unwrap().bucket, first.bucket);
 }
+
+/// **Fix round 1, M5: a commit with no files touches no table.** Every
+/// outcome commit calls `index_task_files`, almost always with nothing;
+/// that must cost no query on the commit's transaction. Asked with a task
+/// run that exists nowhere -- with a query, the workspace check would refuse
+/// it -- and on a transaction already aborted, where ANY statement errors.
+#[tokio::test]
+async fn an_empty_file_list_is_a_no_op_that_queries_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let mut tx = db.pool.begin().await.unwrap();
+    index_task_files(&mut tx, ws, Uuid::new_v4(), &[])
+        .await
+        .expect("nothing to index is not an error");
+    let _ = sqlx::query("SELECT 1/0").execute(&mut *tx).await;
+    index_task_files(&mut tx, ws, Uuid::new_v4(), &[])
+        .await
+        .expect("no statement was sent on the aborted transaction");
+    // The control: with a file, the same run is refused.
+    let err = index_task_files(
+        &mut tx,
+        ws,
+        Uuid::new_v4(),
+        &[StoredFile {
+            uri: "kestra:///x/y/executions/00000000-0000-0000-0000-000000000001/a".into(),
+            size: 1,
+        }],
+    )
+    .await
+    .unwrap_err();
+    assert!(!err.to_string().is_empty());
+}

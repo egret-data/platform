@@ -1601,6 +1601,13 @@ pub async fn apply_outcome(
     // them. A file exists for a flow only once its row does (§4.2), so a run
     // that never commits leaves none. A re-claim writes the same deterministic
     // URIs, and the insert updates its own rows.
+    //
+    // The fence guards the INDEX, not the objects (fix round 1, M6): uploads
+    // happen before this point, so a fenced zombie worker -- one still
+    // collecting after its lease was taken -- can overwrite an object that a
+    // successor already committed under the same deterministic name. Both
+    // read the same container or pod for the same attempt, so the bytes are
+    // normally identical; nothing here can make them so.
     crate::storage::index_task_files(conn, claimed.workspace_id, claimed.id, &outcome.files)
         .await?;
 

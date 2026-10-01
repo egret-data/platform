@@ -554,8 +554,20 @@ impl TaskHandler for Script {
                         .line(LogLevel::Error, &command_failed(result.exit_code))
                         .await;
                 }
-                let prefix = cmds.collect_to.as_ref().map(|c| c.task_prefix.as_str());
-                let mut outcome = outcome_for(type_id, &result, prefix);
+                // Fix round 1, I2 (spec §5): the run's own prefix whether or
+                // not it declared an output -- a marker may name a URI under
+                // it either way, and must not point at nothing.
+                let prefix = cmds
+                    .collect_to
+                    .as_ref()
+                    .map(|c| c.task_prefix.clone())
+                    .or_else(|| {
+                        task.render
+                            .files()
+                            .and_then(|f| f.0.task_prefix())
+                            .map(str::to_string)
+                    });
+                let mut outcome = outcome_for(type_id, &result, prefix.as_deref());
                 if let (Some(h), Some(message)) = (hint.hint(), outcome.message.as_mut()) {
                     message.push_str(". ");
                     message.push_str(&h);
@@ -1850,5 +1862,66 @@ mod tests {
         assert_eq!(out.state, RunState::Failed);
         assert!(out.message.unwrap().contains("ghost.txt"));
         assert_eq!(out.files, vec![real], "the real file is still indexed");
+    }
+
+    /// **Fix round 1, I2 (spec §5): the check runs whether or not the task
+    /// declared an output.** A task with no `outputFiles` and no
+    /// `outputDirectory` that prints a `::{"outputs": …}::` marker naming a
+    /// URI under its OWN run's prefix fails: no output may point at a file
+    /// that does not exist. A URI under another prefix is not this check's.
+    #[tokio::test]
+    async fn a_ghost_uri_under_the_runs_prefix_fails_a_task_that_declares_no_output() {
+        let files = mem_files();
+        let task = scoped(
+            &files,
+            serde_json::json!({"containerImage": "alpine:3.20", "commands": ["x"]}),
+        );
+        let prefix = prefix_of(&task);
+        let ghost = |uri: String| CommandsResult {
+            vars: serde_json::Map::from_iter([("f".to_string(), serde_json::json!(uri))]),
+            ..CommandsResult::default()
+        };
+        let out = stored(Spy::ok(ghost(format!("{prefix}ghost.txt"))), files.clone())
+            .run(&task)
+            .await
+            .expect("the author's failure, not a worker's");
+        assert_eq!(out.state, RunState::Failed, "{out:?}");
+        assert!(out.message.unwrap().contains("ghost.txt"));
+        // The control: a URI of some other run is not this check's business.
+        let other = prefix.replace(
+            &task.run_id.to_string(),
+            &uuid::Uuid::from_u128(9).to_string(),
+        );
+        assert_ne!(other, prefix);
+        let out = stored(Spy::ok(ghost(format!("{other}ghost.txt"))), files)
+            .run(&task)
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Success, "{out:?}");
+    }
+
+    /// **Fix round 1, I3 (spec §11): the store unreachable while the runner
+    /// collects is egret's outage, at the handler too.** A runner's collect
+    /// arm answers `Error::Internal` (`commands::tests::an_unreachable_store_while_collecting_*`
+    /// pin that arm for Docker); the handler must pass it on as a worker
+    /// `Err` -- no outcome, no attempt spent -- never fold it into a FAILED
+    /// task, even for a task that declared outputs and a storage prefix.
+    #[tokio::test]
+    async fn an_unreachable_store_while_collecting_is_a_worker_error_not_a_failed_task() {
+        let files = mem_files();
+        let task = scoped(
+            &files,
+            serde_json::json!({"containerImage": "alpine:3.20", "commands": ["x"], "outputFiles": ["a.txt"]}),
+        );
+        let spy = Spy::new(Err(Error::Internal(anyhow::anyhow!(
+            "{}abc-a.txt could not be stored: internal storage is unavailable: connection refused",
+            prefix_of(&task)
+        ))));
+        let err = stored(spy, files)
+            .run(&task)
+            .await
+            .expect_err("egret's outage, never the author's failed task");
+        assert!(matches!(err, Error::Internal(_)), "{err:?}");
+        assert!(err.to_string().contains("abc-a.txt"), "{err}");
     }
 }

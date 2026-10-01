@@ -94,6 +94,11 @@ impl ObjectStore for Flaky {
         body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
         size_hint: Option<u64>,
     ) -> Result<u64, StorageError> {
+        if OUTAGE.load(Ordering::SeqCst) {
+            return Err(StorageError::S3(format!(
+                "{uri}: dispatch failure: connection refused"
+            )));
+        }
         self.0.put_stream(uri, body, size_hint).await
     }
     async fn head(&self, uri: &str) -> Result<Option<u64>, StorageError> {
@@ -1017,4 +1022,227 @@ async fn a_later_task_stages_an_earlier_tasks_output_uri_end_to_end() {
         json!("made by w"),
         "r staged w's file from the store"
     );
+}
+
+// ---------------------------------------------------------------------------
+// W9a Task 6 fix round 1: what a collection result does to the commit
+// ---------------------------------------------------------------------------
+
+/// What [`Collecting`] makes of `w`'s run.
+#[derive(Debug, Clone, Copy)]
+enum Collect {
+    /// Collect `a.txt` (the shipping `collect_declared`) and report it under
+    /// TWO keys -- its own and the verbatim output-directory name that has
+    /// its URI -- as a runner without I1's guard would have.
+    OneUriTwice,
+    /// Collect `a.txt`; a store failure is `Error::Internal`, as both
+    /// runners' `CollectError::Store` arms answer.
+    Declared,
+}
+
+/// A [`TaskRunner`] for `w`: collects as [`Collect`] says.
+#[derive(Debug)]
+struct Collecting(Arc<FileStore>, Collect);
+
+#[async_trait::async_trait]
+impl egret_workflow::worker::commands::TaskRunner for Collecting {
+    async fn run(
+        &self,
+        _task: &egret_workflow::worker::TaskInput,
+        commands: &egret_workflow::worker::commands::TaskCommands,
+        _spec: &egret_workflow::scripts::RunnerSpec,
+        _observer: &dyn egret_workflow::worker::commands::LineObserver,
+    ) -> egret_core::Result<egret_workflow::worker::commands::CommandsResult> {
+        use egret_workflow::storage::collect::{collect_declared, CollectError};
+        use egret_workflow::storage::transfer::{write_tar, TarReader, TarSource};
+        let to = commands
+            .collect_to
+            .as_ref()
+            .expect("the handler set collect_to");
+        let mut archive = Vec::new();
+        write_tar(
+            &mut archive,
+            &BTreeMap::from([("a.txt".to_string(), TarSource::Contents("made by w"))]),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut src = &archive[..];
+        let mut reader = TarReader::new(&mut src);
+        let file = match collect_declared(&self.0, to, "a.txt", false, &mut reader, &mut 0).await {
+            Ok(f) => f.expect("a file"),
+            Err(CollectError::Store(m)) => {
+                return Err(egret_core::Error::Internal(anyhow::anyhow!("{m}")))
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let mut result = egret_workflow::worker::commands::CommandsResult::default();
+        if let Collect::OneUriTwice = self.1 {
+            let verbatim = file.uri.strip_prefix(&to.task_prefix).unwrap().to_string();
+            result.output_files.insert(verbatim, file.clone());
+        }
+        result.output_files.insert("a.txt".into(), file);
+        Ok(result)
+    }
+    async fn adopt(
+        &self,
+        _: &egret_workflow::worker::TaskInput,
+        _: &egret_workflow::worker::commands::TaskCommands,
+        _: &egret_workflow::scripts::RunnerSpec,
+        _: &dyn egret_workflow::worker::commands::LineObserver,
+    ) -> egret_core::Result<Option<egret_workflow::worker::commands::CommandsResult>> {
+        Ok(None)
+    }
+    async fn cancel(
+        &self,
+        _: &egret_workflow::worker::TaskInput,
+        _: std::time::Duration,
+    ) -> egret_core::Result<()> {
+        Ok(())
+    }
+    async fn release(
+        &self,
+        _: &egret_workflow::worker::TaskInput,
+        _: &egret_workflow::scripts::RunnerSpec,
+    ) -> egret_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// The core tasks plus the script handler over `runner`, with storage `fs`.
+fn collecting_registry(
+    fs: &Arc<FileStore>,
+    runner: Arc<dyn egret_workflow::worker::commands::TaskRunner>,
+) -> Handlers {
+    use egret_config::{PluginConfiguration, PluginConfigurationValues, PluginConfigurations};
+    use egret_workflow::worker::handlers::script::{self, FixedFeatureState, ScriptRuntime};
+    let mut reg = Handlers::with_core_tasks();
+    script::register(
+        &mut reg,
+        Arc::new(ScriptRuntime {
+            runner_kind: egret_workflow::scripts::RunnerKind::Docker,
+            runner,
+            plugin_configurations: PluginConfigurations(vec![PluginConfiguration {
+                r#type: egret_workflow::scripts::RunnerKind::Docker
+                    .fqcn()
+                    .to_string(),
+                values: PluginConfigurationValues {
+                    allowed_images: Some(vec!["*".into(), "*/*".into()]),
+                    allowed_types: None,
+                },
+            }]),
+            features: Arc::new(FixedFeatureState(true)),
+            files: Some(fs.clone()),
+        }),
+    );
+    reg
+}
+
+fn one_collecting_task(flow: &str) -> String {
+    format!(
+        "id: {flow}\nnamespace: {NS}\ntasks:\n\
+         \x20 - id: w\n    type: io.kestra.plugin.scripts.shell.Commands\n    \
+         containerImage: alpine:3.20\n    commands: [produce]\n    outputFiles: [a.txt]\n    \
+         outputDirectory: true\n"
+    )
+}
+
+async fn indexed_uris(pool: &sqlx::PgPool, execution: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT uri FROM workflow.execution_files WHERE execution_id = $1 ORDER BY uri",
+    )
+    .bind(execution)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// **Fix round 1, I1, end to end: two outputs naming one URI are the
+/// author's FAILED task, committed once** -- not an `Internal` error from
+/// the commit's `INSERT … ON CONFLICT DO UPDATE` ("cannot affect row a
+/// second time"), which would leave the run to be re-claimed, re-collected
+/// and refused again for ever, spending no attempt.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_outputs_naming_one_uri_fail_the_task_and_commit_once() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let reg = collecting_registry(&fs, Arc::new(Collecting(fs.clone(), Collect::OneUriTwice)));
+    let ex = start_execution(
+        &db.pool,
+        ws,
+        None,
+        &one_collecting_task("one_uri_twice"),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    let ticked = egret_workflow::worker::tick(&db.pool, 4, &reg).await;
+    let (state, _, message) = result_of(&db.pool, ws, "w").await;
+    assert!(ticked.is_ok(), "the author's, not the worker's: {ticked:?}");
+    assert_eq!(state, "FAILED", "{message:?}");
+    let message = message.unwrap();
+    let uris = indexed_uris(&db.pool, ex).await;
+    assert_eq!(uris.len(), 1, "the URI is indexed once: {uris:?}");
+    assert!(
+        message.contains(&uris[0]) && message.contains("a.txt"),
+        "{message}"
+    );
+}
+
+/// **Fix round 1, I3, end to end: the store unreachable while `w`'s output
+/// is collected is a worker error and spends no attempt** (spec §11). The
+/// runner's arm turns `CollectError::Store` into `Error::Internal` (pinned
+/// for Docker by `commands::tests::an_unreachable_store_while_collecting_*`);
+/// here the handler passes it on, the tick is an `Err`, the run keeps its
+/// lease with no outcome and no index row, and once the store is back the
+/// re-claimed run succeeds on its first attempt.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_outage_while_collecting_is_a_worker_error_and_spends_no_attempt() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let reg = collecting_registry(&fs, Arc::new(Collecting(fs.clone(), Collect::Declared)));
+    let ex = start_execution(
+        &db.pool,
+        ws,
+        None,
+        &one_collecting_task("collect_outage"),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    let before = attempts(&db.pool, ex, "w").await;
+    OUTAGE.store(true, Ordering::SeqCst);
+    let ticked = egret_workflow::worker::tick(&db.pool, 4, &reg).await;
+    OUTAGE.store(false, Ordering::SeqCst);
+    let err = ticked.expect_err("an outage is the worker's error, not the task's");
+    assert!(err.to_string().contains("a.txt"), "{err}");
+    let (state, outputs, message) = result_of(&db.pool, ws, "w").await;
+    assert_eq!((state.as_str(), outputs, message), ("RUNNING", None, None));
+    assert_eq!(
+        attempts(&db.pool, ex, "w").await,
+        before,
+        "no attempt spent"
+    );
+    assert!(indexed_uris(&db.pool, ex).await.is_empty());
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    // At least `w` (a run another failed test left claimed is reaped too).
+    assert!(reap(&db.pool, std::time::Duration::ZERO).await.unwrap() >= 1);
+    for _ in 0..8 {
+        if egret_workflow::worker::tick(&db.pool, 4, &reg)
+            .await
+            .expect("tick")
+            == 0
+        {
+            break;
+        }
+    }
+    let (state, _, message) = result_of(&db.pool, ws, "w").await;
+    assert_eq!(state, "SUCCESS", "{message:?}");
+    assert_eq!(attempts(&db.pool, ex, "w").await, before);
+    assert_eq!(indexed_uris(&db.pool, ex).await.len(), 1);
 }

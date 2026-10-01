@@ -164,6 +164,13 @@ pub const DIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60)
 /// an exec, and a key in the outputs map.
 pub const MAX_OUTPUT_NAMES: usize = 1_000;
 
+/// The most archive ENTRIES `outputDirectory`'s archive may hold -- files,
+/// directories, links, the root itself (W9a Task 6 fix round 1, M1). Files
+/// are also held to [`MAX_OUTPUT_NAMES`]; this bounds what is not a file, so
+/// an archive of endless empty directories cannot keep the worker reading
+/// headers with nothing ever crossing a byte or name cap.
+pub const MAX_OUTPUT_DIR_ENTRIES: usize = 10_000;
+
 /// The most distinct glob PATTERNS one task's `outputFiles` may declare
 /// (W5a Task 5 fix round 3): refused at save, and again at run for a draft.
 pub const MAX_OUTPUT_PATTERNS: usize = 64;
@@ -4522,6 +4529,49 @@ mod tests {
         assert!(matches!(err, Error::Internal(_)), "{err:?}");
         let msg = err.to_string();
         assert!(msg.contains("kestra:///") && msg.contains("a.txt"), "{msg}");
+        assert_eq!(r.failure, None, "never the task's failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Fix round 1, I3: the same for the output directory's arm.** The
+    /// store fails while `docker cp c:<OUTPUT_DIR> -`'s files are collected:
+    /// an `Error::Internal` naming the URI, never `result.failure` (which
+    /// would spend an attempt on egret's outage, spec §11).
+    #[tokio::test]
+    async fn an_unreachable_store_while_collecting_the_output_directory_is_a_worker_error() {
+        let dir = staging("collect-dir-down");
+        let mut tree = crate::storage::transfer::header("out/", 0, b'5', 0o755, 0)
+            .unwrap()
+            .to_vec();
+        tree.extend_from_slice(&file_tar("out/od.txt", b"in outdir"));
+        let tree_path = dir.join("tree.tar");
+        std::fs::write(&tree_path, tree).unwrap();
+        let shim = cp_shim(&dir, &format!("cat {}", tree_path.display()));
+        let task = leased(1);
+        let down = std::sync::Arc::new(crate::storage::FileStore {
+            store: std::sync::Arc::new(LateDown(std::time::Duration::ZERO)),
+            ..std::sync::Arc::into_inner(mem_files()).unwrap()
+        });
+        let mut r = CommandsResult::default();
+        let err = DockerRunner::with_binary(shim)
+            .with_files(down)
+            .collect_output_files(
+                "c",
+                &TaskCommands {
+                    output_directory: true,
+                    collect_to: Some(collect_to(&task)),
+                    ..TaskCommands::default()
+                },
+                &mut r,
+            )
+            .await
+            .expect_err("the store is egret's outage");
+        assert!(matches!(err, Error::Internal(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("kestra:///") && msg.contains("od.txt"),
+            "{msg}"
+        );
         assert_eq!(r.failure, None, "never the task's failure");
         let _ = std::fs::remove_dir_all(&dir);
     }
