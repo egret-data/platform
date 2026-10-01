@@ -48,6 +48,8 @@ struct Gen {
     pos: u64,
     total: u64,
     fail_at: Option<u64>,
+    /// After this many bytes every read is Pending forever (a stalled client).
+    stall_at: Option<u64>,
 }
 
 impl AsyncRead for Gen {
@@ -56,11 +58,17 @@ impl AsyncRead for Gen {
         _: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
+        if self.stall_at.is_some_and(|f| self.pos >= f) {
+            return Poll::Pending;
+        }
         if self.fail_at.is_some_and(|f| self.pos >= f) {
             return Poll::Ready(Err(std::io::Error::other("generator failed")));
         }
         let mut limit = self.total;
         if let Some(f) = self.fail_at {
+            limit = limit.min(f);
+        }
+        if let Some(f) = self.stall_at {
             limit = limit.min(f);
         }
         let n = (limit - self.pos).min(buf.remaining() as u64) as usize;
@@ -119,6 +127,7 @@ async fn a_stream_larger_than_one_part_is_uploaded_in_parts_and_reads_back_byte_
         pos: 0,
         total,
         fail_at: None,
+        stall_at: None,
     };
     let n = store
         .put_stream(&uri, &mut body, Some(total))
@@ -144,6 +153,7 @@ async fn resident_memory_does_not_grow_with_the_file() {
         pos: 0,
         total: 40 * MIB,
         fail_at: None,
+        stall_at: None,
     };
     store.put_stream(&warm_uri, &mut warm, None).await.unwrap();
     assert_reads_back(&store, &warm_uri, 40 * MIB).await;
@@ -155,6 +165,7 @@ async fn resident_memory_does_not_grow_with_the_file() {
         pos: 0,
         total,
         fail_at: None,
+        stall_at: None,
     };
     assert_eq!(
         store
@@ -203,6 +214,7 @@ async fn a_failing_body_aborts_the_multipart_upload() {
         pos: 0,
         total: 30 * MIB,
         fail_at: Some(9 * MIB),
+        stall_at: None,
     };
     let r = store.put_stream(&uri, &mut body, None).await;
     assert!(r.is_err(), "a failing body must fail the upload");
@@ -255,6 +267,7 @@ async fn a_failing_body_aborts_the_multipart_upload() {
         pos: 0,
         total: 30 * MIB,
         fail_at: Some(9 * MIB),
+        stall_at: None,
     };
     let r = store.put_stream(&uri, &mut body, None).await;
     assert!(r.is_err(), "a failing body must fail the upload");
@@ -379,4 +392,117 @@ async fn s3_store_overrides_all_four_streaming_methods() {
     assert!(not_default(s.get_stream(bad).await.err()));
     assert!(not_default(s.head(bad).await.err()));
     assert!(not_default(s.delete_prefix(bad).await.err()));
+}
+
+fn raw_cfg_client_args(c: &StorageConfig) -> (String, String, String) {
+    (
+        c.endpoint.clone().unwrap(),
+        c.access_key.clone(),
+        c.secret_key.clone(),
+    )
+}
+
+async fn raw_client(c: &StorageConfig) -> aws_sdk_s3::Client {
+    let (ep, k, sec) = raw_cfg_client_args(c);
+    let creds = aws_credential_types::Credentials::new(k, sec, None, None, "t");
+    let shared = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(creds)
+        .endpoint_url(ep)
+        .load()
+        .await;
+    aws_sdk_s3::Client::from_conf(
+        aws_sdk_s3::config::Builder::from(&shared)
+            .force_path_style(true)
+            .build(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_put_stream_aborts_the_multipart_upload() {
+    let _g = SERIAL.lock().await;
+    let (c, store) = store_or_skip!();
+    let key = format!("{}dropped.bin", prefix());
+    let uri = format!("s3://{}/{key}", c.bucket);
+    let raw = raw_client(&c).await;
+    let open = |raw: aws_sdk_s3::Client, bucket: String, key: String| async move {
+        raw.list_multipart_uploads()
+            .bucket(bucket)
+            .prefix(key)
+            .send()
+            .await
+            .unwrap()
+            .uploads()
+            .len()
+    };
+    // Part 1 (8 MiB) is uploaded, then the body stalls; the caller gives up and drops
+    // the future (client disconnect / task timeout).
+    let mut body = Gen {
+        pos: 0,
+        total: 30 * MIB,
+        fail_at: None,
+        stall_at: Some(9 * MIB),
+    };
+    let (dropped, seen_mid_flight) = tokio::join!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            store.put_stream(&uri, &mut body, None)
+        ),
+        async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            open(raw.clone(), c.bucket.clone(), key.clone()).await
+        }
+    );
+    assert!(dropped.is_err(), "the stalled upload must have timed out");
+    // Control: the upload really was open while the future was alive.
+    assert_eq!(seen_mid_flight, 1, "instrument never saw the open upload");
+    // The abort is spawned from Drop: give it a bounded wait.
+    let mut left = 1;
+    for _ in 0..50 {
+        left = open(raw.clone(), c.bucket.clone(), key.clone()).await;
+        if left == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        left, 0,
+        "a dropped put_stream left its multipart upload open"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_prefix_refuses_an_empty_key_and_a_key_without_a_trailing_slash() {
+    let _g = SERIAL.lock().await;
+    let (c, store) = store_or_skip!();
+    let p = prefix();
+    let keep = format!("s3://{}/{p}a/bc/x", c.bucket);
+    let inside = format!("s3://{}/{p}a/b/x", c.bucket);
+    store.put(&keep, vec![1]).await.unwrap();
+    store.put(&inside, vec![1]).await.unwrap();
+
+    let bucket_root = format!("s3://{}/", c.bucket);
+    let e = store.delete_prefix(&bucket_root).await.unwrap_err();
+    assert!(e.to_string().contains(&bucket_root), "{e}");
+    let no_slash = format!("s3://{}/{p}a/b", c.bucket);
+    let e = store.delete_prefix(&no_slash).await.unwrap_err();
+    assert!(e.to_string().contains(&no_slash), "{e}");
+    assert_eq!(
+        store.head(&keep).await.unwrap(),
+        Some(1),
+        "refusal must delete nothing"
+    );
+    assert_eq!(store.head(&inside).await.unwrap(), Some(1));
+
+    let n = store
+        .delete_prefix(&format!("s3://{}/{p}a/b/", c.bucket))
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(
+        store.head(&keep).await.unwrap(),
+        Some(1),
+        "a/b/ must not take a/bc/x"
+    );
+    store.delete(&keep).await.unwrap();
 }

@@ -93,3 +93,18 @@ pub trait ObjectStore: Send + Sync {
         Err(StorageError::Unsupported("delete_prefix"))
     }
 }
+
+/// `delete_prefix` removes a whole subtree, so it only accepts a directory-style prefix:
+/// a non-empty key ending in `/` (`a/b` would also take `a/bc`; an empty key is the bucket).
+pub(crate) fn check_delete_prefix(uri: &str) -> Result<(), StorageError> {
+    let key = uri
+        .strip_prefix("s3://")
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(_, key)| key);
+    match key {
+        Some(k) if !k.is_empty() && k.ends_with('/') => Ok(()),
+        _ => Err(StorageError::S3(format!(
+            "{uri}: delete_prefix needs a non-empty key ending in '/'"
+        ))),
+    }
+}

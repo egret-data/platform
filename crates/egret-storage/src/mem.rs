@@ -103,6 +103,7 @@ impl ObjectStore for MemStore {
     }
 
     async fn delete_prefix(&self, uri: &str) -> Result<u64, StorageError> {
+        crate::check_delete_prefix(uri)?;
         let mut m = self.objects.lock().unwrap();
         let before = m.len();
         m.retain(|k, _| !k.starts_with(uri));
@@ -164,5 +165,19 @@ mod tests {
             s.delete_prefix("s3://b/x").await,
             Err(StorageError::Unsupported(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn delete_prefix_refuses_an_empty_key_and_a_key_without_a_trailing_slash() {
+        let s = MemStore::new();
+        s.put("s3://b/a/b/x", vec![1]).await.unwrap();
+        s.put("s3://b/a/bc/x", vec![1]).await.unwrap();
+        for bad in ["s3://b/", "s3://b", "s3://b/a/b"] {
+            let e = s.delete_prefix(bad).await.unwrap_err();
+            assert!(e.to_string().contains(bad), "{e}");
+        }
+        assert_eq!(s.keys().len(), 2, "a refusal deletes nothing");
+        assert_eq!(s.delete_prefix("s3://b/a/b/").await.unwrap(), 1);
+        assert_eq!(s.keys(), vec!["s3://b/a/bc/x"]);
     }
 }

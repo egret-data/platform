@@ -22,6 +22,60 @@ async fn fill(
     Ok(false)
 }
 
+/// Aborts a multipart upload when dropped while armed. A `put_stream` future dropped
+/// mid-upload (client disconnect, task timeout) would otherwise leave the upload open:
+/// billed, and invisible to `list_objects_v2`, so no orphan sweep could find it.
+struct AbortOnDrop {
+    client: aws_sdk_s3::Client,
+    bucket: String,
+    key: String,
+    upload_id: String,
+    armed: bool,
+}
+
+impl AbortOnDrop {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(bucket = %self.bucket, key = %self.key, "put_stream dropped outside a runtime; multipart upload left open");
+            return;
+        };
+        let (client, bucket, key, upload_id) = (
+            self.client.clone(),
+            self.bucket.clone(),
+            self.key.clone(),
+            self.upload_id.clone(),
+        );
+        handle.spawn(async move {
+            if let Err(e) = client
+                .abort_multipart_upload()
+                .bucket(&bucket)
+                .key(&key)
+                .upload_id(&upload_id)
+                .send()
+                .await
+            {
+                tracing::warn!(%bucket, %key, error = %aws_sdk_s3::error::DisplayErrorContext(e), "abort of a dropped multipart upload failed");
+            }
+        });
+    }
+}
+
+/// A HEAD that succeeds must say how long the object is; guessing 0 would read as empty.
+fn head_size(uri: &str, content_length: Option<i64>) -> Result<u64, StorageError> {
+    content_length
+        .and_then(|n| u64::try_from(n).ok())
+        .ok_or_else(|| StorageError::S3(format!("{uri}: HEAD returned no valid Content-Length")))
+}
+
 #[derive(Clone)]
 pub struct S3Store {
     client: aws_sdk_s3::Client,
@@ -279,12 +333,23 @@ impl ObjectStore for S3Store {
             .upload_id()
             .ok_or_else(|| err(&"no upload id returned"))?
             .to_string();
+        let mut guard = AbortOnDrop {
+            client: self.client.clone(),
+            bucket: bucket.clone(),
+            key: key.clone(),
+            upload_id: upload_id.clone(),
+            armed: true,
+        };
         match self
             .upload_parts(uri, &bucket, &key, &upload_id, body, &mut buf)
             .await
         {
-            Ok(n) => Ok(n),
+            Ok(n) => {
+                guard.disarm();
+                Ok(n)
+            }
             Err(e) => {
+                guard.disarm();
                 if let Err(abort) = self
                     .client
                     .abort_multipart_upload()
@@ -337,7 +402,7 @@ impl ObjectStore for S3Store {
             .send()
             .await
         {
-            Ok(out) => Ok(Some(out.content_length().unwrap_or(0).max(0) as u64)),
+            Ok(out) => head_size(uri, out.content_length()).map(Some),
             Err(aws_sdk_s3::error::SdkError::ServiceError(se)) if se.err().is_not_found() => {
                 Ok(None)
             }
@@ -349,6 +414,7 @@ impl ObjectStore for S3Store {
     }
 
     async fn delete_prefix(&self, uri: &str) -> Result<u64, StorageError> {
+        crate::check_delete_prefix(uri)?;
         let (bucket, prefix) = Self::split(uri)?;
         let err = |e: &dyn std::fmt::Display| StorageError::S3(format!("{uri}: {e}"));
         let mut deleted = 0u64;
@@ -405,5 +471,19 @@ impl ObjectStore for S3Store {
             }
         }
         Ok(deleted)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_head_without_content_length_is_an_error_naming_the_uri() {
+        assert_eq!(head_size("s3://b/k", Some(7)).unwrap(), 7);
+        assert_eq!(head_size("s3://b/k", Some(0)).unwrap(), 0);
+        let e = head_size("s3://b/k", None).unwrap_err().to_string();
+        assert!(e.contains("s3://b/k"), "{e}");
+        assert!(head_size("s3://b/k", Some(-1)).is_err());
     }
 }
