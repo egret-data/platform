@@ -79,6 +79,33 @@ cargo test --workspace
 `egret_test_db` clones a private, already-migrated database per test process, so the URL
 above is only a server address plus a name it derives the admin connection from.
 
+### The template is named after the migration set, not fixed
+
+The clone comes from a template, and that template's name is `egret_test_tmpl_` plus a
+digest of the **`(version, checksum)` pairs of every embedded migration** — so two branches
+at different migration sets use different templates and neither can meet the other's schema.
+
+It used to be the single name `egret_test_template`, which meant every worktree on every
+branch shared one template and whichever branch migrated it last decided the schema the
+others tested against. Measured twice on 2026-10-01 on one machine: a tree at `0159` met a
+template another checkout had taken to `0160` and 84 tests failed with one identical
+`VersionMissing(160)`; then, with `main` at `0162`, a suite went 6/6 green and the next
+binary hit `VersionMissing(163)` **mid-run** because a third worktree advanced the template
+while the measurement was in flight. That message reads like a missing migration — a product
+defect — which is why the fix is a name that cannot be wrong rather than a rule to remember.
+
+Two consequences:
+
+- **"Drop `egret_test_template` and re-run" is obsolete.** Older plan documents in
+  `docs/en/plans/` tell you to do that after adding or editing a migration. A new or edited
+  migration now changes the digest, so it asks for a template of its own and builds it from
+  empty. Nothing needs dropping. (The old `egret_test_template` database, if your server
+  still has one, is simply unused; drop it by hand whenever no suite is running.)
+- **Templates are swept, not accumulated.** A template whose database comment says it has
+  not been used for 14 days, and which has no sessions on it, is dropped by the next run —
+  under the same advisory lock as the create, so a template another process is about to
+  clone from cannot be caught. A template with no readable marker is never dropped.
+
 > **Never point `DATABASE_URL` at the dev database `egret`.** `#[sqlx::test]` resolves the
 > variable through dotenvy **unconditionally**, so an *unexported* variable does not make
 > those tests skip — it makes them read `.env`, which points at the dev database, and they
