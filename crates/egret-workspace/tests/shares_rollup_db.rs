@@ -353,7 +353,11 @@ async fn lists_app_grants_scoped_to_workspace() {
 
     let rows = repo.list_object_grants(w.id).await.unwrap();
 
-    assert_eq!(rows.len(), 1, "only the share on this workspace's app: {rows:?}");
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the share on this workspace's app: {rows:?}"
+    );
     assert_eq!(rows[0].kind, "app");
     assert_eq!(rows[0].object_id, app);
     assert_eq!(rows[0].object_name.as_deref(), Some(app_name.as_str()));

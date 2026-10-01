@@ -636,7 +636,12 @@ async fn publish_without_a_body_publishes_the_current_draft() {
     let id = fx.create_app("a").await;
     fx.put_draft(&id, &fx.editor, Some("1"), "two").await;
     let r = fx
-        .call("POST", &fx.path(&format!("/{id}/publish")), &fx.editor, None)
+        .call(
+            "POST",
+            &fx.path(&format!("/{id}/publish")),
+            &fx.editor,
+            None,
+        )
         .await;
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
     assert_eq!(r.body["version_no"], json!(1));
@@ -645,7 +650,14 @@ async fn publish_without_a_body_publishes_the_current_draft() {
     // a JSON content type with an empty body, or the literal `null`.
     let ct = [("Content-Type", "application/json")];
     let r = fx
-        .send("POST", &fx.path(&format!("/{id}/publish")), &fx.editor, None, &ct, true)
+        .send(
+            "POST",
+            &fx.path(&format!("/{id}/publish")),
+            &fx.editor,
+            None,
+            &ct,
+            true,
+        )
         .await;
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
     assert_eq!(r.body["version_no"], json!(2));
