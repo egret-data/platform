@@ -410,16 +410,27 @@ mod tags {
     /// it rather than hiding it, and `attachment_for`'s own ⚠ block carries the
     /// measurement.
     ///
-    /// **SP4d debt Task 2 closed the writer, and the population this path still
-    /// serves is now exactly one row.** `PolicyStore::create_service` refuses a
+    /// **SP4d debt Task 2 made that configuration unrepresentable, and this path
+    /// still must not be weakened.** `PolicyStore::create_service` refuses a
     /// non-Trino profile carrying a `tagService` (it is the only `INSERT INTO
-    /// policy.authz_services` in any `src/`), and migration 0163's `CHECK
-    /// (config_jsonb ->> 'tagService' IS NULL OR type = 'trino')` refuses it for
-    /// every `INSERT` and every `UPDATE` — including the `SET type = 'starrocks'`
-    /// direction, which has no Rust writer at all. That `CHECK` is `NOT VALID`, so
-    /// a row hand-created BEFORE 0163 survives unscanned: that row is the whole
-    /// remaining population, and this fail-closed reproduction is what keeps it
-    /// visible instead of silently inert. Do not weaken it to "unreachable".
+    /// policy.authz_services` in any `src/`), and migration 0165's VALIDATED
+    /// `CHECK (config_jsonb ->> 'tagService' IS NULL OR type = 'trino')` refuses it
+    /// for every `INSERT` and every `UPDATE` — including the `SET type =
+    /// 'starrocks'` direction, which has no Rust writer at all — after clearing the
+    /// key from any row that already carried it. So no StarRocks profile can hold a
+    /// `tagService`, and the configuration in which this drop CHANGES AN OUTCOME is
+    /// gone.
+    ///
+    /// The drop itself is not dead and must stay, for three reasons that are about
+    /// code paths rather than about that configuration. (1) It still FIRES for every
+    /// StarRocks profile with a tagged column: `resolved_tags` comes from
+    /// `catalog_tag_assignments`, not from the `tagService`, which only ever decided
+    /// whether a tag POLICY existed for the drop to discard. (2) It reproduces what
+    /// the real `processServiceTags` does with that payload, which is what makes the
+    /// inertness ASSERTABLE rather than argued. (3) `attachment_for` is a producer,
+    /// and a level set it learns to emit later reaches this subset test with no
+    /// configuration change at all. **Falsified by** the per-engine resource-level
+    /// mapping landing, or by migration 0165's constraint being dropped.
     ///
     /// For a TRINO profile the drop is inert and provably so: the only level sets the
     /// mapping emits are `{catalog, schema, table}` and `{catalog, schema, table,

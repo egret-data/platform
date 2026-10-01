@@ -401,7 +401,11 @@ async fn compile_desired(
     let mut sweep: Vec<i64> = vec![service_id];
 
     let tag_service: Option<String> = if engine == EngineType::Trino {
-        match svc.config_jsonb.get("tagService").and_then(|v| v.as_str()) {
+        match svc
+            .config_jsonb
+            .get(egret_policy_api::TAG_SERVICE_CONFIG_KEY)
+            .and_then(|v| v.as_str())
+        {
             Some(name) => match service_id_by_name_via(conn, name).await.map_err(db_err)? {
                 Some(tag_id) => {
                     writable.insert(name.to_string(), tag_id);

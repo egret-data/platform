@@ -114,7 +114,7 @@ async fn tag_def_seeds_and_tag_service_provisions() {
 /// because a guard on create alone leaves the hole open from the other side, and
 /// **there is no Rust writer to hang a second refusal on**: no `UPDATE` of
 /// `type` or of `config_jsonb` exists in any `src/` in this workspace. So the
-/// other direction is held by migration 0163's CHECK, and the only way to
+/// other direction is held by migration 0165's CHECK, and the only way to
 /// exercise it is to issue the raw `UPDATE`s here — a test that only drove the
 /// route would be a green from a population that cannot reach this behaviour.
 ///
@@ -212,6 +212,6 @@ fn assert_constraint_violation(e: &sqlx::Error, what: &str) {
     };
     assert!(
         named,
-        "{what}: expected migration 0163's CHECK {NAME:?} to refuse, got: {e}"
+        "{what}: expected migration 0165's CHECK {NAME:?} to refuse, got: {e}"
     );
 }

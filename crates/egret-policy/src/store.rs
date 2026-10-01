@@ -1,5 +1,6 @@
 use crate::PolicyStoreError;
 use egret_metastore::Db;
+use egret_policy_api::TAG_SERVICE_CONFIG_KEY;
 use egret_ranger_eval::resource::MatchType;
 use serde_json::Value;
 
@@ -152,18 +153,11 @@ fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
     Ok(())
 }
 
-/// The `policy.authz_services.config_jsonb` key that links a resource profile to
-/// the TAG service its tag-based masks / row filters / clearances live in. Written
-/// by `bind_trino_profile` (engine-mgmt) and read by `download_policies` (as the
-/// `tagPolicies` block), [`PolicyStore::usable_tag_service`] and
-/// [`services_and_tag_services_via`].
-pub const TAG_SERVICE_CONFIG_KEY: &str = "tagService";
-
 /// Whether `config` carries a [`TAG_SERVICE_CONFIG_KEY`] at all.
 ///
 /// Deliberately the SAME predicate as Postgres' `config_jsonb ->> 'tagService'
 /// IS NOT NULL`: the key is present AND its value is not JSON `null`. Migration
-/// 0163's `CHECK` is written with that expression and this function is written
+/// 0165's `CHECK` is written with that expression and this function is written
 /// to match it, because the one failure this guard keeps reproducing in this
 /// programme is **two guards that must agree, written to different shapes** —
 /// here that would be a refusal keyed on `as_str()` (what `download_policies`
@@ -174,7 +168,11 @@ pub const TAG_SERVICE_CONFIG_KEY: &str = "tagService";
 /// `->>` on a non-object `config_jsonb` (a bare `5`, `"x"`, `[]`) yields NULL
 /// rather than erroring — measured on the live PostgreSQL 16.15 — and
 /// `Value::get` on a non-object likewise yields `None`, so the two agree there
-/// too.
+/// too. Migration 0165's own clearing `UPDATE` is keyed on the SAME `->>`
+/// expression, so it cannot leave behind a row its own `CHECK` then rejects, and
+/// the `-` operator it applies is never reached for a scalar or array config
+/// (measured: the `WHERE` excludes those rows, so `jsonb - text` never raises
+/// "cannot delete from scalar").
 fn carries_tag_service(config: &Value) -> bool {
     !matches!(config.get(TAG_SERVICE_CONFIG_KEY), None | Some(Value::Null))
 }
@@ -203,11 +201,14 @@ fn carries_tag_service(config: &Value) -> bool {
 /// Scoped to "only `trino` may carry one" rather than "`starrocks` may not",
 /// because the property that makes it serveable is the def declaring a `schema`
 /// resource, and a FOURTH service-def added without one must be refused by
-/// default instead of inheriting the silence. The per-engine resource-level
+/// default instead of inheriting the silence. A def added WITH a `schema`
+/// resource would be wrongly refused here, which is why
+/// `service_def_set_is_exactly_the_three_this_refusal_was_ruled_on` fails on an
+/// ADDITION and not merely on a change. The per-engine resource-level
 /// mapping (teaching everything that emits Ranger resource keys to take the
 /// engine, or its service-def, as an input) is separate, deliberately
 /// out-of-scope work: **block now, map later.** When it lands, this refusal and
-/// migration 0163's `CHECK` are what it replaces.
+/// migration 0165's `CHECK` are what it replaces.
 ///
 /// # ⚠ Enumerated: every write path that can produce the state
 ///
@@ -227,11 +228,28 @@ fn carries_tag_service(config: &Value) -> bool {
 /// | 3 | the five `SET policy_version = policy_version + 1` bumps in this file, and `egret-perm-compile`'s `trigger.rs` | no | no | cannot |
 /// | 4 | `egret_catalog_registry::tag_version`'s `SET tag_version = …` | no | no | cannot |
 /// | 5 | `egret-perm-compile`'s `trigger.rs` `SET origin = 'generated'` | no | no | cannot |
-/// | 6 | **an `UPDATE` of `type` or of `config_jsonb`** | — | — | **no such statement exists in any `src/` in this workspace.** So "change a profile's type to `starrocks` while it already carries a `tagService`" has no code path to refuse at today. Prose is not a bound, so the direction is closed in the SCHEMA instead: migration 0163's `CHECK` holds for every `INSERT` and every `UPDATE`, from Rust, from a future route, from `psql`, from a test's raw `sqlx::query` |
+/// | 6 | **an `UPDATE` of `type` or of `config_jsonb`** | — | — | **no such statement exists in any `src/` in this workspace.** So "change a profile's type to `starrocks` while it already carries a `tagService`" has no code path to refuse at today. Prose is not a bound, so the direction is closed in the SCHEMA instead: migration 0165's VALIDATED `CHECK` holds for every `INSERT` and every `UPDATE`, from Rust, from a future route, from `psql`, from a test's raw `sqlx::query` |
 ///
 /// Row 6 is why this function is not the whole fix, and why a test that only
 /// drives #1a would be a green from a population that cannot exercise the other
 /// direction. `tests/store_services.rs` drives the raw `UPDATE`s directly.
+///
+/// ## Why the constraint is VALIDATED, and the key cleared, rather than `NOT VALID`
+///
+/// Rows 3 and 4 cannot CREATE the state, but they can be BLOCKED BY it, and that
+/// is what ruled out leaving a pre-existing bad row dormant.
+/// `egret_catalog_registry::tag_version::bump_bound_tag_versions` resolves every
+/// profile bound to any engine on any catalog in a warehouse — its CTE filters on
+/// `e.authz_service_id IS NOT NULL` and **not** on engine type — and bumps them in
+/// ONE `UPDATE … WHERE id = ANY($1)`; `egret_perm_compile::trigger`'s bulk bump has
+/// the same shape. Postgres enforces a `NOT VALID` CHECK on every UPDATE, so one
+/// violating row in that set would make a catalog-tag write fail outright AND
+/// leave a healthy Trino profile in the same warehouse un-bumped — all-or-nothing.
+/// A dormant dead key turning into an outage on an unrelated healthy profile's
+/// write is worse than deleting the key, so migration 0165 deletes it (the value
+/// is provably inert — a non-Trino profile's own enricher discards the
+/// attachments) and validates the constraint. **There is therefore no "legacy row"
+/// population left**; do not reintroduce one by adding a `NOT VALID` variant.
 ///
 /// **Falsified by** a fourth service-def, a second `INSERT INTO
 /// policy.authz_services`, or an `UPDATE` of `type`/`config_jsonb` appearing in
@@ -480,7 +498,7 @@ impl PolicyStore {
     ) -> Result<ServiceRow, PolicyStoreError> {
         // SP4d debt Task 2: pure, no DB needed, and it runs BEFORE the insert so
         // the route answers 400 with the reason rather than letting migration
-        // 0163's `CHECK` surface as an opaque 500. The `CHECK` is not redundant
+        // 0165's `CHECK` surface as an opaque 500. The `CHECK` is not redundant
         // with this — it is the only thing holding the `UPDATE` direction, which
         // has no Rust writer to guard.
         refuse_tag_service_on_non_trino_profile(typ, config)?;
@@ -1696,6 +1714,101 @@ mod tests {
         );
     }
 
+    /// Four SQL statements and migration 0165 name this key as a literal and
+    /// cannot reference the const (interpolating it would mean building the
+    /// statement with `format!`, the dynamic-SQL shape this repository avoids), so
+    /// changing the const's VALUE would silently split the Rust readers from the
+    /// SQL ones — `usable_tag_service` would join on a key nothing writes, and the
+    /// `CHECK` would stop guarding the field the refusal guards. This is the only
+    /// assertion that can catch that, and it is why the test fixtures below spell
+    /// the literal out instead of using the const: an oracle built from the thing
+    /// it checks inherits its blind spot.
+    ///
+    /// Changing the value means rewriting all five statements and a new migration.
+    #[test]
+    fn the_const_is_the_key_the_sql_and_the_migration_name() {
+        assert_eq!(
+            TAG_SERVICE_CONFIG_KEY, "tagService",
+            "the const no longer matches the literal in `usable_tag_service`, \
+             `tag_assignments_for_service`, `services_and_tag_services_via`, \
+             `bump_bound_tag_versions` and migration 0165's CHECK/UPDATE — none of \
+             which can reference it"
+        );
+    }
+
+    /// **The tripwire the three-const test above does not give you.** That test
+    /// asserts the three defs it NAMES, so editing one fails — but ADDING a
+    /// fourth `src/service-defs/*.json` passes it in silence, and an addition is
+    /// the dangerous direction: a def that declares a `schema` resource could
+    /// legitimately carry a `tagService`, and
+    /// [`refuse_tag_service_on_non_trino_profile`] would refuse it anyway because
+    /// its rule is "only `trino`". So this reads the DIRECTORY rather than the
+    /// three `include_str!` consts, and holds two things at once:
+    ///
+    /// 1. the file set is exactly the three the refusal was ruled on — so any
+    ///    addition fails here and gets re-ruled, whatever it contains;
+    /// 2. for every file actually present, declaring a `schema` resource implies
+    ///    the def is named `trino` — the property the refusal rests on, stated
+    ///    over whatever is on disk instead of over a list.
+    ///
+    /// Assertion 2 is not redundant with assertion 1: it is what survives when
+    /// someone updates the list in 1 without re-reading the rule, which is the
+    /// usual way a tripwire gets defused.
+    #[test]
+    fn service_def_set_is_exactly_the_three_this_refusal_was_ruled_on() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service-defs");
+        let mut found: Vec<(String, Value)> = std::fs::read_dir(&dir)
+            .expect("read src/service-defs")
+            .map(|e| e.expect("dir entry").path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .map(|p| {
+                let name = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .expect("utf-8 filename")
+                    .to_owned();
+                let def: Value = serde_json::from_str(
+                    &std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {p:?}: {e}")),
+                )
+                .unwrap_or_else(|e| panic!("parse {p:?}: {e}"));
+                (name, def)
+            })
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let files: Vec<&str> = found.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            files,
+            vec!["starrocks.json", "tag.json", "trino.json"],
+            "a service-def was ADDED or REMOVED. `{}` refuses a `tagService` on \
+             every type but `trino`, and that is only right while `trino` is the \
+             only def declaring a `schema` resource. Re-rule the new def: if it \
+             has no `schema` resource the refusal is already correct for it (add \
+             it to this list and to the per-file check below); if it HAS one, the \
+             refusal is now an OVER-refusal and the rule has to change, not the \
+             list.",
+            "refuse_tag_service_on_non_trino_profile"
+        );
+
+        for (file, def) in &found {
+            let def_name = def["name"].as_str().expect("def name");
+            let has_schema = def["resources"]
+                .as_array()
+                .expect("resources array")
+                .iter()
+                .any(|r| r["name"].as_str() == Some("schema"));
+            if has_schema {
+                assert_eq!(
+                    def_name, "trino",
+                    "{file} declares a `schema` resource, so a `tagService` on a \
+                     {def_name:?} profile WOULD be servable — but \
+                     `refuse_tag_service_on_non_trino_profile` refuses every type \
+                     but `trino`. That is an over-refusal; widen the rule."
+                );
+            }
+        }
+    }
+
     /// Step 1's failing test: the refusal fires for a StarRocks profile and the
     /// message NAMES the level StarRocks lacks, so an operator reading the 400
     /// learns why rather than being told no.
@@ -1775,7 +1888,7 @@ mod tests {
         }
     }
 
-    /// The shape agreement with migration 0163's `CHECK (… config_jsonb ->>
+    /// The shape agreement with migration 0165's `CHECK (… config_jsonb ->>
     /// 'tagService' IS NULL)`. `->>` answers non-NULL for a number, a bool, an
     /// object and an array — none of which `download_policies`' `as_str()`
     /// reads — so the Rust predicate must refuse them too, or a config of

@@ -2600,7 +2600,7 @@ async fn bind_trino_profile(
                 }
             };
             let config = if tag_wired {
-                serde_json::json!({ "tagService": tag_service_name })
+                serde_json::json!({ egret_policy_api::TAG_SERVICE_CONFIG_KEY: tag_service_name })
             } else {
                 serde_json::json!({})
             };

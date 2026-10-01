@@ -1877,7 +1877,7 @@ async fn artifact_for(
     let policies = policy.enabled_policies_for_service(svc.id).await?;
     let tag_service = svc
         .config_jsonb
-        .get("tagService")
+        .get(egret_policy_api::TAG_SERVICE_CONFIG_KEY)
         .and_then(|v| v.as_str())
         .map(str::to_owned);
     let mut envelope = ServicePolicies::new(
@@ -2433,13 +2433,17 @@ fn stored_value_problem(schema: &str, table: &str, column: &str) -> Option<Store
 /// cannot reach a StarRocks engine at all — and it is recorded in Task 7's report,
 /// not papered over here.
 ///
-/// **SP4d debt Task 2 closed the writer.** `PolicyStore::create_service` refuses a
-/// non-Trino profile carrying a `tagService`, and migration 0163's `CHECK
-/// (config_jsonb ->> 'tagService' IS NULL OR type = 'trino')` refuses it for every
-/// `INSERT` and every `UPDATE`, from Rust or from `psql`. The `CHECK` is `NOT
-/// VALID`, so a row hand-created BEFORE 0163 survives unscanned — that row is the
-/// remaining population, and it is why this path still has to be right rather
-/// than merely unused.
+/// **SP4d debt Task 2 made that configuration unrepresentable.**
+/// `PolicyStore::create_service` refuses a non-Trino profile carrying a
+/// `tagService`, and migration 0165's VALIDATED `CHECK (config_jsonb ->>
+/// 'tagService' IS NULL OR type = 'trino')` refuses it for every `INSERT` and every
+/// `UPDATE`, from Rust or from `psql`, having first cleared the key from any row
+/// that already carried it. This mapping still has to be right rather than merely
+/// unused: the levels it synthesises reach `enriched_tags`'
+/// `service_resource_validates` for EVERY StarRocks profile with a tagged column —
+/// `resolved_tags` comes from `catalog_tag_assignments`, not from the `tagService`
+/// — so the drop fires regardless of what any config says. What 0165 removed is the
+/// state in which that drop could silently discard a tag policy somebody wrote.
 ///
 /// # ⚠ Enumerated: the four fields with no column to come from
 ///

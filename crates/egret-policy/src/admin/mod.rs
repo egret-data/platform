@@ -599,7 +599,7 @@ async fn list_profiles(
             let tag_service = if s.r#type == "trino" {
                 let candidate = s
                     .config_jsonb
-                    .get("tagService")
+                    .get(egret_policy_api::TAG_SERVICE_CONFIG_KEY)
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("{}_tag", s.name));
@@ -1030,7 +1030,7 @@ async fn resolve_tag_service_and_body(
     let trino = st.store.get_service(profile).await?;
     let tag_service_name = trino
         .config_jsonb
-        .get("tagService")
+        .get(egret_policy_api::TAG_SERVICE_CONFIG_KEY)
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_string)

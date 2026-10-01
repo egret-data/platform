@@ -53,7 +53,7 @@ pub async fn download_policies(
     // `tagService = <name>_tag`), captured before `svc.name` is moved below.
     let tag_service = svc
         .config_jsonb
-        .get(crate::store::TAG_SERVICE_CONFIG_KEY)
+        .get(egret_policy_api::TAG_SERVICE_CONFIG_KEY)
         .and_then(|v| v.as_str())
         .map(str::to_owned);
     let mut sp = ServicePolicies::new(svc.name, svc.id, svc.policy_version, def, policies, None);
