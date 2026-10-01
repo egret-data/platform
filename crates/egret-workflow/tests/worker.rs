@@ -8881,6 +8881,22 @@ async fn a_fenced_outcome_indexes_nothing(pool: sqlx::PgPool) {
     };
     let mut tx = pool.begin().await.unwrap();
     let late = apply_outcome(&mut tx, c, &outcome).await;
+    // Not even inside the stale worker's own transaction: the fence is checked
+    // BEFORE indexing (spec §4.3), so a lost lease writes no row that only
+    // the rollback would remove (and takes no lock on the live holder's URIs,
+    // which are the same deterministic names). Counted in `tx`, before the
+    // rollback below can hide an index-then-fence order.
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workflow.execution_files WHERE execution_id = $1"
+        )
+        .bind(ex)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap(),
+        0,
+        "the fenced outcome wrote no index row, even uncommitted"
+    );
     // Committed if `apply_outcome` let it through, as `tick` would.
     match &late {
         Ok(()) => tx.commit().await.expect("commit"),
