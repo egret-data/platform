@@ -1,6 +1,9 @@
 //! Files INTO a task container, as a **streamed** POSIX ustar archive (W9a
 //! spec §5): `docker cp -` reads it from its stdin, and on Kubernetes the
-//! `files-in` helper's `tar -x` reads it from the exec's.
+//! `files-in` helper's `tar -x` reads it from the exec's. And files OUT, the
+//! other way (W9a Task 6): [`TarReader`] reads `docker cp c:<path> -` or the
+//! `files-out` helper's `tar -c` entry by entry, as it arrives, for
+//! [`collect`](super::collect) to stream into the store.
 //!
 //! # Streamed, and what "streamed" is measured as
 //!
@@ -12,13 +15,14 @@
 //! buffer. `a_stored_input_is_copied_from_the_store_without_being_collected`
 //! measures the bytes read from the store and not yet written to `out`.
 //!
-//! # The archive, byte for byte
+//! # The archive
 //!
-//! W5a's in-memory packer (`worker::k8s::transfer::pack`) wrote every parent
-//! directory first, then every file in name order; this writes the same bytes
-//! for the same contents (`write_tar_is_byte_identical_to_the_old_packer_for_contents`).
-//! The header, octal and long-name code moved here from that module.
-//!
+//! Every parent directory first, then every file in name order -- the bytes
+//! W5a's in-memory packer (`worker::k8s::transfer::pack`, deleted in W9a
+//! Task 6) wrote for the same contents; Task 5 proved the two byte-identical
+//! before the packer went. Since Task 6 the archive is checked by reading it
+//! back with [`TarReader`] (`write_tar_reads_back_entry_by_entry`).
+
 //! # Whose error
 //!
 //! [`TarError`] says, because the runners must split it (spec §11):
@@ -53,6 +57,10 @@ pub enum TarSource<'a> {
     Contents(&'a str),
     /// A file in internal storage, read from the store as it is written.
     Stored(&'a StoredInput),
+    /// An empty directory the command needs to exist before it starts --
+    /// `outputDirectory: true`'s [`OUTPUT_DIR`](crate::worker::commands::OUTPUT_DIR)
+    /// (W9a Task 6), as Kestra creates its output directory.
+    Directory,
 }
 
 /// Why an archive could not be written, split by whose problem it is.
@@ -105,6 +113,7 @@ pub(crate) async fn write_tar_at(
     }
     for (name, source) in files {
         match source {
+            TarSource::Directory => {}
             TarSource::Contents(contents) => {
                 let bytes = contents.as_bytes();
                 let h = header(name, bytes.len() as u64, b'0', 0o644, mtime)
@@ -214,14 +223,15 @@ async fn pad(out: &mut (dyn AsyncWrite + Send + Unpin), len: u64) -> Result<(), 
 /// host's filesystem; the archive has none, so it is refused here by name.
 fn plan(files: &BTreeMap<String, TarSource<'_>>) -> Result<BTreeSet<String>, String> {
     let mut dirs: BTreeSet<String> = BTreeSet::new();
-    for name in files.keys() {
+    for (name, source) in files {
         if let Some(problem) = relative_problem(name) {
             return Err(problem);
         }
         split_name(name)?;
         let mut acc = String::new();
         let parts: Vec<&str> = name.split('/').collect();
-        for p in &parts[..parts.len().saturating_sub(1)] {
+        let own = usize::from(matches!(source, TarSource::Directory));
+        for p in &parts[..(parts.len() - 1 + own)] {
             if !acc.is_empty() {
                 acc.push('/');
             }
@@ -229,7 +239,10 @@ fn plan(files: &BTreeMap<String, TarSource<'_>>) -> Result<BTreeSet<String>, Str
             dirs.insert(format!("{acc}/"));
         }
     }
-    for name in files.keys() {
+    for (name, source) in files {
+        if matches!(source, TarSource::Directory) {
+            continue;
+        }
         if dirs.contains(&format!("{name}/")) {
             let child = files
                 .keys()
@@ -308,6 +321,345 @@ fn octal(field: &mut [u8], v: u64) {
     field[width] = 0;
 }
 
+// ---------------------------------------------------------------------------
+// Files OUT: an archive read as a stream (W9a Task 6)
+// ---------------------------------------------------------------------------
+
+/// What one archive entry is. Only [`EntryKind::File`] carries contents a
+/// caller takes; every other kind is refused or skipped by name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    /// A regular file (`0`, NUL, or `7`).
+    File,
+    Directory,
+    /// A symbolic link and its target. Its target's bytes are never read.
+    Symlink(String),
+    /// A hard link and the entry it repeats.
+    HardLink(String),
+    /// A device, a FIFO, anything else: the type flag.
+    Other(char),
+}
+
+/// One entry's header, as [`TarReader::next_entry`] read it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TarEntry {
+    /// The full name: a GNU `L` or PAX `path` record when there is one, else
+    /// the ustar prefix and name.
+    pub name: String,
+    pub kind: EntryKind,
+    /// The bytes of contents that follow the header (a PAX `size` wins).
+    pub size: u64,
+}
+
+/// Why an archive could not be read. Both are the transfer failing -- the
+/// process writing it went away or wrote something that is not ustar --
+/// and the runner decides whose that is from the process's own exit.
+#[derive(Debug, thiserror::Error)]
+pub enum ReadError {
+    #[error("the archive could not be read: {0}")]
+    Io(#[source] std::io::Error),
+    #[error("the archive is corrupt: {0}")]
+    Corrupt(String),
+}
+
+/// The largest GNU long-name or PAX record egret reads into memory. A path
+/// is at most 4 KiB on Linux; anything near this is not a header.
+const MAX_META_BYTES: u64 = 64 * 1024;
+
+/// A ustar stream read entry by entry -- `docker cp c:<path> -` (Docker) and
+/// the `files-out` helper's `tar -c` (Kubernetes) -- with only one 512-byte
+/// header (or a bounded long-name record) in memory at a time. An entry's
+/// contents are read through [`TarReader::body`] as they arrive and never
+/// collected; whatever a caller leaves unread is skipped by the next
+/// [`TarReader::next_entry`].
+///
+/// Reads ustar, the GNU `L`/`K` long names and PAX `x` records (`path`,
+/// `linkpath`, `size`) -- what busybox, GNU tar and Docker's Go
+/// `archive/tar` write.
+pub struct TarReader<'a> {
+    inner: &'a mut (dyn tokio::io::AsyncRead + Send + Unpin),
+    /// Contents of the current entry not yet read.
+    left: u64,
+    /// Padding after the current entry's contents.
+    pad: u64,
+    ended: bool,
+}
+
+impl<'a> TarReader<'a> {
+    pub fn new(inner: &'a mut (dyn tokio::io::AsyncRead + Send + Unpin)) -> Self {
+        Self {
+            inner,
+            left: 0,
+            pad: 0,
+            ended: false,
+        }
+    }
+
+    /// The next entry's header; `None` at the end-of-archive block or at a
+    /// clean end of the stream between entries.
+    pub async fn next_entry(&mut self) -> Result<Option<TarEntry>, ReadError> {
+        if self.ended {
+            return Ok(None);
+        }
+        let skip = self.left + self.pad;
+        self.left = 0;
+        self.pad = 0;
+        discard(self.inner, skip).await?;
+        let mut long_name: Option<String> = None;
+        let mut long_link: Option<String> = None;
+        let mut pax_size: Option<u64> = None;
+        loop {
+            let mut h = [0u8; BLOCK];
+            if !read_block(self.inner, &mut h).await? {
+                self.ended = true;
+                return Ok(None);
+            }
+            if h.iter().all(|b| *b == 0) {
+                self.ended = true;
+                return Ok(None);
+            }
+            check_sum(&h)?;
+            let size = parse_size(&h[124..136])?;
+            let flag = h[156];
+            if matches!(flag, b'L' | b'K' | b'x' | b'g') {
+                if size > MAX_META_BYTES {
+                    return Err(ReadError::Corrupt(format!(
+                        "a {:?} record of {size} bytes",
+                        flag as char
+                    )));
+                }
+                let mut data = vec![0u8; size as usize];
+                tokio::io::AsyncReadExt::read_exact(&mut *self.inner, &mut data)
+                    .await
+                    .map_err(ReadError::Io)?;
+                discard(self.inner, pad_of(size)).await?;
+                match flag {
+                    b'L' => long_name = Some(cstr(&data)),
+                    b'K' => long_link = Some(cstr(&data)),
+                    b'x' => {
+                        for (k, v) in pax_records(&data) {
+                            match k.as_str() {
+                                "path" => long_name = Some(v),
+                                "linkpath" => long_link = Some(v),
+                                "size" => {
+                                    pax_size = Some(v.parse().map_err(|_| {
+                                        ReadError::Corrupt(format!("PAX size {v:?}"))
+                                    })?)
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            let name = long_name.take().unwrap_or_else(|| name_of(&h));
+            let size = pax_size.take().unwrap_or(size);
+            let link = long_link.take().unwrap_or_else(|| cstr(&h[157..257]));
+            let kind = match flag {
+                b'0' | 0 | b'7' => EntryKind::File,
+                b'5' => EntryKind::Directory,
+                b'2' => EntryKind::Symlink(link),
+                b'1' => EntryKind::HardLink(link),
+                other => EntryKind::Other(other as char),
+            };
+            self.left = size;
+            self.pad = pad_of(size);
+            return Ok(Some(TarEntry { name, kind, size }));
+        }
+    }
+
+    /// The current entry's contents, read as they arrive: at most its size,
+    /// and a stream that ends sooner is an `UnexpectedEof` error.
+    pub fn body(&mut self) -> EntryBody<'_, 'a> {
+        EntryBody { reader: self }
+    }
+}
+
+/// [`TarReader::body`].
+pub struct EntryBody<'r, 'a> {
+    reader: &'r mut TarReader<'a>,
+}
+
+impl tokio::io::AsyncRead for EntryBody<'_, '_> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::task::Poll;
+        let r = &mut *self.get_mut().reader;
+        if r.left == 0 || buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let max = usize::try_from(r.left)
+            .unwrap_or(usize::MAX)
+            .min(buf.remaining());
+        let mut sub = buf.take(max);
+        match std::pin::Pin::new(&mut *r.inner).poll_read(cx, &mut sub) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {}
+        }
+        let n = sub.filled().len();
+        if n == 0 {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("the archive ended {} bytes short of the entry", r.left),
+            )));
+        }
+        // SAFETY: `sub` is a view of `buf`'s unfilled part, and `n` of its
+        // bytes were just initialised by the read.
+        unsafe { buf.assume_init(n) };
+        buf.advance(n);
+        r.left -= n as u64;
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// One whole header block; `false` at a clean end of the stream.
+async fn read_block(
+    r: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+    h: &mut [u8; BLOCK],
+) -> Result<bool, ReadError> {
+    use tokio::io::AsyncReadExt;
+    let mut got = 0;
+    while got < BLOCK {
+        let n = r.read(&mut h[got..]).await.map_err(ReadError::Io)?;
+        if n == 0 {
+            if got == 0 {
+                return Ok(false);
+            }
+            return Err(ReadError::Corrupt(
+                "the archive ended inside a header".to_string(),
+            ));
+        }
+        got += n;
+    }
+    Ok(true)
+}
+
+/// Read and drop exactly `n` bytes.
+async fn discard(
+    r: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+    n: u64,
+) -> Result<(), ReadError> {
+    use tokio::io::AsyncReadExt;
+    if n == 0 {
+        return Ok(());
+    }
+    let copied = tokio::io::copy(&mut (&mut *r).take(n), &mut tokio::io::sink())
+        .await
+        .map_err(ReadError::Io)?;
+    if copied != n {
+        return Err(ReadError::Corrupt(
+            "the archive ended inside an entry".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn pad_of(size: u64) -> u64 {
+    size.next_multiple_of(BLOCK as u64) - size
+}
+
+fn cstr(b: &[u8]) -> String {
+    let end = b.iter().position(|c| *c == 0).unwrap_or(b.len());
+    String::from_utf8_lossy(&b[..end]).into_owned()
+}
+
+/// The ustar name; the prefix field is a prefix only under the POSIX magic
+/// (`ustar\0`) -- old GNU headers (`ustar  \0`) keep other fields there.
+fn name_of(h: &[u8]) -> String {
+    let base = cstr(&h[0..100]);
+    let prefix = if &h[257..263] == b"ustar\0" {
+        cstr(&h[345..500])
+    } else {
+        String::new()
+    };
+    if prefix.is_empty() {
+        base
+    } else {
+        format!("{prefix}/{base}")
+    }
+}
+
+/// PAX records, `"<len> <key>=<value>\n"`, each `len` bytes long in all.
+fn pax_records(data: &[u8]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < data.len() {
+        let Some(sp) = data[i..].iter().position(|b| *b == b' ') else {
+            break;
+        };
+        let Some(len) = std::str::from_utf8(&data[i..i + sp])
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+        else {
+            break;
+        };
+        if len <= sp + 1 || i + len > data.len() {
+            break;
+        }
+        let rec = &data[i + sp + 1..i + len];
+        let rec = rec.strip_suffix(b"\n").unwrap_or(rec);
+        if let Some(eq) = rec.iter().position(|b| *b == b'=') {
+            out.push((
+                String::from_utf8_lossy(&rec[..eq]).into_owned(),
+                String::from_utf8_lossy(&rec[eq + 1..]).into_owned(),
+            ));
+        }
+        i += len;
+    }
+    out
+}
+
+fn parse_size(f: &[u8]) -> Result<u64, ReadError> {
+    if f[0] & 0x80 != 0 {
+        // GNU base-256: big-endian, the first byte's top bit is the flag.
+        let mut v: u64 = (f[0] & 0x7f) as u64;
+        for b in &f[1..] {
+            v = v
+                .checked_mul(256)
+                .and_then(|v| v.checked_add(*b as u64))
+                .ok_or_else(|| ReadError::Corrupt("an entry size overflows".to_string()))?;
+        }
+        return Ok(v);
+    }
+    let s = cstr(f);
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(0);
+    }
+    u64::from_str_radix(s, 8)
+        .map_err(|_| ReadError::Corrupt(format!("entry size {s:?} is not octal")))
+}
+
+fn check_sum(h: &[u8]) -> Result<(), ReadError> {
+    let stored = cstr(&h[148..156]);
+    let stored = stored.trim();
+    let want = u32::from_str_radix(stored, 8)
+        .map_err(|_| ReadError::Corrupt(format!("header checksum {stored:?} is not octal")))?;
+    let got: u32 = h
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            if (148..156).contains(&i) {
+                32
+            } else {
+                *b as u32
+            }
+        })
+        .sum();
+    if want != got {
+        return Err(ReadError::Corrupt(format!(
+            "header checksum {want} does not match {got}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
@@ -351,36 +703,152 @@ mod tests {
         Ok(out)
     }
 
+    /// Every entry `write_tar` writes reads back through [`TarReader`] as
+    /// itself: parents first, names (a long one through the ustar prefix),
+    /// kinds and contents.
     #[tokio::test]
-    async fn write_tar_is_byte_identical_to_the_old_packer_for_contents() {
-        const MTIME: u64 = 1_700_000_000;
-        let cases: Vec<BTreeMap<String, String>> = vec![
-            BTreeMap::new(),
-            BTreeMap::from([("a.txt".to_string(), "hello\n".to_string())]),
-            BTreeMap::from([
-                ("a.txt".to_string(), "hello\n".to_string()),
-                ("dir/sub/b.txt".to_string(), "x".repeat(700)),
-                ("dir/c".to_string(), String::new()),
-                ("exact".to_string(), "y".repeat(512)),
-                (
-                    format!("{}/{}", "d".repeat(120), "f".repeat(90)),
-                    "z".to_string(),
-                ),
-            ]),
-        ];
-        for files in cases {
-            // The old packer wrote mtime 0; both are given one fixed time.
-            let old = crate::worker::k8s::transfer::pack(&files, MTIME).expect("the old packer");
-            let sources: BTreeMap<String, TarSource<'_>> = files
-                .iter()
-                .map(|(k, v)| (k.clone(), TarSource::Contents(v)))
-                .collect();
-            let mut new = Vec::new();
-            write_tar_at(&mut new, &sources, None, MTIME)
+    async fn write_tar_reads_back_entry_by_entry() {
+        let long = format!("{}/{}", "d".repeat(120), "f".repeat(90));
+        let files = BTreeMap::from([
+            ("a.txt".to_string(), "hello\n".to_string()),
+            ("dir/sub/b.txt".to_string(), "x".repeat(700)),
+            ("dir/c".to_string(), String::new()),
+            ("exact".to_string(), "y".repeat(512)),
+            (long.clone(), "z".to_string()),
+        ]);
+        let mut sources: BTreeMap<String, TarSource<'_>> = files
+            .iter()
+            .map(|(k, v)| (k.clone(), TarSource::Contents(v)))
+            .collect();
+        sources.insert(".egret/out".to_string(), TarSource::Directory);
+        let mut tar = Vec::new();
+        write_tar_at(&mut tar, &sources, None, 1_700_000_000)
+            .await
+            .expect("write_tar");
+        assert_eq!(tar.len() % BLOCK, 0);
+        let mut src = &tar[..];
+        let mut reader = TarReader::new(&mut src);
+        let mut seen = Vec::new();
+        while let Some(e) = reader.next_entry().await.expect("reads") {
+            let mut body = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut reader.body(), &mut body)
                 .await
-                .expect("write_tar");
-            assert_eq!(new, old, "the archive for {:?}", files.keys());
+                .expect("body");
+            seen.push((e.name, e.kind, String::from_utf8(body).unwrap()));
         }
+        let dirs: Vec<&str> = seen
+            .iter()
+            .filter(|(_, k, _)| *k == EntryKind::Directory)
+            .map(|(n, _, _)| n.as_str())
+            .collect();
+        assert_eq!(
+            dirs,
+            [
+                ".egret/",
+                ".egret/out/",
+                format!("{}/", "d".repeat(120)).as_str(),
+                "dir/",
+                "dir/sub/"
+            ],
+            "every parent, and the output directory itself, first"
+        );
+        let got: BTreeMap<String, String> = seen
+            .into_iter()
+            .filter(|(_, k, _)| *k == EntryKind::File)
+            .map(|(n, _, b)| (n, b))
+            .collect();
+        assert_eq!(got, files);
+    }
+
+    fn raw(name: &str, size: u64, kind: u8, link: &str) -> [u8; BLOCK] {
+        let mut h = header(name, size, kind, 0o644, 0).unwrap();
+        if !link.is_empty() {
+            h[157..157 + link.len()].copy_from_slice(link.as_bytes());
+        }
+        h[148..156].copy_from_slice(b"        ");
+        let sum: u32 = h.iter().map(|b| *b as u32).sum();
+        h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        h
+    }
+
+    fn padded(out: &mut Vec<u8>, data: &[u8]) {
+        out.extend_from_slice(data);
+        out.resize(out.len().next_multiple_of(BLOCK), 0);
+    }
+
+    /// GNU `L`/`K` and PAX `x` records name the entry after them; a PAX
+    /// `size` wins over the header's; a link's target is reported and its
+    /// "contents" are none.
+    #[tokio::test]
+    async fn long_names_pax_records_and_links_are_read() {
+        let mut tar = Vec::new();
+        let name = "n".repeat(150);
+        tar.extend_from_slice(&raw("././@LongLink", name.len() as u64 + 1, b'L', ""));
+        padded(&mut tar, format!("{name}\0").as_bytes());
+        tar.extend_from_slice(&raw("short", 3, b'0', ""));
+        padded(&mut tar, b"abc");
+        let pax = "30 path=données/中文 x.txt\n";
+        assert_eq!(pax.len(), 30);
+        tar.extend_from_slice(&raw("PaxHeaders/x", pax.len() as u64, b'x', ""));
+        padded(&mut tar, pax.as_bytes());
+        tar.extend_from_slice(&raw("ignored", 2, b'0', ""));
+        padded(&mut tar, b"hi");
+        tar.extend_from_slice(&raw("leaked.txt", 0, b'2', "/etc/passwd"));
+        tar.extend_from_slice(&raw("hard", 0, b'1', "short"));
+        tar.extend_from_slice(&raw("fifo", 0, b'6', ""));
+        tar.extend_from_slice(&[0u8; 1024]);
+        let mut src = &tar[..];
+        let mut r = TarReader::new(&mut src);
+        let e = r.next_entry().await.unwrap().unwrap();
+        assert_eq!(
+            (e.name.as_str(), &e.kind, e.size),
+            (name.as_str(), &EntryKind::File, 3)
+        );
+        // The body is not read: the next entry skips it.
+        let e = r.next_entry().await.unwrap().unwrap();
+        assert_eq!(e.name, "données/中文 x.txt");
+        let mut body = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut r.body(), &mut body)
+            .await
+            .unwrap();
+        assert_eq!(body, b"hi");
+        let e = r.next_entry().await.unwrap().unwrap();
+        assert_eq!(e.kind, EntryKind::Symlink("/etc/passwd".into()));
+        let e = r.next_entry().await.unwrap().unwrap();
+        assert_eq!(e.kind, EntryKind::HardLink("short".into()));
+        let e = r.next_entry().await.unwrap().unwrap();
+        assert_eq!(e.kind, EntryKind::Other('6'));
+        assert_eq!(r.next_entry().await.unwrap(), None);
+        assert_eq!(r.next_entry().await.unwrap(), None, "and it stays ended");
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_or_cut_archive_is_an_error_and_an_empty_one_is_the_end() {
+        let mut nothing: &[u8] = &[];
+        assert_eq!(
+            TarReader::new(&mut nothing).next_entry().await.unwrap(),
+            None
+        );
+        let mut tar = Vec::new();
+        tar.extend_from_slice(&raw("a", 10, b'0', ""));
+        padded(&mut tar, b"0123456789");
+        let mut bad = tar.clone();
+        bad[0] ^= 1;
+        let mut src = &bad[..];
+        let err = TarReader::new(&mut src).next_entry().await.unwrap_err();
+        assert!(err.to_string().contains("checksum"), "{err}");
+        let mut src = &tar[..100];
+        let err = TarReader::new(&mut src).next_entry().await.unwrap_err();
+        assert!(err.to_string().contains("inside a header"), "{err}");
+        let mut src = &tar[..BLOCK + 4];
+        let mut r = TarReader::new(&mut src);
+        r.next_entry().await.unwrap().unwrap();
+        let mut body = Vec::new();
+        let err = tokio::io::AsyncReadExt::read_to_end(&mut r.body(), &mut body)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert_eq!(body, b"0123", "what arrived was handed on, nothing more");
     }
 
     /// A stored input's entry is the entry its contents would have made.

@@ -308,7 +308,7 @@ fn collect(text: &str, found: &mut BTreeSet<String>) {
     }
 }
 
-fn walk(value: &serde_json::Value, found: &mut BTreeSet<String>) {
+pub(crate) fn walk(value: &serde_json::Value, found: &mut BTreeSet<String>) {
     match value {
         // A string that IS a URI is taken whole (fix round 1, I3): `uri::parse`
         // accepts `'` and spaces, which end the regex's run in source text.

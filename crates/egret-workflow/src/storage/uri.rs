@@ -330,6 +330,38 @@ pub fn output_file_uri(task_prefix: &str, abs_path: &str) -> Result<String, Stri
     Ok(uri)
 }
 
+/// `{task_prefix}{rel}`: a file kept under its own relative path -- what
+/// Kestra does for `outputDirectory` (`w9a-storage.json`
+/// `egret_expected.output_directory.uri_tail`: "the relative path verbatim,
+/// NOT the IdUtils hash scheme") and what the plugin bridge's `.egret/out/`
+/// does (Task 9). `Err` as [`output_file_uri`]'s, naming the file: a name the
+/// parser refuses (`?`, `#`, a backslash, a control character) is the author's.
+pub fn verbatim_file_uri(task_prefix: &str, rel: &str) -> Result<String, String> {
+    let uri = format!("{task_prefix}{rel}");
+    let what = format!("output file {rel:?}");
+    let under = parse(&format!("{task_prefix}{PROBE_FILE}"))
+        .map_err(|reason| refusal(&what, task_prefix, &reason))?;
+    let Tail::Task {
+        task_slug,
+        task_run,
+        ..
+    } = under.tail
+    else {
+        return Err(refusal(&what, task_prefix, "it is not a task's prefix"));
+    };
+    checked(
+        &uri,
+        under.execution,
+        &Tail::Task {
+            task_slug,
+            task_run,
+            file: rel.to_string(),
+        },
+        &what,
+    )?;
+    Ok(uri)
+}
+
 /// **Every URI egret builds is read back before it is used**: `parse(built)`
 /// must name the same writing execution and the same tail, and print back the
 /// same string. A namespace like `a..b` (an empty segment), `a.` (a trailing

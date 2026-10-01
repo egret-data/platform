@@ -13,15 +13,18 @@
 //! never runs another's handlers. The object store is
 //! `storage::install_mem_for_tests`'s `MemStore`: nothing here touches MinIO.
 //!
-//! # How a file gets written before Task 6
+//! # How a file gets written
 //!
-//! No handler writes files yet (Task 6 indexes `outputFiles` in
-//! `apply_outcome`'s transaction). [`finish_writing`] does what that will do,
-//! in the same place: it claims the run, puts the bytes, indexes them **in the
-//! transaction `apply_outcome` then settles in**, and commits once.
+//! [`finish_writing`] stands in for a handler that wrote a file: it claims
+//! the run, puts the bytes, and hands them to `apply_outcome` as
+//! `Outcome::files` -- which, since W9a Task 6, indexes them **in the
+//! transaction it then settles in**, and commits once. The script handler's
+//! own path (a collected `outputFiles` URI staged by a later task) is
+//! [`a_later_task_stages_an_earlier_tasks_output_uri_end_to_end`].
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -29,7 +32,7 @@ use egret_storage::{ObjectStore, StorageError};
 
 use egret_metastore::Db;
 use egret_workflow::render_str;
-use egret_workflow::storage::{self, index_task_files, uri, FileStore, StoredFile};
+use egret_workflow::storage::{self, uri, FileStore, StoredFile};
 use egret_workflow::worker::{
     apply_outcome, claim, execution_render_context, reap, start_execution, start_execution_in,
     Handlers, NewExecution, Outcome,
@@ -213,18 +216,14 @@ async fn write_and_apply(
         put(fs, ws, &file, bytes).await;
     }
     let mut tx = pool.begin().await.unwrap();
-    index_task_files(
-        &mut tx,
-        ws,
-        c.id,
-        &[StoredFile {
+    let outcome = Outcome {
+        files: vec![StoredFile {
             uri: file.clone(),
             size: bytes.map_or(3, |b| b.len() as u64),
         }],
-    )
-    .await
-    .expect("index");
-    let applied = apply_outcome(&mut tx, c, &Outcome::succeeded_with(outputs(&file))).await;
+        ..Outcome::succeeded_with(outputs(&file))
+    };
+    let applied = apply_outcome(&mut tx, c, &outcome).await;
     if applied.is_ok() {
         tx.commit().await.unwrap();
     }
@@ -822,5 +821,187 @@ async fn an_indexed_file_whose_object_is_gone_fails_the_run_naming_the_uri() {
     assert!(
         message.contains(&file) && message.contains("missing from storage"),
         "{message}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W9a Task 6: one task's collected output, staged by the next
+// ---------------------------------------------------------------------------
+
+/// A [`TaskRunner`] standing in for a container: `produce` writes `out.txt`
+/// by streaming an archive of it through the shipping collector into the
+/// commands' `collect_to`; `consume` writes the shipping input archive and
+/// reports what `in.txt` held.
+#[derive(Debug)]
+struct ArchiveRunner(Arc<FileStore>);
+
+#[async_trait::async_trait]
+impl egret_workflow::worker::commands::TaskRunner for ArchiveRunner {
+    async fn run(
+        &self,
+        _task: &egret_workflow::worker::TaskInput,
+        commands: &egret_workflow::worker::commands::TaskCommands,
+        _spec: &egret_workflow::scripts::RunnerSpec,
+        _observer: &dyn egret_workflow::worker::commands::LineObserver,
+    ) -> egret_core::Result<egret_workflow::worker::commands::CommandsResult> {
+        use egret_workflow::storage::transfer::{write_tar, EntryKind, TarReader};
+        let mut result = egret_workflow::worker::commands::CommandsResult::default();
+        if commands.commands.iter().any(|c| c == "produce") {
+            let to = commands
+                .collect_to
+                .as_ref()
+                .expect("the handler set collect_to");
+            let mut archive = Vec::new();
+            write_tar(
+                &mut archive,
+                &BTreeMap::from([(
+                    "out.txt".to_string(),
+                    egret_workflow::storage::transfer::TarSource::Contents("made by w"),
+                )]),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut src = &archive[..];
+            let mut reader = TarReader::new(&mut src);
+            let file = egret_workflow::storage::collect::collect_declared(
+                &self.0,
+                to,
+                "out.txt",
+                false,
+                &mut reader,
+                &mut 0,
+            )
+            .await
+            .expect("collected")
+            .expect("a file");
+            result.output_files.insert("out.txt".into(), file);
+        } else {
+            let mut archive = Vec::new();
+            write_tar(&mut archive, &commands.tar_sources()?, Some(&self.0))
+                .await
+                .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e}")))?;
+            let mut src = &archive[..];
+            let mut reader = TarReader::new(&mut src);
+            while let Some(e) = reader.next_entry().await.unwrap() {
+                if e.kind == EntryKind::File && e.name == "in.txt" {
+                    let mut body = String::new();
+                    tokio::io::AsyncReadExt::read_to_string(&mut reader.body(), &mut body)
+                        .await
+                        .unwrap();
+                    result.vars.insert("staged".into(), json!(body));
+                }
+            }
+        }
+        Ok(result)
+    }
+    async fn adopt(
+        &self,
+        _: &egret_workflow::worker::TaskInput,
+        _: &egret_workflow::worker::commands::TaskCommands,
+        _: &egret_workflow::scripts::RunnerSpec,
+        _: &dyn egret_workflow::worker::commands::LineObserver,
+    ) -> egret_core::Result<Option<egret_workflow::worker::commands::CommandsResult>> {
+        Ok(None)
+    }
+    async fn cancel(
+        &self,
+        _: &egret_workflow::worker::TaskInput,
+        _: std::time::Duration,
+    ) -> egret_core::Result<()> {
+        Ok(())
+    }
+    async fn release(
+        &self,
+        _: &egret_workflow::worker::TaskInput,
+        _: &egret_workflow::scripts::RunnerSpec,
+    ) -> egret_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// **A later task stages an earlier task's output URI, end to end** (Task 5's
+/// reviewer's carry): `w`'s `outputFiles` is collected into the store and
+/// indexed with its outcome; `r`'s `inputFiles` names
+/// `{{ outputs.w.outputFiles['out.txt'] }}`, which the real claim's
+/// `Snapshot::take` resolves readable, and the script handler stages it from
+/// the store under `in.txt`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_task_stages_an_earlier_tasks_output_uri_end_to_end() {
+    use egret_config::{PluginConfiguration, PluginConfigurationValues, PluginConfigurations};
+    use egret_workflow::worker::handlers::script::{self, FixedFeatureState, ScriptRuntime};
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let mut reg = Handlers::with_core_tasks();
+    script::register(
+        &mut reg,
+        Arc::new(ScriptRuntime {
+            runner_kind: egret_workflow::scripts::RunnerKind::Docker,
+            runner: Arc::new(ArchiveRunner(fs.clone())),
+            plugin_configurations: PluginConfigurations(vec![PluginConfiguration {
+                r#type: egret_workflow::scripts::RunnerKind::Docker
+                    .fqcn()
+                    .to_string(),
+                values: PluginConfigurationValues {
+                    allowed_images: Some(vec!["*".into(), "*/*".into()]),
+                    allowed_types: None,
+                },
+            }]),
+            features: Arc::new(FixedFeatureState(true)),
+            files: Some(fs.clone()),
+        }),
+    );
+    let source = format!(
+        "id: chain\nnamespace: {NS}\ntasks:\n\
+         \x20 - id: w\n    type: io.kestra.plugin.scripts.shell.Commands\n    \
+         containerImage: alpine:3.20\n    commands: [produce]\n    outputFiles: [out.txt]\n\
+         \x20 - id: r\n    type: io.kestra.plugin.scripts.shell.Commands\n    \
+         containerImage: alpine:3.20\n    commands: [consume]\n    inputFiles:\n      \
+         in.txt: \"{{{{ outputs.w.outputFiles['out.txt'] }}}}\"\n"
+    );
+    let ex = start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    for _ in 0..16 {
+        if egret_workflow::worker::tick(&db.pool, 4, &reg)
+            .await
+            .expect("tick")
+            == 0
+        {
+            break;
+        }
+    }
+    let (w_state, w_out, w_msg) = result_of(&db.pool, ws, "w").await;
+    assert_eq!(w_state, "SUCCESS", "{w_msg:?}");
+    let uri = w_out.unwrap()["outputFiles"]["out.txt"]
+        .as_str()
+        .expect("a URI")
+        .to_string();
+    let (w_run, _) = run_of(&db.pool, ex, "w").await;
+    assert_eq!(
+        uri,
+        format!(
+            "{}{}-out.txt",
+            uri::task_prefix(NS, "chain", ex, "w", w_run).unwrap(),
+            uri::id_utils_from("/egret/working-dir/out.txt")
+        )
+    );
+    let row: (Option<Uuid>, i64) = sqlx::query_as(
+        "SELECT task_run_id, size FROM workflow.execution_files WHERE workspace_id = $1 AND uri = $2",
+    )
+    .bind(ws)
+    .bind(&uri)
+    .fetch_one(&db.pool)
+    .await
+    .expect("indexed with w's outcome");
+    assert_eq!(row, (Some(w_run), 9));
+    let (r_state, r_out, r_msg) = result_of(&db.pool, ws, "r").await;
+    assert_eq!(r_state, "SUCCESS", "{r_msg:?}");
+    assert_eq!(
+        r_out.unwrap()["vars"]["staged"],
+        json!("made by w"),
+        "r staged w's file from the store"
     );
 }

@@ -72,6 +72,7 @@ use std::sync::{Arc, Mutex};
 
 use egret_workflow::logs::{LogLevel, LogLimits, LogLine, RunIdentity, RunLog};
 use egret_workflow::scripts::{RunnerKind, RunnerSpec};
+use egret_workflow::storage::FileStore;
 use egret_workflow::worker::commands::{
     container_name, DockerRunner, NoObserver, TaskCommands, TaskRunner,
 };
@@ -85,12 +86,18 @@ use uuid::Uuid;
 /// allowed. The gate itself is judged in `tests/scripts_gate.rs`; this file
 /// judges the daemon.
 fn handler(type_id: &str) -> Script {
+    handler_over(type_id, suite_files())
+}
+
+/// [`handler`] over internal storage `files` (W9a Task 6: output files are
+/// streamed there and come back as URIs).
+fn handler_over(type_id: &str, files: Arc<FileStore>) -> Script {
     use egret_config::{PluginConfiguration, PluginConfigurationValues, PluginConfigurations};
     Script::new(
         egret_workflow::scripts::kind_of(type_id).expect("a script type"),
         Arc::new(ScriptRuntime {
             runner_kind: RunnerKind::Docker,
-            runner: Arc::new(DockerRunner::new()),
+            runner: Arc::new(DockerRunner::new().with_files(files.clone())),
             plugin_configurations: PluginConfigurations(vec![PluginConfiguration {
                 r#type: RunnerKind::Docker.fqcn().to_string(),
                 values: PluginConfigurationValues {
@@ -99,9 +106,57 @@ fn handler(type_id: &str) -> Script {
                 },
             }]),
             features: Arc::new(FixedFeatureState(true)),
-            files: None,
+            files: Some(files),
         }),
     )
+}
+
+/// This process's internal storage: a `MemStore` (the transfer is what is
+/// judged here; MinIO is driven by
+/// `output_files_are_uris_streamed_out_and_read_back_byte_identical` when
+/// `EGRET_TEST_S3_ENDPOINT` is set).
+fn suite_files() -> Arc<FileStore> {
+    static FILES: std::sync::OnceLock<Arc<FileStore>> = std::sync::OnceLock::new();
+    FILES
+        .get_or_init(|| {
+            Arc::new(FileStore {
+                store: Arc::new(egret_storage::MemStore::new()),
+                bucket: "egret-test".into(),
+                prefix: "workflow/".into(),
+                caps: egret_workflow::storage::Caps::default(),
+                retention_days: 30,
+            })
+        })
+        .clone()
+}
+
+/// The namespace and flow every task here runs in.
+const NS: &str = "w9a.t6.docker";
+const FLOW: &str = "live";
+
+/// `task`'s own prefix, as the claim builds it.
+fn prefix_of(task: &TaskInput) -> String {
+    egret_workflow::storage::uri::task_prefix(
+        NS,
+        FLOW,
+        task.execution_id,
+        &task.task_id,
+        task.run_id,
+    )
+    .unwrap()
+}
+
+/// The bytes `out`'s `outputFiles[rel]` URI holds in `files`.
+async fn read_back(files: &FileStore, out: &Outcome, rel: &str) -> Vec<u8> {
+    let uri = outputs(out)["outputFiles"][rel]
+        .as_str()
+        .unwrap_or_else(|| panic!("{rel} is a URI in {out:?}"))
+        .to_string();
+    files
+        .store
+        .get(&files.object_uri(suite_workspace(), &uri).unwrap())
+        .await
+        .unwrap_or_else(|e| panic!("{uri} is in the store: {e}"))
 }
 
 /// `egret.container`, W4's spelling, now an alias of `shell.Commands`.
@@ -354,7 +409,13 @@ fn remove_this_suites_containers() {
 /// A [`TaskInput`] with a **fresh** run id, so two tests can never address
 /// the same container.
 fn task(type_id: &str, spec: serde_json::Value) -> TaskInput {
-    TaskInput {
+    task_over(type_id, spec, suite_files())
+}
+
+/// [`task`], its render scope over `files` and carrying the run's own task
+/// prefix -- as `claim::input_for` builds it (W9a Task 4).
+fn task_over(type_id: &str, spec: serde_json::Value, files: Arc<FileStore>) -> TaskInput {
+    let mut t = TaskInput {
         workspace_id: suite_workspace(),
         execution_id: Uuid::new_v4(),
         run_id: Uuid::new_v4(),
@@ -367,7 +428,17 @@ fn task(type_id: &str, spec: serde_json::Value) -> TaskInput {
         timeout: None,
         principal: None,
         log: RunLog::discard(),
-    }
+    };
+    let snapshot = egret_workflow::storage::scope::Snapshot::from_parts(
+        BTreeMap::new(),
+        files,
+        suite_workspace(),
+        Some(prefix_of(&t)),
+    );
+    let mut cx = egret_workflow::runners::RenderContext::new().with_files(snapshot.into_scope());
+    cx.insert("flow", serde_json::json!({"id": FLOW, "namespace": NS}));
+    t.render = cx;
+    t
 }
 
 /// Ask the daemon, not egret, whether a container is there.
@@ -554,12 +625,22 @@ async fn output_files_follow_kestra_literal_missing_and_glob() {
         "{out:?}"
     );
     let files = &outputs(&out)["outputFiles"];
-    assert_eq!(
-        files["counted.csv"],
-        serde_json::json!("1,2,3,4,5,"),
-        "the contents come back, computed by `seq` inside the container"
+    let counted = files["counted.csv"]
+        .as_str()
+        .expect("a URI, never the contents");
+    assert!(
+        counted.starts_with(&prefix_of(&t)) && counted.ends_with("-counted.csv"),
+        "Kestra's name under the run's own prefix: {counted}"
     );
-    assert_eq!(files["sub/inner.txt"], serde_json::json!("deep\n"));
+    assert_eq!(
+        read_back(&suite_files(), &out, "counted.csv").await,
+        b"1,2,3,4,5,",
+        "the contents, computed by `seq` inside the container, are in the store"
+    );
+    assert_eq!(
+        read_back(&suite_files(), &out, "sub/inner.txt").await,
+        b"deep\n"
+    );
 
     // The fixture's glob case: `*.csv` over a.csv, b.csv, sub/c.csv, x.txt
     // keys a.csv and b.csv; plus its missing case, ignored.
@@ -585,11 +666,10 @@ async fn output_files_follow_kestra_literal_missing_and_glob() {
         "a declared file the command did not write is ignored: {out:?}"
     );
     let o = outputs(&out);
-    assert_eq!(
-        o["outputFiles"],
-        serde_json::json!({"a.csv": "a\n", "b.csv": "b\n"}),
-        "non-recursive, files only"
-    );
+    let keys: Vec<&String> = o["outputFiles"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["a.csv", "b.csv"], "non-recursive, files only");
+    assert_eq!(read_back(&suite_files(), &out, "a.csv").await, b"a\n");
+    assert_eq!(read_back(&suite_files(), &out, "b.csv").await, b"b\n");
     assert_eq!(o["vars"], serde_json::json!({"printed": 1}));
 }
 
@@ -676,7 +756,10 @@ async fn python_runs_the_authors_script_and_its_numbers_come_from_cpython() {
         serde_json::json!(4950),
         "the marker's payload was serialised by `json.dumps` inside the container"
     );
-    assert_eq!(o["outputFiles"]["total.txt"], serde_json::json!(SUM_TO_100));
+    assert_eq!(
+        read_back(&suite_files(), &out, "total.txt").await,
+        SUM_TO_100.as_bytes()
+    );
     assert!(
         rec.texts().iter().any(|l| l.starts_with("python 3")),
         "the interpreter that answered is the image's own: {:?}",
@@ -1158,10 +1241,7 @@ async fn a_symlinked_output_file_cannot_read_the_worker_hosts_files() {
     );
     let out = h.run(&t).await.expect("no worker failure");
     let o = outputs(&out);
-    let got = o["outputFiles"]["etcdir/passwd"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let got = String::from_utf8(read_back(&suite_files(), &out, "etcdir/passwd").await).unwrap();
     assert!(
         !got.is_empty(),
         "the per-file copy resolves the component inside the container, so this \
@@ -1219,10 +1299,15 @@ async fn a_parent_and_a_child_declared_together_never_wedges_the_run() {
         "{out:?}"
     );
     let o = outputs(&out);
+    let keys: Vec<&String> = o["outputFiles"].as_object().unwrap().keys().collect();
     assert_eq!(
-        o["outputFiles"],
-        serde_json::json!({"a": "regular-file\n"}),
+        keys,
+        ["a"],
         "the parent came back; the impossible child is simply absent: {o}"
+    );
+    assert_eq!(
+        read_back(&suite_files(), &out, "a").await,
+        b"regular-file\n"
     );
     assert_eq!(o["vars"], serde_json::json!({"ran": 1}), "{o}");
 }
@@ -1232,12 +1317,30 @@ async fn a_parent_and_a_child_declared_together_never_wedges_the_run() {
 /// `worker::commands`'s unit business; what this adds is that a real
 /// `docker cp` of a real file goes through the same seam.
 async fn an_output_file_over_the_cap_fails_the_task_rather_than_being_truncated() {
-    let runner = DockerRunner::new().with_limits(64, 1_048_576);
+    let capped = |max_file_bytes: u64| {
+        Arc::new(FileStore {
+            store: Arc::new(egret_storage::MemStore::new()),
+            bucket: "egret-test".into(),
+            prefix: "workflow/".into(),
+            caps: egret_workflow::storage::Caps {
+                max_file_bytes,
+                ..egret_workflow::storage::Caps::default()
+            },
+            retention_days: 30,
+        })
+    };
+    let files = capped(64);
+    let runner = DockerRunner::new().with_files(files.clone());
     let t = task(container::TYPE_ID, serde_json::json!({}));
     let cmds = TaskCommands {
         container_image: SHELL_IMAGE.to_string(),
         commands: vec!["printf 'x%.0s' $(seq 1 100) > big.txt".into()],
         output_files: vec!["big.txt".into()],
+        collect_to: Some(egret_workflow::worker::commands::CollectTo {
+            workspace: suite_workspace(),
+            task_prefix: prefix_of(&t),
+            naming: egret_workflow::worker::commands::Naming::KestraOutputName,
+        }),
         ..TaskCommands::default()
     };
     let out = runner
@@ -1246,28 +1349,43 @@ async fn an_output_file_over_the_cap_fails_the_task_rather_than_being_truncated(
         .expect("a file over the cap is the author's flow");
     let why = out.failure.clone().expect("the cap must fail the task");
     assert!(why.contains("100 bytes"), "the SIZE must be named: {why}");
-    assert!(why.contains("over the 64"), "the CAP must be named: {why}");
     assert!(
-        out.output_files.is_empty(),
-        "and nothing came back truncated"
+        why.contains("over the 64") && why.contains("workflow.storage.max_file_bytes"),
+        "the CAP must be named: {why}"
     );
+    assert!(out.output_files.is_empty(), "and nothing was stored");
+    assert!(
+        files.store.list("", None).await.unwrap().objects.is_empty(),
+        "not even a truncated object"
+    );
+    runner.release(&t, &docker_spec()).await.expect("release");
 
     // The same file under the cap comes back whole, so the refusal above is
     // the cap and not the copy failing.
-    let runner = DockerRunner::new().with_limits(1024, 1_048_576);
+    let files = capped(1024);
+    let runner = DockerRunner::new().with_files(files.clone());
     let t = task(container::TYPE_ID, serde_json::json!({}));
+    let cmds = TaskCommands {
+        collect_to: Some(egret_workflow::worker::commands::CollectTo {
+            workspace: suite_workspace(),
+            task_prefix: prefix_of(&t),
+            naming: egret_workflow::worker::commands::Naming::KestraOutputName,
+        }),
+        ..cmds
+    };
     let out = runner
         .run(&t, &cmds, &docker_spec(), &NoObserver)
         .await
         .expect("100 bytes is under a 1024-byte cap");
     assert_eq!(out.failure, None, "{out:?}");
-    assert_eq!(out.output_files["big.txt"].len(), 100);
+    assert_eq!(out.output_files["big.txt"].size, 100);
+    runner.release(&t, &docker_spec()).await.expect("release");
 }
 
 /// **A container that floods the marker channel is refused rather than
 /// stored**, and the run still finishes.
 async fn a_flood_of_output_markers_is_refused_rather_than_stored() {
-    let runner = DockerRunner::new().with_limits(1_048_576, 32);
+    let runner = DockerRunner::new().with_vars_cap(32);
     let t = task(container::TYPE_ID, serde_json::json!({}));
     let out = runner
         .run(
@@ -1533,6 +1651,226 @@ async fn a_missing_stored_object_fails_the_task_and_the_container_never_starts()
     assert!(!container_exists(&name), "release removed it");
 }
 
+// ---------------------------------------------------------------------------
+// W9a Task 6: output files are streamed into internal storage
+// ---------------------------------------------------------------------------
+
+/// MinIO when `EGRET_TEST_S3_ENDPOINT` is set (all four `EGRET_TEST_S3_*`),
+/// under a throwaway prefix `w9a-t6-test/<uuid>/`; else a `MemStore`.
+async fn live_files() -> (Arc<FileStore>, &'static str) {
+    let Ok(endpoint) = std::env::var("EGRET_TEST_S3_ENDPOINT") else {
+        return (suite_files(), "MemStore");
+    };
+    let cfg = egret_storage::StorageConfig {
+        endpoint: Some(endpoint),
+        region: "us-east-1".into(),
+        bucket: std::env::var("EGRET_TEST_S3_BUCKET").expect("EGRET_TEST_S3_BUCKET"),
+        access_key: std::env::var("EGRET_TEST_S3_KEY").expect("EGRET_TEST_S3_KEY"),
+        secret_key: std::env::var("EGRET_TEST_S3_SECRET").expect("EGRET_TEST_S3_SECRET"),
+        path_style: true,
+    };
+    let store = egret_storage::S3Store::new(&cfg)
+        .await
+        .expect("an S3 store");
+    (
+        Arc::new(FileStore {
+            store: Arc::new(store),
+            bucket: cfg.bucket,
+            prefix: format!("w9a-t6-test/{}/", Uuid::new_v4()),
+            caps: egret_workflow::storage::Caps::default(),
+            retention_days: 30,
+        }),
+        "MinIO",
+    )
+}
+
+/// Delete, by exact key, every object under `files`' throwaway prefix --
+/// never a prefix delete, and never outside `w9a-t6-test/`.
+async fn forget(files: &FileStore) -> usize {
+    if !files.prefix.starts_with("w9a-t6-test/") {
+        return 0;
+    }
+    let listed = files.store.list(&files.prefix, None).await.expect("list");
+    for o in &listed.objects {
+        assert!(o.key.starts_with(&files.prefix), "{}", o.key);
+        files
+            .store
+            .delete(&format!("s3://{}/{}", files.bucket, o.key))
+            .await
+            .expect("delete by exact key");
+    }
+    listed.objects.len()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// **`outputFiles` are `kestra://` URIs, streamed out of the container**
+/// (W9a spec §6.2): a `*.csv` glob, `sub/x.csv`, a 12 MiB file (more than
+/// one 8 MiB part) and `outputDirectory: true`, each read back from the store
+/// byte-identical -- the 12 MiB one by a SHA-256 computed INSIDE the
+/// container. Keys and URIs as Kestra's (`w9a-storage.json`
+/// `script_output_files_map`): declared names hashed, the output directory's
+/// verbatim.
+async fn output_files_are_uris_streamed_out_and_read_back_byte_identical() {
+    let (files, which) = live_files().await;
+    eprintln!("    (store: {which}, prefix {})", files.prefix);
+    let h = handler_over(container::TYPE_ID, files.clone());
+    let (t, rec) = {
+        let (r, rec) = recorded(container::TYPE_ID, serde_json::json!({}));
+        let mut t = task_over(
+            container::TYPE_ID,
+            serde_json::json!({
+                "image": SHELL_IMAGE,
+                "commands": [
+                    "echo a > a.csv", "echo b > b.csv", "echo x > x.txt",
+                    "mkdir -p sub && printf 'x,y\\n1,2\\n' > sub/x.csv",
+                    "head -c 12582912 /dev/urandom > big.bin",
+                    "echo \"OUTPUT_DIR=$OUTPUT_DIR\"",
+                    "printf 'in outdir' > \"$OUTPUT_DIR/od.txt\"",
+                    "mkdir -p '{{ outputDir }}/deep' && printf 'deep' > '{{ outputDir }}/deep/d.txt'",
+                    "echo \"::{\\\"outputs\\\":{\\\"sha\\\":\\\"$(sha256sum big.bin | cut -d' ' -f1)\\\"}}::\"",
+                ],
+                "outputFiles": ["*.csv", "sub/x.csv", "big.bin"],
+                "outputDirectory": true,
+            }),
+            files.clone(),
+        );
+        t.log = r.log;
+        (t, rec)
+    };
+    let out = h.run(&t).await.expect("no worker failure");
+    assert_eq!(
+        out.state,
+        egret_workflow::executor::RunState::Success,
+        "{out:?} {:?}",
+        rec.texts()
+    );
+    assert!(
+        rec.texts()
+            .contains(&"OUTPUT_DIR=/egret/working-dir/.egret/out".to_string()),
+        "Kestra's env var: {:?}",
+        rec.texts()
+    );
+    let o = outputs(&out);
+    let map = o["outputFiles"].as_object().unwrap();
+    let keys: Vec<&String> = map.keys().collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        [
+            "a.csv",
+            "b.csv",
+            "big.bin",
+            "deep/d.txt",
+            "od.txt",
+            "sub/x.csv"
+        ],
+        "{o}"
+    );
+    let p = prefix_of(&t);
+    // `w9a-storage.json` `id_utils_from`: /egret/working-dir/sub/x.csv.
+    assert_eq!(
+        map["sub/x.csv"],
+        serde_json::json!(format!("{p}10ehIGUrkxwg9tBZYZJQ9K-x.csv"))
+    );
+    assert_eq!(map["od.txt"], serde_json::json!(format!("{p}od.txt")));
+    assert_eq!(
+        map["deep/d.txt"],
+        serde_json::json!(format!("{p}deep/d.txt"))
+    );
+    assert_eq!(read_back(&files, &out, "a.csv").await, b"a\n");
+    assert_eq!(read_back(&files, &out, "sub/x.csv").await, b"x,y\n1,2\n");
+    assert_eq!(read_back(&files, &out, "od.txt").await, b"in outdir");
+    assert_eq!(read_back(&files, &out, "deep/d.txt").await, b"deep");
+    let big = read_back(&files, &out, "big.bin").await;
+    assert_eq!(big.len(), 12 << 20);
+    assert_eq!(
+        serde_json::json!(sha256_hex(&big)),
+        o["vars"]["sha"],
+        "byte-identical to what the container wrote"
+    );
+    // Every file rides with the outcome, to be indexed at its commit.
+    let mut uris: Vec<String> = out.files.iter().map(|f| f.uri.clone()).collect();
+    uris.sort();
+    let mut want: Vec<String> = map
+        .values()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    want.sort();
+    assert_eq!(uris, want);
+    h.release(&t).await.expect("released");
+    let removed = forget(&files).await;
+    eprintln!("    ({removed} objects deleted by exact key)");
+}
+
+/// **A re-attached container is collected under the same URIs** (W5a's
+/// adopt path, same (run, attempt); spec §5 "Re-attach"): holder A is
+/// dropped while the command runs, B re-attaches and collects, C re-attaches
+/// to the exited container and collects again -- the same names, the same
+/// object count. Nothing is indexed by a runner; `apply_outcome`'s upsert
+/// (`tests/worker.rs`) turns the same URIs into one row each.
+async fn a_reattached_container_is_collected_under_the_same_uris() {
+    let files = Arc::new(FileStore {
+        store: Arc::new(egret_storage::MemStore::new()),
+        bucket: "egret-test".into(),
+        prefix: "workflow/".into(),
+        caps: egret_workflow::storage::Caps::default(),
+        retention_days: 30,
+    });
+    let h = handler_over(container::TYPE_ID, files.clone());
+    let a = task_over(
+        container::TYPE_ID,
+        serde_json::json!({
+            "image": SHELL_IMAGE,
+            "commands": ["sleep 3", "echo one > one.txt", "printf two > \"$OUTPUT_DIR/two.txt\""],
+            "outputFiles": ["one.txt"],
+            "outputDirectory": true,
+            "taskRunner": {"type": egret_workflow::scripts::DOCKER_RUNNER, "delete": false},
+        }),
+        files.clone(),
+    );
+    let name = container_name(&a);
+    let dropped = tokio::time::timeout(std::time::Duration::from_millis(1500), h.run(&a)).await;
+    assert!(dropped.is_err(), "A was still inside its handler");
+    assert!(container_running(&name));
+    let b = h.run(&a).await.expect("B re-attaches");
+    assert_eq!(
+        b.state,
+        egret_workflow::executor::RunState::Success,
+        "{b:?}"
+    );
+    let c = h
+        .run(&a)
+        .await
+        .expect("C re-attaches to the exited container");
+    assert_eq!(
+        c.state,
+        egret_workflow::executor::RunState::Success,
+        "{c:?}"
+    );
+    assert_eq!(
+        containers_of(a.run_id),
+        vec![name.clone()],
+        "one container, ever"
+    );
+    assert_eq!(b.files, c.files, "the same names, sizes and all");
+    assert_eq!(b.files.len(), 2);
+    assert_eq!(
+        files.store.list("", None).await.unwrap().objects.len(),
+        2,
+        "C overwrote B's objects rather than adding beside them"
+    );
+    assert_eq!(read_back(&files, &c, "two.txt").await, b"two");
+    force_remove(&name);
+}
+
 type Case = fn() -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
 macro_rules! case {
@@ -1564,6 +1902,8 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
         case!(an_output_marker_printed_by_the_container_becomes_task_outputs),
         case!(python_runs_the_authors_script_and_its_numbers_come_from_cpython),
         case!(the_runner_refuses_an_empty_image_with_the_artifacts_own_message),
+        case!(output_files_are_uris_streamed_out_and_read_back_byte_identical),
+        case!(a_reattached_container_is_collected_under_the_same_uris),
     ]
 }
 

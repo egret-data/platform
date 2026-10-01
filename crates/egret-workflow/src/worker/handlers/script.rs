@@ -66,9 +66,13 @@
 //! # Where egret differs from the artifact here, on the record
 //!
 //! * `outputFiles` follows Kestra (a non-recursive glob; a missing file
-//!   ignored -- [`TaskCommands::output_files`]), but its value is the file's
-//!   CONTENTS under W4's 1 MiB per-file and total caps, not an
-//!   internal-storage URI (W9 owns storage); spec §2's table says so.
+//!   ignored -- [`TaskCommands::output_files`]), and since W9a its value is
+//!   the file's `kestra://` URI in internal storage, as Kestra's (W9a spec
+//!   §6.2, breaking: W5a's value was the CONTENTS). `outputDirectory: true`
+//!   collects everything under `{{ outputDir }}`. A task declaring either
+//!   fails, before any runner, when egret has no `[storage]`. The output
+//!   name's scheme is Kestra's (`IdUtils.from(path)-name`); its hash cannot
+//!   be, since Kestra's working directory is a random temp dir.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -77,8 +81,9 @@ use egret_config::PluginConfigurations;
 use egret_core::{Error, Result};
 
 use super::super::commands::{
-    relative_problem, LineObserver, NoObserver, StoredInput, TaskCommands, TaskRunner,
-    LOG_DEBUG_MARKER, LOG_INFO_MARKER, WORKING_DIR,
+    no_storage_for_outputs, relative_problem, CollectTo, LineObserver, Naming, NoObserver,
+    StoredInput, TaskCommands, TaskRunner, LOG_DEBUG_MARKER, LOG_INFO_MARKER, OUTPUT_DIR,
+    WORKING_DIR,
 };
 use super::super::{Handlers, Outcome, TaskHandler, TaskInput};
 use super::container::{
@@ -91,6 +96,11 @@ use crate::scripts::{self, gate, RunnerKind, RunnerSpec, ScriptKind, ScriptTask}
 
 /// The render variable Kestra binds to the working directory (`{{ workingDir }}`).
 pub const WORKING_DIR_VAR: &str = "workingDir";
+
+/// Kestra's `{{ outputDir }}` (`w9a-storage.json`
+/// `egret_expected.output_directory.render_variable`), bound to
+/// [`OUTPUT_DIR`] when `outputDirectory: true`.
+pub const OUTPUT_DIR_VAR: &str = "outputDir";
 
 /// Whether a workspace has `workflow_containers` ON -- the workspace half of
 /// the gate's input, **read at run time** for every run.
@@ -233,6 +243,11 @@ impl Script {
     ) -> std::result::Result<TaskCommands, Outcome> {
         let mut cx = task.render.clone();
         cx.insert(WORKING_DIR_VAR, serde_json::json!(WORKING_DIR));
+        // Kestra's `{{ outputDir }}`, bound with the directory enabled
+        // (`w9a-storage.json` `egret_expected.output_directory.render_variable`).
+        if p.output_directory {
+            cx.insert(OUTPUT_DIR_VAR, serde_json::json!(OUTPUT_DIR));
+        }
 
         let one = |what: &str, s: &str| {
             render_str(s, &cx).map_err(|e| {
@@ -303,8 +318,61 @@ impl Script {
             input_files,
             stored_inputs,
             output_files,
+            output_directory: p.output_directory,
+            // Set by `run` once the commands render: see `collect_to`.
+            collect_to: None,
             host_protocol: false,
         })
+    }
+
+    /// Where this run's output files go (W9a spec §5, §6.2): its workspace
+    /// and its own task prefix, the render scope's `task_prefix` -- the
+    /// writing execution's, an iteration's inside a `Loop`. `Err` is the
+    /// task's failure, decided before the gate and before any runner:
+    ///
+    /// * no internal storage: W5a's contents-in-outputs path is gone, so a
+    ///   task declaring an output fails naming `[storage]`;
+    /// * a namespace, flow or task id no URI can carry (`uri::task_prefix`'s
+    ///   `Err`, which the claim dropped when it built the scope): the
+    ///   AUTHOR's error, named here -- never `Internal`, which would fence
+    ///   the commit and re-claim the run for ever.
+    fn collect_to(
+        &self,
+        type_id: &str,
+        task: &TaskInput,
+    ) -> std::result::Result<CollectTo, Outcome> {
+        let fail = |why: String| Outcome::failed_with(format!("{type_id}: {why}"));
+        if self.rt.files.is_none() {
+            return Err(fail(no_storage_for_outputs()));
+        }
+        let to = |task_prefix: String| CollectTo {
+            workspace: task.workspace_id,
+            task_prefix,
+            naming: Naming::KestraOutputName,
+        };
+        if let Some(prefix) = task.render.files().and_then(|f| f.0.task_prefix()) {
+            return Ok(to(prefix.to_string()));
+        }
+        let flow = (
+            render_str("{{ flow.namespace }}", &task.render),
+            render_str("{{ flow.id }}", &task.render),
+        );
+        let (Ok(namespace), Ok(flow_id)) = flow else {
+            return Err(fail(
+                "this run has no storage prefix for its output files: it is not a task run of \
+                 a flow's execution"
+                    .to_string(),
+            ));
+        };
+        crate::storage::uri::task_prefix(
+            &namespace,
+            &flow_id,
+            task.execution_id,
+            &task.task_id,
+            task.run_id,
+        )
+        .map(to)
+        .map_err(fail)
     }
 
     /// W9a spec §5: a rendered `inputFiles` value that is a `kestra://` URI is
@@ -411,10 +479,16 @@ impl TaskHandler for Script {
         };
 
         // 2. render.
-        let cmds = match self.render(type_id, task, &parsed) {
+        let mut cmds = match self.render(type_id, task, &parsed) {
             Ok(c) => c,
             Err(o) => return Ok(o),
         };
+        if cmds.has_outputs() {
+            cmds.collect_to = match self.collect_to(type_id, task) {
+                Ok(to) => Some(to),
+                Err(o) => return Ok(o),
+            };
+        }
 
         // 3. the gate, on the RENDERED image, with the feature read now.
         let spec = parsed
@@ -480,7 +554,8 @@ impl TaskHandler for Script {
                         .line(LogLevel::Error, &command_failed(result.exit_code))
                         .await;
                 }
-                let mut outcome = outcome_for(type_id, &result);
+                let prefix = cmds.collect_to.as_ref().map(|c| c.task_prefix.as_str());
+                let mut outcome = outcome_for(type_id, &result, prefix);
                 if let (Some(h), Some(message)) = (hint.hint(), outcome.message.as_mut()) {
                     message.push_str(". ");
                     message.push_str(&h);
@@ -1240,7 +1315,7 @@ mod tests {
         let spy = Spy::ok(CommandsResult::default());
         let cx = crate::runners::RenderContext::from_json_object(&serde_json::json!({
             "inputs": {"tag": "3.20", "who": "world"},
-            "flow": {"id": "q2_input_files_inline"},
+            "flow": {"id": "q2_input_files_inline", "namespace": "w5a.q2"},
         }))
         .expect("an object");
         let task = TaskInput {
@@ -1256,7 +1331,10 @@ mod tests {
                 }),
             )
         };
-        open(spy.clone()).run(&task).await.expect("no worker error");
+        stored(spy.clone(), mem_files())
+            .run(&task)
+            .await
+            .expect("no worker error");
         let cmds = spy.only();
         assert_eq!(cmds.container_image, "alpine:3.20");
         assert_eq!(cmds.commands, vec!["echo world > /egret/working-dir/x"]);
@@ -1604,5 +1682,173 @@ mod tests {
             spy.released.lock().unwrap().as_slice(),
             [(name.clone(), true), (name, false)]
         );
+    }
+
+    // ---- W9a Task 6: outputs into internal storage ----------------------
+
+    /// A task run's prefix, as the claim builds it.
+    fn prefix_of(task: &TaskInput) -> String {
+        crate::storage::uri::task_prefix(
+            "w9a.t6",
+            "f",
+            task.execution_id,
+            &task.task_id,
+            task.run_id,
+        )
+        .unwrap()
+    }
+
+    /// A task whose render scope carries its own task prefix, as
+    /// `claim::input_for` builds it.
+    fn scoped(files: &Arc<crate::storage::FileStore>, spec: serde_json::Value) -> TaskInput {
+        let mut task = input(scripts::SHELL_COMMANDS, spec);
+        task.workspace_id = WS;
+        let snapshot = crate::storage::scope::Snapshot::from_parts(
+            BTreeMap::new(),
+            files.clone(),
+            WS,
+            Some(prefix_of(&task)),
+        );
+        let mut cx = crate::runners::RenderContext::new().with_files(snapshot.into_scope());
+        cx.insert(
+            "flow",
+            serde_json::json!({"id": "f", "namespace": "w9a.t6"}),
+        );
+        task.render = cx;
+        task
+    }
+
+    /// The runner is told where the run's files go -- its own prefix, Kestra's
+    /// naming -- and `outputDirectory` gives the command `{{ outputDir }}`.
+    #[tokio::test]
+    async fn the_runner_is_given_the_runs_prefix_and_the_output_directory() {
+        let files = mem_files();
+        let spy = Spy::ok(CommandsResult::default());
+        let task = scoped(
+            &files,
+            serde_json::json!({
+                "containerImage": "alpine:3.20",
+                "outputFiles": ["*.csv"],
+                "outputDirectory": true,
+                "commands": ["echo x > {{ outputDir }}/od.txt"],
+            }),
+        );
+        let out = stored(spy.clone(), files).run(&task).await.unwrap();
+        assert_eq!(out.state, RunState::Success, "{out:?}");
+        let cmds = spy.only();
+        assert_eq!(
+            cmds.collect_to,
+            Some(CollectTo {
+                workspace: WS,
+                task_prefix: prefix_of(&task),
+                naming: Naming::KestraOutputName,
+            })
+        );
+        assert!(cmds.output_directory);
+        assert_eq!(
+            cmds.commands,
+            vec![format!("echo x > {OUTPUT_DIR}/od.txt")],
+            "Kestra's render variable"
+        );
+    }
+
+    /// No internal storage: a task declaring an output fails naming
+    /// `[storage]`, before the gate and before any runner -- W5a's
+    /// contents-in-outputs path no longer exists. A task declaring none runs.
+    #[tokio::test]
+    async fn an_output_without_storage_fails_naming_the_storage_section_before_the_runner() {
+        for spec in [
+            serde_json::json!({"containerImage": "alpine:3.20", "commands": ["x"], "outputFiles": ["a.txt"]}),
+            serde_json::json!({"containerImage": "alpine:3.20", "commands": ["x"], "outputDirectory": true}),
+        ] {
+            let spy = Spy::ok(CommandsResult::default());
+            let out = open(spy.clone())
+                .run(&input(scripts::SHELL_COMMANDS, spec.clone()))
+                .await
+                .expect("the task's failure, not a worker's");
+            assert_eq!(out.state, RunState::Failed);
+            assert!(
+                out.message.as_deref().unwrap().contains("[storage]"),
+                "{spec}: {out:?}"
+            );
+            assert!(spy.seen.lock().unwrap().is_empty(), "no runner was called");
+        }
+        let spy = Spy::ok(CommandsResult::default());
+        let out = open(spy.clone())
+            .run(&input(
+                scripts::SHELL_COMMANDS,
+                serde_json::json!({"containerImage": "alpine:3.20", "commands": ["x"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Success);
+        assert_eq!(spy.only().collect_to, None);
+    }
+
+    /// A namespace no URI can carry (Task 3's builder `Err`, which the claim
+    /// drops when it builds the scope): the AUTHOR's failure, naming why,
+    /// before any runner -- never `Internal`, which would fence the commit
+    /// and re-claim the run for ever.
+    #[tokio::test]
+    async fn a_prefix_no_uri_can_carry_is_the_authors_failure_naming_it() {
+        let files = mem_files();
+        let spy = Spy::ok(CommandsResult::default());
+        let mut task = input(
+            scripts::SHELL_COMMANDS,
+            serde_json::json!({"containerImage": "alpine:3.20", "commands": ["x"], "outputFiles": ["a.txt"]}),
+        );
+        let mut cx = crate::runners::RenderContext::new();
+        cx.insert("flow", serde_json::json!({"id": "f", "namespace": "a..b"}));
+        task.render = cx;
+        let out = stored(spy.clone(), files)
+            .run(&task)
+            .await
+            .expect("an author's namespace is never a worker failure");
+        assert_eq!(out.state, RunState::Failed);
+        let msg = out.message.unwrap();
+        assert!(
+            msg.contains("a..b") && msg.contains("cannot be read back"),
+            "{msg}"
+        );
+        assert!(spy.seen.lock().unwrap().is_empty());
+    }
+
+    /// The collected files ride with the outcome, and `outputFiles` holds
+    /// their URIs; a marker naming a URI under the prefix that was not
+    /// collected fails the task (spec §5).
+    #[tokio::test]
+    async fn collected_files_ride_with_the_outcome_and_a_ghost_uri_fails_it() {
+        let files = mem_files();
+        let task = scoped(
+            &files,
+            serde_json::json!({"containerImage": "alpine:3.20", "commands": ["x"], "outputFiles": ["a.txt"]}),
+        );
+        let prefix = prefix_of(&task);
+        let real = crate::storage::StoredFile {
+            uri: format!("{prefix}abc-a.txt"),
+            size: 3,
+        };
+        let result = CommandsResult {
+            output_files: BTreeMap::from([("a.txt".to_string(), real.clone())]),
+            ..CommandsResult::default()
+        };
+        let out = stored(Spy::ok(result.clone()), files.clone())
+            .run(&task)
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Success, "{out:?}");
+        assert_eq!(out.files, vec![real.clone()]);
+        assert_eq!(
+            out.outputs.as_ref().unwrap()["outputFiles"],
+            serde_json::json!({"a.txt": real.uri})
+        );
+        let mut ghost = result;
+        ghost
+            .vars
+            .insert("f".into(), serde_json::json!(format!("{prefix}ghost.txt")));
+        let out = stored(Spy::ok(ghost), files).run(&task).await.unwrap();
+        assert_eq!(out.state, RunState::Failed);
+        assert!(out.message.unwrap().contains("ghost.txt"));
+        assert_eq!(out.files, vec![real], "the real file is still indexed");
     }
 }

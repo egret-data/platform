@@ -72,15 +72,15 @@ use super::pod_spec::{
     self, attempt_of, pod_name, PodConfig, DELETE_ANNOTATION, ENDED_MARKER, FILES_IN, FILES_OUT,
     MAIN, MARKERS_DIR, READY_MARKER, STDERR_FILE,
 };
-use super::transfer;
 use crate::logs::{LogLevel, LogRepo, RunIdentity};
 use crate::scripts::RunnerSpec;
 use crate::storage::transfer::{write_tar, TarError, TarSource};
 use crate::worker::commands::{
-    expand_outputs, listing_too_big, output_problem, pattern_dirs, relative_problem, run_liveness,
-    staging_error, stream_replayed_line, CommandsResult, LineObserver, OrphanSweep, StreamState,
-    TaskCommands, TaskRunner, CANCEL_WAIT_MARGIN, MAX_LISTING_BYTES, MAX_OUTPUT_FILE_BYTES,
-    MAX_OUTPUT_NAMES, MAX_VARS_BYTES, RUN_NAME_PREFIX, TASKRUN_LABEL, WORKING_DIR,
+    collection_target, expand_outputs, listing_too_big, output_problem, pattern_dirs,
+    relative_problem, run_liveness, staging_error, stream_replayed_line, CommandsResult,
+    LineObserver, OrphanSweep, StreamState, TaskCommands, TaskRunner, CANCEL_WAIT_MARGIN,
+    MAX_LISTING_BYTES, MAX_OUTPUT_NAMES, MAX_VARS_BYTES, OUTPUT_DIR, OUTPUT_DIR_REL,
+    RUN_NAME_PREFIX, TASKRUN_LABEL, WORKING_DIR,
 };
 use crate::worker::TaskInput;
 
@@ -117,14 +117,14 @@ pub struct KubernetesRunner {
     cfg: PodConfig,
     /// Where a re-attach reads its `sinceTime` from.
     logs: LogRepo,
-    max_output_bytes: usize,
     max_vars_bytes: usize,
     poll: Duration,
     /// Set once the first `pods/exec` 403 has been logged at ERROR (final
     /// review I4): the operator gets one loud line with the RBAC hint, and
     /// every task that meets the same refusal fails naming it.
     exec_forbidden_logged: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Internal storage, which stored inputs are streamed from (W9a Task 5).
+    /// Internal storage, which stored inputs are streamed from (W9a Task 5)
+    /// and output files into (Task 6).
     files: Option<std::sync::Arc<crate::storage::FileStore>>,
 }
 
@@ -144,7 +144,6 @@ impl KubernetesRunner {
             client,
             cfg,
             logs,
-            max_output_bytes: MAX_OUTPUT_FILE_BYTES,
             max_vars_bytes: MAX_VARS_BYTES,
             poll: Duration::from_millis(500),
             exec_forbidden_logged: Default::default(),
@@ -159,11 +158,12 @@ impl KubernetesRunner {
         self
     }
 
-    /// Smaller caps, for a test ([`DockerRunner::with_limits`]'s reason).
+    /// A smaller markers cap, for a test ([`DockerRunner::with_vars_cap`]'s
+    /// reason). The output files' caps are the [`FileStore`]'s.
     ///
-    /// [`DockerRunner::with_limits`]: crate::worker::commands::DockerRunner::with_limits
-    pub fn with_limits(mut self, max_output_bytes: usize, max_vars_bytes: usize) -> Self {
-        self.max_output_bytes = max_output_bytes;
+    /// [`DockerRunner::with_vars_cap`]: crate::worker::commands::DockerRunner::with_vars_cap
+    /// [`FileStore`]: crate::storage::FileStore
+    pub fn with_vars_cap(mut self, max_vars_bytes: usize) -> Self {
         self.max_vars_bytes = max_vars_bytes;
         self
     }
@@ -435,7 +435,7 @@ impl KubernetesRunner {
         }
 
         // ---- outputs --------------------------------------------------------
-        if !cmds.output_files.is_empty() && result.failure.is_none() {
+        if cmds.has_outputs() && result.failure.is_none() {
             self.download(name, cmds, &mut result).await?;
         }
         if exit != 0 && reason.as_deref() == Some("OOMKilled") && result.failure.is_none() {
@@ -642,9 +642,14 @@ impl KubernetesRunner {
 
         // Kestra's `verifyFileUpload`: `wc -c < <file>` per file, compared
         // with what was sent.
-        let script: String = sources
-            .keys()
-            .map(|rel| format!("wc -c < {}\n", shell_quote(&format!("{WORKING_DIR}/{rel}"))))
+        // A directory (`outputDirectory`'s) has no size to verify.
+        let files: Vec<(&String, &TarSource<'_>)> = sources
+            .iter()
+            .filter(|(_, s)| !matches!(s, TarSource::Directory))
+            .collect();
+        let script: String = files
+            .iter()
+            .map(|(rel, _)| format!("wc -c < {}\n", shell_quote(&format!("{WORKING_DIR}/{rel}"))))
             .collect();
         let out = self
             .exec(
@@ -659,11 +664,12 @@ impl KubernetesRunner {
             .split_whitespace()
             .filter_map(|n| n.parse().ok())
             .collect();
-        let expected: Vec<u64> = sources
-            .values()
-            .map(|s| match s {
+        let expected: Vec<u64> = files
+            .iter()
+            .map(|(_, s)| match s {
                 TarSource::Contents(c) => c.len() as u64,
                 TarSource::Stored(st) => st.size,
+                TarSource::Directory => 0,
             })
             .collect();
         if !out.success || found != expected {
@@ -687,22 +693,42 @@ impl KubernetesRunner {
         Ok(())
     }
 
-    /// Each declared output, one `tar -c` out of `files-out` apiece, judged by
-    /// [`transfer::judge`] under the W4 caps. An author's problem lands in
-    /// `result.failure`, exit code and vars intact; `Err` is the transfer.
+    /// Each declared output, one `tar -c` out of `files-out` apiece, read as
+    /// a stream ([`TarReader`]) straight into internal storage
+    /// ([`collect_declared`]); then, with `outputDirectory: true`, the whole
+    /// [`OUTPUT_DIR`] the same way ([`collect_directory`]). W9a Task 6
+    /// replaced W5a's in-memory `unpack_one` + `judge` (the archive held whole
+    /// under the 1 MiB cap): nothing is held whole now, and a link entry has
+    /// no contents to take, so it is refused by name.
+    ///
+    /// An author's problem lands in `result.failure`, exit code and vars
+    /// intact. So does a `tar -c` that **exited non-zero** part-way through a
+    /// file -- the pod's failure, naming the file -- but only that exit: a
+    /// lost status, a kubelet-side failure or a stalled stream is egret's
+    /// (`Err`), and so is the store not answering (spec §11).
+    ///
+    /// [`TarReader`]: crate::storage::transfer::TarReader
     async fn download(
         &self,
         name: &str,
         cmds: &TaskCommands,
         result: &mut CommandsResult,
     ) -> Result<()> {
-        let mut total = 0usize;
+        use crate::storage::collect::{collect_declared, collect_directory, CollectError};
+        use crate::storage::transfer::TarReader;
         for rel in &cmds.output_files {
             if let Some(problem) = output_problem(rel) {
                 result.failure = Some(problem);
                 return Ok(());
             }
         }
+        let (fs, to) = match collection_target(self.files.as_ref(), cmds) {
+            Ok(both) => both,
+            Err(problem) => {
+                result.failure = Some(problem);
+                return Ok(());
+            }
+        };
         // Patterns (W5a Task 5 fix round 1): list each directory a pattern
         // names in `files-out` -- `ls -A1p`, so a directory carries a `/` and
         // is dropped (Kestra's glob visits files only) -- then read every
@@ -747,80 +773,152 @@ impl KubernetesRunner {
                 return Ok(());
             }
         };
-        for (rel, from_glob) in names {
-            let rel = &rel;
+        let mut so_far = 0u64;
+        let mut names_left = MAX_OUTPUT_NAMES.saturating_sub(names.len());
+        for (rel, from_glob) in &names {
             // An EXPANDED name is re-validated like a declared one (fix round
             // 2): a file named `x\n..` lists as the line `..`, which `*`
             // matches, and must never reach `tar -C <wd> -- ..`.
             if let Some(problem) = output_problem(rel) {
                 result.failure = Some(problem);
-                break;
+                return Ok(());
             }
-            // The contents, their header, a possible long-name entry and the
-            // end blocks. Past this the stream is cut and the header decides.
-            let cap = self.max_output_bytes + 8 * 512;
-            let out = self
-                .exec(
-                    name,
-                    FILES_OUT,
-                    vec![
-                        "tar".into(),
-                        "-c".into(),
-                        "-f".into(),
-                        "-".into(),
-                        "-C".into(),
-                        WORKING_DIR.into(),
-                        "--".into(),
-                        rel.clone(),
-                    ],
-                    None,
-                    cap,
+            let mut out = self.exec_out(name, tar_create(rel)).await?;
+            let got = {
+                let mut reader = TarReader::new(&mut out.stdout);
+                until_idle(
+                    collect_declared(&fs, &to, rel, *from_glob, &mut reader, &mut so_far),
+                    &out.progress,
+                    EXEC_TIMEOUT,
                 )
-                .await?;
-            let entry = transfer::unpack_one(&out.stdout, self.max_output_bytes)
-                .map_err(|e| internal(&format!("reading {rel:?} out of files-out"), e))?;
-            // A glob visits files only: a directory it matched is skipped.
-            if from_glob && matches!(entry, Some(transfer::Entry::Directory)) {
-                continue;
-            }
-            let bytes = match transfer::judge(rel, entry, self.max_output_bytes) {
-                Ok(Some(b)) => b,
-                // Not there: ignored, as Kestra (`missing_declared_file`).
-                Ok(None) => continue,
-                Err(problem) => {
-                    result.failure = Some(problem);
-                    break;
-                }
+                .await
             };
-            // The key counts toward the total too (fix round 2).
-            total += bytes.len() + rel.len();
-            if total > self.max_output_bytes {
-                result.failure = Some(format!(
-                    "the output files declared by this task come to {total} bytes (names and \
-                     contents), over the \
-                     {} one task may carry. `outputFiles:` is an unbounded list, so a per-file \
-                     cap alone bounds nothing",
-                    self.max_output_bytes
-                ));
-                break;
-            }
-            match String::from_utf8(bytes) {
-                Ok(text) => {
-                    result.output_files.insert(rel.clone(), text);
+            match got {
+                None => {
+                    out.abort().await;
+                    return Err(stalled(rel));
                 }
-                Err(_) => {
-                    result.failure = Some(format!(
-                        "the output file {rel:?} is not UTF-8, and an output is JSON. egret has \
-                         no internal storage to hand back a URI to (W9 owns it), so a binary \
-                         artefact cannot be an output of this task today"
+                Some(Ok(file)) => {
+                    let exit = out.finish().await;
+                    match file {
+                        Some(file) => {
+                            result.output_files.insert(rel.clone(), file);
+                        }
+                        // Nothing archived: the file is not there (tar -c
+                        // EXITED non-zero saying so) -- IGNORED, as Kestra.
+                        None if exit.ended() => {}
+                        None => return Err(exit.lost(rel)),
+                    }
+                }
+                Some(Err(CollectError::Author(problem))) => {
+                    out.abort().await;
+                    result.failure = Some(problem);
+                    return Ok(());
+                }
+                Some(Err(CollectError::Store(m))) => {
+                    out.abort().await;
+                    return Err(Error::Internal(anyhow::anyhow!("{m}")));
+                }
+                Some(Err(CollectError::Source(m))) => {
+                    let exit = out.finish().await;
+                    if exit.exited_non_zero() {
+                        result.failure = Some(tar_died(rel, &m, &exit.stderr));
+                        return Ok(());
+                    }
+                    return Err(internal(&format!("reading {rel:?} out of {FILES_OUT}"), m));
+                }
+            }
+        }
+        if cmds.output_directory {
+            let mut out = self.exec_out(name, tar_create(OUTPUT_DIR_REL)).await?;
+            let got = {
+                let mut reader = TarReader::new(&mut out.stdout);
+                until_idle(
+                    collect_directory(
+                        &fs,
+                        &to,
+                        &mut reader,
+                        &mut so_far,
+                        &mut names_left,
+                        &mut result.output_files,
+                    ),
+                    &out.progress,
+                    EXEC_TIMEOUT,
+                )
+                .await
+            };
+            match got {
+                None => {
+                    out.abort().await;
+                    return Err(stalled(OUTPUT_DIR));
+                }
+                Some(Ok(())) => {
+                    let exit = out.finish().await;
+                    if !exit.ended() {
+                        return Err(exit.lost(OUTPUT_DIR));
+                    }
+                }
+                Some(Err(CollectError::Author(problem))) => {
+                    out.abort().await;
+                    result.failure = Some(problem);
+                }
+                Some(Err(CollectError::Store(m))) => {
+                    out.abort().await;
+                    return Err(Error::Internal(anyhow::anyhow!("{m}")));
+                }
+                Some(Err(CollectError::Source(m))) => {
+                    let exit = out.finish().await;
+                    if exit.exited_non_zero() {
+                        result.failure = Some(tar_died(OUTPUT_DIR, &m, &exit.stderr));
+                        return Ok(());
+                    }
+                    return Err(internal(
+                        &format!("reading {OUTPUT_DIR} out of {FILES_OUT}"),
+                        m,
                     ));
-                    break;
                 }
             }
         }
         Ok(())
     }
 
+    /// `cmd` in `files-out`, its stdout handed back as a stream (W9a Task 6)
+    /// with every byte recorded as [`Progress`], and its stderr read beside
+    /// it (16 KiB kept).
+    async fn exec_out(&self, name: &str, cmd: Vec<String>) -> Result<OutExec> {
+        let ap = AttachParams::default()
+            .container(FILES_OUT)
+            .stdin(false)
+            .stdout(true)
+            .stderr(true)
+            .max_stdout_buf_size(64 * 1024)
+            .max_stderr_buf_size(64 * 1024);
+        let mut proc = match self.pods().exec(name, cmd, &ap).await {
+            Ok(p) => p,
+            Err(kube::Error::Api(ae)) if ae.code == 404 => return Err(deleted(name)),
+            Err(e) if is_forbidden(&e) => return Err(self.exec_forbidden(FILES_OUT, e)),
+            Err(e) => return Err(internal(&format!("exec in {FILES_OUT}"), e)),
+        };
+        let status = proc
+            .take_status()
+            .ok_or_else(|| internal("exec", "no status channel"))?;
+        let stdout = proc
+            .stdout()
+            .ok_or_else(|| internal("exec", "no stdout channel"))?;
+        let stderr = proc.stderr();
+        let errs = tokio::spawn(async move { read_capped(stderr, 16 * 1024, true).await.0 });
+        let progress = Progress::new();
+        Ok(OutExec {
+            stdout: ProgressReader {
+                inner: Box::new(stdout),
+                progress: progress.clone(),
+            },
+            status: Box::pin(status),
+            errs,
+            proc,
+            progress,
+        })
+    }
     /// Run `cmd` in `container`, feed it `stdin`, and collect its output.
     async fn exec(
         &self,
@@ -1605,6 +1703,138 @@ fn extract_verdict(out: &ExecOut) -> Result<()> {
         "the input files could not be extracted in the task pod ({FILES_IN}: tar -x failed): {}",
         out.stderr.trim()
     )))
+}
+
+/// `tar -c` of one path relative to the working directory, to stdout.
+fn tar_create(rel: &str) -> Vec<String> {
+    vec![
+        "tar".into(),
+        "-c".into(),
+        "-f".into(),
+        "-".into(),
+        "-C".into(),
+        WORKING_DIR.into(),
+        "--".into(),
+        rel.to_string(),
+    ]
+}
+
+fn stalled(what: &str) -> Error {
+    internal(
+        &format!("reading {what:?} out of {FILES_OUT}"),
+        format!("no byte moved for {EXEC_TIMEOUT:?} (the download stalled)"),
+    )
+}
+
+/// `tar -c` in the pod EXITED non-zero part-way through: the pod's failure
+/// (a file that vanished or shrank as it was read), the task's, naming it.
+fn tar_died(what: &str, read: &str, stderr: &str) -> String {
+    format!(
+        "{what:?} could not be read out of the task pod ({FILES_OUT}: tar -c failed part-way: \
+         {}; {read})",
+        stderr.trim()
+    )
+}
+
+/// A `files-out` exec whose stdout is read as a stream ([`KubernetesRunner::exec_out`]).
+struct OutExec {
+    stdout: ProgressReader,
+    status: std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Status>,
+                > + Send,
+        >,
+    >,
+    errs: tokio::task::JoinHandle<Vec<u8>>,
+    proc: kube::api::AttachedProcess,
+    progress: Progress,
+}
+
+/// How a `files-out` exec ended.
+struct OutExit {
+    status: Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Status>,
+    stderr: String,
+}
+
+impl OutExit {
+    fn success(&self) -> bool {
+        self.status.as_ref().and_then(|s| s.status.as_deref()) == Some("Success")
+    }
+    /// The process's OWN non-zero exit ([`EXITED`]), never a lost status.
+    fn exited_non_zero(&self) -> bool {
+        self.status.as_ref().and_then(|s| s.reason.as_deref()) == Some(EXITED)
+    }
+    /// The process ended by itself, either way.
+    fn ended(&self) -> bool {
+        self.success() || self.exited_non_zero()
+    }
+    fn lost(&self, what: &str) -> Error {
+        internal(
+            &format!("reading {what:?} out of {FILES_OUT}"),
+            format!(
+                "no exit status from tar -c ({}): {}",
+                self.status
+                    .as_ref()
+                    .and_then(|s| s.reason.as_deref())
+                    .unwrap_or("the status was lost"),
+                self.stderr.trim()
+            ),
+        )
+    }
+}
+
+impl OutExec {
+    /// Read what is left of the archive (its end blocks; at most 1 MiB, within
+    /// [`EXEC_TIMEOUT`]) and wait for the exit status.
+    async fn finish(mut self) -> OutExit {
+        use tokio::io::AsyncReadExt;
+        let drained = tokio::time::timeout(
+            EXEC_TIMEOUT,
+            tokio::io::copy(
+                &mut (&mut self.stdout).take(1 << 20),
+                &mut tokio::io::sink(),
+            ),
+        )
+        .await;
+        if !matches!(drained, Ok(Ok(n)) if n < 1 << 20) {
+            self.proc.abort();
+        }
+        let status = tokio::time::timeout(EXEC_TIMEOUT, self.status)
+            .await
+            .ok()
+            .flatten();
+        let _ = self.proc.join().await;
+        let stderr = String::from_utf8_lossy(&self.errs.await.unwrap_or_default()).into_owned();
+        OutExit { status, stderr }
+    }
+
+    /// Stop reading: the exec is aborted (a refusal part-way, an outage).
+    async fn abort(self) {
+        self.proc.abort();
+        let _ = self.proc.join().await;
+    }
+}
+
+/// An `AsyncRead` that records [`Progress`] for every byte it yields.
+struct ProgressReader {
+    inner: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
+    progress: Progress,
+}
+
+impl tokio::io::AsyncRead for ProgressReader {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let r = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+        if buf.filled().len() > before {
+            self.progress.touch();
+        }
+        r
+    }
 }
 
 fn internal(what: &str, e: impl std::fmt::Display) -> Error {

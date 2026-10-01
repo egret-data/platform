@@ -186,6 +186,9 @@ impl KestraRuntime {
             // Task 9 (the plugin storage bridge) stages a plugin's URIs.
             stored_inputs: BTreeMap::new(),
             output_files: Vec::new(),
+            // Task 9 collects `.egret/out/` with `Naming::UnderPrefixVerbatim`.
+            output_directory: false,
+            collect_to: None,
             host_protocol: true,
         }
     }

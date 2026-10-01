@@ -54,7 +54,8 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use crate::scripts::{PullPolicy, ResourceAmounts, Resources, RunnerSpec};
 use crate::worker::commands::{
-    TaskCommands, ENV_WORKING_DIR, RUN_NAME_PREFIX, TASKRUN_LABEL, WORKING_DIR,
+    TaskCommands, ENV_OUTPUT_DIR, ENV_WORKING_DIR, OUTPUT_DIR, RUN_NAME_PREFIX, TASKRUN_LABEL,
+    WORKING_DIR,
 };
 use crate::worker::TaskInput;
 
@@ -318,6 +319,13 @@ pub fn build(
         value: Some(WORKING_DIR.to_string()),
         value_from: None,
     }];
+    if cmds.output_directory {
+        env.push(EnvVar {
+            name: ENV_OUTPUT_DIR.to_string(),
+            value: Some(OUTPUT_DIR.to_string()),
+            value_from: None,
+        });
+    }
     env.extend(cmds.env.iter().map(|(k, v)| EnvVar {
         name: k.clone(),
         value: Some(v.clone()),
@@ -718,6 +726,8 @@ mod tests {
             input_files: BTreeMap::new(),
             stored_inputs: BTreeMap::new(),
             output_files: vec![],
+            output_directory: false,
+            collect_to: None,
             host_protocol: false,
         }
     }

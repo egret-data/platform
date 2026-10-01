@@ -1594,6 +1594,15 @@ pub async fn apply_outcome(
     if hit.rows_affected() == 0 {
         return Err(worker_err(WorkerError::LeaseLost(claimed.id)));
     }
+    // **W9a Task 6 (spec §4.3): the run's files are indexed HERE** -- after
+    // the fence, so a worker whose lease was taken returns above and indexes
+    // nothing (its uploads stay orphans for the pruner, §10), and before
+    // `settle`, so a successor rendered in this same transaction can read
+    // them. A file exists for a flow only once its row does (§4.2), so a run
+    // that never commits leaves none. A re-claim writes the same deterministic
+    // URIs, and the insert updates its own rows.
+    crate::storage::index_task_files(conn, claimed.workspace_id, claimed.id, &outcome.files)
+        .await?;
 
     let run = usize::try_from(claimed.run_ix).map_err(|_| {
         worker_err(WorkerError::Corrupt(

@@ -42,15 +42,15 @@ pub(super) const EXIT_ON_ERROR: &str = "set -e";
 
 /// The outputs one finished command produces.
 ///
-/// `ScriptOutput`'s shape minus what egret has no storage for: `vars`,
-/// `exitCode`, `outputFiles`, `stdOutLineCount`, `stdErrLineCount`. The keys
-/// are Kestra's own spellings so an author who has read its docs is not
-/// surprised.
+/// `ScriptOutput`'s shape: `vars`, `exitCode`, `outputFiles`,
+/// `stdOutLineCount`, `stdErrLineCount` (`taskRunner` is left out: nothing
+/// in egret reads it). The keys are Kestra's own spellings so an author who
+/// has read its docs is not surprised.
 ///
-/// **`outputFiles` maps a name to its CONTENTS, where Kestra's maps a name to a
-/// URI.** `crate::worker::commands`'s module doc carries the reason and the
-/// cap; it is the one place this handler's outputs are shaped differently from
-/// the artifact's, and it is not silent.
+/// **`outputFiles` maps a file's relative path to its `kestra://` URI**, as
+/// Kestra's does (`w9a-storage.json` `egret_expected.script_output_files_map`)
+/// -- W9a spec §6.2, a breaking change from W5a, where the value was the
+/// file's CONTENTS. Content is read with `{{ read(outputs.t.outputFiles['a.txt']) }}`.
 pub(super) fn outputs_for(result: &CommandsResult) -> serde_json::Value {
     serde_json::json!({
         "exitCode": result.exit_code,
@@ -58,7 +58,7 @@ pub(super) fn outputs_for(result: &CommandsResult) -> serde_json::Value {
         "outputFiles": result
             .output_files
             .iter()
-            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.uri.clone())))
             .collect::<serde_json::Map<_, _>>(),
         "stdOutLineCount": result.stdout_line_count,
         "stdErrLineCount": result.stderr_line_count,
@@ -74,27 +74,51 @@ pub(super) fn outputs_for(result: &CommandsResult) -> serde_json::Value {
 /// carrying an `Output`. `apply_outcome` writes `outputs` from the outcome
 /// whatever its state, so `{{ outputs.c.exitCode }}` on a failed task resolves
 /// here as it does there.
-pub(super) fn outcome_for(type_id: &str, result: &CommandsResult) -> Outcome {
+///
+/// **The collected files ride along whatever the state** (W9a Task 6): the
+/// outputs name them, so they are indexed with the outcome. Then, with the
+/// run's `task_prefix`, [`check_outputs_collected`] runs over the final
+/// outputs -- a `::{"outputs": …}::` marker naming a URI under this run's
+/// prefix that was never collected fails the task (spec §5: no output points
+/// at nothing).
+///
+/// [`check_outputs_collected`]: crate::storage::collect::check_outputs_collected
+pub(super) fn outcome_for(
+    type_id: &str,
+    result: &CommandsResult,
+    task_prefix: Option<&str>,
+) -> Outcome {
     let outputs = outputs_for(result);
+    let files: Vec<crate::storage::StoredFile> = result.output_files.values().cloned().collect();
     // **[`CommandsResult::failure`] first**, and it carries the outputs too:
     // fix round 1's Important 1 was that an output-file problem discarded the
     // exit code and the marker vars, contradicting fact 7 which this very file
     // quotes as its principle. `RunnableTaskException(e, ScriptOutput)` is an
     // exception CARRYING an output; so is this.
-    if let Some(why) = &result.failure {
+    let failure = result.failure.clone().or_else(|| {
+        task_prefix.and_then(|prefix| {
+            crate::storage::collect::check_outputs_collected(&outputs, prefix, &files).err()
+        })
+    });
+    if let Some(why) = failure {
         return Outcome {
             state: crate::executor::RunState::Failed,
             outputs: Some(outputs),
             message: Some(format!("{type_id}: {why}")),
+            files,
         };
     }
     if result.exit_code == 0 {
-        return Outcome::succeeded_with(outputs);
+        return Outcome {
+            files,
+            ..Outcome::succeeded_with(outputs)
+        };
     }
     Outcome {
         state: crate::executor::RunState::Failed,
         outputs: Some(outputs),
         message: Some(format!("{type_id}: {}", command_failed(result.exit_code))),
+        files,
     }
 }
 
@@ -335,5 +359,117 @@ pub(super) mod testing {
                 .push((crate::worker::commands::container_name(task), spec.delete));
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::StoredFile;
+
+    const PREFIX: &str = "kestra:///w9a/storage/out-filescase/executions/00000000-0000-0000-0000-0000000000e1/tasks/shell-task/00000000-0000-0000-0000-000000000041/";
+
+    fn result_with(files: &[(&str, &str)]) -> CommandsResult {
+        CommandsResult {
+            output_files: files
+                .iter()
+                .map(|(rel, name)| {
+                    (
+                        rel.to_string(),
+                        StoredFile {
+                            uri: format!("{PREFIX}{name}"),
+                            size: 1,
+                        },
+                    )
+                })
+                .collect(),
+            ..CommandsResult::default()
+        }
+    }
+
+    /// What follows the measured task run id in one of Kestra's URIs.
+    fn tail_of(v: &serde_json::Value) -> String {
+        v.as_str()
+            .unwrap()
+            .rsplit_once("/6ngIlvhFCotzCT8Em70NT4/")
+            .unwrap()
+            .1
+            .to_string()
+    }
+
+    /// `w9a-storage.json` `script_output_files_map`: `outputFiles` maps each
+    /// file's relative path to its URI -- the declared ones under Kestra's
+    /// `{hash}-{name}` and the output directory's verbatim -- and nothing
+    /// else.
+    #[test]
+    fn output_files_are_uris_keyed_by_relative_path() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oracle-exec/w9a-storage.json");
+        let fx: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let want = fx["egret_expected"]["script_output_files_map"]["outputs"]["outputFiles"]
+            .as_object()
+            .expect("the measured map")
+            .clone();
+        assert_eq!(want.len(), 6, "a zero beside a number that can disagree");
+        // Kestra's map, with egret's execution and run ids under the same
+        // tails: the tail of each measured URI after its task run id.
+        let tails: Vec<(String, String)> =
+            want.iter().map(|(k, v)| (k.clone(), tail_of(v))).collect();
+        let result = result_with(
+            &tails
+                .iter()
+                .map(|(k, t)| (k.as_str(), t.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let outputs = outputs_for(&result);
+        let got = outputs["outputFiles"].as_object().unwrap();
+        assert_eq!(got.len(), want.len());
+        for (k, v) in &want {
+            let tail = tail_of(v);
+            assert_eq!(
+                got[k],
+                serde_json::json!(format!("{PREFIX}{tail}")),
+                "{k}: a URI, never the contents"
+            );
+        }
+        let mut keys: Vec<&String> = outputs.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "exitCode",
+                "outputFiles",
+                "stdErrLineCount",
+                "stdOutLineCount",
+                "vars"
+            ]
+        );
+        let o = outcome_for("t", &result, Some(PREFIX));
+        assert_eq!(o.state, crate::executor::RunState::Success, "{o:?}");
+        assert_eq!(
+            o.files.len(),
+            6,
+            "every collected file rides with the outcome"
+        );
+    }
+
+    /// A marker naming a URI under this run's prefix that was not collected
+    /// fails the task, keeping the outputs and the files; without a prefix
+    /// (a handler with no storage) there is nothing to check.
+    #[test]
+    fn a_marker_pointing_at_an_uncollected_file_fails_the_task() {
+        let mut result = result_with(&[("a.txt", "x-a.txt")]);
+        result.vars.insert(
+            "fake".into(),
+            serde_json::json!(format!("{PREFIX}never.txt")),
+        );
+        let o = outcome_for("t", &result, Some(PREFIX));
+        assert_eq!(o.state, crate::executor::RunState::Failed);
+        assert!(o.message.as_deref().unwrap().contains("never.txt"), "{o:?}");
+        assert_eq!(o.files.len(), 1);
+        assert!(o.outputs.is_some());
+        let o = outcome_for("t", &result, None);
+        assert_eq!(o.state, crate::executor::RunState::Success);
     }
 }

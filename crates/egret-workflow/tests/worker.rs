@@ -706,6 +706,7 @@ async fn a_worker_whose_lease_was_reaped_cannot_commit(pool: sqlx::PgPool) {
         state: egret_workflow::executor::RunState::Failed,
         outputs: Some(serde_json::json!({ "from": "the reaped worker" })),
         message: None,
+        files: Vec::new(),
     };
     let mut tx = pool.begin().await.unwrap();
     let late = apply_outcome(&mut tx, &a[0], &late_outcome).await;
@@ -8691,4 +8692,258 @@ async fn a_script_task_without_timeout_gets_the_default(pool: sqlx::PgPool) {
         Some("Timeout after 00:00:01.000")
     );
     assert_eq!(reg.killed.lock().unwrap().clone(), vec!["slow".to_string()]);
+}
+
+// ---------------------------------------------------------------------------
+// W9a Task 6: a run's files are indexed with its outcome (spec §4.3)
+// ---------------------------------------------------------------------------
+
+/// The URI a task run's file `name` gets: its own execution and task run, as
+/// `uri::task_prefix` builds them for the claim.
+fn file_of(execution: Uuid, task_id: &str, run: Uuid, flow: &str, name: &str) -> String {
+    format!(
+        "{}{name}",
+        egret_workflow::storage::uri::task_prefix("t", flow, execution, task_id, run).unwrap()
+    )
+}
+
+/// The index rows of `execution`: `(uri, task_run_id, size)`.
+async fn indexed(pool: &sqlx::PgPool, execution: Uuid) -> Vec<(String, Option<Uuid>, i64)> {
+    sqlx::query_as(
+        "SELECT uri, task_run_id, size FROM workflow.execution_files \
+          WHERE execution_id = $1 ORDER BY uri",
+    )
+    .bind(execution)
+    .fetch_all(pool)
+    .await
+    .expect("read the index")
+}
+
+/// A handler that "wrote" one file per run, `out.txt`, of `attempt * 10`
+/// bytes -- and, while it runs (before any commit), saw no row for it.
+#[derive(Default)]
+struct WritesFiles {
+    pool: Mutex<Option<sqlx::PgPool>>,
+    flow: String,
+    /// `(run id, attempt, rows seen for its URI while the handler ran)`.
+    seen: Mutex<Vec<(Uuid, usize, i64)>>,
+    fail_first: bool,
+}
+
+#[async_trait::async_trait]
+impl Registry for WritesFiles {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        let uri = file_of(
+            task.execution_id,
+            &task.task_id,
+            task.run_id,
+            &self.flow,
+            "out.txt",
+        );
+        let pool = self.pool.lock().unwrap().clone().expect("a pool");
+        let before: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM workflow.execution_files WHERE uri = $1")
+                .bind(&uri)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        self.seen
+            .lock()
+            .unwrap()
+            .push((task.run_id, task.attempt, before));
+        let files = vec![egret_workflow::storage::StoredFile {
+            uri: uri.clone(),
+            size: task.attempt as u64 * 10,
+        }];
+        let outputs = Some(serde_json::json!({ "outputFiles": { "out.txt": uri } }));
+        if self.fail_first && task.attempt == 1 {
+            return Ok(Outcome {
+                state: egret_workflow::executor::RunState::Failed,
+                outputs,
+                message: Some("the first attempt fails, having written its file".into()),
+                files,
+            });
+        }
+        Ok(Outcome {
+            state: egret_workflow::executor::RunState::Success,
+            outputs,
+            message: None,
+            files,
+        })
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        panic!("nothing here is killed: {}", task.task_id);
+    }
+}
+
+/// **Files are indexed in the outcome's transaction, and not before** (spec
+/// §4.3): while the handler runs there is no row; while the outcome's
+/// transaction is open no other connection sees one; after the commit the
+/// row is there, carrying the task run.
+#[sqlx::test(migrations = "../../migrations")]
+async fn files_are_indexed_in_the_outcomes_transaction_and_not_before(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    // Through the worker: a registry whose handler returns a file.
+    let ex = start_execution(&pool, ws, None, &one_task("indexed"), serde_json::json!({}))
+        .await
+        .expect("start");
+    let reg = WritesFiles {
+        pool: Mutex::new(Some(pool.clone())),
+        flow: "indexed".into(),
+        ..WritesFiles::default()
+    };
+    assert_eq!(drain_with(&pool, &reg).await, 1);
+    let seen = reg.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    let (run, _, before) = seen[0];
+    assert_eq!(before, 0, "no row while the handler ran");
+    assert_eq!(
+        indexed(&pool, ex).await,
+        vec![(file_of(ex, "a", run, "indexed", "out.txt"), Some(run), 10)],
+        "after the commit: one row, the task run's"
+    );
+
+    // And the transaction itself: apply_outcome writes the row, nobody
+    // outside sees it until the commit.
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task("indexed2"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    let claimed = claim(&pool, 1).await.expect("claim");
+    assert_eq!(claimed.len(), 1);
+    let c = &claimed[0];
+    let uri = file_of(ex, &c.task_id, c.id, "indexed2", "a.csv");
+    let outcome = Outcome {
+        files: vec![egret_workflow::storage::StoredFile {
+            uri: uri.clone(),
+            size: 7,
+        }],
+        ..Outcome::success()
+    };
+    let mut tx = pool.begin().await.unwrap();
+    apply_outcome(&mut tx, c, &outcome)
+        .await
+        .expect("the live lease commits");
+    let inside: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workflow.execution_files WHERE uri = $1")
+            .bind(&uri)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(inside, 1, "the transaction holds the row");
+    assert!(
+        indexed(&pool, ex).await.is_empty(),
+        "no other connection sees it before the commit"
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(indexed(&pool, ex).await, vec![(uri, Some(c.id), 7)]);
+}
+
+/// **A fenced outcome indexes nothing**: a worker whose lease moved returns
+/// `LeaseLost` before any row is written, so its uploads stay orphans.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_fenced_outcome_indexes_nothing(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task("fenced-files"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    let claimed = claim(&pool, 1).await.expect("claim");
+    let c = &claimed[0];
+    // Another holder renewed the lease: the fencing token moved.
+    sqlx::query(
+        "UPDATE workflow.task_runs SET claimed_at = claimed_at + interval '1 second' \
+          WHERE id = $1",
+    )
+    .bind(c.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let outcome = Outcome {
+        files: vec![egret_workflow::storage::StoredFile {
+            uri: file_of(ex, &c.task_id, c.id, "fenced-files", "a.csv"),
+            size: 7,
+        }],
+        ..Outcome::success()
+    };
+    let mut tx = pool.begin().await.unwrap();
+    let late = apply_outcome(&mut tx, c, &outcome).await;
+    // Committed if `apply_outcome` let it through, as `tick` would.
+    match &late {
+        Ok(()) => tx.commit().await.expect("commit"),
+        Err(_) => drop(tx),
+    }
+    let err = late.expect_err("the lease moved");
+    assert!(err.to_string().contains("lease"), "{err}");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workflow.execution_files WHERE execution_id = $1"
+        )
+        .bind(ex)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0,
+        "nothing indexed for the run"
+    );
+}
+
+/// **A retry attempt overwrites its own URIs** without a unique violation:
+/// the task run keeps its id across attempts, so its names are the same
+/// (spec §4.3), and the row ends holding the second attempt's size.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_retry_attempt_overwrites_its_own_uris_without_a_unique_violation(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_with_retry("retried-files", "PT1S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    let reg = WritesFiles {
+        pool: Mutex::new(Some(pool.clone())),
+        flow: "retried-files".into(),
+        fail_first: true,
+        ..WritesFiles::default()
+    };
+    assert_eq!(drain_with(&pool, &reg).await, 1, "the first attempt");
+    assert_eq!(run_state(&pool, ex, "a").await.as_deref(), Some("RETRYING"));
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    assert_eq!(wake(&pool, 8).await.expect("wake"), vec![ex]);
+    assert_eq!(drain_with(&pool, &reg).await, 1, "the second attempt");
+    assert_eq!(run_state(&pool, ex, "a").await.as_deref(), Some("SUCCESS"));
+    let seen = reg.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].0, seen[1].0, "one task run, two attempts");
+    assert_eq!((seen[0].1, seen[1].1), (1, 2));
+    assert_eq!(
+        seen[1].2, 1,
+        "the first attempt's row was there when the second ran"
+    );
+    assert_eq!(
+        indexed(&pool, ex).await,
+        vec![(
+            file_of(ex, "a", seen[0].0, "retried-files", "out.txt"),
+            Some(seen[0].0),
+            20
+        )],
+        "one row, overwritten by the second attempt"
+    );
 }

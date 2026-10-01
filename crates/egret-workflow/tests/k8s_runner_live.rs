@@ -187,6 +187,60 @@ async fn runner() -> KubernetesRunner {
         pod_config(),
         LogRepo::new(pool().await),
     )
+    .with_files(suite_files())
+}
+
+/// This process's internal storage (W9a Task 6): a `MemStore`; the transfer
+/// is what is judged here.
+fn suite_files() -> Arc<egret_workflow::storage::FileStore> {
+    static FILES: std::sync::OnceLock<Arc<egret_workflow::storage::FileStore>> =
+        std::sync::OnceLock::new();
+    FILES
+        .get_or_init(|| {
+            Arc::new(egret_workflow::storage::FileStore {
+                store: Arc::new(egret_storage::MemStore::new()),
+                bucket: "egret-test".into(),
+                prefix: "workflow/".into(),
+                caps: egret_workflow::storage::Caps::default(),
+                retention_days: 30,
+            })
+        })
+        .clone()
+}
+
+/// `cmds` collecting into `t`'s own task prefix.
+fn collecting(t: &TaskInput, mut cmds: TaskCommands) -> TaskCommands {
+    cmds.collect_to = Some(egret_workflow::worker::commands::CollectTo {
+        workspace: t.workspace_id,
+        task_prefix: egret_workflow::storage::uri::task_prefix(
+            "w9a.t6.k8s",
+            "live",
+            t.execution_id,
+            &t.task_id,
+            t.run_id,
+        )
+        .unwrap(),
+        naming: egret_workflow::worker::commands::Naming::KestraOutputName,
+    });
+    cmds
+}
+
+/// What the store holds for each collected file, by its relative path.
+async fn contents(
+    files: &egret_workflow::storage::FileStore,
+    t: &TaskInput,
+    out: &CommandsResult,
+) -> BTreeMap<String, String> {
+    let mut got = BTreeMap::new();
+    for (rel, f) in &out.output_files {
+        let bytes = files
+            .store
+            .get(&files.object_uri(t.workspace_id, &f.uri).unwrap())
+            .await
+            .unwrap_or_else(|e| panic!("{} is in the store: {e}", f.uri));
+        got.insert(rel.clone(), String::from_utf8(bytes).unwrap());
+    }
+    got
 }
 
 fn pods(c: &kube::Client) -> Api<Pod> {
@@ -487,6 +541,7 @@ async fn input_and_output_files_round_trip() {
         ("b.txt".to_string(), "x".repeat(700)),
     ]);
     cmds.output_files = vec!["out.txt".into(), "wd.txt".into(), "n.txt".into()];
+    let cmds = collecting(&t, cmds);
     let out = r
         .run(&t, &cmds, &k8s_spec(), &NoObserver)
         .await
@@ -494,7 +549,7 @@ async fn input_and_output_files_round_trip() {
     assert_eq!(out.exit_code, 0, "{out:?}");
     assert_eq!(out.failure, None, "{out:?}");
     assert_eq!(
-        out.output_files,
+        contents(&suite_files(), &t, &out).await,
         BTreeMap::from([
             ("out.txt".to_string(), "abc\nline two\n".to_string()),
             ("wd.txt".to_string(), "/egret/working-dir".to_string()),
@@ -517,13 +572,14 @@ async fn input_and_output_files_round_trip() {
         "mkdir -p sub d.csv && echo c > sub/c.csv",
     ]);
     cmds.output_files = vec!["there.txt".into(), "missing.txt".into(), "*.csv".into()];
+    let cmds = collecting(&t, cmds);
     let out = r
         .run(&t, &cmds, &k8s_spec(), &NoObserver)
         .await
         .expect("no worker failure");
     assert_eq!(out.failure, None, "a missing output is ignored: {out:?}");
     assert_eq!(
-        out.output_files,
+        contents(&suite_files(), &t, &out).await,
         BTreeMap::from([
             ("a.csv".to_string(), "a\n".to_string()),
             ("b.csv".to_string(), "b\n".to_string()),
@@ -589,14 +645,15 @@ async fn a_stored_input_file_streams_into_the_pod() {
         "lit.txt".into(),
         "mtime.txt".into(),
     ];
+    let cmds = collecting(&t, cmds);
     let out = r
         .run(&t, &cmds, &k8s_spec(), &NoObserver)
         .await
         .expect("no worker failure");
     assert_eq!(out.exit_code, 0, "{out:?}");
     assert_eq!(out.failure, None, "{out:?}");
-    let mtime: u64 = out
-        .output_files
+    let mut files_out = contents(&files, &t, &out).await;
+    let mtime: u64 = files_out
         .get("mtime.txt")
         .and_then(|m| m.trim().parse().ok())
         .unwrap_or_else(|| panic!("{out:?}"));
@@ -608,7 +665,6 @@ async fn a_stored_input_file_streams_into_the_pod() {
         mtime >= 315_532_800 && mtime <= now + 60 && mtime + 3600 >= now,
         "the staged file carries the upload's time, not 1970: {mtime}"
     );
-    let mut files_out = out.output_files.clone();
     files_out.remove("mtime.txt");
     assert_eq!(
         files_out,
@@ -745,6 +801,7 @@ async fn a_nonzero_exit_fails_and_keeps_outputs() {
         "exit 3",
     ]);
     cmds.output_files = vec!["o.txt".into()];
+    let cmds = collecting(&t, cmds);
     let out: CommandsResult = r
         .run(&t, &cmds, &k8s_spec(), &NoObserver)
         .await
@@ -752,7 +809,10 @@ async fn a_nonzero_exit_fails_and_keeps_outputs() {
     assert_eq!(out.exit_code, 3);
     assert_eq!(out.vars.get("k"), Some(&serde_json::json!("v")));
     assert_eq!(
-        out.output_files.get("o.txt").map(String::as_str),
+        contents(&suite_files(), &t, &out)
+            .await
+            .get("o.txt")
+            .map(String::as_str),
         Some("partial\n")
     );
     assert_eq!(out.failure, None);
@@ -974,6 +1034,191 @@ async fn a_second_run_call_for_the_same_attempt_reattaches_not_recreates() {
     // Final review I3: `run` deletes nothing; `release` (after the commit) does.
     r.release(&t2, &k8s_spec()).await.expect("release");
     assert!(wait_gone(&c, &name, Duration::from_secs(20)).await);
+}
+
+/// **W9a Task 6, in a pod**: `outputFiles` are streamed out of `files-out`
+/// by `tar -c` straight into the store -- a `*.csv` glob, `sub/x.csv`, a
+/// 12 MiB file (byte-identical by a SHA-256 computed in `main`) and
+/// `outputDirectory: true` (`$OUTPUT_DIR`, keyed by relative path, stored
+/// verbatim). A declared symlink is refused by name and never followed.
+async fn output_files_are_streamed_out_of_the_pod_byte_identical() {
+    use sha2::Digest;
+    let c = client().await;
+    let r = runner().await;
+    let (t, rec) = task();
+    let mut cmds = shell(&[
+        "echo a > a.csv",
+        "echo b > b.csv",
+        "mkdir -p sub && printf 'x,y\\n1,2\\n' > sub/x.csv",
+        "head -c 12582912 /dev/urandom > big.bin",
+        "echo \"SHA=$(sha256sum big.bin | cut -d' ' -f1)\"",
+        "echo \"OUTPUT_DIR=$OUTPUT_DIR\"",
+        "printf 'in outdir' > \"$OUTPUT_DIR/od.txt\"",
+        "mkdir -p \"$OUTPUT_DIR/deep\" && printf deep > \"$OUTPUT_DIR/deep/d.txt\"",
+    ]);
+    cmds.output_files = vec!["*.csv".into(), "sub/x.csv".into(), "big.bin".into()];
+    cmds.output_directory = true;
+    let cmds = collecting(&t, cmds);
+    let prefix = cmds.collect_to.clone().unwrap().task_prefix;
+    let out = r
+        .run(&t, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("no worker failure");
+    assert_eq!((out.exit_code, out.failure.clone()), (0, None), "{out:?}");
+    let texts = rec.texts();
+    assert!(
+        texts.contains(&"OUTPUT_DIR=/egret/working-dir/.egret/out".to_string()),
+        "{texts:?}"
+    );
+    let sha = texts
+        .iter()
+        .find_map(|l| l.strip_prefix("SHA="))
+        .expect("main printed the SHA")
+        .to_string();
+    let uris: BTreeMap<&str, &str> = out
+        .output_files
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.uri.as_str()))
+        .collect();
+    assert_eq!(
+        uris.keys().copied().collect::<Vec<_>>(),
+        [
+            "a.csv",
+            "b.csv",
+            "big.bin",
+            "deep/d.txt",
+            "od.txt",
+            "sub/x.csv"
+        ]
+    );
+    assert_eq!(
+        uris["sub/x.csv"],
+        format!("{prefix}10ehIGUrkxwg9tBZYZJQ9K-x.csv")
+    );
+    assert_eq!(uris["deep/d.txt"], format!("{prefix}deep/d.txt"));
+    let files = suite_files();
+    let big = files
+        .store
+        .get(&files.object_uri(t.workspace_id, uris["big.bin"]).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(big.len(), 12 << 20);
+    let got: String = sha2::Sha256::digest(&big)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(got, sha, "byte-identical to what main wrote");
+    let mut small = contents(&suite_files(), &t, &out).await;
+    small.remove("big.bin");
+    assert_eq!(
+        small,
+        BTreeMap::from([
+            ("a.csv".to_string(), "a\n".to_string()),
+            ("b.csv".to_string(), "b\n".to_string()),
+            ("deep/d.txt".to_string(), "deep".to_string()),
+            ("od.txt".to_string(), "in outdir".to_string()),
+            ("sub/x.csv".to_string(), "x,y\n1,2\n".to_string()),
+        ])
+    );
+    r.release(&t, &k8s_spec()).await.expect("release");
+    assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
+
+    // A declared symlink: refused by name, the target never read.
+    let (t, _rec) = task();
+    let mut cmds = shell(&["ln -s /etc/passwd leaked.txt"]);
+    cmds.output_files = vec!["leaked.txt".into()];
+    let cmds = collecting(&t, cmds);
+    let out = r
+        .run(&t, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("a link is the author's flow");
+    let why = out.failure.clone().expect("refused");
+    assert!(
+        why.contains("SYMLINK") && why.contains("leaked.txt"),
+        "{why}"
+    );
+    assert!(out.output_files.is_empty());
+    r.release(&t, &k8s_spec()).await.expect("release");
+    assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
+}
+
+/// **A re-attached pod is collected under the same URIs** (spec §5
+/// "Re-attach"): the first holder is dropped while `main` runs, the second
+/// re-attaches and collects, a third re-attaches to the finished pod and
+/// collects again -- the same names and sizes, the same object count.
+async fn a_reattached_pod_is_collected_under_the_same_uris() {
+    let c = client().await;
+    let r = runner().await;
+    let (t, rec) = task();
+    let mut cmds = shell(&[
+        "echo started",
+        "sleep 6",
+        "echo one > one.txt",
+        "printf two > \"$OUTPUT_DIR/two.txt\"",
+    ]);
+    cmds.output_files = vec!["one.txt".into()];
+    cmds.output_directory = true;
+    let cmds = collecting(&t, cmds);
+    {
+        let spec = k8s_spec();
+        let first = r.run(&t, &cmds, &spec, &NoObserver);
+        tokio::pin!(first);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            tokio::select! {
+                res = &mut first => panic!("the first call finished early: {res:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            }
+            if rec.texts().iter().any(|l| l == "started") {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "never saw `started`"
+            );
+        }
+    } // <- dropped
+    let b = r
+        .run(&t, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("the second holder re-attaches");
+    let c2 = r
+        .run(&t, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("the third re-attaches to the finished pod");
+    assert_eq!((b.failure.clone(), c2.failure.clone()), (None, None));
+    assert_eq!(b.output_files, c2.output_files);
+    assert_eq!(
+        b.output_files
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["one.txt", "two.txt"]
+    );
+    let prefix = &cmds.collect_to.as_ref().unwrap().task_prefix;
+    let files = suite_files();
+    let under = files
+        .object_uri(t.workspace_id, &format!("{prefix}x"))
+        .unwrap();
+    let key_prefix = under
+        .strip_prefix("s3://egret-test/")
+        .unwrap()
+        .strip_suffix('x')
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        files
+            .store
+            .list(&key_prefix, None)
+            .await
+            .unwrap()
+            .objects
+            .len(),
+        2,
+        "the third holder overwrote the second's objects"
+    );
+    r.release(&t, &k8s_spec()).await.expect("release");
+    assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
 }
 
 /// A line written on the node just before the reclaim, and never stored, is
@@ -1511,6 +1756,18 @@ async fn an_exec_the_role_refuses_fails_the_task_naming_the_missing_verb() {
     let mut with_files = shell(&["cat in.txt > out.txt"]);
     with_files.input_files = BTreeMap::from([("in.txt".to_string(), "x".to_string())]);
     with_files.output_files = vec!["out.txt".into()];
+    with_files.collect_to = Some(egret_workflow::worker::commands::CollectTo {
+        workspace: Uuid::nil(),
+        task_prefix: egret_workflow::storage::uri::task_prefix(
+            "w9a.t6.k8s",
+            "live",
+            Uuid::nil(),
+            "t",
+            Uuid::nil(),
+        )
+        .unwrap(),
+        naming: egret_workflow::worker::commands::Naming::KestraOutputName,
+    });
     for (what, cmds) in [
         ("no files", no_files),
         ("input and output files", with_files),
@@ -1630,6 +1887,8 @@ fn cases() -> Vec<(&'static str, Case)> {
     vec![
         case!(a_shell_command_runs_in_a_pod_and_the_pod_is_deleted),
         case!(input_and_output_files_round_trip),
+        case!(output_files_are_streamed_out_of_the_pod_byte_identical),
+        case!(a_reattached_pod_is_collected_under_the_same_uris),
         case!(a_stored_input_file_streams_into_the_pod),
         case!(a_tar_x_that_dies_in_the_pod_fails_the_task),
         case!(a_short_stored_object_aborts_the_upload_and_fails_the_task),

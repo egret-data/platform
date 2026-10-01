@@ -7,7 +7,9 @@
 //! - [`scope`]: the render snapshot the four file functions read through
 //!   (spec §7.2), resolved before every render.
 //! - [`transfer`]: the streamed ustar archive that carries files into a task
-//!   container (spec §5).
+//!   container, and the reader that takes them back out (spec §5).
+//! - [`collect`]: files out of a task container, streamed into the store
+//!   under the task run's prefix (spec §5, §6.2).
 //! - this module: the [`FileStore`] (the object store, its bucket, prefix and
 //!   caps), the process-wide slot it is installed in, and the index writers.
 //!
@@ -22,6 +24,7 @@
 //! the store or the connection as a parameter; only wiring points call
 //! [`current`].
 
+pub mod collect;
 pub mod index;
 pub mod scope;
 pub mod transfer;

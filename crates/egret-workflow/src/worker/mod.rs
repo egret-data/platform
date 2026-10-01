@@ -297,6 +297,15 @@ pub struct Outcome {
     /// state and not its message could not tell a budget that fired from a
     /// handler that failed for an unrelated reason.
     pub message: Option<String>,
+    /// Files this run wrote, indexed by apply_outcome in the fenced transaction (§4.3).
+    ///
+    /// W9a Task 6: the files are already in the store; their index rows --
+    /// what makes a file exist for a flow (spec §4.2) -- are inserted by
+    /// [`apply_outcome`] in the transaction that commits this outcome, after
+    /// the lease fence. A run that never commits leaves only unindexed
+    /// objects, which the pruner sweeps (§10). Empty for every handler that
+    /// writes no file.
+    pub files: Vec<crate::storage::StoredFile>,
 }
 
 impl Outcome {
@@ -306,6 +315,7 @@ impl Outcome {
             state: RunState::Success,
             outputs: None,
             message: None,
+            files: Vec::new(),
         }
     }
     /// `SUCCESS`, carrying an output map.
@@ -314,6 +324,7 @@ impl Outcome {
             state: RunState::Success,
             outputs: Some(outputs),
             message: None,
+            files: Vec::new(),
         }
     }
     /// `FAILED`, with no message. Kept because Task 2's tests use it.
@@ -322,6 +333,7 @@ impl Outcome {
             state: RunState::Failed,
             outputs: None,
             message: None,
+            files: Vec::new(),
         }
     }
     /// `FAILED`, carrying the message the task failed with.
@@ -330,6 +342,7 @@ impl Outcome {
             state: RunState::Failed,
             outputs: None,
             message: Some(message.into()),
+            files: Vec::new(),
         }
     }
 }

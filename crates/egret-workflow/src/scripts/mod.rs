@@ -168,6 +168,7 @@ const COMMON_IMPLEMENTED: &[&str] = &[
     "failFast",
     "inputFiles",
     "interpreter",
+    "outputDirectory",
     "outputFiles",
     "taskRunner",
     "timeout",
@@ -191,14 +192,14 @@ pub const HANDLED_BY_TASK_MODEL: &[&str] = &[
 /// Refused on all four types. Seven of these are base-`Task` properties
 /// (`assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`,
 /// `workerSelector`) that egret's `Task` model would otherwise drop without
-/// effect; the other four (`namespaceFiles`, `outputDirectory`, `runner`,
-/// `targetOS`) are the script tasks' own.
+/// effect; the other three (`namespaceFiles`, `runner`, `targetOS`) are the
+/// script tasks' own. `outputDirectory` left this list in W9a Task 6: it is
+/// implemented over internal storage.
 const COMMON_REFUSED: &[&str] = &[
     "assets",
     "logLevel",
     "logToFile",
     "namespaceFiles",
-    "outputDirectory",
     "policyRefs",
     "runner",
     "targetOS",
@@ -352,6 +353,9 @@ pub struct ScriptTask {
     /// Inline contents only; a storage URI (a string) is refused.
     pub input_files: BTreeMap<String, String>,
     pub output_files: Vec<String>,
+    /// `outputDirectory`, default `false` (W9a Task 6): every file the
+    /// command writes under `{{ outputDir }}` / `$OUTPUT_DIR` is collected.
+    pub output_directory: bool,
     /// Default `true`: `set -e` is prepended iff this is true (Task 1).
     pub fail_fast: bool,
     /// Accepted; **no effect** (see the module doc).
@@ -469,6 +473,7 @@ pub fn parse(type_id: &str, spec: &Value) -> Result<ScriptTask, Vec<ScriptRefusa
         env: BTreeMap::new(),
         input_files: BTreeMap::new(),
         output_files: Vec::new(),
+        output_directory: false,
         fail_fast: true,
         warning_on_std_err: true,
         task_runner: None,
@@ -568,6 +573,9 @@ pub fn parse(type_id: &str, spec: &Value) -> Result<ScriptTask, Vec<ScriptRefusa
                         ));
                     }
                 }
+            }
+            "outputDirectory" => {
+                out.output_directory = boolean(value, key, &mut errs).unwrap_or(false)
             }
             "failFast" => out.fail_fast = boolean(value, key, &mut errs).unwrap_or(true),
             "warningOnStdErr" => {
@@ -1037,5 +1045,28 @@ mod tests {
         .unwrap();
         let found: Vec<String> = script_tasks(&flow).into_iter().map(|(p, ..)| p).collect();
         assert_eq!(found, vec!["tasks.s.e"]);
+    }
+
+    /// W9a Task 6: `outputDirectory` is implemented on all four types, read
+    /// as a boolean, and no longer refused -- at publish, through `parse`.
+    #[test]
+    fn output_directory_is_implemented_and_no_longer_refused() {
+        for kind in ScriptKind::ALL {
+            assert!(kind.implemented_properties().contains(&"outputDirectory"));
+            assert!(!kind.refused_properties().contains(&"outputDirectory"));
+            let body = match kind.body_property() {
+                "commands" => json!({"commands": ["x"], "outputDirectory": true}),
+                _ => json!({"script": "x", "outputDirectory": true}),
+            };
+            let parsed = parse(kind.fqcn(), &body)
+                .unwrap_or_else(|e| panic!("{} saves with outputDirectory: {e:?}", kind.fqcn()));
+            assert!(parsed.output_directory);
+            let mut not_bool = body.clone();
+            not_bool["outputDirectory"] = json!("{{ inputs.x }}");
+            let errs = parse(kind.fqcn(), &not_bool).expect_err("a boolean, as Kestra's");
+            assert!(errs.iter().any(|r| r.path == "outputDirectory"), "{errs:?}");
+        }
+        let parsed = parse(SHELL_COMMANDS, &json!({"commands": ["x"]})).unwrap();
+        assert!(!parsed.output_directory, "default false");
     }
 }

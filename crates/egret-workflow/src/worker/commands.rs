@@ -47,9 +47,9 @@
 //!    ten of the twelve, dropping `getAdditionalVars` and
 //!    `getEnableOutputDirectory` without their absence being stated anywhere —
 //!    `getAdditionalVars` is Kestra's `{{ workingDir }}` / `{{ outputDir }}`
-//!    render vars, which this crate's renderer does not expose to a task, and
-//!    `getEnableOutputDirectory` gates the separate output directory named
-//!    below.
+//!    render vars, which the script handler binds itself (`outputDir` since
+//!    W9a Task 6), and `getEnableOutputDirectory` is
+//!    [`TaskCommands::output_directory`].
 //! 4. **The argv is `interpreter ++ [ (beforeCommands ++ commands).join(lineSeparator) ]`** —
 //!    `ScriptService.scriptCommands`, which builds `new ArrayList<>(interpreter)`
 //!    and adds ONE element made by `Collectors.joining(targetOS.lineSeparator)`.
@@ -92,18 +92,20 @@
 //!
 //! # What this module deliberately does NOT have
 //!
-//! * **No internal storage.** Kestra's `ScriptOutput.outputFiles` is a
-//!   `Map<String, URI>` into Kestra's own storage. egret's object store belongs
-//!   to W9 and this crate cannot reach it — the same wall
-//!   [`handlers::sql`](super::handlers::sql)'s missing `fetch: STORE` hit — so
-//!   an output file's **contents** come back inline under
-//!   [`MAX_OUTPUT_FILE_BYTES`], and a file over the cap fails the task rather
-//!   than being truncated. A prefix is not an answer.
-//! * **No `namespaceFiles`, no `inputFiles` from storage, no `outputDirectory`,
-//!   no `targetOS`.** Each needs a seam this crate does not have (storage,
-//!   namespace files, Windows workers). [`TaskCommands::input_files`] carries
-//!   the one case a handler here actually needs — a script written by the
-//!   handler itself.
+//! * **Internal storage since W9a (2026-10-01).** Kestra's
+//!   `ScriptOutput.outputFiles` is a `Map<String, URI>` into its own storage,
+//!   and so is egret's now: every declared output (and, with
+//!   `outputDirectory: true`, every file under [`OUTPUT_DIR`]) is streamed out
+//!   of the container into the object store ([`crate::storage::collect`])
+//!   and its value is the `kestra://` URI. W5a carried the **contents**
+//!   inline under a 1 MiB cap, UTF-8 only; both limits are gone (W9a spec
+//!   §6.2) -- `workflow.storage.max_file_bytes` and `max_task_bytes` bound
+//!   what a task stores. An `inputFiles` value that is a `kestra://` URI is
+//!   staged from the store ([`TaskCommands::stored_inputs`]).
+//! * **No `namespaceFiles`, no `targetOS`.** Each needs a seam this crate
+//!   does not have (namespace files are W9b, Windows workers none).
+//!   [`TaskCommands::input_files`] carries the inline case -- a script
+//!   written by the handler itself, or an author's literal contents.
 //! * **No registry credentials, no `shmSize`, `deviceRequests`, `privileged`,
 //!   `networkMode`, volumes.** W5a Task 5 implements `pullPolicy`, `cpu.cpus`,
 //!   `memory.memory` and `delete` (see [`create_args`]); every other Kestra
@@ -138,24 +140,6 @@ pub const ENV_WORKING_DIR: &str = "WORKING_DIR";
 /// `AbstractExecScript.$default$interpreter` is `["/bin/sh", "-c"]` and
 /// `CommandsWrapper` carries the same literal `/bin/sh`.
 pub const DEFAULT_INTERPRETER: [&str; 2] = ["/bin/sh", "-c"];
-
-/// The most bytes ONE output file may carry back, and — summed —
-/// the most all of them may.
-///
-/// Not a performance number, and the same argument as
-/// [`handlers::sql::MAX_FETCH_ROWS`](super::handlers::sql::MAX_FETCH_ROWS):
-/// an output is written to `task_runs.outputs` (JSONB) and re-read into the
-/// render context of **every** later task in the execution. Kestra does not
-/// need a cap because its equivalent is a URI into internal storage; egret has
-/// no such storage here, so the contents are inline and a cap is the only thing
-/// standing between a flow and an unbounded Postgres row.
-///
-/// **It bounds the total as well as each file, and fix round 1's Important 2 is
-/// why that sentence is here.** `outputFiles:` is an unbounded `Vec`, so a
-/// per-file cap alone bounds nothing: a thousand files a byte under the cap is
-/// a gigabyte, and this doc used to claim it was *the* bound.
-/// [`ingest_output_file`] carries a running total and refuses on either.
-pub const MAX_OUTPUT_FILE_BYTES: usize = 1_048_576;
 
 /// The most bytes a directory LISTING for `outputFiles` globs may be -- the
 /// output of `docker diff` (Docker) or `ls -A1p` (Kubernetes). Past it the
@@ -201,9 +185,12 @@ pub const GLOB_STEP_BUDGET: u64 = 200_000_000;
 
 /// The most bytes the `::{…}::` markers may contribute in total.
 ///
-/// Same argument as [`MAX_OUTPUT_FILE_BYTES`], applied to the other channel:
-/// a container that prints a marker in a loop would otherwise grow the row
-/// without bound.
+/// The markers are written to `task_runs.outputs` (JSONB) and re-read into
+/// the render context of every later task in the execution, so a container
+/// that prints a marker in a loop would otherwise grow the row without bound.
+/// (W5a's output-file cap made the same argument for file contents; since
+/// W9a an output file is a URI into internal storage, under
+/// `workflow.storage.max_file_bytes` and `max_task_bytes`.)
 pub const MAX_VARS_BYTES: usize = 1_048_576;
 
 /// What to run, as data — egret's `TaskCommands`.
@@ -255,9 +242,24 @@ pub struct TaskCommands {
     /// key, no failure). Measured: `w5a-scripts.json`
     /// `egret_expected.output_files`. `**`, `[...]` and a wildcard directory
     /// are refused by name ([`output_problem`]). W4 took literal names only
-    /// and failed a missing one. The 1 MiB per-file and total caps stay: the
-    /// value is the contents, not a storage URI (W9).
+    /// and failed a missing one.
+    ///
+    /// **W9a (spec §6.2): each file is streamed into internal storage** at
+    /// [`Self::collect_to`], and its value in the outputs is the
+    /// `kestra://` URI -- no longer its contents. W5a's 1 MiB and UTF-8
+    /// limits are gone; `workflow.storage.max_file_bytes` and
+    /// `max_task_bytes` replace them.
     pub output_files: Vec<String>,
+    /// `outputDirectory: true` (W9a Task 6): the command gets
+    /// [`OUTPUT_DIR`] (the env var [`ENV_OUTPUT_DIR`], the render variable
+    /// `outputDir`), created before it starts, and every file under it is
+    /// collected as if declared, keyed by its path relative to it and stored
+    /// verbatim under the task prefix -- Kestra's measured keying
+    /// (`w9a-storage.json` `egret_expected.output_directory`).
+    pub output_directory: bool,
+    /// Where collected files go. `None` with any output declared fails the task naming
+    /// `[storage]`: W5a's contents-in-outputs path no longer exists.
+    pub collect_to: Option<CollectTo>,
     /// **The plugin host's stdout protocol** (W5b): `false` for every script
     /// task, which keeps W5a's and W11's line rules byte for byte.
     ///
@@ -281,6 +283,46 @@ pub struct TaskCommands {
     /// script pod (`false`) is W5a's byte for byte.
     pub host_protocol: bool,
 }
+
+/// Where a task run's collected files go (W9a spec §5): its workspace, and
+/// its prefix `kestra:///…/executions/{the run's own execution}/tasks/{task}/{taskRunId}/`
+/// (an iteration's id in a `Loop`, spec §3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollectTo {
+    pub workspace: uuid::Uuid,
+    pub task_prefix: String,
+    pub naming: Naming,
+}
+
+/// How a declared output's URI is named under [`CollectTo::task_prefix`].
+/// The output directory's files are always [`Naming::UnderPrefixVerbatim`]
+/// (Kestra's measured `output_directory.uri_tail`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Naming {
+    /// `IdUtils.from({WORKING_DIR}/{rel}) + "-" + filename`, spaces as `+`
+    /// (`FilesService.java:94-97`). The scheme is Kestra's; the hash cannot
+    /// equal Kestra's, whose working directory is a random temp dir.
+    KestraOutputName,
+    /// `{task_prefix}{rel}` -- the plugin bridge's `.egret/out/` (Task 9).
+    UnderPrefixVerbatim,
+}
+
+/// The output directory of `outputDirectory: true`, inside [`WORKING_DIR`]
+/// so the `files-out` helper of a Kubernetes pod sees it (the working
+/// directory is the pod's shared volume).
+///
+/// Kestra's is a fresh `IdUtils.create()` under its working directory,
+/// random per run (`w9a-storage.json` `egret_expected.output_directory`);
+/// egret's is fixed, because a re-claim that adopts a running container
+/// rebuilds the commands and must name the directory the container was
+/// given. Its name never reaches a URI or a key -- both are relative to it.
+pub const OUTPUT_DIR: &str = "/egret/working-dir/.egret/out";
+
+/// [`OUTPUT_DIR`] relative to [`WORKING_DIR`].
+pub const OUTPUT_DIR_REL: &str = ".egret/out";
+
+/// The env var naming [`OUTPUT_DIR`]: Kestra's `OUTPUT_DIR`, measured.
+pub const ENV_OUTPUT_DIR: &str = "OUTPUT_DIR";
 
 /// One file staged from internal storage (W9a spec §5).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -319,15 +361,22 @@ impl std::fmt::Debug for TaskCommands {
             .field("input_files", &files)
             .field("stored_inputs", &stored)
             .field("output_files", &self.output_files)
+            .field("output_directory", &self.output_directory)
+            .field("collect_to", &self.collect_to)
             .field("host_protocol", &self.host_protocol)
             .finish()
     }
 }
 
 impl TaskCommands {
+    /// Whether anything is collected out of the container after the command.
+    pub fn has_outputs(&self) -> bool {
+        !self.output_files.is_empty() || self.output_directory
+    }
+
     /// Whether anything goes into the working directory before the command.
     pub fn has_inputs(&self) -> bool {
-        !self.input_files.is_empty() || !self.stored_inputs.is_empty()
+        !self.input_files.is_empty() || !self.stored_inputs.is_empty() || self.output_directory
     }
 
     /// Every input file, by name, as the archive writes it. A name in both
@@ -345,6 +394,18 @@ impl TaskCommands {
                     "the input file {k:?} is declared twice, as contents and as a stored file"
                 )));
             }
+        }
+        if self.output_directory {
+            if let Some(clash) = out
+                .keys()
+                .find(|k| *k == OUTPUT_DIR_REL || k.starts_with(&format!("{OUTPUT_DIR_REL}/")))
+            {
+                return Err(Error::InvalidInput(format!(
+                    "the input file {clash:?} is inside the output directory {OUTPUT_DIR}, \
+                     which egret creates empty for `outputDirectory: true`"
+                )));
+            }
+            out.insert(OUTPUT_DIR_REL.to_string(), TarSource::Directory);
         }
         Ok(out)
     }
@@ -392,8 +453,10 @@ pub struct CommandsResult {
     pub stderr_line_count: usize,
     /// `ScriptOutput.vars` — everything a `::{"outputs": {…}}::` line carried.
     pub vars: serde_json::Map<String, serde_json::Value>,
-    /// Declared output files, name → contents.
-    pub output_files: BTreeMap<String, String>,
+    /// Every collected output file -- declared, globbed or in the output
+    /// directory -- by its path relative to where it was found, as stored.
+    /// `outputs.outputFiles` maps the same keys to the URIs (W9a spec §6.2).
+    pub output_files: BTreeMap<String, crate::storage::StoredFile>,
     /// Why the task must fail even though the command may have exited `0`.
     ///
     /// **This channel exists because fix round 1's Important 1 found the code
@@ -941,161 +1004,6 @@ pub(crate) fn classify_marker(line: &str) -> Marker {
     }
 }
 
-/// **Resolve one declared output file inside the copied working directory.**
-///
-/// The second pure seam, and the reason the whole working directory is copied
-/// back in one `docker cp` rather than one per declared file: *whether a
-/// declared file is there* becomes a question for the **filesystem** instead of
-/// a question about the wording of a daemon error string.
-///
-/// That is fix round 1's Critical 1 and Important 5 answered together, because
-/// they were one bug seen from two ends:
-///
-/// * **C1** — `outputFiles: ["some-dir"]` copied fine, then `fs::read` on a
-///   directory gave an `io::Error`, which became `Error::Internal`, which
-///   `handlers::container::mapped` correctly reads as **egret's outage** and
-///   turns into a tick-aborting worker failure. One typo'd flow wedged the
-///   worker for ever, blaming egret. A directory is now named and refused here.
-/// * **I5** — the old code asked "is this the daemon?" by looking for
-///   `"no such file or directory"` in the copy's stderr **before** concluding
-///   the author's file was missing, so a CLI wording change would have silently
-///   converted an author error into C1's failure mode. There is no longer a
-///   string test on that path at all: an absent file is `ErrorKind::NotFound`
-///   on a `std::fs::metadata` of a path in egret's own staging directory.
-///
-/// `Err` is the message the **task** fails with — never a worker failure. The
-/// caller puts it in [`CommandsResult::failure`], so the exit code and the vars
-/// the command printed survive it.
-#[cfg(test)]
-pub(crate) fn ingest_output_file(
-    result: &mut CommandsResult,
-    staged_root: &std::path::Path,
-    rel: &str,
-    max_file_bytes: usize,
-    max_total_bytes: usize,
-    total: &mut usize,
-) -> std::result::Result<(), String> {
-    ingest_output(
-        result,
-        staged_root,
-        rel,
-        max_file_bytes,
-        max_total_bytes,
-        total,
-        false,
-    )
-}
-
-/// [`ingest_output_file`], for a name that is either declared literally
-/// (`from_glob = false`) or one a declared glob matched (`true`). A glob that
-/// matched a DIRECTORY skips it -- Kestra's glob visits files only -- where a
-/// directory declared by name is refused.
-pub(crate) fn ingest_output(
-    result: &mut CommandsResult,
-    staged_root: &std::path::Path,
-    rel: &str,
-    max_file_bytes: usize,
-    max_total_bytes: usize,
-    total: &mut usize,
-    from_glob: bool,
-) -> std::result::Result<(), String> {
-    if let Some(problem) = output_problem(rel) {
-        return Err(problem);
-    }
-
-    // **Every component is `lstat`ed and a symlink is refused, leaf or not.**
-    // See [`SYMLINK_REFUSAL`] for what this is defending against and why the
-    // check is here rather than a `canonicalize` that would resolve the very
-    // link it is trying to catch.
-    let mut path = staged_root.to_path_buf();
-    let mut walked = String::new();
-    let mut meta = None;
-    for segment in rel.split('/') {
-        path.push(segment);
-        if !walked.is_empty() {
-            walked.push('/');
-        }
-        walked.push_str(segment);
-
-        // `symlink_metadata` is `lstat`: it describes the entry itself and does
-        // NOT follow it. `metadata` here would stat the TARGET, which for
-        // `leaked.txt -> /etc/passwd` is the worker host's file, and the check
-        // would pass on the very thing it exists to stop.
-        let m = match std::fs::symlink_metadata(&path) {
-            Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // **A declared output that is not there is IGNORED** -- no key,
-                // no failure -- the artifact's measured behaviour
-                // (`w5a-scripts.json` `egret_expected.output_files`:
-                // `missing_declared_file: "ignored"`, state SUCCESS). W4 failed
-                // the task here; W5a Task 5 fix round 1 follows Kestra, by the
-                // user's decision.
-                return Ok(());
-            }
-            Err(e) => {
-                return Err(format!(
-                    "`outputFiles` declares {rel:?}, which could not be read back out of \
-                     {WORKING_DIR}: {e}"
-                ))
-            }
-        };
-        if m.file_type().is_symlink() {
-            let target = std::fs::read_link(&path)
-                .map(|t| t.display().to_string())
-                .unwrap_or_else(|_| "?".to_string());
-            return Err(format!(
-                "`outputFiles` declares {rel:?}, and {walked:?} is a SYMLINK (to \
-                 {target:?}). {SYMLINK_REFUSAL}"
-            ));
-        }
-        meta = Some(m);
-    }
-    let meta = meta.expect("`relative_problem` refuses an empty name, so there is a segment");
-
-    if meta.is_dir() && from_glob {
-        return Ok(());
-    }
-    if meta.is_dir() {
-        return Err(format!(
-            "`outputFiles` declares {rel:?}, which is a DIRECTORY. An output is JSON \
-             and egret has no internal storage to hand back an archive URI for (W9 \
-             owns it), so name the files inside it instead"
-        ));
-    }
-    let len = meta.len() as usize;
-    if len > max_file_bytes {
-        return Err(format!(
-            "the output file {rel:?} is {len} bytes, over the {max_file_bytes} an \
-             output may carry. egret has no internal storage for a workflow yet (W9 \
-             owns it), so an output file's CONTENTS are stored on the task run and \
-             re-rendered by every later task in the execution; a prefix is not an \
-             answer"
-        ));
-    }
-    // The KEY counts too (fix round 2): many empty files matched by a glob
-    // would otherwise grow the outputs map with no bound.
-    *total += len + rel.len();
-    if *total > max_total_bytes {
-        return Err(format!(
-            "the output files declared by this task come to {total} bytes (names and \
-             contents), over the {max_total_bytes} one task may carry. `outputFiles:` is \
-             an unbounded list, so a per-file cap alone bounds nothing"
-        ));
-    }
-    let bytes = std::fs::read(&path).map_err(|e| {
-        format!("the output file {rel:?} could not be read out of the staging copy: {e}")
-    })?;
-    let text = String::from_utf8(bytes).map_err(|_| {
-        format!(
-            "the output file {rel:?} is not UTF-8, and an output is JSON. egret has no \
-             internal storage to hand back a URI to (W9 owns it), so a binary artefact \
-             cannot be an output of this task today"
-        )
-    })?;
-    result.output_files.insert(rel.to_string(), text);
-    Ok(())
-}
-
 /// `TaskLogLineMatcher.LOG_DATA_SYNTAX`, applied to one log line.
 ///
 /// The artifact's regex is `^::(\{.*})::$`, compiled once and matched against
@@ -1125,17 +1033,15 @@ pub fn parse_marker(line: &str) -> Option<serde_json::Map<String, serde_json::Va
     }
 }
 
-/// What a symlink in the staged output tree means, and why it is refused
-/// outright.
+/// **What a symlink declared as an output means, and why it is refused by
+/// name** -- the history, kept because each fix was measured.
 ///
-/// # This is a sandbox escape, measured, and fix round 1 made half of it
+/// # W5a: a sandbox escape through the host staging directory
 ///
-/// `docker cp` out of a container **recreates a symlink as a symlink** on the
-/// host — it does not resolve it and it does not materialise its target.
-/// Anything that then opens that path with an ordinary `read`/`stat` is opening
-/// it **on the worker host**, outside the container the author was confined to.
-/// Measured on this machine (daemon 28.4.0), with
-/// `ln -s /etc/passwd leaked.txt` inside an `alpine:3.20` working directory:
+/// `docker cp` out of a container to a host path **recreates a symlink as a
+/// symlink** there; anything that then opened that path read it **on the
+/// worker host**. Measured on daemon 28.4.0 with `ln -s /etc/passwd leaked.txt`
+/// in an `alpine:3.20` working directory:
 ///
 /// ```text
 /// host      /etc/passwd   9344 bytes
@@ -1144,72 +1050,27 @@ pub fn parse_marker(line: &str) -> Option<serde_json::Map<String, serde_json::Va
 /// read back                9344 bytes   <- the WORKER HOST's file, as a SUCCESS
 /// ```
 ///
-/// Two legs, and they have different histories:
+/// Two legs: the leaf (a declared name that is itself a link) and an
+/// intermediate component (`etcdir/passwd` with `ln -s /etc etcdir`, which a
+/// whole-directory copy brought over as a host link). W5a refused both by
+/// `lstat`ing every component of the staged path, and copied per file so an
+/// intermediate link resolved **inside the container** (alpine's 702 bytes).
 ///
-/// * **the leaf** — a declared name that is itself a symlink. Present since the
-///   handler was written, under both copy strategies;
-/// * **an intermediate component** — `outputFiles: ["etcdir/passwd"]` with
-///   `ln -s /etc etcdir`. **Introduced by fix round 1**, which replaced the
-///   per-file copy with one whole-directory copy: measured, a per-file
-///   `docker cp c:<wd>/etcdir/passwd` resolves `etcdir` *inside the container*
-///   and yields alpine's 702-byte file, while the directory copy brings
-///   `etcdir` over as a host symlink and yields the host's 9344.
+/// # W9a Task 6 (2026-10-01): no host path at all
 ///
-/// # What the artifact does, and why egret cannot just copy it
-///
-/// `Docker.downloadOutputFiles` reads the working directory as a **TAR stream**
-/// (`copyArchiveFromContainerCmd`) and, per entry, calls
-/// `Files.copy(InputStream, Path)` — it materialises the entry's *content* into
-/// a regular file. A tar symlink entry carries no content, so Kestra's host
-/// filesystem never acquires a symlink and never follows one. The protection is
-/// structural rather than a check.
-///
-/// egret uses `docker cp`, which is the same daemon endpoint without the tar
-/// parsing (and without a tar dependency), so it must reach the same end state
-/// by refusing instead: `symlink_metadata` on every component, no symlink
-/// tolerated anywhere in a declared path.
-///
-/// # What is left after the fix, stated rather than found later
-///
-/// The per-file copy resolves an intermediate component **inside the
-/// container**, so `outputFiles: ["etcdir/passwd"]` with `ln -s /etc etcdir`
-/// now returns *alpine's* `/etc/passwd` as a regular file — the container's
-/// own, which the task could have printed anyway. There is no link on the host
-/// and nothing for this guard to see, and it **succeeds**.
-///
-/// That is deliberate and it is not the defect: the boundary that matters is
-/// the worker host, and the task already owns its container. The residual is
-/// that a declared name can still name a file outside the working directory
-/// *within the container*. What Kestra does instead differs **per leg**, and
-/// fix round 3 corrects this paragraph, which had one answer for both:
-///
-/// * **leaf** (`leaked.txt`) — the tar entry for a link carries no content, so
-///   `Files.copy(InputStream, Path)` materialises an **empty regular file**,
-///   which `Files.walkFileTree` then matches. Kestra returns an empty file.
-/// * **intermediate** (`etcdir/passwd`) — there is no such entry to materialise.
-///   `FilesService.outputFiles` resolves declared names through
-///   `WorkingDir.findAllFilesMatching`, which is a `MatcherFileVisitor` over
-///   `Files.walkFileTree` (`LocalWorkingDir`), so an unmatched name yields **no
-///   entry at all**. Kestra returns *nothing*, not an empty file.
-///
-/// Either way both are inside the sandbox and neither is the host, so the
-/// judgement is unchanged — only its justification was wrong.
-/// `a_symlinked_output_file_cannot_read_the_worker_hosts_files` drives both legs
-/// and asserts the host's file appears on neither.
-///
-/// # Why a refusal rather than "resolve it and check it stays inside"
-///
-/// Because the check would have to resolve the link to test it, and on the host
-/// the resolution **is** the escape — `canonicalize` on `leaked.txt` returns
-/// `/etc/passwd` having already left the staging directory. A containment test
-/// is also the wrong question: the author's link was written inside the
-/// container, where `/etc/passwd` is alpine's; it only became the host's by
-/// being carried out. So the honest answer is that a link cannot be carried out
-/// at all, and the author names the file it points at.
-const SYMLINK_REFUSAL: &str = "A symlink is refused rather than followed: `docker cp` \
-     recreates it as a symlink on the WORKER HOST, so reading it would read the host's \
-     file rather than the container's, outside the sandbox the task ran in. Name the \
-     file itself instead";
+/// Output files are now read as a **stream** -- `docker cp c:<path> -` into
+/// [`TarReader`](crate::storage::transfer::TarReader) -- and only a regular
+/// file's contents are ever taken, straight into internal storage. A link is
+/// an archive entry with **no contents**: there is nothing on the host to
+/// resolve, and it is refused by name rather than stored empty (Kestra's
+/// `Files.copy` of a link entry makes an empty file, an empty output the
+/// author did not write). The per-file copy still resolves an intermediate
+/// component inside the container, so `etcdir/passwd` returns the
+/// container's own file, which the task could have printed anyway; the
+/// boundary that matters, the worker host, is not reachable from either leg.
+/// `a_symlinked_output_file_cannot_read_the_worker_hosts_files` (live) drives
+/// both.
+const _SYMLINKS_ARE_REFUSED_BY_NAME: () = ();
 
 /// **egret does NOT classify a docker failure by reading its stderr**, and the
 /// whole-branch re-review's Critical is why.
@@ -1323,8 +1184,6 @@ pub struct DockerRunner {
     /// Docker — which is how [`DockerRunner::run`]'s daemon-versus-task split
     /// is driven without breaking the machine's daemon.
     binary: String,
-    /// [`MAX_OUTPUT_FILE_BYTES`], as a field.
-    max_output_bytes: usize,
     /// [`MAX_VARS_BYTES`], as a field.
     max_vars_bytes: usize,
     /// [`MAX_LISTING_BYTES`], as a field (a test drives the cap).
@@ -1335,8 +1194,9 @@ pub struct DockerRunner {
     /// follows the container's log from there rather than from its start
     /// (W5a Task 5). `None`: a re-attach replays the whole log.
     logs: Option<crate::logs::LogRepo>,
-    /// Internal storage, which stored inputs are streamed from (W9a Task 5).
-    /// `None`: a stored input fails the task naming `[storage]`.
+    /// Internal storage, which stored inputs are streamed from (W9a Task 5)
+    /// and output files into (Task 6). `None`: either fails the task naming
+    /// `[storage]`.
     files: Option<std::sync::Arc<crate::storage::FileStore>>,
 }
 
@@ -1347,12 +1207,10 @@ impl Default for DockerRunner {
 }
 
 impl DockerRunner {
-    /// The shipping runner: the `docker` on `PATH`, [`MAX_OUTPUT_FILE_BYTES`]
-    /// and [`MAX_VARS_BYTES`].
+    /// The shipping runner: the `docker` on `PATH` and [`MAX_VARS_BYTES`].
     pub fn new() -> Self {
         Self {
             binary: "docker".to_string(),
-            max_output_bytes: MAX_OUTPUT_FILE_BYTES,
             max_vars_bytes: MAX_VARS_BYTES,
             max_listing_bytes: MAX_LISTING_BYTES,
             max_diff_bytes: MAX_DIFF_BYTES,
@@ -1384,15 +1242,14 @@ impl DockerRunner {
         }
     }
 
-    /// The same runner with smaller caps.
+    /// The same runner with a smaller [`MAX_VARS_BYTES`].
     ///
-    /// `handlers::sql::Sql::with_limits`'s reason, applied to the other two
-    /// unbounded channels: *"so a test can drive the cap without materialising
-    /// ten thousand rows to do it"*. A cap nobody has watched refuse is a cap
-    /// nobody has watched, and a megabyte of container output inside a test is
-    /// a slow way to learn that.
-    pub fn with_limits(mut self, max_output_bytes: usize, max_vars_bytes: usize) -> Self {
-        self.max_output_bytes = max_output_bytes;
+    /// `handlers::sql::Sql::with_limits`'s reason: *"so a test can drive the
+    /// cap without materialising ten thousand rows to do it"*. The output
+    /// files' caps are internal storage's (`workflow.storage.max_file_bytes`,
+    /// `max_task_bytes`), read from the [`FileStore`](crate::storage::FileStore)
+    /// this runner is given ([`with_files`](Self::with_files)).
+    pub fn with_vars_cap(mut self, max_vars_bytes: usize) -> Self {
         self.max_vars_bytes = max_vars_bytes;
         self
     }
@@ -1906,9 +1763,8 @@ impl DockerRunner {
             ))
         })?;
 
-        if !commands.output_files.is_empty() && result.failure.is_none() {
-            let staging = tempdir(task)?;
-            self.collect_output_files(name, commands, staging.path(), &mut result)
+        if commands.has_outputs() && result.failure.is_none() {
+            self.collect_output_files(name, commands, &mut result)
                 .await?;
         }
         Ok(result)
@@ -2125,73 +1981,68 @@ impl DockerRunner {
         })?;
 
         // ---- output files ---------------------------------------------------
-        if !commands.output_files.is_empty() && result.failure.is_none() {
-            let staging = tempdir(task)?;
-            self.collect_output_files(name, commands, staging.path(), &mut result)
+        if commands.has_outputs() && result.failure.is_none() {
+            self.collect_output_files(name, commands, &mut result)
                 .await?;
         }
 
         Ok(result)
     }
 
-    /// Copy **only the declared files** out, then resolve each one with
-    /// [`ingest_output_file`].
+    /// Stream **only the declared files** out, one `docker cp c:<path> -` per
+    /// name, each read entry by entry ([`TarReader`]) straight into internal
+    /// storage ([`collect_declared`]); then, with `outputDirectory: true`,
+    /// the whole [`OUTPUT_DIR`] the same way ([`collect_directory`]).
     ///
-    /// # Fix round 2 moved this back to a per-file copy, and that is the fix
+    /// # W9a Task 6 (2026-10-01): no host staging directory any more
     ///
-    /// Fix round 1 replaced N per-file copies with one whole-directory copy, on
-    /// the reasoning that it is what `Docker.run` does and that it lets
-    /// [`ingest_output_file`] answer *"is the author's file there?"* from the
-    /// filesystem instead of from a daemon error string. The second half was
-    /// right and is kept. The first half was wrong twice:
+    /// W5a copied each declared file to a staging directory on the worker and
+    /// then had to refuse symlinks component by component, because a link
+    /// `docker cp` recreated there resolved against the WORKER HOST
+    /// ([`_SYMLINKS_ARE_REFUSED_BY_NAME`]). Read as a stream, a link is an archive
+    /// entry with no contents: it is refused by name and nothing is followed,
+    /// on any host. `docker cp c:<wd>/etcdir/passwd -` still resolves an
+    /// intermediate link inside the container, so that leg returns the
+    /// container's own file, as before.
     ///
-    /// * **it moved symlink resolution from inside the container to the worker
-    ///   host**, which is [`SYMLINK_REFUSAL`]'s intermediate-component leg — a
-    ///   sandbox escape that per-file copies do not have, because
-    ///   `docker cp c:<wd>/etcdir/passwd` resolves `etcdir` container-side;
-    /// * **it copied the whole working directory regardless of what was
-    ///   declared** — measured, 64 MiB of undeclared scratch in 2.66s. The
-    ///   output caps bound what reaches Postgres; nothing bounded what reached
-    ///   the worker's disk.
+    /// # Whose error
     ///
-    /// And the appeal to the artifact was only half true: `downloadOutputFiles`
-    /// does copy the whole directory, but as a **tar stream it materialises**
-    /// (`Files.copy(InputStream, Path)` per entry), never as a filesystem copy —
-    /// which is exactly why Kestra's host never ends up holding a symlink. The
-    /// shape mattered more than the granularity, and the granularity was the
-    /// part that got copied.
+    /// An author's problem (a cap, a directory, a link, a name no URI can
+    /// carry) lands in [`CommandsResult::failure`] with the exit code and the
+    /// vars intact. `Err` is egret's: the store did not answer (an outage,
+    /// the run is re-claimed with no attempt spent), or the copy broke off.
+    /// Whether the daemon is there is asked with
+    /// [`daemon_answers`](DockerRunner::daemon_answers), never read from
+    /// stderr ([`_CLASSIFICATION_IS_A_PROBE_NOT_A_SUBSTRING_TEST`]): a copy
+    /// that failed while the daemon answers is a file that is not there,
+    /// IGNORED as Kestra ignores it.
     ///
-    /// # The daemon-free property is preserved, deliberately
-    ///
-    /// The copy's exit status is **ignored except to ask the daemon whether it
-    /// is still there**. A file that did not copy simply is not in the staging
-    /// tree, and `ingest_output_file` says so from `symlink_metadata` — so the
-    /// merge condition still holds: the missing file, the directory, the
-    /// symlink and both caps are all decided with no daemon. Nothing about the
-    /// author's declared name is read out of stderr any more; the only input to
-    /// the worker-versus-task decision is
-    /// [`daemon_answers`](DockerRunner::daemon_answers).
-    ///
-    /// `Err` is a **worker** failure and reaches only the daemon case; an
-    /// author's problem lands in [`CommandsResult::failure`] with the exit code
-    /// and the vars intact.
+    /// [`TarReader`]: crate::storage::transfer::TarReader
+    /// [`collect_declared`]: crate::storage::collect::collect_declared
+    /// [`collect_directory`]: crate::storage::collect::collect_directory
     async fn collect_output_files(
         &self,
         name: &str,
         commands: &TaskCommands,
-        staging: &std::path::Path,
         result: &mut CommandsResult,
     ) -> Result<()> {
-        let mut total = 0usize;
+        use crate::storage::collect::{collect_declared, collect_directory, CollectError};
+        use crate::storage::transfer::TarReader;
         // Every declared name is vetted BEFORE anything is interpolated into
-        // a `docker` argument, so `..` never reaches the daemon and a staged
-        // path cannot land outside `staging`.
+        // a `docker` argument, so `..` never reaches the daemon.
         for rel in &commands.output_files {
             if let Some(problem) = output_problem(rel) {
                 result.failure = Some(problem);
                 return Ok(());
             }
         }
+        let (fs, to) = match collection_target(self.files.as_ref(), commands) {
+            Ok(both) => both,
+            Err(problem) => {
+                result.failure = Some(problem);
+                return Ok(());
+            }
+        };
         // Patterns are resolved against `docker diff` -- the paths the
         // container added, which works on a stopped container and moves no
         // file contents -- then read back one file at a time like a literal.
@@ -2214,52 +2065,189 @@ impl DockerRunner {
                 return Ok(());
             }
         };
-        for (i, (rel, from_glob)) in names.iter().enumerate() {
-            let (rel, from_glob) = (rel.as_str(), *from_glob);
-            // **One private root per declared name** — see
-            // [`stage_destination`] for the whole argument. Nothing an author
-            // declares can reach another declared name's staging tree.
-            let root = staging.join(i.to_string());
-            let dst = match stage_destination(&root, rel) {
-                Ok(dst) => dst,
-                Err(problem) => {
+        let mut so_far = 0u64;
+        let mut names_left = MAX_OUTPUT_NAMES.saturating_sub(names.len());
+        for (rel, from_glob) in &names {
+            let src = format!("{name}:{WORKING_DIR}/{rel}");
+            let mut copy = self.copy_out(&src).await?;
+            let got = {
+                let mut reader = TarReader::new(&mut copy.stdout);
+                collect_declared(&fs, &to, rel, *from_glob, &mut reader, &mut so_far).await
+            };
+            let finished = copy.finish(matches!(got, Ok(_))).await;
+            match got {
+                Ok(Some(file)) => {
+                    result.output_files.insert(rel.clone(), file);
+                }
+                Ok(None) => {
+                    if !finished && !self.daemon_answers().await {
+                        return Err(Error::Internal(anyhow::anyhow!(
+                            "the Docker daemon could not be reached, so {rel:?} could not be \
+                             copied out of {name}: {}",
+                            copy.stderr().await
+                        )));
+                    }
+                }
+                Err(CollectError::Author(problem)) => {
                     result.failure = Some(problem);
                     return Ok(());
                 }
-            };
-            let src = format!("{name}:{WORKING_DIR}/{rel}");
-            let dst_s = dst.display().to_string();
-            let out = self.cli(&["cp", &src, &dst_s]).await?;
-            if !out.status.success() && !self.daemon_answers().await {
-                // **The daemon is asked, not the stderr.** `docker cp` echoes
-                // the author's own path into its error message, so a declared
-                // `outputFiles: ["docker.sock"]` used to be read as the socket
-                // being unreachable and wedged the run. See
-                // [`_CLASSIFICATION_IS_A_PROBE_NOT_A_SUBSTRING_TEST`].
-                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                return Err(Error::Internal(anyhow::anyhow!(
-                    "the Docker daemon could not be reached, so {rel:?} could not be \
-                     copied back out of {name}: {stderr}"
-                )));
+                Err(e) => return Err(self.collect_failure(name, rel, e, &mut copy).await),
             }
-            // A copy that failed while the daemon is up is left to the
-            // filesystem: the file is simply not staged, and
-            // `ingest_output_file` produces the author-facing message.
-            if let Err(problem) = ingest_output(
-                result,
-                &root,
-                rel,
-                self.max_output_bytes,
-                self.max_output_bytes,
-                &mut total,
-                from_glob,
-            ) {
-                result.failure = Some(problem);
-                break;
+        }
+        if commands.output_directory {
+            let src = format!("{name}:{OUTPUT_DIR}");
+            let mut copy = self.copy_out(&src).await?;
+            let got = {
+                let mut reader = TarReader::new(&mut copy.stdout);
+                collect_directory(
+                    &fs,
+                    &to,
+                    &mut reader,
+                    &mut so_far,
+                    &mut names_left,
+                    &mut result.output_files,
+                )
+                .await
+            };
+            let finished = copy.finish(got.is_ok()).await;
+            match got {
+                Ok(()) => {
+                    if !finished && !self.daemon_answers().await {
+                        return Err(Error::Internal(anyhow::anyhow!(
+                            "the Docker daemon could not be reached, so {OUTPUT_DIR} could not \
+                             be copied out of {name}: {}",
+                            copy.stderr().await
+                        )));
+                    }
+                }
+                Err(CollectError::Author(problem)) => result.failure = Some(problem),
+                Err(e) => return Err(self.collect_failure(name, OUTPUT_DIR, e, &mut copy).await),
             }
         }
         Ok(())
     }
+
+    /// `docker cp <src> -`: the archive on its stdout, its stderr read beside
+    /// it (64 KiB kept) so a chatty CLI cannot block the copy.
+    async fn copy_out(&self, src: &str) -> Result<CopyOut> {
+        let mut child = Command::new(&self.binary)
+            .args(["cp", src, "-"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                Error::Internal(anyhow::anyhow!("could not run `{} cp`: {e}", self.binary))
+            })?;
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+        let errs = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut kept = Vec::new();
+            let mut stderr = stderr;
+            let _ = (&mut stderr).take(64 * 1024).read_to_end(&mut kept).await;
+            let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+            kept
+        });
+        Ok(CopyOut {
+            child,
+            stdout,
+            errs: Some(errs),
+            kept: None,
+        })
+    }
+
+    /// An `Err` out of collection that is not the author's: the store (an
+    /// outage), or the copy breaking off -- the daemon gone, or a stream egret
+    /// could not read. Either way egret's, and the run is re-claimed.
+    async fn collect_failure(
+        &self,
+        name: &str,
+        what: &str,
+        e: crate::storage::collect::CollectError,
+        copy: &mut CopyOut,
+    ) -> Error {
+        use crate::storage::collect::CollectError;
+        match e {
+            CollectError::Store(m) => Error::Internal(anyhow::anyhow!("{m}")),
+            CollectError::Source(m) if !self.daemon_answers().await => {
+                Error::Internal(anyhow::anyhow!(
+                    "the Docker daemon could not be reached, so {what:?} could not be copied \
+                     out of {name}: {m} ({})",
+                    copy.stderr().await
+                ))
+            }
+            CollectError::Source(m) | CollectError::Author(m) => Error::Internal(anyhow::anyhow!(
+                "copying {what:?} out of {name} broke off: {m} ({})",
+                copy.stderr().await
+            )),
+        }
+    }
+}
+
+/// One `docker cp <src> -` in flight ([`DockerRunner::copy_out`]).
+struct CopyOut {
+    child: tokio::process::Child,
+    stdout: tokio::process::ChildStdout,
+    errs: Option<tokio::task::JoinHandle<Vec<u8>>>,
+    kept: Option<String>,
+}
+
+impl CopyOut {
+    /// End the copy. After a clean read (`drain`), what is left of the
+    /// archive (the end blocks) is read, at most 1 MiB, and the CLI's own
+    /// exit is waited for: `true` when it succeeded. Otherwise -- a refusal
+    /// part-way, or a declared directory whose whole tree is not wanted --
+    /// it is killed, and `false`.
+    async fn finish(&mut self, drain: bool) -> bool {
+        use tokio::io::AsyncReadExt;
+        if drain {
+            let left = tokio::io::copy(
+                &mut (&mut self.stdout).take(1 << 20),
+                &mut tokio::io::sink(),
+            )
+            .await
+            .unwrap_or(0);
+            if left < 1 << 20 {
+                return self.child.wait().await.is_ok_and(|s| s.success());
+            }
+        }
+        let _ = self.child.kill().await;
+        false
+    }
+
+    /// The CLI's stderr, trimmed (read once).
+    async fn stderr(&mut self) -> String {
+        if let Some(errs) = self.errs.take() {
+            let bytes = errs.await.unwrap_or_default();
+            self.kept = Some(String::from_utf8_lossy(&bytes).trim().to_string());
+        }
+        self.kept.clone().unwrap_or_default()
+    }
+}
+
+/// The store and the target for a run's output files, or the task's failure
+/// naming `[storage]` (W9a spec §4.6, §6.2): W5a's contents-in-outputs path
+/// no longer exists, so without internal storage nothing can be collected.
+pub(crate) fn collection_target(
+    files: Option<&std::sync::Arc<crate::storage::FileStore>>,
+    commands: &TaskCommands,
+) -> std::result::Result<(std::sync::Arc<crate::storage::FileStore>, CollectTo), String> {
+    match (files, &commands.collect_to) {
+        (Some(fs), Some(to)) => Ok((fs.clone(), to.clone())),
+        _ => Err(no_storage_for_outputs()),
+    }
+}
+
+/// The message a declared output fails with when egret has no internal
+/// storage to put it in.
+pub(crate) fn no_storage_for_outputs() -> String {
+    "`outputFiles` and `outputDirectory` need internal storage, and egret has none \
+     configured (the `[storage]` section of its configuration): since W9a an output \
+     file is a kestra:// URI, not its contents"
+        .to_string()
 }
 
 /// The label every egret task container **and** task pod carries with its
@@ -2471,6 +2459,10 @@ pub(crate) fn create_args(
     }
     create.push("--env".into());
     create.push(format!("{ENV_WORKING_DIR}={WORKING_DIR}"));
+    if commands.output_directory {
+        create.push("--env".into());
+        create.push(format!("{ENV_OUTPUT_DIR}={OUTPUT_DIR}"));
+    }
     for (k, v) in &commands.env {
         create.push("--env".into());
         create.push(format!("{k}={v}"));
@@ -2505,162 +2497,6 @@ pub(crate) fn staging_error(e: crate::storage::transfer::TarError) -> Error {
     }
 }
 
-/// Make the staging destination for **one** declared output name, under a root
-/// that is private to that name.
-///
-/// # The general statement, which is what the whole-branch review asked for
-///
-/// **Nothing computed from an author's `outputFiles` string may produce a
-/// worker failure.** Only egret's own environment may — the `docker` binary not
-/// being spawnable, and the daemon socket not answering. That is the class, and
-/// it has now been violated twice from two different code paths:
-///
-/// * Task 5 review's Critical 1 — `fs::read` on a declared **directory** gave
-///   `Error::Internal`, so `outputFiles: ["a-dir"]` aborted the tick;
-/// * the whole-branch review's Critical — `create_dir_all(staging/a)` gave
-///   `AlreadyExists` when the container wrote a **regular file** `a` and the
-///   author declared `["a", "a/b.txt"]`, so that flow left the run `RUNNING` and leased with
-///   no outcome applied, and repeated for ever at every reap. Measured:
-///   `File exists (os error 17)`.
-///
-/// The second was reintroduced by fix round 2 restoring the per-file copy, which
-/// is why patching the measured case is not the fix: the *shape* keeps coming
-/// back. Two things enforce the class instead of a branch:
-///
-/// 1. **This function's error type is `String`, not [`Error`]** — the same
-///    discipline [`ingest_output_file`] already has (it contains zero
-///    `Error::Internal`). An author's path is now handled end to end by
-///    functions that *cannot* express a worker failure, so the classification
-///    happens once, at the type, rather than at each `?`.
-/// 2. **One private root per declared name.** `staging/<i>/<rel>`, so no
-///    declared name can create, occupy or block a path another declared name
-///    needs. `["a", "a/b.txt"]` cannot collide because they never share a tree.
-///
-/// # Exactly what the type-level half covers, which is less than it used to say
-///
-/// This sentence used to read *"the only `?` left on the author's route … Both
-/// are egret's environment"*, and the re-review is right that it was **false as
-/// written**: [`DockerRunner::collect_output_files`] returns
-/// `Result<(), Error>` and builds an `Error::Internal` inline, so the route is
-/// not type-proof end to end. A rule this task wrote and this task falsified —
-/// the category I named last round.
-///
-/// Stated precisely instead:
-///
-/// * **[`stage_destination`] and [`ingest_output_file`] cannot express a worker
-///   failure**, by their signatures — `Result<_, String>`. Everything decided
-///   *about the author's declared name* happens in those two.
-/// * **[`DockerRunner::collect_output_files`] can**, and does, for exactly one
-///   reason: the daemon stopped answering. Its `Error` values are now built
-///   solely from [`daemon_answers`](DockerRunner::daemon_answers), which takes
-///   no author input — so an author still cannot *cause* one, which is the
-///   property the class actually needs. The type does not carry that claim; the
-///   probe does.
-fn stage_destination(
-    root: &std::path::Path,
-    rel: &str,
-) -> std::result::Result<std::path::PathBuf, String> {
-    let dst = root.join(rel);
-    // **Parents are created here, by egret, as real directories.** That is the
-    // other half of the intermediate-component defence: nothing the container
-    // wrote can become a path component of the staged tree.
-    // `ingest_output_file` still `lstat`s every component, so the guard is one
-    // a test can plant a link under and watch fail.
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "`outputFiles` declares {rel:?}, and egret could not make a place to \
-                 copy it into: {e}"
-            )
-        })?;
-    }
-    Ok(dst)
-}
-
-/// A staging directory that removes itself **however** its scope ends —
-/// including when the future holding it is dropped.
-///
-/// The whole-branch review's Minor 3, and it is cross-task in the way that makes
-/// it easy to miss: `worker::timeout::guard` enforces a task-level `timeout:`
-/// by **dropping the future** (Task 2), and the directory is mine (Task 5). An
-/// explicit `remove_dir_all` after the `await` never runs on that path, so a
-/// timed-out `egret.script.python` left `$TMPDIR/egret-workflow-*` behind
-/// holding the author's **rendered `script:`** — which may carry whatever a
-/// `{{ … }}` resolved to, in a directory that outlives the run.
-///
-/// `Drop` is the fix rather than another cleanup call, because the whole point
-/// is that no call site runs: dropping the future drops its locals, and this
-/// runs then. `remove_dir_all`'s result is discarded for the reason every
-/// destructor discards one — there is nobody left to tell, and the run has
-/// already failed on its budget.
-struct StagingDir(std::path::PathBuf);
-
-impl StagingDir {
-    fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-
-impl Drop for StagingDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// A private staging directory for one run's file copies.
-///
-/// Named after the run so two concurrent runs cannot collide, and created under
-/// the process temp dir rather than in the repo.
-fn tempdir(task: &TaskInput) -> Result<StagingDir> {
-    // **0700 and unpredictable, and review Minor 3 is only half the reason.**
-    // The stated half: this directory holds the author's rendered `script:`,
-    // which may carry whatever a `{{ … }}` resolved to, and 0755 under a
-    // typical umask makes that world-readable on a shared host.
-    //
-    // The half that makes it a correctness issue and not only a disclosure one:
-    // the name used to be a pure function of `(run_id, claimed_at)`, both of
-    // which an author can see, in a world-writable directory. Anyone able to
-    // guess it could pre-create it **as a symlink to a directory** and
-    // `create_dir_all` would happily succeed through it — putting the staging
-    // tree, and every `docker cp` destination under it, somewhere else. A
-    // random component removes the guess and `create_dir` (not `create_dir_all`)
-    // refuses a path that already exists, so a pre-created anything is an error
-    // rather than a silent redirection.
-    let dir = std::env::temp_dir().join(format!(
-        "egret-workflow-{}-{}",
-        task.run_id.simple(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    create_private_dir(&dir)?;
-    Ok(StagingDir(dir))
-}
-
-/// Create one directory, private to this user, refusing a path that is already
-/// there.
-///
-/// **Split out of [`tempdir`] so the properties can be asserted against THIS
-/// code.** Fix round 3's NEW Minor 1: the test used to check that
-/// `std::fs::DirBuilder::new().create(existing)` errors, which is a fact about
-/// `std` — it passed with this implementation reverted to `create_dir_all`, and
-/// a test that passes with the implementation reverted is not a test. It cannot
-/// be asserted through `tempdir` directly either, because `tempdir`'s whole
-/// point is that its path is random and therefore never already there.
-///
-/// `create_dir` and not `create_dir_all`: the recursive form **succeeds** on a
-/// path that already exists, including one an attacker pre-created as a symlink
-/// to a directory, which would silently relocate every `docker cp` destination
-/// underneath it.
-fn create_private_dir(dir: &std::path::Path) -> Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    // Deliberately NOT `.recursive(true)`.
-    builder.create(dir).map_err(io_err)
-}
-
 /// A file name a handler may name, relative to [`WORKING_DIR`].
 ///
 /// Kestra's own check is a character allow-list with the message *"Output file
@@ -2678,7 +2514,7 @@ fn check_relative(rel: &str) -> Result<()> {
     }
 }
 
-/// The same rule as a **message or nothing**, so [`ingest_output_file`] can use
+/// The same rule as a **message or nothing**, so the collectors can use
 /// it without an [`Error`] it would only have to unwrap again.
 pub(crate) fn relative_problem(rel: &str) -> Option<String> {
     if rel.is_empty() {
@@ -2705,7 +2541,7 @@ pub(crate) fn relative_problem(rel: &str) -> Option<String> {
     // DIRECTORY, and `docker cp c:<wd>/. dst` copies the whole subtree before
     // anything can refuse it — fix round 3's NEW Minor 2. The refusal for a
     // directory that is only discovered after the copy still happens in
-    // `ingest_output_file`; this closes the spellings that ask for one by name.
+    // collection; this closes the spellings that ask for one by name.
     if rel.split('/').any(|seg| seg == ".") || rel.ends_with('/') {
         return Some(format!(
             "{rel:?} names a DIRECTORY rather than a file. An output is JSON and egret \
@@ -2895,7 +2731,7 @@ pub(crate) fn pattern_dirs(declared: &[String]) -> std::collections::BTreeSet<St
 
 /// `docker diff` lines (`A /egret/working-dir/sub/c.csv`), as the entries of
 /// each directory in `dirs` that are not a parent of another entry -- i.e.
-/// its files (and empty directories, which [`ingest_output`] skips for a
+/// its files (and empty directories, which collection skips for a
 /// glob).
 fn parse_docker_diff(
     stdout: &str,
@@ -3241,6 +3077,74 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("staging");
         dir
+    }
+
+    /// Internal storage over a `MemStore`, default caps (W9a Task 6).
+    fn mem_files() -> std::sync::Arc<crate::storage::FileStore> {
+        std::sync::Arc::new(crate::storage::FileStore {
+            store: std::sync::Arc::new(egret_storage::MemStore::new()),
+            bucket: "egret-test".into(),
+            prefix: "workflow/".into(),
+            caps: crate::storage::Caps::default(),
+            retention_days: 30,
+        })
+    }
+
+    /// Where `task`'s collected files go.
+    fn collect_to(task: &TaskInput) -> CollectTo {
+        CollectTo {
+            workspace: task.workspace_id,
+            task_prefix: crate::storage::uri::task_prefix(
+                "t",
+                "f",
+                task.execution_id,
+                &task.task_id,
+                task.run_id,
+            )
+            .unwrap(),
+            naming: Naming::KestraOutputName,
+        }
+    }
+
+    /// What `docker cp c:<file> -` writes for one regular file.
+    fn file_tar(name: &str, contents: &[u8]) -> Vec<u8> {
+        let mut out = crate::storage::transfer::header(
+            name,
+            contents.len() as u64,
+            b'0',
+            0o644,
+            1_700_000_000,
+        )
+        .unwrap()
+        .to_vec();
+        out.extend_from_slice(contents);
+        out.resize(out.len().next_multiple_of(512) + 1024, 0);
+        out
+    }
+
+    /// What `docker cp c:<dir> -` writes for a directory with one file.
+    fn dir_tar(name: &str) -> Vec<u8> {
+        let mut out = crate::storage::transfer::header(&format!("{name}/"), 0, b'5', 0o755, 0)
+            .unwrap()
+            .to_vec();
+        out.extend_from_slice(&file_tar(&format!("{name}/inner"), b"x"));
+        out
+    }
+
+    /// The bytes stored for `rel`'s URI.
+    async fn stored_bytes(
+        fs: &crate::storage::FileStore,
+        task: &TaskInput,
+        r: &CommandsResult,
+        rel: &str,
+    ) -> Vec<u8> {
+        fs.store
+            .get(
+                &fs.object_uri(task.workspace_id, &r.output_files[rel].uri)
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
     }
 
     /// `ingest_line` over a fresh state, one line.
@@ -3735,8 +3639,8 @@ mod tests {
     /// file the command never wrote, which is IGNORED (no key, no failure).
     /// Driven through the two pure seams both runners use: `expand_outputs`
     /// over the working directory's listing, then `ingest_output` per name.
-    #[test]
-    fn output_files_follow_the_fixtures_cases() {
+    #[tokio::test]
+    async fn output_files_follow_the_fixtures_cases() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/oracle-exec/w5a-scripts.json");
         let fx: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
@@ -3752,41 +3656,70 @@ mod tests {
         };
         let cases = spec["cases"].as_array().unwrap();
         assert_eq!(cases.len(), 3);
+        let fs = mem_files();
+        let task = leased(1_700_000_000);
+        let to = collect_to(&task);
         for case in cases {
             let declared = strings(&case["declared"]);
             let written = strings(&case["written"]);
-            let dir = staging("fixture-outputs");
-            for w in &written {
-                let p = dir.join(w);
-                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-                std::fs::write(&p, format!("contents of {w}")).unwrap();
-            }
+            // The container's working directory: each written file, and the
+            // directories they imply.
+            let is_dir = |rel: &str| written.iter().any(|w| w.starts_with(&format!("{rel}/")));
             // What a listing of each pattern's directory returns: its direct
             // entries (a subdirectory included, which a glob then skips).
             let mut listed = std::collections::BTreeMap::new();
             for d in pattern_dirs(&declared) {
-                let mut names: Vec<String> = std::fs::read_dir(dir.join(&d))
-                    .map(|rd| {
-                        rd.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                names.sort();
-                listed.insert(d, names);
+                let under = if d.is_empty() {
+                    String::new()
+                } else {
+                    format!("{d}/")
+                };
+                let names: std::collections::BTreeSet<String> = written
+                    .iter()
+                    .filter_map(|w| w.strip_prefix(&under))
+                    .map(|rest| rest.split('/').next().unwrap().to_string())
+                    .collect();
+                listed.insert(d, names.into_iter().collect::<Vec<_>>());
             }
             let mut r = CommandsResult::default();
-            let mut total = 0usize;
+            let mut so_far = 0;
             for (rel, from_glob) in expand_outputs(&declared, &listed, MAX_OUTPUT_NAMES).unwrap() {
-                ingest_output(&mut r, &dir, &rel, 1024, 4096, &mut total, from_glob)
-                    .unwrap_or_else(|e| panic!("{case}: {rel}: {e}"));
+                // The archive `docker cp c:<wd>/<rel> -` would write.
+                let archive = if written.contains(&rel) {
+                    file_tar(
+                        rel.rsplit('/').next().unwrap(),
+                        format!("contents of {rel}").as_bytes(),
+                    )
+                } else if is_dir(&rel) {
+                    dir_tar(&rel)
+                } else {
+                    Vec::new()
+                };
+                let mut src = &archive[..];
+                let mut reader = crate::storage::transfer::TarReader::new(&mut src);
+                if let Some(f) = crate::storage::collect::collect_declared(
+                    &fs,
+                    &to,
+                    &rel,
+                    from_glob,
+                    &mut reader,
+                    &mut so_far,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{case}: {rel}: {e}"))
+                {
+                    r.output_files.insert(rel.clone(), f);
+                }
             }
             let keys: Vec<String> = r.output_files.keys().cloned().collect();
             assert_eq!(keys, strings(&case["keys"]), "{case}");
             assert_eq!(case["state"], "SUCCESS");
             for k in &keys {
-                assert_eq!(r.output_files[k], format!("contents of {k}"));
+                assert_eq!(
+                    stored_bytes(&fs, &task, &r, k).await,
+                    format!("contents of {k}").into_bytes()
+                );
             }
-            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
@@ -3817,12 +3750,14 @@ mod tests {
         }
         std::fs::set_permissions(&shim, perms).expect("chmod");
 
-        let runner =
-            DockerRunner::with_binary(shim.display().to_string()).with_listing_cap(64 * 1024);
+        let runner = DockerRunner::with_binary(shim.display().to_string())
+            .with_listing_cap(64 * 1024)
+            .with_files(mem_files());
         let cmds = TaskCommands {
             container_image: "alpine:3.20".into(),
             commands: vec!["true".into()],
             output_files: vec!["*.x".into()],
+            collect_to: Some(collect_to(&leased(1_700_000_000))),
             ..TaskCommands::default()
         };
         let started = std::time::Instant::now();
@@ -3887,27 +3822,12 @@ mod tests {
         assert!(err.contains("resolves to more than 10"), "{err}");
     }
 
-    /// The output KEYS count toward the total: empty files cost their names.
-    #[test]
-    fn output_keys_count_toward_the_total() {
-        let dir = staging("keys");
-        for n in ["aaaa", "bbbb", "cccc"] {
-            std::fs::write(dir.join(n), "").unwrap();
-        }
-        let mut r = CommandsResult::default();
-        let mut total = 0usize;
-        ingest_output(&mut r, &dir, "aaaa", 100, 10, &mut total, true).expect("4 bytes");
-        ingest_output(&mut r, &dir, "bbbb", 100, 10, &mut total, true).expect("8 bytes");
-        let err = ingest_output(&mut r, &dir, "cccc", 100, 10, &mut total, true)
-            .expect_err("12 bytes of names is over 10");
-        assert!(err.contains("names and contents"), "{err}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// A `docker` shim whose `diff` prints `diff_script`'s output and whose
-    /// `cp` stages the word `staged`.
+    /// `cp … -` writes an archive of one file holding the word `staged`.
     fn diff_shim(tag: &str, diff_script: &str) -> (std::path::PathBuf, String) {
         let dir = staging(tag);
+        let tar = dir.join("staged.tar");
+        std::fs::write(&tar, file_tar("a.csv", b"staged")).expect("write tar");
         let shim = dir.join("docker-shim.sh");
         std::fs::write(
             &shim,
@@ -3918,8 +3838,9 @@ mod tests {
                  \x20 version) exit 0 ;;\n\
                  \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
                  \x20 diff) {diff_script} ;;\n\
-                 \x20 cp) printf 'staged' > \"$3\" ;;\n\
-                 esac\nexit 0\n"
+                 \x20 cp) cat {tar} ;;\n\
+                 esac\nexit 0\n",
+                tar = tar.display()
             ),
         )
         .expect("write shim");
@@ -3937,6 +3858,7 @@ mod tests {
             container_image: "alpine:3.20".into(),
             commands: vec!["true".into()],
             output_files: vec!["*.csv".into()],
+            collect_to: Some(collect_to(&leased(1_700_000_000))),
             ..TaskCommands::default()
         };
         tokio::time::timeout(
@@ -3963,12 +3885,16 @@ mod tests {
             "yes 'A /usr/lib/python3/site-packages/torch/x.py' | head -n 10000; \
              echo 'A /egret/working-dir'; echo 'A /egret/working-dir/a.csv'",
         );
-        let runner = DockerRunner::with_binary(shim).with_listing_cap(64 * 1024);
+        let fs = mem_files();
+        let runner = DockerRunner::with_binary(shim)
+            .with_listing_cap(64 * 1024)
+            .with_files(fs.clone());
         let out = run_glob(&runner).await;
         assert_eq!(out.failure, None, "{out:?}");
+        assert_eq!(out.output_files.keys().collect::<Vec<_>>(), ["a.csv"]);
         assert_eq!(
-            out.output_files,
-            BTreeMap::from([("a.csv".to_string(), "staged".to_string())])
+            stored_bytes(&fs, &leased(1_700_000_000), &out, "a.csv").await,
+            b"staged"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3980,7 +3906,9 @@ mod tests {
             "huge-diff",
             "yes 'A /usr/lib/python3/site-packages/torch/x.py' | head -n 10000",
         );
-        let runner = DockerRunner::with_binary(shim).with_diff_cap(100_000);
+        let runner = DockerRunner::with_binary(shim)
+            .with_diff_cap(100_000)
+            .with_files(mem_files());
         let out = run_glob(&runner).await;
         let why = out.failure.expect("over the hard cap fails the task");
         assert!(
@@ -4079,241 +4007,10 @@ mod tests {
         assert_eq!(listed["sub"], vec!["c.csv".to_string()]);
     }
 
-    /// **A directory named as an output file fails the TASK, not the worker.**
-    ///
-    /// Fix round 1's Critical 1: `fs::read` on a directory gave an
-    /// `io::Error`, which became `Error::Internal`, which
-    /// `handlers::container::mapped` reads as egret's outage and turns into a
-    /// tick-aborting worker failure. One typo'd flow wedged the worker for
-    /// ever, blaming egret. This function cannot produce a worker failure at
-    /// all — its `Err` is the task's message — and the directory is now named.
-    #[test]
-    fn a_directory_named_as_an_output_file_fails_the_task_rather_than_the_worker() {
-        let dir = staging("dir");
-        std::fs::create_dir_all(dir.join("adir")).expect("mkdir");
-        std::fs::write(dir.join("adir/inner"), "x").expect("write");
-        let mut r = CommandsResult::default();
-        let mut total = 0usize;
-        let err = ingest_output_file(&mut r, &dir, "adir", 1024, 4096, &mut total)
-            .expect_err("a directory is not an output");
-        assert!(err.contains("DIRECTORY"), "{err}");
-        assert!(err.contains("adir"), "{err}");
-        // The file inside it is nameable, so the refusal is about the shape
-        // and not about the path being unreachable.
-        ingest_output_file(&mut r, &dir, "adir/inner", 1024, 4096, &mut total)
-            .expect("a file inside a directory is a fine output");
-        assert_eq!(
-            r.output_files.get("adir/inner").map(String::as_str),
-            Some("x")
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// **The per-file cap and the TOTAL cap both refuse**, and the second is
-    /// fix round 1's Important 2: `outputFiles:` is an unbounded list, so a
-    /// per-file cap alone bounds nothing.
-    #[test]
-    fn both_the_per_file_cap_and_the_total_cap_refuse() {
-        let dir = staging("caps");
-        std::fs::write(dir.join("a"), "x".repeat(100)).expect("write");
-        std::fs::write(dir.join("b"), "y".repeat(100)).expect("write");
-        std::fs::write(dir.join("c"), "z".repeat(100)).expect("write");
-
-        // Per file.
-        let mut r = CommandsResult::default();
-        let mut total = 0usize;
-        let err = ingest_output_file(&mut r, &dir, "a", 64, 1_000_000, &mut total)
-            .expect_err("100 bytes is over a 64-byte per-file cap");
-        assert!(err.contains("100 bytes"), "{err}");
-        assert!(err.contains("over the 64"), "{err}");
-        assert!(err.contains("a prefix is not an answer"), "{err}");
-
-        // Total: each file is UNDER the per-file cap, and together they are
-        // over the total. A per-file-only bound passes this.
-        let mut r = CommandsResult::default();
-        let mut total = 0usize;
-        ingest_output_file(&mut r, &dir, "a", 150, 250, &mut total).expect("a fits");
-        ingest_output_file(&mut r, &dir, "b", 150, 250, &mut total).expect("b fits");
-        let err = ingest_output_file(&mut r, &dir, "c", 150, 250, &mut total)
-            .expect_err("three 100-byte files are over a 250-byte total");
-        // 3 x (100 bytes + a 1-byte name) since fix round 2 counts the key.
-        assert!(err.contains("303 bytes"), "the TOTAL must be named: {err}");
-        assert!(err.contains("unbounded list"), "{err}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// **A declared output that is a SYMLINK is refused, not followed.**
-    ///
-    /// Fix round 2's Critical. `docker cp` recreates a symlink as a symlink on
-    /// the worker host, so following it reads the HOST's file — outside the
-    /// container the task was confined to. The reviewer measured it end to end:
-    /// `ln -s /etc/passwd leaked.txt` returned the worker's 9344-byte
-    /// `/etc/passwd` as a **successful** task output, where alpine's own is 702.
-    ///
-    /// This plants a real symlink rather than a regular file, which is the
-    /// review's caveat applied: `ingest_output_file` traded daemon-dependence
-    /// for host-filesystem-dependence, and a test that only ever writes regular
-    /// files cannot see what the filesystem does with a link.
-    #[test]
-    fn a_declared_output_that_is_a_symlink_is_refused_rather_than_followed() {
-        let dir = staging("symlink-leaf");
-        // Something outside the staging tree, with content this test can
-        // recognise: if the guard ever regresses, the assertion below sees the
-        // secret rather than an absence.
-        let outside = dir.parent().expect("a parent").join(format!(
-            "egret-w4t5-secret-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::write(&outside, "SECRET-FROM-OUTSIDE-THE-STAGING-TREE").expect("write");
-        std::os::unix::fs::symlink(&outside, dir.join("leaked.txt")).expect("symlink");
-
-        let mut r = CommandsResult::default();
-        let mut total = 0usize;
-        let err = ingest_output_file(&mut r, &dir, "leaked.txt", 1_000_000, 1_000_000, &mut total)
-            .expect_err("a symlink must be refused");
-
-        assert!(err.contains("SYMLINK"), "{err}");
-        assert!(
-            err.contains("leaked.txt"),
-            "the declared name must be named: {err}"
-        );
-        assert!(
-            err.contains("WORKER HOST"),
-            "the refusal must say what the hazard is: {err}"
-        );
-        assert!(
-            r.output_files.is_empty(),
-            "nothing may be read out of a symlink"
-        );
-        assert_eq!(
-            total, 0,
-            "and it must not be counted against the caps either"
-        );
-
-        let _ = std::fs::remove_file(&outside);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// **An INTERMEDIATE component that is a symlink is refused too.**
-    ///
-    /// The second leg, and the one fix round 1 introduced by copying the whole
-    /// working directory: `outputFiles: ["etcdir/passwd"]` with
-    /// `ln -s /etc etcdir`. A guard that only checked the leaf would pass this,
-    /// which is the shape this programme keeps shipping — so it is asserted
-    /// separately rather than assumed to follow from the leaf case.
-    #[test]
-    fn a_symlinked_intermediate_component_is_refused_as_well_as_a_symlinked_leaf() {
-        let dir = staging("symlink-mid");
-        let outside = dir
-            .parent()
-            .expect("a parent")
-            .join(format!("egret-w4t5-etc-{}", uuid::Uuid::new_v4().simple()));
-        std::fs::create_dir_all(&outside).expect("mkdir");
-        std::fs::write(
-            outside.join("passwd"),
-            "SECRET-VIA-AN-INTERMEDIATE-COMPONENT",
-        )
-        .expect("write");
-        std::os::unix::fs::symlink(&outside, dir.join("etcdir")).expect("symlink");
-
-        let mut r = CommandsResult::default();
-        let mut total = 0usize;
-        let err = ingest_output_file(
-            &mut r,
-            &dir,
-            "etcdir/passwd",
-            1_000_000,
-            1_000_000,
-            &mut total,
-        )
-        .expect_err("a symlinked path COMPONENT must be refused");
-
-        assert!(err.contains("SYMLINK"), "{err}");
-        assert!(
-            err.contains("\"etcdir\""),
-            "the offending COMPONENT must be named, not just the declared path: {err}"
-        );
-        assert!(r.output_files.is_empty());
-
-        let _ = std::fs::remove_dir_all(&outside);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// **Even a symlink that points back INSIDE the staging tree is refused**,
-    /// and a dangling one is refused as a symlink rather than reported missing.
-    ///
-    /// Both directions matter. The first says the rule is "no links", not "no
-    /// links that escape" — a containment test would have to resolve the link
-    /// to judge it, and on the host the resolution IS the escape. The second
-    /// says the refusal is decided by `lstat` and not by whether the target
-    /// happens to exist, so a link planted at a moment when its target is
-    /// absent cannot slip through and be followed later.
-    #[test]
-    fn a_symlink_is_refused_even_pointing_inside_the_tree_or_at_nothing() {
-        let dir = staging("symlink-inside");
-        std::fs::write(dir.join("real.txt"), "legitimate").expect("write");
-        std::os::unix::fs::symlink(dir.join("real.txt"), dir.join("alias.txt")).expect("symlink");
-        std::os::unix::fs::symlink(dir.join("gone.txt"), dir.join("dangling.txt"))
-            .expect("symlink");
-
-        let mut r = CommandsResult::default();
-        let mut total = 0usize;
-
-        let err = ingest_output_file(&mut r, &dir, "alias.txt", 1_000_000, 1_000_000, &mut total)
-            .expect_err("a link inside the tree is still a link");
-        assert!(err.contains("SYMLINK"), "{err}");
-
-        let err = ingest_output_file(
-            &mut r,
-            &dir,
-            "dangling.txt",
-            1_000_000,
-            1_000_000,
-            &mut total,
-        )
-        .expect_err("a dangling link is refused as a link");
-        assert!(
-            err.contains("SYMLINK"),
-            "a dangling link must not be reported as a missing file -- `lstat` sees \
-             the link whatever its target does: {err}"
-        );
-
-        // The file the link pointed at is nameable directly, so the refusal is
-        // about the link and not about the content being unreachable.
-        ingest_output_file(&mut r, &dir, "real.txt", 1_000_000, 1_000_000, &mut total)
-            .expect("the real file is a fine output");
-        assert_eq!(
-            r.output_files.get("real.txt").map(String::as_str),
-            Some("legitimate")
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A binary artefact cannot be an output, and says why.
-    #[test]
-    fn a_non_utf8_output_file_fails_the_task_saying_why() {
-        let dir = staging("binary");
-        std::fs::write(dir.join("b.bin"), [0xff_u8, 0xfe, 0x00]).expect("write");
-        let mut r = CommandsResult::default();
-        let mut total = 0usize;
-        let err = ingest_output_file(&mut r, &dir, "b.bin", 1024, 4096, &mut total)
-            .expect_err("not UTF-8");
-        assert!(err.contains("not UTF-8"), "{err}");
-        assert!(
-            err.contains("W9"),
-            "the reason is the missing storage seam: {err}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The name rule reaches the output path too, and before the filesystem
-    /// does.
-    #[test]
-    fn an_escaping_output_name_is_refused_before_the_filesystem_is_touched() {
-        let dir = staging("escape");
-        let mut r = CommandsResult::default();
-        let mut total = 0usize;
+    /// The name rule reaches the output path too, before any `docker`
+    /// argument is built.
+    #[tokio::test]
+    async fn an_escaping_output_name_is_refused_before_anything_is_copied() {
         for (bad, needle) in [
             ("../secret", "climbs out"),
             ("/etc/passwd", "absolute path"),
@@ -4322,12 +4019,59 @@ mod tests {
             ("*/x.csv", "not implemented"),
             ("", "must not be empty"),
         ] {
-            let err = ingest_output_file(&mut r, &dir, bad, 1024, 4096, &mut total)
-                .expect_err("an escaping name must be refused");
+            let err = output_problem(bad).expect("an escaping name must be refused");
             assert!(err.contains(needle), "{bad:?} was refused with {err}");
+            // Through the runner, over a `docker` that does not exist: an
+            // attempt to copy would be a worker failure, not this refusal.
+            let runner = DockerRunner::with_binary("/nonexistent-docker").with_files(mem_files());
+            let mut r = CommandsResult::default();
+            runner
+                .collect_output_files(
+                    "c",
+                    &TaskCommands {
+                        output_files: vec![bad.to_string()],
+                        collect_to: Some(collect_to(&leased(1))),
+                        ..TaskCommands::default()
+                    },
+                    &mut r,
+                )
+                .await
+                .expect("an author's name is never a worker failure");
+            assert!(r.failure.unwrap().contains(needle), "{bad:?}");
         }
-        assert_eq!(total, 0, "a refused name must not have been measured");
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **No internal storage, no outputs**: W5a's contents-in-outputs path
+    /// is gone, so a declared output fails the task naming `[storage]` --
+    /// whether the runner has no store or the commands no target.
+    #[tokio::test]
+    async fn an_output_without_storage_fails_the_task_naming_the_storage_section() {
+        let task = leased(1);
+        for (runner, to) in [
+            (
+                DockerRunner::with_binary("/nonexistent-docker"),
+                Some(collect_to(&task)),
+            ),
+            (
+                DockerRunner::with_binary("/nonexistent-docker").with_files(mem_files()),
+                None,
+            ),
+        ] {
+            let mut r = CommandsResult::default();
+            runner
+                .collect_output_files(
+                    "c",
+                    &TaskCommands {
+                        output_files: vec!["a.txt".into()],
+                        collect_to: to,
+                        ..TaskCommands::default()
+                    },
+                    &mut r,
+                )
+                .await
+                .expect("the task's failure, not a worker's");
+            assert!(r.failure.unwrap().contains("[storage]"));
+        }
     }
 
     /// **Only the DECLARED files are copied out of the container.**
@@ -4402,8 +4146,10 @@ mod tests {
         // A `docker` that records what it was asked and fakes just enough:
         // `create` prints an id, `start` prints nothing, `inspect` prints 0
         // (and finds no container by name, so the run creates one),
-        // and `cp` materialises a file at the destination so the pure seam has
-        // something to ingest.
+        // and `cp … -` writes an archive of one file to its stdout, as
+        // `docker cp c:<file> -` does.
+        let tar = dir.join("staged.tar");
+        std::fs::write(&tar, file_tar("f", b"staged")).expect("write tar");
         std::fs::write(
             &shim,
             format!(
@@ -4412,10 +4158,11 @@ mod tests {
                  case \"$1\" in\n\
                  \x20 create) echo fake-container-id ;;\n\
                  \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
-                 \x20 cp) case \"$3\" in *?) printf 'staged' > \"$3\" ;; esac ;;\n\
+                 \x20 cp) case \"$3\" in -) cat {tar} ;; esac ;;\n\
                  esac\n\
                  exit 0\n",
-                log = log.display()
+                log = log.display(),
+                tar = tar.display()
             ),
         )
         .expect("write shim");
@@ -4426,7 +4173,7 @@ mod tests {
         }
         std::fs::set_permissions(&shim, perms).expect("chmod");
 
-        let runner = DockerRunner::with_binary(shim.display().to_string());
+        let runner = DockerRunner::with_binary(shim.display().to_string()).with_files(mem_files());
         let task = leased(1_700_000_000);
         let out = runner
             .run(
@@ -4435,6 +4182,7 @@ mod tests {
                     container_image: "alpine:3.20".into(),
                     commands: vec!["true".into()],
                     output_files: vec!["wanted.txt".into(), "nested/also.txt".into()],
+                    collect_to: Some(collect_to(&task)),
                     ..TaskCommands::default()
                 },
                 &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
@@ -4473,65 +4221,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **The staging directory is private and unguessable.**
-    ///
-    /// Review Minor 3, and the leg that makes it more than a disclosure issue:
-    /// the name used to be a pure function of `(run_id, claimed_at)` in a
-    /// world-writable directory, so it could be pre-created as a symlink to
-    /// somewhere else and `create_dir_all` would follow it — putting every
-    /// `docker cp` destination under an attacker's path.
-    #[test]
-    fn the_staging_directory_is_private_and_not_predictable() {
-        let task = leased(1_700_000_000);
-        let a_guard = tempdir(&task).expect("staging");
-        let b_guard = tempdir(&task).expect("staging");
-        let a = a_guard.path().to_path_buf();
-        let b = b_guard.path().to_path_buf();
-        assert_ne!(
-            a, b,
-            "two runs of the SAME task must not agree on the path -- a guessable \
-             name in a world-writable directory can be pre-created as a symlink"
-        );
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&a).expect("stat").permissions().mode() & 0o777;
-            assert_eq!(
-                mode, 0o700,
-                "the author's rendered `script:` is written here, so it is not \
-                 world-readable: got {mode:o}"
-            );
-        }
-
-        // **And an existing path is an error rather than a silent reuse —
-        // asserted against `create_private_dir`, which is THIS code.**
-        // Fix round 3's NEW Minor 1: this leg used to call
-        // `std::fs::DirBuilder::new().create(..)` itself, which is a fact about
-        // `std` and passed with `tempdir` reverted to `create_dir_all`.
-        assert!(
-            create_private_dir(&a).is_err(),
-            "`create_dir` must refuse a path that is already there -- the recursive \
-             form succeeds, including through a symlink somebody pre-created"
-        );
-
-        // The same property where it actually bites: a directory standing in
-        // for the staging path must not be adopted.
-        let squatted = a.parent().expect("a parent").join(format!(
-            "egret-w4t5-squat-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::create_dir_all(&squatted).expect("pre-create");
-        assert!(
-            create_private_dir(&squatted).is_err(),
-            "a path somebody else created first must be refused, not reused"
-        );
-        let _ = std::fs::remove_dir_all(&squatted);
-
-        let _ = std::fs::remove_dir_all(&a);
-        let _ = std::fs::remove_dir_all(&b);
-    }
-
     /// **A parent and a child declared together is a TASK failure, never a
     /// worker one.**
     ///
@@ -4553,6 +4242,8 @@ mod tests {
     async fn a_parent_and_a_child_declared_together_never_wedges_the_run() {
         let dir = staging("parent-child");
         let log = dir.join("argv.log");
+        let tar = dir.join("a.tar");
+        std::fs::write(&tar, file_tar("a", b"regular-file")).expect("write tar");
         let shim = dir.join("docker-shim.sh");
         std::fs::write(
             &shim,
@@ -4564,11 +4255,12 @@ mod tests {
                  \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
                  \x20 cp) case \"$2\" in\n\
                  \x20        *a/b.txt) echo 'Error response from daemon: not a directory' >&2; exit 1 ;;\n\
-                 \x20        *) printf 'regular-file' > \"$3\" ;;\n\
+                 \x20        *) cat {tar} ;;\n\
                  \x20      esac ;;\n\
                  esac\n\
                  exit 0\n",
-                log = log.display()
+                log = log.display(),
+                tar = tar.display()
             ),
         )
         .expect("write shim");
@@ -4579,14 +4271,17 @@ mod tests {
         }
         std::fs::set_permissions(&shim, perms).expect("chmod");
 
-        let runner = DockerRunner::with_binary(shim.display().to_string());
+        let fs = mem_files();
+        let runner = DockerRunner::with_binary(shim.display().to_string()).with_files(fs.clone());
+        let task = leased(1_700_000_000);
         let out = runner
             .run(
-                &leased(1_700_000_000),
+                &task,
                 &TaskCommands {
                     container_image: "alpine:3.20".into(),
                     commands: vec!["true".into()],
                     output_files: vec!["a".into(), "a/b.txt".into()],
+                    collect_to: Some(collect_to(&task)),
                     ..TaskCommands::default()
                 },
                 &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
@@ -4605,126 +4300,13 @@ mod tests {
         // collision, because each declared name gets its own root.
         assert_eq!(out.failure, None, "{out:?}");
         assert_eq!(
-            out.output_files.get("a").map(String::as_str),
-            Some("regular-file"),
+            stored_bytes(&fs, &task, &out, "a").await,
+            b"regular-file",
             "the parent came back"
         );
         assert!(!out.output_files.contains_key("a/b.txt"), "{out:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// **Two declared names never share a staging tree — asserted through the
-    /// wiring, not beside it.**
-    ///
-    /// The re-review's NEW Minor 1: this test used to call `stage_destination`
-    /// twice with roots it chose itself, so it **passed with the per-name root
-    /// removed from `collect_output_files`** — it never touched the wiring it
-    /// was named for. A test that passes with the thing it names deleted is the
-    /// defect this programme opens with.
-    ///
-    /// It now drives the real `collect_output_files` through the shim and reads
-    /// the destinations the runner actually issued, so removing the per-name
-    /// root makes it fail.
-    #[tokio::test]
-    async fn each_declared_output_gets_a_staging_root_of_its_own() {
-        let dir = staging("roots");
-        let log = dir.join("argv.log");
-        let shim = dir.join("docker-shim.sh");
-        std::fs::write(
-            &shim,
-            format!(
-                "#!/bin/sh\n\
-                 case \"$1\" in\n\
-                 \x20 create) echo id ;;\n\
-                 \x20 version) exit 0 ;;\n\
-                 \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
-                 \x20 cp) echo \"$3\" >> {log}; printf x > \"$3\" ;;\n\
-                 esac\nexit 0\n",
-                log = log.display()
-            ),
-        )
-        .expect("write shim");
-        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            perms.set_mode(0o700);
-        }
-        std::fs::set_permissions(&shim, perms).expect("chmod");
-
-        let runner = DockerRunner::with_binary(shim.display().to_string());
-        let cmds = TaskCommands {
-            container_image: "alpine:3.20".into(),
-            commands: vec!["true".into()],
-            output_files: vec!["a".into(), "a/b.txt".into()],
-            ..TaskCommands::default()
-        };
-        let sink = NoObserver;
-        runner
-            .run(
-                &leased(1_700_000_000),
-                &cmds,
-                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
-                &sink,
-            )
-            .await
-            .expect("no worker failure");
-
-        let logged = std::fs::read_to_string(&log).expect("the shim logged");
-        let dests: Vec<&str> = logged
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .collect();
-        assert_eq!(dests.len(), 2, "one copy per declared name: {dests:?}");
-        let root_of = |d: &str| {
-            // `<staging>/<i>/<rel>` — the root is the component before `rel`.
-            let p = std::path::Path::new(d);
-            let depth = p.components().count();
-            p.components()
-                .take(depth.saturating_sub(1))
-                .collect::<std::path::PathBuf>()
-        };
-        assert_ne!(
-            root_of(dests[0]),
-            root_of(dests[1])
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_default(),
-            "the two names must not be staged under one root: {dests:?}"
-        );
-        assert!(
-            dests[0] != dests[1] && !dests[1].starts_with(dests[0]),
-            "`a/b.txt` must not be staged underneath `a` -- that is the collision \
-             the Critical came from: {dests:?}"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// **A panic unwinding through the staging scope removes the directory**
-    /// (W5b Task 6, when it held a plugin task's rendered `task.json`; since
-    /// W9a Task 5 inputs stream and the directory holds copied-out OUTPUT
-    /// files). The workspace builds with `panic = "unwind"` (no profile sets
-    /// `abort`), so `Drop` runs on unwind; this pins it.
-    #[test]
-    fn a_panic_unwinding_through_the_staging_scope_removes_the_directory() {
-        let task = leased(1_700_000_000);
-        let (tx, rx) = std::sync::mpsc::channel();
-        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let staging = tempdir(&task).expect("staging");
-            std::fs::write(staging.path().join("output"), "{\"password\":\"s3cr3t\"}")
-                .expect("staged");
-            tx.send(staging.path().to_path_buf()).expect("send");
-            panic!("a panic between staging and `docker cp`");
-        }));
-        assert!(unwound.is_err(), "the closure panicked");
-        let dir = rx.recv().expect("the path");
-        assert!(
-            !dir.exists(),
-            "{} outlived a panic, holding the rendered task.json",
-            dir.display()
-        );
     }
 
     /// **A dropped future leaves no input file on the worker's disk and no
@@ -4892,6 +4474,129 @@ mod tests {
             tokio::time::sleep(self.0).await;
             Err(egret_storage::StorageError::S3("connection refused".into()))
         }
+        async fn put_stream(
+            &self,
+            uri: &str,
+            body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+            _: Option<u64>,
+        ) -> std::result::Result<u64, egret_storage::StorageError> {
+            let mut first = [0u8; 1];
+            let _ = tokio::io::AsyncReadExt::read(body, &mut first).await;
+            tokio::time::sleep(self.0).await;
+            Err(egret_storage::StorageError::S3(format!(
+                "{uri}: connection refused"
+            )))
+        }
+    }
+
+    // ---- W9a Task 6: `docker cp c:<path> -` -----------------------------
+
+    /// **An unreachable store while collecting is a worker error, not a
+    /// failed task** (spec §11): the run is re-claimed and no attempt is
+    /// spent. The archive arrived whole; only the store failed.
+    #[tokio::test]
+    async fn an_unreachable_store_while_collecting_is_a_worker_error_not_a_failed_task() {
+        let dir = staging("collect-down");
+        let tar = dir.join("a.tar");
+        std::fs::write(&tar, file_tar("a.txt", b"abc")).unwrap();
+        let shim = cp_shim(&dir, &format!("cat {}", tar.display()));
+        let task = leased(1);
+        let down = std::sync::Arc::new(crate::storage::FileStore {
+            store: std::sync::Arc::new(LateDown(std::time::Duration::ZERO)),
+            ..std::sync::Arc::into_inner(mem_files()).unwrap()
+        });
+        let mut r = CommandsResult::default();
+        let err = DockerRunner::with_binary(shim)
+            .with_files(down)
+            .collect_output_files(
+                "c",
+                &TaskCommands {
+                    output_files: vec!["a.txt".into()],
+                    collect_to: Some(collect_to(&task)),
+                    ..TaskCommands::default()
+                },
+                &mut r,
+            )
+            .await
+            .expect_err("the store is egret's outage");
+        assert!(matches!(err, Error::Internal(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("kestra:///") && msg.contains("a.txt"), "{msg}");
+        assert_eq!(r.failure, None, "never the task's failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **`outputDirectory: true`**: the whole directory is one
+    /// `docker cp c:<OUTPUT_DIR> -`, every file in it keyed by its path
+    /// relative to it and stored verbatim; the declared names keep Kestra's
+    /// hashed names (`w9a-storage.json` `script_output_files_map`).
+    #[tokio::test]
+    async fn the_output_directory_is_one_copy_and_its_files_keep_their_paths() {
+        let dir = staging("outdir");
+        let log = dir.join("argv.log");
+        let file = dir.join("f.tar");
+        std::fs::write(&file, file_tar("a b.txt", b"hello a b")).unwrap();
+        let mut tree = crate::storage::transfer::header("out/", 0, b'5', 0o755, 0)
+            .unwrap()
+            .to_vec();
+        tree.extend_from_slice(
+            &crate::storage::transfer::header("out/deep/", 0, b'5', 0o755, 0).unwrap(),
+        );
+        tree.extend_from_slice(&file_tar("out/deep/d.txt", b"deep"));
+        let tree_path = dir.join("tree.tar");
+        std::fs::write(&tree_path, tree).unwrap();
+        let shim = cp_shim(
+            &dir,
+            &format!(
+                "echo \"$2\" >> {log}; case \"$2\" in *.egret/out) cat {tree} ;; *) cat {file} ;; esac",
+                log = log.display(),
+                tree = tree_path.display(),
+                file = file.display()
+            ),
+        );
+        let fs = mem_files();
+        let task = leased(1);
+        let mut r = CommandsResult::default();
+        DockerRunner::with_binary(shim)
+            .with_files(fs.clone())
+            .collect_output_files(
+                "c",
+                &TaskCommands {
+                    output_files: vec!["a b.txt".into()],
+                    output_directory: true,
+                    collect_to: Some(collect_to(&task)),
+                    ..TaskCommands::default()
+                },
+                &mut r,
+            )
+            .await
+            .expect("collected");
+        assert_eq!(r.failure, None, "{r:?}");
+        let prefix = collect_to(&task).task_prefix;
+        let uris: BTreeMap<&str, String> = r
+            .output_files
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.uri.clone()))
+            .collect();
+        assert_eq!(
+            uris,
+            BTreeMap::from([
+                ("a b.txt", format!("{prefix}3a3goS5hpDPIJpezcLagQ0-a+b.txt")),
+                ("deep/d.txt", format!("{prefix}deep/d.txt")),
+            ])
+        );
+        assert_eq!(stored_bytes(&fs, &task, &r, "deep/d.txt").await, b"deep");
+        assert_eq!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            [
+                "c:/egret/working-dir/a b.txt",
+                "c:/egret/working-dir/.egret/out"
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **A store failure part-way kills and reaps `docker cp` before its
@@ -5095,11 +4800,12 @@ mod tests {
         }
         std::fs::set_permissions(&shim, perms).expect("chmod");
 
-        let runner = DockerRunner::with_binary(shim.display().to_string());
+        let runner = DockerRunner::with_binary(shim.display().to_string()).with_files(mem_files());
         let cmds = TaskCommands {
             container_image: "alpine:3.20".into(),
             commands: vec!["true".into()],
             output_files: vec!["docker.sock".into()],
+            collect_to: Some(collect_to(&leased(1_700_000_000))),
             ..TaskCommands::default()
         };
         let sink = NoObserver;
