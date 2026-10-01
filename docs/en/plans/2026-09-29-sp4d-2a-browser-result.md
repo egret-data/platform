@@ -664,6 +664,11 @@ for the same reason its tag is. Two branches, not one. `ExplainAttribution::Clea
 also make this unrepresentable by carrying `required_roles: Option<Vec<String>>`, so "the gate
 says no roles" and "the gate could not be read" cannot arrive as the same value.
 
+**Applied** in SP4d-2b Task 6, by the `Option` route rather than the two-branch one:
+`attribution_for` sends `null` when it had no `tags.key` to look a gate up by, and the page's
+three sentences all read that one field. The residual conflation is stated there and here:
+`Some([])` still covers both a groups-only gate and a deleted gate row.
+
 ### Minor 1 — the honest-limits block talks about "the verdicts above" when there are none
 
 In the no-profile state (P2) the block still renders "…— the verdicts above are what the engine

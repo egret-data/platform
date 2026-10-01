@@ -511,9 +511,11 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * the clearing role — the fact D10 exists to surface — silently absent rather
    * than reported as unknown.
    *
-   * `required_roles: []` has two causes on this wire (`routes.rs:1659-1667`
-   * returns `Vec::new()` whenever `tag` is `None`), so the empty list may only
-   * be read as "the gate says no roles" when the tag DID resolve.
+   * The fix was on the wire, not in the guard: `required_roles` is an
+   * `Option`, and `attribution_for` in `crates/egret-perm-compile/src/routes.rs`
+   * sends `null` on the one path that cannot look a gate up. So the payload
+   * here is `required_roles: null`, and the page no longer has to infer
+   * "unknown" from a second field.
    */
   test("an unresolved clearance reports its roles as unknown, not as groups-only", async () => {
     mutateAsync.mockResolvedValueOnce({
@@ -539,7 +541,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
                   kind: "clearance",
                   tag_id: "88888888-8888-4888-8888-888888888888",
                   tag: null,
-                  required_roles: [],
+                  required_roles: null,
                   locator: "sp4d2a_wh.sales.orders.ssn",
                 },
               },
@@ -562,10 +564,14 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     expect(clearance).toHaveTextContent(/clearing roles are unknown/i);
   });
 
-  /** Finding 2's other half — the case where the empty list IS readable. With
-   *  the tag resolved, no clearing role recorded is a fact about the gate, and
-   *  it must not be reported as unknown either. Both branches are pinned so the
-   *  two cannot be confused again. */
+  /** Finding 2's other half — the case where the empty list IS readable, and the
+   *  honest 3→2 this task settles for. `Some([])` is still two facts: a gate
+   *  that declares only `required_groups`, and a gate row already deleted
+   *  (`clearance_gates_for_tags_via` filters on
+   *  `cardinality(required_roles) > 0`, so a missing row and a groups-only row
+   *  both miss the lookup). What it can no longer mean is "nothing was looked
+   *  up" — that is `null` now. Both branches are pinned so the two cannot be
+   *  confused again. */
   test("a resolved clearance with no roles states that, without claiming it is unknown", async () => {
     mutateAsync.mockResolvedValueOnce({
       status: 200,
@@ -609,6 +615,63 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     expect(clearance).toHaveTextContent(/no clearing role is recorded/i);
     expect(clearance).not.toHaveTextContent(/clearing roles are unknown/i);
     expect(clearance).not.toHaveTextContent(/the tag row is gone/i);
+  });
+
+  /**
+   * The point of making the field an `Option`: the roles sentence reads
+   * `required_roles` and NOTHING ELSE. `attribution_for`
+   * (`crates/egret-perm-compile/src/routes.rs`) is the only producer of this
+   * variant and it sends `null` only when `tag` is `null`, so no egret code
+   * path emits the payload below today — which is exactly why it is the
+   * discriminating fixture. Under the old `tag === null` guard it rendered the
+   * groups-only sentence about a gate nothing had looked up; a page that still
+   * consults `tag` fails here and nowhere else.
+   */
+  test("a clearance whose roles are null is unknown even when the tag resolved", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "denied",
+                  policy_id: 30,
+                  policy_name: "perm-clearance-88888888-8888-4888-8888-888888888888",
+                  reason: "deny_policy_item",
+                },
+                attribution: {
+                  kind: "clearance",
+                  tag_id: "88888888-8888-4888-8888-888888888888",
+                  tag: "sp4d2a_ssn",
+                  required_roles: null,
+                  locator: null,
+                },
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const clearance = within(result).getByTestId("clearance-attribution");
+    // The tag IS known, and still nothing is claimed about the gate's roles.
+    expect(clearance).toHaveTextContent("sp4d2a_ssn");
+    expect(clearance).not.toHaveTextContent(/the tag row is gone/i);
+    expect(clearance).toHaveTextContent(/clearing roles are unknown/i);
+    expect(clearance).not.toHaveTextContent(/no clearing role is recorded/i);
+    expect(clearance).not.toHaveTextContent(/declares only groups/i);
   });
 
   /**

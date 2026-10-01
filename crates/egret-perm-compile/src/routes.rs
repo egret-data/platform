@@ -413,21 +413,34 @@ pub enum ExplainAttribution {
     /// the next recompile, and inventing a name for it would be worse than
     /// saying none is known.
     ///
-    /// **`required_roles` is empty under THREE different facts, and the wire
-    /// cannot tell them apart.** (1) The `tags` row is gone, so `tag` is
-    /// `None` and there was no key to look a gate up by. (2) The gate declares
-    /// only `required_groups`, which compiles to no engine deny at all
-    /// (D2/D7). (3) There is no `classification_policies` row for the tag at
-    /// all — `clearance_gates_for_tags_via` filters on
-    /// `cardinality(cp.required_roles) > 0` and the lookup here
-    /// `.unwrap_or_default()`s, so a DELETED gate whose compiled clearance
-    /// policy is still being served reads exactly like an empty one. The page
-    /// states all three; this doc is the only place a Rust reader learns the
-    /// field is ambiguous, so it has to state them too.
+    /// **`required_roles` is `None` when no gate could be looked up, and that
+    /// is why it is an `Option` rather than a list.** The gate is keyed by
+    /// `tags.key`, so when the `tags` row is gone there is no key to look one
+    /// up by and nothing is known about the clearing roles. An empty list
+    /// would state the opposite — that the gate names no role — which SP4d-2a
+    /// measured live and found false: the gate declared `['sp4d2a_cleared']`
+    /// and the page said it declared only groups. `None` makes "we could not
+    /// look" unrepresentable as "there is nothing to find".
+    ///
+    /// **This is an honest 3→2, not 3→3.** `Some([])` still carries two facts
+    /// this wire cannot separate: (1) the gate declares only
+    /// `required_groups`, which compiles to no engine deny at all (D2/D7), and
+    /// (2) there is no `classification_policies` row for the tag at all —
+    /// `clearance_gates_for_tags_via` filters on
+    /// `cardinality(cp.required_roles) > 0` and `clearing_roles` turns a miss
+    /// into an empty list, so a DELETED gate whose compiled clearance
+    /// policy is still being served reads exactly like a groups-only one.
+    /// Separating those two needs a second query that distinguishes "no row"
+    /// from "row with no roles"; until something asks for it, the page says
+    /// both out loud.
     Clearance {
         tag_id: Uuid,
         tag: Option<String>,
-        required_roles: Vec<String>,
+        /// `None` = no gate was looked up because `tag` is `None`.
+        /// `Some(roles)` = the lookup ran, and an empty `roles` is a fact
+        /// about the gate rather than about the lookup. `attribution_for` is
+        /// its only producer, via `clearing_roles`.
+        required_roles: Option<Vec<String>>,
         locator: Option<String>,
     },
 }
@@ -1718,23 +1731,50 @@ async fn attribution_for(
                 .into_iter()
                 .find(|(id, _)| *id == tag_id)
                 .map(|(_, key)| key);
-            let required_roles = match &tag {
-                Some(key) => clearance_gates_for_tags_via(conn, std::slice::from_ref(key))
-                    .await?
-                    .into_iter()
-                    .find(|(gated, _)| gated == key)
-                    .map(|(_, roles)| roles)
-                    .unwrap_or_default(),
+            // The gate is keyed by `tags.key`, so with no key there is no
+            // lookup to run. What the result MEANS is `clearing_roles`' job,
+            // where it is testable without a database.
+            let gates = match &tag {
+                Some(key) => clearance_gates_for_tags_via(conn, std::slice::from_ref(key)).await?,
                 None => Vec::new(),
             };
             Some(ExplainAttribution::Clearance {
                 tag_id,
+                required_roles: clearing_roles(tag.as_deref(), &gates),
                 tag,
-                required_roles,
                 locator,
             })
         }
     })
+}
+
+/// What [`ExplainAttribution::Clearance`]'s `required_roles` carries, given the
+/// `tags.key` the policy name resolved to (if any) and whatever
+/// `clearance_gates_for_tags_via` returned.
+///
+/// **`None` if and only if `tag` is `None`.** That is the guarantee the
+/// `Option` exists for, and it is a pure function here rather than three lines
+/// inside `attribution_for` because that function needs a `PgConnection` and so
+/// can only be tested where a database is reachable. A guarantee nothing can
+/// check is a comment.
+///
+/// `gates` is ignored entirely when `tag` is `None`: a clearance whose tag row
+/// is gone must not borrow another tag's gate, which is the one way a wrong
+/// `Some([...])` could be invented rather than merely conflated.
+fn clearing_roles(tag: Option<&str>, gates: &[(String, Vec<String>)]) -> Option<Vec<String>> {
+    let key = tag?;
+    // The lookup ran, so an empty result is a fact about the gate rather than
+    // about the lookup — either it declares only `required_groups` (which
+    // `clearance_gates_for_tags_via` filters out) or its row is already
+    // deleted. `ExplainAttribution::Clearance` states that those two stay
+    // conflated; what they no longer collide with is "nothing was looked up".
+    Some(
+        gates
+            .iter()
+            .find(|(gated, _)| gated == key)
+            .map(|(_, roles)| roles.clone())
+            .unwrap_or_default(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1780,4 +1820,64 @@ async fn compile(
         vec![service_id],
         std::slice::from_ref(&summary),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clearing_roles;
+
+    fn gate(key: &str, roles: &[&str]) -> (String, Vec<String>) {
+        (
+            key.to_string(),
+            roles.iter().map(|r| r.to_string()).collect(),
+        )
+    }
+
+    /// The whole point of the `Option`. SP4d-2a's browser gate deleted a `tags`
+    /// row while the compiled clearance policy kept being served; the gate had
+    /// declared `['sp4d2a_cleared']`, and the page reported that it declared
+    /// only groups — because an empty list was all the wire could say. `None`
+    /// is now the only thing a missing key can produce.
+    #[test]
+    fn no_tag_key_means_the_roles_are_unknown_not_empty() {
+        assert_eq!(clearing_roles(None, &[]), None);
+    }
+
+    /// `gates` is ignored when there is no key, so a key-less clearance cannot
+    /// be handed somebody else's gate. Without this, "looked nothing up" and
+    /// "found another tag's roles" are the same code path.
+    #[test]
+    fn no_tag_key_borrows_no_other_tags_gate() {
+        assert_eq!(clearing_roles(None, &[gate("pii", &["pii_cleared"])]), None);
+    }
+
+    /// The lookup ran and found the gate: the roles are the answer, verbatim
+    /// and in order, and `Some` says the list may be read as a fact.
+    #[test]
+    fn a_resolved_gate_reports_its_roles() {
+        assert_eq!(
+            clearing_roles(
+                Some("pii"),
+                &[
+                    gate("other", &["nope"]),
+                    gate("pii", &["pii_cleared", "auditor"])
+                ]
+            ),
+            Some(vec!["pii_cleared".to_string(), "auditor".to_string()])
+        );
+    }
+
+    /// The honest 3→2. The lookup ran and missed, which happens for a
+    /// groups-only gate (`clearance_gates_for_tags_via` filters on
+    /// `cardinality(required_roles) > 0`) and for a gate row already deleted.
+    /// Those two stay conflated in `Some([])` — what matters is that neither
+    /// can be confused with `None`.
+    #[test]
+    fn a_resolved_tag_with_no_matching_gate_reports_an_empty_list_not_none() {
+        assert_eq!(clearing_roles(Some("pii"), &[]), Some(Vec::new()));
+        assert_eq!(
+            clearing_roles(Some("pii"), &[gate("other", &["nope"])]),
+            Some(Vec::new())
+        );
+    }
 }

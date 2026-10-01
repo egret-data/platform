@@ -31,7 +31,14 @@ export type ExplainAttribution = {
   tag_id: string;
   /** @nullable */
   tag?: string | null;
-  required_roles: string[];
+  /**
+     * `None` = no gate was looked up because `tag` is `None`.
+     * `Some(roles)` = the lookup ran, and an empty `roles` is a fact
+     * about the gate rather than about the lookup. `attribution_for` is
+     * its only producer, via `clearing_roles`.
+     * @nullable
+     */
+  required_roles?: string[] | null;
   /** @nullable */
   locator?: string | null;
   kind: 'clearance';

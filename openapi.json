@@ -34639,10 +34639,9 @@
           },
           {
             "type": "object",
-            "description": "`perm-clearance-{tag_id}[-{locator}]`. A clearance has no Ranger\nanalogue on the wire, so `tag` and `required_roles` are reconstructed\nhere from the `tags` row the name points at (`tags.key`, not\n`tags.name`) and from `classification_policies`. `tag` is `None` when\nthe tag row is gone — a compiled clearance can outlive its gate until\nthe next recompile, and inventing a name for it would be worse than\nsaying none is known.\n\n**`required_roles` is empty under THREE different facts, and the wire\ncannot tell them apart.** (1) The `tags` row is gone, so `tag` is\n`None` and there was no key to look a gate up by. (2) The gate declares\nonly `required_groups`, which compiles to no engine deny at all\n(D2/D7). (3) There is no `classification_policies` row for the tag at\nall — `clearance_gates_for_tags_via` filters on\n`cardinality(cp.required_roles) > 0` and the lookup here\n`.unwrap_or_default()`s, so a DELETED gate whose compiled clearance\npolicy is still being served reads exactly like an empty one. The page\nstates all three; this doc is the only place a Rust reader learns the\nfield is ambiguous, so it has to state them too.",
+            "description": "`perm-clearance-{tag_id}[-{locator}]`. A clearance has no Ranger\nanalogue on the wire, so `tag` and `required_roles` are reconstructed\nhere from the `tags` row the name points at (`tags.key`, not\n`tags.name`) and from `classification_policies`. `tag` is `None` when\nthe tag row is gone — a compiled clearance can outlive its gate until\nthe next recompile, and inventing a name for it would be worse than\nsaying none is known.\n\n**`required_roles` is `None` when no gate could be looked up, and that\nis why it is an `Option` rather than a list.** The gate is keyed by\n`tags.key`, so when the `tags` row is gone there is no key to look one\nup by and nothing is known about the clearing roles. An empty list\nwould state the opposite — that the gate names no role — which SP4d-2a\nmeasured live and found false: the gate declared `['sp4d2a_cleared']`\nand the page said it declared only groups. `None` makes \"we could not\nlook\" unrepresentable as \"there is nothing to find\".\n\n**This is an honest 3→2, not 3→3.** `Some([])` still carries two facts\nthis wire cannot separate: (1) the gate declares only\n`required_groups`, which compiles to no engine deny at all (D2/D7), and\n(2) there is no `classification_policies` row for the tag at all —\n`clearance_gates_for_tags_via` filters on\n`cardinality(cp.required_roles) > 0` and `clearing_roles` turns a miss\ninto an empty list, so a DELETED gate whose compiled clearance\npolicy is still being served reads exactly like a groups-only one.\nSeparating those two needs a second query that distinguishes \"no row\"\nfrom \"row with no roles\"; until something asks for it, the page says\nboth out loud.",
             "required": [
               "tag_id",
-              "required_roles",
               "kind"
             ],
             "properties": {
@@ -34657,10 +34656,14 @@
                 ]
               },
               "required_roles": {
-                "type": "array",
+                "type": [
+                  "array",
+                  "null"
+                ],
                 "items": {
                   "type": "string"
-                }
+                },
+                "description": "`None` = no gate was looked up because `tag` is `None`.\n`Some(roles)` = the lookup ran, and an empty `roles` is a fact\nabout the gate rather than about the lookup. `attribution_for` is\nits only producer, via `clearing_roles`."
               },
               "locator": {
                 "type": [

@@ -523,6 +523,13 @@ function DecidedBy({
   // "Unrecognized reason class." and dropped the gating tag and the clearing
   // roles — the two facts a steward most needs. Both are on the wire, so both
   // are rendered.
+  //
+  // `null` and a missing key both mean "no gate was looked up": the server
+  // always serialises the key, but the generated type is optional because the
+  // field is nullable, and a reader of this block should not have to know
+  // which. They collapse here, once, so the three sentences below each test
+  // one thing.
+  const clearingRoles = attribution.required_roles ?? null;
   return (
     <div data-testid="clearance-attribution" className="space-y-1">
       <Badge variant="warning" className="gap-1">
@@ -545,31 +552,34 @@ function DecidedBy({
         )}
         {ranger}
       </div>
-      {attribution.required_roles.length > 0 ? (
+      {/* **Browser-gate Finding 2, now answered by the wire.** This used to
+          branch on `attribution.tag === null` because an empty
+          `required_roles` meant either "the gate names no role" or "no gate
+          could be looked up", and only the OTHER field could tell them apart.
+          With the tag unresolved the page asserted "it declares only groups" —
+          contradicting the sentence directly above it, and false for the gate
+          the browser gate measured, which declared `sp4d2a_cleared`. The field
+          is now `Option`: `attribution_for` in
+          `crates/egret-perm-compile/src/routes.rs` sends `null` on the one
+          path that cannot look a gate up, and a list on the one that did. So
+          all three sentences read one field, and "unknown" can no longer be
+          inferred from a second. */}
+      {clearingRoles === null ? (
+        <p className="text-xs text-muted-foreground">
+          The clearing roles are unknown: no gate could be looked up for this clearance, so
+          this is unknown rather than none — the engine is still enforcing the compilation
+          as it was.
+        </p>
+      ) : clearingRoles.length > 0 ? (
         <p className="text-xs text-muted-foreground">
           Cleared by holding any one of{" "}
-          {attribution.required_roles.map((r, i) => (
+          {clearingRoles.map((r, i) => (
             <span key={r}>
               {i > 0 && ", "}
               <span className="font-mono">{r}</span>
             </span>
           ))}
           .
-        </p>
-      ) : attribution.tag === null ? (
-        /* **Browser-gate Finding 2.** An empty `required_roles` has TWO causes
-           on this wire: `attribution_for` returns `Vec::new()` whenever the tag
-           row could not be read (`routes.rs:1659-1667`), as well as for a gate
-           that really declares no roles. So the list is only readable as a fact
-           about the gate once the tag resolved. With the tag unresolved the page
-           used to assert "it declares only groups" — contradicting the sentence
-           directly above it, and false for the gate the gate measured, which
-           declared a role. Unknown is a different thing from none, and the
-           clearing role is the one fact this block exists to surface. */
-        <p className="text-xs text-muted-foreground">
-          The clearing roles are unknown too: they are read from that same tag row, so this
-          is unknown rather than none — the engine is still enforcing the compilation as it
-          was.
         </p>
       ) : (
         <p className="text-xs text-muted-foreground">
