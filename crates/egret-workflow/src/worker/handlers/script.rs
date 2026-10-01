@@ -321,8 +321,7 @@ impl Script {
         type_id: &str,
         task: &TaskInput,
         rendered: BTreeMap<String, String>,
-    ) -> std::result::Result<(BTreeMap<String, String>, BTreeMap<String, StoredInput>), Outcome>
-    {
+    ) -> std::result::Result<StagedInputs, Outcome> {
         let mut contents = BTreeMap::new();
         let mut stored = BTreeMap::new();
         for (name, value) in rendered {
@@ -360,6 +359,9 @@ impl Script {
         Ok((contents, stored))
     }
 }
+
+/// `inputFiles` split: inline contents, and files staged from storage.
+type StagedInputs = (BTreeMap<String, String>, BTreeMap<String, StoredInput>);
 
 /// What makes an `inputFiles` value a file in internal storage rather than
 /// contents -- Kestra's own test (`value.startsWith("kestra://")`). A value
@@ -1202,7 +1204,10 @@ mod tests {
                 .await
                 .expect("the author's failure, not the worker's");
             let calls = spy.seen.lock().unwrap().len();
-            assert_eq!(calls, 0, "the runner was called {calls} time(s) for {why:?}");
+            assert_eq!(
+                calls, 0,
+                "the runner was called {calls} time(s) for {why:?}"
+            );
             assert_eq!(out.state, RunState::Failed, "{why:?}");
             let message = out.message.expect("a message");
             assert!(message.contains(&uri), "{message}");
