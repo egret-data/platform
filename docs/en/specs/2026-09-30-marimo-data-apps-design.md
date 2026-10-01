@@ -572,7 +572,9 @@ never merged; automated Playwright, single run per case, macOS dev laptop under 
    uid from the server (or `PR_SET_DUMPABLE=0` as a stopgap) so a cell cannot read the server's tokens;
    only `ai` and `rtc_v2` are locked in config — the PEP 723 / venv / runtime keys are still open; a
    reload while the old WebSocket is still connected needs a second reload; the `egret.databases()`
-   endpoint; re-run the marimo contract tests, e2e and route inventory on every marimo upgrade.
+   endpoint; re-run the marimo contract tests, e2e and route inventory on every marimo upgrade; the grid
+   layout (`layouts/*.grid.json`) is written only to the pod's disk, never to egret — store it with the
+   draft or block the grid layout in edit mode.
 5. **P5 — Run mode.** Per-version launcher, publish/versions/restore UI, the viewer page; the kernel
    launcher (warm pool or fork server), the per-pod session cap, memory limit and session-start UX set
    from measurements on kind (§6.3). **Start-up targets (D15):** acceptance = a new viewer on a warm pod

@@ -569,7 +569,8 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
    `PR_SET_DUMPABLE=0` tạm thời) để cell không đọc được token của server; config mới chỉ khoá `ai` và
    `rtc_v2` — các khoá PEP 723 / venv / runtime vẫn mở; tải lại khi WebSocket cũ còn kết nối cần tải lại
    lần hai; endpoint `egret.databases()`; chạy lại test hợp đồng marimo, e2e và kiểm kê route mỗi lần
-   nâng marimo.
+   nâng marimo; layout dạng grid (`layouts/*.grid.json`) chỉ ghi xuống đĩa của pod, không bao giờ về egret —
+   lưu cùng draft hoặc chặn layout grid ở chế độ edit.
 5. **P5 — Chế độ run.** Launcher theo phiên bản, UI publish/versions/khôi phục, trang xem app; launcher
    kernel (warm pool hoặc fork server), mức trần session mỗi pod, giới hạn bộ nhớ và UX lúc mở session
    đặt theo số đo trên kind (§6.3). **Mục tiêu khởi động (D15):** tiêu chí nghiệm thu = người xem mới trên
