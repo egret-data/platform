@@ -8436,11 +8436,22 @@ async fn a_run_whose_worker_stopped_renewing_is_reaped(pool: sqlx::PgPool) {
 /// A [`Registry`] whose handler writes three lines, then lets a rival take its
 /// run exactly as production would (the reaper clears the lease, another
 /// worker claims it), then sleeps `sleep` and answers FAILED with a message.
+///
+/// **The rival runs on its own task** (W9a Task 6 fix round 2). The reap is
+/// what moves the fence, so the stale worker's next renewal (every 100 ms
+/// under `lease_of_ms(300)`) finds it moved and DROPS this handler -- which
+/// is the behaviour under test. Awaited inline, the reap and the rival's
+/// claim were part of the handler future and died with it whenever the reap
+/// committed less than one renewal before the claim returned; a reap that
+/// took ~90 ms (measured: 6-90 ms on the dev Postgres) left no rival at all
+/// and the test failed on its own harness ("the rival claimed"). A rival
+/// worker is never inside another worker's handler in production; spawned,
+/// it outlives the drop as a real one would.
 struct FenceMover {
     pool: sqlx::PgPool,
     sink: std::sync::Arc<Lines>,
     sleep: std::time::Duration,
-    rival: Mutex<Option<egret_workflow::worker::Claimed>>,
+    rival: std::sync::Arc<Mutex<Option<egret_workflow::worker::Claimed>>>,
     completed: std::sync::atomic::AtomicBool,
 }
 
@@ -8450,15 +8461,19 @@ impl Registry for FenceMover {
         for i in 1..=3 {
             task.log.info(&format!("line {i}")).await;
         }
-        assert_eq!(
-            reap(&self.pool, std::time::Duration::ZERO)
-                .await
-                .expect("reap"),
-            1
-        );
-        let rival = claim(&self.pool, 1).await.expect("rival claim");
-        assert_eq!(rival.len(), 1, "the reaped run is claimable again");
-        *self.rival.lock().unwrap() = rival.into_iter().next();
+        let (pool, slot) = (self.pool.clone(), self.rival.clone());
+        let rival = tokio::spawn(async move {
+            assert_eq!(
+                reap(&pool, std::time::Duration::ZERO).await.expect("reap"),
+                1
+            );
+            let rival = claim(&pool, 1).await.expect("rival claim");
+            assert_eq!(rival.len(), 1, "the reaped run is claimable again");
+            *slot.lock().unwrap() = rival.into_iter().next();
+        });
+        // Dropped here (or in the sleep) when the renewal finds the fence
+        // moved; the rival's task runs on regardless.
+        rival.await.expect("the rival's reap and claim");
         tokio::time::sleep(self.sleep).await;
         self.completed
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -8498,7 +8513,7 @@ async fn a_worker_that_loses_its_fence_records_no_outcome(pool: sqlx::PgPool) {
         pool: pool.clone(),
         sink: std::sync::Arc::new(Lines::default()),
         sleep: std::time::Duration::from_secs(3),
-        rival: Mutex::new(None),
+        rival: std::sync::Arc::new(Mutex::new(None)),
         completed: std::sync::atomic::AtomicBool::new(false),
     };
 
@@ -8517,12 +8532,21 @@ async fn a_worker_that_loses_its_fence_records_no_outcome(pool: sqlx::PgPool) {
         started.elapsed()
     );
 
-    let rival = reg
-        .rival
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("the rival claimed");
+    // The rival's task may still be finishing its claim when the tick
+    // returns: wait for it (bounded), never assume it.
+    let rival = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(r) = reg.rival.lock().unwrap().clone() {
+                break r;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the rival claimed within 10 s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
     assert_eq!(
         lease_of(&pool, ex, "a").await,
         Some(rival.claimed_at),
