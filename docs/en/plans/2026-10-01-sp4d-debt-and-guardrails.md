@@ -210,6 +210,42 @@ the guard or record the bound.
 
 ---
 
+### Task 9: the same silently-inert symptom, on the legitimate type
+
+**Files:**
+- Modify: `crates/egret-policy/src/admin/mod.rs:1031-1037` (the `{profile}_tag` fallback), the
+  service write path's value shape
+- Reference: `crates/egret-policy/src/ranger/api/download.rs:55-58`
+
+**Found by Task 2's review.** Task 2's guards test key **presence**, deliberately and correctly,
+so `POST /policies/services {"name":"p","type":"trino","config":{"tagService":""}}` is accepted
+200. Then the two readers of that config **disagree**: `download.rs` does `.and_then(as_str)`
+with **no fallback**, while `admin/mod.rs` falls back to `{profile}_tag`. So the tag editor files
+policies into `p_tag` while the plugin receives **no `tagPolicies` block** — every one of those
+tag policies silently inert, which is Task 2's own symptom **on the supported type**. It needs a
+stranded `p_tag` row, and `engines.rs:2595` documents that as a real state ("Left by a deleted
+same-name engine: reuse, never delete"). The compiler path is safe — `trigger.rs:404-418` warns
+and skips.
+
+- [ ] **Step 1: Do NOT fix it inside `carries_tag_service`.** That predicate is written to match
+the migration's `->>` shape on purpose, and changing it breaks the agreement Task 2 built and
+mutation-tested.
+
+- [ ] **Step 2: Measure whether anything relies on the `{profile}_tag` fallback** before removing
+it. If something does, that is the finding and it changes the fix.
+
+- [ ] **Step 3: Make the two readers agree.** The root is the fallback: one reader invents a
+default the other does not. Removing it makes the editor **refuse** rather than mis-file.
+
+- [ ] **Step 4: Guard the value shape at the write path** so an empty `tagService` cannot be
+stored at all — presence is the right test for the type rule, and it is not the right test for
+whether the value names anything.
+
+- [ ] **Step 5: Mutate each half separately** and confirm a different test dies for each.
+- [ ] **Step 6: Commit.**
+
+---
+
 ## Open, not in this plan — named so it is not mistaken for closed
 
 **A StarRocks engine bound to a `trino`-typed profile that carries a `tagService` still
