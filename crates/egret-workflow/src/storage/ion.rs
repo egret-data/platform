@@ -843,15 +843,18 @@ mod tests {
         let (rows, stop) = read_values(cursor(text), 10);
         assert!(matches!(stop, Stop::End), "{stop:?}");
         assert_eq!(rows.len(), 4);
-        let deep = "[".repeat(MAX_DEPTH + 1);
+        // 50 levels open, then closing brackets the reader does not take as
+        // closing, then 51 more levels: 101 in all, whatever those claim.
+        let open = "[".repeat(50);
+        let deep = "[".repeat(MAX_DEPTH + 1 - 50);
         let closes = "]".repeat(300);
         for hiding in [
-            format!("\"{closes}\" {deep}"),
-            format!("'{closes}' {deep}"),
-            format!("'''{closes}''' {deep}"),
-            format!("/* {closes} */ {deep}"),
-            format!("// {closes}\n{deep}"),
-            format!("(a // {closes}\n{deep}"),
+            format!("{open}\"{closes}\" {deep}"),
+            format!("{open}'{closes}' {deep}"),
+            format!("{open}'''{closes}''' {deep}"),
+            format!("{open}/* {closes} */ {deep}"),
+            format!("{open}// {closes}\n{deep}"),
+            format!("{open}(a // {closes}\n{deep}"),
         ] {
             let (_, stop) = read_values(cursor(hiding.clone()), 10);
             assert!(matches!(stop, Stop::TooDeep(_)), "{hiding:.40}: {stop:?}");
