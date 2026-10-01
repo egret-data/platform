@@ -383,7 +383,16 @@ so the refusal reads as consistency rather than as a restriction.
 - [ ] **Step 3: Both layers, keyed to one shape**, as Tasks 2, 3 and 12 did — and Task 12's standing
 third test arm plus the ⚠ paragraph in `0167` are where the measurement already lives.
 - [ ] **Step 4: `perm.rules` too.** Task 12 established the two tables are a verbatim copy of each
-other; leaving one is leaving half a fix.
+other; leaving one is leaving half a fix. Check whether `ensure_row_filter_scope_is_a_table` counts
+`'*'` as a **named** schema — it counted `''` as one, which is how that shape slipped past a guard whose
+entire job is to refuse a row-filter scope that is not exactly catalog+schema+table.
+
+- [ ] **Step 5: Carried from Task 12's concern 3 — give `compile_rule` the symmetry.** It is `pub` and
+unguarded, deliberately, matching `ensure_row_filter_scope_is_a_table` and justified by fail-closed
+versus fail-open. That justification is sound for severity and **not** sound for a `pub` entry point: a
+caller reaching `compile_rule` directly gets no refusal at all, and "the wrong artifact withholds more
+than the author wrote" is still a wrong artifact. Guard it, and say in the doc that the severity argument
+is why it was not guarded before.
 
 ---
 
@@ -424,6 +433,13 @@ programme.
    this host, so this is covered. It stays on the list because "the only deployment is local" is a
    claim about **reach**, and reach claims have been wrong five times on this programme while the
    behaviour claim beside them was right.
+
+2. **Run migration 0167's listing query too**, for the same reason as 0166's and with a weaker evidence
+   base. Task 12 measured **23 databases on this host**: 4 grant rows and 3 rule rows in total, all in
+   scratch DBs, **zero violating**. But as it said itself, that is weaker than it looks — **no database on
+   this host has ever held a `perm.grants` row outside three scratch DBs**, and the only live-cluster
+   measurement on record in this repo is about **tag assignments, not grants**. 0167 is `VALID`, so it
+   aborts `migrate()` before the process serves if a real cluster holds one.
 
 ## Open, not in this plan — named so it is not mistaken for closed
 
