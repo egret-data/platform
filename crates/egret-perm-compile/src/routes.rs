@@ -1557,7 +1557,10 @@ async fn explain(
             };
             let decision =
                 egret_ranger_eval::eval::evaluate(&artifact, &request, &service_def, &config);
-            let attribution = attribution_for(&mut conn, &decision).await?;
+            // `&mut *conn` and not `&mut conn`: `attribution_for` is generic
+            // over `ClearanceLookups`, which `sqlx::PgConnection` implements,
+            // and a `PoolConnection` does not — inference needs the deref.
+            let attribution = attribution_for(&mut *conn, &decision).await?;
             accesses.push(ExplainAccess {
                 access_type: access_type.to_string(),
                 decision: WireDecision::from(&decision),
@@ -1706,8 +1709,16 @@ async fn artifact_for(
 /// the causes in `why` name the policies they are about themselves. And a
 /// policy egret's compiler does not own attributes to nothing either, which is
 /// a real answer: see [`ExplainAttribution`].
-async fn attribution_for(
-    conn: &mut sqlx::PgConnection,
+///
+/// **Generic over its lookups so this function — the WIRING — is testable with
+/// no database.** A pure `clearing_roles` covers the decision, but fix round 1
+/// measured that it left the call site uncovered: substituting
+/// `clearing_roles(None, &gates)` here passed 10/0, because the only test that
+/// reached this function was DB-gated. `ClearanceLookups` is the seam that
+/// closes it; `sqlx::PgConnection` is the production implementation and the
+/// tests at the bottom of this file hand it a fake that records what was asked.
+async fn attribution_for<L: ClearanceLookups + Send>(
+    conn: &mut L,
     decision: &Decision,
 ) -> Result<Option<ExplainAttribution>, PermHttpError> {
     let name = match decision {
@@ -1726,16 +1737,11 @@ async fn attribution_for(
         // the wire the engine sees, so both are reconstructed here — `tags.key`
         // (not `tags.name`), and the gate's roles keyed by that same key.
         Some(PolicyAttribution::Clearance { tag_id, locator }) => {
-            let tag = tag_keys_by_ids_via(conn, &[tag_id])
-                .await?
-                .into_iter()
-                .find(|(id, _)| *id == tag_id)
-                .map(|(_, key)| key);
+            let tag = conn.tag_key(tag_id).await?;
             // The gate is keyed by `tags.key`, so with no key there is no
-            // lookup to run. What the result MEANS is `clearing_roles`' job,
-            // where it is testable without a database.
+            // lookup to run. What the result MEANS is `clearing_roles`' job.
             let gates = match &tag {
-                Some(key) => clearance_gates_for_tags_via(conn, std::slice::from_ref(key)).await?,
+                Some(key) => conn.gates_for(key).await?,
                 None => Vec::new(),
             };
             Some(ExplainAttribution::Clearance {
@@ -1748,15 +1754,56 @@ async fn attribution_for(
     })
 }
 
+/// The two reads a clearance attribution needs, behind a trait so that
+/// [`attribution_for`] can be driven with no database.
+///
+/// Both methods are `-> impl Future + Send` rather than `async fn` because the
+/// caller is an axum handler: an `async fn` in a trait yields a future with no
+/// `Send` bound, and the handler would stop compiling.
+trait ClearanceLookups {
+    /// `tags.key` for this `tags.id`, or `None` when the row is gone — a
+    /// compiled clearance outlives its tag until the next recompile.
+    fn tag_key(
+        &mut self,
+        tag_id: Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<String>, PermHttpError>> + Send;
+
+    /// The clearance gates for one `tags.key`, exactly as
+    /// `clearance_gates_for_tags_via` returns them — `(tag key, roles)` pairs,
+    /// and empty when the tag has no gate with roles.
+    fn gates_for(
+        &mut self,
+        tag_key: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<(String, Vec<String>)>, PermHttpError>> + Send;
+}
+
+/// The production implementation: the two store queries, unchanged. `tags.key`
+/// (never `tags.name`) is what a gate is keyed by, which is why the first read
+/// returns a key rather than a display name.
+impl ClearanceLookups for sqlx::PgConnection {
+    async fn tag_key(&mut self, tag_id: Uuid) -> Result<Option<String>, PermHttpError> {
+        Ok(tag_keys_by_ids_via(self, &[tag_id])
+            .await?
+            .into_iter()
+            .find(|(id, _)| *id == tag_id)
+            .map(|(_, key)| key))
+    }
+
+    async fn gates_for(
+        &mut self,
+        tag_key: &str,
+    ) -> Result<Vec<(String, Vec<String>)>, PermHttpError> {
+        Ok(clearance_gates_for_tags_via(self, &[tag_key.to_string()]).await?)
+    }
+}
+
 /// What [`ExplainAttribution::Clearance`]'s `required_roles` carries, given the
 /// `tags.key` the policy name resolved to (if any) and whatever
-/// `clearance_gates_for_tags_via` returned.
+/// [`ClearanceLookups::gates_for`] returned.
 ///
 /// **`None` if and only if `tag` is `None`.** That is the guarantee the
-/// `Option` exists for, and it is a pure function here rather than three lines
-/// inside `attribution_for` because that function needs a `PgConnection` and so
-/// can only be tested where a database is reachable. A guarantee nothing can
-/// check is a comment.
+/// `Option` exists for, pinned here directly and again through
+/// [`attribution_for`], which is where the call site lives.
 ///
 /// `gates` is ignored entirely when `tag` is `None`: a clearance whose tag row
 /// is gone must not borrow another tag's gate, which is the one way a wrong
@@ -1879,5 +1926,192 @@ mod tests {
             clearing_roles(Some("pii"), &[gate("other", &["nope"])]),
             Some(Vec::new())
         );
+    }
+}
+
+// ── the wiring, with no database ─────────────────────────────────────────
+//
+// Fix round 1. The four tests above pin the DECISION; these pin the CALL
+// SITE, which is the part a surviving mutant found uncovered. `attribution_for`
+// is generic over `ClearanceLookups`, so the fake below stands in for the two
+// store queries and also RECORDS them — "no key, so no second query" is a
+// claim about behaviour, and a test that only looked at the return value could
+// not tell a skipped query from one whose result was thrown away.
+
+#[cfg(test)]
+mod wiring_tests {
+    use super::{attribution_for, ClearanceLookups, ExplainAttribution, PermHttpError};
+    use egret_ranger_eval::eval::{Decision, DenyReason};
+    use uuid::Uuid;
+
+    /// Stands in for the two store queries, and records what it was asked.
+    struct FakeLookups {
+        tag: Option<String>,
+        gates: Vec<(String, Vec<String>)>,
+        tags_asked: Vec<Uuid>,
+        gates_asked: Vec<String>,
+    }
+
+    impl FakeLookups {
+        fn new(tag: Option<&str>, gates: &[(&str, &[&str])]) -> Self {
+            Self {
+                tag: tag.map(str::to_string),
+                gates: gates
+                    .iter()
+                    .map(|(k, roles)| {
+                        (
+                            (*k).to_string(),
+                            roles.iter().map(|r| (*r).to_string()).collect(),
+                        )
+                    })
+                    .collect(),
+                tags_asked: Vec::new(),
+                gates_asked: Vec::new(),
+            }
+        }
+    }
+
+    impl ClearanceLookups for FakeLookups {
+        async fn tag_key(&mut self, tag_id: Uuid) -> Result<Option<String>, PermHttpError> {
+            self.tags_asked.push(tag_id);
+            Ok(self.tag.clone())
+        }
+
+        async fn gates_for(
+            &mut self,
+            tag_key: &str,
+        ) -> Result<Vec<(String, Vec<String>)>, PermHttpError> {
+            self.gates_asked.push(tag_key.to_string());
+            // The real query filters by key in SQL; the fake filters here, so a
+            // caller that passed the wrong key gets the same empty answer it
+            // would get from Postgres rather than a convenient one.
+            Ok(self
+                .gates
+                .iter()
+                .filter(|(k, _)| k == tag_key)
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn denied(policy_name: &str) -> Decision {
+        Decision::Denied {
+            policy_id: Some(30),
+            policy_name: policy_name.to_string(),
+            reason: DenyReason::DenyPolicyItem,
+        }
+    }
+
+    const TAG_ID: &str = "88888888-8888-4888-8888-888888888888";
+
+    fn clearance_name(locator: Option<&str>) -> String {
+        match locator {
+            Some(l) => format!("perm-clearance-{TAG_ID}-{l}"),
+            None => format!("perm-clearance-{TAG_ID}"),
+        }
+    }
+
+    /// **This is the test that kills the fix-round-1 survivor.** Substituting
+    /// `clearing_roles(None, &gates)` at the call site makes `required_roles`
+    /// `null` here while the gate plainly declares a role, so this assertion
+    /// fails — with no `DATABASE_URL`, in 0.00s.
+    #[tokio::test]
+    async fn a_resolved_clearance_carries_the_gates_roles_onto_the_wire() {
+        let mut lookups =
+            FakeLookups::new(Some("sp4d2a_ssn"), &[("sp4d2a_ssn", &["sp4d2a_cleared"])]);
+        let got = attribution_for(&mut lookups, &denied(&clearance_name(None)))
+            .await
+            .expect("no error");
+        assert_eq!(
+            got,
+            Some(ExplainAttribution::Clearance {
+                tag_id: Uuid::parse_str(TAG_ID).unwrap(),
+                tag: Some("sp4d2a_ssn".to_string()),
+                required_roles: Some(vec!["sp4d2a_cleared".to_string()]),
+                locator: None,
+            })
+        );
+        assert_eq!(
+            lookups.gates_asked,
+            vec!["sp4d2a_ssn".to_string()],
+            "the gate must be looked up BY THE KEY the tag resolved to"
+        );
+    }
+
+    /// The browser-gate state: the `tags` row is gone and the compiled policy is
+    /// still served. `required_roles` is `None` — not `[]` — and the second
+    /// query is never issued, because there is no key to issue it with.
+    #[tokio::test]
+    async fn an_unresolved_clearance_sends_null_roles_and_asks_no_gate() {
+        let mut lookups = FakeLookups::new(None, &[("sp4d2a_ssn", &["sp4d2a_cleared"])]);
+        let got = attribution_for(&mut lookups, &denied(&clearance_name(Some("wh.s.t.ssn"))))
+            .await
+            .expect("no error");
+        assert_eq!(
+            got,
+            Some(ExplainAttribution::Clearance {
+                tag_id: Uuid::parse_str(TAG_ID).unwrap(),
+                tag: None,
+                required_roles: None,
+                locator: Some("wh.s.t.ssn".to_string()),
+            })
+        );
+        assert!(
+            lookups.gates_asked.is_empty(),
+            "no key means no gate query, not a query with a borrowed key"
+        );
+    }
+
+    /// The other half of the honest 3→2: the key resolved, the gate query ran
+    /// and matched nothing. `Some([])` is a fact about the gate, and it must not
+    /// become `None` just because the list is empty.
+    #[tokio::test]
+    async fn a_resolved_clearance_with_no_gate_sends_an_empty_list() {
+        let mut lookups = FakeLookups::new(Some("sp4d2a_ssn"), &[]);
+        let got = attribution_for(&mut lookups, &denied(&clearance_name(None)))
+            .await
+            .expect("no error");
+        assert_eq!(
+            got,
+            Some(ExplainAttribution::Clearance {
+                tag_id: Uuid::parse_str(TAG_ID).unwrap(),
+                tag: Some("sp4d2a_ssn".to_string()),
+                required_roles: Some(Vec::new()),
+                locator: None,
+            })
+        );
+        assert_eq!(lookups.gates_asked, vec!["sp4d2a_ssn".to_string()]);
+    }
+
+    /// A grant, a rule and an `Undecidable` all reach this function too, and
+    /// none of them may touch the clearance lookups — a tag read per verdict on
+    /// a profile that has no clearance at all would be pure cost.
+    #[tokio::test]
+    async fn the_other_attributions_issue_no_clearance_lookups() {
+        let grant = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        let rule = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        for (decision, want) in [
+            (
+                denied(&format!("perm-grant-{grant}")),
+                Some(ExplainAttribution::Grant { grant_id: grant }),
+            ),
+            (
+                denied(&format!("perm-rule-{rule}-wh.s.t.c")),
+                Some(ExplainAttribution::Rule {
+                    rule_id: rule,
+                    locator: Some("wh.s.t.c".to_string()),
+                }),
+            ),
+            // Ranger's own super-user short-circuit: a real decider with no
+            // model object, reported by name on the decision itself.
+            (denied("superuser"), None),
+            (Decision::Undecidable { why: Vec::new() }, None),
+        ] {
+            let mut lookups = FakeLookups::new(Some("sp4d2a_ssn"), &[("sp4d2a_ssn", &["r"])]);
+            let got = attribution_for(&mut lookups, &decision).await.expect("ok");
+            assert_eq!(got, want, "for {decision:?}");
+            assert_eq!(lookups.tags_asked, Vec::<Uuid>::new(), "for {decision:?}");
+            assert!(lookups.gates_asked.is_empty(), "for {decision:?}");
+        }
     }
 }

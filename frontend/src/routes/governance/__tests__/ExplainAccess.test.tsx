@@ -618,16 +618,21 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
   });
 
   /**
-   * The point of making the field an `Option`: the roles sentence reads
-   * `required_roles` and NOTHING ELSE. `attribution_for`
+   * **THE PAYLOAD BELOW CANNOT ARISE FROM THE LIVE PATH TODAY — this test is
+   * evidence about the page, not about production.** `attribution_for`
    * (`crates/egret-perm-compile/src/routes.rs`) is the only producer of this
-   * variant and it sends `null` only when `tag` is `null`, so no egret code
-   * path emits the payload below today — which is exactly why it is the
-   * discriminating fixture. Under the old `tag === null` guard it rendered the
-   * groups-only sentence about a gate nothing had looked up; a page that still
-   * consults `tag` fails here and nowhere else.
+   * variant and it sends `required_roles: null` only when `tag` is `null`, so
+   * `tag` resolved + roles `null` is a shape nothing emits.
+   *
+   * It is here because it is the ONLY fixture that discriminates: the point of
+   * making the field an `Option` is that the roles sentence reads
+   * `required_roles` and NOTHING ELSE, and under the old `tag === null` guard
+   * this payload rendered the groups-only sentence about a gate nothing had
+   * looked up. A page that goes back to consulting `tag` fails here and nowhere
+   * else. If the wire ever gains a path that emits this shape, this comment is
+   * what needs deleting — not the test.
    */
-  test("a clearance whose roles are null is unknown even when the tag resolved", async () => {
+  test("a clearance whose roles are null is unknown even when the tag resolved (shape no live path emits)", async () => {
     mutateAsync.mockResolvedValueOnce({
       status: 200,
       data: {
