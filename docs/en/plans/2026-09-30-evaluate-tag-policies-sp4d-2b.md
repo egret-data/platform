@@ -51,7 +51,7 @@ gives the ranking instead. Read it in this order:
 | 2 | **Item C** (in the scope-finding section above) | a supported API call makes a whole table unreadable, `count(*)` included. One assignment away from live. |
 | 3 | **Item 0** | model or refuse `accessTypeResults` — two defects trace to it, and nothing executable in the gate can report the mechanism. |
 | 4 | **Item B** / **Item B2** | nothing constrains what `catalog_tag_assignments` stores, nor what `explain`'s target strings contain; a gate enumerating three classes compensates. One `CHECK` retires it. |
-| 5 | **Item 0b** | the differential gate — the instrument that found **seven** defects — **is in CI and vacuously green**: `cargo test --workspace` runs it, `EGRET_TEST_RANGER_E2E` is set nowhere, so it reports `1 passed … 0.00s`. Wired by Task 8's fix round (unverified on a runner); the fail-by-default inversion is still open. |
+| 5 | **Item 0b** | the differential gate — the instrument that found **seven** defects — was reached by **nothing that actually runs**: present in CI behind a job never executed on a runner, and absent from `just check`, which is the real pre-merge gate because CI is out of quota. **CLOSED**: `just check` now ends with `just test-ranger-gates`. The fail-by-default inversion is ruled out, with reasons. |
 | 6 | **Item 1** | is the composed ACCESS path finished? On the evidence, no. |
 | 7 | **Item 2** | the `required_roles` 3→2 residual; one `SELECT EXISTS`. |
 
@@ -234,15 +234,21 @@ implementer and the reviewer independently concluded that no further corpus
 extension should precede this. Tasks 6-8 do not extend the corpus, so they are not
 blocked; anything that does, is.
 
-### Item 0b: the differential gate IS in CI, green, and measures nothing
+### Item 0b: the gate with the best hit rate was reached by nothing that actually runs
 
-⚠ **The earlier wording of this item — "runs on no automated path" — was wrong, and
-the truth is worse.** `.github/workflows/ci.yml` runs `cargo test --workspace
---no-fail-fast` in the `rust` job, so the gate **is** on an automated path and **is**
-reported green on every push. What is absent is `EGRET_TEST_RANGER_E2E`, which appears
-in no workflow and no Justfile recipe — so the gate self-skips, prints a line to
-stderr that nothing reads, and contributes `1 passed` to a green suite. With the flag
-set it takes **136 s** and really runs.
+⚠ **This item has been wrong twice, each time in the same direction — too kind — and
+this is the accurate version.** First wording: "runs on no automated path." Second:
+"in CI and vacuously green." Accurate: **it was in CI behind a job that had never been
+executed on a runner, and absent from the local recipe that is the real gate.**
+
+Both halves matter and neither alone is the problem. `.github/workflows/ci.yml` runs
+`cargo test --workspace` in the `rust` job, so the gate was *present* and reported green
+on every push while `EGRET_TEST_RANGER_E2E` appeared in no workflow and no Justfile
+recipe — it self-skipped, printed a line to stderr that nothing reads, and contributed
+`1 passed … 0.00s`. And **GitHub CI is out of quota on this project**: the standing
+practice is that everything runs locally before merge, so `just check` IS the gate, and
+adding a CI job alone would have left the instrument unreached by anything anybody runs.
+With the flag set it takes **136 s** and really runs.
 
 **A gate that is absent is visibly absent; a gate that is present and vacuously green
 is worse**, because its presence is the argument against adding another. Two tests have
@@ -256,20 +262,25 @@ the jars. Leaving it off every automated path means the next regression is found
 whoever next remembers the variable.
 
 It legitimately needs a JVM, Maven and the jars, so it cannot be a plain unit test.
-**Task 8's fix round wired it: `.github/workflows/ci.yml` gains a `ranger-differential`
-job** that sets `EGRET_TEST_RANGER_E2E=1` and runs both gates on a runner with Maven
-and a JDK, with the `~/.m2` cache — and the `rust` job's Test step now says in the log
-that its green does NOT cover them. ⚠ **Unverified on a real runner**: no GitHub
-Actions run can be executed from this worktree, so what is proven is the COMMAND (run
-locally, green) and not the job. First CI run is the gate on the gate.
+**CLOSED on the path that matters: `just check` now ends with `just test-ranger-gates`**,
+a named recipe that sets `EGRET_TEST_RANGER_E2E=1` over both gates. It runs last because
+it is the most expensive thing in the recipe, and it is named so a failure is
+attributable to it rather than lost in a workspace run. **On a machine with no JVM or
+Maven, `just check` FAILING there is the intended outcome** — somebody about to merge
+needs to know the differential did not run, and a green that silently skipped it is the
+thing this item is about.
 
-The better fix, and it is NOT done because it is outside the fix round's file scope:
-**invert the default the way `EGRET_ALLOW_ENGINE_SKIP` and `EGRET_ALLOW_DOCKER_SKIP`
-already do in this repo** — fail without the instrument unless an explicit
-`EGRET_ALLOW_RANGER_E2E_SKIP=1` is passed, so the skip is visible in the command line
-that produced the green. That is two lines in each of the two test files and it is the
-pattern this repository already settled on; see the comment above `ci.yml`'s Test step,
-which argues for exactly it.
+`.github/workflows/ci.yml` also gains a `ranger-differential` job, kept for the day the
+quota returns. ⚠ **That job is unverified on a real runner**: no Actions run can be
+executed from this worktree, so what is proven there is the YAML and the commands, not
+the job.
+
+**RULED OUT, deliberately: inverting the default** (fail without the instrument unless
+`EGRET_ALLOW_RANGER_E2E_SKIP=1`, the way `EGRET_ALLOW_ENGINE_SKIP` and
+`EGRET_ALLOW_DOCKER_SKIP` do). It buys safety by making a plain `cargo test` hostile to
+anyone without a JVM, and it would be defeated the first time someone exports the
+variable as `0` to get work done. Reaching the gate from `just check` closes the same
+hole without that cost: keep the self-skip, and make the path that matters run it.
 
 ### Item 2: the 3→2 residual on `required_roles` — one `SELECT EXISTS`
 
