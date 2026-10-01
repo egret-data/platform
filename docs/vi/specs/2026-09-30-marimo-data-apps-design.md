@@ -294,9 +294,11 @@ Quy tắc phía pod, rút ra từ S0:
 - **Revision gốc theo từng session editor, không theo app.** marimo tạo một `AppFileManager` mới ở mỗi
   lần `NotebookWorkspace.load`, và mỗi session editor giữ manager từ lần nạp của chính nó. Vì vậy mỗi lần
   nạp đều tải draft mới nhất, và `EgretStorage` của nó giữ revision của nội dung mà session đó nhận được.
-  Session nào có draft đã thay đổi bên dưới sẽ nhận 409 ở lần lưu kế tiếp; marimo hiện toast, và tải lại
-  trang cho tác giả một session mới ở revision mới nhất. Cách này bắt được tab cũ, tab thứ hai và tác giả
-  thứ hai. Quy tắc cũ (một revision gốc cho mỗi app suốt vòng đời pod) đã bị bỏ ở P3: revision dùng chung
+  Session nào có draft đã thay đổi bên dưới sẽ nhận 409 ở lần lưu kế tiếp, và marimo hiện toast. Ở chế độ
+  edit marimo giữ một session cho mỗi file, và tải lại trình duyệt thường *tiếp tục* session mồ côi (TTL
+  120 giây). Vì vậy pod đánh dấu session là xung đột khi gặp 409 và từ chối tiếp tục nó, và lần tải lại
+  tạo một session mới ở revision mới nhất. Tab thứ hai dùng chung session (kiosk hoặc RTC) chứ không tách
+  ra. Cách này bắt được editor cũ và tác giả thứ hai. Quy tắc cũ (một revision gốc cho mỗi app suốt vòng đời pod) đã bị bỏ ở P3: revision dùng chung
   không phân biệt được các session, nên một session cũ có thể lưu đè bản mới hơn sau khi một lần nạp khác
   đã tải lại.
 - **Pod từ chối khởi động** nếu có `.marimo.toml` trong thư mục làm việc, bất kỳ thư mục cha nào của nó,

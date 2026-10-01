@@ -297,9 +297,11 @@ Pod-side rules, from S0:
 - **A base revision per editor session, not per app.** marimo builds a fresh `AppFileManager` on every
   `NotebookWorkspace.load`, and each editor session keeps the manager from its own load. So every load
   fetches the latest draft, and its `EgretStorage` holds the revision of what that session was given.
-  A session whose draft has moved on underneath it gets a 409 on its next save; marimo shows a toast,
-  and a reload hands the author a new session at the latest revision. This catches a stale tab, a
-  second tab, and a second author. The earlier rule (one base revision per app for the pod's lifetime)
+  A session whose draft has moved on underneath it gets a 409 on its next save, and marimo shows a
+  toast. In edit mode marimo keeps one session per file, and a browser reload normally *resumes* the
+  orphaned session (TTL 120 s). So the pod marks a session conflicted on 409 and refuses to resume it,
+  and the reload creates a new session at the latest revision. A second tab shares the session (kiosk or
+  RTC) rather than forking it. This catches a stale editor and a second author. The earlier rule (one base revision per app for the pod's lifetime)
   was dropped in P3: a shared revision could not tell sessions apart, so a stale session could save
   over newer work once any other load had re-fetched.
 - **The pod refuses to start** if a `.marimo.toml` exists in its working directory, any parent of it, or
