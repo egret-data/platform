@@ -6170,7 +6170,7 @@
         },
         "responses": {
           "200": {
-            "description": "One verdict per profile over the artifact each engine downloads",
+            "description": "One verdict per profile over the artifact each engine downloads — including the `no_profile_serves_the_catalog` outcome for a catalog that exists and that no profile serves, which is an answer and not an error",
             "content": {
               "application/json": {
                 "schema": {
@@ -6180,7 +6180,7 @@
             }
           },
           "400": {
-            "description": "The target skips a resource level (a column implies a table implies a schema)",
+            "description": "The target skips a resource level (a column implies a table implies a schema), names a level as \"\" or \"*\" (Ranger's \"every value\", not a resource name), or names a catalog id no registered catalog has",
             "content": {
               "application/json": {
                 "schema": {
@@ -6200,7 +6200,7 @@
             }
           },
           "403": {
-            "description": "Missing policy:read permission",
+            "description": "Missing policy:read permission, or a workspace-scoped impersonation overlay asking about a catalog that workspace is not assigned",
             "content": {
               "application/json": {
                 "schema": {
