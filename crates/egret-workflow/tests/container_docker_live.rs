@@ -99,6 +99,7 @@ fn handler(type_id: &str) -> Script {
                 },
             }]),
             features: Arc::new(FixedFeatureState(true)),
+            files: None,
         }),
     )
 }
@@ -1298,6 +1299,118 @@ async fn a_flood_of_output_markers_is_refused_rather_than_stored() {
 // The runner
 // ---------------------------------------------------------------------------
 
+/// **W9a Task 5: a 12 MiB file in internal storage streams into the
+/// container** under its `inputFiles` name -- `docker cp -` fed by
+/// `write_tar` -- and the command counts it there. `12582912` is computed by
+/// `wc -c` inside the container; the object lives in a `MemStore`, so this
+/// judges the transfer, not S3.
+async fn a_stored_input_file_streams_into_the_container() {
+    const SIZE: usize = 12 << 20;
+    let files = Arc::new(egret_workflow::storage::FileStore {
+        store: Arc::new(egret_storage::MemStore::new()),
+        bucket: "egret-test".into(),
+        prefix: "workflow/".into(),
+        caps: egret_workflow::storage::Caps::default(),
+        retention_days: 30,
+    });
+    let uri = format!(
+        "kestra:///w9a/t5/in-files/executions/{}/tasks/w/{}/big.bin",
+        Uuid::new_v4(),
+        Uuid::new_v4()
+    );
+    let body = "0123456789abcdef".repeat(SIZE / 16);
+    assert_eq!(body.len(), SIZE);
+    files
+        .store
+        .put(
+            &files.object_uri(suite_workspace(), &uri).unwrap(),
+            body.into_bytes(),
+        )
+        .await
+        .unwrap();
+    let snapshot = egret_workflow::storage::scope::Snapshot::from_parts(
+        BTreeMap::from([(
+            uri.clone(),
+            Ok(egret_workflow::storage::IndexedFile {
+                uri: uri.clone(),
+                execution_id: Uuid::new_v4(),
+                task_run_id: None,
+                size: SIZE as u64,
+            }),
+        )]),
+        files.clone(),
+        suite_workspace(),
+        None,
+    );
+    use egret_config::{PluginConfiguration, PluginConfigurationValues, PluginConfigurations};
+    let h = Script::new(
+        egret_workflow::scripts::kind_of(container::TYPE_ID).expect("a script type"),
+        Arc::new(ScriptRuntime {
+            runner_kind: RunnerKind::Docker,
+            runner: Arc::new(DockerRunner::new().with_files(files.clone())),
+            plugin_configurations: PluginConfigurations(vec![PluginConfiguration {
+                r#type: RunnerKind::Docker.fqcn().to_string(),
+                values: PluginConfigurationValues {
+                    allowed_images: Some(vec!["*".into(), "*/*".into(), "*/*/*".into()]),
+                    allowed_types: None,
+                },
+            }]),
+            features: Arc::new(FixedFeatureState(true)),
+            files: Some(files.clone()),
+        }),
+    );
+    let (mut t, rec) = recorded(
+        container::TYPE_ID,
+        serde_json::json!({
+            "image": SHELL_IMAGE,
+            "inputFiles": {
+                "d/big.bin": "{{ outputs.w.uri }}",
+                "literal.txt": "just contents",
+            },
+            "commands": [
+                "echo \"SIZE=$(wc -c < d/big.bin | tr -d ' ')\"",
+                "echo \"FOREIGN=$(tr -d '0-9a-f' < d/big.bin | wc -c | tr -d ' ')\"",
+                "echo \"HEAD=$(head -c 16 d/big.bin)\"",
+                "echo \"LITERAL=$(cat literal.txt)\"",
+            ],
+        }),
+    );
+    t.render = egret_workflow::runners::RenderContext::from_json_object(
+        &serde_json::json!({"outputs": {"w": {"uri": uri}}}),
+    )
+    .expect("an object")
+    .with_files(snapshot.into_scope());
+
+    let out = h
+        .run(&t)
+        .await
+        .expect("a real daemon is not a worker failure");
+    assert_eq!(
+        out.state,
+        egret_workflow::executor::RunState::Success,
+        "{:?} {:?}",
+        out.message,
+        rec.texts()
+    );
+    let texts = rec.texts();
+    for want in [
+        "SIZE=12582912",
+        "FOREIGN=0",
+        "HEAD=0123456789abcdef",
+        "LITERAL=just contents",
+    ] {
+        assert!(
+            texts.contains(&want.to_string()),
+            "the container printed {want:?}: {texts:?}"
+        );
+    }
+    assert!(
+        !texts.iter().any(|t| t.contains("kestra://")),
+        "the task never sees the URI: {texts:?}"
+    );
+    h.release(&t).await.expect("released");
+}
+
 type Case = fn() -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
 macro_rules! case {
@@ -1310,6 +1423,7 @@ macro_rules! case {
 fn daemon_cases() -> Vec<(&'static str, Case)> {
     vec![
         case!(a_container_runs_and_both_of_its_streams_reach_the_sink),
+        case!(a_stored_input_file_streams_into_the_container),
         case!(a_directory_named_as_an_output_file_does_not_wedge_the_worker),
         case!(a_dropped_future_leaves_the_container_running_and_cancel_is_what_stops_it),
         case!(docker_cancel_with_grace_lets_a_sigterm_trap_run),

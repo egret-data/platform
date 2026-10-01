@@ -1,5 +1,6 @@
-//! The tar framing for moving files in and out of a task pod by exec — pure,
-//! in memory, and hand-rolled.
+//! The tar framing for moving files OUT of a task pod by exec — pure, in
+//! memory, and hand-rolled. Files go IN through the streamed
+//! [`write_tar`](crate::storage::transfer::write_tar) (W9a Task 5).
 //!
 //! # Why hand-rolled
 //!
@@ -22,16 +23,17 @@
 //! link entry produces), because an empty output the author did not write is a
 //! wrong answer that looks like a right one.
 
+#[cfg(test)]
 use std::collections::BTreeMap;
 
-const BLOCK: usize = 512;
+#[cfg(test)]
+use crate::storage::transfer::header;
+use crate::storage::transfer::BLOCK;
 
-/// A ustar archive of `files` (name relative to the working directory →
-/// contents), with an entry for every parent directory first so the extract
-/// does not depend on the tar implementation creating them.
-///
-/// `Err` is the author's: a name ustar cannot carry (over 255 bytes, or a
-/// final component over 100).
+/// W5a's in-memory packer, kept ONLY as the reference
+/// `storage::transfer::write_tar` is proven byte-identical to (W9a Task 5);
+/// uploads stream through `write_tar`. This file goes in Task 6.
+#[cfg(test)]
 pub fn pack(files: &BTreeMap<String, String>) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -57,54 +59,6 @@ pub fn pack(files: &BTreeMap<String, String>) -> Result<Vec<u8>, String> {
     }
     out.extend_from_slice(&[0u8; BLOCK * 2]);
     Ok(out)
-}
-
-fn header(name: &str, size: u64, kind: u8, mode: u32) -> Result<[u8; BLOCK], String> {
-    let mut h = [0u8; BLOCK];
-    let (prefix, base) = split_name(name)?;
-    h[..base.len()].copy_from_slice(base.as_bytes());
-    octal(&mut h[100..108], mode as u64);
-    octal(&mut h[108..116], 0);
-    octal(&mut h[116..124], 0);
-    octal(&mut h[124..136], size);
-    octal(&mut h[136..148], 0);
-    h[156] = kind;
-    h[257..263].copy_from_slice(b"ustar\0");
-    h[263..265].copy_from_slice(b"00");
-    h[345..345 + prefix.len()].copy_from_slice(prefix.as_bytes());
-    h[148..156].copy_from_slice(b"        ");
-    let sum: u32 = h.iter().map(|b| *b as u32).sum();
-    let s = format!("{sum:06o}\0 ");
-    h[148..156].copy_from_slice(s.as_bytes());
-    Ok(h)
-}
-
-/// ustar's name field is 100 bytes and its prefix 155, split at a `/`.
-fn split_name(name: &str) -> Result<(&str, &str), String> {
-    let too_long = || {
-        format!(
-            "the input file name {name:?} is too long to transfer: a name may be at most 255 \
-             bytes, with at most 100 after its last `/`"
-        )
-    };
-    if name.len() <= 100 {
-        return Ok(("", name));
-    }
-    // The longest prefix that fits, so the base is as short as possible.
-    let bytes = name.as_bytes();
-    for i in (0..bytes.len()).rev() {
-        if bytes[i] == b'/' && i <= 155 && name.len() - i - 1 <= 100 && i > 0 {
-            return Ok((&name[..i], &name[i + 1..]));
-        }
-    }
-    Err(too_long())
-}
-
-fn octal(field: &mut [u8], v: u64) {
-    let width = field.len() - 1;
-    let s = format!("{v:0width$o}");
-    field[..width].copy_from_slice(s.as_bytes());
-    field[width] = 0;
 }
 
 /// What one declared output file turned out to be, read out of the archive a

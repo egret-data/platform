@@ -1164,6 +1164,7 @@ fn worker_registry(
             runner: spy,
             plugin_configurations: configs(&[(scripts::DOCKER_RUNNER, images)]),
             features: std::sync::Arc::new(PgFeatureState::new(pool.clone())),
+            files: None,
         }),
     );
     reg
@@ -1462,6 +1463,7 @@ fn daemon_registry(
             runner: daemon,
             plugin_configurations: configs(&[(scripts::DOCKER_RUNNER, &["ubuntu:*"])]),
             features: std::sync::Arc::new(PgFeatureState::new(pool.clone())),
+            files: None,
         }),
     );
     reg

@@ -198,6 +198,10 @@ pub(super) mod testing {
         /// `(is_stderr, line)` to stream, in order. `None` streams the one
         /// stdout line the argv would print.
         streams: Mutex<Option<Vec<(bool, String)>>>,
+        /// When set, `run` writes the input archive from this store into a
+        /// sink first, through the shipping `write_tar` and `staging_error`
+        /// -- what a real runner does before it creates anything that runs.
+        stage_from: Mutex<Option<Arc<crate::storage::FileStore>>>,
     }
 
     impl Spy {
@@ -214,6 +218,11 @@ pub(super) mod testing {
         /// `commands::stream_line` the real runner uses.
         pub fn streaming(self: Arc<Self>, lines: Vec<(bool, String)>) -> Arc<Self> {
             *self.streams.lock().unwrap() = Some(lines);
+            self
+        }
+        /// Stage the inputs from `files` as a real runner does (W9a Task 5).
+        pub fn staging(self: Arc<Self>, files: Arc<crate::storage::FileStore>) -> Arc<Self> {
+            *self.stage_from.lock().unwrap() = Some(files);
             self
         }
         pub fn only(&self) -> TaskCommands {
@@ -234,6 +243,13 @@ pub(super) mod testing {
         ) -> Result<CommandsResult> {
             self.seen.lock().unwrap().push(commands.clone());
             self.specs.lock().unwrap().push(spec.clone());
+            let stage_from = self.stage_from.lock().unwrap().clone();
+            if let Some(files) = stage_from {
+                let sources = commands.tar_sources()?;
+                crate::storage::transfer::write_tar(&mut tokio::io::sink(), &sources, Some(&files))
+                    .await
+                    .map_err(crate::worker::commands::staging_error)?;
+            }
             // A real runner streams; this one streams what the test gave it,
             // or the one line the argv would print, through the real runner's
             // own `stream_line` — so the levels, the markers and the

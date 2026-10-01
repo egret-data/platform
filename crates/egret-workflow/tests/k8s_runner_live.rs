@@ -20,6 +20,9 @@
 //! EGRET_TEST_KIND=1 DATABASE_URL=… cargo test -p egret-workflow --test k8s_runner_live
 //! ```
 //!
+//! `EGRET_TEST_KIND_CONTEXT=kind-<name>` runs it against another cluster
+//! (a temporary one) instead of `kind-egret`; load the two images there.
+//!
 //! # It touches ONE namespace, and deletes it
 //!
 //! The kind cluster `egret` is shared with the dev stack. Every object this
@@ -50,7 +53,7 @@ use std::time::Duration;
 use egret_workflow::logs::{LogLevel, LogLimits, LogLine, LogRepo, RunIdentity, RunLog};
 use egret_workflow::scripts::{ResourceAmounts, Resources, RunnerKind, RunnerSpec};
 use egret_workflow::worker::commands::{
-    CommandsResult, DockerRunner, NoObserver, OrphanSweep, TaskCommands, TaskRunner,
+    CommandsResult, DockerRunner, NoObserver, OrphanSweep, StoredInput, TaskCommands, TaskRunner,
 };
 use egret_workflow::worker::handlers::LogSink;
 use egret_workflow::worker::k8s::{pod_spec, sweep_orphans, KubernetesRunner, PodConfig};
@@ -67,7 +70,14 @@ mod common;
 const NS: &str = "egret-w5a-tasks-test";
 /// The gate.
 const GATE: &str = "EGRET_TEST_KIND";
+/// The kubeconfig context, `kind-egret` unless [`CONTEXT_VAR`] names another
+/// -- a temporary cluster, so a run need not touch the shared one.
 const CONTEXT: &str = "kind-egret";
+const CONTEXT_VAR: &str = "EGRET_TEST_KIND_CONTEXT";
+
+fn context() -> String {
+    std::env::var(CONTEXT_VAR).unwrap_or_else(|_| CONTEXT.to_string())
+}
 const HELPER_IMAGE: &str = "egret-task-helper:dev";
 /// `alpine:3.20`, retagged so `kind load` has a single-platform image.
 const SHELL_IMAGE: &str = "egret-w5a-test-shell:dev";
@@ -80,12 +90,12 @@ const RUNNER_SA: &str = "egret-task-runner-test";
 
 async fn client() -> kube::Client {
     let opts = kube::config::KubeConfigOptions {
-        context: Some(CONTEXT.to_string()),
+        context: Some(context()),
         ..Default::default()
     };
     let cfg = kube::Config::from_kubeconfig(&opts)
         .await
-        .unwrap_or_else(|e| panic!("no kubeconfig context {CONTEXT}: {e}"));
+        .unwrap_or_else(|e| panic!("no kubeconfig context {}: {e}", context()));
     kube::Client::try_from(cfg).expect("a kube client")
 }
 
@@ -93,12 +103,12 @@ async fn client() -> kube::Client {
 /// request is authorised as that account, so as the chart's Role.
 async fn runner_client() -> kube::Client {
     let opts = kube::config::KubeConfigOptions {
-        context: Some(CONTEXT.to_string()),
+        context: Some(context()),
         ..Default::default()
     };
     let mut cfg = kube::Config::from_kubeconfig(&opts)
         .await
-        .unwrap_or_else(|e| panic!("no kubeconfig context {CONTEXT}: {e}"));
+        .unwrap_or_else(|e| panic!("no kubeconfig context {}: {e}", context()));
     cfg.auth_info.impersonate = Some(format!("system:serviceaccount:{NS}:{RUNNER_SA}"));
     kube::Client::try_from(cfg).expect("an impersonating kube client")
 }
@@ -518,6 +528,75 @@ async fn input_and_output_files_round_trip() {
         "`*.csv` is non-recursive and skips the directory `d.csv`"
     );
     // Final review I3: `run` deletes nothing; `release` (after the commit) does.
+    r.release(&t, &k8s_spec()).await.expect("release");
+    assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
+}
+
+/// **W9a Task 5: a 12 MiB file in internal storage streams into the pod**
+/// through the exec's `tar -x`, fed by `write_tar` as it reads the store, and
+/// passes Kestra's `wc -c` verification; the command counts it in `main`.
+async fn a_stored_input_file_streams_into_the_pod() {
+    const SIZE: usize = 12 << 20;
+    let c = client().await;
+    let files = Arc::new(egret_workflow::storage::FileStore {
+        store: Arc::new(egret_storage::MemStore::new()),
+        bucket: "egret-test".into(),
+        prefix: "workflow/".into(),
+        caps: egret_workflow::storage::Caps::default(),
+        retention_days: 30,
+    });
+    let r = runner().await.with_files(files.clone());
+    let (t, _rec) = task();
+    let uri = format!(
+        "kestra:///w9a/t5/in-files/executions/{}/tasks/w/{}/big.bin",
+        Uuid::new_v4(),
+        Uuid::new_v4()
+    );
+    let object_uri = files.object_uri(t.workspace_id, &uri).unwrap();
+    files
+        .store
+        .put(
+            &object_uri,
+            "0123456789abcdef".repeat(SIZE / 16).into_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut cmds = shell(&[
+        "wc -c < d/big.bin | tr -d ' ' > n.txt",
+        "tr -d '0-9a-f' < d/big.bin | wc -c | tr -d ' ' > foreign.txt",
+        "head -c 16 d/big.bin > head.txt",
+        "cp literal.txt lit.txt",
+    ]);
+    cmds.input_files = BTreeMap::from([("literal.txt".to_string(), "just contents".to_string())]);
+    cmds.stored_inputs = BTreeMap::from([(
+        "d/big.bin".to_string(),
+        StoredInput {
+            uri,
+            object_uri,
+            size: SIZE as u64,
+        },
+    )]);
+    cmds.output_files = vec![
+        "n.txt".into(),
+        "foreign.txt".into(),
+        "head.txt".into(),
+        "lit.txt".into(),
+    ];
+    let out = r
+        .run(&t, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("no worker failure");
+    assert_eq!(out.exit_code, 0, "{out:?}");
+    assert_eq!(out.failure, None, "{out:?}");
+    assert_eq!(
+        out.output_files,
+        BTreeMap::from([
+            ("n.txt".to_string(), "12582912\n".to_string()),
+            ("foreign.txt".to_string(), "0\n".to_string()),
+            ("head.txt".to_string(), "0123456789abcdef".to_string()),
+            ("lit.txt".to_string(), "just contents".to_string()),
+        ])
+    );
     r.release(&t, &k8s_spec()).await.expect("release");
     assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
 }
@@ -1059,7 +1138,8 @@ async fn create_namespace() {
             }
             Some(_) => panic!(
                 "namespace {NS} already exists and is not terminating: a previous run did not \
-                 clean up. Inspect it, then `kubectl --context {CONTEXT} delete ns {NS}`"
+                 clean up. Inspect it, then `kubectl --context {} delete ns {NS}`",
+                context()
             ),
         }
     }
@@ -1230,12 +1310,12 @@ async fn client_with_role(sa: &str, rules: Vec<PolicyRule>) -> kube::Client {
         .await
         .expect("bind the Role");
     let opts = kube::config::KubeConfigOptions {
-        context: Some(CONTEXT.to_string()),
+        context: Some(context()),
         ..Default::default()
     };
     let mut cfg = kube::Config::from_kubeconfig(&opts)
         .await
-        .unwrap_or_else(|e| panic!("no kubeconfig context {CONTEXT}: {e}"));
+        .unwrap_or_else(|e| panic!("no kubeconfig context {}: {e}", context()));
     cfg.auth_info.impersonate = Some(format!("system:serviceaccount:{NS}:{sa}"));
     let rc = kube::Client::try_from(cfg).expect("an impersonating kube client");
     for _ in 0..40 {
@@ -1417,6 +1497,7 @@ fn cases() -> Vec<(&'static str, Case)> {
     vec![
         case!(a_shell_command_runs_in_a_pod_and_the_pod_is_deleted),
         case!(input_and_output_files_round_trip),
+        case!(a_stored_input_file_streams_into_the_pod),
         case!(a_nonzero_exit_fails_and_keeps_outputs),
         case!(cancel_deletes_the_pod),
         case!(k8s_cancel_with_grace_waits_for_termination_then_release_deletes),

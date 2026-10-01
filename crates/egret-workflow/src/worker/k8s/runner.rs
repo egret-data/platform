@@ -58,6 +58,7 @@
 //! line before a high-water mark, because the kubelet's timestamps are not
 //! ordered across stdout and stderr (measured; see [`Seen`]).
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -74,11 +75,12 @@ use super::pod_spec::{
 use super::transfer;
 use crate::logs::{LogLevel, LogRepo, RunIdentity};
 use crate::scripts::RunnerSpec;
+use crate::storage::transfer::{write_tar, TarError, TarSource};
 use crate::worker::commands::{
     expand_outputs, listing_too_big, output_problem, pattern_dirs, relative_problem, run_liveness,
-    stream_replayed_line, CommandsResult, LineObserver, OrphanSweep, StreamState, TaskCommands,
-    TaskRunner, CANCEL_WAIT_MARGIN, MAX_LISTING_BYTES, MAX_OUTPUT_FILE_BYTES, MAX_OUTPUT_NAMES,
-    MAX_VARS_BYTES, RUN_NAME_PREFIX, TASKRUN_LABEL, WORKING_DIR,
+    staging_error, stream_replayed_line, CommandsResult, LineObserver, OrphanSweep, StreamState,
+    TaskCommands, TaskRunner, CANCEL_WAIT_MARGIN, MAX_LISTING_BYTES, MAX_OUTPUT_FILE_BYTES,
+    MAX_OUTPUT_NAMES, MAX_VARS_BYTES, RUN_NAME_PREFIX, TASKRUN_LABEL, WORKING_DIR,
 };
 use crate::worker::TaskInput;
 
@@ -122,6 +124,8 @@ pub struct KubernetesRunner {
     /// review I4): the operator gets one loud line with the RBAC hint, and
     /// every task that meets the same refusal fails naming it.
     exec_forbidden_logged: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Internal storage, which stored inputs are streamed from (W9a Task 5).
+    files: Option<std::sync::Arc<crate::storage::FileStore>>,
 }
 
 impl std::fmt::Debug for KubernetesRunner {
@@ -144,7 +148,15 @@ impl KubernetesRunner {
             max_vars_bytes: MAX_VARS_BYTES,
             poll: Duration::from_millis(500),
             exec_forbidden_logged: Default::default(),
+            files: None,
         }
+    }
+
+    /// The same runner, streaming stored inputs from `files` -- what
+    /// production builds when `[storage]` is configured (`runtime::handlers_for`).
+    pub fn with_files(mut self, files: std::sync::Arc<crate::storage::FileStore>) -> Self {
+        self.files = Some(files);
+        self
     }
 
     /// Smaller caps, for a test ([`DockerRunner::with_limits`]'s reason).
@@ -271,7 +283,7 @@ impl KubernetesRunner {
         reattached: bool,
     ) -> Result<CommandsResult> {
         // ---- start: upload the inputs, wait for main ---------------------
-        let mut uploaded = cmds.input_files.is_empty();
+        let mut uploaded = !cmds.has_inputs();
         let mut pulling_since: Option<tokio::time::Instant> = None;
         loop {
             let p = self.get(name).await?;
@@ -615,9 +627,16 @@ impl KubernetesRunner {
     }
 
     async fn upload_once(&self, name: &str, cmds: &TaskCommands) -> Result<()> {
-        let archive = transfer::pack(&cmds.input_files).map_err(Error::InvalidInput)?;
+        let sources = cmds.tar_sources()?;
+        let bytes: u64 = sources
+            .values()
+            .map(|s| match s {
+                TarSource::Contents(c) => c.len() as u64,
+                TarSource::Stored(st) => st.size,
+            })
+            .sum();
         let out = self
-            .exec(
+            .exec_within(
                 name,
                 FILES_IN,
                 vec![
@@ -628,8 +647,9 @@ impl KubernetesRunner {
                     "-C".into(),
                     WORKING_DIR.into(),
                 ],
-                Some(archive),
+                Some(&sources),
                 64 * 1024,
+                upload_timeout(bytes),
             )
             .await?;
         if !out.success {
@@ -641,8 +661,7 @@ impl KubernetesRunner {
 
         // Kestra's `verifyFileUpload`: `wc -c < <file>` per file, compared
         // with what was sent.
-        let script: String = cmds
-            .input_files
+        let script: String = sources
             .keys()
             .map(|rel| format!("wc -c < {}\n", shell_quote(&format!("{WORKING_DIR}/{rel}"))))
             .collect();
@@ -659,7 +678,13 @@ impl KubernetesRunner {
             .split_whitespace()
             .filter_map(|n| n.parse().ok())
             .collect();
-        let expected: Vec<u64> = cmds.input_files.values().map(|c| c.len() as u64).collect();
+        let expected: Vec<u64> = sources
+            .values()
+            .map(|s| match s {
+                TarSource::Contents(c) => c.len() as u64,
+                TarSource::Stored(st) => st.size,
+            })
+            .collect();
         if !out.success || found != expected {
             return Err(internal(
                 "verifying the input files",
@@ -821,11 +846,26 @@ impl KubernetesRunner {
         name: &str,
         container: &str,
         cmd: Vec<String>,
-        stdin: Option<Vec<u8>>,
+        stdin: Option<&BTreeMap<String, TarSource<'_>>>,
         stdout_cap: usize,
     ) -> Result<ExecOut> {
+        self.exec_within(name, container, cmd, stdin, stdout_cap, EXEC_TIMEOUT)
+            .await
+    }
+
+    /// [`exec`](Self::exec) under a given time limit -- the upload's grows
+    /// with the bytes it carries ([`upload_timeout`]).
+    async fn exec_within(
+        &self,
+        name: &str,
+        container: &str,
+        cmd: Vec<String>,
+        stdin: Option<&BTreeMap<String, TarSource<'_>>>,
+        stdout_cap: usize,
+        limit: Duration,
+    ) -> Result<ExecOut> {
         match tokio::time::timeout(
-            EXEC_TIMEOUT,
+            limit,
             self.exec_inner(name, container, cmd, stdin, stdout_cap),
         )
         .await
@@ -833,7 +873,7 @@ impl KubernetesRunner {
             Ok(r) => r,
             Err(_) => Err(internal(
                 &format!("exec in {container}"),
-                format!("no answer within {EXEC_TIMEOUT:?}"),
+                format!("no answer within {limit:?}"),
             )),
         }
     }
@@ -843,7 +883,7 @@ impl KubernetesRunner {
         name: &str,
         container: &str,
         cmd: Vec<String>,
-        stdin: Option<Vec<u8>>,
+        stdin: Option<&BTreeMap<String, TarSource<'_>>>,
         stdout_cap: usize,
     ) -> Result<ExecOut> {
         let ap = AttachParams::default()
@@ -864,29 +904,46 @@ impl KubernetesRunner {
             .take_status()
             .ok_or_else(|| internal("exec", "no status channel"))?;
         let stdout = proc.stdout();
-        // stdin and stderr run beside the stdout read, so neither can stall
-        // it; both end when the process (or the abort below) ends the stream.
         let writer = proc.stdin();
-        let write = tokio::spawn(async move {
-            if let (Some(mut w), Some(bytes)) = (writer, stdin) {
-                w.write_all(&bytes).await?;
-                w.shutdown().await?;
-            }
-            Ok::<(), std::io::Error>(())
-        });
         let stderr = proc.stderr();
         let errs = tokio::spawn(async move { read_capped(stderr, 16 * 1024, true).await });
-        let (out, overflowed) = read_capped(stdout, stdout_cap, false).await;
-        if overflowed {
-            proc.abort();
-        }
+        // stdin is written beside the stdout read, so neither can stall the
+        // other. The archive streams from the store as it is written (W9a
+        // Task 5); a failure part-way aborts the exec, or `tar -x` would wait
+        // for the rest of an archive that is never coming.
+        let store = self.files.as_deref();
+        let proc_ref = &proc;
+        let write = async move {
+            let (Some(mut w), Some(files)) = (writer, stdin) else {
+                return Ok(());
+            };
+            let wrote = match write_tar(&mut w, files, store).await {
+                Ok(()) => w.shutdown().await.map_err(TarError::Write),
+                Err(e) => Err(e),
+            };
+            if wrote.is_err() {
+                proc_ref.abort();
+            }
+            wrote
+        };
+        let read = async move {
+            let (out, overflowed) = read_capped(stdout, stdout_cap, false).await;
+            if overflowed {
+                proc_ref.abort();
+            }
+            (out, overflowed)
+        };
+        let (wrote, (out, overflowed)) = tokio::join!(write, read);
         let stderr = errs.await.map(|(b, _)| b).unwrap_or_default();
-        let wrote = write.await;
         let status = if overflowed { None } else { status.await };
         let _ = proc.join().await;
         if !overflowed {
-            if let Ok(Err(e)) = wrote {
-                return Err(internal("writing to the exec's stdin", e));
+            match wrote {
+                Ok(()) => {}
+                Err(TarError::Write(e)) => {
+                    return Err(internal("writing to the exec's stdin", e));
+                }
+                Err(e) => return Err(staging_error(e)),
             }
         }
         let success = status.as_ref().and_then(|s| s.status.as_deref()) == Some("Success");
@@ -1154,7 +1211,11 @@ impl TaskRunner for KubernetesRunner {
                 "This task runner needs the `containerImage` property to be set".to_string(),
             ));
         }
-        for rel in commands.input_files.keys() {
+        for rel in commands
+            .input_files
+            .keys()
+            .chain(commands.stored_inputs.keys())
+        {
             if let Some(problem) = relative_problem(rel) {
                 return Err(Error::InvalidInput(problem));
             }
@@ -1367,6 +1428,14 @@ pub async fn sweep_orphans(
         }
     }
     Ok(deleted)
+}
+
+/// How long the upload exec may take: [`EXEC_TIMEOUT`], plus a second for
+/// every 8 MiB it carries -- a stored input may be up to
+/// `workflow.storage.max_file_bytes` (1 GiB by default), which a fixed two
+/// minutes would turn into a timeout, a worker error and a re-claim for ever.
+fn upload_timeout(bytes: u64) -> Duration {
+    EXEC_TIMEOUT + Duration::from_secs(bytes / (8 << 20))
 }
 
 fn internal(what: &str, e: impl std::fmt::Display) -> Error {

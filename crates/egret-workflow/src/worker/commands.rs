@@ -237,6 +237,14 @@ pub struct TaskCommands {
     /// as `io.kestra.plugin.scripts.python.Script` does (measured: it writes a
     /// `.py`, then runs it).
     pub input_files: BTreeMap<String, String>,
+    /// Files staged from internal storage: name relative to WORKING_DIR -> where egret reads them.
+    /// Never contents; the Debug impl prints names and sizes only.
+    ///
+    /// W9a spec §5: an `inputFiles` value that is a `kestra://` URI, resolved
+    /// readable by the render snapshot. The runner streams each one from the
+    /// store into the container ([`write_tar`](crate::storage::transfer::write_tar));
+    /// no name may be in both this and [`Self::input_files`].
+    pub stored_inputs: BTreeMap<String, StoredInput>,
     /// `AbstractExecScript.outputFiles` — names relative to [`WORKING_DIR`],
     /// read back after the command exits.
     ///
@@ -274,15 +282,33 @@ pub struct TaskCommands {
     pub host_protocol: bool,
 }
 
+/// One file staged from internal storage (W9a spec §5).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StoredInput {
+    /// The `kestra://` URI the author named, for messages.
+    pub uri: String,
+    /// `FileStore::object_uri` of it, in the running execution's workspace.
+    pub object_uri: String,
+    /// The size its index row holds; the archive entry declares it, and an
+    /// object of any other size fails the task.
+    pub size: u64,
+}
+
 impl std::fmt::Debug for TaskCommands {
     /// Every field but [`TaskCommands::input_files`]' contents, which are
     /// printed as their names and byte counts (W5b fix round 1, M5): the
-    /// plugin handler's `task.json` holds resolved secrets.
+    /// plugin handler's `task.json` holds resolved secrets. The stored inputs
+    /// are printed as names and sizes the same way.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let files: BTreeMap<&str, String> = self
             .input_files
             .iter()
             .map(|(k, v)| (k.as_str(), format!("<{} bytes>", v.len())))
+            .collect();
+        let stored: BTreeMap<&str, String> = self
+            .stored_inputs
+            .iter()
+            .map(|(k, v)| (k.as_str(), format!("<{} bytes stored>", v.size)))
             .collect();
         f.debug_struct("TaskCommands")
             .field("container_image", &self.container_image)
@@ -291,6 +317,7 @@ impl std::fmt::Debug for TaskCommands {
             .field("commands", &self.commands)
             .field("env", &self.env)
             .field("input_files", &files)
+            .field("stored_inputs", &stored)
             .field("output_files", &self.output_files)
             .field("host_protocol", &self.host_protocol)
             .finish()
@@ -298,6 +325,30 @@ impl std::fmt::Debug for TaskCommands {
 }
 
 impl TaskCommands {
+    /// Whether anything goes into the working directory before the command.
+    pub fn has_inputs(&self) -> bool {
+        !self.input_files.is_empty() || !self.stored_inputs.is_empty()
+    }
+
+    /// Every input file, by name, as the archive writes it. A name in both
+    /// maps is refused: it would be staged twice.
+    pub fn tar_sources(&self) -> Result<BTreeMap<String, crate::storage::transfer::TarSource<'_>>> {
+        use crate::storage::transfer::TarSource;
+        let mut out: BTreeMap<String, TarSource<'_>> = self
+            .input_files
+            .iter()
+            .map(|(k, v)| (k.clone(), TarSource::Contents(v.as_str())))
+            .collect();
+        for (k, v) in &self.stored_inputs {
+            if out.insert(k.clone(), TarSource::Stored(v)).is_some() {
+                return Err(Error::InvalidInput(format!(
+                    "the input file {k:?} is declared twice, as contents and as a stored file"
+                )));
+            }
+        }
+        Ok(out)
+    }
+
     /// The argv a container is created with: `interpreter ++ [ joined ]`.
     ///
     /// `ScriptService.scriptCommands` (fact 4 on this module's doc), ported
@@ -1284,6 +1335,9 @@ pub struct DockerRunner {
     /// follows the container's log from there rather than from its start
     /// (W5a Task 5). `None`: a re-attach replays the whole log.
     logs: Option<crate::logs::LogRepo>,
+    /// Internal storage, which stored inputs are streamed from (W9a Task 5).
+    /// `None`: a stored input fails the task naming `[storage]`.
+    files: Option<std::sync::Arc<crate::storage::FileStore>>,
 }
 
 impl Default for DockerRunner {
@@ -1303,7 +1357,15 @@ impl DockerRunner {
             max_listing_bytes: MAX_LISTING_BYTES,
             max_diff_bytes: MAX_DIFF_BYTES,
             logs: None,
+            files: None,
         }
+    }
+
+    /// The same runner, streaming stored inputs from `files` -- what
+    /// production builds when `[storage]` is configured (`runtime::handlers_for`).
+    pub fn with_files(mut self, files: std::sync::Arc<crate::storage::FileStore>) -> Self {
+        self.files = Some(files);
+        self
     }
 
     /// The same runner, reading the re-attach window from `logs` -- what
@@ -1556,7 +1618,11 @@ impl TaskRunner for DockerRunner {
             ));
         }
         // An input name is the author's: refused before a container exists.
-        for rel in commands.input_files.keys() {
+        for rel in commands
+            .input_files
+            .keys()
+            .chain(commands.stored_inputs.keys())
+        {
             check_relative(rel)?;
         }
 
@@ -1916,6 +1982,53 @@ impl DockerRunner {
         Ok(result)
     }
 
+    /// The input files into `name`'s working directory: `docker cp -`, fed
+    /// by [`write_tar`](crate::storage::transfer::write_tar) on its stdin.
+    ///
+    /// The split (spec §11): an author's name or object problem fails the
+    /// task; the store being unreachable is egret's outage (`Internal`); and a
+    /// `docker cp` that stopped reading or failed is classified like every
+    /// other docker call -- the daemon answering makes it the task's.
+    async fn copy_in(&self, commands: &TaskCommands, name: &str) -> Result<()> {
+        use crate::storage::transfer::{write_tar, TarError};
+        let sources = commands.tar_sources()?;
+        let dst = format!("{name}:{WORKING_DIR}");
+        let mut child = Command::new(&self.binary)
+            .args(["cp", "-", &dst])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            // As `cli`: a dropped future (`timeout::guard`) must not orphan
+            // the `docker cp`.
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                Error::Internal(anyhow::anyhow!("could not run `{} cp`: {e}", self.binary))
+            })?;
+        let mut stdin = child.stdin.take().expect("stdin piped");
+        let wrote = write_tar(&mut stdin, &sources, self.files.as_deref()).await;
+        // EOF for `docker cp`, whatever happened.
+        drop(stdin);
+        match wrote {
+            Ok(()) | Err(TarError::Write(_)) => {}
+            Err(e) => {
+                let _ = child.kill().await;
+                return Err(staging_error(e));
+            }
+        }
+        let out = child.wait_with_output().await.map_err(io_err)?;
+        if !out.status.success() {
+            return Err(self
+                .classify("cp", &String::from_utf8_lossy(&out.stderr))
+                .await);
+        }
+        match wrote {
+            // `docker cp` exited 0 having not read the whole archive.
+            Err(e) => Err(staging_error(e)),
+            Ok(()) => Ok(()),
+        }
+    }
+
     /// The half of a fresh run that runs with a container in existence:
     /// input files in, `start --attach`, exit code, output files out.
     async fn run_created(
@@ -1931,32 +2044,23 @@ impl DockerRunner {
         // Kestra's `copyArchiveToContainer` and the reason the working
         // directory does not have to exist first: measured on this machine's
         // daemon (28.4.0), a copy into `/egret/working-dir` creates it.
-        if !commands.input_files.is_empty() {
-            // **[`StagingDir`] removes itself however this scope ends** --
-            // including when `timeout::guard` drops the whole future mid-copy.
+        if commands.has_inputs() {
+            // **Streamed (W9a spec §5)**: `docker cp -` reads a ustar archive
+            // from its stdin, written by [`write_tar`] as the stored inputs
+            // are read from the store. Nothing is staged on the worker's
+            // disk any more -- W5a's staging directory held the author's
+            // rendered `script:` and the plugin's `task.json` -- and no file
+            // is held whole in memory.
             //
             // # `input_files` KEYS ARE AUTHOR-SUPPLIED SINCE W5a
             //
-            // `inputFiles:` is a script task property, so a key is the
-            // author's path. Everything decided about it must be a TASK
-            // failure, never a worker failure: [`check_relative`] (in `run`)
-            // refuses `..`, absolute paths, `.` and globs, and the staging
-            // writes below go through [`stage_input`], whose error type is
-            // `String` and becomes `InvalidInput` -- so `{"a": .., "a/b": ..}`
-            // (a file where a directory must go) fails the task instead of
-            // wedging the run as the closed Critical's shape did.
-            let staging = tempdir(task)?;
-            for (rel, contents) in &commands.input_files {
-                stage_input(staging.path(), rel, contents).map_err(Error::InvalidInput)?;
-            }
-            let src = format!("{}/.", staging.path().display());
-            let dst = format!("{name}:{WORKING_DIR}");
-            let out = self.cli(&["cp", &src, &dst]).await?;
-            if !out.status.success() {
-                return Err(self
-                    .classify("cp", &String::from_utf8_lossy(&out.stderr))
-                    .await);
-            }
+            // [`check_relative`] (in `run`) refuses `..`, absolute paths, `.`
+            // and globs, and `write_tar` refuses a name that is also another's
+            // parent (`{"a": .., "a/b": ..}`) before writing a byte -- both
+            // the TASK's failure, never a worker failure.
+            //
+            // [`write_tar`]: crate::storage::transfer::write_tar
+            self.copy_in(commands, name).await?;
         }
 
         // ---- start, and stream --------------------------------------------
@@ -2376,29 +2480,16 @@ pub(crate) fn create_args(
     create
 }
 
-/// Write one author-named input file under the staging `root`.
-///
-/// `String` errors, as [`stage_destination`]: an author's `inputFiles` key
-/// must never be able to produce a worker failure. Parents are created by
-/// egret; a name whose parent is already a FILE (`{"a": …, "a/b": …}`) or
-/// that is itself a directory another name needs is refused with a message.
-pub(crate) fn stage_input(
-    root: &std::path::Path,
-    rel: &str,
-    contents: &str,
-) -> std::result::Result<(), String> {
-    if let Some(problem) = relative_problem(rel) {
-        return Err(problem);
+/// What a failed [`write_tar`](crate::storage::transfer::write_tar) is to a
+/// runner (spec §11): the author's problem fails the task
+/// (`InvalidInput`); the store or the transfer failing is egret's
+/// (`Internal`: the lease lapses, the run is re-claimed, no attempt is spent).
+pub(crate) fn staging_error(e: crate::storage::transfer::TarError) -> Error {
+    use crate::storage::transfer::TarError;
+    match e {
+        TarError::Author(m) => Error::InvalidInput(m),
+        e @ (TarError::Store(_) | TarError::Write(_)) => Error::Internal(anyhow::anyhow!("{e}")),
     }
-    let path = root.join(rel);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!("the input file {rel:?} cannot be placed: a parent of it is also declared as a file ({e})")
-        })?;
-    }
-    std::fs::write(&path, contents).map_err(|e| {
-        format!("the input file {rel:?} cannot be written: another input file needs it to be a directory ({e})")
-    })
 }
 
 /// Make the staging destination for **one** declared output name, under a root
@@ -3016,23 +3107,6 @@ mod tests {
             parse_docker_ps(&out),
             vec![("egret-run-x-1".to_string(), a)]
         );
-    }
-
-    /// An author's `inputFiles` keys cannot produce a worker failure: a file
-    /// where a directory must go is a `String` error, i.e. a task failure.
-    #[test]
-    fn an_input_file_where_a_directory_must_go_is_the_authors_error() {
-        let root = staging("input-collision");
-        stage_input(&root, "a", "x").expect("a plain file stages");
-        let err = stage_input(&root, "a/b", "y").expect_err("`a` is a file");
-        assert!(err.contains("\"a/b\""), "{err}");
-        stage_input(&root, "sub/nested.txt", "n").expect("parents are created");
-        assert_eq!(
-            std::fs::read_to_string(root.join("sub/nested.txt")).unwrap(),
-            "n"
-        );
-        assert!(stage_input(&root, "../x", "y").is_err());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// `ScriptService.scriptCommands`: the interpreter, then **one** element.
@@ -4596,7 +4670,8 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let staging = tempdir(&task).expect("staging");
-            stage_input(staging.path(), "task.json", "{\"password\":\"s3cr3t\"}").expect("staged");
+            std::fs::write(staging.path().join("output"), "{\"password\":\"s3cr3t\"}")
+                .expect("staged");
             tx.send(staging.path().to_path_buf()).expect("send");
             panic!("a panic between staging and `docker cp`");
         }));
@@ -4609,50 +4684,32 @@ mod tests {
         );
     }
 
-    /// **A dropped future leaves no staging directory behind.**
+    /// **A dropped future leaves no input file on the worker's disk and no
+    /// `docker cp` behind.**
     ///
-    /// The whole-branch review's Minor 3, and it is cross-task: `timeout::guard`
-    /// enforces a task-level `timeout:` by **dropping the future** (Task 2), and
-    /// the directory holding the author's rendered `script:` is Task 5's. An
-    /// explicit cleanup after the `await` cannot run on that path, so
-    /// [`StagingDir`] removes itself on `Drop`.
-    ///
-    /// # This test counted a GLOBAL directory once, and the full suite caught it
-    ///
-    /// The first version counted `$TMPDIR/egret-workflow-*` before and after,
-    /// which is how the reviewer measured the leak by hand. It passed alone and
-    /// **failed in `cargo test --workspace`** — `left: 66, right: 65` — because
-    /// the lib tests run in parallel and a *different* test's staging directory
-    /// appeared between the two counts. A global counter is not an observation
-    /// of this run.
-    ///
-    /// So the shim reports the path it was handed, and the assertion is about
-    /// **that** directory: immune to whatever else is running, and a stronger
-    /// claim than a count besides.
+    /// W5a's form of this test (the whole-branch review's Minor 3) proved the
+    /// staging directory holding the author's rendered `script:` was removed
+    /// when `timeout::guard` dropped the future mid-copy. Since W9a Task 5 the
+    /// input files stream through `docker cp -`'s stdin and are never on the
+    /// worker's disk, so the claim is now stronger and the test says it: the
+    /// copy's source is `-`, and dropping the future kills the `docker cp`
+    /// (`kill_on_drop`), so nothing keeps reading the rendered script.
     #[tokio::test]
     async fn a_dropped_run_future_leaves_no_staging_directory_behind() {
         let dir = staging("drop-leak");
         let log = dir.join("argv.log");
         let shim = dir.join("docker-shim.sh");
-        // `cp` records the staging path it was given and then never returns, so
-        // the future is guaranteed to be dropped inside the window between
-        // creating that directory and removing it.
-        //
-        // **`exec sleep`, and the word is load-bearing.** `kill_on_drop` reaps
-        // the process this crate spawned — the shim's `/bin/sh` — and a plain
-        // `sleep 300` is that shell's *child*, which survives it and reparents
-        // to init. Measured at the previous HEAD: 0 orphans before the test, 1
-        // after, on every run. `exec` replaces the shell with the sleep so
-        // there is one process and `kill_on_drop` reaches it. The production
-        // path is not affected either way (nothing egret spawns forks a child),
-        // which is why this was the test leaking and not the runner.
+        // `cp` records its source and PID and then never returns, so the
+        // future is guaranteed to be dropped while the copy is running.
+        // **`exec sleep`**: one process, the one `kill_on_drop` reaches (a
+        // plain `sleep` would be the shell's child and survive it).
         std::fs::write(
             &shim,
             format!(
                 "#!/bin/sh\n\
                  case \"$1\" in\n\
                  \x20 create) echo id ;;\n\
-                 \x20 cp) echo \"$2\" >> {log}; exec sleep 300 ;;\n\
+                 \x20 cp) echo \"$2 $$\" >> {log}; exec sleep 300 ;;\n\
                  \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
                  esac\n\
                  exit 0\n",
@@ -4690,26 +4747,34 @@ mod tests {
             "the shim hangs, so the future must still have been running"
         );
 
-        let logged = std::fs::read_to_string(&log)
-            .expect("the shim was reached, so it logged the staging path");
-        let src = logged
+        let logged = std::fs::read_to_string(&log).expect("the shim was reached, so it logged");
+        let (src, pid) = logged
             .lines()
             .next()
             .expect("one `cp` happened")
             .trim()
-            .to_string();
-        let staged = src
-            .strip_suffix("/.")
-            .expect("the input-file copy is `<staging>/.`");
-        assert!(
-            staged.contains("egret-workflow-"),
-            "sanity: {staged} should be a staging directory"
+            .split_once(' ')
+            .expect("source and pid");
+        assert_eq!(
+            src, "-",
+            "the input files go through `docker cp -`'s stdin, never a path on the worker's disk"
         );
+        // `kill_on_drop` sends SIGKILL; give the kernel a moment to reap.
+        let mut alive = true;
+        for _ in 0..50 {
+            alive = std::process::Command::new("kill")
+                .args(["-0", pid])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
         assert!(
-            !std::path::Path::new(staged).exists(),
-            "dropping the future left {staged} behind, holding the author's \
-             rendered `script:` -- an explicit cleanup after the `await` never \
-             runs on this path, which is why `StagingDir` uses `Drop`"
+            !alive,
+            "the dropped future left `docker cp` (pid {pid}) running"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

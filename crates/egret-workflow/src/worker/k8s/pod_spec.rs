@@ -309,7 +309,7 @@ pub fn build(
 ) -> Result<Pod, String> {
     cfg.validate()?;
     let resources = effective_resources(spec.resources.as_ref(), cfg)?;
-    let has_inputs = !cmds.input_files.is_empty();
+    let has_inputs = cmds.has_inputs();
 
     let mut env = vec![EnvVar {
         name: ENV_WORKING_DIR.to_string(),
@@ -714,6 +714,7 @@ mod tests {
             commands: vec!["echo a".into(), "echo b".into()],
             env: BTreeMap::from([("B".into(), "2".into()), ("A".into(), "1".into())]),
             input_files: BTreeMap::new(),
+            stored_inputs: BTreeMap::new(),
             output_files: vec![],
             host_protocol: false,
         }

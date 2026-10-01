@@ -6,6 +6,8 @@
 //!   one function that decides whether a URI is readable** (spec §4.4).
 //! - [`scope`]: the render snapshot the four file functions read through
 //!   (spec §7.2), resolved before every render.
+//! - [`transfer`]: the streamed ustar archive that carries files into a task
+//!   container (spec §5).
 //! - this module: the [`FileStore`] (the object store, its bucket, prefix and
 //!   caps), the process-wide slot it is installed in, and the index writers.
 //!
@@ -22,6 +24,7 @@
 
 pub mod index;
 pub mod scope;
+pub mod transfer;
 pub mod uri;
 
 use std::sync::{Arc, OnceLock};
@@ -69,6 +72,16 @@ pub struct FileStore {
     pub caps: Caps,
     /// `workflow.storage_retention_days`; `0` keeps files for ever.
     pub retention_days: u32,
+}
+
+impl std::fmt::Debug for FileStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileStore")
+            .field("bucket", &self.bucket)
+            .field("prefix", &self.prefix)
+            .field("caps", &self.caps)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FileStore {

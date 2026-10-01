@@ -77,8 +77,8 @@ use egret_config::PluginConfigurations;
 use egret_core::{Error, Result};
 
 use super::super::commands::{
-    relative_problem, LineObserver, NoObserver, TaskCommands, TaskRunner, LOG_DEBUG_MARKER,
-    LOG_INFO_MARKER, WORKING_DIR,
+    relative_problem, LineObserver, NoObserver, StoredInput, TaskCommands, TaskRunner,
+    LOG_DEBUG_MARKER, LOG_INFO_MARKER, WORKING_DIR,
 };
 use super::super::{Handlers, Outcome, TaskHandler, TaskInput};
 use super::container::{
@@ -188,6 +188,9 @@ pub struct ScriptRuntime {
     pub plugin_configurations: PluginConfigurations,
     /// The workspace half of the gate.
     pub features: Arc<dyn FeatureState>,
+    /// Internal storage (`[storage]`), where a `kestra://` `inputFiles` value
+    /// is read from (W9a spec §5). `None`: such a value fails the task.
+    pub files: Option<Arc<crate::storage::FileStore>>,
 }
 
 impl std::fmt::Debug for ScriptRuntime {
@@ -243,7 +246,8 @@ impl Script {
         };
         let before = render_all(type_id, "beforeCommands", &p.before_commands, &cx)?;
         let author_env = render_values(type_id, "env", &p.env, &cx)?;
-        let mut input_files = render_values(type_id, "inputFiles", &p.input_files, &cx)?;
+        let rendered_inputs = render_values(type_id, "inputFiles", &p.input_files, &cx)?;
+        let (mut input_files, stored_inputs) = self.stage_inputs(type_id, task, rendered_inputs)?;
         let output_files = render_all(type_id, "outputFiles", &p.output_files, &cx)?;
         let script = p.script.as_deref().unwrap_or_default();
 
@@ -254,7 +258,8 @@ impl Script {
             ScriptKind::ShellScript => vec![one("script", script)?],
             ScriptKind::PythonScript => {
                 let body = one("script", script)?;
-                if input_files.contains_key(SCRIPT_FILE) {
+                if input_files.contains_key(SCRIPT_FILE) || stored_inputs.contains_key(SCRIPT_FILE)
+                {
                     return Err(Outcome::failed_with(format!(
                         "{type_id}: `inputFiles` declares {SCRIPT_FILE:?}, which is where egret \
                          writes this task's `script`; name the file something else"
@@ -267,7 +272,7 @@ impl Script {
 
         // An input file's NAME is the author's: a problem with it is this
         // task's failure, decided before the gate and before any runner.
-        for rel in input_files.keys() {
+        for rel in input_files.keys().chain(stored_inputs.keys()) {
             if let Some(problem) = relative_problem(rel) {
                 return Err(Outcome::failed_with(format!(
                     "{type_id}: `inputFiles`: {problem}"
@@ -296,11 +301,70 @@ impl Script {
             commands,
             env,
             input_files,
+            stored_inputs,
             output_files,
             host_protocol: false,
         })
     }
+
+    /// W9a spec §5: a rendered `inputFiles` value that is a `kestra://` URI is
+    /// a file in internal storage, staged under its name; any other value
+    /// stays contents (W5a, §6.1).
+    ///
+    /// The URI is resolved through the run's render snapshot -- the same
+    /// readability decision `read()` and `fileExists()` make, taken before
+    /// the render -- so an unreadable, missing or assembled URI fails the
+    /// task HERE, before the gate and before any runner is called. The size
+    /// is the index row's.
+    fn stage_inputs(
+        &self,
+        type_id: &str,
+        task: &TaskInput,
+        rendered: BTreeMap<String, String>,
+    ) -> std::result::Result<(BTreeMap<String, String>, BTreeMap<String, StoredInput>), Outcome>
+    {
+        let mut contents = BTreeMap::new();
+        let mut stored = BTreeMap::new();
+        for (name, value) in rendered {
+            if !value.starts_with(STORAGE_SCHEME) {
+                contents.insert(name, value);
+                continue;
+            }
+            let fail = |why: &str| {
+                Outcome::failed_with(format!("{type_id}: `inputFiles` {name:?}: {why}"))
+            };
+            let Some(scope) = task.render.files() else {
+                return Err(fail(&format!(
+                    "{value} cannot be read: this render has no file scope"
+                )));
+            };
+            let meta = scope.0.lookup(&value).map_err(|u| fail(u.message()))?;
+            let Some(files) = &self.rt.files else {
+                return Err(fail(&format!(
+                    "{value} cannot be read: egret has no internal storage configured (the \
+                     `[storage]` section of its configuration)"
+                )));
+            };
+            let object_uri = files
+                .object_uri(task.workspace_id, &value)
+                .map_err(|e| fail(&e))?;
+            stored.insert(
+                name,
+                StoredInput {
+                    uri: value,
+                    object_uri,
+                    size: meta.size,
+                },
+            );
+        }
+        Ok((contents, stored))
+    }
 }
+
+/// What makes an `inputFiles` value a file in internal storage rather than
+/// contents -- Kestra's own test (`value.startsWith("kestra://")`). A value
+/// with the scheme that does not parse is refused by the snapshot, naming it.
+const STORAGE_SCHEME: &str = "kestra://";
 
 /// The lines ahead of the commands, as the artifact writes them (module doc):
 /// `set -e` iff `fail_fast`, and a DEBUG bracket around `before` when there
@@ -489,6 +553,7 @@ mod tests {
                 runner: spy,
                 plugin_configurations: allow(RunnerKind::Docker, images),
                 features: Arc::new(FixedFeatureState(feature)),
+                files: None,
             }),
         )
     }
@@ -639,6 +704,7 @@ mod tests {
                     allow(RunnerKind::Kubernetes, &["*"]).0.remove(0),
                 ]),
                 features: Arc::new(FixedFeatureState(true)),
+                files: None,
             }),
         );
         let out = h
@@ -881,6 +947,289 @@ mod tests {
         assert!(spy.seen.lock().unwrap().is_empty());
     }
 
+    // ---- W9a Task 5: `inputFiles` values that are kestra:// URIs ----------
+
+    const WS: uuid::Uuid = uuid::Uuid::from_u128(0x5eed);
+
+    /// `w9a-storage.json` `input_files_uri`'s rendered URI, in egret's form.
+    fn staged_uri() -> String {
+        format!(
+            "kestra:///w9a/storage/in-files/executions/{}/tasks/w/{}/12811733253095936987.txt",
+            uuid::Uuid::from_u128(1),
+            uuid::Uuid::from_u128(2)
+        )
+    }
+
+    fn mem_files() -> Arc<crate::storage::FileStore> {
+        Arc::new(crate::storage::FileStore {
+            store: Arc::new(egret_storage::MemStore::new()),
+            bucket: "egret-test".into(),
+            prefix: "workflow/".into(),
+            caps: crate::storage::Caps::default(),
+            retention_days: 30,
+        })
+    }
+
+    /// A script handler over `spy` with internal storage `files`.
+    fn stored(spy: Arc<Spy>, files: Arc<crate::storage::FileStore>) -> Script {
+        Script::new(
+            ScriptKind::ShellCommands,
+            Arc::new(ScriptRuntime {
+                runner_kind: RunnerKind::Docker,
+                runner: spy,
+                plugin_configurations: allow(RunnerKind::Docker, &["*"]),
+                features: Arc::new(FixedFeatureState(true)),
+                files: Some(files),
+            }),
+        )
+    }
+
+    /// `w9a-storage.json` `input_files_uri`'s flow, as a task input whose
+    /// render context has `outputs.w.uri` and a snapshot resolving `uri` to
+    /// `resolution`.
+    fn in_files_task(
+        files: &Arc<crate::storage::FileStore>,
+        uri: &str,
+        resolution: std::result::Result<crate::storage::IndexedFile, crate::storage::Unreadable>,
+    ) -> TaskInput {
+        let snapshot = crate::storage::scope::Snapshot::from_parts(
+            std::collections::BTreeMap::from([(uri.to_string(), resolution)]),
+            files.clone(),
+            WS,
+            None,
+        );
+        let mut cx = crate::runners::RenderContext::from_json_object(&serde_json::json!({
+            "outputs": {"w": {"uri": uri}},
+        }))
+        .expect("an object")
+        .with_files(snapshot.into_scope());
+        cx.insert("flow", serde_json::json!({"id": "in-files"}));
+        let mut task = input(
+            scripts::SHELL_COMMANDS,
+            serde_json::json!({
+                "containerImage": "alpine:3.20",
+                "inputFiles": {
+                    "staged.txt": "{{ outputs.w.uri }}",
+                    "d/nested.txt": "{{ outputs.w.uri }}",
+                    "literal.txt": "just contents",
+                },
+                "commands": ["cat staged.txt d/nested.txt literal.txt"],
+            }),
+        );
+        task.workspace_id = WS;
+        task.render = cx;
+        task
+    }
+
+    fn indexed(uri: &str, size: u64) -> crate::storage::IndexedFile {
+        crate::storage::IndexedFile {
+            uri: uri.to_string(),
+            execution_id: uuid::Uuid::from_u128(1),
+            task_run_id: Some(uuid::Uuid::from_u128(2)),
+            size,
+        }
+    }
+
+    /// `w9a-storage.json` `input_files_uri`: a URI value lands under its key
+    /// (sub-directories too) and the task never sees the URI; a plain value
+    /// stays contents.
+    #[tokio::test]
+    async fn a_uri_input_is_staged_under_its_name_and_never_as_contents() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oracle-exec/w9a-storage.json");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read w9a-storage.json"))
+                .expect("parse w9a-storage.json");
+        let fixture = &doc["egret_expected"]["input_files_uri"];
+        assert_eq!(fixture["basis"], "measured");
+        assert_eq!(fixture["staged"][0]["task_reads"], "staged content");
+        let files = mem_files();
+        let uri = staged_uri();
+        let spy = Spy::ok(CommandsResult::default());
+        let out = stored(spy.clone(), files.clone())
+            .run(&in_files_task(&files, &uri, Ok(indexed(&uri, 14))))
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        let cmds = spy.only();
+        let want = crate::worker::commands::StoredInput {
+            uri: uri.clone(),
+            object_uri: files.object_uri(WS, &uri).unwrap(),
+            size: 14,
+        };
+        assert_eq!(
+            cmds.stored_inputs,
+            BTreeMap::from([
+                ("d/nested.txt".to_string(), want.clone()),
+                ("staged.txt".to_string(), want),
+            ])
+        );
+        assert_eq!(
+            cmds.input_files,
+            BTreeMap::from([("literal.txt".to_string(), "just contents".to_string())]),
+            "a URI is never passed as contents"
+        );
+        assert!(
+            cmds.input_files.values().all(|v| !v.contains("kestra://")),
+            "{:?}",
+            cmds.input_files
+        );
+        assert!(
+            cmds.stored_inputs["staged.txt"]
+                .object_uri
+                .contains(&WS.hyphenated().to_string()),
+            "the object is in the RUN's workspace"
+        );
+        let shown = format!("{cmds:?}");
+        assert!(
+            shown.contains("\"staged.txt\": \"<14 bytes stored>\""),
+            "{shown}"
+        );
+    }
+
+    /// Spec §11: the store unreachable while the runner stages is egret's
+    /// outage -- a worker `Err`, no outcome -- while an object missing behind
+    /// its index row is the author's failed task naming the URI.
+    #[tokio::test]
+    async fn an_unreachable_store_while_staging_is_a_worker_error_not_a_failed_task() {
+        struct Down;
+        #[async_trait::async_trait]
+        impl egret_storage::ObjectStore for Down {
+            async fn put(
+                &self,
+                _: &str,
+                _: Vec<u8>,
+            ) -> std::result::Result<(), egret_storage::StorageError> {
+                Err(egret_storage::StorageError::S3("connection refused".into()))
+            }
+            async fn get(
+                &self,
+                _: &str,
+            ) -> std::result::Result<Vec<u8>, egret_storage::StorageError> {
+                Err(egret_storage::StorageError::S3("connection refused".into()))
+            }
+            async fn delete(
+                &self,
+                _: &str,
+            ) -> std::result::Result<(), egret_storage::StorageError> {
+                Err(egret_storage::StorageError::S3("connection refused".into()))
+            }
+            async fn copy(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> std::result::Result<(), egret_storage::StorageError> {
+                Err(egret_storage::StorageError::S3("connection refused".into()))
+            }
+            async fn list(
+                &self,
+                _: &str,
+                _: Option<&str>,
+            ) -> std::result::Result<egret_storage::Listing, egret_storage::StorageError>
+            {
+                Err(egret_storage::StorageError::S3("connection refused".into()))
+            }
+            async fn get_stream(
+                &self,
+                _: &str,
+            ) -> std::result::Result<
+                Box<dyn tokio::io::AsyncBufRead + Send + Unpin>,
+                egret_storage::StorageError,
+            > {
+                Err(egret_storage::StorageError::S3("connection refused".into()))
+            }
+        }
+        let uri = staged_uri();
+        let down = Arc::new(crate::storage::FileStore {
+            store: Arc::new(Down),
+            ..Arc::into_inner(mem_files()).unwrap()
+        });
+        let spy = Spy::ok(CommandsResult::default()).staging(down.clone());
+        let err = stored(spy.clone(), down.clone())
+            .run(&in_files_task(&down, &uri, Ok(indexed(&uri, 14))))
+            .await
+            .expect_err("an unreachable store is egret's outage");
+        assert!(matches!(err, Error::Internal(_)), "{err:?}");
+        assert!(err.to_string().contains(&uri), "{err}");
+
+        // The object missing behind its row: the author's, naming the URI.
+        let files = mem_files();
+        let spy = Spy::ok(CommandsResult::default()).staging(files.clone());
+        let out = stored(spy.clone(), files.clone())
+            .run(&in_files_task(&files, &uri, Ok(indexed(&uri, 14))))
+            .await
+            .expect("a missing object is the task's failure");
+        assert_eq!(out.state, RunState::Failed);
+        let message = out.message.expect("a message");
+        assert!(
+            message.contains(&uri) && message.contains("missing"),
+            "{message}"
+        );
+
+        // Control: the object there, the same flow succeeds.
+        let files = mem_files();
+        files
+            .store
+            .put(
+                &files.object_uri(WS, &uri).unwrap(),
+                b"staged content".to_vec(),
+            )
+            .await
+            .unwrap();
+        let spy = Spy::ok(CommandsResult::default()).staging(files.clone());
+        let out = stored(spy, files.clone())
+            .run(&in_files_task(&files, &uri, Ok(indexed(&uri, 14))))
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+    }
+
+    /// Spec §5: "a URI the snapshot refuses fails the task at render, before
+    /// any container exists, naming the URI" -- through the snapshot's own
+    /// resolution, the one readability decision (`resolve_readable_many`).
+    #[tokio::test]
+    async fn an_unreadable_uri_fails_the_task_at_render_and_calls_no_runner() {
+        let files = mem_files();
+        let uri = staged_uri();
+        let cases = [
+            crate::storage::Unreadable::NotReadable { uri: uri.clone() },
+            crate::storage::Unreadable::Missing { uri: uri.clone() },
+        ];
+        for why in cases {
+            let spy = Spy::ok(CommandsResult::default());
+            let out = stored(spy.clone(), files.clone())
+                .run(&in_files_task(&files, &uri, Err(why.clone())))
+                .await
+                .expect("the author's failure, not the worker's");
+            assert_eq!(out.state, RunState::Failed, "{why:?}");
+            let message = out.message.expect("a message");
+            assert!(message.contains(&uri), "{message}");
+            assert!(
+                message.contains("`inputFiles` \"d/nested.txt\""),
+                "{message}"
+            );
+            assert!(
+                spy.seen.lock().unwrap().is_empty(),
+                "no runner is called for {why:?}"
+            );
+        }
+        // A URI assembled at render is not in the snapshot: refused too.
+        let spy = Spy::ok(CommandsResult::default());
+        let mut task = in_files_task(&files, &uri, Ok(indexed(&uri, 14)));
+        task.spec = serde_json::json!({
+            "containerImage": "alpine:3.20",
+            "inputFiles": {"x.txt": "{{ outputs.w.uri ~ '.other' }}"},
+            "commands": ["cat x.txt"],
+        });
+        let out = stored(spy.clone(), files.clone())
+            .run(&task)
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Failed);
+        assert!(out.message.unwrap().contains("was not looked up"));
+        assert!(spy.seen.lock().unwrap().is_empty());
+    }
+
     /// Every renderable property renders, `{{ workingDir }}` included, and
     /// inline `inputFiles` contents render (`input_files_inline`).
     #[tokio::test]
@@ -1077,6 +1426,7 @@ mod tests {
                 runner: spy.clone(),
                 plugin_configurations: allow(RunnerKind::Docker, &["*"]),
                 features: Arc::new(Down),
+                files: None,
             }),
         );
         h.run(&input(scripts::ALIAS_CONTAINER, alias_spec()))
@@ -1145,6 +1495,7 @@ mod tests {
                 runner: Spy::ok(CommandsResult::default()),
                 plugin_configurations: PluginConfigurations::default(),
                 features: Arc::new(FixedFeatureState(false)),
+                files: None,
             }),
         );
         assert_eq!(

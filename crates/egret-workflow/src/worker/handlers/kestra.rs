@@ -183,6 +183,8 @@ impl KestraRuntime {
                 self.kill_wait_ms().to_string(),
             )]),
             input_files: BTreeMap::from([(TASK_JSON.to_string(), task_json.to_string())]),
+            // Task 9 (the plugin storage bridge) stages a plugin's URIs.
+            stored_inputs: BTreeMap::new(),
             output_files: Vec::new(),
             host_protocol: true,
         }

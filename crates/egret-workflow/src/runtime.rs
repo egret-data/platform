@@ -694,31 +694,38 @@ pub async fn handlers_for(
     cfg.validate_plugin_host()
         .map_err(egret_core::Error::InvalidInput)?;
     let mut handlers = Handlers::with_core_tasks();
-    let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) =
-        match cfg.container_runner {
-            egret_config::ContainerRunner::None => return Ok((handlers, None)),
-            egret_config::ContainerRunner::Docker => {
-                let r = Arc::new(DockerRunner::new().with_logs(LogRepo::new(pool.clone())));
-                (RunnerKind::Docker, r.clone(), r)
+    let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) = match cfg
+        .container_runner
+    {
+        egret_config::ContainerRunner::None => return Ok((handlers, None)),
+        egret_config::ContainerRunner::Docker => {
+            let mut r = DockerRunner::new().with_logs(LogRepo::new(pool.clone()));
+            // W9a Task 5: stored inputs stream from the installed store.
+            if let Some(files) = crate::storage::current() {
+                r = r.with_files(files);
             }
-            egret_config::ContainerRunner::Kubernetes => {
-                let pod = pod_config(&cfg.kubernetes);
-                pod.validate()
-                    .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e}")))?;
-                let client = kube::Client::try_default().await.map_err(|e| {
-                    egret_core::Error::Internal(anyhow::anyhow!(
-                        "workflow.container_runner is kubernetes but no cluster client could be \
+            let r = Arc::new(r);
+            (RunnerKind::Docker, r.clone(), r)
+        }
+        egret_config::ContainerRunner::Kubernetes => {
+            let pod = pod_config(&cfg.kubernetes);
+            pod.validate()
+                .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e}")))?;
+            let client = kube::Client::try_default().await.map_err(|e| {
+                egret_core::Error::Internal(anyhow::anyhow!(
+                    "workflow.container_runner is kubernetes but no cluster client could be \
                          built: {e}"
-                    ))
-                })?;
-                let r = Arc::new(crate::worker::k8s::KubernetesRunner::new(
-                    client,
-                    pod,
-                    LogRepo::new(pool.clone()),
-                ));
-                (RunnerKind::Kubernetes, r.clone(), r)
+                ))
+            })?;
+            let mut r =
+                crate::worker::k8s::KubernetesRunner::new(client, pod, LogRepo::new(pool.clone()));
+            if let Some(files) = crate::storage::current() {
+                r = r.with_files(files);
             }
-        };
+            let r = Arc::new(r);
+            (RunnerKind::Kubernetes, r.clone(), r)
+        }
+    };
     let features: Arc<dyn crate::worker::handlers::script::FeatureState> =
         Arc::new(PgFeatureState::new(pool));
     register(
@@ -728,6 +735,7 @@ pub async fn handlers_for(
             runner: runner.clone(),
             plugin_configurations: cfg.plugin_configurations.clone(),
             features: features.clone(),
+            files: crate::storage::current(),
         }),
     );
     crate::worker::handlers::kestra::register(
