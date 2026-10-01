@@ -40,7 +40,21 @@ tagged. It is one assignment away. Task 8's own follow-up measurement killed the
 explanation — the row filter was a red herring; a clean table-level MASK with no row
 filter fails the same way.
 
-## Open items — raised by Task 5, ranked
+## Open items — raised by Tasks 5 through 8
+
+The labels below are cited by task reports, so they are **not** renumbered; this index
+gives the ranking instead. Read it in this order:
+
+| rank | item | one line |
+|---|---|---|
+| 1 | **Item A** | tag downloads name `schema` for every engine → tag-selected masks and clearances **cannot reach StarRocks**. The only Critical here. |
+| 2 | **Item C** (in the scope-finding section above) | a supported API call makes a whole table unreadable, `count(*)` included. One assignment away from live. |
+| 3 | **Item 0** | model or refuse `accessTypeResults` — two defects trace to it, and nothing executable in the gate can report the mechanism. |
+| 4 | **Item B** / **Item B2** | nothing constrains what `catalog_tag_assignments` stores, nor what `explain`'s target strings contain; a gate enumerating three classes compensates. One `CHECK` retires it. |
+| 5 | **Item 0b** | the differential gate — the instrument that found **seven** defects — runs on no automated path. |
+| 6 | **Item 1** | is the composed ACCESS path finished? On the evidence, no. |
+| 7 | **Item 2** | the `required_roles` 3→2 residual; one `SELECT EXISTS`. |
+
 
 ### Item A (NEW, Task 7, and the only CRITICAL one here): egret's tag download names `schema` for every engine, so tag-selected masks and clearances cannot reach StarRocks
 
@@ -69,6 +83,17 @@ wire's literal keys, `enriched_tags` drops them, and the profile answers with it
 tag policies reported as reaching nothing. Fixing the WRITER is a separate change
 (per-engine level names in `from_assignments`, plus a decision about already-served
 tag versions).
+
+
+**Three things this duplicate section carried that are worth keeping.** `download_tags`
+takes **no engine argument** at all, so the hierarchy is not merely wrong for StarRocks
+— nothing in the call even offers the information needed to get it right. Task 7 made
+the mapping write the wire's **literal keys**, so `explain` **reproduces** the drop
+rather than hiding it: correct interim behaviour, and not a fix. And this **falsifies a
+claim in my own Task 7 brief**, where I wrote that the D9 drop stays unreachable after
+that task — it does not. The structural fix: a resource hierarchy is a property of the
+**engine**, so anything emitting Ranger resource keys must take the engine or its
+service-def as an input.
 
 ### Item B (Task 7, WIDENED by fix round 1): nothing constrains what `catalog_tag_assignments` stores, and the gate now enumerates three classes to compensate
 
@@ -115,6 +140,16 @@ rows) rather than a Task 7 change. Unrepresentable beats unforgettable; a gate
 whose predicate enumerates the matcher's syntax is the shape that misses a class,
 which is precisely how this item got wider.
 
+
+**The sharper half, which my duplicate section stated and this one should not lose:**
+the **returned** row is not the dangerous one. A row stored `('sales','','')` ships as a
+`{catalog, schema}` service resource — an ANCESTOR of `sales.orders.email` that Ranger
+admits for a tag request — while the resolver's exact `table_name = $3` can **never
+return it**. So the set egret passes the evaluator is *missing a tag the engine
+enforces*, and an empty set is a licence to skip the tag phase entirely: a **wrong
+confident verdict**, invisible to any inspection of the mapping's input. One `CHECK` on
+`catalog_tag_assignments` would retire the gate Task 7 added for it.
+
 ### Item B2 (NEW, Task 7): nothing constrains `explain`'s target strings
 
 `ExplainRequest`'s `schema` / `table` / `column` are plain `Option<String>`. The
@@ -151,44 +186,6 @@ coverage**, all pointing at this one mechanism — and with T7's shape held out,
 implementer and the reviewer independently concluded that no further corpus
 extension should precede this. Tasks 6-8 do not extend the corpus, so they are not
 blocked; anything that does, is.
-
-### Item A (product, found by Task 7): tag attachments are emitted in TRINO's hierarchy
-
-`ServiceTags::from_assignments` hard-codes `catalog`/`schema`/`table`/`column` and
-`download_tags` takes **no engine argument** — but StarRocks' service-def has **no
-`schema` resource**. A StarRocks profile given a `tagService` therefore downloads
-attachments its own enricher drops, and **every tag policy in its block is silently
-inert**: not a wrong deny, no enforcement at all, and no error anywhere.
-
-Nothing egret auto-binds reaches it today (`bind_trino_profile` is the only auto-bind
-and filters `tp.type = 'trino'`), but **the policy-admin service-create route takes an
-arbitrary config**, so the state is hand-creatable rather than impossible. Task 7 made
-the mapping write the wire's literal keys so `explain` **reproduces** the drop instead
-of hiding it — which is the right interim behaviour and not a fix.
-
-This also **falsifies a claim in my own Task 7 brief**: I wrote that the D9 drop stays
-unreachable after this task. It does not.
-
-The fix is structural: a resource hierarchy is a property of the **engine**, not a
-constant, so anything emitting Ranger resource keys must take the engine or its
-service-def as an input.
-
-### Item B (product, found by Task 7): nothing constrains an empty tag-assignment level
-
-`ExplainRequest.target` is an `egret_perm::Scope` of plain `Option<String>` with no
-validator, and the handler's 400 tests an *absent* level, never an empty one. Measured:
-`{"schema":"","table":""}` reaches `request_resource` and the empty values are inserted
-as resource levels.
-
-The sharper half, which Task 7 found and my brief had not conceived: the **returned**
-row is not the dangerous one. A row stored `('sales','','')` ships as a
-`{catalog, schema}` service resource — an ANCESTOR of `sales.orders.email` that Ranger
-admits for a tag request — while the resolver's exact `table_name = $3` can **never
-return it**. So the set egret passes the evaluator is *missing a tag the engine
-enforces*, and an empty set is a licence to skip the tag phase: a **wrong confident
-verdict**, invisible to any inspection of the mapping's input. Task 7 added a gate
-(`tag_assignment_coordinates_via` + `stored_value_problem`) that declines while it is
-non-zero. **One `CHECK` on `catalog_tag_assignments` would retire the gate.**
 
 ### Item 0b: the differential gate never runs automatically
 
