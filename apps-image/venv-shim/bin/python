@@ -1,0 +1,7 @@
+#!/bin/sh
+# D14: answer marimo's per-launch install probe without starting an interpreter
+# (it costs 1.0–1.8 s per kernel launch — S0b). Everything else runs the real Python.
+if [ "$1" = "-c" ] && [ "$2" = "import marimo, msgspec, zmq; print(marimo.__version__)" ]; then
+  echo "$EGRET_MARIMO_VERSION"; exit 0
+fi
+exec "$EGRET_REAL_PYTHON" "$@"

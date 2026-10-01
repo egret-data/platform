@@ -119,3 +119,69 @@ def test_resume_path_shape(tmp_path):
     from marimo._server.api.endpoints.ws import ws_session_connector
 
     assert "self.manager.maybe_resume_session(" in inspect.getsource(ws_session_connector)
+
+
+# --- Task 3: the run-mode IPC patch, the D14 shim, the locked config ---------
+
+
+def test_session_create_takes_mode_and_sandbox_as_keywords():
+    from marimo._session.session import SessionImpl
+
+    assert isinstance(inspect.getattr_static(SessionImpl, "create"), classmethod)
+    params = inspect.signature(SessionImpl.create).parameters
+    for name in ("mode", "sandbox", "app_host_context"):
+        assert params[name].kind is inspect.Parameter.KEYWORD_ONLY, name
+    assert params["sandbox"].default is False
+    src = inspect.getsource(SessionImpl.create)
+    # sandbox=True takes the IPC kernel path unless an app host is in play.
+    assert "elif sandbox:" in src and "IPCKernelManagerImpl(" in src
+
+
+def test_session_manager_passes_mode_and_sandbox_by_keyword():
+    from marimo._server.session_manager import SessionManager
+
+    src = inspect.getsource(SessionManager)
+    assert "SessionImpl.create(" in src
+    assert "mode=self.mode," in src and "sandbox=self.sandbox," in src
+
+
+def test_ipc_start_kernel_reads_venv_config_through_the_module_global():
+    from marimo._session.managers import ipc
+
+    assert callable(ipc._get_venv_config)
+    assert list(inspect.signature(ipc._get_venv_config).parameters) == ["config_manager"]
+    src = inspect.getsource(ipc.IPCKernelManagerImpl.start_kernel)
+    assert "_get_venv_config(self.config_manager)" in src
+    assert "has_marimo_installed(venv_python)" in src
+    assert 'venv_config.get("writable", False)' in src
+
+
+def test_install_probe_is_what_the_shim_answers():
+    from marimo._session import _venv
+
+    probe = "import marimo, msgspec, zmq; print(marimo.__version__)"
+    assert f'"{probe}"' in inspect.getsource(_venv.has_marimo_installed)
+    shim = (Path(__file__).resolve().parent.parent / "venv-shim" / "bin" / "python").read_text()
+    assert f'"$2" = "{probe}"' in shim
+    assert 'venv / "bin" / "python"' in inspect.getsource(_venv._find_python_in_venv)
+
+
+def test_rtc_v2_is_the_experimental_key_the_ws_connector_reads():
+    from marimo._config.config import ExperimentalConfig
+    from marimo._server.api.endpoints.ws import ws_connection_validator
+
+    assert "rtc_v2" in ExperimentalConfig.__annotations__
+    assert '"rtc_v2", False' in inspect.getsource(ws_connection_validator)
+
+
+def test_cli_entry_accepts_args_and_standalone_mode():
+    import click
+    from marimo._cli.cli import main
+
+    assert isinstance(main, click.Group)
+    assert {"edit", "run"} <= set(main.commands)
+    edit = {p.name for p in main.commands["edit"].params}
+    run = {p.name for p in main.commands["run"].params}
+    common = {"host", "port", "headless", "base_url", "token_password", "watch"}
+    assert common <= edit and common <= run
+    assert "skip_update_check" in edit and "skip_update_check" not in run

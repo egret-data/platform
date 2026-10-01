@@ -3,3 +3,4 @@ pytest==8.4.0
 starlette==0.46.2
 uvicorn==0.34.2
 playwright==1.52.0
+websockets==17.1

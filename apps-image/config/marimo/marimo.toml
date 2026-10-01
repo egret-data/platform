@@ -1,0 +1,11 @@
+# The pod's locked marimo configuration (XDG_CONFIG_HOME points here).
+# The launcher refuses to start if a .marimo.toml could shadow this file.
+
+[ai]
+enabled = false
+
+[experimental]
+# Must stay off: with RTC the websocket connector reattaches a reload to the
+# orphaned session before resume runs, so a session whose save hit a 409
+# (egret_marimo.storage) would come back stale instead of being closed.
+rtc_v2 = false
