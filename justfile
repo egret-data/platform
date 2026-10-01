@@ -244,6 +244,7 @@ images-build:
     docker build -f deploy/docker/backend.Dockerfile -t egret-backend:dev .
     docker build -f frontend/Dockerfile -t egret-frontend:dev frontend
     docker build -t egret-kernel:dev kernel-image
+    docker build -t egret-apps:dev apps-image
     docker build -t egret-renderer:dev renderer
 
 # Build images, load them into the kind `egret` cluster, and (re)install the chart.
@@ -259,7 +260,7 @@ _kind-refresh:
     kubectl delete pods -n egret-notebooks --all --ignore-not-found=true
 
 deploy-kind: images-build
-    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev egret-renderer:dev --name egret
+    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev egret-renderer:dev egret-apps:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m
     just _kind-refresh
     @echo "egret SPA: http://localhost:30080  (login admin@egret.local / Admin12345!)"
@@ -267,7 +268,7 @@ deploy-kind: images-build
 # Like deploy-kind but OIDC-on + ingress (Milestone B) — required for the data-plane e2e.
 # Also enables the k8s per-user kernel launcher: this is the canonical notebook-execution path.
 deploy-kind-oidc: images-build
-    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev --name egret
+    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev egret-apps:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
       --set oidc.enabled=true --set ingress.enabled=true --set kernel.launcher=kubernetes
     just _kind-refresh
@@ -300,7 +301,7 @@ e2e-kind-notebook-viz: deploy-kind-oidc
 # Like deploy-kind-oidc but ALSO Ranger-on — provisioned Trino engines bind Ranger
 # (egret embeds the Ranger admin at /service). For the governance enforcement e2e.
 deploy-kind-governance: images-build
-    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev --name egret
+    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev egret-apps:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
       --set oidc.enabled=true --set ingress.enabled=true --set ranger.enabled=true --set kernel.launcher=kubernetes
     just _kind-refresh
@@ -398,3 +399,7 @@ coredns-rewrite:
 # See deploy/prune-target.sh for the measurement that motivated it.
 prune-target:
     ./deploy/prune-target.sh
+
+# apps-image: unit/contract tests of egret_marimo (own venv, Python 3.12).
+apps-image-test:
+    cd apps-image && python3.12 -m venv .venv && .venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt -e . && .venv/bin/pytest -q
