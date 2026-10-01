@@ -34,6 +34,9 @@
 //!
 //! Task 8, four the built engine does not register at all -- refusals:
 //!   render renderOnce errorLogs subflow
+//!
+//! W9a Task 4 implemented four of the null-backed eight over the render's
+//! file scope: read fileSize fileExists isFileEmpty
 //! ```
 //!
 //! # Seven of Task 8's "service-backed" functions reach no service
@@ -57,12 +60,12 @@
 //!
 //! # A refusal is a feature
 //!
-//! The twelve that are refused say so in a sentence naming the function, what
-//! it needs and the package that will implement it. **The oracle cannot check
+//! The eight that are refused (twelve until W9a Task 4) say so in a sentence
+//! naming the function, what it needs and the package that will implement it. **The oracle cannot check
 //! any of that**: their corpus entries are `compare: "error-class"`, which any
 //! failure satisfies — including `unknown function: secret is unknown`, which
 //! is what egret said before this task. See [`not_implemented`] and
-//! `the_twelve_refusals_name_themselves_and_their_owner`.
+//! `the_eight_refusals_name_themselves_and_their_owner`.
 //!
 //! # `range` was already bound, and it did not error
 //!
@@ -1551,8 +1554,8 @@ fn base62_bytes(bytes: &[u8], pad: usize) -> String {
 /// any failure satisfies — including `unknown function: secret is unknown`,
 /// which is what egret said before this task and which tells a flow author
 /// nothing. So the shape is pinned by a unit test per function instead
-/// (`runners::functions::the_twelve_refusals_name_themselves_and_their_owner`),
-/// and this one function is where the shape lives so twelve messages cannot
+/// (`runners::functions::the_eight_refusals_name_themselves_and_their_owner`),
+/// and this one function is where the shape lives so the messages cannot
 /// drift apart.
 ///
 /// Three things are in it on purpose: the function's own wire name, what it
@@ -3228,7 +3231,7 @@ mod tests {
     /// The standing rule is that a paired test asserts a refused input **and**
     /// a neighbouring accepted one, because an entry pins *that* egret refuses
     /// and a test pins *what it says* — neither pins *which inputs*. There is
-    /// no boundary here: every one of the twelve refuses for every argument
+    /// no boundary here: every one of the eight refuses for every argument
     /// list, including none. So what this asserts instead is the two things
     /// that could actually go wrong:
     ///
