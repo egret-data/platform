@@ -325,6 +325,57 @@ zero is not evidence** — say how you looked.
 
 ---
 
+### Task 12 (DO THIS NEXT — it is a privilege escalation in the permission model)
+
+**Files:** a migration (**0167**), the grant write path (`crates/egret-perm`/`egret-perm-compile`)
+
+**Found by Task 4, measured end to end.** `perm.grants` accepts `schema_name = ''` — stopped only by
+the FK, and the control proves the gap is real: a level **skip** *is* stopped by `grants_check`, so the
+probe would have shown a CHECK if one existed. Then `compile_grant` emits
+`"schema": {"values": [""]}`, and `LevelMatcher::build` **drops an empty policy value**, so
+`is_match_any = true`.
+
+**A grant written with `"schema": ""` is enforced across the whole catalog.** Reachable by any
+`policy:update` caller. This is Task 3's class on the **write side of the permission model** rather
+than of tags, and the blast radius is a grant rather than a tag, so it outranks everything left here.
+
+- [ ] **Step 1: Note the rule is not the tag rule.** `'*'` is a **legitimate** policy value; only `''`
+is wrong. Copying Task 3's predicate down would refuse something real — the same mistake as copying
+`0147`'s regex, and for the same reason.
+- [ ] **Step 2: Migration 0167 plus a write-path 400**, keyed to the same shape, mutation-tested for
+divergence. Measure existing rows first and say what you found, as Task 3 did.
+- [ ] **Step 3: Check every level**, not only `schema`. And check the *compile* side too: if a `''`
+survives anywhere into `compile_grant`, the guard is in the wrong place.
+
+---
+
+### Task 13: a ws-scoped overlay can reach another workspace's WRITE routes
+
+**Files:** `validate_impersonation_target` (interim), then a shared extractor/layer
+
+**Found by Task 4, which closed only `explain`.** `WsContext` documents itself as "the airtight choke
+point … no route can reach another workspace under a scoped overlay". **That is false for every
+`/api/control-plane` route**, because none resolves a `{workspace}` so none builds a `WsContext` —
+`grep workspace_scope` finds two consumers, both in `egret-workspace`. And
+`validate_impersonation_target` refuses only a `platform_admin` target while migration 0059 seeds
+platform `data_steward` with `policy:read`. So **a ws_admin of A can impersonate a member of A holding
+`data_steward` and act on a catalog of B.**
+
+Task 4 closed the read side for `explain` only. **The write side is open on the same router** — a
+ws_admin overlay can *create a grant* on another workspace's catalog — and the same gap sits on
+`policy_admin_router`, `catalog_admin_router`, `engine_mgmt_router` and `control_plane_router`.
+
+- [ ] **Step 1: Take the interim fix first, because it is one predicate in one place instead of six.**
+Make `validate_impersonation_target` refuse a target holding **any platform-scoped permission grant**,
+not only `platform_admin`. That closes all five routers at once.
+- [ ] **Step 2: Then the structural fix.** Six copies of one predicate is the shape this programme has
+been burned by four times; this wants a shared extractor or layer, and that is its own piece of work.
+- [ ] **Step 3: Correct `WsContext`'s own doc**, which currently asserts a containment it does not
+have. A comment claiming a guarantee that does not exist has made two defects invisible in this
+programme.
+
+---
+
 ## Pre-merge steps
 
 1. **Run migration 0166's own listing query** (`migrations/0166_…sql:124`) against any cluster that
