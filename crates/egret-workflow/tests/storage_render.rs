@@ -86,6 +86,19 @@ impl ObjectStore for Flaky {
         }
         self.0.get_stream(uri).await
     }
+    // W9a Task 6: collected output files are written by stream and sized by
+    // `head`; both go straight to the `MemStore`.
+    async fn put_stream(
+        &self,
+        uri: &str,
+        body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+        size_hint: Option<u64>,
+    ) -> Result<u64, StorageError> {
+        self.0.put_stream(uri, body, size_hint).await
+    }
+    async fn head(&self, uri: &str) -> Result<Option<u64>, StorageError> {
+        self.0.head(uri).await
+    }
 }
 
 /// The process-wide store, installed once: [`Flaky`] over a `MemStore`.
