@@ -291,12 +291,14 @@ phục vụ các route này; P3 xây client và test nó với một egret giả
 | run (một phiên bản) | `GET /api/apps/pod/apps/{app_id}/versions/{version_id}` | `{source, version_no}`. Token gắn với đúng phiên bản đó. |
 
 Quy tắc phía pod, rút ra từ S0:
-- **Một revision gốc cho mỗi app trong suốt vòng đời pod.** marimo gọi `NotebookWorkspace.load` hơn một
-  lần mỗi lần mở editor (ít nhất hai lần). Nếu mỗi lần nạp đều tải lại và gắn lại revision thì revision
-  của một editor đang mở sẽ âm thầm bị đặt lại, và lần lưu kế tiếp sẽ ghi đè bản của tác giả khác. Vì vậy
-  pod chỉ tải draft khi chưa giữ revision gốc nào cho app đó. Mỗi lần lưu thành công thì revision gốc
-  tăng theo. **Một lần 409 đánh dấu app là cũ**, và chỉ lần nạp kế tiếp sau đó mới tải lại và gắn lại
-  revision. Tác giả đi tới bước này bằng cách làm theo chữ "reload" trong toast của marimo.
+- **Revision gốc theo từng session editor, không theo app.** marimo tạo một `AppFileManager` mới ở mỗi
+  lần `NotebookWorkspace.load`, và mỗi session editor giữ manager từ lần nạp của chính nó. Vì vậy mỗi lần
+  nạp đều tải draft mới nhất, và `EgretStorage` của nó giữ revision của nội dung mà session đó nhận được.
+  Session nào có draft đã thay đổi bên dưới sẽ nhận 409 ở lần lưu kế tiếp; marimo hiện toast, và tải lại
+  trang cho tác giả một session mới ở revision mới nhất. Cách này bắt được tab cũ, tab thứ hai và tác giả
+  thứ hai. Quy tắc cũ (một revision gốc cho mỗi app suốt vòng đời pod) đã bị bỏ ở P3: revision dùng chung
+  không phân biệt được các session, nên một session cũ có thể lưu đè bản mới hơn sau khi một lần nạp khác
+  đã tải lại.
 - **Pod từ chối khởi động** nếu có `.marimo.toml` trong thư mục làm việc, bất kỳ thư mục cha nào của nó,
   hoặc `$HOME`. marimo ưu tiên các file đó hơn cấu hình đã khoá trong `XDG_CONFIG_HOME`.
 - **marimo 0.25.0 không có API đặt engine mặc định.** SQL cell mới dùng kết nối được định nghĩa gần nhất

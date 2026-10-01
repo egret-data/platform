@@ -29,6 +29,14 @@ Everything is tested against a fake egret. The real pod endpoints and the launch
 - §6.3 (pods, locked configuration);
 - D7 (a process per session), D13 (DuckDB shipped; the template makes egret the default), D14 (the shim answers the check).
 
+## Change made during implementation (2026-10-01)
+
+Task 2 dropped the per-app `BaseRevisions` registry in favour of a **per-manager base revision**:
+- every `NotebookWorkspace.load` fetches the latest draft;
+- each `EgretStorage` keeps the revision its own load received.
+
+A shared registry could not tell editor sessions apart, which let a stale session overwrite newer work after any other load re-fetched. Spec §5.3 is amended to match. Where Task 2 below says `BaseRevisions` or "stale-after-409", the per-manager rule governs.
+
 ## Global Constraints
 
 - **Branch:** `feat/data-apps-p3-image`, off `origin/main`, in its own worktree.

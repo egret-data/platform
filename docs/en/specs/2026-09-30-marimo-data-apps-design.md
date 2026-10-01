@@ -294,12 +294,14 @@ it and serves these routes; P3 builds the client and tests it against a fake egr
 | run (one version) | `GET /api/apps/pod/apps/{app_id}/versions/{version_id}` | `{source, version_no}`. The token is bound to exactly that version. |
 
 Pod-side rules, from S0:
-- **One base revision per app for the pod's lifetime.** marimo calls `NotebookWorkspace.load` more than
-  once per editor open (twice at minimum). Re-fetching and rebinding on every load would silently reset
-  the revision of an editor that is already open, and its next save would overwrite another author's
-  work. So the pod fetches a draft only when it holds no base revision for that app. A successful save
-  advances the base. A **409 marks the app stale**, and only the next load after that re-fetches and
-  rebinds. The author gets there by following the "reload" in marimo's toast.
+- **A base revision per editor session, not per app.** marimo builds a fresh `AppFileManager` on every
+  `NotebookWorkspace.load`, and each editor session keeps the manager from its own load. So every load
+  fetches the latest draft, and its `EgretStorage` holds the revision of what that session was given.
+  A session whose draft has moved on underneath it gets a 409 on its next save; marimo shows a toast,
+  and a reload hands the author a new session at the latest revision. This catches a stale tab, a
+  second tab, and a second author. The earlier rule (one base revision per app for the pod's lifetime)
+  was dropped in P3: a shared revision could not tell sessions apart, so a stale session could save
+  over newer work once any other load had re-fetched.
 - **The pod refuses to start** if a `.marimo.toml` exists in its working directory, any parent of it, or
   `$HOME`. marimo prefers those files over the locked-down `XDG_CONFIG_HOME` config.
 - **No default-engine API exists** in marimo 0.25.0. A new SQL cell uses the most recently defined
