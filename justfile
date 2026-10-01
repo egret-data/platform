@@ -92,8 +92,8 @@ check:
 test-ranger-gates:
     @echo "── Ranger gates (real jars, 2.5.0 + 2.8.0). Needs a JVM and Maven; a failure"
     @echo "   here means the differential did NOT run, which is the thing to know."
-    EGRET_TEST_RANGER_E2E=1 cargo test -p egret-policy --test ranger_engine_gate --no-fail-fast
-    EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture
+    {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-policy --test ranger_engine_gate --no-fail-fast
+    {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture
 
 # egret-workflow's tests, compiled under the resolution the BINARY ships.
 #
