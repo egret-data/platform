@@ -117,7 +117,7 @@
 
 ---
 
-### Task 7: F4/F5 has no passing assertion — give it one that can fail
+### Task 7: two assertions merged in #611 that pin shapes the same PR changed
 
 **Files:**
 - Modify: `crates/egret-perm-compile/tests/routes.rs` (`explain_reports_the_tag_set_the_evaluator_was_handed`)
@@ -156,7 +156,23 @@ different assertion dies for each.
 - [ ] **Step 5: Fix the stale doc link.** `resolved_tags_for_display` links
 `[ExplainResponse::tags]`, a field that no longer exists.
 
-- [ ] **Step 6: Commit.**
+- [ ] **Step 6: The second one, same class, found by Task 2.**
+`cause_access_priority_composite_rides_the_arbitration_wire_shape`
+(`crates/egret-perm-compile/tests/wire_dtos.rs:593`) fails. It pins
+`AccessPriorityCompositeNotModelled` as riding `tag_priority_arbitration_not_modelled`'s three
+**positional** lists — and that cause now serialises as its **own named variant**, because the
+final SP4d round split it deliberately (`explain_wire.rs`'s own doc records the split and names
+the defect it fixed: the page was calling a resource policy a tag policy). **So the test is the
+stale side, not the code** — but confirm that from `explain_wire.rs`'s contract before changing
+it, because rewriting another package's pinned assertion on the strength of a comment is how a
+real defect gets papered over.
+
+**And note what this one proves, because it is worse than Task 7's half:** this test is
+**DB-free**. The broken shared template never hid it. It reached `main` because **CI is out of
+quota** and `just check` was the only gate — which is plan item 0b's cost, arriving. Say that
+in the commit message; it is the evidence for why that item matters.
+
+- [ ] **Step 7: Commit.**
 
 ---
 
@@ -193,6 +209,15 @@ the guard or record the bound.
 - [ ] **Step 4: Commit.**
 
 ---
+
+## Open, not in this plan — named so it is not mistaken for closed
+
+**A StarRocks engine bound to a `trino`-typed profile that carries a `tagService` still
+produces a wrong artifact, and is not refused at bind time.** Task 2's guard keys on the
+profile's own `type`; this is a different invariant, cross-table — `engines.authz_service_id`
+against `authz_services.type`. Today it is only **reported**, through
+`UndecidableCause::EngineMismatch`. Closing it needs its own measurement, so it is not folded
+into Task 2.
 
 ## Verification for every task
 
