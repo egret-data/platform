@@ -1000,10 +1000,15 @@ async fn bearer_scheme_is_case_insensitive() {
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
-/// Fix round 1: a grant held through a GROUP authorizes a run token — pins the
-/// gateway's `user_groups` load into the PDP subject.
+/// Fix round 1: group membership reaches the PDP subject. Two things depend
+/// on it, and this pins both:
+/// - a role granted to a GROUP authorizes the member (the PDP resolves this
+///   one from the DB itself);
+/// - a classification on the app that clears ONLY by group membership reads
+///   `Subject::group_ids` — what the gateway loads from `user_groups`. Without
+///   that load the member is forbidden like any non-member.
 #[tokio::test]
-async fn group_grant_authorizes_a_run_token() {
+async fn group_membership_authorizes_and_clears_a_group_gated_app() {
     let mut f = Fixture::new().await;
     let member = f.new_user().await;
     let group: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
@@ -1019,10 +1024,39 @@ async fn group_grant_authorizes_a_run_token() {
         .expect("membership");
     let role = custom_role(&f.db, &["app:read"]).await;
     grant(&f.db, "group", group, role, f.ws_a).await;
+
+    // Gate the app on membership of `group` (no role clears it).
+    let tag: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, 'Dept') RETURNING id")
+            .bind(format!("dept-{}", Uuid::new_v4().simple()))
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("tag");
+    sqlx::query(
+        "INSERT INTO tag_assignments (tag_id, object_type, object_id) VALUES ($1, 'app', $2)",
+    )
+    .bind(tag)
+    .bind(f.app)
+    .execute(&f.db.pool)
+    .await
+    .expect("tag app");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, '{}', $2)",
+    )
+    .bind(tag)
+    .bind(vec![group])
+    .execute(&f.db.pool)
+    .await
+    .expect("classification");
     f.rebuild().await;
 
     let token = f.mint(&member, AppMode::Run).await;
     let (s, body) = f.select1(&token).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(f.port.calls()[0].2, UserId(member.id));
+
+    // The fixture viewer holds app:read directly but is not in the group.
+    let outside = f.viewer_run().await;
+    assert_eq!(f.select1(&outside).await.0, StatusCode::FORBIDDEN);
 }
