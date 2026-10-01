@@ -23,7 +23,8 @@
   - W9 is split: **W9a** internal storage (this plan), **W9b** namespace files, **W9c** the KV store.
   - **egret moves files for the pod.** A task pod holds no storage credential and opens no connection to the object store.
   - Streamed, with large configurable caps; **no file is ever held whole in egret's memory.**
-  - A running flow reads its own execution's (its loop root's) files and its trigger execution's, and a replay reads its source's (§4.4). Never another workspace's; never an unrelated execution's in the same workspace.
+  - A running flow reads its own execution's files, its loop family's (its loop root and every iteration under it), its trigger execution's, and a replay reads its source chain's (§4.4).
+  - **(User ruling, 2026-10-01, on Task 1's concern 1.)** A file written inside a `Loop` iteration carries the **iteration's** execution id, as Kestra does; no URI is mapped to the loop root (spec §3). Never another workspace's; never an unrelated execution's in the same workspace.
   - Retention of its own, **30 days** by default, `0` keeps forever (§10).
   - `outputs.<task>.outputFiles` becomes `{relative path → kestra:// URI}` — **breaking** (§6.2).
   - In scope: FILE inputs + file functions (§7), the execution file API (§8), the plugin storage bridge (§9.1), `egret.sql` STORE (§9.2), core storage tasks + `Loop` over a file (§9.3).
@@ -32,7 +33,7 @@
   - Multipart part size 8 MiB (a single PUT under 8 MiB).
   - Preview `maxRows` default 100, max 5000.
   - Orphans older than 24 hours.
-- **URIs (§3):** `kestra:///{ns-as-path}/{flow-slug}/executions/{exec}/{tail}`, tail `inputs/{input}/{file}` | `tasks/{task-slug}/{taskRunId}/{file}` | `trigger/{trigger-slug}/{file}`. **The URI carries no workspace**; the key is `{prefix}{workspace_id}{uri path}`, the workspace always being the running execution's. `{exec}` is the **loop root**. A URI is refused if the scheme is not `kestra`, it holds `..`, or it does not parse.
+- **URIs (§3):** `kestra:///{ns-as-path}/{flow-slug}/executions/{exec}/{tail}`, tail `inputs/{input}/{file}` | `tasks/{task-slug}/{taskRunId}/{file}` | `trigger/{trigger-slug}/{file}` | a bare `{file}` (Kestra's `Loop` STORE outputs, `executions/{iteration}/{n}.ion`; `w9a-storage.json` finding `loop_outputs_store_uri`). **The URI carries no workspace**; the key is `{prefix}{workspace_id}{uri path}`, the workspace always being the running execution's. `{exec}` is the **writing execution** (a `Loop` iteration's own id; the user's ruling); the loop root is computed only for the readable set and the file API. A URI is refused if the scheme is not `kestra`, it holds `..`, or it does not parse.
 - **Errors (§11).** Every storage error names the URI and never a secret value. An unreachable store at run is an **infrastructure** error: the handler returns `Err` (a worker failure — the lease lapses, the run is re-claimed, no `attempts` is spent, W4), never `Ok(Outcome FAILED)`. A crossed cap, an unreadable URI or a bad file is the author's: a failed task naming the cap or the URI. This is the split `handlers::container::mapped` already makes (`container.rs:120-128`).
 - **One readability function.** `storage::resolve_readable_many` is the only code that decides whether a URI is readable. The file functions, staging, the plugin bridge, FILE inputs given as JSON and the file API all reach it (through the render snapshot or directly). A second predicate anywhere is a review failure.
 - **Every refusal has a test that fails when the check is removed** (mutation-minded). Where a refusal exists at save or start time and again at run, both go through one shared function, and the test says which.
@@ -93,8 +94,8 @@ crates/egret-workflow/Cargo.toml                             MOD  T3 egret-stora
 crates/egret-workflow/src/storage/mod.rs                     NEW  T3: FileStore, Caps, install/current, IndexedFile,
                                                                   Unreadable, StoredFile, index writers
 crates/egret-workflow/src/storage/uri.rs                     NEW  T3: ExecUri, Tail, parse, slugify_str, id_utils_from,
-                                                                  task_prefix, output_file_uri
-crates/egret-workflow/src/storage/index.rs                   NEW  T3: loop_root, readable_executions, resolve_readable_many
+                                                                  task_prefix, execution_file_uri, output_file_uri
+crates/egret-workflow/src/storage/index.rs                   NEW  T3: loop_root, loop_family, readable_executions, resolve_readable_many
 crates/egret-workflow/src/storage/scope.rs                   NEW  T4: Snapshot (implements runners::files::RenderFiles)
 crates/egret-workflow/src/storage/transfer.rs                NEW  T5: streaming ustar writer/reader (replaces worker/k8s/transfer.rs)
 crates/egret-workflow/src/storage/collect.rs                 NEW  T6: one collected entry -> put_stream -> StoredFile; caps
@@ -296,7 +297,7 @@ async fn a_refused_credential_error_names_the_uri_and_not_the_secret() {
 CREATE TABLE workflow.execution_files (
   id            bigserial   PRIMARY KEY,
   workspace_id  uuid        NOT NULL,
-  execution_id  uuid        NOT NULL,        -- the LOOP ROOT (spec §3)
+  execution_id  uuid        NOT NULL,        -- the WRITING execution: a Loop iteration's own id (spec §3, §4.2)
   task_run_id   uuid,                        -- NULL for an input file; no FK, as task_logs.task_run_id (0159)
   uri           text        NOT NULL CHECK (left(uri, 10) = 'kestra:///'),
   size          bigint      NOT NULL CHECK (size >= 0),
@@ -334,6 +335,9 @@ pub enum Tail {
     Input { input: String, file: String },
     Task { task_slug: String, task_run: String, file: String },
     Trigger { trigger_slug: String, file: String },
+    /// `executions/{exec}/{file}`: Kestra's `Loop` STORE outputs (Task 1, `loop_outputs_store_uri`). Parsed and readable;
+    /// egret writes it only if a task implements Loop `outputs` in STORE mode.
+    Execution { file: String },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecUri { pub ns_path: String, pub flow_slug: String, pub execution: Uuid, pub tail: Tail }
@@ -342,8 +346,10 @@ impl ExecUri { pub fn to_uri(&self) -> String; }             // parse(u)?.to_uri
 pub fn namespace_as_path(namespace: &str) -> String;         // dots -> slashes (StorageContext.namespaceAsPath)
 pub fn slugify_str(input: &str) -> String;                   // Slugify.of; re-exported from runners::filters' body
 pub fn id_utils_from(s: &str) -> String;                     // IdUtils.from: md5 -> nameUUIDFromBytes -> base62
-pub fn task_prefix(namespace: &str, flow_id: &str, root: Uuid, task_id: &str, task_run: Uuid) -> String; // ends with '/'
-pub fn input_uri(namespace: &str, flow_id: &str, root: Uuid, input: &str, file: &str) -> String;
+/// `execution` is the writing execution — the task run's own execution, an iteration's own id inside a `Loop`.
+pub fn task_prefix(namespace: &str, flow_id: &str, execution: Uuid, task_id: &str, task_run: Uuid) -> String; // ends with '/'
+pub fn input_uri(namespace: &str, flow_id: &str, execution: Uuid, input: &str, file: &str) -> String;
+pub fn execution_file_uri(namespace: &str, flow_id: &str, execution: Uuid, file: &str) -> String; // Tail::Execution
 /// `{task_prefix}{id_utils_from(abs_path)}-{basename with ' ' -> '+'}` (FilesService.java:94-97).
 pub fn output_file_uri(task_prefix: &str, abs_path: &str) -> String;
 
@@ -360,7 +366,7 @@ pub struct FileStore {
 impl FileStore {
     /// `s3://{bucket}/{prefix}{workspace}{path of uri}` — the workspace is the caller's, never the URI's.
     pub fn object_uri(&self, workspace: Uuid, uri: &str) -> Result<String, String>;
-    pub fn execution_prefix(&self, workspace: Uuid, namespace: &str, flow_id: &str, root: Uuid) -> String;
+    pub fn execution_prefix(&self, workspace: Uuid, namespace: &str, flow_id: &str, execution: Uuid) -> String;
 }
 /// Process-wide, set once by egret-bin. See "Why a process-wide store" below.
 pub fn install(fs: std::sync::Arc<FileStore>) -> Result<(), std::sync::Arc<FileStore>>;
@@ -374,7 +380,7 @@ pub struct IndexedFile { pub uri: String, pub execution_id: Uuid, pub task_run_i
 pub enum Unreadable {
     #[error("{uri} is not a storage URI egret can read: {reason}")]
     Malformed { uri: String, reason: String },
-    /// Its execution is not this execution's loop root, trigger execution or replay source.
+    /// Its execution is not in this execution's readable set (loop family, trigger execution, replay chain).
     /// Deliberately one variant: the message never says whether the file exists.
     #[error("{uri} belongs to an execution this flow may not read: a flow reads only its own \
              execution's files, its trigger execution's and, for a replay, its source's")]
@@ -393,9 +399,13 @@ pub async fn index_input_files(conn: &mut PgConnection, workspace: Uuid, executi
 /// A retry replay also has parent_execution_id set, with loop_index NULL (0138's table;
 /// worker/replay.rs's module doc), and must NOT be walked through.
 pub async fn loop_root(conn: &mut PgConnection, workspace: Uuid, execution: Uuid) -> egret_core::Result<Uuid>;
-/// {R} ∪ {trigger_execution_id of R} for R in the replay chain from loop_root(execution):
-/// the root, then (parent_execution_id WHERE loop_index IS NULL) or replayed_from_execution_id,
-/// transitively (a replay copies its source's inputs verbatim, replay.rs:254-257, routes.rs:1943).
+/// The loop family of `execution`: loop_root(execution) and every loop iteration under it, at any
+/// depth (rows reached downward through parent_execution_id WHERE loop_index IS NOT NULL). Spec §4.4 items 1-2, §8.
+pub async fn loop_family(conn: &mut PgConnection, workspace: Uuid, execution: Uuid) -> egret_core::Result<Vec<Uuid>>;
+/// Spec §4.4: loop_family(execution) (which holds `execution` and its root R)
+/// ∪ the replay chain from R — (parent_execution_id WHERE loop_index IS NULL) or replayed_from_execution_id,
+///   transitively (a replay copies its source's inputs verbatim, replay.rs:254-257, routes.rs:1943)
+/// ∪ trigger_execution_id of `execution`, of R and of every link of the chain (one level each).
 pub async fn readable_executions(conn: &mut PgConnection, workspace: Uuid, execution: Uuid) -> egret_core::Result<Vec<Uuid>>;
 /// THE readability decision. Never reads a row of an execution outside `readable`.
 pub async fn resolve_readable_many(
@@ -426,6 +436,7 @@ pub replayed_from_execution_id: Option<Uuid>,  // the manual replay's link
     // "s3://b/k", "file:///etc/passwd", "nsfile:///a", "kestra:///a/../b/executions/<uuid>/inputs/f/x",
     // "kestra:///ns/f/executions/not-a-uuid/inputs/f/x", "kestra:///ns/f/executions/<uuid>/other/x",
     // "kestra:///ns//f/executions/<uuid>/inputs/f/x" -> each Err naming the reason
+    // and "kestra:///ns/f/executions/<uuid>/123.ion" (Tail::Execution) is ACCEPTED
 }
 #[test] fn parse_to_uri_round_trips() {}
 #[test] fn the_object_key_takes_the_workspace_from_the_caller_and_nothing_from_the_uri() {
@@ -435,8 +446,14 @@ pub replayed_from_execution_id: Option<Uuid>,  // the manual replay's link
 // tests/storage_index.rs (Postgres :5438)
 #[tokio::test] async fn a_loop_iteration_resolves_to_its_root_and_a_retry_replay_does_not() {}
 #[tokio::test] async fn readable_covers_own_root_trigger_retry_replay_and_manual_replay_chain() {
-    // root R (trigger T), retry-replay R1 of R, manual replay R2 of R1; a loop iteration I of R2:
-    // readable_executions(I) == {R2, R1, R, T}
+    // root R (trigger T), retry-replay R1 of R, manual replay R2 of R1; loop iterations I and I2 of R2:
+    // readable_executions(I) == {I, I2, R2, R1, R, T}
+}
+#[tokio::test] async fn a_task_after_the_loop_and_a_sibling_read_an_iterations_file() {
+    // a file indexed under iteration I (its URI's {exec} is I): readable from the root R2 and from sibling I2
+}
+#[tokio::test] async fn a_file_written_in_an_iteration_is_indexed_under_the_iteration() {
+    // index_task_files for a task run of I: the row's execution_id == I, not R2
 }
 #[tokio::test] async fn a_file_of_an_unrelated_execution_in_the_same_workspace_is_not_readable() {
     // THE probe: the other execution's row EXISTS. Removing the `readable` filter makes it Ok.
@@ -456,14 +473,14 @@ pub replayed_from_execution_id: Option<Uuid>,  // the manual replay's link
 - [ ] **Step 3: Implement.**
   - `slugify_str`: move the body of `runners::filters::slugify` (`filters.rs:2242-2275`) into a `pub(crate) fn slugify_str(&str) -> String`, and have the filter call it (the filter keeps its Java-null arm).
   - `id_utils_from`: `md5(s)`, then `nameUUIDFromBytes` (md5 of those 16 bytes, version nibble 3, variant `10`), then `runners::functions::base62(u128::from_be_bytes(..), 0)` (`functions.rs:1403`, made `pub(crate)`). The fixture decides; do not argue from the Java.
-  - `loop_root`/`readable_executions`: one recursive CTE each, scoped by `workspace_id` in every step.
+  - `loop_root`/`loop_family`/`readable_executions`: one recursive CTE each, scoped by `workspace_id` in every step.
   - `resolve_readable_many`: parse each URI; `Malformed` on failure; `NotReadable` when `{exec}` ∉ `readable`; else one `SELECT uri, execution_id, task_run_id, size FROM workflow.execution_files WHERE workspace_id = $1 AND uri = ANY($2)` over the readable ones; absent → `Missing`.
-  - `index_*_files`: `INSERT … ON CONFLICT (workspace_id, uri) DO UPDATE SET size = EXCLUDED.size, task_run_id = EXCLUDED.task_run_id, created_at = now()` — a retried task run writes the same deterministic URIs (§4.3). Each file's `execution_id` is parsed from its URI and must be the loop root the caller passes; a mismatch is `Error::Internal` (egret built a wrong URI).
+  - `index_*_files`: `INSERT … ON CONFLICT (workspace_id, uri) DO UPDATE SET size = EXCLUDED.size, task_run_id = EXCLUDED.task_run_id, created_at = now()` — a retried task run writes the same deterministic URIs (§4.3). Each file's `execution_id` is parsed from its URI and must be the writing execution the caller passes (an iteration's own id inside a `Loop`); a mismatch is `Error::Internal` (egret built a wrong URI).
   - `replay_execution` (`routes.rs:1902`): switch from `worker::start_execution` to `start_execution_in` in a transaction with `replayed_from_execution_id: Some(id)`; update the handler doc's *"no column carries it"* paragraph (it names this column as the fix). `start_execution_in` binds the two new columns; every `NewExecution { … }` literal gets the new field (`flow_trigger/process.rs:917`, `scheduler/fire.rs:260`, `worker/claim.rs:1872`, `tests/worker.rs:7103,7130,7166,7245,7367,7566`).
   - Config: `WorkflowStorageConfig` with serde defaults; a boot check that `container_runner != none` requires `[storage]` `bucket`, `access_key`, `secret_key` non-empty (spec §15).
   - `egret-bin`: build the `FileStore` from the `storage` Arc already created at `main.rs:1582-1583` (reuse the Arc, not a second client) and `storage::install` it before the router and the runtime.
 - [ ] **Step 4: Run the tests to see them pass**, then `cargo test -p egret-workflow --test worker --test executions_routes`.
-- [ ] **Step 5: Mutations:** (a) `resolve_readable_many` without the `readable` filter; (b) the SELECT without `workspace_id`; (c) `loop_root` walking through a row with `loop_index IS NULL`; (d) `readable_executions` without the trigger step; (e) without the replay chain; (f) `object_uri` taking the workspace from the URI's first segment.
+- [ ] **Step 5: Mutations:** (a) `resolve_readable_many` without the `readable` filter; (b) the SELECT without `workspace_id`; (c) `loop_root` walking through a row with `loop_index IS NULL`; (d) `readable_executions` without the trigger step; (e) without the replay chain; (f) `object_uri` taking the workspace from the URI's first segment; (g) `readable_executions` without the iterations under the root (the after-the-loop/sibling test dies); (h) `index_task_files` writing the loop root instead of the writing execution.
 - [ ] **Step 6: Commit** `feat(workflow): W9a Task 3 — the file index, kestra:// URIs and the one readability check`.
 
 ---
@@ -476,7 +493,7 @@ pub replayed_from_execution_id: Option<Uuid>,  // the manual replay's link
 - Modify `src/worker/render.rs` (`Surface` `:82`, `Surface::context` `:547`), `src/worker/claim.rs` (`input_for` `:1475`, `settle` `:1658`).
 
 **Interfaces:**
-- Consumes (Task 3): `storage::{current, FileStore, IndexedFile, Unreadable, readable_executions, resolve_readable_many, loop_root, uri::task_prefix}`.
+- Consumes (Task 3): `storage::{current, FileStore, IndexedFile, Unreadable, readable_executions, resolve_readable_many, loop_root, loop_family, uri::task_prefix}`.
 - Produces:
 
 ```rust
@@ -542,6 +559,9 @@ impl Snapshot {
 }
 #[tokio::test(flavor = "multi_thread")] async fn a_log_task_reads_its_trigger_executions_file() {}
 #[tokio::test(flavor = "multi_thread")] async fn a_loop_iteration_reads_a_file_its_root_wrote() {}
+#[tokio::test(flavor = "multi_thread")] async fn a_task_after_the_loop_reads_a_file_an_iteration_wrote() {
+    // the iteration's file URI carries the iteration's id (spec §3, the user's ruling); still readable from the root
+}
 #[tokio::test(flavor = "multi_thread")] async fn a_file_of_an_unrelated_execution_fails_the_render_naming_the_uri() {}
 #[tokio::test(flavor = "multi_thread")] async fn a_flow_trigger_condition_calling_read_is_refused_by_name() {
     // execution_render_context (render.rs:808) carries no scope
@@ -557,7 +577,7 @@ impl Snapshot {
   - **Both render threads** add the `FILE_SCOPE` global when `cx.files()` is `Some`: `render_on_this_thread` after `extend` (so an `extend` cannot unbind it) and `bind_on_this_thread` (`egret.sql`). `environment()` itself never holds it, so `the name-surface test` (`env.rs:2842-2851`) is unchanged; confirm.
   - `read_utf8` in `Snapshot`: `handle.block_on(store.get_stream(object_uri))`, read at most `max_read_bytes + 1` bytes; one more is the cap error.
   - **Where a scope is attached**, and nowhere else:
-    - `input_for` (`claim.rs:1475`): after `Surface::load`, take a `Snapshot` on `conn` with `task_prefix = Some(uri::task_prefix(flow.namespace, flow.id, root, &c.task_id, c.id))`, attach to the `RenderContext` passed to `c.input(…)`.
+    - `input_for` (`claim.rs:1475`): after `Surface::load`, take a `Snapshot` on `conn` with `task_prefix = Some(uri::task_prefix(flow.namespace, flow.id, c.execution_id, &c.task_id, c.id))` — the claimed run's **own** execution (an iteration's id inside a `Loop`, spec §3), never the loop root, attach to the `RenderContext` passed to `c.input(…)`.
     - `settle` (`claim.rs:1658`): after `Surface::load`, take a `Snapshot` with `task_prefix = None` and store it on the `Surface`; `Surface::context` attaches it. That reaches `render_run_if` (`render.rs:981`), `render_expressions` (`:1031`) and the SLA render (`claim.rs:2546`).
     - `execution_render_context` (`render.rs:808`) does **not** take one: a Flow trigger's `conditions`/`inputs` render refuses the four (§7.2).
     - With `storage::current()` `None`, no snapshot is taken and the four refuse, naming `[storage]`.
@@ -650,7 +670,7 @@ pub collect_to: Option<CollectTo>,
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollectTo {
     pub workspace: Uuid,
-    pub task_prefix: String,   // kestra:///…/tasks/{task}/{taskRunId}/
+    pub task_prefix: String,   // kestra:///…/executions/{the run's own execution}/tasks/{task}/{taskRunId}/ (an iteration's id in a Loop)
     pub naming: Naming,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -827,7 +847,10 @@ pub fn line_to_json(line: &str) -> Result<serde_json::Value, String>;   // the v
 #[tokio::test] async fn another_executions_file_is_404_with_no_redirect() { /* same ws, a real row of another execution */ }
 #[tokio::test] async fn another_workspaces_execution_is_404() {}
 #[tokio::test] async fn without_workflow_read_it_is_403() {}
-#[tokio::test] async fn a_loop_iteration_id_serves_its_roots_files() {}   // "(its loop root)", §8
+#[tokio::test] async fn any_id_of_the_loop_family_serves_the_familys_files() {
+    // spec §8: the root's id serves an iteration's file; an iteration's id serves the root's and a sibling's
+}
+#[tokio::test] async fn a_trigger_executions_file_is_404_through_this_id() {}   // readable at render, not served here
 #[tokio::test] async fn metas_is_the_index_size() {}
 #[tokio::test] async fn ion_preview_rows_match_the_artifact_and_max_rows_caps_at_5000() {}
 #[tokio::test] async fn csv_jsonl_and_text_preview_as_lines_and_binary_is_not_previewable() {}
@@ -838,11 +861,11 @@ pub fn line_to_json(line: &str) -> Result<serde_json::Value, String>;   // the v
 - [ ] **Step 2: Run them to watch them fail.**
 - [ ] **Step 3: Implement.**
   - Authorisation exactly as `GET …/executions/{id}/logs` (`routes.rs:1398-1422`): `WsContext`, `egret_core::authz::require(&*st.pdp, &ctx, WF_READ)`, `st.executions.get(ws, id)` for existence (a foreign id is 404).
-  - The file: `resolve_readable_many(&mut conn, ws, &[loop_root(&mut conn, ws, id).await?], &[path])` — the **one** function, with the readable set narrowed to that execution's root; anything but `Ok` is 404 (§8: no redirect).
+  - The file: `resolve_readable_many(&mut conn, ws, &loop_family(&mut conn, ws, id).await?, &[path])` — the **one** function, with the readable set narrowed to `{id}`'s loop family (spec §8, chosen as the option consistent with §4.4); anything but `Ok` is 404 (§8: no redirect).
   - Download: `Body::from_stream(tokio_util::io::ReaderStream::new(get_stream(..)))`.
   - Preview: read line by line up to `maxRows` and at most `max_read_bytes`; `.ion` through `ion::line_to_json`; `.csv`/`.jsonl`/`.json`/text as strings; else `{previewable: false, rows: []}`.
 - [ ] **Step 4: Run the tests to see them pass**; the OpenAPI test; `npm run gen:api && npm run lint && npm test`.
-- [ ] **Step 5: Mutations:** (a) the readable set widened to `readable_executions(id)` (the other-execution test must die only if the file is the trigger's — add that case); (b) `maxRows` unclamped; (c) `Content-Disposition` unsanitised.
+- [ ] **Step 5: Mutations:** (a) the readable set widened to `readable_executions(id)` (`a_trigger_executions_file_is_404_through_this_id` dies); (d) the readable set narrowed to `[id]` (`any_id_of_the_loop_family_serves_the_familys_files` dies); (b) `maxRows` unclamped; (c) `Content-Disposition` unsanitised.
 - [ ] **Step 6: Commit** `feat(workflow): W9a Task 8 — download, metas and preview of an execution's files`.
 
 ---
@@ -861,7 +884,7 @@ task.json = {"type": FQCN, "properties": {…rendered…}, "mask": [...],
              "storage": {"<kestra:// uri>": ".egret/storage/<n>", …},
              "baseUri": "kestra:///…/tasks/{task}/{taskRunId}/",
              "maxTaskBytes": <u64>,
-             "context": {"namespace": …, "flowId": …, "executionId": <loop root>, "taskId": …, "taskRunId": …}}
+             "context": {"namespace": …, "flowId": …, "executionId": <the run's own execution — an iteration's id inside a Loop>, "taskId": …, "taskRunId": …}}
 host writes    .egret/out/<path relative to baseUri>
 host outputs   the plugin's own outputs, URIs = baseUri + relative path
 ```
@@ -944,7 +967,7 @@ pub struct Write; pub struct Size; pub struct Delete; pub struct PurgeCurrentExe
 
 **Every list that enumerates task types and must gain these four (and Task 12's five):** `spec::registry::TASK_TYPES` (`add_publishable` requires the row); `Handlers::with_core_tasks` (`registry.rs:123`); `oracle-exec/driver.rs::registry()` (`:131`; with a `MemStore`-backed `install_mem_for_tests`, so the ratchet can run them); `oracle-exec/handler-surface.txt` if `handler_surface.py` lists implemented types (run it and commit the diff); `executor/mod.rs`'s `PUBLISHED_BUT_REFUSED` (`:3804`) if a type appears there. `plugin-host`'s `NATIVE_TYPES` (`EgretPluginHost.java:84-93`) excludes natively ported types from the catalog; `describe` scans only the three JDBC jars, so `core.storage` classes never reach it — **verify with `describe` and state it**, rather than adding them.
 
-- [ ] **Step 1: Write the failing tests:** per class, the properties and outputs equal `w9a-storage.json`'s `core_storage` and one run reproduces the recorded outputs and bytes; `Delete` of a file of another (readable) execution — a trigger's — is refused (§9.3: only the loop root's), **index row first** (a store failure after the row delete leaves an orphan, never a dangling row); `PurgeCurrentExecutionFiles` deletes only the loop root's files; `Loop` with `values: "{{ outputs.write.uri }}"` iterates the file's records as `loop_over_ion` records, a `null` record fails the run with Kestra's message, a file over `max_read_bytes` fails naming the cap.
+- [ ] **Step 1: Write the failing tests:** per class, the properties and outputs equal `w9a-storage.json`'s `core_storage` and one run reproduces the recorded outputs and bytes; `Delete` of a file of another (readable) execution — a trigger's — is refused (§9.3: only the loop family's), **index row first** (a store failure after the row delete leaves an orphan, never a dangling row); `PurgeCurrentExecutionFiles` deletes only the loop family's files (the root and every iteration under it; each under its own `execution_prefix`); `Loop` with `values: "{{ outputs.write.uri }}"` iterates the file's records as `loop_over_ion` records, a `null` record fails the run with Kestra's message, a file over `max_read_bytes` fails naming the cap.
 - [ ] **Step 2: Run them to watch them fail.**
 - [ ] **Step 3: Implement.**
   - Inputs through `task.render.files()` (the snapshot); outputs written with `put_stream` under `task_prefix`, returned in `Outcome.files`.
@@ -980,8 +1003,8 @@ pub struct Write; pub struct Size; pub struct Delete; pub struct PurgeCurrentExe
 ```sql
 -- migrations/0162_workflow_execution_files_pruned.sql (exact DDL)
 ALTER TABLE workflow.executions
-  ADD COLUMN files_pruned_at timestamptz,   -- set when the pruner deleted this root's files
-  ADD COLUMN files_swept_at  timestamptz;   -- set when the orphan sweep of a FAILED/KILLED root ran
+  ADD COLUMN files_pruned_at timestamptz,   -- set when the pruner deleted this execution's files
+  ADD COLUMN files_swept_at  timestamptz;   -- set when the orphan sweep of a FAILED/KILLED execution ran
 ```
 
 ```rust
@@ -1006,7 +1029,7 @@ pub async fn prune_pass(pool: &PgPool, fs: &FileStore, cfg: &StoragePruneConfig)
 #[tokio::test] async fn an_execution_that_has_not_ended_is_never_pruned() {
     // RUNNING, updated_at forced 400 days back, with rows: kept
 }
-#[tokio::test] async fn an_ended_root_older_than_the_window_loses_objects_then_rows() {}
+#[tokio::test] async fn an_ended_execution_older_than_the_window_loses_objects_then_rows() {}
 #[tokio::test] async fn a_failed_store_delete_keeps_the_rows_and_the_next_pass_retries() {}
 #[tokio::test] async fn orphans_older_than_a_day_are_deleted_and_younger_ones_and_indexed_ones_are_kept() {}
 #[tokio::test] async fn zero_retention_starts_no_pruner() {}
@@ -1015,7 +1038,7 @@ pub async fn prune_pass(pool: &PgPool, fs: &FileStore, cfg: &StoragePruneConfig)
 ```
 
 - [ ] **Step 2: Run them to watch them fail.**
-- [ ] **Step 3: Implement.** "Ended" = state terminal (`RunState::ALL` filtered by `is_terminal`, the idiom of `ExecutionRepo::log_status`, `repo.rs:1085-1090`) and `updated_at < now() - make_interval(days => $n)`, over **roots with index rows**. Per root: `delete_prefix(execution_prefix)`, then `DELETE` its rows and set `files_pruned_at` in one statement; a failed `delete_prefix` leaves both. Orphans: for each root pruned in this pass and each FAILED/KILLED root ended more than 24 h ago with `files_swept_at IS NULL`, `list` its prefix, delete objects with no row whose `last_modified` is older than 24 h, set `files_swept_at`. Started from `spawn_with_logs` beside `spawn_pruner` (`runtime.rs:356-360`) when `storage::current()` is `Some` and retention > 0.
+- [ ] **Step 3: Implement.** "Ended" = state terminal (`RunState::ALL` filtered by `is_terminal`, the idiom of `ExecutionRepo::log_status`, `repo.rs:1085-1090`) and `updated_at < now() - make_interval(days => $n)`, over **executions with index rows** — an iteration's files are its own (spec §3), so iterations are pruned as executions, each by its own end. Per execution: `delete_prefix(execution_prefix)`, then `DELETE` its rows and set `files_pruned_at` in one statement; a failed `delete_prefix` leaves both. Orphans: for each execution pruned in this pass and each FAILED/KILLED execution ended more than 24 h ago with `files_swept_at IS NULL`, `list` its prefix, delete objects with no row whose `last_modified` is older than 24 h, set `files_swept_at`. Started from `spawn_with_logs` beside `spawn_pruner` (`runtime.rs:356-360`) when `storage::current()` is `Some` and retention > 0.
 - [ ] **Step 4: Run the tests to see them pass.**
 - [ ] **Step 5: Mutations:** (a) the terminal predicate dropped; (b) rows deleted before the store; (c) the orphan age check removed; (d) `Pruned` reported as `Missing` (`fileExists` would then answer `false` silently).
 - [ ] **Step 6: Commit** `feat(workflow): W9a Task 13 — execution files are pruned 30 days after the execution ends`.
@@ -1035,7 +1058,7 @@ pub async fn prune_pass(pool: &PgPool, fs: &FileStore, cfg: &StoragePruneConfig)
   3. `core.storage.Write` → `Loop` over its URI (three iterations) → `Size`.
   4. **The pod holds no storage credential:** `kubectl get pod -o yaml` **during** a run (hold it with `sleep 20`) contains none of `[storage]`'s access key, secret key or endpoint; controls: the image name appears.
   5. A second workspace's execution cannot read the first's URI (render error naming it; file API 404).
-  6. Retention: set `storage_retention_days=1`, force one ended root's `updated_at` back two days in Postgres, wait for one pass (or restart to trigger), and see its objects gone and the URI answering the pruned message.
+  6. Retention: set `storage_retention_days=1`, force one ended execution's `updated_at` back two days in Postgres, wait for one pass (or restart to trigger), and see its objects gone and the URI answering the pruned message.
 - [ ] **Step 3:** `kind delete cluster --name egret-w9a-e2e`.
 - [ ] **Step 4: Coverage and docs.**
   - `oracle-exec/README.md` gains a W9a section, as W5b's (`README.md:9112-9245`): the ratchet **measured** before (Task 1's `baseline-ratchet.txt`) and after, per task in a table; which of the corpus's 5 FILE-input, 1 `outputFiles`, 2 STORE (both `Loop` STORE and webhook STORE, which W9a does not implement) and 2 `core.storage` flows moved and why; every live test with its gate; what was measured live; what was not.
@@ -1045,7 +1068,7 @@ pub async fn prune_pass(pool: &PgPool, fs: &FileStore, cfg: &StoragePruneConfig)
   - **Sweep** (N examined / M corrected per population, `/usr/bin/grep` with file arguments): (1) `\bW9\b` in `crates/egret-workflow/src`, `plugin-host/src` and both programme specs — a message that says storage "needs W9" is now false; KV says W9c, namespace files W9b; (2) *"1 MiB"*/*"contents"* about `outputFiles` in docs and doc comments; (3) *"no internal storage"*.
 - [ ] **Step 5: Full local CI**, compared with Task 1's baselines:
   - `cargo fmt --all --check`;
-  - `cargo clippy --workspace --all-targets -- -D warnings`: the `error:` locations compared with `baseline-clippy.txt`; **no new location** passes, and the known-red members are listed as still red;
+  - clippy: run `cargo clippy --workspace --all-targets --keep-going` (**no** `-D warnings`) and compare its `warning:` locations with the supplementary, non-`-D` list in Task 1's `baseline-clippy.txt` (16 locations); **no new location** passes, and the 16 are listed as still present or gone. Under `-D warnings` `egret-workspace` (`members.rs:191`, `:196`) fails to compile and every crate depending on it goes unlinted, so the `-D` list (2 locations) cannot gate this branch; run it too and report it beside the other;
   - `cargo test --workspace` on `:5438` with the Global Constraints' env, plus the MinIO-gated suites with the four `EGRET_TEST_S3_*` vars; `just test-shipping-resolution` (the `-p egret-bin` resolution, `.github/workflows/ci.yml`);
   - `cargo test -p egret-server committed_openapi_json_is_current`; in `frontend/`: `npm run gen:api` (never bare `orval`; memory `orval-regeneration-strips-url-encoding`), `git diff --exit-code src/api/generated`, `npm run lint`, `npm test`;
   - `mvn -f plugin-host/pom.xml verify` with `JAVA_HOME`;
