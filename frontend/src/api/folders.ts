@@ -23,6 +23,7 @@ import {
 } from "./generated/folders/folders";
 import type { FolderDto } from "./generated/model";
 import { alertsSetFolder, getAlertsListQueryKey } from "./generated/alerts/alerts";
+import { appsSetFolder, getAppsListQueryKey } from "./generated/apps/apps";
 import { notebooksSetFolder } from "./generated/notebooks/notebooks";
 import { sqllabSqSetFolder } from "./generated/sqllab/sqllab";
 
@@ -32,7 +33,8 @@ export type EntityKind =
   | "datasets"
   | "notebooks"
   | "saved_queries"
-  | "alerts";
+  | "alerts"
+  | "apps";
 
 /**
  * Every `{kind}` the GENERIC folder router accepts — `egret-bi`'s `kind_perms`
@@ -61,6 +63,8 @@ const listKeyOf: Record<EntityKind, (ws: string) => readonly unknown[]> = {
   saved_queries: (ws) => ["sqllab", ws, "saved"],
   // Prefix key: both list tabs (`{type: alert|report}`) invalidate together.
   alerts: (ws) => getAlertsListQueryKey(ws),
+  // Prefix key: the live list and the trash (`{trashed: true}`) invalidate together.
+  apps: (ws) => getAppsListQueryKey(ws),
 };
 
 /** `PATCH /ws/{ws}/{kind}/{id}/folder` via each domain's generated fetch fn. */
@@ -71,6 +75,7 @@ const setFolderOf: Record<EntityKind, (ws: string, id: string, folderId: string 
   notebooks: (ws, id, folder_id) => notebooksSetFolder(ws, id, { folder_id }),
   saved_queries: (ws, id, folder_id) => sqllabSqSetFolder(ws, id, { folder_id }),
   alerts: (ws, id, folder_id) => alertsSetFolder(ws, id, { folder_id }),
+  apps: (ws, id, folder_id) => appsSetFolder(ws, id, { folder_id }),
 };
 
 export const folderKeys = { list: (ws: string, kind: FolderKind) => getFoldersFoldersListQueryKey(ws, kind) };

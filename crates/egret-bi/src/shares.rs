@@ -28,19 +28,38 @@ fn object_table(kind: &str) -> Option<&'static str> {
         "folder" => Some("folders"),
         "notebook" => Some("notebooks"),
         "saved_query" => Some("saved_queries"),
+        "app" => Some("apps"),
         _ => None,
     }
 }
 
-/// The action a caller must hold on the object to manage its shares. Notebooks
-/// have no `notebook:manage` action, so notebook sharing requires `notebook:write`
-/// (Editor); every BI kind uses `<kind>:manage`.
-fn manage_action(kind: &str) -> String {
-    if kind == "notebook" {
-        "notebook:write".to_string()
-    } else {
-        format!("{kind}:manage")
+/// The action a caller must hold on the object to manage its shares (and its
+/// tags), one literal arm per kind `object_table` accepts. Notebooks have no
+/// `notebook:manage` action, so notebook sharing requires `notebook:write`
+/// (Editor); every other kind uses `<kind>:manage`.
+///
+/// Literals rather than `format!("{kind}:manage")` so `catalog_drift` can see
+/// each key as enforced (this is one of its `PERM_TABLE_FNS`). `None` for a kind
+/// `object_table` does not know.
+fn manage_action(kind: &str) -> Option<&'static str> {
+    match kind {
+        "dashboard" => Some("dashboard:manage"),
+        "chart" => Some("chart:manage"),
+        "dataset" => Some("dataset:manage"),
+        "folder" => Some("folder:manage"),
+        "notebook" => Some("notebook:write"),
+        "saved_query" => Some("saved_query:manage"),
+        "app" => Some("app:manage"),
+        _ => None,
     }
+}
+
+/// `manage_action` as the share/tag handlers need it. In practice an unknown kind
+/// never reaches here — `resolve` (via `object_ref`) rejects it first as
+/// `InvalidInput` — so the `NotFound` is only a backstop for a kind `object_table`
+/// knows but `manage_action` does not.
+fn manage_action_for(kind: &str) -> Result<&'static str, BiApiError> {
+    manage_action(kind).ok_or_else(|| Error::NotFound("object kind".to_string()).into())
 }
 
 /// The action a caller must hold on the object to read it (and its tags). Every
@@ -234,7 +253,7 @@ pub(crate) async fn resolve(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
     ),
     request_body = ObjectGrantBody,
@@ -254,7 +273,7 @@ async fn grant_put(
     Json(b): Json<ObjectGrantBody>,
 ) -> Result<Json<ObjectGrantDto>, BiApiError> {
     let obj = resolve(&st, &ctx, &kind, id).await?;
-    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
+    require_object(&*st.pdp, &ctx, manage_action_for(&kind)?, obj)
         .await
         .map_err(BiApiError::from)?;
     valid_principal_type(&b.principal_type)?;
@@ -342,7 +361,7 @@ async fn grant_put(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
         ("grant_id" = Uuid, Path, description = "Grant id to revoke"),
     ),
@@ -361,7 +380,7 @@ async fn grant_delete(
     Path((_w, kind, id, grant_id)): Path<(String, String, Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
     let obj = resolve(&st, &ctx, &kind, id).await?;
-    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
+    require_object(&*st.pdp, &ctx, manage_action_for(&kind)?, obj)
         .await
         .map_err(BiApiError::from)?;
     // Scope the delete by the object so a manage holder can't revoke an unrelated grant.
@@ -391,7 +410,7 @@ async fn grant_delete(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
     ),
     responses(
@@ -412,7 +431,7 @@ async fn grant_list(
     // Listing the ACL exposes every grantee, so it is manage-only (matching
     // grant_put/grant_delete) — a merely read-shared recipient must not be able
     // to enumerate who else the object is shared with.
-    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
+    require_object(&*st.pdp, &ctx, manage_action_for(&kind)?, obj)
         .await
         .map_err(BiApiError::from)?;
     // LEFT JOIN resolves the grantee's display name: a user's email or a group's
@@ -470,7 +489,7 @@ async fn grant_list(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
     ),
     responses(
@@ -504,7 +523,7 @@ async fn object_tags_list(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
         ("tag_id" = Uuid, Path, description = "Tag id to assign"),
     ),
@@ -523,7 +542,7 @@ async fn object_tag_assign(
     Path((_w, kind, id, tag_id)): Path<(String, String, Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
     let obj = resolve(&st, &ctx, &kind, id).await?;
-    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
+    require_object(&*st.pdp, &ctx, manage_action_for(&kind)?, obj)
         .await
         .map_err(BiApiError::from)?;
     crate::tags::TagRepo::new(st.db.clone())
@@ -547,7 +566,7 @@ async fn object_tag_assign(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
         ("tag_id" = Uuid, Path, description = "Tag id to unassign"),
     ),
@@ -566,7 +585,7 @@ async fn object_tag_unassign(
     Path((_w, kind, id, tag_id)): Path<(String, String, Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
     let obj = resolve(&st, &ctx, &kind, id).await?;
-    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
+    require_object(&*st.pdp, &ctx, manage_action_for(&kind)?, obj)
         .await
         .map_err(BiApiError::from)?;
     crate::tags::TagRepo::new(st.db.clone())
@@ -599,3 +618,33 @@ async fn object_tag_unassign(
     tags((name = "shares", description = "Per-object grants: share a dashboard / chart / dataset / folder with a user or group at a workspace role")),
 )]
 pub struct BiSharesApi;
+
+#[cfg(test)]
+mod tests {
+    use super::{manage_action, object_table};
+
+    /// Pins the action each kind required BEFORE `manage_action` became a table
+    /// (`format!("{kind}:manage")`, with notebooks special-cased to
+    /// `notebook:write`), plus `app` from Data Apps P2. Every kind `object_table`
+    /// accepts has a manage action, and nothing else does.
+    #[test]
+    fn manage_action_per_kind_is_unchanged() {
+        let expected = [
+            ("dashboard", "dashboard:manage"),
+            ("chart", "chart:manage"),
+            ("dataset", "dataset:manage"),
+            ("folder", "folder:manage"),
+            ("notebook", "notebook:write"),
+            ("saved_query", "saved_query:manage"),
+            ("app", "app:manage"),
+        ];
+        for (kind, action) in expected {
+            assert!(object_table(kind).is_some(), "{kind} must be a share kind");
+            assert_eq!(manage_action(kind), Some(action), "{kind}");
+        }
+        for kind in ["", "alert", "data_api_endpoint", "apps", "Dashboard"] {
+            assert_eq!(object_table(kind), None, "{kind}");
+            assert_eq!(manage_action(kind), None, "{kind}");
+        }
+    }
+}

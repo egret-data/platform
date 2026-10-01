@@ -15,8 +15,9 @@ import { EXPLORE_MODULES } from "@/lib/exploreModules";
  * key with no nav gate yet — the group that will read it lands in a later
  * package — but it still belongs here because this list has to name every key
  * the backend can return, not just the ones currently wired into the nav.
+ * `apps` (Data Apps) is the same: a backend entitlement whose UI lands later.
  */
-export const ALL_FEATURE_KEYS: string[] = [...EXPLORE_MODULES.map((m) => m.key), "data_api", "workflows"];
+export const ALL_FEATURE_KEYS: string[] = [...EXPLORE_MODULES.map((m) => m.key), "data_api", "workflows", "apps"];
 
 /**
  * The module keys the *current route's* workspace has switched on — the

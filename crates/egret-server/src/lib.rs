@@ -94,6 +94,9 @@ pub struct AppState {
     /// Data Apps query gateway (`POST /api/apps/query`), called with a
     /// per-marimo-session bearer token from inside app pods; `None` in unit tests.
     pub apps: Option<egret_apps::AppsState>,
+    /// Data Apps management API (`/api/ws/{workspace}/apps…`): cookie session,
+    /// behind CSRF; `None` in unit tests.
+    pub apps_api: Option<egret_apps::AppsApiState>,
 }
 
 impl AppState {
@@ -125,6 +128,7 @@ impl AppState {
             // the side of that sentence.
             workflow_webhooks_enabled: false,
             apps: None,
+            apps_api: None,
         }
     }
 
@@ -177,6 +181,14 @@ impl AppState {
     /// not behind the CSRF layer (same reasoning as [`Self::with_dataapi`]).
     pub fn with_apps(mut self, apps: egret_apps::AppsState) -> Self {
         self.apps = Some(apps);
+        self
+    }
+
+    /// Attach the Data Apps management API to an otherwise-empty test state, so a
+    /// test can prove through the COMPOSED router that it is mounted and IS behind
+    /// the CSRF layer — the opposite of the gateway.
+    pub fn with_apps_api(mut self, apps_api: egret_apps::AppsApiState) -> Self {
+        self.apps_api = Some(apps_api);
         self
     }
 }
@@ -235,6 +247,7 @@ pub fn openapi_doc() -> utoipa::openapi::OpenApi {
     doc.merge(egret_machine_idp::openapi());
     doc.merge(egret_dataapi::openapi());
     doc.merge(egret_workflow::openapi());
+    doc.merge(egret_apps::openapi());
     // A SECOND document from the same crate, kept as its own line rather than
     // folded into the one above: the management surface is a browser-session API
     // under `/api/ws/{workspace}/…` and the serving surface is a machine API
@@ -388,6 +401,16 @@ pub fn build_router(state: AppState) -> Router {
             .nest("/api", egret_apps::gateway_router())
             .with_state(apps);
         router = router.merge(gateway_group);
+    }
+
+    if let Some(apps_api) = state.apps_api.clone() {
+        // Data Apps management (CRUD, drafts, publish, versions): browser-session
+        // routes, CSRF-protected like the notebook group.
+        let group = Router::new()
+            .nest("/api", egret_apps::apps_router())
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(apps_api);
+        router = router.merge(group);
     }
 
     if let Some(cp) = state.control_plane.clone() {

@@ -125,6 +125,9 @@ struct Fixture {
     db: Db,
     ws_a: Uuid,
     app: Uuid,
+    /// A published version of `app`: run sessions pin it (migration 0163's
+    /// `app_sessions_version_app_fk` refuses a version of no app / another app).
+    version: Uuid,
     viewer: User,
     editor: User,
     outsider: User,
@@ -274,6 +277,14 @@ impl Fixture {
         .fetch_one(&db.pool)
         .await
         .expect("insert app");
+        let version: Uuid = sqlx::query_scalar(
+            "INSERT INTO analytics.app_versions (app_id, version_no, source) \
+             VALUES ($1, 1, 'import marimo') RETURNING id",
+        )
+        .bind(app)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert version");
 
         let trino_prod = insert_database(&db, ws_a, "trino_prod", "trino").await;
         insert_database(&db, ws_b, "b_only", "trino").await;
@@ -285,6 +296,7 @@ impl Fixture {
             db,
             ws_a,
             app,
+            version,
             viewer,
             editor,
             outsider,
@@ -320,7 +332,7 @@ impl Fixture {
                     workspace_id: WorkspaceId(self.ws_a),
                     app_id: self.app,
                     version_id: match mode {
-                        AppMode::Run => Some(Uuid::new_v4()),
+                        AppMode::Run => Some(self.version),
                         AppMode::Edit => None,
                     },
                     mode,

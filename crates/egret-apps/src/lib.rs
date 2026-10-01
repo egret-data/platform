@@ -1,9 +1,19 @@
 //! Data Apps: the query gateway and its session tokens (spec docs/en/specs/2026-09-30-marimo-data-apps-design.md).
 pub mod gateway;
 pub mod readonly;
+pub mod routes;
 pub mod session;
+pub mod store;
+pub mod template;
 
 pub use gateway::{gateway_router, QueryRequest};
+pub use routes::{apps_router, AppsApiState};
+
+/// OpenAPI fragment for the cookie-session app API (`/api/ws/{workspace}/apps…`).
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    use utoipa::OpenApi;
+    routes::AppsApi::openapi()
+}
 
 /// Everything `POST /api/apps/query` needs. Built by the server binary.
 #[derive(Clone)]

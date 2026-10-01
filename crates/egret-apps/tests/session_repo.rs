@@ -13,6 +13,9 @@ struct Fixture {
     user: UserId,
     ws: WorkspaceId,
     app: Uuid,
+    /// A published version of `app`: since migration 0163 a run session's
+    /// `version_id` must name a version of its own app (`app_sessions_version_app_fk`).
+    version: Uuid,
     login_sid: Uuid,
 }
 
@@ -56,11 +59,20 @@ impl Fixture {
         .fetch_one(&db.pool)
         .await
         .expect("insert app");
+        let version: Uuid = sqlx::query_scalar(
+            "INSERT INTO analytics.app_versions (app_id, version_no, source) \
+             VALUES ($1, 1, 'import marimo') RETURNING id",
+        )
+        .bind(app)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert version");
         Self {
             db,
             user: UserId(user),
             ws: WorkspaceId(ws),
             app,
+            version,
             login_sid,
         }
     }
@@ -70,7 +82,7 @@ impl Fixture {
             user_id: self.user,
             workspace_id: self.ws,
             app_id: self.app,
-            version_id: Some(Uuid::new_v4()),
+            version_id: Some(self.version),
             mode: AppMode::Run,
             login_sid: self.login_sid,
         }

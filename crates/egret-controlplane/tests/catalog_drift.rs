@@ -86,6 +86,14 @@ const EXTRA_FILES: &[&str] = &[
     // `WorkspaceContext`, so the gateway passes the core PEP its own
     // `AuthTarget` rather than calling `Pdp::authorize` by hand.
     "../egret-apps/src/gateway.rs",
+    // `app:read` / `app:write` (Data Apps P2) on the cookie-session app API:
+    // `authz::require` for list/create and `require_object` on every `{id}` route,
+    // with the same `APP_READ`/`APP_WRITE` consts.
+    "../egret-apps/src/routes.rs",
+    // `app:manage` (Data Apps P2) is gated by the object-share API through
+    // `require_object(manage_action(kind))`; `manage_action` is a literal table
+    // of every share kind's manage key, listed in `PERM_TABLE_FNS`.
+    "../egret-bi/src/shares.rs",
 ];
 
 /// Gate function names whose permission-key argument (an inline
@@ -118,7 +126,11 @@ const GATE_CALLS: &[&str] = &[
 /// Deliberately a NAMED list rather than "any tuple of permission literals":
 /// the point of the test is that a key nobody gates is caught, and a rule broad
 /// enough to match any table would let a genuinely dead key hide in one.
-const PERM_TABLE_FNS: &[&str] = &["fn kind_perms("];
+///
+/// `manage_action` in `egret-bi/src/shares.rs` is the second case: the share and
+/// tag handlers gate with `require_object(.., manage_action_for(&kind)?, obj)`, so
+/// `app:manage` never appears on a gate line.
+const PERM_TABLE_FNS: &[&str] = &["fn kind_perms(", "fn manage_action("];
 
 /// Functions whose whole body IS the gate, so the permission is named inside
 /// them rather than on the line that calls the gate.
