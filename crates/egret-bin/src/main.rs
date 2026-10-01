@@ -2261,6 +2261,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // other token this deployment signs; `consumer_base_url` is the address a
     // caller outside the cluster uses, so the `token_endpoint` handed back with
     // a new client points somewhere they can actually reach.
+    // ONE `Arc` around the query engine, cloned into every seam that reaches it
+    // as a `QueryExecPort` (the Data API and the Data Apps gateway), so there is
+    // exactly one `EngineState` behind both.
+    let query_port = std::sync::Arc::new(engine_state);
     let dataapi = Some(egret_dataapi::DataApiState {
         db: db.clone(),
         clients: egret_dataapi::ClientStore::new(db.clone()),
@@ -2269,7 +2273,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // publish resolves an endpoint's output columns through `describe_as` and
         // freezes them into the snapshot. This is the one place the concrete
         // `EngineState` and the trait object meet.
-        query: std::sync::Arc::new(engine_state),
+        query: query_port.clone(),
         users: egret_auth::users::UserRepo::new(db.clone()),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
@@ -2345,6 +2349,29 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         },
     });
 
+    // Data Apps query gateway (`POST /api/apps/query`). Same query engine `Arc`,
+    // audit sink, PDP and Db as every other seam.
+    //
+    // The limiter's lockout is `rate_window_secs`, NOT 0. `RateLimiter::new`
+    // accepts 0, but `check_at` then clears a key's attempts on the very next
+    // call after a denial (`now >= locked_until` immediately), so a token would
+    // get `rate_max` calls, one 429, then `rate_max` more — the limit would
+    // barely bind. A lockout of one window keeps a token at `rate_max` calls
+    // per window, which is what `AppsConfig::rate_max` documents.
+    let apps = Some(egret_apps::AppsState {
+        db: db.clone(),
+        pdp: pdp.clone(),
+        query: query_port.clone(),
+        audit: audit_sink.clone(),
+        sessions: egret_apps::session::AppSessionRepo::new(db.clone()),
+        limiter: RateLimiter::new(
+            config.apps.rate_max,
+            config.apps.rate_window_secs,
+            config.apps.rate_window_secs,
+        ),
+        cfg: config.apps.clone(),
+    });
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
@@ -2383,6 +2410,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // error** rather than a silent `false`: an operator who meant to turn
         // this on and mistyped finds out at boot.
         workflow_webhooks_enabled: config.workflow.webhooks_enabled,
+        apps,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

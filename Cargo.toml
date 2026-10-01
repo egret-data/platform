@@ -43,6 +43,7 @@ egret-events = { path = "crates/egret-events" }
 egret-audit = { path = "crates/egret-audit" }
 egret-dataapi-api = { path = "crates/egret-dataapi-api" }
 egret-dataapi = { path = "crates/egret-dataapi" }
+egret-apps = { path = "crates/egret-apps" }
 # Test-only: one private, already-migrated Postgres per test process. A
 # dev-dependency of every crate whose tests talk to a database; never linked
 # into a shipped binary.
@@ -98,6 +99,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+# SQL parser for the Data Apps read-only gate (egret-apps). Pinned: the gate matches
+# on AST variants, so an upgrade must re-run egret-apps' readonly tests.
+sqlparser = { version = "=0.63.0", features = ["visitor"] }
 # Cron parsing for automation schedules (P1). `croner` speaks the standard
 # 5-field crontab users type (and that Superset accepts); the older `cron` crate
 # requires a leading seconds field, which would silently reinterpret every
