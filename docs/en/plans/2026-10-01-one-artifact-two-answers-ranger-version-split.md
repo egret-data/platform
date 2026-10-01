@@ -1,6 +1,12 @@
 # One artifact, two answers: Ranger 2.5.0 and 2.8.0 enforce a tag deny differently
 
 Date: 2026-10-01
+Vietnamese reference:
+[`docs/vi/plans/2026-10-01-one-artifact-two-answers-ranger-version-split.md`](../../vi/plans/2026-10-01-one-artifact-two-answers-ranger-version-split.md).
+This English version is canonical.
+Linked from
+[`tests/ranger/README.md`](../../../tests/ranger/README.md) under "T5 — the two
+plugin versions DISAGREE".
 Measured by: the SP4d-2b differential gate (`crates/egret-ranger-eval/tests/differential.rs`
 plus `tests/ranger/src/test/java/EgretCaseRunner.java`), against real
 `RangerPolicyEngineImpl` instances from `ranger-plugins-common` 2.5.0 and 2.8.0.

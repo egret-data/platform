@@ -525,3 +525,45 @@ fn a_workspace_members_exclude_is_refused_rather_than_silently_failing_open() {
         }
     );
 }
+
+/// **`policyPriority` MUST be 0 on every RESOURCE policy the grant compiler
+/// emits, and until SP4d-2b Task 5 fix round 2 nothing asserted it.**
+///
+/// This is the second half of the invariant T4's and T7's cost claims rest on.
+/// Round 1 asserted it for TAG bodies (`tag_service_routing.rs`) and the clearance
+/// path already had it (`clearance_starrocks.rs`); the grants path had nothing at
+/// all between `compile_grant`'s hard-coded `is_override: false`
+/// (`grants.rs`) and the emitted wire value.
+///
+/// Why it matters here rather than only on the tag side: the differential gate
+/// measured that a tag verdict plus RESOURCE policies at two priorities is a shape
+/// this crate answers wrongly (`tests/ranger/README.md`, finding T7), and the
+/// corpus holds it out on the strength of "egret never emits a non-zero priority".
+/// `AccessPolicyInput.is_override` is a PUBLIC wire field (`isOverride`), so one
+/// flag flip makes that shape egret's own data.
+///
+/// Asserted on the EMITTED `policyPriority` rather than on the flag, so it survives
+/// a refactor that renames or reroutes `is_override`, and on both engines because
+/// the two take different `scope_to_resources` arms.
+#[test]
+fn a_compiled_grant_always_emits_policy_priority_zero() {
+    for engine in [EngineType::Trino, EngineType::StarRocks] {
+        for effect in [Effect::Allow, Effect::Deny] {
+            let mut g = grant_allow_read(&["finance"], &["contractors"]);
+            g.effect = effect;
+            let input = compile_grant(&g, "warehouse", "svc-1", engine).unwrap();
+            assert!(
+                !input.is_override,
+                "{engine:?}/{effect:?}: the compiler must not request an override"
+            );
+            let body = egret_policy::admin::access_to_ranger_json(&input);
+            assert_eq!(
+                body["policyPriority"], 0,
+                "{engine:?}/{effect:?}: a non-zero priority on a compiled grant makes \
+                 egret's own downloads reach the shape the differential corpus holds out \
+                 (tests/ranger/README.md, T7), and the zero-cost claim behind that \
+                 hold-out is exactly this value"
+            );
+        }
+    }
+}

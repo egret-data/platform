@@ -276,6 +276,73 @@ fn the_tag_policy_carries_the_resolved_tag_name_not_the_selectors_key() {
     assert_eq!(out[0]["serviceType"], "tag");
 }
 
+/// **`policyPriority` MUST be 0 on every body the rule compiler emits — the
+/// resource-addressed ones as well as the tag-addressed ones — and until SP4d-2b
+/// Task 5 fix round 2 nothing asserted it for either.**
+///
+/// The third and last hole in the invariant T4's and T7's cost claims rest on.
+/// Round 1 closed it for tag bodies through `tag_service_routing.rs`, which needs a
+/// database; `clearance_starrocks.rs` covers the clearance path; this covers both
+/// arms of `build_tag_body` AND both arms of the resource path, with no database at
+/// all — which matters, because the shared `egret_test_template` is currently
+/// unusable on this branch and a DB-gated assertion that cannot run is not an
+/// assertion.
+///
+/// Asserted on the EMITTED `policyPriority`, not on the `is_override` flag the four
+/// call sites in `rules.rs` hard-code, so it survives a refactor that renames or
+/// reroutes the flag. `isOverride` is a public wire field, so one flip makes
+/// egret's own downloads reach the shape the differential corpus holds out
+/// (`tests/ranger/README.md`, T7).
+#[test]
+fn every_compiled_rule_body_emits_policy_priority_zero() {
+    let cases: Vec<(&str, Rule)> = vec![
+        ("mask", mask_rule_on_tag("pii-key", "MASK_HASH")),
+        (
+            "rowfilter",
+            rowfilter_rule_on_tag("pii-key", "dept = 'eng'"),
+        ),
+    ];
+    for (label, r) in cases {
+        // The TAG-addressed arm.
+        let tagged = compile_rule(
+            &r,
+            EngineType::Trino,
+            "trino-1",
+            Some("trino-1_tag"),
+            &resolved("warehouse", Some("PII")),
+            &[],
+            100,
+        )
+        .unwrap();
+        assert!(!tagged.is_empty(), "{label}: the tag arm produced nothing");
+        for body in &tagged {
+            assert_eq!(
+                body["policyPriority"], 0,
+                "{label}: tag-addressed body must carry policyPriority 0"
+            );
+        }
+        // …and the RESOURCE-addressed arm, which takes the other branch of
+        // `build_body` and had no assertion of its own either.
+        let untagged = compile_rule(
+            &r,
+            EngineType::Trino,
+            "trino-1",
+            None,
+            &resolved("warehouse", None),
+            &[],
+            100,
+        );
+        if let Ok(bodies) = untagged {
+            for body in &bodies {
+                assert_eq!(
+                    body["policyPriority"], 0,
+                    "{label}: resource-addressed body must carry policyPriority 0"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn starrocks_expanded_policies_each_name_their_own_column_and_are_all_distinct() {
     // Important 3 from the round-1 review: a count of 3 would also pass if

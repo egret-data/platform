@@ -97,7 +97,7 @@ phase generated for the first time:
 | Cases | **2000 per engine — 4000 total** (`EGRET_DIFF_CASES`) |
 | Versions | **2.5.0** against the Trino service-def, **2.8.0** against the StarRocks one |
 | Cases carrying a `tagPolicies` block | **1906 of 4000** |
-| Compared and agreeing | **3528** (88.2% of all cases) |
+| Compared and agreeing | **3529** (88.2% of all cases) |
 | `Undecidable` outside the five declared refusals | **0** (asserted) |
 | Deliberate shapes | 584 eval-order duels (259 composed), 201 candidacy duels, 187 restore duels |
 | Reported ACCESS `policyId` divergences outside the declared list | **0** (asserted) |
@@ -177,8 +177,8 @@ is now its own reported axis:
 | | |
 |---|---|
 | ACCESS cases where both sides agreed on allow/deny and named an id | **1716** |
-| agreeing on the id | **1577 = 91.90%** |
-| declared divergence: same `(policyPriority, hasDeny)` band (`getEvalOrder()`) | 37 |
+| agreeing on the id | **1578 = 91.96%** |
+| declared divergence: same `(policyPriority, hasDeny)` band (`getEvalOrder()`) | 36 |
 | declared divergence: tag deny restored over a resource allow | 102 |
 | **NOT on the declared list** | **0** (asserted) |
 
@@ -357,7 +357,18 @@ priority 0):
 
 Ranger **2.5.0's own log line at offset 224** — *"access denied by a tag policy.
 Higher priority resource policies will be evaluated to check for allow"* —
-promises the 2.8.0 behaviour and does not deliver it. The equal-priority row and
+promises the 2.8.0 behaviour and does not deliver it. (The line is present at that
+offset in BOTH jars.)
+
+📄 **This one left the package.** It is a product-level fact — egret serves ONE
+artifact to two engines that answer it differently — and it is written up for
+people who do not read this file at
+[`docs/en/plans/2026-10-01-one-artifact-two-answers-ranger-version-split.md`](../../docs/en/plans/2026-10-01-one-artifact-two-answers-ranger-version-split.md)
+(Vietnamese reference: [`docs/vi/plans/…`](../../docs/vi/plans/2026-10-01-one-artifact-two-answers-ranger-version-split.md)).
+That write-up carries the numeric policy id on every row, names the engines in the
+column headers, and says what has NOT been decided: what egret should DO about it.
+It cites this file four times, and this is the back-pointer, so the two are
+findable from each other. The equal-priority row and
 the deny-capable row agree across versions, which is what makes this specific
 rather than general. This crate reproduces 2.8.0 and refuses on 2.5.0 and on
 `plugin_version: None` (`TagDenyReopenedDiffersByPluginVersion`) — the one place
@@ -402,6 +413,30 @@ already-allowed tag verdict could only have been written into a FRESH
 per-access-type result. So the map raises the slot's priority where this crate's
 model says nothing moves, and `getCompositeAccessResult` copies that priority back
 and shuts out the lower-priority denier this crate still runs.
+
+⚠ **T7 does NOT reach `origin/main`, and that was settled by construction rather
+than by analogy** (fix round 2). The re-review built the T7 shape with no
+`tagPolicies` key at all and ran both engines: Ranger `Allowed, policyId 2`, crate
+`Allowed, policyId 2` — **agree**. Same for an empty block, and for a tag policy
+matching no tag the request carries. Its sharper control: a *lower*-priority
+resource allower named first also agrees, because `getLikelyMatchPolicyEvaluators`
+is priority-DESCENDING, so a resource allow can never seed `isAllowed` below a later
+allower's priority. Re-adding the tag ALLOW restores the divergence. So T7 is a
+BRANCH finding — it needs the tag phase this branch introduces — not a shipped
+defect.
+
+**The map is live on EVERY request, not only an `_any` one, and that is what makes
+T4 and T7 one finding.** `evaluatePolicyItems`' map path is gated on
+`isNotEmpty(getAllRequestedAccessTypes(request))` (offsets 61-72) and
+`getAllRequestedAccessTypes` falls back to
+`Collections.singleton(request.getAccessType())` (offsets 67-84), so there is no
+single-access-type bypass; the composite is copied back at offsets 627-643,
+`result.setAccessResultFrom(getCompositeAccessResult(…))`. That is also why the two
+models COINCIDE on the resource path, which "green over 4000 cases" could not
+explain: with no tag verdict the first allower's `if (!result.getIsAllowed())` guard
+is open, so it writes id AND priority into both `result` and the map and the two stay
+in lockstep. Only a tag ALLOW can leave `result` already-allowed at a priority BELOW
+a later resource allower's.
 
 **This invalidates part of the resource loop's model, not just the tag phase's.**
 It is HELD OUT of the corpus rather than refused: the honest refusal ("a resource
@@ -539,14 +574,30 @@ each is acceptable. Anything not on this list and not `Undecidable` is a bug.
   instead — which is what `IOCase.checkRegionMatches` does. Both paths
   diverge in the same direction and on the same code points.
 
-- **The reported policy id of an ACCESS decision can differ.** Within one
-  `(policyPriority, hasDeny)` band Ranger picks by `getEvalOrder()` and this
-  crate by a name-then-id tie-break, so the two can agree on allow/deny while
-  naming different policies. Measured at the recorded seed: **39 of 1972
-  compared ACCESS cases, of which 31 are DENIES** — not, as an earlier comment
-  in `eval.rs` claimed, only allows. The allow/deny OUTCOME is unaffected (see
-  the duels below); nothing in this crate asserts a reported ACCESS policy id,
-  which is why the gate is green in spite of it.
+- **The reported policy id of an ACCESS decision can differ, and the gate now
+  ASSERTS on it.** Within one `(policyPriority, hasDeny)` band Ranger picks by
+  `getEvalOrder()` and this crate by a name-then-id tie-break, so the two can
+  agree on allow/deny while naming different policies.
+
+  ⚠ **This entry said "nothing in this crate asserts a reported ACCESS policy id,
+  which is why the gate is green in spite of it" and quoted `39 of 1972`. Both are
+  superseded** (SP4d-2b Task 5, fix round 1 RULING 3 / round 2). The id IS compared
+  now, on its own axis, and this section is the declared pointer the allow-list's
+  first entry sends a reader to — so it was denying the existence of the thing it
+  is cited for. Current, at the recorded seed:
+
+  | | |
+  |---|---|
+  | ACCESS cases where the verdicts agree and both sides named an id | **1716** |
+  | agreeing on the id | **1578 = 91.96%** |
+  | this divergence (same `(policyPriority, hasDeny)` band) | **36**, floor 4‰ |
+  | the restore divergence below | **102**, floor 12‰ |
+  | anything else | **0**, and it FAILS the run with a reproducer |
+
+  The allow/deny OUTCOME is unaffected (see the duels below). What keeps the gate
+  green is that these two classes are a CLOSED allow-list, each tested
+  structurally on the two policies the two sides named — not that the id is
+  unchecked.
 
 - **A tag deny restored over a discarded resource allow reports the TAG
   policy, deliberately.** SP4d-2b Task 3, and the one entry on this list that
@@ -561,10 +612,15 @@ each is acceptable. Anything not on this list and not `Undecidable` is a bug.
   ALLOWED as the source of the deny.** This crate names the tag policy that
   actually denied.
 
-  The allow/deny OUTCOME is identical — only the reported id differs, so this
-  sits inside the ACCESS reported-id divergence above rather than adding a new
-  class of disagreement, and the same "nothing asserts a reported ACCESS policy
-  id" argument keeps the gate green. The reason for the choice is that Ranger's
+  The allow/deny OUTCOME is identical — only the reported id differs, so this is
+  the SECOND entry of the id allow-list above rather than a new class of
+  disagreement. ⚠ Its classifier tests all four of this shape's conditions — the
+  crate named a tag policy, Ranger named a resource policy, the tag policy is
+  deny-capable, and the resource policy allows at a strictly higher priority.
+  Round 1 tested only "the two ids are in different blocks", which absorbed a
+  measured instance of T7's `accessTypeResults` mechanism with no tag deny anywhere
+  in the case; round 2 narrowed it, and re-running the whole gate showed nothing
+  had been mis-filed (the split label fired 0 times). The reason for the choice is that Ranger's
   answer sends a reader to a policy that allows, to explain a deny.
   `eval.rs`'s restore block carries the same note at the site;
   `tag_arbitration.rs::nothing_else_determines_so_the_tag_verdict_is_restored`

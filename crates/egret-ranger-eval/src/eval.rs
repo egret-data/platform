@@ -1590,15 +1590,16 @@ pub fn evaluate(
     // rest cannot deny. What CAN differ is which policy gets reported, so a
     // stable name-then-id tie-break stands in for the score.
     //
-    // That reported-id difference is REAL and is measured, not waved away:
-    // at the recorded corpus seed, 39 of 1972 compared ACCESS cases agree on
-    // allow/deny while naming a different policy — and **31 of those are
-    // DENIES**, not allows. (An earlier version of this comment said only an
-    // allow's id could differ. It was wrong, and wrong in the direction that
-    // makes the gap sound smaller than it is.) `tests/ranger/README.md`
-    // carries it as a declared divergence; nothing in this crate asserts a
-    // reported policy id for an ACCESS decision, which is why the gate is
-    // green in spite of it.
+    // That reported-id difference is REAL and is MEASURED AND ASSERTED, not waved
+    // away. ⚠ This comment used to end "nothing in this crate asserts a reported
+    // policy id for an ACCESS decision, which is why the gate is green in spite of
+    // it", and quoted `39 of 1972`. Both are superseded by SP4d-2b Task 5 (fix
+    // round 1, RULING 3): the differential gate compares the reported ACCESS
+    // `policyId` on its own axis, 1578 of 1716 agree (91.96%) at the recorded
+    // seed, and the 138 that do not are a CLOSED allow-list of two classes — this
+    // one (36 cases) and the restore below (102) — each tested structurally on the
+    // two policies the two sides named. Anything else fails the run with a
+    // reproducer. `tests/ranger/README.md` carries the table.
     sort_eval_order(&mut candidates);
 
     // ── the evaluator loop ─────────────────────────────────────────────

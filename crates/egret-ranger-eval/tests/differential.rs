@@ -297,7 +297,7 @@ const TAG_DEF_PATH: &str = concat!(
 ///
 /// Resource policies are numbered from 1 and tag policies from here, so the two
 /// **never collide**. That is not cosmetic: the differential gate compares the
-/// reported `policyId` (see [`IdVerdict`]), and the only way to tell "the crate
+/// reported `policyId` (see [`classify_id_divergence`]), and the only way to tell "the crate
 /// named the tag policy and Ranger named the resource policy" — the declared
 /// cross-phase restore divergence — from an ordinary mismatch is to read which
 /// side of this line the id falls on. Before SP4d-2b Task 5 fix round 1 both
@@ -1510,7 +1510,24 @@ fn tag_layer(
     policy_type: i32,
 ) -> TagLayer {
     let tags = resolved_tags(rng, profile);
-    let names: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
+    // ⚠ The bias is towards the names of ADMITTED tags (fix round 2). A tag policy
+    // whose value covers only a `DESCENDANT` or `NONE` tag is a candidate the tag
+    // phase never lets reach its items, so every axis gated on admission — which is
+    // all of them bar two, see the `AXES` header — counted it as nothing. Biasing
+    // towards names that can actually decide lifted `tag: ACCESS policy with 2+ deny
+    // items` from 5‰, where a floor could not be set meaningfully, and it lifts the
+    // rest with it. The unadmitted names are still generated on the REQUEST side,
+    // which is where the `DESCENDANT` / `NONE` axes read them.
+    let admitted: Vec<String> = tags
+        .iter()
+        .filter(|t| ADMITTED_TAG_MATCH_TYPES.contains(&t.match_type))
+        .map(|t| t.name.clone())
+        .collect();
+    let names: Vec<String> = if admitted.is_empty() {
+        tags.iter().map(|t| t.name.clone()).collect()
+    } else {
+        admitted
+    };
 
     let count = 1 + rng.below(3);
     // Several tag policies at ONE priority is the shape the tag phase's own
@@ -2256,7 +2273,7 @@ fn rust_outcome(
 /// rows from one another, and what `explain` puts in front of a steward. It is
 /// compared on its own axis rather than folded into `Outcome`, because two of the
 /// divergences are DECLARED and folding them in would either flood the gate or
-/// force the comparison to be weakened; see [`IdDivergence`].
+/// force the comparison to be weakened; see [`ID_DIVERGENCES`].
 ///
 /// Scoped to ACCESS, which is what the ruling asked for. The mask and row-filter
 /// paths already compare their DATA, and their ids are the subject of
@@ -2294,6 +2311,12 @@ struct PolicyBand {
     tag: bool,
     priority: i64,
     has_deny: bool,
+    /// A non-empty `policyItems`, i.e. the policy is capable of ALLOWING.
+    ///
+    /// Needed by [`classify_id_divergence`]'s restore arm: the shape it declares
+    /// has Ranger naming a policy that ALLOWED and was then discarded, and
+    /// "capable of allowing" is as close as a structural test gets to that.
+    has_allow: bool,
 }
 
 /// Find a generated policy by id, in either list.
@@ -2320,6 +2343,9 @@ fn policy_band(case: &Case, id: i64) -> Option<PolicyBand> {
                     || policy["denyPolicyItems"]
                         .as_array()
                         .is_some_and(|b| !b.is_empty()),
+                has_allow: policy["policyItems"]
+                    .as_array()
+                    .is_some_and(|b| !b.is_empty()),
             });
         }
     }
@@ -2334,14 +2360,20 @@ fn policy_band(case: &Case, id: i64) -> Option<PolicyBand> {
 /// comparison must not be weakened to accommodate the known divergences, so each
 /// arm is a structural test on the two policies the two sides named, not a
 /// blanket "ids may differ".
-const ID_DIVERGENCES: &[(&str, &str)] = &[
+const ID_DIVERGENCES: &[(&str, &str, u32)] = &[
     (
         "same (policyPriority, hasDeny) band — getEvalOrder() not reproduced",
-        "tests/ranger/README.md, \"Declared divergences\"; eval.rs's sort_eval_order",
+        "tests/ranger/README.md, \"Declared divergences from the real engine\"; \
+         eval.rs's sort_eval_order",
+        // measured 37/4000 = 9‰
+        4,
     ),
     (
         "tag deny restored over a resource allow — setIsAllowed(false) keeps the last writer's id",
-        "eval.rs's restore at offsets 599-632",
+        "eval.rs's restore at offsets 599-632; the fixture is \
+         tag_arbitration.rs::nothing_else_determines_so_the_tag_verdict_is_restored",
+        // measured 102/4000 = 25‰
+        12,
     ),
 ];
 
@@ -2362,11 +2394,28 @@ fn classify_id_divergence(
         // pretend to.
         return None;
     };
-    // The cross-phase restore: the crate names the TAG policy that denied and
-    // Ranger names the resource policy that allowed and was then discarded.
-    // `setIsAllowed(false)` does not touch `policyId`, so Ranger's id points at a
-    // policy that ALLOWS — which is why this crate reports the other one.
-    if a.tag != b.tag {
+    // The cross-phase restore at offsets 599-632: the crate names the TAG policy
+    // that denied and Ranger names the RESOURCE policy that allowed and was then
+    // discarded, because `setIsAllowed(false)` does not touch `policyId`.
+    //
+    // ⚠ FIX ROUND 2. This arm was `if a.tag != b.tag`, i.e. "the two ids are in
+    // different blocks" — which is not the restore, it is every cross-block
+    // mismatch, and the re-review built a measured instance of a DIFFERENT
+    // mechanism that it absorbed: a tag ALLOW at priority 0, a plain resource
+    // allower at 1 and a denier at 0, where ranger 2.8.0 answers
+    // `Allowed, policyId 2` and this crate answers `Allowed, policyId 901` with
+    // **no tag deny anywhere in the case**. That is T7's `accessTypeResults`
+    // composite, the mechanism this package is reporting as UNMODELLED, filed
+    // under the one it has modelled.
+    //
+    // Splitting the arm and re-running the whole gate fired the split label 0
+    // times, so nothing was mis-filed — the gap was latent. It is narrowed anyway,
+    // because **an allow-list that can absorb an unknown mechanism is worse than
+    // no allow-list**: it converts the one class of finding the axis exists to
+    // catch into a counted, declared row.
+    //
+    // All four of the restore's conditions, in the direction the shape has them:
+    if a.tag && !b.tag && a.has_deny && b.has_allow && b.priority > a.priority {
         return Some(ID_DIVERGENCES[1].0);
     }
     // One `(priority, hasDeny)` band, one list: `getEvalOrder()` decides which
@@ -2677,47 +2726,72 @@ const AXES: &[Axis] = &[
     // a tag nothing evaluates is not coverage of the tag phase. That
     // distinction has already produced a false green in this package.
     //
-    // ⚠ FIX ROUND 1, IMPORTANT 3: six of these axes did NOT honour that
-    // sentence when it was written — the five match-type axes and the prune axis
-    // read the ingredient only. They now require a covering policy of the kind
-    // (and, for the prune, `isDenyAllElse`), and the floors below are re-measured
-    // against the narrowed predicates. The reach these floors guard is CANDIDACY,
-    // not "the answer would flip": the flip rate is lower (3‰ for DESCENDANT,
-    // measured by re-running Step 4's mutation) and is guarded by that mutation
-    // rather than by a floor, because `axis_hits` reads no decision.
+    // ⚠ FIX ROUND 1, IMPORTANT 3 and FIX ROUND 2: that sentence was not true of
+    // this block when it was written. Round 1 narrowed six axes (the five
+    // match-type ones and the prune); round 2 found the prune still missing the
+    // ADMITTED filter its siblings had, and about ten more axes counting pure
+    // ingredient underneath the claim. **Every tag axis is now gated on a policy of
+    // the case's kind ADMITTING a tag the request carries**, with exactly two
+    // stated exceptions:
+    //
+    // * the five MATCH-TYPE axes gate on COVERAGE, not admission — `DESCENDANT`
+    //   and `NONE` are axes precisely because they are not admitted, so gating them
+    //   on admission would leave them counting nothing;
+    // * `tag: empty resolved set` is a property of the request alone, because an
+    //   empty set has no tag for any policy to cover and its whole content is that
+    //   the phase is narrowed away before a policy is consulted.
+    //
+    // What these floors guard is CANDIDACY, and that is intrinsic: the rule two
+    // blocks down is that `axis_hits` reads no DECISION, so "the answer would have
+    // flipped" is not expressible here. The gap is quantified rather than left
+    // implicit — Step 4's `DESCENDANT` mutation flips 6 of 1743 compared cases
+    // (3‰) against a 14‰ candidacy floor, so roughly four in five cases that
+    // satisfy that floor are candidates whose items do not decide. The mutation is
+    // what guards the flip; the floor is what guards the candidacy. Neither
+    // substitutes for the other and the file says so in both places.
+    //
+    // ⚠ The DENOMINATOR here is `cases`, not `compared`, and that is deliberate
+    // (fix round 2). These floors guard the GENERATOR — `report_coverage` runs
+    // before a JVM starts, precisely so a starved axis is reported before anything
+    // downstream means what it says — and a case the crate later declines still
+    // exercised the generator. The degeneracy floors at the bottom of this file use
+    // `compared` for the opposite reason: they are about the population that can
+    // agree or disagree. What bounds the overlap is the compared-FRACTION ceiling,
+    // which caps the declined share at 25%, so an axis floor can at worst be
+    // satisfied by a quarter of cases the gate did not compare.
     Axis {
         name: "tag: tagPolicies block present",
-        min_per_mille: 220,
+        min_per_mille: 232,
         only: None,
     },
     Axis {
         name: "tag: a tag the block's policies REACH",
-        min_per_mille: 170,
+        min_per_mille: 179,
         only: None,
     },
     Axis {
         name: "tag: a tag the block's policies do NOT reach",
-        min_per_mille: 83,
+        min_per_mille: 80,
         only: None,
     },
     Axis {
         name: "tag: match SELF",
-        min_per_mille: 70,
+        min_per_mille: 71,
         only: None,
     },
     Axis {
         name: "tag: match SELF_AND_ALL_DESCENDANTS",
-        min_per_mille: 67,
+        min_per_mille: 68,
         only: None,
     },
     Axis {
         name: "tag: match ANCESTOR",
-        min_per_mille: 73,
+        min_per_mille: 75,
         only: None,
     },
     Axis {
         name: "tag: match DESCENDANT (NOT admitted)",
-        min_per_mille: 14,
+        min_per_mille: 11,
         only: None,
     },
     Axis {
@@ -2727,47 +2801,53 @@ const AXES: &[Axis] = &[
     },
     Axis {
         name: "tag: empty resolved set (the narrowing)",
-        min_per_mille: 14,
+        min_per_mille: 20,
         only: None,
     },
     Axis {
         name: "tag: same NAME at two match types",
-        min_per_mille: 48,
+        min_per_mille: 32,
         only: None,
     },
     Axis {
         name: "tag: attachment carrying attributes",
-        min_per_mille: 78,
+        min_per_mille: 54,
         only: None,
     },
     Axis {
         name: "tag: deny-capable ACCESS policy",
-        min_per_mille: 55,
+        min_per_mille: 70,
         only: None,
     },
+    // ⚠ The THINNEST floor in this table (measured 6‰, floor 3‰ = 12 cases in
+    // 4000), because the shape needs two deny items on a tag policy that ALSO
+    // admits a carried tag. It is kept rather than raised by generating more deny
+    // items, which would cost the corpus its ALLOW outcomes — the trade the round-1
+    // report records. It still catches the thing it is for: the draw going back to
+    // at-most-one.
     Axis {
         name: "tag: ACCESS policy with 2+ deny items",
-        min_per_mille: 6,
+        min_per_mille: 3,
         only: None,
     },
     Axis {
         name: "tag: MASK policy of this kind",
-        min_per_mille: 47,
+        min_per_mille: 31,
         only: None,
     },
     Axis {
         name: "tag: ROW FILTER policy of this kind",
-        min_per_mille: 48,
+        min_per_mille: 31,
         only: None,
     },
     Axis {
         name: "tag: several policies of this kind at ONE priority",
-        min_per_mille: 63,
+        min_per_mille: 35,
         only: None,
     },
     Axis {
         name: "tag: policyPriority override",
-        min_per_mille: 43,
+        min_per_mille: 29,
         only: None,
     },
     Axis {
@@ -2777,17 +2857,17 @@ const AXES: &[Axis] = &[
     },
     Axis {
         name: "tag: policy value is a prefix wildcard",
-        min_per_mille: 88,
+        min_per_mille: 86,
         only: None,
     },
     Axis {
         name: "tag: value differing from a resolved tag only by CASE",
-        min_per_mille: 21,
+        min_per_mille: 20,
         only: None,
     },
     Axis {
         name: "tag: composed eval-order duel",
-        min_per_mille: 33,
+        min_per_mille: 31,
         only: None,
     },
     // The prune, and its asymmetry. Three axes rather than one: a corpus that
@@ -2796,12 +2876,15 @@ const AXES: &[Axis] = &[
     // right.
     Axis {
         name: "tag: restore duel (T3's skip reachable)",
-        min_per_mille: 0,
+        // measured 187/4000 = 46‰. A real floor, because `min_per_mille: 0`
+        // asserts nothing and the two floors in the test body are about the shape
+        // AGREEING, not about it being generated (fix round 2).
+        min_per_mille: 19,
         only: None,
     },
     Axis {
         name: "tag: candidacy duel (offset 553 reachable)",
-        min_per_mille: 29,
+        min_per_mille: 23,
         only: None,
     },
     Axis {
@@ -2811,12 +2894,12 @@ const AXES: &[Axis] = &[
     },
     Axis {
         name: "tag: audit-disabled policy WITH items (kept)",
-        min_per_mille: 43,
+        min_per_mille: 31,
         only: None,
     },
     Axis {
         name: "resource policy audit-disabled with NO items (NOT pruned)",
-        min_per_mille: 24,
+        min_per_mille: 21,
         only: None,
     },
 ];
@@ -2929,18 +3012,12 @@ fn tag_facts(case: &Case) -> TagFacts {
     facts.block_present = true;
 
     let tags = case.request.resolved_tags.as_deref().unwrap_or_default();
+    // The ONE axis that is a property of the request alone, and intrinsically so:
+    // an empty tag set has no tag for any policy to cover, and its whole content is
+    // that `getLikelyMatchPolicyEvaluators` returns `EMPTY_LIST` and the phase is
+    // narrowed away before a policy is consulted. Every other tag axis is gated on
+    // a policy of the kind ADMITTING a carried tag — see the `admits` block below.
     facts.empty_set = tags.is_empty();
-    for tag in tags {
-        if !tag.attributes.is_empty() {
-            facts.attributes = true;
-        }
-        if tags
-            .iter()
-            .any(|other| other.name == tag.name && other.match_type != tag.match_type)
-        {
-            facts.repeated_name = true;
-        }
-    }
 
     let policies = block["policies"].as_array().cloned().unwrap_or_default();
     let mut priorities_of_kind: Vec<i64> = Vec::new();
@@ -2956,50 +3033,92 @@ fn tag_facts(case: &Case) -> TagFacts {
             // resource loop above follows.
             continue;
         }
-        if policy["policyPriority"].as_i64().unwrap_or(0) != 0 {
-            facts.priority_override = true;
-        }
-        priorities_of_kind.push(policy["policyPriority"].as_i64().unwrap_or(0));
-        if policy["isAuditEnabled"].as_bool() == Some(false) {
-            if all_item_buckets_empty(policy) {
-                // `isDenyAllElse` and a covering value are both required — see the
-                // field's doc. Without the first the prune changes nothing;
-                // without the second nothing reaches the policy at all.
-                let covers_a_tag =
-                    policy["resources"]["tag"]["values"]
-                        .as_array()
-                        .is_some_and(|vs| {
-                            vs.iter()
-                                .filter_map(Value::as_str)
-                                .any(|v| tags.iter().any(|tag| tag_value_covers(v, &tag.name)))
-                        });
-                if policy["isDenyAllElse"].as_bool() == Some(true) && covers_a_tag {
-                    facts.audit_pruned = true;
-                }
-            } else {
-                facts.audit_kept = true;
-            }
-        }
-        match policy_type {
-            1 => facts.mask_policy = true,
-            2 => facts.row_filter_policy = true,
-            _ => {
-                let deny_items = policy["denyPolicyItems"]
-                    .as_array()
-                    .map(Vec::len)
-                    .unwrap_or(0);
-                if policy["isDenyAllElse"].as_bool() == Some(true) || deny_items > 0 {
-                    facts.deny_capable_access = true;
-                }
-                if deny_items >= 2 {
-                    facts.multi_deny_access = true;
-                }
-            }
-        }
         let values: Vec<&str> = policy["resources"]["tag"]["values"]
             .as_array()
             .map(|v| v.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
+
+        // ⚠ FIX ROUND 2. Every fact below that is a property of THIS POLICY is
+        // gated on `admits`, and the two words are not interchangeable:
+        //
+        // * `covers` — some tag the request carries has a name this policy's
+        //   `resources.tag` matches, i.e. the trie would return it;
+        // * `admits` — and that tag's match type is one
+        //   `RangerDefaultPolicyEvaluator.evaluate` lets reach the policy items.
+        //
+        // The prune axis used `covers` alone, which is the gap the other five were
+        // fixed for one round earlier: a case whose only covering tag is
+        // `DESCENDANT` satisfied an 11‰ floor while `evaluate_tag_policies` admits
+        // nothing and the prune cannot be observed. The generator makes that
+        // reachable, because the pruned policy's value is overwritten with
+        // `names.first()` and `names` includes non-admitted tags.
+        //
+        // The MATCH-TYPE axes below are the deliberate exception and use `covers`:
+        // `DESCENDANT` and `NONE` exist as axes precisely because they are NOT
+        // admitted, so gating them on admission would leave them counting nothing.
+        let admits = tags.iter().any(|tag| {
+            ADMITTED_TAG_MATCH_TYPES.contains(&tag.match_type)
+                && values.iter().any(|v| tag_value_covers(v, &tag.name))
+        });
+
+        if admits {
+            if policy["policyPriority"].as_i64().unwrap_or(0) != 0 {
+                facts.priority_override = true;
+            }
+            priorities_of_kind.push(policy["policyPriority"].as_i64().unwrap_or(0));
+        }
+        if policy["isAuditEnabled"].as_bool() == Some(false) {
+            if all_item_buckets_empty(policy) {
+                // `isDenyAllElse` and an ADMITTED tag are both required: without the
+                // first the prune changes nothing, without the second nothing
+                // reaches the policy at all.
+                if policy["isDenyAllElse"].as_bool() == Some(true) && admits {
+                    facts.audit_pruned = true;
+                }
+            } else if admits {
+                facts.audit_kept = true;
+            }
+        }
+        if admits {
+            match policy_type {
+                1 => facts.mask_policy = true,
+                2 => facts.row_filter_policy = true,
+                _ => {
+                    let deny_items = policy["denyPolicyItems"]
+                        .as_array()
+                        .map(Vec::len)
+                        .unwrap_or(0);
+                    if policy["isDenyAllElse"].as_bool() == Some(true) || deny_items > 0 {
+                        facts.deny_capable_access = true;
+                    }
+                    if deny_items >= 2 {
+                        facts.multi_deny_access = true;
+                    }
+                }
+            }
+            // Properties of the request's tag SET, recorded only once some policy
+            // of the kind admits one of them — otherwise the tag phase never looks
+            // at the set at all. `empty_set` is the one exception and is set above,
+            // because an empty set has no tag for any policy to admit and its whole
+            // content is that the phase is narrowed away.
+            for tag in tags {
+                if !ADMITTED_TAG_MATCH_TYPES.contains(&tag.match_type) {
+                    continue;
+                }
+                if !values.iter().any(|v| tag_value_covers(v, &tag.name)) {
+                    continue;
+                }
+                if !tag.attributes.is_empty() {
+                    facts.attributes = true;
+                }
+                if tags
+                    .iter()
+                    .any(|other| other.name == tag.name && other.match_type != tag.match_type)
+                {
+                    facts.repeated_name = true;
+                }
+            }
+        }
         for value in &values {
             if value.len() > 1 && value.ends_with('*') && !value.ends_with("**") {
                 facts.prefix_value = true;
@@ -3540,9 +3659,15 @@ enum Population {
 impl Population {
     fn of(case: &Case) -> Population {
         let tagged = case.service_policies.get("tagPolicies").is_some();
+        // ⚠ `composed_duel` is named explicitly (fix round 2). It happens to imply
+        // `duel` today, through an unasserted coupling in `generate_case` — and a
+        // builder that set `composed_duel: true, duel: false` would file a
+        // CONSTRUCTED shape into `composed, random`, which is the exact defect the
+        // four populations exist to fix. Naming every constructed flag costs
+        // nothing and removes the coupling from the argument.
         match (
             tagged,
-            case.duel || case.candidacy_duel || case.restore_duel,
+            case.duel || case.composed_duel || case.candidacy_duel || case.restore_duel,
         ) {
             (false, false) => Population::Resource,
             (false, true) => Population::ResourceDuel,
@@ -4415,7 +4540,7 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
                          reasons are: {}",
                         ID_DIVERGENCES
                             .iter()
-                            .map(|(what, where_)| format!("{what} (see {where_})"))
+                            .map(|(what, where_, _)| format!("{what} (see {where_})"))
                             .collect::<Vec<_>>()
                             .join("; ")
                     ),
@@ -4669,9 +4794,14 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
         over.len(),
         over.join("\n")
     );
-    // 75% of cases, against ~87% measured. The injected 42% over-refusal that
-    // exposed this gap left 58% and would be caught here even if it had been
-    // spread evenly across all five kinds.
+    // 75% of cases, against ~88% measured — and the re-review bisected the
+    // threshold exactly: an over-refusal spread thinly under every per-kind ceiling
+    // FAILS here at 73.22% and PASSES at 75.17%. So the slack is real and worth
+    // knowing: **roughly twice today's refusal rate, spread evenly across all five
+    // kinds, still passes.** The per-kind ceilings are the sharp instrument (any
+    // single kind doubling fails there); this is the backstop for the one shape
+    // they cannot see, and it is set loose on purpose because a ceiling that flaps
+    // gets deleted.
     assert!(
         total.compared * 4 >= total.cases * 3,
         "only {} of {} cases were compared at all ({:.1}%). The crate is refusing most of \
@@ -4684,16 +4814,37 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
 
     // ── the ACCESS policy-id axis (RULING 3) ───────────────────────────────
     //
-    // A floor, because the axis is only a gate while cases reach it, and the
-    // declared divergences are reported rather than asserted — a run in which
-    // neither fired would mean the shapes had stopped being generated, not that
-    // the crate had improved.
+    // A floor, because the axis is only a gate while cases reach it.
     assert!(
         total.ids_compared * 4 >= total.cases,
         "only {} of {} cases compared a reported ACCESS policy id — the axis RULING 3 \
          added is not reaching anything",
         total.ids_compared,
         total.cases
+    );
+    // ⚠ FIX ROUND 2. …and a floor on EACH DECLARED divergence, which the first
+    // version admitted it lacked: a regression that stopped producing one of them
+    // was green and silent, and a declared divergence nothing produces is a row in
+    // an allow-list nobody is checking. These are the floors that make the
+    // allow-list's narrowing above meaningful — narrowing a class nothing reaches
+    // proves nothing.
+    let mut unreached: Vec<String> = Vec::new();
+    for (reason, _, floor) in ID_DIVERGENCES {
+        let count = total.id_divergences.get(reason).copied().unwrap_or(0);
+        let per_mille = 1000 * count / total.cases.max(1);
+        if per_mille < *floor as usize {
+            unreached.push(format!(
+                "  {reason} — {count} cases ({per_mille}‰), floor {floor}‰"
+            ));
+        }
+    }
+    assert!(
+        unreached.is_empty(),
+        "{} DECLARED policy-id divergence(s) have stopped being produced. Each is an \
+         allow-list entry, so one that nothing reaches is a class the gate would admit \
+         without ever having seen it:\n{}",
+        unreached.len(),
+        unreached.join("\n")
     );
 
     // A corpus where nothing ever matches agrees with Ranger perfectly and
