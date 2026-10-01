@@ -38,6 +38,24 @@ implementer and the reviewer independently concluded that no further corpus
 extension should precede this. Tasks 6-8 do not extend the corpus, so they are not
 blocked; anything that does, is.
 
+### Item 0b: the differential gate never runs automatically
+
+Measured 2026-10-01: `EGRET_TEST_RANGER_E2E` appears **nowhere** in CI config or the
+Justfile. A plain `cargo test -p egret-ranger-eval` reports the gate as
+`ok … finished in 0.00s` and exits 0 — it prints a skip line to stderr, but the test
+result is a pass. With the flag set it takes **136 s** and really runs.
+
+This is the instrument that found **seven** defects across two rounds, in code that
+127 unit tests and three review rounds had already passed. It is also the only test
+in the crate whose other side is Apache Ranger rather than its authors' reading of
+the jars. Leaving it off every automated path means the next regression is found by
+whoever next remembers the variable.
+
+It legitimately needs a JVM, Maven and the jars, so it cannot be a plain unit test.
+Wire it into a job that has those — or, at minimum, make a plain run print something
+a human will not read as a pass. A gate that is not on the list is a gate nobody
+runs, and this one has the best hit rate in the package.
+
 ### Item 1: is the composed ACCESS path finished?
 
 **No, on the evidence.** Task 5's gate found **five** defects in
