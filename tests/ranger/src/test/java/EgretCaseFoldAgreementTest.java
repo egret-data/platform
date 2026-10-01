@@ -2,13 +2,18 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.Test;
 
 /**
@@ -33,11 +38,21 @@ import org.junit.Test;
  * {@code lower()}** — both implement Unicode's full {@code Lowercase_Mapping} (including the
  * length-changing {@code SpecialCasing} entries and the {@code Final_Sigma} context rule), and
  * {@code Locale.ROOT} excludes the locale-tailored Turkish/Lithuanian mappings that a
- * {@code tr_TR} database collation would apply. **No Postgres runs in this harness**, so every row
- * below is UNVERIFIED on that side, exactly as the SQL half of the fold itself is. What would
- * falsify it: a database whose collation tailors case (e.g. {@code tr_TR}), or an ICU/glibc
- * difference on one of the 25. The direction of the residual is named in
- * {@code egret_perm_compile::routes::StoredValueProblem::FoldDivergentCharacter}.
+ * {@code tr_TR} database collation would apply.
+ *
+ * <p><b>This harness runs no Postgres</b> — it has no JDBC dependency — so no row below is
+ * asserted against one. ⚠ But a Postgres IS reachable from this worktree, and fix round 3
+ * measured the whole set against it (PostgreSQL 16.15, {@code en_US.utf8}, read-only
+ * {@code SELECT lower(…)}, no template touched): <b>51 of the 53 pairs the set is derived from
+ * still disagree there, and 2 do not</b> — see the ⚠ block on {@link #DOCUMENTED} for which, and
+ * for the two claims that are stand-in-only as a result. The earlier wording here said "No Postgres
+ * runs in this harness" and left it there, which reads as "not verifiable" when it was merely "not
+ * verified here".
+ *
+ * <p>What would still falsify the set: a collation that tailors case ({@code tr_TR} would move
+ * {@code I}/{@code i} INTO it), or an ICU/glibc difference on one of the 25. The direction of the
+ * residual is named on {@code egret_perm_compile::routes::FOLD_DIVERGENT} and on
+ * {@code StoredValueProblem::FoldDivergentCharacter}.
  *
  * <p>This class measures the JDK's Unicode tables, not Ranger — the jar is irrelevant to it. It
  * lives here because this is where the Java-side oracles live, and because the claim it settles is
@@ -45,9 +60,53 @@ import org.junit.Test;
  */
 public class EgretCaseFoldAgreementTest {
 
+    /** Where the one source of truth lives — parsed, never duplicated. See {@link #gatedSet()}. */
+    private static final String RUST_GATE = "../../crates/egret-perm-compile/src/routes.rs";
+
     /**
-     * The 25 code points where the two folds can disagree, which
-     * {@code egret_perm_compile::routes::fold_divergent} reproduces verbatim.
+     * The gated set, read out of the RUST constant {@code FOLD_DIVERGENT} itself.
+     *
+     * <p><b>⚠ Fix round 3, MINOR 1.</b> This class used to hold its own {@code int[] DIVERGENT},
+     * and the sweep asserted equality against THAT — so the array the gate actually uses was
+     * compared to nothing. The claim in the Task 7 report ("asserted verbatim … and it fails on
+     * either direction of drift") was false by code path: deleting {@code U+1C85} from the Rust
+     * constant (a fail-open) or mistyping {@code U+03F1} (an over-refusal) failed no test, because
+     * {@code [char; 25]} pins only the LENGTH and the Rust tests name 7 of the 25.
+     *
+     * <p>So there is one copy now and this test reads it. A set is a set in either direction: a code
+     * point the sweep finds and Rust does not have is a fail-open, one Rust has and the sweep does
+     * not find is an over-refusal, and {@link #theDisagreementSetIsExactlyTheOneTheGateEncodes()}
+     * fails on both. The parse is deliberately strict — it asserts the constant was found and that
+     * the declared length matches the number of entries — because a silently-empty parse would make
+     * this test vacuous, which is the failure mode it exists to remove.
+     */
+    private static List<Integer> gatedSet() throws Exception {
+        String rust = new String(Files.readAllBytes(Paths.get(RUST_GATE)), "UTF-8");
+        Matcher decl =
+                Pattern.compile("const FOLD_DIVERGENT: \\[char; (\\d+)\\] = \\[(.*?)\\];", Pattern.DOTALL)
+                        .matcher(rust);
+        assertTrue(
+                "FOLD_DIVERGENT must be findable in " + RUST_GATE + " — a parse that matches nothing "
+                        + "makes this whole test vacuous",
+                decl.find());
+        int declaredLength = Integer.parseInt(decl.group(1));
+        List<Integer> cps = new ArrayList<>();
+        Matcher m = Pattern.compile("'\\\\u\\{([0-9A-Fa-f]{1,6})\\}'").matcher(decl.group(2));
+        while (m.find()) {
+            cps.add(Integer.parseInt(m.group(1), 16));
+        }
+        assertEquals(
+                "every entry of FOLD_DIVERGENT must parse as a `'\\u{…}'` char literal, and the "
+                        + "declared array length must match how many were found",
+                declaredLength,
+                cps.size());
+        Collections.sort(cps);
+        return cps;
+    }
+
+    /**
+     * The code points the gate declines, as documentation — the authoritative list is the Rust
+     * constant {@link #gatedSet()} reads.
      *
      * <p>Derived, not hand-listed — see {@link #theDisagreementSetIsExactlyTheOneTheGateEncodes()}
      * for the sweep that produces it over every defined code point. Grouped by the mechanism that
@@ -64,8 +123,31 @@ public class EgretCaseFoldAgreementTest {
      *   <li><b>context-dependent full lowercase</b> — {@code Σ} lowercases to {@code ς} at the end
      *       of a word and {@code σ} elsewhere, which no per-character fold can reproduce.
      * </ul>
+     *
+     * <p><b>⚠ What the real database says, measured — and two of these are stand-in-only.</b> Fix
+     * round 3 ran {@code lower()} on a real PostgreSQL 16.15, {@code en_US.utf8}, read-only
+     * ({@code SELECT lower(…)} needs no schema and touches no template). Of the 53 single-character
+     * pairs this set is derived from, <b>51 still disagree there</b> and 2 do not: both of
+     * {@code U+0130}'s. So:
+     *
+     * <ul>
+     *   <li>{@code U+0130} is a <b>measured over-refusal on en_US.utf8</b> — glibc's
+     *       {@code lower('İ')} is {@code 'i'}, length 1, not the two-code-point full mapping the
+     *       Java stand-in produces. It stays gated because {@code tr_TR} is a collation where it
+     *       earns its place, and because the direction is conservative;
+     *   <li>criterion 3's <i>justification</i> (the string pair {@code ("ΑΣ","ασ")}) is
+     *       <b>stand-in-only</b>: glibc has no {@code Final_Sigma}, so {@code lower('ΑΣ')='ασ'}
+     *       there and that pair AGREES. The criterion's <i>conclusion</i> is right on both oracles
+     *       anyway — {@code U+03A3} is gated, and on the real database it is load-bearing through
+     *       its single-character pair with {@code U+03C2}, which disagrees there. An ICU collation
+     *       does implement {@code Final_Sigma}, which is why the criterion stays.
+     * </ul>
+     *
+     * <p>Every other row of {@link #expectedPairs()} behaves on the real database exactly as it does
+     * here, Vietnamese included. The measurement is recorded in the Task 7 report; this harness has
+     * no JDBC dependency and does not assert it.
      */
-    private static final int[] DIVERGENT = {
+    private static final int[] DOCUMENTED = {
         0x00B5, 0x0130, 0x0131, 0x017F, 0x0345, 0x03A3, 0x03C2, 0x03D0, 0x03D1, 0x03D5, 0x03D6,
         0x03F0, 0x03F1, 0x03F5, 0x1C80, 0x1C81, 0x1C82, 0x1C83, 0x1C84, 0x1C85, 0x1C86, 0x1C87,
         0x1C88, 0x1E9B, 0x1FBE
@@ -171,10 +253,16 @@ public class EgretCaseFoldAgreementTest {
      * is what keeps Vietnamese out of the refusal.
      */
     @Test
-    public void theDisagreementSetIsExactlyTheOneTheGateEncodes() {
+    public void theDisagreementSetIsExactlyTheOneTheGateEncodes() throws Exception {
         List<Integer> flagged = new ArrayList<>();
         for (int cp = 0; cp <= Character.MAX_CODE_POINT; cp++) {
-            if (!Character.isDefined(cp) || Character.isSurrogate((char) cp)) {
+            // ⚠ `Character.isSurrogate((char) cp)` was the condition here and it TRUNCATES: for
+            // every cp above 0xFFFF the cast wraps, so 6 853 defined code points were skipped and
+            // the method's name was false by code path (fix round 3, LOW 2). Inert — none of them
+            // is cased in a way that diverges — but a sweep that claims "every defined code point"
+            // has to visit them.
+            if (!Character.isDefined(cp)
+                    || (cp >= Character.MIN_SURROGATE && cp <= Character.MAX_SURROGATE)) {
                 continue;
             }
             String isolated = new String(Character.toChars(cp));
@@ -207,16 +295,24 @@ public class EgretCaseFoldAgreementTest {
             }
         }
 
-        List<Integer> encoded = new ArrayList<>();
-        for (int cp : DIVERGENT) {
-            encoded.add(cp);
-        }
         assertEquals(
-                "the derived disagreement set must be exactly the one `fold_divergent` encodes — "
-                        + "a code point here and not there is a fail-open, one there and not here is "
-                        + "an over-refusal; got " + hex(flagged),
-                encoded,
+                "the derived disagreement set must be exactly the one the RUST constant "
+                        + "FOLD_DIVERGENT encodes (read from " + RUST_GATE + ", not a copy here) — a "
+                        + "code point the sweep finds and Rust lacks is a fail-open, one Rust has and "
+                        + "the sweep does not find is an over-refusal; swept " + hex(flagged),
+                gatedSet(),
                 flagged);
+        // The documented list in this file is prose, so it must not be allowed to rot away from
+        // the constant it describes either.
+        List<Integer> documented = new ArrayList<>();
+        for (int cp : DOCUMENTED) {
+            documented.add(cp);
+        }
+        Collections.sort(documented);
+        assertEquals(
+                "this file's DOCUMENTED list is commentary on the Rust constant and must match it",
+                gatedSet(),
+                documented);
 
         // 25 is small enough to enumerate and that is the whole finding: the fix-round-1 gate
         // declined every non-ASCII value on a premise this narrow.
@@ -229,11 +325,8 @@ public class EgretCaseFoldAgreementTest {
      * catalog whose every {@code explain} answers {@code TagsUnresolved}.
      */
     @Test
-    public void noVietnameseLetterIsInTheDivergentSet() {
-        Set<Integer> divergent = new LinkedHashSet<>();
-        for (int cp : DIVERGENT) {
-            divergent.add(cp);
-        }
+    public void noVietnameseLetterIsInTheDivergentSet() throws Exception {
+        Set<Integer> divergent = new LinkedHashSet<>(gatedSet());
         // Every Vietnamese letter that is not a plain ASCII one, upper and lower: the seven base
         // letters with their own code points, and the full tone-marked ranges.
         List<Integer> vietnamese = new ArrayList<>();

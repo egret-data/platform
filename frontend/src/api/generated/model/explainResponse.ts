@@ -7,6 +7,7 @@
  */
 import type { ExplainOutcome } from './explainOutcome';
 import type { ExplainProfile } from './explainProfile';
+import type { ExplainTagDecline } from './explainTagDecline';
 
 /**
  * What `explain` answers with: one verdict block per profile serving the
@@ -32,4 +33,5 @@ export interface ExplainResponse {
      * given a set narrower than the enricher's. See the handler.
      */
   tags: string[];
+  tag_resolution_declined?: null | ExplainTagDecline;
 }

@@ -20,6 +20,8 @@ import type {
   ExplainAttribution,
   ExplainProfile,
   ExplainResponse,
+  ExplainTagDecline,
+  ExplainTargetLevel,
   Scope,
   WireDecision,
   WireEngineType,
@@ -276,9 +278,83 @@ function tagNormalisationProblemPhrase(p: WireTagNormalisationProblem): string {
   return _never;
 }
 
-function causeScopeNote(c: WireUndecidableCause): string | null {
+/** The stored coordinate a decline is about, as a steward reads it: `sales.orders.email`,
+ *  with an omitted level shown as `(none)` so an EMPTY one is visible rather than
+ *  swallowed by a dot. The empty level is the whole subject of one of the four states. */
+function storedCoordinate(d: { schema: string; table: string; column: string }): string {
+  const level = (v: string) => (v === "" ? "(none)" : v);
+  return `${level(d.schema)} / ${level(d.table)} / ${d.column === "" ? "(the table itself)" : d.column}`;
+}
+
+const TARGET_LEVEL_LABEL: Record<ExplainTargetLevel, string> = {
+  schema: "schema",
+  table: "table",
+  column: "column",
+};
+
+/**
+ * Why egret declined to resolve this target's tags, as a sentence naming the thing
+ * to fix.
+ *
+ * **⚠ Fix round 3 — this function is the fix for a measured defect, not a
+ * refinement.** Round 1 wrote ONE sentence for this cause, "a tag assignment in
+ * this catalog is stored with no schema or no table … re-store that assignment on a
+ * table or a column", when `EmptyLevel` was the only state that produced it. Rounds
+ * 1 and 2 added three more states and left the sentence alone, so a steward whose
+ * catalog held `('sales','*','')` was told about a row with no table — a row that
+ * does not exist — and offered a remedy already satisfied. The four states have four
+ * different remedies, which is exactly why `ExplainTagDecline` carries them apart
+ * and why the handler stopped discarding the variant.
+ */
+function tagDeclineSentence(d: ExplainTagDecline): string {
+  switch (d.kind) {
+    case "stored_level_empty":
+      return `a tag assignment in this catalog is stored at ${storedCoordinate(d)}, and a level left empty there is one the engine applies to every resource beneath it while egret cannot match it to any. Re-store that assignment on a table or a column`;
+    case "stored_wildcard":
+      return `a tag assignment in this catalog is stored at ${storedCoordinate(d)}, whose “*” or “?” the engine matches against many resources by a rule egret's database cannot reproduce. Re-store that assignment on the exact table or column it is meant for`;
+    case "stored_fold_divergent":
+      return `a tag assignment in this catalog is stored at ${storedCoordinate(d)}, which carries a character whose upper- and lower-case forms egret's database and the engine's matcher need not agree on. Rename that resource, or re-store the assignment without it`;
+    case "target_fold_divergent":
+      return `the ${TARGET_LEVEL_LABEL[d.level]} you asked about, “${d.value}”, carries a character whose upper- and lower-case forms egret's database and the engine's matcher need not agree on. Nothing is stored wrongly — re-ask for the resource's exact name`;
+  }
+  // No wildcard and no string fallback, for the reason spelled out on
+  // `unmodelledPhrase`: an arm added to the wire enum and not here must break the
+  // build, not render an empty sentence.
+  const _never: never = d;
+  return _never;
+}
+
+/**
+ * How far one decline reaches — and the two answers are genuinely different, which
+ * is why this is not one note.
+ *
+ * ⚠ Round 1's note said "every target in this catalog answers the same way" for ALL
+ * of them. Measured false for `target_fold_divergent`: that state is a property of
+ * the REQUEST, so every other target in the catalog answers normally, and telling a
+ * steward otherwise sends them looking at stored data that is fine.
+ */
+function tagDeclineScope(d: ExplainTagDecline): string {
+  switch (d.kind) {
+    case "stored_level_empty":
+    case "stored_wildcard":
+    case "stored_fold_divergent":
+      return "This is not specific to your target: egret declines to resolve tags for the whole catalog while that assignment is stored this way, so every target in this catalog answers the same way until it changes.";
+    case "target_fold_divergent":
+      return "This one IS specific to what you asked: nothing is stored wrongly, and every other target in this catalog answers normally.";
+  }
+  const _never: never = d;
+  return _never;
+}
+
+function causeScopeNote(c: WireUndecidableCause, declined?: ExplainTagDecline): string | null {
   if (c.kind === "tags_unresolved") {
-    return "This is not specific to your target: egret declines to resolve tags for a whole catalog while any tag assignment in it is stored with no schema or no table, so every target in this catalog answers the same way until that assignment names a table or a column.";
+    // ⚠ No note at all when the reason is absent, rather than round 1's
+    // per-catalog claim: without `tag_resolution_declined` the REACH is unknown,
+    // and one of the four states is per-request. The backend sends the two
+    // together — `tag_resolution_declined` is `Some` exactly when the handler
+    // passed `resolved_tags: None`, which is the only production state raising
+    // this cause — so the absent case is a payload egret does not produce.
+    return declined ? tagDeclineScope(declined) : null;
   }
   const construct =
     c.kind === "envelope_construct" || c.kind === "policy_construct" ? c.construct : null;
@@ -299,7 +375,7 @@ function causeScopeNote(c: WireUndecidableCause): string | null {
  * things, and collapsing it discards exactly what the three-valued contract
  * exists to say.
  */
-function causeSentence(c: WireUndecidableCause): string {
+function causeSentence(c: WireUndecidableCause, declined?: ExplainTagDecline): string {
   switch (c.kind) {
     case "envelope_construct":
       return `The downloaded policy set carries ${unmodelledPhrase(c.construct)} — so this access cannot be decided.`;
@@ -327,15 +403,20 @@ function causeSentence(c: WireUndecidableCause): string {
       return `This profile declares ${ENGINE_LABEL[c.declared]} but carries the service definition “${c.service_def_name}”, whose resource levels are a different vocabulary.`;
     case "plugin_version_mismatch":
       return `This profile declares ${PLUGIN_LABEL[c.declared]} but ${ENGINE_LABEL[c.engine]} is running ${PLUGIN_LABEL[c.measured]}, and the two evaluate differently.`;
-    case "tags_unresolved":
-      // ⚠ Rewritten by SP4d-2b Task 7 because the cause changed MEANING. It used
-      // to be unconditional — `explain` never resolved tags — so the sentence
-      // could only say "did not resolve". egret resolves them now, and this
-      // cause is what one specific recoverable state produces, so the sentence
-      // names that state and the remedy. The distinction it has always carried,
-      // "did not resolve" versus "there are none", stays: an empty set would
-      // have been an ANSWER.
-      return "This profile's tag service carries policies that would be evaluated against this resource's tags, and egret declined to resolve them: a tag assignment in this catalog is stored with no schema or no table, which the engine would apply to resources egret cannot match it to. “Declined to resolve” is not the same as there being none, so no verdict here could be relied on — re-store that assignment on a table or a column and this answers.";
+    case "tags_unresolved": {
+      // ⚠ Rewritten TWICE. Task 7 changed the cause's meaning (it used to be
+      // unconditional, because `explain` never resolved tags); fix round 3 moved
+      // the REASON out of this sentence and into `tag_resolution_declined`,
+      // because by then four states produced this cause and this sentence named
+      // only the first of them. The distinction the cause has always carried —
+      // "declined to resolve" is not "there are none", since an empty set would
+      // have been an ANSWER — stays here, where it is true of all four.
+      const head =
+        "This profile's tag service carries policies that would be evaluated against this resource's tags, and egret declined to resolve them";
+      const tail =
+        "“Declined to resolve” is not the same as there being none, so no verdict here could be relied on.";
+      return declined ? `${head}: ${tagDeclineSentence(declined)}. ${tail}` : `${head}. ${tail}`;
+    }
     case "tag_resource_not_reproducible":
       return `Tag policy ${policyRef(c.policy_name, c.policy_id)} ${tagResourceProblemPhrase(c.problem)}, so egret cannot tell which tags the engine would run it for.`;
     case "tag_sub_policy_is_deny_capable":
@@ -647,7 +728,15 @@ function namesADecidingPolicy(d: DecidedDecision): boolean {
 /** One access type's verdict inside one profile. A `write` explain is several
  *  of these and they are never collapsed: Ranger has no `write`, and an
  *  operator who can insert but not delete has to be able to see that. */
-function AccessRow({ verdict }: { verdict: AccessVerdict }) {
+function AccessRow({
+  verdict,
+  declined,
+}: {
+  verdict: AccessVerdict;
+  /** `ExplainResponse::tag_resolution_declined`, which is per RESPONSE because it
+   *  is a property of the target and the catalog rather than of this access. */
+  declined?: ExplainTagDecline;
+}) {
   const meta = decisionMeta(verdict.decision);
   const Icon = meta.icon;
   return (
@@ -678,10 +767,12 @@ function AccessRow({ verdict }: { verdict: AccessVerdict }) {
                     a suite asserting both through the <li> (SP4d-2b Task 7), which
                     is the "harness can satisfy your assertion" shape — the
                     containing node holds the other string. */}
-                <p data-testid="undecidable-cause-sentence">{causeSentence(cause)}</p>
-                {causeScopeNote(cause) && (
+                <p data-testid="undecidable-cause-sentence">
+                  {causeSentence(cause, declined)}
+                </p>
+                {causeScopeNote(cause, declined) && (
                   <p data-testid="undecidable-cause-scope" className="italic">
-                    {causeScopeNote(cause)}
+                    {causeScopeNote(cause, declined)}
                   </p>
                 )}
               </li>
@@ -710,7 +801,13 @@ function AccessRow({ verdict }: { verdict: AccessVerdict }) {
  * request is built from (`schema` vs `database`), and their access-type
  * vocabularies only partly overlap.
  */
-function ProfileBlock({ profile }: { profile: ExplainProfile }) {
+function ProfileBlock({
+  profile,
+  declined,
+}: {
+  profile: ExplainProfile;
+  declined?: ExplainTagDecline;
+}) {
   return (
     <section
       data-testid="explain-profile"
@@ -728,7 +825,7 @@ function ProfileBlock({ profile }: { profile: ExplainProfile }) {
       </p>
       <ul className="space-y-2">
         {profile.accesses.map((verdict) => (
-          <AccessRow key={verdict.access_type} verdict={verdict} />
+          <AccessRow key={verdict.access_type} verdict={verdict} declined={declined} />
         ))}
         {profile.accesses.length === 0 && (
           <li className="text-sm text-muted-foreground">No access type was evaluated.</li>
@@ -996,7 +1093,11 @@ export default function ExplainAccess() {
           ) : (
             <div className="space-y-3">
               {result.profiles.map((profile) => (
-                <ProfileBlock key={profile.service_id} profile={profile} />
+                <ProfileBlock
+                  key={profile.service_id}
+                  profile={profile}
+                  declined={result.tag_resolution_declined ?? undefined}
+                />
               ))}
               {result.profiles.length === 0 && (
                 <p className="text-sm text-muted-foreground">

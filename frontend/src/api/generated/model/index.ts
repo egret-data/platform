@@ -189,6 +189,8 @@ export * from './explainProfile';
 export * from './explainRequest';
 export * from './explainResponse';
 export * from './explainSubject';
+export * from './explainTagDecline';
+export * from './explainTargetLevel';
 export * from './featureDto';
 export * from './filter';
 export * from './filterOp';

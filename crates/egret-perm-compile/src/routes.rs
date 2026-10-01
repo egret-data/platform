@@ -162,6 +162,11 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         ExplainProfile,
         ExplainAccess,
         ExplainAttribution,
+        // SP4d-2b Task 7 fix round 3: reachable from `ExplainResponse::
+        // tag_resolution_declined`, which is why they are registered — see the
+        // note above about registered-but-unreachable schemas.
+        ExplainTagDecline,
+        ExplainTargetLevel,
         // SP4d-2a Task 5: the Task 4 wire mirrors `ExplainResponse` can
         // actually carry, registered here (the route crate owns the document)
         // rather than in `explain_wire` itself. Every one of these is reachable
@@ -511,6 +516,113 @@ pub struct ExplainResponse {
     /// reach `AccessRequest::resolved_tags`, whose narrowing would be unsound
     /// given a set narrower than the enricher's. See the handler.
     pub tags: Vec<String>,
+    /// Why `explain` declined to resolve this target's tags — absent when it
+    /// resolved them.
+    ///
+    /// **This exists because the REASON was unreachable (fix round 3, IMPORTANT 1
+    /// / LOW 3).** The evaluator's `UndecidableCause::TagsUnresolved` is a unit
+    /// variant and says only "the caller did not resolve", which is all the
+    /// evaluator can know; `resolved_tags_for_target` declines for four different
+    /// states with four different remedies, and `.is_some()` at the call site threw
+    /// the distinction away. The page then rendered round 1's single sentence for
+    /// all four — naming a stored row that does not exist, and claiming a
+    /// per-catalog reach for the one state that is per-REQUEST.
+    ///
+    /// **Carried here rather than as a payload on `TagsUnresolved`**, which was
+    /// the other option: `egret-ranger-eval` is a pure crate that knows nothing of
+    /// `catalog_tag_assignments`, and the reason is a property of egret's STORAGE
+    /// and of this REQUEST, not of the evaluator's input. It is also per
+    /// target-and-catalog rather than per access, so the response is where it is
+    /// true exactly once. The 1:1 pairing is a property of one function: this is
+    /// `Some` exactly when the handler passed `resolved_tags: None`, which is the
+    /// only production state in which the evaluator raises `TagsUnresolved`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag_resolution_declined: Option<ExplainTagDecline>,
+}
+
+/// Split one tag resolution into the two things `explain` does with it: the
+/// evaluator's `resolved_tags`, and the response's
+/// [`ExplainResponse::tag_resolution_declined`].
+///
+/// # ⚠ Three lines in a function because a mutation survived at this exact spot
+///
+/// **Fix round 3.** This was inline in the handler, and a mutant that threw the
+/// decline away (`Err(_) => (None, None)`) **survived the whole suite** — the
+/// handler body is reachable only from DB-gated tests, which do not run on this
+/// branch. That is the same finding Task 6 made about `attribution_for` and the
+/// same one that moved `stored_value_problem` out of SQL: where a mutation cannot
+/// reach, the code is in the wrong shape. Pulling the pairing out makes both arms
+/// assertable with no database, which is what
+/// `the_decline_reason_reaches_the_response_and_the_tags_do_not` does.
+///
+/// The two outputs are mutually exclusive by construction — a `Result` in, one
+/// `Some` out — which is the invariant the page depends on: it renders the reason
+/// only beside `UndecidableCause::TagsUnresolved`, and that cause is raised only
+/// when `resolved_tags` is `None`.
+fn explain_tag_inputs(
+    resolution: Result<UnenrichedTags, ExplainTagDecline>,
+) -> (Option<UnenrichedTags>, Option<ExplainTagDecline>) {
+    match resolution {
+        Ok(tags) => (Some(tags), None),
+        Err(decline) => (None, Some(decline)),
+    }
+}
+
+/// Which of the four states made `explain` decline to resolve the target's tags
+/// — see [`ExplainResponse::tag_resolution_declined`] and
+/// [`stored_value_problem`].
+///
+/// The four have four different remedies and two different REACHES, which is the
+/// whole reason they are carried apart: three are properties of stored data and
+/// hold for every target in the catalog until it changes; the fourth is a property
+/// of the request and holds for nothing else.
+///
+/// Each stored variant carries the offending coordinate so the page can name the
+/// row to fix. That is a `policy:read` surface already — the response's `tags`
+/// field reports attachments on the target — and naming no row is what produced
+/// the measured defect: a sentence telling a steward to re-store an assignment
+/// that was already stored on a table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExplainTagDecline {
+    /// A stored assignment has an empty `schema_name` or `table_name`, so
+    /// `from_assignments` omits that level and the engine resolves the shorter
+    /// resource as an ANCESTOR of everything beneath it.
+    StoredLevelEmpty {
+        schema: String,
+        table: String,
+        column: String,
+    },
+    /// A stored assignment value carries `*` or `?`, which the engine matches with
+    /// `FilenameUtils.wildcardMatch` and no SQL predicate reproduces.
+    StoredWildcard {
+        schema: String,
+        table: String,
+        column: String,
+    },
+    /// A stored assignment value carries one of the characters on which the two
+    /// case folds can disagree — see [`FOLD_DIVERGENT`].
+    StoredFoldDivergent {
+        schema: String,
+        table: String,
+        column: String,
+    },
+    /// The TARGET carries one of those characters. **Per request, not per
+    /// catalog** — nothing is stored wrongly and every other target in the catalog
+    /// answers normally.
+    TargetFoldDivergent {
+        level: ExplainTargetLevel,
+        value: String,
+    },
+}
+
+/// Which level of the target [`ExplainTagDecline::TargetFoldDivergent`] is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExplainTargetLevel {
+    Schema,
+    Table,
+    Column,
 }
 
 /// What `preview` is asked to try — SP4b D2.
@@ -1456,7 +1568,8 @@ async fn explain(
     // StarRocks profile's attachments are dropped by the enricher rather than
     // renamed). The resolution is a property of the target, so computing it once
     // also removes any way for two profiles to be answered from two tag sets.
-    let resolved_tags = resolved_tags_for_target(&mut *conn, &body.target).await?;
+    let (resolved_tags, tag_resolution_declined) =
+        explain_tag_inputs(resolved_tags_for_target(&mut *conn, &body.target).await?);
 
     let mut profiles: Vec<ExplainProfile> = Vec::new();
     for service_id in services_for_catalog_via(&mut conn, body.target.catalog_id).await? {
@@ -1593,6 +1706,7 @@ async fn explain(
         outcome,
         profiles,
         tags,
+        tag_resolution_declined,
     }))
 }
 
@@ -1878,7 +1992,7 @@ impl ClearanceLookups for sqlx::PgConnection {
 async fn resolved_tags_for_target<L: TagLookups + Send>(
     conn: &mut L,
     target: &Scope,
-) -> Result<Option<UnenrichedTags>, PermHttpError> {
+) -> Result<Result<UnenrichedTags, ExplainTagDecline>, PermHttpError> {
     // THE GATE, first and before anything can return a set. Nothing below may
     // move above it: every argument on this function for why the resolution is
     // enricher-equivalent assumes it passed.
@@ -1897,31 +2011,58 @@ async fn resolved_tags_for_target<L: TagLookups + Send>(
     // answer in a state that was already safe. Ordered this way on purpose — the
     // alternative is an argument per branch, and a gate that has to be re-argued
     // per branch is the shape that lost two classes in round 1.
-    if [
-        target.schema.as_deref(),
-        target.table.as_deref(),
-        target.column.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(fold_divergent)
-    {
-        return Ok(None);
+    //
+    // ⚠ The REASON is returned, not discarded. Fix round 3 measured that
+    // `.is_some()` here threw away the only thing that could tell the four
+    // decline states apart, and the page then rendered round 1's single sentence
+    // for all four — naming a stored row that did not exist and claiming a
+    // per-catalog reach for this per-REQUEST one.
+    for (level, value) in [
+        (ExplainTargetLevel::Schema, target.schema.as_deref()),
+        (ExplainTargetLevel::Table, target.table.as_deref()),
+        (ExplainTargetLevel::Column, target.column.as_deref()),
+    ] {
+        if value.is_some_and(fold_divergent) {
+            return Ok(Err(ExplainTagDecline::TargetFoldDivergent {
+                level,
+                value: value.unwrap_or_default().to_string(),
+            }));
+        }
     }
-    // `any`, not a count: one offending coordinate anywhere in the catalog is
-    // enough, because the resolver's predicate is the same predicate for every
-    // target in it.
-    if conn
+    // `find_map`, not `any`: one offending coordinate anywhere in the catalog is
+    // enough — the resolver's predicate is the same predicate for every target in
+    // it — and the one that offends is the one the page has to name.
+    if let Some(decline) = conn
         .assignment_coordinates(target.catalog_id)
         .await?
-        .iter()
-        .any(|(schema, table, column)| stored_value_problem(schema, table, column).is_some())
+        .into_iter()
+        .find_map(|(schema, table, column)| {
+            stored_value_problem(&schema, &table, &column).map(|problem| match problem {
+                StoredValueProblem::EmptyLevel => ExplainTagDecline::StoredLevelEmpty {
+                    schema,
+                    table,
+                    column,
+                },
+                StoredValueProblem::WildcardMetacharacter => ExplainTagDecline::StoredWildcard {
+                    schema,
+                    table,
+                    column,
+                },
+                StoredValueProblem::FoldDivergentCharacter => {
+                    ExplainTagDecline::StoredFoldDivergent {
+                        schema,
+                        table,
+                        column,
+                    }
+                }
+            })
+        })
     {
-        return Ok(None);
+        return Ok(Err(decline));
     }
     let (Some(schema), Some(table)) = (target.schema.as_deref(), target.table.as_deref()) else {
         // Not a shortcut — see the DESCENDANT argument in the doc above.
-        return Ok(Some(UnenrichedTags::new(Vec::new())));
+        return Ok(Ok(UnenrichedTags::new(Vec::new())));
     };
     let column = target.column.as_deref().unwrap_or("");
     let resolved = conn
@@ -1929,11 +2070,24 @@ async fn resolved_tags_for_target<L: TagLookups + Send>(
         .await?;
     // `collect::<Option<Vec<_>>>` so that ONE unmappable attachment declines the
     // whole resolution rather than silently shipping a set with a hole in it.
+    //
+    // ⚠ The decline it produces is reported as `StoredFoldDivergent` on the
+    // target's own coordinate, and that is an approximation stated rather than
+    // hidden: `attachment_for` returns `None` only for a match type no arm of
+    // `resolved_tags_for_resource_via` produces, which no caller can reach today
+    // (its two arms are `Self_` and `Ancestor`). If a producer ever reaches it,
+    // the page will name the right resource and the wrong reason — which is why
+    // the arm is also a refusal in the evaluator rather than only here.
     Ok(resolved
         .iter()
         .map(|tag| attachment_for(tag, schema, table, column))
         .collect::<Option<Vec<_>>>()
-        .map(UnenrichedTags::new))
+        .map(UnenrichedTags::new)
+        .ok_or(ExplainTagDecline::StoredFoldDivergent {
+            schema: schema.to_string(),
+            table: table.to_string(),
+            column: column.to_string(),
+        }))
 }
 
 /// Why one stored `catalog_tag_assignments` coordinate is outside the population
@@ -2022,11 +2176,38 @@ enum StoredValueProblem {
 /// asserted verbatim by
 /// `tests/ranger/src/test/java/EgretCaseFoldAgreementTest.java::theDisagreementSetIsExactlyTheOneTheGateEncodes`.
 ///
-/// That test is the oracle: a code point in it and not here is a fail-open, one
-/// here and not in it is an over-refusal, and it fails on either. This list is
-/// therefore a measured constant reproduced in Rust, the same arrangement
-/// `egret_ranger_eval`'s `service_resource_validates` has with the drop table —
-/// not a second implementation of a rule.
+/// **This list is the SINGLE SOURCE OF TRUTH, and the test reads it** — ⚠ fix
+/// round 3, MINOR 1. The Java test used to hold its own copy of the set and assert
+/// the sweep against THAT, so this constant was compared to nothing: deleting
+/// U+1C85 (a fail-open) or mistyping U+03F1 (an over-refusal) failed no test, since
+/// `[char; 25]` pins only the length and the Rust tests name 7 of the 25. The test
+/// now parses this very declaration out of this file, so a code point the sweep
+/// finds and this lacks is a fail-open, one this has and the sweep does not find is
+/// an over-refusal, and it fails on either.
+///
+/// # ⚠ Measured on a real database, and TWO entries are stand-in-only
+///
+/// The sweep's `lower()` side is Java's `String.toLowerCase(Locale.ROOT)` standing
+/// in for Postgres. Fix round 3 also ran the real thing — PostgreSQL 16.15,
+/// `en_US.utf8`, read-only `SELECT lower(…)`, no template touched — over the 53
+/// single-character pairs this set is derived from: **51 still disagree there, 2 do
+/// not.** Both of the two are U+0130's.
+///
+/// * **U+0130 is therefore a MEASURED OVER-REFUSAL on `en_US.utf8`**: glibc's
+///   `lower('İ')` is `'i'`, length 1, not the two-code-point full mapping the
+///   stand-in produces, so the folds agree there and this declines anyway. It stays
+///   because the direction is conservative and because **`tr_TR` is the collation
+///   where it earns its place** — and `tr_TR` is also where this set as a whole
+///   becomes too NARROW, since it would move `I`/`i` in.
+/// * **U+03A3 stays load-bearing on both oracles, for different reasons.** On the
+///   stand-in it is criterion 3 (the context-dependent `Final_Sigma`); on glibc,
+///   which has no `Final_Sigma`, the string pair `("ΑΣ","ασ")` AGREES and what
+///   catches it is its single-character pair with U+03C2, which disagrees there.
+///   The criterion stays because an ICU collation does implement `Final_Sigma`.
+///
+/// Everything else behaves on the real database exactly as the sweep says,
+/// Vietnamese included. **Falsified by** a case-tailoring collation, or an
+/// ICU/glibc difference on one of the 25.
 const FOLD_DIVERGENT: [char; 25] = [
     '\u{00B5}', // MICRO SIGN — uppercases to Greek Mu, which lowercases to Greek mu
     '\u{0130}', // LATIN CAPITAL LETTER I WITH DOT ABOVE — full lowercase is TWO code points
@@ -2086,7 +2267,7 @@ fn fold_divergent(value: &str) -> bool {
 /// | `*` / `?` | `{"wildCard": true}` ⇒ `FilenameUtils.wildcardMatch` | [`StoredValueProblem::WildcardMetacharacter`] |
 /// | letter case | `{"ignoreCase": true}` ⇒ `equalsIgnoreCase` | **reproduced, not refused** — the resolver folds both sides, measured on the Ranger side by `EgretTagAttachmentMatchTypeTest` |
 /// | a character from [`FOLD_DIVERGENT`] | `equalsIgnoreCase`'s PER-CHARACTER fold versus `lower()`'s FULL-STRING one — the 25 code points on which the two can disagree, derived by a sweep over all of Unicode | [`StoredValueProblem::FoldDivergentCharacter`] |
-/// | any other non-ASCII character | the two folds AGREE on it, measured | **ruled fine** — ⚠ fix round 2 narrowed this from "all non-ASCII declines", which was an over-refusal on an un-measured premise in a Vietnamese-language deployment |
+/// | any other non-ASCII character | the two folds AGREE on it — measured over every defined code point by the Java sweep against a `lower()` STAND-IN, and over the derived pairs against a real PostgreSQL 16.15 `en_US.utf8`; the caveats for U+0130 and U+03A3 are on [`FOLD_DIVERGENT`] | **ruled fine** — ⚠ fix round 2 narrowed this from "all non-ASCII declines", which was an over-refusal on an un-measured premise in a Vietnamese-language deployment |
 /// | leading / trailing whitespace | none: the matcher compares the value as given, and so does the predicate — `' sales'` matches `' sales'` and nothing else on BOTH sides | **ruled fine**, and it is a ruling rather than an omission |
 /// | length, `NULL` | `NOT NULL` on all three columns (migration 0081); the matcher has no length rule | **ruled fine** |
 /// | `isExcludes` / `isRecursive` | not expressible: `from_assignments` writes `{"values": [v]}` and no flag, so the matcher's defaults (`false`) are what the enricher gets | **ruled fine**, and `ServiceTags::from_assignments` is what makes it so |
@@ -2587,8 +2768,8 @@ mod wiring_tests {
 #[cfg(test)]
 mod tag_resolution_tests {
     use super::{
-        attachment_for, resolved_tags_for_target, stored_value_problem, PermHttpError, Scope,
-        StoredValueProblem, TagLookups,
+        attachment_for, resolved_tags_for_target, stored_value_problem, ExplainTagDecline,
+        ExplainTargetLevel, PermHttpError, Scope, StoredValueProblem, TagLookups, UnenrichedTags,
     };
     use egret_ranger_eval::resource::MatchType;
     use uuid::Uuid;
@@ -2692,6 +2873,39 @@ mod tag_resolution_tests {
     /// resolve".
     #[tokio::test]
     async fn every_unreproducible_stored_coordinate_declines_the_whole_resolution() {
+        // ⚠ The variant each row must REPORT, written out per coordinate rather
+        // than derived from `stored_value_problem` (fix round 3). Deriving it would
+        // be a correlated oracle — the function under test would be asked to grade
+        // its own answer — and the `other =>` arm means a row added without an
+        // expectation fails loudly instead of being graded by nothing.
+        let coord = |(schema, table, column): (&str, &str, &str)| {
+            (schema.to_string(), table.to_string(), column.to_string())
+        };
+        let expected_for = |c: (&str, &str, &str)| {
+            let (schema, table, column) = coord(c);
+            match c {
+                ("sales", "", "") | ("", "", "") => ExplainTagDecline::StoredLevelEmpty {
+                    schema,
+                    table,
+                    column,
+                },
+                ("sales", "*", "")
+                | ("sales", "ord*", "")
+                | ("*", "*", "")
+                | ("sales", "order?", "")
+                | ("sales", "orders", "ema*") => ExplainTagDecline::StoredWildcard {
+                    schema,
+                    table,
+                    column,
+                },
+                ("sales", "orders", "ema\u{0131}l") => ExplainTagDecline::StoredFoldDivergent {
+                    schema,
+                    table,
+                    column,
+                },
+                other => panic!("no expected decline written for {other:?}"),
+            }
+        };
         for (coordinate, why) in [
             (
                 ("sales", "", ""),
@@ -2736,9 +2950,16 @@ mod tag_resolution_tests {
             )
             .await
             .expect("no error");
-            assert!(
-                got.is_none(),
-                "{coordinate:?} must decline the narrowing ({why}), got {got:?}"
+            // ⚠ The VARIANT and the COORDINATE, not merely "declined" (fix round
+            // 3). Three states with three different remedies were collapsed by an
+            // `.is_some()` at the call site, and the page then named a stored row
+            // that did not exist and offered a remedy already satisfied. An
+            // assertion that only checked for a decline could not have caught
+            // that — and did not.
+            assert_eq!(
+                got.as_ref().err(),
+                Some(&expected_for(coordinate)),
+                "{coordinate:?} must decline and name itself ({why}), got {got:?}"
             );
             assert_eq!(
                 lookups.gate_asked,
@@ -2780,6 +3001,43 @@ mod tag_resolution_tests {
             lookups.resolved_asked.len(),
             1,
             "the resolver is asked — the fold is ITS job, not the gate's"
+        );
+    }
+
+    /// **The wiring a surviving mutation found (fix round 3).** Dropping the
+    /// decline on its way to the response — `Err(_) => (None, None)` — passed the
+    /// entire suite, because the handler body is reachable only from DB-gated
+    /// tests. Both arms are asserted here, and the second assertion is the one that
+    /// matters: a reason that does not reach the response is a page that renders
+    /// round 1's sentence for all four states, which is the defect this round
+    /// exists to fix.
+    #[test]
+    fn the_decline_reason_reaches_the_response_and_the_tags_do_not() {
+        let decline = ExplainTagDecline::StoredWildcard {
+            schema: "sales".to_string(),
+            table: "*".to_string(),
+            column: String::new(),
+        };
+        let (tags, declined) = super::explain_tag_inputs(Err(decline.clone()));
+        assert!(
+            tags.is_none(),
+            "a decline must not hand the evaluator a tag set"
+        );
+        assert_eq!(
+            declined,
+            Some(decline),
+            "and the REASON must reach the response, verbatim"
+        );
+
+        let (tags, declined) = super::explain_tag_inputs(Ok(UnenrichedTags::new(Vec::new())));
+        assert_eq!(
+            tags.map(|t| t.as_slice().len()),
+            Some(0),
+            "a resolution hands the evaluator its set, empty or not"
+        );
+        assert!(
+            declined.is_none(),
+            "and reports no decline — the page keys the reason on this being present"
         );
     }
 
@@ -2847,22 +3105,38 @@ mod tag_resolution_tests {
     #[tokio::test]
     async fn a_fold_divergent_character_in_the_target_declines_the_resolution() {
         for value in ["\u{017f}ales", "\u{0131}", "\u{03a3}igma"] {
-            for target in [
-                target(Some(value), Some("orders"), Some("email")),
-                target(Some("sales"), Some(value), Some("email")),
-                target(Some("sales"), Some("orders"), Some(value)),
+            for (level, t) in [
+                (
+                    ExplainTargetLevel::Schema,
+                    target(Some(value), Some("orders"), Some("email")),
+                ),
+                (
+                    ExplainTargetLevel::Table,
+                    target(Some("sales"), Some(value), Some("email")),
+                ),
+                (
+                    ExplainTargetLevel::Column,
+                    target(Some("sales"), Some("orders"), Some(value)),
+                ),
             ] {
                 let mut lookups = FakeTagLookups::clean(&[("pii", MatchType::Self_)]);
-                let got = resolved_tags_for_target(&mut lookups, &target)
+                let got = resolved_tags_for_target(&mut lookups, &t)
                     .await
                     .expect("no error");
-                assert!(
-                    got.is_none(),
-                    "a divergent character in the target must decline: {target:?}"
+                // The LEVEL is part of the answer: the page names the box the
+                // steward typed it in, and this is the one decline whose reach is
+                // the REQUEST rather than the whole catalog.
+                assert_eq!(
+                    got.as_ref().err(),
+                    Some(&ExplainTagDecline::TargetFoldDivergent {
+                        level,
+                        value: value.to_string(),
+                    }),
+                    "a divergent target value must decline and name its level: {t:?}"
                 );
                 assert!(
                     lookups.resolved_asked.is_empty(),
-                    "and decline before resolving: {target:?}"
+                    "and decline before resolving: {t:?}"
                 );
             }
         }
@@ -2902,7 +3176,7 @@ mod tag_resolution_tests {
         let got = resolved_tags_for_target(&mut lookups, &target(Some("s"), Some("t"), None))
             .await
             .expect("no error");
-        assert_eq!(got.map(|t| t.as_slice().len()), Some(0));
+        assert_eq!(got.map(|t| t.as_slice().len()), Ok(0));
         assert_eq!(
             lookups.resolved_asked,
             vec![(
@@ -3031,9 +3305,16 @@ mod tag_resolution_tests {
                 resolved_tags_for_target(&mut lookups, &target(Some("s"), Some("t"), Some("c")))
                     .await
                     .expect("no error");
-            assert!(
-                got.is_none(),
-                "one unmappable attachment must decline the whole set, not be skipped: {mt:?}"
+            assert_eq!(
+                got.as_ref().err(),
+                Some(&ExplainTagDecline::StoredFoldDivergent {
+                    schema: "s".to_string(),
+                    table: "t".to_string(),
+                    column: "c".to_string(),
+                }),
+                "one unmappable attachment must decline the whole set, not be skipped — and the \
+                 reason it reports is the APPROXIMATION documented at the call site, because this \
+                 arm is unreachable from `resolved_tags_for_resource_via`: {mt:?}"
             );
         }
     }

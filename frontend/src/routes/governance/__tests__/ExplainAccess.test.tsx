@@ -770,14 +770,129 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
   });
 
   /**
-   * The second surviving shape, and the one Task 7 created: egret DOES resolve
-   * tags now, and declines for a whole catalog while an assignment in it is
-   * stored with no schema or no table. The note has to name the catalog (not the
-   * installation, not the profile) and the thing to fix, and it must not read
-   * like the download note above — `tsc` proves the switch exhaustive and proves
-   * nothing at all about two arms rendering distinguishable sentences.
+   * **Fix round 3: all FOUR decline states, four distinguishable remedies, two
+   * different reaches — and that is the defect this replaces, not an addition.**
+   *
+   * Task 7 wrote one sentence for this cause when `EmptyLevel` was the only state
+   * that produced it, and rounds 1 and 2 added three more states and left the
+   * sentence alone. Measured: a catalog holding `('sales','*','')` was told "a tag
+   * assignment … stored with no schema or no table … re-store that assignment on a
+   * table or a column" — a row that does not exist and a remedy already satisfied —
+   * and a target carrying `Σ` got the same sentence PLUS a scope note claiming
+   * "every target in this catalog answers the same way", which is false, because
+   * that state is per REQUEST. The old version of this test pinned the wrong
+   * wording, so the suite required it.
+   *
+   * `tsc` proves the switch exhaustive and proves nothing about two arms rendering
+   * distinguishable sentences, so the distinctness is asserted directly.
    */
-  test("an unresolved-tags refusal names the catalog and the assignment to fix", async () => {
+  test("each of the four decline states names its own remedy and its own reach", async () => {
+    const declines = [
+      {
+        declined: {
+          kind: "stored_level_empty",
+          schema: "sales",
+          table: "",
+          column: "",
+        },
+        sentence: [/stored at sales \/ \(none\)/i, /level left empty/i, /re-store that assignment on a table or a column/i],
+        perCatalog: true,
+      },
+      {
+        declined: { kind: "stored_wildcard", schema: "sales", table: "*", column: "" },
+        sentence: [/stored at sales \/ \*/i, /matches against many resources/i, /the exact table or column/i],
+        perCatalog: true,
+      },
+      {
+        declined: {
+          kind: "stored_fold_divergent",
+          schema: "sales",
+          table: "tab\u0131e",
+          column: "",
+        },
+        sentence: [/stored at sales \/ tab\u0131e/i, /upper- and lower-case forms/i, /rename that resource/i],
+        perCatalog: true,
+      },
+      {
+        declined: { kind: "target_fold_divergent", level: "schema", value: "\u03a3ales" },
+        sentence: [/the schema you asked about/i, /\u03a3ales/, /nothing is stored wrongly/i],
+        perCatalog: false,
+      },
+    ] as const;
+
+    const rendered: string[] = [];
+    for (const row of declines) {
+      mutateAsync.mockResolvedValueOnce({
+        status: 200,
+        data: {
+          outcome: "per_profile",
+          profiles: [
+            {
+              service_id: 11,
+              service_name: "egret-trino-prod",
+              engine: "trino",
+              accesses: [
+                {
+                  access_type: "select",
+                  decision: { kind: "undecidable", why: [{ kind: "tags_unresolved" }] },
+                  attribution: null,
+                },
+              ],
+            },
+          ],
+          tags: [],
+          tag_resolution_declined: row.declined,
+        } satisfies ExplainResponse,
+      });
+      const user = userEvent.setup();
+      const view = renderPage();
+      await submit(user);
+
+      const result = await screen.findByTestId("explain-result");
+      const cause = within(result).getAllByTestId("undecidable-cause")[0];
+      const sentence = within(cause).getByTestId("undecidable-cause-sentence");
+      const scope = within(cause).getByTestId("undecidable-cause-scope");
+
+      // The cause's own distinction, true of all four and therefore in the head.
+      expect(sentence).toHaveTextContent(/declined to resolve/i);
+      expect(sentence).toHaveTextContent(/not the same as there being none/i);
+      // …and this state's own subject and remedy.
+      for (const pattern of row.sentence) {
+        expect(sentence).toHaveTextContent(pattern);
+      }
+      // ⚠ The remedy that belongs to ONE of the four must not appear on the others.
+      if (row.declined.kind !== "stored_level_empty") {
+        expect(sentence).not.toHaveTextContent(/stored with no schema or no table/i);
+        expect(sentence).not.toHaveTextContent(
+          /re-store that assignment on a table or a column/i,
+        );
+      }
+      // The REACH, which differs, and whose round-1 wording was measured false for
+      // the request-side state.
+      if (row.perCatalog) {
+        expect(scope).toHaveTextContent(/every target in this catalog answers the same way/i);
+        expect(scope).not.toHaveTextContent(/specific to what you asked/i);
+      } else {
+        expect(scope).toHaveTextContent(/specific to what you asked/i);
+        expect(scope).toHaveTextContent(/every other target in this catalog answers normally/i);
+        expect(scope).not.toHaveTextContent(/every target in this catalog answers the same way/i);
+      }
+      rendered.push(sentence.textContent ?? "");
+      view.unmount();
+    }
+
+    expect(new Set(rendered).size).toBe(4);
+  });
+
+  /**
+   * The cause with NO reason attached — a payload egret does not produce, because
+   * `tag_resolution_declined` is `Some` exactly when the handler passed
+   * `resolved_tags: None`, which is the only production state raising this cause.
+   * It is asserted anyway, and what it must NOT do is invent a reach: round 1's
+   * note claimed a per-catalog scope unconditionally, and one of the four states
+   * is per-request, so with no reason the honest answer is no note at all.
+   */
+  test("an unresolved-tags cause with no reason renders the head and claims no reach", async () => {
     mutateAsync.mockResolvedValueOnce({
       status: 200,
       data: {
@@ -816,25 +931,23 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     const causes = within(result).getAllByTestId("undecidable-cause");
     expect(causes).toHaveLength(2);
 
-    const scope = within(causes[0]).getByTestId("undecidable-cause-scope");
-    expect(scope).toHaveTextContent(/whole catalog/i);
-    expect(scope).toHaveTextContent(/every target in this catalog/i);
-    expect(scope).toHaveTextContent(/no schema or no table/i);
-    // The reach is a catalog. Saying "this profile" would send a steward to the
-    // profile's tag download, which is the OTHER cause's subject.
-    expect(scope).not.toHaveTextContent(/every catalog this profile serves/i);
-
-    // And the SENTENCE carries the state and the remedy on its own — asserted
-    // apart from the note, which repeats neither.
     const sentence = within(causes[0]).getByTestId("undecidable-cause-sentence");
     expect(sentence).toHaveTextContent(/declined to resolve/i);
-    expect(sentence).toHaveTextContent(/no schema or no table/i);
     expect(sentence).toHaveTextContent(/not the same as there being none/i);
+    // No reason, so no remedy may be invented — this is where round 1's sentence
+    // named a stored row.
+    expect(sentence).not.toHaveTextContent(/no schema or no table/i);
+    expect(sentence).not.toHaveTextContent(/re-store/i);
+    // And no scope note at all, because the reach is unknown without the reason.
+    expect(
+      within(causes[0]).queryByTestId("undecidable-cause-scope"),
+    ).not.toBeInTheDocument();
 
-    // Two causes, two scopes, two remedies — and two different sentences.
+    // The sibling cause still carries its own note, so "no note" above is
+    // content-derived rather than the element having gone missing everywhere.
     const scope1 = within(causes[1]).getByTestId("undecidable-cause-scope");
     expect(scope1).toHaveTextContent(/tag-policy download this profile received/i);
-    expect(scope.textContent).not.toEqual(scope1.textContent);
+    expect(sentence.textContent).not.toEqual(scope1.textContent);
   });
 
   /**
@@ -989,10 +1102,12 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     // for this catalog, because of a stored assignment". The distinction it has
     // always existed to make — declining is not finding none — is still asserted,
     // because an empty set would have been an ANSWER.
+    // This fixture attaches no `tag_resolution_declined`, so the head is all this
+    // cause can say — the remedy moved into that field in fix round 3, and the
+    // state-specific wording is asserted by its own test above.
     const unresolved = within(causes[0]).getByTestId("undecidable-cause-sentence");
     expect(unresolved).toHaveTextContent(/declined to resolve/i);
     expect(unresolved).toHaveTextContent(/not the same as there being none/i);
-    expect(unresolved).toHaveTextContent(/no schema or no table/i);
 
     // The four `tag_resource_not_reproducible` shapes have four different
     // remedies, so each must read differently and name its own policy.

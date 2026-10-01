@@ -4205,6 +4205,12 @@ async fn a_tag_policy_block_with_no_tags_recorded_answers_through_the_narrowing(
         verdict["decision"]["why"].is_null(),
         "a decided verdict carries no causes at all; body: {body}"
     );
+    // And no decline reason, because nothing declined — the field is the page's
+    // signal that `tags_unresolved` has a reason to render.
+    assert!(
+        body["tag_resolution_declined"].is_null(),
+        "a resolved target reports no decline; body: {body}"
+    );
 
     // The StarRocks profile alongside it has no tag service at all, and decides
     // as it always did — the change is scoped to the profile that had the block.
@@ -4269,6 +4275,22 @@ async fn an_assignment_below_no_table_declines_the_resolution_and_refuses() {
             .iter()
             .any(|c| c["kind"] == "tags_unresolved"),
         "no tags_unresolved cause in {body}"
+    );
+    // **Fix round 3: the REASON reaches the wire, and names the row.** The cause
+    // alone cannot say which of four states produced it — the page rendered one
+    // sentence for all four, naming a stored row that did not exist — so the
+    // response carries the reason and the coordinate beside it.
+    assert_eq!(
+        body["tag_resolution_declined"]["kind"], "stored_level_empty",
+        "the decline's reason must reach the response; body: {body}"
+    );
+    assert_eq!(
+        body["tag_resolution_declined"]["schema"], "sales",
+        "body: {body}"
+    );
+    assert_eq!(
+        body["tag_resolution_declined"]["table"], "",
+        "and the coordinate must be the offending one, so the page can name it; body: {body}"
     );
 }
 
