@@ -108,7 +108,11 @@ pub(crate) async fn write_tar_at(
 ) -> Result<(), TarError> {
     let dirs = plan(files).map_err(TarError::Author)?;
     for d in &dirs {
-        let h = header(d, 0, b'5', 0o755, mtime).map_err(TarError::Author)?;
+        let own = files
+            .get(d.trim_end_matches('/'))
+            .is_some_and(|s| matches!(s, TarSource::Directory));
+        let mode = if own { OUTPUT_DIR_MODE } else { 0o755 };
+        let h = header(d, 0, b'5', mode, mtime).map_err(TarError::Author)?;
         out.write_all(&h).await.map_err(TarError::Write)?;
     }
     for (name, source) in files {
@@ -257,6 +261,15 @@ fn plan(files: &BTreeMap<String, TarSource<'_>>) -> Result<BTreeSet<String>, Str
     }
     Ok(dirs)
 }
+
+/// The mode of a [`TarSource::Directory`] -- the output directory a task
+/// writes into: world-writable (W9a Task 9). `docker cp` makes every entry
+/// root-owned, and the plugin host image runs as `USER 65532`
+/// (`deploy/docker/plugin-host.Dockerfile`), whose `EgretStorage` writes
+/// `.egret/out/`; at `0o755` every plugin write failed in the live test. The
+/// directory exists only inside the task's own container. Its parents keep
+/// `0o755`.
+pub(crate) const OUTPUT_DIR_MODE: u32 = 0o777;
 
 /// One ustar header block.
 pub(crate) fn header(
@@ -758,6 +771,20 @@ mod tests {
             .map(|(n, _, b)| (n, b))
             .collect();
         assert_eq!(got, files);
+        // The output directory is writable by a non-root task (W9a Task 9);
+        // its parent and every other directory are not.
+        let mode_of = |name: &str| -> u32 {
+            let block = tar
+                .chunks(BLOCK)
+                .find(|b| b[..name.len()] == *name.as_bytes() && b[name.len()] == 0)
+                .unwrap_or_else(|| panic!("no header for {name}"));
+            let text = std::str::from_utf8(&block[100..107]).expect("octal");
+            u32::from_str_radix(text.trim_matches(|c: char| c == '\0' || c == ' '), 8)
+                .expect("a mode")
+        };
+        assert_eq!(mode_of(".egret/out/"), 0o777);
+        assert_eq!(mode_of(".egret/"), 0o755);
+        assert_eq!(mode_of("dir/sub/"), 0o755);
     }
 
     fn raw(name: &str, size: u64, kind: u8, link: &str) -> [u8; BLOCK] {

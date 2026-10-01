@@ -227,6 +227,24 @@ class EgretStorageTest {
             storage.getContextBaseURI(), "Kestra's own context URI, unchanged");
     }
 
+    /**
+     * Live, W9a Task 9: on Docker $WORKING_DIR is root-owned and the host runs as USER 65532, so the
+     * plugin's scratch (Kestra's LocalWorkingDir) is a separate, writable base; staged and written
+     * files stay under $WORKING_DIR.
+     */
+    @Test
+    void the_plugins_scratch_and_egrets_files_have_separate_bases(@TempDir Path scratch) throws Exception {
+        var shim = new ShimRunContext(scratch, wd, new ShimRunContext.StorageSpec(Map.of(STAGED, ".egret/storage/0"),
+            URI.create(BASE), 100, Map.of("namespace", "w9a.plugins", "flowId", "pg-storage", "executionId", EXEC,
+                "taskId", "copy_out", "taskRunId", RUN)));
+        Path tmp = shim.workingDir().createTempFile(".ion");
+        assertTrue(tmp.startsWith(scratch), tmp.toString());
+        Files.writeString(tmp, "{i:1}");
+        URI uri = shim.storage().putFile(tmp.toFile());
+        assertEquals("{i:1}", Files.readString(wd.resolve(".egret/out").resolve(Path.of(uri.getPath()).getFileName())));
+        assertArrayEquals(STAGED_BYTES, read(shim.storage().getFile(URI.create(STAGED))));
+    }
+
     @Test
     void namespace_files_are_w9b_and_exit_4() {
         var storage = shim().storage();

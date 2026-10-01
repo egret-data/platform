@@ -42,7 +42,8 @@ import jakarta.validation.Validator;
  *   <li>Every {@code render*} returns its input: egret rendered the properties before dispatch.</li>
  *   <li>{@link #logger()} writes {@code LEVEL message} lines to stdout (logback.xml).</li>
  *   <li>{@link #metric} logs one DEBUG line.</li>
- *   <li>{@link #workingDir()} is Kestra's own {@link LocalWorkingDir} under the given directory.</li>
+ *   <li>{@link #workingDir()} is Kestra's own {@link LocalWorkingDir} under the JVM's temp directory
+ *       (W9a Task 9: on Docker, {@code $WORKING_DIR} is root-owned and the host runs as USER 65532).</li>
  *   <li>{@link #storage()} is Kestra's own {@link InternalStorage} over {@link EgretStorage}: the files
  *       egret staged and the ones this task writes (W9a spec §9.1).</li>
  *   <li>KV, namespace files, secrets, encryption, ACLs and the application context throw
@@ -88,19 +89,30 @@ public class ShimRunContext extends DefaultRunContext {
     }
 
     ShimRunContext(Path workingDirBase, StorageSpec storageSpec) {
+        this(workingDirBase, workingDirBase, storageSpec);
+    }
+
+    /**
+     * @param scratchBase where Kestra's {@link LocalWorkingDir} makes its random directory (the
+     *     plugin's temp files)
+     * @param workingDirBase {@code $WORKING_DIR}: where egret staged {@code .egret/storage/} and
+     *     collects {@code .egret/out/}
+     */
+    ShimRunContext(Path scratchBase, Path workingDirBase, StorageSpec storageSpec) {
         this.workingDirBase = workingDirBase;
-        this.workingDir = new LocalWorkingDir(workingDirBase);
+        this.workingDir = new LocalWorkingDir(scratchBase);
         this.storageSpec = storageSpec;
         setVariables(Collections.emptyMap());
         setPluginConfiguration(Collections.emptyMap());
     }
 
     ShimRunContext(Path workingDirBase, Task task) {
-        this(workingDirBase, task, StorageSpec.NONE);
+        this(workingDirBase, workingDirBase, StorageSpec.NONE);
+        setTask(task);
     }
 
-    ShimRunContext(Path workingDirBase, Task task, StorageSpec storageSpec) {
-        this(workingDirBase, storageSpec);
+    ShimRunContext(Path scratchBase, Path workingDirBase, Task task, StorageSpec storageSpec) {
+        this(scratchBase, workingDirBase, storageSpec);
         setTask(task);
     }
 

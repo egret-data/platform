@@ -181,11 +181,15 @@ public final class EgretPluginHost {
         }
         Task task = loaded.task();
 
+        // The plugin's temp files go to the JVM's own temp directory, which its user owns; egret's
+        // staged inputs and collected outputs are under $WORKING_DIR. W9a Task 9, measured live:
+        // `docker cp` makes $WORKING_DIR root-owned and the image runs as USER 65532, so Kestra's
+        // LocalWorkingDir could not create its directory there and every STORE failed with
+        // NoSuchFileException on its temp file.
+        Path scratch = Path.of(System.getProperty("java.io.tmpdir"));
         String base = System.getenv("WORKING_DIR");
-        Path workingDirBase = base == null || base.isBlank()
-            ? Path.of(System.getProperty("java.io.tmpdir"))
-            : Path.of(base);
-        ShimRunContext runContext = new ShimRunContext(workingDirBase, task, loaded.storage());
+        Path workingDirBase = base == null || base.isBlank() ? scratch : Path.of(base);
+        ShimRunContext runContext = new ShimRunContext(scratch, workingDirBase, task, loaded.storage());
 
         try {
             runContext.validate(task);
