@@ -101,10 +101,25 @@ Two consequences:
   migration now changes the digest, so it asks for a template of its own and builds it from
   empty. Nothing needs dropping. (The old `egret_test_template` database, if your server
   still has one, is simply unused; drop it by hand whenever no suite is running.)
-- **Templates are swept, not accumulated.** A template whose database comment says it has
-  not been used for 14 days, and which has no sessions on it, is dropped by the next run —
-  under the same advisory lock as the create, so a template another process is about to
-  clone from cannot be caught. A template with no readable marker is never dropped.
+- **Templates accumulate, and the cleanup is manual on purpose.** One template per
+  migration set means a machine that follows `main` picks one up every few days, 12 MB each
+  measured 2026-10-01. An automatic sweep was written and then removed by ruling: a
+  mechanism that **deletes databases** whose drop had never been observed to fire is not
+  something to carry on an unmeasured 14-day TTL, and the cost it saves is small and cheap
+  to clean by hand. List them, and drop the ones you recognise as finished branches:
+
+  ```bash
+  psql postgres://egret:egret@localhost:5432/postgres \
+    -c "select datname, pg_size_pretty(pg_database_size(datname)) \
+        from pg_database where datname like 'egret_test_tmpl%' order by 1"
+  psql postgres://egret:egret@localhost:5432/postgres \
+    -c 'drop database "egret_test_tmpl_<digest>"'
+  ```
+
+  Dropping the one your current branch uses costs a single ~7 s re-migration, nothing more,
+  so a wrong guess here is cheap — which is the other half of why the sweep is not needed.
+  Never run the drop while a suite is running: `CREATE DATABASE … TEMPLATE x` and a `DROP`
+  of `x` race, and the loser sees a missing relation.
 
 > **Never point `DATABASE_URL` at the dev database `egret`.** `#[sqlx::test]` resolves the
 > variable through dotenvy **unconditionally**, so an *unexported* variable does not make

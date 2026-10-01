@@ -84,24 +84,24 @@ static TEST_DB: tokio::sync::OnceCell<Option<String>> = tokio::sync::OnceCell::c
 /// the eighth character (`_` against `e`), and a regex `_` is literal. That is the same
 /// distinction `a_clone_name_is_the_prefix_and_exactly_32_hex_digits` records for
 /// `egret_test` itself, and `postgres_matches_a_clone_and_never_the_shared_database` asks
-/// Postgres about a freshly generated template name rather than taking it on reading.
+/// Postgres about a freshly generated template name rather than taking it on reading — which
+/// is the one claim here that is NOT a matter of reading the two strings.
+///
+/// # Templates accumulate, and that is a known condition with a manual remedy
+///
+/// A name per migration set means a template per migration set: a machine that follows
+/// `main` acquires one every few days, 12 MB each measured 2026-10-01. An automatic sweep for
+/// them was written and then **removed on the controller's ruling** — a mechanism that
+/// DELETES databases and whose drop had never been observed to fire is the one place an
+/// unfalsifiable green is not acceptable, and its whole policy was an unmeasured TTL. The
+/// remedy is a listing and a judgement, in `docs/en/testing/db-gated-tests.md`:
+///
+/// ```text
+/// psql postgres://egret:egret@localhost:5432/postgres \
+///   -c "select datname, pg_size_pretty(pg_database_size(datname)) \
+///       from pg_database where datname like 'egret_test_tmpl%'"
+/// ```
 const TEMPLATE_PREFIX: &str = "egret_test_tmpl_";
-
-/// What [`drop_stale_templates`] is allowed to drop: the prefix, then exactly 32 hex.
-///
-/// Anchored at both ends, and a REGEX rather than `LIKE`, for the reason [`CLONE_PATTERN`]
-/// gives at length. It can only match a name [`template_db_name`] produced — not
-/// `egret_test`, not the old `egret_test_template`, not a developer's scratch database.
-const TEMPLATE_PATTERN: &str = "^egret_test_tmpl_[0-9a-f]{32}$";
-
-/// How long a template outlives its last use.
-///
-/// A name per migration set means a template per migration set, and a machine that follows
-/// `main` acquires one every few days — 12 MB each, measured 2026-10-01. Long enough that a
-/// branch picked up again next week still clones instead of re-running 162 migrations (~7 s);
-/// short enough that the accumulation this crate removed from rows does not simply reappear
-/// as databases.
-const TEMPLATE_TTL: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 60 * 60);
 
 /// This process's template database: [`TEMPLATE_PREFIX`] and a digest of the migration set.
 ///
@@ -190,83 +190,6 @@ fn template_db_name(migrations: &[(i64, &[u8])]) -> String {
     format!("{TEMPLATE_PREFIX}{}", hex::encode(&h.finalize()[..16]))
 }
 
-/// Unix seconds, or `None` if the clock is before the epoch.
-///
-/// `None` rather than `0`, because `0` is a timestamp — it would mark a live template as
-/// fourteen days stale and invite the sweep to drop it.
-fn now_unix() -> Option<i64> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs() as i64)
-}
-
-/// Stamp a template's last use into its database comment.
-///
-/// # Why a timestamp and not `pg_stat_activity`
-///
-/// `pg_database` records no last-used time, and sessions cannot stand in for one: a template
-/// legitimately has nothing connected to it for the whole window between being migrated and
-/// being cloned, so a sweep that read only sessions would drop the template another process
-/// was about to clone from — the exact race [`drop_abandoned_clones`] documents for clones,
-/// whose symptom is a missing relation and whose reader goes looking in the migrations. A
-/// timestamp cannot race: a template used a moment ago is never stale, whatever is or is not
-/// connected to it.
-async fn mark_template_used(admin: &mut sqlx::PgConnection, name: &str, now: i64) {
-    // `AssertSqlSafe`: `name` is `TEMPLATE_PREFIX` plus 32 hex digits and `now` is an
-    // `i64`, so neither can carry an identifier or literal break — and `COMMENT ON
-    // DATABASE` has no bind form for either position.
-    let stmt = format!(r#"COMMENT ON DATABASE "{name}" IS '{now}'"#);
-    let _ = sqlx::query(sqlx::AssertSqlSafe(stmt)).execute(admin).await;
-}
-
-/// Whether a template may be dropped, as a pure function over what its marker says.
-///
-/// Absent or unparseable means **keep**. An instrument that cannot read the time must not be
-/// able to authorise a drop, and a half-built template — created, then abandoned before it
-/// could be stamped — costs 12 MB where dropping the wrong database costs a suite. A marker
-/// in the future (two clocks, one database) is not stale either.
-fn template_is_stale(marker: Option<&str>, now: i64, ttl: std::time::Duration) -> bool {
-    let Some(stamped) = marker.map(str::trim).and_then(|s| s.parse::<i64>().ok()) else {
-        return false;
-    };
-    now.saturating_sub(stamped) > ttl.as_secs() as i64
-}
-
-/// Drop templates for migration sets nobody has used for [`TEMPLATE_TTL`].
-///
-/// Runs under the same advisory lock as the create in [`ensure_template`], and never touches
-/// `keep` — the template this process is about to clone.
-///
-/// Not `WITH (FORCE)`, and session-free as well as stale: a template with a connection on it
-/// is one some other process is using, and a cleanup that can turn a running suite red is
-/// worse than a leaked 12 MB. Every error here is ignored for the same reason.
-async fn drop_stale_templates(admin: &mut sqlx::PgConnection, keep: &str, now: i64) {
-    let stale: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT d.datname, shobj_description(d.oid, 'pg_database') FROM pg_database d \
-         WHERE d.datname ~ $1 \
-           AND d.datname <> $2 \
-           AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datid = d.oid)",
-    )
-    .bind(TEMPLATE_PATTERN)
-    .bind(keep)
-    .fetch_all(&mut *admin)
-    .await
-    .unwrap_or_default();
-
-    for (name, marker) in stale {
-        if !template_is_stale(marker.as_deref(), now, TEMPLATE_TTL) {
-            continue;
-        }
-        // `name` came from `pg_database` one query ago and matched `TEMPLATE_PATTERN`, so it
-        // is a name Postgres itself produced — not caller input.
-        let stmt = format!(r#"DROP DATABASE IF EXISTS "{name}""#);
-        let _ = sqlx::query(sqlx::AssertSqlSafe(stmt))
-            .execute(&mut *admin)
-            .await;
-    }
-}
-
 /// Everything below reconnects to `postgres` rather than reusing the caller's pool:
 /// `CREATE DATABASE ... TEMPLATE x` is refused while anything is connected to `x`.
 fn admin_url_of(url: &str) -> Option<String> {
@@ -305,14 +228,6 @@ async fn ensure_template(url: &str) -> Option<()> {
             .execute(&mut admin)
             .await
             .ok()?;
-    }
-
-    // Mark-and-sweep, inside the same critical section as the create above, and BEFORE the
-    // migration: a template that exists is stamped even if migrating it then fails, so the
-    // sweep's "no marker means keep" rule is reserved for the cases it is actually for.
-    if let Some(now) = now_unix() {
-        mark_template_used(&mut admin, template, now).await;
-        drop_stale_templates(&mut admin, template, now).await;
     }
 
     // Migrate the template itself, then drop the connection so it can be cloned.
@@ -839,8 +754,7 @@ pub async fn url() -> Option<String> {
 mod tests {
     use super::{
         dotenv_file_setting_from, opt_out_verdict, process_db_name, skip_verdict, template_db,
-        template_db_name, template_is_stale, ALLOW_SKIP_VAR, CLONE_PATTERN, TEMPLATE_PATTERN,
-        TEMPLATE_PREFIX, TEMPLATE_TTL,
+        template_db_name, ALLOW_SKIP_VAR, CLONE_PATTERN, TEMPLATE_PREFIX,
     };
     use std::path::{Path, PathBuf};
 
@@ -1089,26 +1003,13 @@ mod tests {
             assert_eq!(matched, expected, "{name} against {CLONE_PATTERN}");
         }
 
-        // And the other direction: the template sweep reaches this process's template and
-        // nothing else that lives on this server. `egret_test` and the dev database `egret`
-        // are named explicitly because dropping either is the failure this guards.
-        let template_cases: [(&str, bool); 6] = [
-            (template, true),
-            ("egret_test", false),
-            ("egret", false),
-            ("egret_test_template", false),
-            (mine.as_str(), false),
-            ("egret_test_tmpl_0123456789abcdef", false),
-        ];
-        for (name, expected) in template_cases {
-            let (matched,): (bool,) = sqlx::query_as("SELECT $1 ~ $2")
-                .bind(name)
-                .bind(TEMPLATE_PATTERN)
-                .fetch_one(&mut conn)
-                .await
-                .expect("evaluate the pattern");
-            assert_eq!(matched, expected, "{name} against {TEMPLATE_PATTERN}");
-        }
+        // The other direction — a TEMPLATE pattern that must never reach `egret_test`, the
+        // dev `egret`, or a clone — was asserted here too, against the automatic template
+        // sweep that has since been removed. It is not kept: with no production code owning
+        // such a pattern, the test would have to declare the regex itself and then check it,
+        // which is an oracle drawn from the same vocabulary as the thing it checks. The
+        // claim belongs with whoever writes the next sweep, and the condition it would have
+        // guarded is on [`super::TEMPLATE_PREFIX`].
     }
 
     /// **The collision this whole change exists to make impossible.**
@@ -1252,7 +1153,8 @@ mod tests {
         assert!(
             hex.bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-            "{name} must be lowercase hex — TEMPLATE_PATTERN's character class is [0-9a-f]"
+            "{name} must be lowercase hex — a `LIKE 'egret_test_tmpl%'` listing is how these \
+             are found by hand, and mixed case makes that listing lie"
         );
         assert!(
             name.len() <= 63,
@@ -1265,69 +1167,11 @@ mod tests {
             template_db(),
             "memoised once per process: the clone and the migration must name one database"
         );
-        assert!(
-            TEMPLATE_PATTERN.contains(TEMPLATE_PREFIX),
-            "the sweep pattern and the prefix have to agree, and only one of them is \
-             checked by the compiler: {TEMPLATE_PATTERN} vs {TEMPLATE_PREFIX}"
-        );
         assert_eq!(
             name.strip_prefix("egret_t_"),
             None,
             "the clone sweep anchors on `egret_t_` and DROPS what it matches, so a template \
              must not be of that shape: {name}"
-        );
-    }
-
-    /// What a template-sweep is allowed to conclude from a marker.
-    ///
-    /// The two `None`-ish rows are the ones that matter. A template with no readable marker
-    /// is one that was created and then abandoned before it could be stamped, or one written
-    /// by a version of this crate that did not stamp at all; keeping it costs 12 MB, and
-    /// dropping it costs whichever process is cloning from it a missing relation. The
-    /// mutation this kills is making `template_is_stale` ignore the marker and answer from
-    /// the age alone.
-    #[test]
-    fn an_unreadable_marker_never_authorises_dropping_a_template() {
-        let ttl = TEMPLATE_TTL.as_secs() as i64;
-        let now = 1_900_000_000;
-
-        assert!(
-            !template_is_stale(None, now, TEMPLATE_TTL),
-            "no marker at all must mean KEEP — a database this module cannot date is not a \
-             database it may drop"
-        );
-        assert!(
-            !template_is_stale(Some("not a timestamp"), now, TEMPLATE_TTL),
-            "an unparseable marker is no more evidence of abandonment than a missing one"
-        );
-        assert!(
-            !template_is_stale(Some(""), now, TEMPLATE_TTL),
-            "an empty comment is the shape `COMMENT ... IS ''` leaves behind"
-        );
-        assert!(
-            !template_is_stale(Some(&now.to_string()), now, TEMPLATE_TTL),
-            "stamped this instant: this is the template the sweeping process itself just \
-             created, one tick before it clones from it"
-        );
-        assert!(
-            !template_is_stale(Some(&(now - ttl).to_string()), now, TEMPLATE_TTL),
-            "exactly at the TTL is not yet past it"
-        );
-        assert!(
-            template_is_stale(Some(&(now - ttl - 1).to_string()), now, TEMPLATE_TTL),
-            "one second past the TTL is stale, or the sweep never fires and the \
-             accumulation this crate moved off rows reappears as databases"
-        );
-        assert!(
-            !template_is_stale(Some(&(now + 86_400).to_string()), now, TEMPLATE_TTL),
-            "a marker in the future is clock skew between two machines sharing one \
-             Postgres, not abandonment"
-        );
-        // Whitespace, because `shobj_description` returns exactly what was written and a
-        // trailing newline in a comment is easy to produce by hand.
-        assert!(
-            template_is_stale(Some(&format!("  {}\n", now - ttl - 1)), now, TEMPLATE_TTL),
-            "a padded marker is still a marker"
         );
     }
 }
