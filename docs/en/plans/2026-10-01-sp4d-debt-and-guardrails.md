@@ -117,6 +117,49 @@
 
 ---
 
+### Task 7: F4/F5 has no passing assertion — give it one that can fail
+
+**Files:**
+- Modify: `crates/egret-perm-compile/tests/routes.rs` (`explain_reports_the_tag_set_the_evaluator_was_handed`)
+- Modify: `crates/egret-perm-compile/src/routes.rs` (`resolved_tags_for_display`'s doc link)
+
+**Found by Task 1, and it is a defect merged in #611.** That test reads `body["tags"]` and
+gets `Null`, for two independent reasons, neither environmental: the response-level `tags`
+field **no longer exists** — the H3 fix moved the set to `ExplainProfile::tags` — and
+`git show f5e2e84d` shows the test being **added** in the same squashed PR that moved it, so
+the assertion was never re-pointed. It is DB-gated, so the broken shared template hid it.
+
+**Consequence: the F4/F5 property — the reported list IS the evaluator's input — has no
+passing automated assertion on `main`.** The three e2e tests that pass read decisions and
+decline reasons; none reads `profiles[].tags` at all.
+
+- [ ] **Step 1: Do NOT re-point it to expect `[]`.** The current fixture (`setup()`, one
+StarRocks profile, no bound tag service) has `tag_policies_in_download: 0`, so
+`tags_for_profile` returns empty by construction. Asserting `[]` there would be a green from
+a population that cannot exercise the behaviour — the exact shape this programme has been
+caught by five times — and would assert nothing about name-not-key or `attached_at_column`.
+
+- [ ] **Step 2: Build a fixture that can fail.** `two_profile_catalog` plus a tag assigned at
+a known coordinate plus a bound tag service carrying one policy. The assertion must pin all
+three things the field exists for: the **name** rather than the `tags.key`, `attached_at_column`
+matching the coordinate the assignment actually used, and the list being **non-empty for the
+profile that resolves it and empty for the profile that does not** — which is also H1's
+property, so one fixture covers both.
+
+- [ ] **Step 3: Make the key assertable as absent.** The helper must let the test say the
+`tags.key` does **not** appear, or name-not-key is pinned only by the happy path.
+
+- [ ] **Step 4: Mutate three ways** — return the key instead of the name, invert
+`attached_at_column`, and return the request-level set for every profile — and confirm a
+different assertion dies for each.
+
+- [ ] **Step 5: Fix the stale doc link.** `resolved_tags_for_display` links
+`[ExplainResponse::tags]`, a field that no longer exists.
+
+- [ ] **Step 6: Commit.**
+
+---
+
 ## Verification for every task
 
 `cargo test -p egret-ranger-eval --no-fail-fast` (baseline **262/0 across 10 binaries**; the flag matters, or cargo stops at the first failing binary and undercounts) · `cargo test -p egret-perm-compile` with `DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test` passed **explicitly** · `cargo check --workspace --all-targets` · `cargo fmt --all -- --check` · scoped `clippy -D warnings` (note `cargo clippy --workspace` is rc 101 on `crates/egret-workspace/src/members.rs:191,196`, byte-identical to `origin/main` — pre-existing, not yours) · the `--lib` drift gate · `just test-ranger-gates` · and in `frontend/`: `npx tsc --noEmit`, `npx eslint .`, and the ExplainAccess suite by its real path `src/routes/governance/__tests__/ExplainAccess.test.tsx` (a path missing `__tests__/` exits 0 with "No test files found").
