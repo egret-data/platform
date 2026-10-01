@@ -22,6 +22,14 @@ Drafts, versions and the app API are P2.
 
 **Spec:** `docs/en/specs/2026-09-30-marimo-data-apps-design.md` §4 (gateway, tokens, read-only), §5 (tables), §8 (permissions), D3/D4/D6.
 
+## Changes made during implementation (2026-10-01)
+
+- `app:manage` was **deferred to P2**: the `catalog_drift` test refuses a declared permission that nothing enforces. Wherever this plan says `app:manage`, read it as P2.
+- The read-only gate uses **stock** `GenericDialect`/`MySqlDialect`, plus lexer rules. The adversarial review found four comment-lexing bypasses and closed them: nested `/* */`, `/*!` hints, `\r` ending `--`, and `--`/`-->` adjacency. `derive_dialect!` wrappers were rejected because they read the cargo registry at compile time.
+- The gateway also refuses **non-active workspaces**, with the same 404 as a missing app. It audits rate-limited and invalid-body calls, and accepts the bearer scheme case-insensitively.
+- The schema enforces that a session's workspace equals its app's workspace, with a composite FK.
+- The rate limiter's lockout is one window, so a 429 holds the token for 2 s.
+
 ## Global Constraints
 
 - **Branch:** `feat/data-apps-p1-gateway`, off `origin/main`, in its own worktree. Do not commit on `main`.

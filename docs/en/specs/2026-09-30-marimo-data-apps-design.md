@@ -180,7 +180,8 @@ Response: `TabularResult` as JSON (columns, rows, `truncated`). Arrow is a later
 Errors keep the port's distinctions: `Forbidden` → 403 with the engine's message (the viewer lacks a
 grant — expected under D3); `NotFound` → 404; `InvalidInput` → 400; `Internal` → 500 without engine
 addresses; expired token → 401, which the helper turns into "session expired — reload the app". Each
-session has a rate limit (configurable, default 10 queries/s, burst 20).
+session has a rate limit (configurable; as built in P1: 20 calls per 2 s window, and a call over the limit
+holds the token for one further window).
 
 ### 4.3 Read-only check
 
@@ -474,7 +475,8 @@ An axum service in egret, listening on the apps host:
 
 - New permissions: `app:read` (open the published app), `app:write` (edit the draft, publish, restore),
   `app:manage` (manage shares). Sharing uses the generic object-shares system with `app` as the object
-  kind.
+  kind. **P1 ships only `app:read` and `app:write`**; `app:manage` arrives with shares in P2, because the
+  catalog-drift test refuses a declared permission that nothing enforces.
 - The workspace feature module `notebooks` is replaced by `apps`, covering `apps`, `apps-runtime`.
 - `notebook:read` / `notebook:write` are removed in P6.
 
@@ -513,7 +515,10 @@ never merged; automated Playwright, single run per case, macOS dev laptop under 
    permissions and the `apps` feature module. Backend only; testable with a seeded token and no marimo.
    Plan: `docs/en/plans/2026-10-01-data-apps-p1-query-gateway.md`.
 2. **P2 — Storage and lifecycle.** `app_drafts`, `app_versions` (+ trigger, and the FK from
-   `app_sessions.version_id`), draft API with revision/409, publish, restore, app CRUD and shares.
+   `app_sessions.version_id`, composite with `app_id` so a version belongs to its app), draft API with
+   revision/409, publish, restore, app CRUD and shares with `app:manage`; the gateway checks that a run
+   token's version still exists and is published; `apps.folder_id` FK (used for PDP ancestry); the
+   frontend `ALL_FEATURE_KEYS` gains `apps`.
 3. **P3 — `egret-apps` image and `egret_marimo`.** Entrypoints, `EgretStorage`, DB-API, `egret.sql`,
    locked-down marimo configuration, the run-mode IPC patch and the fix for marimo's per-launch
    `has_marimo_installed` check (D14: the launcher shim answers it, with a contract test that fails when
@@ -524,7 +529,11 @@ never merged; automated Playwright, single run per case, macOS dev laptop under 
 4. **P4 — Apps origin, proxy, edit mode.** Ticket → cookie, proxy (route allow-list or the S0 block
    list, one raw path checked and forwarded, `X-Notebook-Id` stripped or pinned), `__Host-` cookie rename
    verified over HTTPS on kind, the egret-side audit that `GET` routes have no side effects and CSRF stays
-   header-based (§6.1), edit launcher, the Apps list and Edit page.
+   header-based (§6.1), edit launcher, the Apps list and Edit page. From the P1 final review: token
+   revocation by id / login session (not only by plaintext) and a sweeper for expired rows; decide whether
+   an expired-but-undeleted egret login session must stop its app tokens; an `impersonator` column on
+   `app_sessions` before any token is minted under impersonation; check `session_idle_secs <=
+   session_absolute_secs` at boot; audit only the call that starts a rate-limit lockout, not every 429.
 5. **P5 — Run mode.** Per-version launcher, publish/versions/restore UI, the viewer page; the kernel
    launcher (warm pool or fork server), the per-pod session cap, memory limit and session-start UX set
    from measurements on kind (§6.3). **Start-up targets (D15):** acceptance = a new viewer on a warm pod
