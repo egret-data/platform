@@ -433,15 +433,40 @@ async fn session_with_permission(f: &mut Fixture, permission: &str) -> String {
 /// `active_for_session(row.session_id)`), and resolving that session yields the
 /// target's principal plus `Impersonator { workspace_scope: Some(scope) }`.
 ///
-/// The target holds `policy:read` and is NOT a `platform_admin`, which is
-/// exactly what `egret_auth::impersonation::validate_impersonation_target`
-/// permits: it refuses a `platform_admin` target and nothing else, and migration
-/// 0059 seeds the platform `data_steward` role with `policy:read`. So this
-/// principal is reachable from the real `POST /api/ws/{workspace}/impersonate`
-/// flow, not only from this helper.
+/// ⚠ **This principal is no longer reachable from the real
+/// `POST /api/ws/{workspace}/impersonate` flow, and this comment used to say it
+/// was.** When Task 4 wrote it that was true:
+/// `egret_auth::impersonation::validate_impersonation_target` refused a
+/// `platform_admin` target and nothing else, and migration 0059 seeds the platform
+/// `data_steward` role with the whole `policy:*` family, so a `ws_admin` could
+/// start exactly this overlay. SP4d debt **Task 13 closed that at the source**:
+/// the validator now refuses a target holding ANY platform-scoped role grant, so
+/// no entry point will mint a scoped overlay over a `policy:*` holder.
+///
+/// The helper writes the overlay row directly (`ImpersonationRepo::start`), which
+/// is deliberate and is the only way these tests can still reach the state they
+/// guard. What they now hold is the SECOND line: the containment that would still
+/// stand if a future entry point wrote a scoped overlay row without going through
+/// that validator. `a_ws_admin_may_not_impersonate_a_platform_permission_holder`
+/// in `egret-auth` holds the first line, and
+/// `the_ws_impersonate_route_refuses_a_platform_role_holding_member` in
+/// `egret-workspace` holds it over the real HTTP route.
 async fn ws_scoped_overlay_session(f: &mut Fixture, scope: Uuid) -> String {
+    ws_scoped_overlay_session_with(f, scope, &["policy:read"]).await
+}
+
+/// [`ws_scoped_overlay_session`] with the target's platform permission set spelled
+/// out — `policy:update` for the write routes, which is the permission migration
+/// 0059's `data_steward` carries alongside `policy:read`.
+async fn ws_scoped_overlay_session_with(
+    f: &mut Fixture,
+    scope: Uuid,
+    permissions: &[&str],
+) -> String {
     let steward = new_user(f, "perm_overlay_steward").await;
-    grant_platform_permission(f, steward, "policy:read").await;
+    for permission in permissions {
+        grant_platform_permission(f, steward, permission).await;
+    }
     let ws_admin = new_user(f, "perm_overlay_wsadmin").await;
     let issued = f
         .sessions
@@ -4724,15 +4749,20 @@ async fn a_platform_steward_may_explain_a_catalog_of_any_workspace() {
 /// **The workspace boundary that DOES reach this handler, and it arrives by
 /// impersonation.**
 ///
-/// `egret_workspace::context::WsContext` calls its own containment "the airtight
-/// choke point for the ws-scoped isolation boundary: no route can reach another
-/// workspace under a scoped overlay". That conclusion is false for every
-/// `/api/control-plane` route — none of them resolves a `{workspace}`, so none
-/// builds a `WsContext`. Measured reachable path:
-/// `validate_impersonation_target` refuses only a `platform_admin` target, so a
-/// `ws_admin` of workspace A may impersonate a member of A holding the platform
-/// `data_steward` role (migration 0059 seeds it with `policy:read`) and ask about
-/// a catalog of workspace B.
+/// `egret_workspace::context::WsContext` confines a scoped overlay, but only on a
+/// route that resolves a `{workspace}` path segment — the only thing that builds a
+/// `WsContext`. No `/api/control-plane` route resolves one. (Its comment used to
+/// call that containment "airtight … no route can reach another workspace under a
+/// scoped overlay"; Task 13 corrected it at the site.)
+///
+/// ⚠ **The path this test was written against is now closed at its source, so
+/// what this test holds is the SECOND line, not the live gate.** When Task 4 wrote
+/// it, `validate_impersonation_target` refused only a `platform_admin` target, so a
+/// `ws_admin` of workspace A could impersonate a member of A holding the platform
+/// `data_steward` role (migration 0059 seeds it with the whole `policy:*` family)
+/// and ask about a catalog of workspace B. Task 13 made that validator refuse ANY
+/// platform-role-holding target; see `ws_scoped_overlay_session`, which writes the
+/// overlay row directly for exactly that reason.
 ///
 /// Three rows, because a guard that refused everything under an overlay would
 /// pass the first alone:
@@ -4820,6 +4850,375 @@ async fn a_workspace_scoped_overlay_is_confined_to_that_workspaces_catalogs() {
         StatusCode::OK,
         "without an overlay the same question is a platform steward's to ask; body: {body}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// SP4d debt Task 13: the WRITE half of the same containment
+// ---------------------------------------------------------------------------
+
+/// Compiled policies under the fixture's own profile — the table the engine's
+/// Ranger plugin downloads. A cross-workspace *write* is only interesting if it
+/// reaches this, so the test asserts on it rather than on `perm.grants` alone.
+async fn policies_on(f: &Fixture, service_id: i64) -> i64 {
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM policy.authz_policies WHERE service_id = $1")
+        .bind(service_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count policies")
+}
+
+/// **The write half Task 4 named open, measured on a route that mutates.**
+///
+/// Task 4 confined `explain` only, and recorded that the same router's write
+/// routes were open: a `ws_admin` of workspace A, impersonating a member of A who
+/// holds the platform `data_steward` role, could `POST /perm/grants` naming a
+/// catalog of workspace B — a grant that is COMPILED by the same request into the
+/// Ranger artifact B's engine downloads. That is strictly worse than reading an
+/// explain, and it is what this test refuses.
+///
+/// Three rows, in the shape Task 4's mutation round taught:
+/// 1. the foreign catalog is `403` and **nothing is written** — asserted against
+///    `perm.grants` AND `policy.authz_policies`, because the 403 would be worth
+///    little if the row had already been compiled;
+/// 2. the overlay's OWN workspace's catalog is still `201`, so this is not a
+///    blanket refusal of every write under an overlay;
+/// 3. the same foreign body with the same permission and NO overlay is `201`, so
+///    row 1 is the containment and not a missing permission.
+///
+/// The foreign catalog is the fixture's own `f.catalog_id` on purpose: it is
+/// attached to an engine bound to `f.service_id`, so a grant on it compiles to a
+/// real policy row. An orphan catalog would have made row 1 pass against a
+/// `policy.authz_policies` assertion that could never have changed.
+///
+/// ⚠ **Both catalogs carry a `registry.catalog_workspaces` row.** A fixture whose
+/// "foreign" catalog had no assignment at all let Task 4's M8 mutant survive — an
+/// `EXISTS` that dropped `AND workspace_id = $2` still produced a 403 — while that
+/// mutant is the actual leak.
+#[tokio::test]
+async fn a_workspace_scoped_overlay_cannot_create_a_grant_on_another_workspaces_catalog() {
+    let Some(mut f) = setup().await else { return };
+    // The overlay's own workspace, with a catalog of its own so row 2 is askable.
+    let scope = new_workspace(&f, "perm-task13-scope").await;
+    let own = orphan_catalog(&f, "perm-task13-own-cat").await;
+    assign_catalog_to_workspace(&f, own, scope).await;
+    // The other workspace's catalog: served by `f.service_id`, and assigned.
+    let foreign_ws = new_workspace(&f, "perm-task13-foreign-ws").await;
+    assign_catalog_to_workspace(&f, f.catalog_id, foreign_ws).await;
+
+    let grants_before = grants_on(&f, f.catalog_id).await;
+    let policies_before = policies_on(&f, f.service_id).await;
+
+    let overlay = ws_scoped_overlay_session_with(&mut f, scope, &["policy:update"]).await;
+
+    // 1. The foreign catalog.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &overlay,
+                Some(grant_body(f.catalog_id, "alice")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a ws-scoped overlay must not be able to WRITE a permission grant on \
+         another workspace's catalog; body: {body}"
+    );
+    assert_eq!(
+        grants_on(&f, f.catalog_id).await,
+        grants_before,
+        "the refused grant must not have been stored"
+    );
+    assert_eq!(
+        policies_on(&f, f.service_id).await,
+        policies_before,
+        "the refused grant must not have reached the artifact the engine downloads"
+    );
+
+    // 2. The overlay's own workspace's catalog: still writable.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &overlay,
+                Some(grant_body(own, "alice")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the overlay's own workspace is assigned this catalog, so authoring there \
+         must still work — a blanket refusal would pass row 1 alone; body: {body}"
+    );
+
+    // 3. The same foreign body, same permission, no overlay.
+    let plain = session_with_permission(&mut f, "policy:update").await;
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &plain,
+                Some(grant_body(f.catalog_id, "alice")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "without an overlay this is a platform steward's write to make, so row 1 \
+         is the containment and not the permission; body: {body}"
+    );
+}
+
+/// The three write shapes a single catalog check would miss, each a separate
+/// refusal in `write_grant` / `write_rule` / the delete handlers.
+///
+/// 1. **A PATCH that moves a grant OUT of the overlay's workspace** — caught by
+///    confining the body's catalog.
+/// 2. **A PATCH of a FOREIGN grant into the overlay's own workspace** — caught
+///    only by confining the STORED row's catalog. Confining the body alone accepts
+///    this, and it is a write to another workspace's model (the foreign profile is
+///    recompiled and the grant leaves it).
+/// 3. **A DELETE of a foreign grant** — no body exists to confine, so the
+///    containment has to run on the stored row.
+///
+/// Plus the rule surface, which has a selector rather than a scope:
+///
+/// 4. a **tag rule**, which names no catalog at all and whose fan-out is the whole
+///    installation (`affected_services_for_rule` walks every profile), so a
+///    confined caller may not author one in any form;
+/// 5. a **path-selector rule** on the foreign catalog — the rule twin of
+///    `create_grant`, and the only leg that reaches `confine_rule_selector`'s
+///    `Path` arm;
+/// 6. a **DELETE of a foreign path rule**, the rule half of row 3.
+///
+/// The last row is a control: the same tag rule with the same permission and NO
+/// overlay is created, so none of the six refusals above can be satisfied by a
+/// route that refuses everything.
+#[tokio::test]
+async fn a_workspace_scoped_overlay_cannot_patch_delete_or_fan_out_across_the_boundary() {
+    let Some(mut f) = setup().await else { return };
+    let scope = new_workspace(&f, "perm-task13b-scope").await;
+    let own = orphan_catalog(&f, "perm-task13b-own-cat").await;
+    assign_catalog_to_workspace(&f, own, scope).await;
+    let foreign_ws = new_workspace(&f, "perm-task13b-foreign-ws").await;
+    assign_catalog_to_workspace(&f, f.catalog_id, foreign_ws).await;
+
+    // Two grants, both written WITHOUT an overlay (a platform steward's writes),
+    // so the overlay below is only ever asked to change existing state.
+    let plain = session_with_permission(&mut f, "policy:update").await;
+    let own_grant = created_id(&f, &plain, grant_body(own, "alice")).await;
+    let foreign_grant = created_id(&f, &plain, grant_body(f.catalog_id, "alice")).await;
+
+    let overlay = ws_scoped_overlay_session_with(&mut f, scope, &["policy:update"]).await;
+
+    // 1. Move the overlay's own grant OUT, to the foreign catalog.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/grants/{own_grant}"),
+                &overlay,
+                Some(grant_body(f.catalog_id, "alice")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a confined caller must not move a grant onto another workspace's \
+         catalog; body: {body}"
+    );
+
+    // 2. Drag the FOREIGN grant into the overlay's own workspace. Only the
+    //    stored-row confinement refuses this one — the body names `own`, which is
+    //    assigned to the overlay's workspace, so the body check passes.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/grants/{foreign_grant}"),
+                &overlay,
+                Some(grant_body(own, "alice")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a confined caller must not edit another workspace's grant, even to point \
+         it at its own catalog — the foreign profile is recompiled and the grant \
+         leaves it; body: {body}"
+    );
+
+    // 3. Delete the foreign grant.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "DELETE",
+                &format!("/perm/grants/{foreign_grant}"),
+                &overlay,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a confined caller must not delete another workspace's grant; body: {body}"
+    );
+    assert_eq!(
+        grants_on(&f, f.catalog_id).await,
+        1,
+        "the foreign grant must still be there after all three refusals"
+    );
+
+    // 4. A tag rule names no catalog and fans out over the installation.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/rules",
+                &overlay,
+                Some(json!({
+                    "name": unique("task13-fanout"),
+                    "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+                    "selector": { "type": "tag", "key": f.tag_key },
+                    "exempt": { "include": [], "exclude": [] }
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a tag rule's affected set is every profile in the installation, so a \
+         confined caller may not author one; body: {body}"
+    );
+
+    // 5. A PATH-selector rule naming the foreign catalog: the rule twin of row 1,
+    //    and the only leg that exercises `confine_rule_selector`'s `Path` arm.
+    let foreign_path_rule = json!({
+        "name": unique("task13-path"),
+        "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+        "selector": { "type": "path", "catalog_id": f.catalog_id,
+                      "schema": "sales", "table": "orders", "column": "email" },
+        "exempt": { "include": [], "exclude": [] }
+    });
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/rules",
+                &overlay,
+                Some(foreign_path_rule.clone()),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a confined caller must not author a masking rule over another \
+         workspace's catalog; body: {body}"
+    );
+
+    // 6. And must not DELETE one, which is the rule half of row 3.
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/rules", &plain, Some(foreign_path_rule)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "setup rule write failed: {created}"
+    );
+    let foreign_rule_id = created["id"].as_str().expect("minted rule id").to_string();
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "DELETE",
+                &format!("/perm/rules/{foreign_rule_id}"),
+                &overlay,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a confined caller must not delete another workspace's rule; body: {body}"
+    );
+
+    // Control: the same tag rule, same permission, no overlay. Without this the
+    // refusals above would all pass against a route that refuses everything.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/rules",
+                &plain,
+                Some(json!({
+                    "name": unique("task13-fanout-ok"),
+                    "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+                    "selector": { "type": "tag", "key": f.tag_key },
+                    "exempt": { "include": [], "exclude": [] }
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a platform steward with no overlay authors tag rules; body: {body}"
+    );
+}
+
+/// `POST /perm/grants` with `body`, returning the minted id. Panics unless the
+/// write was accepted, so a setup failure cannot be mistaken for the behaviour
+/// under test.
+async fn created_id(f: &Fixture, token: &str, body: Value) -> Uuid {
+    let (status, json) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/grants", token, Some(body)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup write failed: {json}");
+    json["id"]
+        .as_str()
+        .expect("minted id")
+        .parse()
+        .expect("uuid")
 }
 
 /// **SP4d-2b Task 7: the refusal lifts, and this is where it is pinned.**

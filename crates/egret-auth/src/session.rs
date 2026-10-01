@@ -191,7 +191,14 @@ impl SessionService {
     }
 
     /// Public wrapper over `platform_roles` so endpoints can check a target
-    /// user's platform roles (e.g. to forbid impersonating a platform_admin).
+    /// user's platform roles.
+    ///
+    /// `validate_impersonation_target` reads it for EMPTINESS, not for a name: an
+    /// impersonation target may hold no platform-scoped role grant at all, because
+    /// such a grant is the only thing `egret_auth::grants::grants_for` admits when
+    /// the PDP decides a `Resource::Platform`, and no `/api/control-plane` route
+    /// builds a `WsContext` to confine a scoped overlay. See that function's ⚠
+    /// paragraph for the measured chain.
     pub async fn platform_roles_of(&self, user_id: UserId) -> Result<Vec<String>> {
         self.platform_roles(user_id).await
     }

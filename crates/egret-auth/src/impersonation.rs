@@ -13,9 +13,9 @@ use crate::users::UserRepo;
 /// intended scope) may target `target_user_id`. Enforces the target-facing
 /// invariants shared by **every** impersonation entry point: not self, reason
 /// non-empty, target exists, the target is not a service account (a machine
-/// principal must never end up inside an interactive session), and the target is
-/// not itself a `platform_admin` (admins are off-limits so an overlay can never
-/// be used to borrow admin power).
+/// principal must never end up inside an interactive session), and the target
+/// **holds no platform-scoped role grant at all** (platform authority is
+/// off-limits so an overlay can never be used to borrow it).
 ///
 /// It deliberately does **not** check the caller's own authority (platform-admin
 /// vs ws-admin) — that differs per entry point and the caller enforces it first,
@@ -55,9 +55,53 @@ pub async fn validate_impersonation_target(
             "cannot impersonate a service account".into(),
         ));
     }
-    // Target must NOT itself be a platform admin.
+    // Target must hold NO platform-scoped role grant — not merely not be a
+    // `platform_admin`.
+    //
+    // ⚠ **This used to read `.any(|r| r == "platform_admin")`, and that was a
+    // privilege escalation with a measured path, SP4d debt Task 13.** The chain,
+    // by code path rather than by intent:
+    //
+    // * `ws_impersonate_start` (`egret_workspace::routes`) lets a `ws_admin` of
+    //   workspace A target any MEMBER of A who is not a `ws_admin` there, and the
+    //   overlay it writes carries `workspace_scope = Some(A)`.
+    // * `egret_workspace::context::WsContext` confines a scoped overlay to that
+    //   one workspace — but only on a route that resolves a `{workspace}` path
+    //   segment, which is the only thing that builds a `WsContext`. **No
+    //   `/api/control-plane` route resolves one**, so none is confined there;
+    //   measured, every handler on `control_plane_router`,
+    //   `policy_admin_router`, `catalog_admin_router`, `engine_mgmt_router` and
+    //   `perm_router` gates on a `Scope::Platform` permission instead.
+    // * Migration `0059_rbac_permission_seed.sql` seeds the platform
+    //   `data_steward` role with the whole `policy:*` family — `policy:update`
+    //   included.
+    //
+    // ⇒ a `ws_admin` of A impersonated a member of A holding `data_steward` and
+    // then *created a permission grant on a catalog of workspace B*, which
+    // compiles into the Ranger artifact B's engine downloads. Refusing the target
+    // here removes the escalation at its source, for every entry point and every
+    // platform route at once, instead of at each consumer.
+    //
+    // **Why ANY platform role and not "any platform role carrying a
+    // permission".** `platform_roles` is the same query that populates
+    // `Principal::platform_roles` for the overlay (see `SessionService::validate`,
+    // which calls it for the TARGET), and `egret_auth::grants::grants_for` admits
+    // only `scope_type = 'platform'` rows when the PDP decides a
+    // `Resource::Platform` — so a platform-scoped role grant is the *only* way the
+    // overlay principal can satisfy any of those gates, and this emptiness test
+    // cannot disagree with the authority the overlay would confer. Narrowing it to
+    // `role_permissions` being non-empty would have been a second spelling of the
+    // PDP's own role closure and could fail open the day the two diverged. The
+    // cost of the wider form is refusing a target whose only platform grant is to
+    // a role that carries nothing, which grants nothing and so loses nothing.
+    //
+    // It is deliberately stricter than it needs to be for the *platform* entry
+    // point, where the caller is already a `platform_admin` and so gains nothing
+    // from the target's roles. Keeping one target rule for all three entry points
+    // is the shape the rest of this function already has, and a per-entry-point
+    // parameter would be the second predicate this guard exists to avoid.
     let target_roles = sessions.platform_roles_of(target_user_id).await?;
-    if target_roles.iter().any(|r| r == "platform_admin") {
+    if !target_roles.is_empty() {
         return Err(Error::Forbidden);
     }
     Ok(())

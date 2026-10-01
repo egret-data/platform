@@ -484,7 +484,10 @@ export const getWorkspaceMembersWsImpersonateStartUrl = (workspace: string,) => 
  * Guards run in a deliberate order so a caller learns nothing before its own
  * authority is proven: (1) not already impersonating; (2) caller is `ws_admin`
  * here or a platform_admin; (3) the shared target guards (not-self, reason
- * non-empty, target exists, target-not-platform-admin); (4) the target is a
+ * non-empty, target exists, target holds NO platform-scoped role grant —
+ * `validate_impersonation_target`, and read its ⚠ paragraph: that third guard is
+ * what stops this endpoint minting a scoped overlay with platform authority,
+ * which no `/api/control-plane` route confines); (4) the target is a
  * MEMBER of this workspace and is NOT itself a `ws_admin` of it. Step-up re-auth
  * then mirrors the platform endpoint: a local caller re-enters their password; an
  * OIDC caller gets a `409` with an authorize URL whose sealed intent carries this

@@ -859,7 +859,14 @@ async fn write_grant(
     tx: &mut Transaction<'_, Postgres>,
     id: Option<Uuid>,
     body: NewGrant,
+    p: &egret_core::Principal,
 ) -> Result<WriteOutcome, PermHttpError> {
+    // The workspace containment, first thing and on the BODY's catalog, so a
+    // confined caller is refused before this function reads or writes anything —
+    // see [`confine_to_overlay_workspace`]. It lives here rather than in the three
+    // handlers because this is the one implementation of a model write, which is
+    // also why it takes the principal it has no other use for.
+    confine_to_overlay_workspace(&mut **tx, p, body.scope.catalog_id).await?;
     if body.actions.is_empty() {
         return Err(PermHttpError::BadRequest(
             "a grant must name at least one action".into(),
@@ -905,6 +912,11 @@ async fn write_grant(
             // assignment on demand, so an edit here would either be reverted by
             // the next sync or collide with `grants_one_per_assignment`. The
             // create path refuses to MINT one for the same reason.
+            // The patch's OTHER end. The body's catalog was confined at the top;
+            // a grant can MOVE between catalogs, so a caller confined to one
+            // workspace must also not be able to drag a *foreign* grant into its
+            // own workspace — which is what confining only the body would allow.
+            confine_to_overlay_workspace(&mut **tx, p, old.scope.catalog_id).await?;
             if !matches!(old.origin, GrantOrigin::Explicit) {
                 return Err(PermHttpError::BadRequest(
                     "this grant is derived from a workspace assignment and is owned by the \
@@ -1034,7 +1046,10 @@ async fn write_rule(
     tx: &mut Transaction<'_, Postgres>,
     id: Option<Uuid>,
     body: NewRule,
+    p: &egret_core::Principal,
 ) -> Result<WriteOutcome, PermHttpError> {
+    // Same containment, same position and same reason as [`write_grant`]'s.
+    confine_rule_selector(&mut **tx, p, &body.selector).await?;
     // `perm.rules.name` is `text NOT NULL UNIQUE` with no emptiness CHECK, and
     // the name is what every skip log, compile error and audit line identifies
     // the rule by. Refused here for the same reason a grant's empty `actions`
@@ -1050,6 +1065,9 @@ async fn write_rule(
             let Some(old) = get_rule_via(tx, id).await? else {
                 return Err(PermHttpError::NotFound);
             };
+            // The patch's other end — a rule can be moved between selectors, so
+            // see the twin comment in `write_grant`.
+            confine_rule_selector(&mut **tx, p, &old.selector).await?;
             affected_services_for_rule(tx, &old).await?
         }
         None => Vec::new(),
@@ -1176,7 +1194,7 @@ async fn create_grant(
     // recompile — see `write_grant`, which is the same code the patch and
     // preview routes run.
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
-    let (id, compile) = write_grant(&mut tx, None, body)
+    let (id, compile) = write_grant(&mut tx, None, body, &p)
         .await?
         .into_compile_response();
     tx.commit().await.map_err(PermHttpError::db)?;
@@ -1226,7 +1244,7 @@ async fn patch_grant(
 ) -> Result<Json<CompileResponse>, PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
-    let (_, compile) = write_grant(&mut tx, Some(id), body)
+    let (_, compile) = write_grant(&mut tx, Some(id), body, &p)
         .await?
         .into_compile_response();
     tx.commit().await.map_err(PermHttpError::db)?;
@@ -1258,6 +1276,9 @@ async fn delete_grant(
     let Some(g) = get_grant_via(&mut tx, id).await? else {
         return Err(PermHttpError::NotFound);
     };
+    // The delete paths build no body, so the containment runs on the stored row —
+    // see [`confine_to_overlay_workspace`].
+    confine_to_overlay_workspace(&mut *tx, &p, g.scope.catalog_id).await?;
     let services = affected_services_for_grant(&mut tx, &g).await?;
     // Before the DELETE, never after — see `lock_services_in_tx`.
     lock_services_in_tx(&mut tx, &services).await?;
@@ -1353,7 +1374,7 @@ async fn create_rule(
 ) -> Result<(axum::http::StatusCode, Json<CreatedResponse>), PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
-    let (id, compile) = write_rule(&mut tx, None, body)
+    let (id, compile) = write_rule(&mut tx, None, body, &p)
         .await?
         .into_compile_response();
     tx.commit().await.map_err(PermHttpError::db)?;
@@ -1399,7 +1420,7 @@ async fn patch_rule(
 ) -> Result<Json<CompileResponse>, PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
-    let (_, compile) = write_rule(&mut tx, Some(id), body)
+    let (_, compile) = write_rule(&mut tx, Some(id), body, &p)
         .await?
         .into_compile_response();
     tx.commit().await.map_err(PermHttpError::db)?;
@@ -1431,6 +1452,8 @@ async fn delete_rule(
     let Some(r) = get_rule_via(&mut tx, id).await? else {
         return Err(PermHttpError::NotFound);
     };
+    // Same as `delete_grant`'s.
+    confine_rule_selector(&mut *tx, &p, &r.selector).await?;
     let services = affected_services_for_rule(&mut tx, &r).await?;
     lock_services_in_tx(&mut tx, &services).await?;
     if !delete_rule_in_tx(&mut tx, id).await? {
@@ -1517,8 +1540,8 @@ async fn preview(
     // Every exit from here rolls back: the explicit `rollback()` on success, and
     // dropping `tx` on any `?`. Nothing below commits.
     let outcome = match (grant, rule) {
-        (Some(g), None) => write_grant(&mut tx, id, g).await?,
-        (None, Some(r)) => write_rule(&mut tx, id, r).await?,
+        (Some(g), None) => write_grant(&mut tx, id, g, &p).await?,
+        (None, Some(r)) => write_rule(&mut tx, id, r, &p).await?,
         _ => {
             return Err(PermHttpError::BadRequest(
                 "a preview must name exactly one of `grant` or `rule`".into(),
@@ -1939,15 +1962,22 @@ fn validate_explain_target(target: &Scope) -> Result<(), PermHttpError> {
 ///
 /// What IS a boundary: an impersonation overlay started by a `ws_admin` carries
 /// `Impersonator::workspace_scope = Some(ws)`, and
-/// `egret_workspace::context::WsContext` calls itself "the airtight choke point
-/// for the ws-scoped isolation boundary: no route can reach another workspace
-/// under a scoped overlay". That conclusion is **false for every
-/// `/api/control-plane` route**, because none of them resolves a `{workspace}` and
-/// so none builds a `WsContext`. The reachable path, measured:
-/// `validate_impersonation_target` refuses only a target who is a
-/// `platform_admin`, so a `ws_admin` of workspace A may impersonate a member of A
-/// who holds the platform `data_steward` role — which migration 0059 seeds with
-/// `policy:read` — and ask about a catalog of workspace B.
+/// `egret_workspace::context::WsContext` confines it — but only on a route that
+/// resolves a `{workspace}` path segment, which is the only thing that builds a
+/// `WsContext`. **No `/api/control-plane` route resolves one**, so none is
+/// confined there. (`WsContext`'s own comment used to claim the containment was
+/// "airtight … no route can reach another workspace under a scoped overlay";
+/// SP4d debt Task 13 corrected it at the site, and that comment now names which
+/// routes it does and does not cover.)
+///
+/// The path that was reachable, measured, and is now closed at its source:
+/// `validate_impersonation_target` refused only a target who was a
+/// `platform_admin`, so a `ws_admin` of workspace A could impersonate a member of
+/// A holding the platform `data_steward` role — which migration 0059 seeds with
+/// the whole `policy:*` family — and both ask about and WRITE a grant on a catalog
+/// of workspace B. Task 13 made that validator refuse a target holding ANY
+/// platform-scoped role grant, so such an overlay can no longer satisfy the
+/// `policy:read` / `policy:update` gate at the top of these handlers at all.
 ///
 /// This confines that overlay to catalogs assigned to the workspace it was
 /// started in, which is the same containment `WsContext` applies (`scope != ws →
@@ -1959,22 +1989,90 @@ fn validate_explain_target(target: &Scope) -> Result<(), PermHttpError> {
 /// route to probe which uuids are real.
 ///
 /// **An unscoped overlay (`workspace_scope == None`, a platform_admin acting as
-/// someone) is unrestricted here, exactly as it is in `WsContext`.** The same gap
-/// exists on this router's WRITE routes and on the rest of
-/// `/api/control-plane`; the cross-cutting fix belongs in a shared extractor, not
-/// in six copies of this function.
+/// someone) is unrestricted here, exactly as it is in `WsContext`.**
+///
+/// # Where this runs, by code path (SP4d debt Task 13)
+///
+/// Task 4 called it from `explain` only and recorded the write side as open. It
+/// now runs on every route of `perm_router` that *writes* the model, and it runs
+/// inside [`write_grant`] and [`write_rule`] rather than in each handler — those
+/// two are the one implementation of a model write, shared by create, patch and
+/// the rolled-back `preview`, so a future authoring route cannot acquire the hole
+/// back by forgetting a call. A patch is confined TWICE, against the stored row's
+/// catalog and against the body's, because a patch can move a grant between
+/// catalogs and either end alone leaves half the move reachable. `delete_grant`
+/// and `delete_rule` call it directly on the stored row, since they never build a
+/// body.
+///
+/// Still **not** confined here, deliberately and named so it is not mistaken for
+/// covered:
+///
+/// * `list_grants` / `list_rules` return the whole model. Confining a list means
+///   FILTERING it, which is a different change with a different failure mode (a
+///   silently short list), and it is a read.
+/// * `compile` names a `service_id`, not a catalog. A profile serves many
+///   catalogs, so there is no single catalog to compare; it also writes no model
+///   row — it recompiles state some other authorized write already committed.
+/// * Every other `/api/control-plane` router (`policy_admin_router`,
+///   `catalog_admin_router`, `engine_mgmt_router`, `control_plane_router`).
+///
+/// All three are closed at the SOURCE instead, by
+/// `egret_auth::impersonation::validate_impersonation_target` refusing a target
+/// that holds any platform-scoped role grant — which is what makes a scoped
+/// overlay unable to satisfy the `policy:read`/`policy:update` gate above this
+/// function at all. **That is the load-bearing guard and this one is the second
+/// line**, kept because it is the only one that would still hold if a future entry
+/// point wrote a scoped overlay row without going through that validator.
 async fn confine_to_overlay_workspace(
-    conn: &mut sqlx::pool::PoolConnection<Postgres>,
+    conn: &mut sqlx::PgConnection,
     p: &egret_core::Principal,
     catalog_id: Uuid,
 ) -> Result<(), PermHttpError> {
-    let Some(scope) = p.impersonator.as_ref().and_then(|i| i.workspace_scope) else {
+    let Some(scope) = overlay_workspace_scope(p) else {
         return Ok(());
     };
     if catalog_is_assigned_to_workspace_via(&mut *conn, catalog_id, scope.0).await? {
         return Ok(());
     }
     Err(PermHttpError::Forbidden)
+}
+
+/// The workspace a ws-scoped impersonation overlay is confined to, or `None` for
+/// a caller that is not inside one (and for an UNSCOPED overlay, which is a
+/// platform_admin acting as someone and is unrestricted — see
+/// [`confine_to_overlay_workspace`]).
+///
+/// One accessor rather than the same `and_then` chain written at each use, so
+/// "what counts as confined" has a single spelling in this module: a second one
+/// that read `p.impersonator.is_some()` instead would confine a platform_admin's
+/// overlay too, and a second one that forgot the `and_then` would confine nobody.
+fn overlay_workspace_scope(p: &egret_core::Principal) -> Option<egret_core::WorkspaceId> {
+    p.impersonator.as_ref().and_then(|i| i.workspace_scope)
+}
+
+/// [`confine_to_overlay_workspace`] for a rule, whose target is a [`Selector`]
+/// rather than a catalog.
+///
+/// A `Path` selector names a catalog and is confined exactly like a grant's
+/// scope. A **`Tag` selector names no catalog and is installation-wide** — it
+/// fans out over every profile in the installation (`affected_services_for_rule`),
+/// so there is nothing to compare against and no subset of it that stays inside
+/// one workspace. A confined caller is therefore refused outright, which is the
+/// only answer that is not a guess: silently narrowing the fan-out would author a
+/// rule that does not mean what the author wrote, and permitting it would be the
+/// widest cross-workspace write on this surface.
+async fn confine_rule_selector(
+    conn: &mut sqlx::PgConnection,
+    p: &egret_core::Principal,
+    selector: &Selector,
+) -> Result<(), PermHttpError> {
+    match selector {
+        Selector::Path(scope) => confine_to_overlay_workspace(conn, p, scope.catalog_id).await,
+        Selector::Tag { .. } if overlay_workspace_scope(p).is_some() => {
+            Err(PermHttpError::Forbidden)
+        }
+        Selector::Tag { .. } => Ok(()),
+    }
 }
 
 /// `egret_perm::EngineType` → the evaluator's own. Two enums for one fact

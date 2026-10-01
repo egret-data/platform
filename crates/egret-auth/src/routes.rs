@@ -293,7 +293,7 @@ async fn session_id_from_jar(st: &AuthState, jar: &CookieJar) -> Result<uuid::Uu
         (status = 200, description = "Impersonation started; the session now resolves to the target"),
         (status = 400, description = "Bad target / empty reason", body = ErrorBody),
         (status = 401, description = "Not authenticated, or wrong step-up password", body = ErrorBody),
-        (status = 403, description = "Not a platform admin, already impersonating, or target is an admin", body = ErrorBody),
+        (status = 403, description = "Not a platform admin, already impersonating, or the target holds a platform-scoped role grant (any platform role, not just platform_admin)", body = ErrorBody),
         (status = 409, description = "OIDC admin: re-authenticate at `authorize_url`, then the callback creates the overlay", body = OidcStepUp),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -315,8 +315,8 @@ async fn impersonate_start(
         return Err(AuthError(Error::Forbidden));
     }
     // 3. Parse the target and run the SHARED target guards (not-self, reason
-    //    non-empty, target exists, target-not-admin). Same guard set the OIDC
-    //    callback and the ws_admin start (Task 9) reuse.
+    //    non-empty, target exists, target holds no platform-scoped role grant).
+    //    Same guard set the OIDC callback and the ws_admin start (Task 9) reuse.
     let target = UserId(
         body.target_user_id
             .parse::<uuid::Uuid>()

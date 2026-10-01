@@ -267,6 +267,16 @@ export function MembersPanel({ workspaceId }: { workspaceId: string }) {
         // the caller's own row, for another ws_admin, for a platform_admin, and
         // for groups: the backend rejects all four, but a visible-then-403
         // action reads as a bug rather than a rule.
+        //
+        // ⚠ There is now a FIFTH case the backend rejects that this cannot hide:
+        // a member holding ANY platform-scoped role grant, not just
+        // `platform_admin` (SP4d debt Task 13 — a ws-scoped overlay over a
+        // platform `data_steward` could write permission grants on any
+        // workspace's catalog, because no `/api/control-plane` route confines
+        // one). Such a member still shows the action and gets a 403. Hiding it
+        // needs a new field on the member DTO — `is_platform_admin` is the only
+        // platform fact the row carries, and it answers a narrower question —
+        // which is a backend change this task did not take.
         const canImpersonate =
           m.principal_type === "user" &&
           !isSelf(m) &&

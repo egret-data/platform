@@ -288,7 +288,8 @@ pub async fn complete_impersonation_step_up(
             .into_response();
     }
     let target = UserId(intent.target_user_id);
-    // (3) Re-run the shared target guards (not-self / target-exists / not-admin).
+    // (3) Re-run the shared target guards (not-self / target-exists / target holds
+    //     no platform-scoped role grant).
     if let Err(e) = validate_impersonation_target(
         &st.users,
         &st.sessions,

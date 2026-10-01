@@ -439,6 +439,129 @@ async fn a_service_account_cannot_be_impersonated() {
     );
 }
 
+/// **SP4d debt Task 13: a target holding ANY platform-scoped role grant is
+/// refused, not only a `platform_admin`.**
+///
+/// The chain this closes, by code path:
+///
+/// * `egret_workspace::routes::ws_impersonate_start` lets a `ws_admin` of
+///   workspace A target any MEMBER of A who is not a `ws_admin` there, and writes
+///   an overlay carrying `workspace_scope = Some(A)`.
+/// * `egret_workspace::context::WsContext` confines a scoped overlay only on a
+///   route that resolves a `{workspace}` path segment — the only thing that builds
+///   one. **No `/api/control-plane` route resolves one**, and every handler on all
+///   five of those routers gates on a `Scope::Platform` permission instead.
+/// * Migration `0059_rbac_permission_seed.sql` seeds the platform `data_steward`
+///   role with the whole `policy:*` family, `policy:update` included.
+///
+/// ⇒ that `ws_admin` could create a permission grant on another workspace's
+/// catalog, which the same request compiles into the Ranger artifact that
+/// workspace's engine downloads.
+///
+/// **The fixture is built so it holds the state it guards.** It does not merely
+/// insert a role row: it resolves the target's own session through
+/// `SessionService::validate` and asserts the resulting `Principal` really carries
+/// `policy:update`, because that is the authority the overlay would confer. A
+/// fixture that proved only "a row exists" would pass against a guard keyed to
+/// something else entirely.
+///
+/// Both legs are asserted — a target with no platform grant must still validate —
+/// so this cannot pass against a guard that refuses every target.
+#[tokio::test]
+async fn a_target_holding_any_platform_role_grant_is_refused() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let users = UserRepo::new(db.clone());
+    let sessions = egret_auth::session::SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(8),
+        chrono::Duration::hours(1),
+    );
+    let admin = seed_user(&db).await;
+
+    // Leg 1: an ordinary member, no platform grant of any kind. Nothing about
+    // impersonation changed for this target, and if it had, leg 2 would be
+    // meaningless.
+    let plain = seed_user(&db).await;
+    egret_auth::impersonation::validate_impersonation_target(
+        &users,
+        &sessions,
+        admin,
+        plain,
+        "debugging",
+    )
+    .await
+    .expect("a target with no platform role grant must still be impersonable");
+
+    // Leg 2: the escalating target. A platform-scoped role carrying
+    // `policy:update` — the shape migration 0059's `data_steward` has, built here
+    // with its own role so the test does not depend on the seed's contents.
+    let target = seed_user(&db).await;
+    let role_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (scope, name, description) VALUES ('platform', $1, 'task 13') \
+         RETURNING id",
+    )
+    .bind(format!("task13_steward_{}", uuid::Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'policy:update')")
+        .bind(role_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL)",
+    )
+    .bind(target.0)
+    .bind(role_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    // The fixture holds the state it guards: the target's OWN session resolves to
+    // a principal carrying `policy:update`, which is the authority a scoped
+    // overlay over this user would hand a `/api/control-plane` write route.
+    let issued = sessions.create(target, "test", "127.0.0.1").await.unwrap();
+    let resolved = sessions
+        .validate(&issued.token)
+        .await
+        .unwrap()
+        .expect("the target's own session resolves");
+    assert!(
+        resolved.permissions.iter().any(|p| p == "policy:update"),
+        "fixture does not hold the state under test — the target must really carry \
+         policy:update, got {:?}",
+        resolved.permissions
+    );
+    assert!(
+        !resolved
+            .platform_roles
+            .iter()
+            .any(|r| r == "platform_admin"),
+        "the target must NOT be a platform_admin, or the pre-Task-13 guard would \
+         have refused it and this test would prove nothing; roles: {:?}",
+        resolved.platform_roles
+    );
+
+    let err = egret_auth::impersonation::validate_impersonation_target(
+        &users,
+        &sessions,
+        admin,
+        target,
+        "debugging",
+    )
+    .await
+    .expect_err("a target holding a platform-scoped role grant must not be impersonable");
+    assert!(
+        matches!(err, egret_core::Error::Forbidden),
+        "expected Forbidden, got: {err:?}"
+    );
+}
+
 // ── HTTP endpoint tests: the platform-admin impersonation start/exit surface ──
 //
 // These drive the real routers (`auth_router` + `admin_impersonation_router`) over
