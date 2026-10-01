@@ -651,6 +651,30 @@ should know, because two of them correct the steps:
 
 ### Task 8: Ask the engine that is actually enforcing
 
+**Step 0 — the browser pass for Task 7's copy belongs here, because this is the task
+that stands up a live environment.** Task 7 rewrote the page's copy **three times**
+(the `tags_unresolved` sentence, both scope notes, the `policies` phrase) and split the
+sentence and scope note into two elements with their own test ids. Nothing has been
+verified in a browser.
+
+That is not a formality on this page. SP4d-2a's browser pass found **two Majors** on
+this exact page that a full review and fifteen green tests both missed, and the
+programme-wide record is that every defect that mattered was found by running a real
+engine, a real Java evaluator, or a browser — never by review alone.
+
+**Measured 2026-10-01, so you do not repeat it:** a stack *is* listening on :5173 and
+:8080, and it is **not this branch**. Its served spec is 665 KB against this branch's
+1.28 MB and contains **no `ExplainAttribution`** and none of the explain causes — it
+predates the whole feature. Verifying against it would measure nothing. Check what the
+live spec actually serves before you trust any running stack: `curl -s
+localhost:8080/api-docs/openapi.json | grep -c resource_candidacy_not_reproducible`
+must be non-zero, or you are looking at someone else's build.
+
+Also note another session has been running `cargo test --workspace` against
+`egret_test`, and the shared `egret_test_template` is at migration **162** against this
+branch's `0159` — so bring up your own instance without disturbing that, and do not
+drop or rebuild the shared template.
+
 **Ruling carried from Task 3 — go through the composed evaluator, not the phase.**
 `evaluate_tag_data_mask` and `evaluate_tag_row_filter` are `#[cfg(test)]`, and they
 stay that way. Task 3 tightened that boundary because the phase functions do not
