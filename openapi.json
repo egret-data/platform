@@ -12003,6 +12003,16 @@
               }
             }
           },
+          "400": {
+            "description": "The coordinate cannot be stored: an empty schema or table, or `*`/`?` in any level — see migration 0166",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Not authenticated",
             "content": {
@@ -34797,7 +34807,7 @@
               },
               {
                 "$ref": "#/components/schemas/ExplainTagDecline",
-                "description": "Why `explain` declined to resolve this target's tags — absent when it\nresolved them.\n\n**This exists because the REASON was unreachable (fix round 3, IMPORTANT 1\n/ LOW 3).** The evaluator's `UndecidableCause::TagsUnresolved` is a unit\nvariant and says only \"the caller did not resolve\", which is all the\nevaluator can know; `resolved_tags_for_target` declines for four different\nstates with four different remedies, and `.is_some()` at the call site threw\nthe distinction away. The page then rendered round 1's single sentence for\nall four — naming a stored row that does not exist, and claiming a\nper-catalog reach for the one state that is per-REQUEST.\n\n**Carried here rather than as a payload on `TagsUnresolved`**, which was\nthe other option: `egret-ranger-eval` is a pure crate that knows nothing of\n`catalog_tag_assignments`, and the reason is a property of egret's STORAGE\nand of this REQUEST, not of the evaluator's input. It is also per\ntarget-and-catalog rather than per access, so the response is where it is\ntrue exactly once. The 1:1 pairing is a property of one function: this is\n`Some` exactly when the handler passed `resolved_tags: None`, which is the\nonly production state in which the evaluator raises `TagsUnresolved`."
+                "description": "Why `explain` declined to resolve this target's tags — absent when it\nresolved them.\n\n**This exists because the REASON was unreachable (fix round 3, IMPORTANT 1\n/ LOW 3).** The evaluator's `UndecidableCause::TagsUnresolved` is a unit\nvariant and says only \"the caller did not resolve\", which is all the\nevaluator can know; `resolved_tags_for_target` declines for more than one\nstate and the states have different remedies and different REACHES, and\n`.is_some()` at the call site threw the distinction away. The page then\nrendered round 1's single sentence for every one of them — naming a stored\nrow that does not exist, and claiming a per-catalog reach for the state that\nis per-REQUEST. (There were four states when that was measured; migration\n0166 made two of them unrepresentable and left two.)\n\n**Carried here rather than as a payload on `TagsUnresolved`**, which was\nthe other option: `egret-ranger-eval` is a pure crate that knows nothing of\n`catalog_tag_assignments`, and the reason is a property of egret's STORAGE\nand of this REQUEST, not of the evaluator's input. It is also per\ntarget-and-catalog rather than per access, so the response is where it is\ntrue exactly once. The 1:1 pairing is a property of one function: this is\n`Some` exactly when the handler passed `resolved_tags: None`, which is the\nonly production state in which the evaluator raises `TagsUnresolved`."
               }
             ]
           }
@@ -34817,60 +34827,6 @@
       },
       "ExplainTagDecline": {
         "oneOf": [
-          {
-            "type": "object",
-            "description": "A stored assignment has an empty `schema_name` or `table_name`, so\n`from_assignments` omits that level and the engine resolves the shorter\nresource as an ANCESTOR of everything beneath it.",
-            "required": [
-              "schema",
-              "table",
-              "column",
-              "kind"
-            ],
-            "properties": {
-              "schema": {
-                "type": "string"
-              },
-              "table": {
-                "type": "string"
-              },
-              "column": {
-                "type": "string"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "stored_level_empty"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "A stored assignment value carries `*` or `?`, which the engine matches with\n`FilenameUtils.wildcardMatch` and no SQL predicate reproduces.",
-            "required": [
-              "schema",
-              "table",
-              "column",
-              "kind"
-            ],
-            "properties": {
-              "schema": {
-                "type": "string"
-              },
-              "table": {
-                "type": "string"
-              },
-              "column": {
-                "type": "string"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "stored_wildcard"
-                ]
-              }
-            }
-          },
           {
             "type": "object",
             "description": "A stored assignment value carries one of the characters on which the two\ncase folds can disagree — see [`FOLD_DIVERGENT`].",
@@ -34922,7 +34878,7 @@
             }
           }
         ],
-        "description": "Which of the four states made `explain` decline to resolve the target's tags\n— see [`ExplainResponse::tag_resolution_declined`] and\n[`stored_value_problem`].\n\nThe four have four different remedies and two different REACHES, which is the\nwhole reason they are carried apart: three are properties of stored data and\nhold for every target in the catalog until it changes; the fourth is a property\nof the request and holds for nothing else.\n\nEach stored variant carries the offending coordinate so the page can name the\nrow to fix. That is a `policy:read` surface already — the response's `tags`\nfield reports attachments on the target — and naming no row is what produced\nthe measured defect: a sentence telling a steward to re-store an assignment\nthat was already stored on a table."
+        "description": "Which of the two states made `explain` decline to resolve the target's tags\n— see [`ExplainResponse::tag_resolution_declined`] and\n[`stored_coordinate_is_fold_divergent`].\n\nThe two have two different REACHES, which is the whole reason they are carried\napart: the first is a property of stored data and holds for every target in the\ncatalog until that row changes; the second is a property of the request and\nholds for nothing else.\n\n⚠ **This carried FOUR variants until SP4d debt Task 3.** `StoredLevelEmpty` and\n`StoredWildcard` were the other two, and migration 0166's\n`catalog_tag_assignments_levels_are_present_and_literal` makes both states\nunrepresentable: no running egret can read such a row, so no response can\nreport one. They are removed rather than left unreachable — an API variant a\nclient must still branch on for a state that cannot occur is the same defect as\na superseded comment. The enumeration of what the matcher does and the schema\nnow forbids survives on [`stored_coordinate_is_fold_divergent`], which is where\nthe next person needs it.\n\nThe stored variant carries the offending coordinate so the page can name the\nrow to fix. That is a `policy:read` surface already — the response's `tags`\nfield reports attachments on the target — and naming no row is what produced\nthe measured defect: a sentence telling a steward to re-store an assignment\nthat was already stored on a table."
       },
       "ExplainTargetLevel": {
         "type": "string",

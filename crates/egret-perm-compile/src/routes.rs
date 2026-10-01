@@ -611,11 +611,13 @@ pub struct ExplainResponse {
     /// **This exists because the REASON was unreachable (fix round 3, IMPORTANT 1
     /// / LOW 3).** The evaluator's `UndecidableCause::TagsUnresolved` is a unit
     /// variant and says only "the caller did not resolve", which is all the
-    /// evaluator can know; `resolved_tags_for_target` declines for four different
-    /// states with four different remedies, and `.is_some()` at the call site threw
-    /// the distinction away. The page then rendered round 1's single sentence for
-    /// all four — naming a stored row that does not exist, and claiming a
-    /// per-catalog reach for the one state that is per-REQUEST.
+    /// evaluator can know; `resolved_tags_for_target` declines for more than one
+    /// state and the states have different remedies and different REACHES, and
+    /// `.is_some()` at the call site threw the distinction away. The page then
+    /// rendered round 1's single sentence for every one of them — naming a stored
+    /// row that does not exist, and claiming a per-catalog reach for the state that
+    /// is per-REQUEST. (There were four states when that was measured; migration
+    /// 0166 made two of them unrepresentable and left two.)
     ///
     /// **Carried here rather than as a payload on `TagsUnresolved`**, which was
     /// the other option: `egret-ranger-eval` is a pure crate that knows nothing of
@@ -657,16 +659,26 @@ fn explain_tag_inputs(
     }
 }
 
-/// Which of the four states made `explain` decline to resolve the target's tags
+/// Which of the two states made `explain` decline to resolve the target's tags
 /// — see [`ExplainResponse::tag_resolution_declined`] and
-/// [`stored_value_problem`].
+/// [`stored_coordinate_is_fold_divergent`].
 ///
-/// The four have four different remedies and two different REACHES, which is the
-/// whole reason they are carried apart: three are properties of stored data and
-/// hold for every target in the catalog until it changes; the fourth is a property
-/// of the request and holds for nothing else.
+/// The two have two different REACHES, which is the whole reason they are carried
+/// apart: the first is a property of stored data and holds for every target in the
+/// catalog until that row changes; the second is a property of the request and
+/// holds for nothing else.
 ///
-/// Each stored variant carries the offending coordinate so the page can name the
+/// ⚠ **This carried FOUR variants until SP4d debt Task 3.** `StoredLevelEmpty` and
+/// `StoredWildcard` were the other two, and migration 0166's
+/// `catalog_tag_assignments_levels_are_present_and_literal` makes both states
+/// unrepresentable: no running egret can read such a row, so no response can
+/// report one. They are removed rather than left unreachable — an API variant a
+/// client must still branch on for a state that cannot occur is the same defect as
+/// a superseded comment. The enumeration of what the matcher does and the schema
+/// now forbids survives on [`stored_coordinate_is_fold_divergent`], which is where
+/// the next person needs it.
+///
+/// The stored variant carries the offending coordinate so the page can name the
 /// row to fix. That is a `policy:read` surface already — the response's `tags`
 /// field reports attachments on the target — and naming no row is what produced
 /// the measured defect: a sentence telling a steward to re-store an assignment
@@ -674,21 +686,6 @@ fn explain_tag_inputs(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExplainTagDecline {
-    /// A stored assignment has an empty `schema_name` or `table_name`, so
-    /// `from_assignments` omits that level and the engine resolves the shorter
-    /// resource as an ANCESTOR of everything beneath it.
-    StoredLevelEmpty {
-        schema: String,
-        table: String,
-        column: String,
-    },
-    /// A stored assignment value carries `*` or `?`, which the engine matches with
-    /// `FilenameUtils.wildcardMatch` and no SQL predicate reproduces.
-    StoredWildcard {
-        schema: String,
-        table: String,
-        column: String,
-    },
     /// A stored assignment value carries one of the characters on which the two
     /// case folds can disagree — see [`FOLD_DIVERGENT`].
     StoredFoldDivergent {
@@ -2034,20 +2031,33 @@ impl ClearanceLookups for sqlx::PgConnection {
 /// Its comparison is case-folded (fix round 1), which reproduces the matcher's
 /// `ignoreCase: true`; what it cannot reproduce is a stored value that is not a
 /// LITERAL. So the set it returns is exactly the enricher's **provided every
-/// stored coordinate in the catalog is one this predicate reproduces** — which is
-/// three conditions, not one, and [`stored_value_problem`] is where each is ruled
-/// on. [`TagLookups::assignment_coordinates`] reads them and this function checks
-/// them FIRST, for the whole catalog, before any resolution; see the ⚠ block on
-/// `egret_policy::tag_assignment_coordinates_via` for the fail-open that closes
-/// and why no mapping over the resolver's RESULT could close it instead.
+/// stored coordinate in the catalog is one this predicate reproduces** — which was
+/// three conditions, and is now ONE read plus one `CHECK`:
+///
+/// * an empty `schema_name` or `table_name`, and a `*` or `?` in any level, are
+///   **unrepresentable** — migration 0166's
+///   `catalog_tag_assignments_levels_are_present_and_literal`, VALIDATED, so no
+///   running egret can read such a row and nothing here rules on one. The write
+///   that used to produce them is refused by `egret_bi::catalog_tags` with a 400
+///   keyed to the same predicate shape.
+/// * a character on which the two case folds can disagree is still only
+///   DETECTABLE, never forbidden — those 25 code points are legitimate identifiers
+///   and which of them diverge depends on the deployment's collation. So
+///   [`stored_coordinate_is_fold_divergent`] is the surviving ruling,
+///   [`TagLookups::assignment_coordinates`] still reads every coordinate, and this
+///   function still checks them FIRST, for the whole catalog, before any
+///   resolution. See the ⚠ block on
+///   `egret_policy::tag_assignment_coordinates_via` for the fail-open that closes
+///   and why no mapping over the resolver's RESULT could close it instead.
 ///
 /// ⚠ **The earlier version of this paragraph named ONE condition** ("provided
 /// every stored row is at one of those two levels"), and the review measured two
 /// more of the same shape — a `('sales','*','')` row and a `('SALES','ORDERS','')`
 /// row are both `ANCESTOR`-admitted on the real jar and neither was returned or
 /// counted. A proviso is only worth what its enumeration covers, which is why the
-/// enumeration now lives in one function with a test per class rather than in a
-/// SQL `WHERE` clause nothing here can run.
+/// enumeration survives on [`stored_coordinate_is_fold_divergent`] — including the
+/// two rows the schema now forbids — rather than being deleted along with the
+/// branches, and why it was never a SQL `WHERE` clause nothing here can run.
 ///
 /// With the precondition holding, a target that names no schema or no table is
 /// `Some(empty)` rather than a refusal, and that is an argument rather than a
@@ -2066,12 +2076,12 @@ impl ClearanceLookups for sqlx::PgConnection {
 /// | input | read | ruling |
 /// |---|---|---|
 /// | `target.catalog_id` | **yes** | scopes both reads, and scopes them identically (`a.warehouse_id = c.warehouse_id` for `c.id = $1`), so a row the gate counts is a row the resolver could return |
-/// | `target.schema` / `target.table` — PRESENCE | **yes** | `None` on either ⇒ `Some(empty)`, argued above. `Some("")` is NOT special-cased: with the gate clear no stored coordinate has an empty `schema_name` or `table_name`, so an empty request value matches nothing and the empty set is the right answer — the one shape that could arrive, a `('', '')` row, is exactly what [`StoredValueProblem::EmptyLevel`] refuses on |
+/// | `target.schema` / `target.table` — PRESENCE | **yes** | `None` on either ⇒ `Some(empty)`, argued above. `Some("")` is NOT special-cased, and since migration 0166 that needs no gate to be sound: no stored coordinate CAN have an empty `schema_name` or `table_name`, so an empty request value matches nothing and the empty set is the right answer. ⚠ Before 0166 this row rested on the gate having refused a `('', '')` row; it now rests on the `CHECK`, which is a stronger claim about a smaller surface |
 /// | `target.schema` / `target.table` / `target.column` — the VALUES' CASE | **yes, and ruled on since fix round 1** | the resolver folds both sides, so `SALES` against a row stored `sales` resolves. ⚠ This row did not exist, and its absence was the review's Critical: the values reach `request_resource` verbatim from `ScopePicker`'s free-text inputs, so differing case is what ORDINARY use produces — more reachable than the empty-string class that was gated |
-/// | `target.*` — the VALUES' SYNTAX | **no, and that is a ruling** | a `*` or `?` the OPERATOR types is a request value, and Ranger matches a request value literally: the wildcard lives on the POLICY side of `getMatchType`, never the request side. So a typed `*` names a resource called `*` and resolves nothing, which is correct. The syntax that matters is the STORED side's, ruled on in [`stored_value_problem`] |
+/// | `target.*` — the VALUES' SYNTAX | **no, and that is a ruling** | a `*` or `?` the OPERATOR types is a request value, and Ranger matches a request value literally: the wildcard lives on the POLICY side of `getMatchType`, never the request side. So a typed `*` names a resource called `*` and resolves nothing, which is correct — and migration 0166 does NOT constrain the request, only what can be stored, so a steward can still type one. The syntax that matters is the STORED side's, and since 0166 the schema refuses it rather than this function detecting it |
 /// | `target.*` — a [`FOLD_DIVERGENT`] character | **yes, since fix round 2** | ⚠ the divergence is a property of the PAIR, not of the stored side: `("ſ", "s")` is measured disagreeing, so an ASCII stored value and an odd REQUEST value are the same fail-open. Checked with the same `fold_divergent` the stored side uses |
 /// | `target.column` | **yes** | `None` ⇒ `""`, which is migration 0081's "the table itself" convention in the REQUEST position, and is the value `resolved_tags_for_resource_via` is documented against |
-/// | `assignment_coordinates` + [`stored_value_problem`] | **yes, first** | any problem ⇒ `None`. Per CATALOG and not per request: the coordinate that breaks the equivalence is one the resolver cannot return, so there is nothing per-request to test it against |
+/// | `assignment_coordinates` + [`stored_coordinate_is_fold_divergent`] | **yes, first** | a divergent coordinate ⇒ `None`. Per CATALOG and not per request: the coordinate that breaks the equivalence is one the resolver cannot return, so there is nothing per-request to test it against. ⚠ The read is NOT retired by 0166 — the `CHECK` takes the empty-level and wildcard classes, and the fold class is the one a `CHECK` must not take |
 /// | `egret_policy::ResolvedTag::name` | **yes** | `tags.name`, which is what `from_assignments` puts in the wire tag's `type` and therefore what the engine matches. Never `tags.key` — live they differ for one of three tags |
 /// | `egret_policy::ResolvedTag::match_type` | **yes** | both the evaluator's admission test AND, here, the only surviving record of WHICH level the attachment was at — see [`attachment_for`] |
 /// | the engine (Trino / StarRocks) | **no** | and that is the ruling, not an omission: `ServiceTags::from_assignments` writes the keys `catalog`/`schema`/`table`/`column` for every service type. See [`attachment_for`] |
@@ -2102,10 +2112,11 @@ async fn resolved_tags_for_target<L: TagLookups + Send>(
     // per branch is the shape that lost two classes in round 1.
     //
     // ⚠ The REASON is returned, not discarded. Fix round 3 measured that
-    // `.is_some()` here threw away the only thing that could tell the four
-    // decline states apart, and the page then rendered round 1's single sentence
-    // for all four — naming a stored row that did not exist and claiming a
-    // per-catalog reach for this per-REQUEST one.
+    // `.is_some()` here threw away the only thing that could tell the decline
+    // states apart, and the page then rendered round 1's single sentence for every
+    // one of them — naming a stored row that did not exist and claiming a
+    // per-catalog reach for this per-REQUEST one. (Four states then; two since
+    // migration 0166.)
     for (level, value) in [
         (ExplainTargetLevel::Schema, target.schema.as_deref()),
         (ExplainTargetLevel::Table, target.table.as_deref()),
@@ -2118,46 +2129,40 @@ async fn resolved_tags_for_target<L: TagLookups + Send>(
             }));
         }
     }
-    // `find_map`, not `any`: one offending coordinate anywhere in the catalog is
+    // `find`, not `any`: one offending coordinate anywhere in the catalog is
     // enough — the resolver's predicate is the same predicate for every target in
     // it — and the one that offends is the one the page has to name.
+    //
+    // ⚠ **WHAT THIS STILL ASKS, after migration 0166.** The gate used to rule on
+    // three classes; the CHECK that migration adds makes two of them
+    // unrepresentable (an empty `schema_name`/`table_name`, and `*`/`?` in any
+    // level), so the only class left for this read is the fold divergence — which
+    // a CHECK must NOT take over, because those 25 code points are legitimate
+    // identifiers and the set is collation-dependent. The migration's own text
+    // carries that ruling. The read therefore STAYS: it is one `SELECT DISTINCT`
+    // per `explain`, and it is the only thing that can see a stored coordinate the
+    // resolver's fold and the matcher's fold could disagree about.
     //
     // ⚠ **WHICH one, when several offend: the FIRST in
     // `tag_assignment_coordinates_via`'s order**, which is
     // `ORDER BY schema_name, table_name, column_name`. Task 8 reported this as
     // unpinned and was half wrong — the SQL has always carried that `ORDER BY`;
     // what nothing pinned was the rule on THIS side, so `the_first_offending_
-    // coordinate_is_the_one_named` now asserts it with the same two offenders in
-    // both orders. The order is the database's collation's, so it is deterministic
+    // coordinate_is_the_one_named` now asserts it with two offenders in both
+    // orders. The order is the database's collation's, so it is deterministic
     // within a deployment rather than universal; a catalog with two broken
     // assignments reports one of them and fixing it reveals the next.
-    if let Some(decline) = conn
+    if let Some((schema, table, column)) = conn
         .assignment_coordinates(target.catalog_id)
         .await?
         .into_iter()
-        .find_map(|(schema, table, column)| {
-            stored_value_problem(&schema, &table, &column).map(|problem| match problem {
-                StoredValueProblem::EmptyLevel => ExplainTagDecline::StoredLevelEmpty {
-                    schema,
-                    table,
-                    column,
-                },
-                StoredValueProblem::WildcardMetacharacter => ExplainTagDecline::StoredWildcard {
-                    schema,
-                    table,
-                    column,
-                },
-                StoredValueProblem::FoldDivergentCharacter => {
-                    ExplainTagDecline::StoredFoldDivergent {
-                        schema,
-                        table,
-                        column,
-                    }
-                }
-            })
-        })
+        .find(|(schema, table, column)| stored_coordinate_is_fold_divergent(schema, table, column))
     {
-        return Ok(Err(decline));
+        return Ok(Err(ExplainTagDecline::StoredFoldDivergent {
+            schema,
+            table,
+            column,
+        }));
     }
     let (Some(schema), Some(table)) = (target.schema.as_deref(), target.table.as_deref()) else {
         // Not a shortcut — see the DESCENDANT argument in the doc above.
@@ -2187,87 +2192,6 @@ async fn resolved_tags_for_target<L: TagLookups + Send>(
             table: table.to_string(),
             column: column.to_string(),
         }))
-}
-
-/// Why one stored `catalog_tag_assignments` coordinate is outside the population
-/// `resolved_tags_for_resource_via` reproduces — see [`stored_value_problem`].
-///
-/// Each variant is a shape `ServiceTags::from_assignments` would put on the tag
-/// wire and `RangerTagEnricher.findMatchingTags` would ADMIT for a request the
-/// resolver's predicate does not return it for. They are kept apart because they
-/// have different remedies and because collapsing them into "malformed" would
-/// hide which test covers which.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StoredValueProblem {
-    /// An empty `schema_name` or `table_name`.
-    ///
-    /// `from_assignments` OMITS an empty level, so `('sales','','')` ships as
-    /// `resourceElements = {catalog, schema}` — measured `ANCESTOR` of
-    /// `hive.sales.orders.email` on the real jar — while the resolver's equality
-    /// on `table_name` can never return it. (`column_name = ''` is NOT this: it
-    /// is migration 0081's documented table-level sentinel and the resolver's own
-    /// second arm handles it.)
-    EmptyLevel,
-    /// A `*` or `?` anywhere in a stored value.
-    ///
-    /// `trino.json`'s four resources declare `{"wildCard": true}`, so the
-    /// enricher's matcher runs `FilenameUtils.wildcardMatch` and `('sales','*','')`
-    /// is `ANCESTOR` of `hive.sales.orders.email`, `('sales','ord*','')` likewise,
-    /// `('sales','orders','ema*')` is `SELF` — all measured, none returned by an
-    /// equality predicate.
-    ///
-    /// **This one DECLINES rather than being reproduced, and that is the trade.**
-    /// `wildcardMatch` is a token-based backtracking algorithm over `*`/`?`;
-    /// SQL `LIKE` is not that algorithm (`%`/`_`, no `?`, different escaping), and
-    /// standing up a second matcher implementation is the trade this package has
-    /// declined three times — the tag trie, the candidate rule, T4. So the state
-    /// is detected and refused, fail-closed, with the page naming it.
-    WildcardMetacharacter,
-    /// One of the 25 code points in [`FOLD_DIVERGENT`] — the characters on which
-    /// the resolver's fold and the matcher's fold can disagree.
-    ///
-    /// The resolver folds with Postgres `lower()`, a FULL-STRING Unicode lowercase;
-    /// the matcher folds with `StringUtils.equalsIgnoreCase`, a PER-CHARACTER
-    /// `toUpperCase`/`toLowerCase` pair after a length check. Two different
-    /// algorithms, so "the query reproduces the matcher" is a claim about where
-    /// they agree — and neither direction of a disagreement is safe: too wide
-    /// invents a tag the engine does not apply, too narrow misses one it does.
-    ///
-    /// # ⚠ Fix round 2 narrowed this from "any non-ASCII value" by MEASURING
-    ///
-    /// Round 1 declined every non-ASCII stored value, on the un-measured premise
-    /// that the two folds "are not provably identical outside ASCII". In a
-    /// Vietnamese-language deployment that is a recurring over-refusal: one tag on
-    /// a table named `người` would have made every `explain` in that catalog answer
-    /// `TagsUnresolved`.
-    ///
-    /// The premise was much narrower than the gate.
-    /// `tests/ranger/src/test/java/EgretCaseFoldAgreementTest.java` sweeps **every
-    /// defined code point in Unicode** against three criteria (asymmetric 1:1
-    /// mapping, length-changing full lowercase, context-dependent full lowercase)
-    /// and finds **25**: the Turkish `İ`/`ı`, the long `ſ`, the Greek final sigma
-    /// and `Σ` itself, the Greek and Cyrillic variant letters, the micro sign, and
-    /// the Greek ypogegrammeni pair. **No Vietnamese letter is in it** — that test
-    /// asserts so directly, over both the precomposed letters and the whole
-    /// `U+1EA0..U+1EF9` tone-mark range — and neither is German `ß`, Cyrillic, or
-    /// the Kelvin sign. Named pairs in that table, measured: `("I","ı")`,
-    /// `("İ","i")`, `("ſ","s")`, `("Σ","ς")`, `("ΑΣ","ασ")` and `("µ","μ")`
-    /// DISAGREE; `("Tiếng","TIẾNG")`, `("người","NGƯỜI")`, `("ß","ẞ")`, `("Д","д")`
-    /// and `("K","k")` AGREE.
-    ///
-    /// # ⚠ One side of that measurement is a STAND-IN, and it is unverified
-    ///
-    /// The matcher's side is exact (`String.equalsIgnoreCase` is what
-    /// `StringUtils.equalsIgnoreCase` delegates to). The query's side is Java
-    /// `String.toLowerCase(Locale.ROOT)` standing in for Postgres `lower()`: both
-    /// implement Unicode's full `Lowercase_Mapping`, `SpecialCasing` entries and
-    /// the `Final_Sigma` rule included, and `Locale.ROOT` excludes the
-    /// locale-tailored mappings. **No Postgres runs in that harness**, so the set
-    /// is unverified on the database side exactly as the SQL half of the fold is.
-    /// **Falsified by** a collation that tailors case (`tr_TR` would move `I`/`i`
-    /// into the divergent set and is the one deployment where this gate would be
-    /// too narrow), or by an ICU/glibc difference on one of the 25.
-    FoldDivergentCharacter,
 }
 
 /// The 25 code points on which Postgres `lower()` and Java `equalsIgnoreCase` can
@@ -2347,46 +2271,96 @@ fn fold_divergent(value: &str) -> bool {
     value.chars().any(|c| FOLD_DIVERGENT.contains(&c))
 }
 
-/// The ruling on ONE stored coordinate: `None` when
-/// `resolved_tags_for_resource_via`'s predicate reproduces the enricher for it,
-/// and the reason otherwise.
+/// The ruling on ONE stored coordinate: `true` when
+/// `resolved_tags_for_resource_via`'s predicate cannot be shown to reproduce the
+/// enricher for it, which after migration 0166 means exactly one thing — one of
+/// its levels carries a character the two case folds can disagree on.
+///
+/// # ⚠ This ruled on THREE classes until migration 0166 took two of them
+///
+/// It was `stored_value_problem`, returning `Option<StoredValueProblem>` over
+/// `EmptyLevel`, `WildcardMetacharacter` and `FoldDivergentCharacter`. Migration
+/// 0166 adds `catalog_tag_assignments_levels_are_present_and_literal` — a
+/// VALIDATED `CHECK` forbidding an empty `schema_name`/`table_name` and `*`/`?` in
+/// any of the three levels — so the first two are no longer states a running
+/// egret can read: unrepresentable beats unforgettable. The fold divergence is the
+/// one class that stays here, and the migration's text carries the ruling on why a
+/// `CHECK` must not take it over (those 25 code points are legitimate identifiers,
+/// and which of them diverge is a property of the deployment's collation rather
+/// than of the string).
 ///
 /// # ⚠ Enumerated: every property of a stored value that reaches the comparison
 ///
-/// A predicate the enricher applies and this list does not rule on is a
-/// fail-open, which is exactly how fix round 1 arrived: the first version of this
-/// gate ruled on emptiness alone and the review measured two more classes. **A
-/// new matcher option in `trino.json` or `starrocks.json`, or a new level in
-/// `from_assignments`, is a new row here.**
+/// The two retired classes keep their rows, because the ENUMERATION is what this
+/// function is worth: the first version of this gate ruled on emptiness alone and
+/// the review measured two more classes of the same shape. A property the matcher
+/// applies and this table does not rule on is a fail-open. **A new matcher option
+/// in `trino.json` or `starrocks.json`, or a new level in `from_assignments`, is a
+/// new row here** — and a row whose ruling is "the schema forbids it" names the
+/// constraint that does, so that dropping the constraint is visibly a fail-open
+/// rather than a tidy-up.
 ///
 /// | property of the stored value | the matcher's rule | here |
 /// |---|---|---|
-/// | emptiness of `schema` / `table` | `from_assignments` omits the level; the shorter resource is an ANCESTOR the enricher admits | [`StoredValueProblem::EmptyLevel`] |
-/// | emptiness of `column` | the same omission, but it is migration 0081's documented table-level sentinel and the resolver's second arm IS that ANCESTOR case | **ruled fine** — the one emptiness that is reproduced |
-/// | `*` / `?` | `{"wildCard": true}` ⇒ `FilenameUtils.wildcardMatch` | [`StoredValueProblem::WildcardMetacharacter`] |
+/// | emptiness of `schema` / `table` | `from_assignments` omits the level, and the shorter resource is an ANCESTOR the enricher admits — `('sales','','')` ships as `{catalog, schema}`, measured ANCESTOR of `hive.sales.orders.email` on the real jar, and an equality predicate on `table_name` can never return it | **UNREPRESENTABLE since 0166** — `catalog_tag_assignments_levels_are_present_and_literal`. Not ruled on here, and not reachable |
+/// | emptiness of `column` | the same omission, but it is migration 0081's documented table-level sentinel and the resolver's second arm IS that ANCESTOR case | **ruled fine, and deliberately still writable** — the one emptiness that is reproduced, and the one 0166's predicate had to keep: a constraint forbidding every empty string would break the table-level attachment |
+/// | `*` / `?` | `{"wildCard": true}` on all four `trino.json` resources ⇒ `FilenameUtils.wildcardMatch`, a token-based backtracking matcher that SQL `LIKE` is not (`%`/`_`, no `?`, different escaping) | **UNREPRESENTABLE since 0166**, same constraint. Standing up a second matcher implementation is the trade this package has declined three times — the tag trie, the candidate rule, T4 — so the state is refused at the WRITE instead of reproduced |
 /// | letter case | `{"ignoreCase": true}` ⇒ `equalsIgnoreCase` | **reproduced, not refused** — the resolver folds both sides, measured on the Ranger side by `EgretTagAttachmentMatchTypeTest` |
-/// | a character from [`FOLD_DIVERGENT`] | `equalsIgnoreCase`'s PER-CHARACTER fold versus `lower()`'s FULL-STRING one — the 25 code points on which the two can disagree, derived by a sweep over all of Unicode | [`StoredValueProblem::FoldDivergentCharacter`] |
+/// | a character from [`FOLD_DIVERGENT`] | `equalsIgnoreCase`'s PER-CHARACTER fold versus `lower()`'s FULL-STRING one — the 25 code points on which the two can disagree, derived by a sweep over all of Unicode | **this function**, and the only class left in it |
 /// | any other non-ASCII character | the two folds AGREE on it — measured over every defined code point by the Java sweep against a `lower()` STAND-IN, and over the derived pairs against a real PostgreSQL 16.15 `en_US.utf8`; the caveats for U+0130 and U+03A3 are on [`FOLD_DIVERGENT`] | **ruled fine** — ⚠ fix round 2 narrowed this from "all non-ASCII declines", which was an over-refusal on an un-measured premise in a Vietnamese-language deployment |
 /// | leading / trailing whitespace | none: the matcher compares the value as given, and so does the predicate — `' sales'` matches `' sales'` and nothing else on BOTH sides | **ruled fine**, and it is a ruling rather than an omission |
 /// | length, `NULL` | `NOT NULL` on all three columns (migration 0081); the matcher has no length rule | **ruled fine** |
 /// | `isExcludes` / `isRecursive` | not expressible: `from_assignments` writes `{"values": [v]}` and no flag, so the matcher's defaults (`false`) are what the enricher gets | **ruled fine**, and `ServiceTags::from_assignments` is what makes it so |
 ///
+/// # Why a divergence is a decline in BOTH directions
+///
+/// The resolver folds with Postgres `lower()`, a FULL-STRING Unicode lowercase;
+/// the matcher folds with `StringUtils.equalsIgnoreCase`, a PER-CHARACTER
+/// `toUpperCase`/`toLowerCase` pair after a length check. Two different
+/// algorithms, so "the query reproduces the matcher" is a claim about where they
+/// agree — and neither direction of a disagreement is safe: too wide invents a tag
+/// the engine does not apply, too narrow misses one it does.
+///
+/// # ⚠ Fix round 2 narrowed this from "any non-ASCII value" by MEASURING
+///
+/// Round 1 declined every non-ASCII stored value, on the un-measured premise that
+/// the two folds "are not provably identical outside ASCII". In a
+/// Vietnamese-language deployment that is a recurring over-refusal: one tag on a
+/// table named `người` would have made every `explain` in that catalog answer
+/// `TagsUnresolved`.
+///
+/// The premise was much narrower than the gate.
+/// `tests/ranger/src/test/java/EgretCaseFoldAgreementTest.java` sweeps **every
+/// defined code point in Unicode** against three criteria (asymmetric 1:1 mapping,
+/// length-changing full lowercase, context-dependent full lowercase) and finds
+/// **25**: the Turkish `İ`/`ı`, the long `ſ`, the Greek final sigma and `Σ` itself,
+/// the Greek and Cyrillic variant letters, the micro sign, and the Greek
+/// ypogegrammeni pair. **No Vietnamese letter is in it** — that test asserts so
+/// directly, over both the precomposed letters and the whole `U+1EA0..U+1EF9`
+/// tone-mark range — and neither is German `ß`, Cyrillic, or the Kelvin sign.
+/// Named pairs in that table, measured: `("I","ı")`, `("İ","i")`, `("ſ","s")`,
+/// `("Σ","ς")`, `("ΑΣ","ασ")` and `("µ","μ")` DISAGREE; `("Tiếng","TIẾNG")`,
+/// `("người","NGƯỜI")`, `("ß","ẞ")`, `("Д","д")` and `("K","k")` AGREE.
+///
+/// # ⚠ One side of that measurement is a STAND-IN, and it is unverified
+///
+/// The matcher's side is exact (`String.equalsIgnoreCase` is what
+/// `StringUtils.equalsIgnoreCase` delegates to). The query's side is Java
+/// `String.toLowerCase(Locale.ROOT)` standing in for Postgres `lower()`: both
+/// implement Unicode's full `Lowercase_Mapping`, `SpecialCasing` entries and the
+/// `Final_Sigma` rule included, and `Locale.ROOT` excludes the locale-tailored
+/// mappings. **No Postgres runs in that harness**, so the set is unverified on the
+/// database side exactly as the SQL half of the fold is. **Falsified by** a
+/// collation that tailors case (`tr_TR` would move `I`/`i` into the divergent set
+/// and is the one deployment where this gate would be too narrow), or by an
+/// ICU/glibc difference on one of the 25.
+///
 /// The REQUEST side is not this function's: see the `target.*` rows on
 /// [`resolved_tags_for_target`]. A `*` an operator types is a literal there,
-/// because `getMatchType` takes the wildcard from the POLICY position only.
-fn stored_value_problem(schema: &str, table: &str, column: &str) -> Option<StoredValueProblem> {
-    if schema.is_empty() || table.is_empty() {
-        return Some(StoredValueProblem::EmptyLevel);
-    }
-    for value in [schema, table, column] {
-        if value.contains(['*', '?']) {
-            return Some(StoredValueProblem::WildcardMetacharacter);
-        }
-        if fold_divergent(value) {
-            return Some(StoredValueProblem::FoldDivergentCharacter);
-        }
-    }
-    None
+/// because `getMatchType` takes the wildcard from the POLICY position only — and
+/// 0166 does not constrain the request, only what can be stored.
+fn stored_coordinate_is_fold_divergent(schema: &str, table: &str, column: &str) -> bool {
+    [schema, table, column].into_iter().any(fold_divergent)
 }
 
 /// `egret_policy::ResolvedTag` → `egret_ranger_eval::eval::ResolvedTag`: two
@@ -2932,9 +2906,9 @@ mod wiring_tests {
 #[cfg(test)]
 mod tag_resolution_tests {
     use super::{
-        attachment_for, resolved_tags_for_display, resolved_tags_for_target, stored_value_problem,
-        ExplainResolvedTag, ExplainTagDecline, ExplainTargetLevel, PermHttpError, Scope,
-        StoredValueProblem, TagLookups, UnenrichedTags,
+        attachment_for, resolved_tags_for_display, resolved_tags_for_target,
+        stored_coordinate_is_fold_divergent, ExplainResolvedTag, ExplainTagDecline,
+        ExplainTargetLevel, PermHttpError, Scope, TagLookups, UnenrichedTags,
     };
     use egret_ranger_eval::resource::MatchType;
     use uuid::Uuid;
@@ -3019,95 +2993,54 @@ mod tag_resolution_tests {
             .collect()
     }
 
-    /// **The fail-open this seam exists for — all three classes of it.**
+    /// **The fail-open this seam exists for — the one class of it the schema
+    /// cannot take.**
     ///
     /// Each row below is a stored coordinate the enricher's matcher ADMITS for the
     /// target `catalog/sales/orders/email` and the resolver's equality predicate
     /// can never return, so passing the resolved set would pass a set MISSING a tag
     /// the engine enforces — and an empty set is the licence to skip the tag phase
-    /// entirely. Every one of them is measured on the real jar: the first by Task
-    /// 7's own probe, the wildcards and the mixed case by fix round 1's review and
-    /// now by `tests/ranger/.../EgretTagAttachmentMatchTypeTest.java`.
+    /// entirely.
     ///
-    /// ⚠ **Fix round 1 added the wildcard and non-ASCII rows.** The first version
-    /// of this gate ruled on emptiness alone, which is the LESS reachable class
-    /// (`ScopePicker` sends `undefined` for an empty input, so the form cannot
-    /// produce it), while a `*` in a stored value is one `PUT …/resource-tags`
-    /// away. Deleting a class from `stored_value_problem`, or dropping the gate
-    /// call, makes this test report a tag set where it must report "did not
-    /// resolve".
+    /// ⚠ **This had EIGHT rows until SP4d debt Task 3, covering three classes.**
+    /// Seven of them — `('sales','','')`, `('','','')`, `('sales','*','')`,
+    /// `('sales','ord*','')`, `('*','*','')`, `('sales','order?','')` and
+    /// `('sales','orders','ema*')` — are coordinates migration 0166's
+    /// `catalog_tag_assignments_levels_are_present_and_literal` now refuses to
+    /// store. A test that feeds them to the fake lookup asserts a branch no
+    /// production read can produce, which is the shape that lets a stale
+    /// expectation outlive its subject. They are not deleted silently: the
+    /// enumeration of what the matcher admits, including those coordinates and the
+    /// measurements behind them, is on `stored_coordinate_is_fold_divergent`, and
+    /// `the_database_refuses_a_coordinate_the_resolver_cannot_reproduce` in
+    /// `crates/egret-policy/tests/tag_resolution.rs` is where they are now measured
+    /// — against the real `CHECK`, which is a stronger instrument than this fake.
+    ///
+    /// What is left is the class a `CHECK` must NOT take: a character on which
+    /// Postgres `lower()` and Java `equalsIgnoreCase` can disagree. Deleting the
+    /// gate call, or narrowing `fold_divergent`, makes this test report a tag set
+    /// where it must report "did not resolve".
     #[tokio::test]
-    async fn every_unreproducible_stored_coordinate_declines_the_whole_resolution() {
-        // ⚠ The variant each row must REPORT, written out per coordinate rather
-        // than derived from `stored_value_problem` (fix round 3). Deriving it would
-        // be a correlated oracle — the function under test would be asked to grade
-        // its own answer — and the `other =>` arm means a row added without an
-        // expectation fails loudly instead of being graded by nothing.
-        let coord = |(schema, table, column): (&str, &str, &str)| {
-            (schema.to_string(), table.to_string(), column.to_string())
-        };
-        let expected_for = |c: (&str, &str, &str)| {
-            let (schema, table, column) = coord(c);
-            match c {
-                ("sales", "", "") | ("", "", "") => ExplainTagDecline::StoredLevelEmpty {
-                    schema,
-                    table,
-                    column,
-                },
-                ("sales", "*", "")
-                | ("sales", "ord*", "")
-                | ("*", "*", "")
-                | ("sales", "order?", "")
-                | ("sales", "orders", "ema*") => ExplainTagDecline::StoredWildcard {
-                    schema,
-                    table,
-                    column,
-                },
-                ("sales", "orders", "ema\u{0131}l") => ExplainTagDecline::StoredFoldDivergent {
-                    schema,
-                    table,
-                    column,
-                },
-                other => panic!("no expected decline written for {other:?}"),
-            }
-        };
+    async fn a_fold_divergent_stored_coordinate_declines_the_whole_resolution() {
+        // ⚠ The decline each row must REPORT, written out per coordinate rather
+        // than derived from the predicate under test (fix round 3). Deriving it
+        // would be a correlated oracle — the function under test would be asked to
+        // grade its own answer.
         for (coordinate, why) in [
             (
-                ("sales", "", ""),
-                "a schema-level row ships as {catalog, schema}: ANCESTOR",
-            ),
-            (
-                ("", "", ""),
-                "a catalog-level row ships as {catalog}: ANCESTOR",
-            ),
-            (
-                ("sales", "*", ""),
-                "wildCard: true makes `*` match `orders`: ANCESTOR",
-            ),
-            (
-                ("sales", "ord*", ""),
-                "a wildcard PREFIX matches too: ANCESTOR",
-            ),
-            (("*", "*", ""), "both levels wildcarded: ANCESTOR"),
-            (
-                ("sales", "order?", ""),
-                "`?` is the other metacharacter: ANCESTOR",
-            ),
-            (
-                ("sales", "orders", "ema*"),
-                "a wildcarded COLUMN is SELF, not ancestor",
-            ),
-            // ⚠ Fix round 2 replaced this row. It used to be
-            // `("sales","orders","e\u{0301}mail")` — `e` plus a combining acute —
-            // on the round-1 rule that ANY non-ASCII value declines. The two folds
-            // AGREE on a combining mark, so that row now asserts the opposite of
-            // what it says; what diverges is the measured set, and `\u{0131}` (the
-            // Turkish dotless i, which uppercases to ASCII `I`) is a member.
-            (
                 ("sales", "orders", "ema\u{0131}l"),
-                "a character the two folds disagree on",
+                "the Turkish dotless i in the COLUMN: uppercases to ASCII `I`",
+            ),
+            (
+                ("sale\u{017f}", "orders", ""),
+                "the long s in the SCHEMA: uppercases to ASCII `S`",
+            ),
+            (
+                ("sales", "order\u{03a3}", ""),
+                "capital sigma in the TABLE: its lowercase depends on the next character",
             ),
         ] {
+            let (schema, table, column) = coordinate;
             let mut lookups = FakeTagLookups::new(&[coordinate], &[("pii", MatchType::Self_)]);
             let got = resolved_tags_for_target(
                 &mut lookups,
@@ -3116,14 +3049,17 @@ mod tag_resolution_tests {
             .await
             .expect("no error");
             // ⚠ The VARIANT and the COORDINATE, not merely "declined" (fix round
-            // 3). Three states with three different remedies were collapsed by an
-            // `.is_some()` at the call site, and the page then named a stored row
-            // that did not exist and offered a remedy already satisfied. An
-            // assertion that only checked for a decline could not have caught
-            // that — and did not.
+            // 3). The states were collapsed by an `.is_some()` at the call site,
+            // and the page then named a stored row that did not exist and offered a
+            // remedy already satisfied. An assertion that only checked for a
+            // decline could not have caught that — and did not.
             assert_eq!(
                 got.as_ref().err(),
-                Some(&expected_for(coordinate)),
+                Some(&ExplainTagDecline::StoredFoldDivergent {
+                    schema: schema.to_string(),
+                    table: table.to_string(),
+                    column: column.to_string(),
+                }),
                 "{coordinate:?} must decline and name itself ({why}), got {got:?}"
             );
             assert_eq!(
@@ -3143,7 +3079,7 @@ mod tag_resolution_tests {
     /// folds both sides — so a row stored `SALES`/`ORDERS`/`EMAIL` is a coordinate
     /// the predicate handles, not one it declines.
     ///
-    /// Gating it instead would have been the obvious fourth class and it would be
+    /// Gating it instead would have been the obvious extra class and it would be
     /// wrong in a way no fail-open test catches: `ScopePicker` renders the three
     /// levels as free-text inputs and `request_resource` inserts them verbatim, so
     /// differing case is what ORDINARY use produces. A steward who typed `SALES`
@@ -3174,14 +3110,14 @@ mod tag_resolution_tests {
     /// entire suite, because the handler body is reachable only from DB-gated
     /// tests. Both arms are asserted here, and the second assertion is the one that
     /// matters: a reason that does not reach the response is a page that renders
-    /// round 1's sentence for all four states, which is the defect this round
+    /// round 1's sentence for every decline state, which is the defect this round
     /// exists to fix.
     #[test]
     fn the_decline_reason_reaches_the_response_and_the_tags_do_not() {
-        let decline = ExplainTagDecline::StoredWildcard {
+        let decline = ExplainTagDecline::StoredFoldDivergent {
             schema: "sales".to_string(),
-            table: "*".to_string(),
-            column: String::new(),
+            table: "orders".to_string(),
+            column: "ema\u{0131}l".to_string(),
         };
         let (tags, declined) = super::explain_tag_inputs(Err(decline.clone()));
         assert!(
@@ -3303,16 +3239,22 @@ mod tag_resolution_tests {
     ///
     /// Both orders are asserted, which is what makes this a test of the rule
     /// rather than of the fixture: the SAME pair of offenders handed over in the
-    /// opposite order must name the OTHER row. A `find_map` changed to `.last()`
-    /// or to a per-class precedence fails one of the two.
+    /// opposite order must name the OTHER row. A `find` changed to `.last()` fails
+    /// one of the two.
+    ///
+    /// ⚠ **The pair used to be one wildcard row and one fold-divergent row**, which
+    /// also disproved a per-CLASS precedence. Migration 0166 makes the wildcard row
+    /// unstorable, so there is one class left and no precedence left to disprove;
+    /// the two offenders are now two fold-divergent rows carrying the divergent
+    /// character at DIFFERENT levels, which is what the rule still has to order.
     #[tokio::test]
     async fn the_first_offending_coordinate_is_the_one_named() {
-        // Two offenders of DIFFERENT classes, so the assertion cannot be satisfied
-        // by a rule that happens to prefer one class.
-        let wildcard_first = [("sales", "ord*", "email"), ("sales", "orders", "emaıl")];
-        let fold_first = [("sales", "orders", "emaıl"), ("sales", "ord*", "email")];
+        // Two offenders that differ in which LEVEL carries the divergent character,
+        // so neither can be named by a rule that happens to look at one level.
+        let schema_first = [("saleſ", "orders", ""), ("sales", "orders", "emaıl")];
+        let column_first = [("sales", "orders", "emaıl"), ("saleſ", "orders", "")];
 
-        let mut lookups = FakeTagLookups::new(&wildcard_first, &[]);
+        let mut lookups = FakeTagLookups::new(&schema_first, &[]);
         let got = resolved_tags_for_target(
             &mut lookups,
             &target(Some("sales"), Some("orders"), Some("email")),
@@ -3321,15 +3263,15 @@ mod tag_resolution_tests {
         .expect("no error");
         assert_eq!(
             got,
-            Err(ExplainTagDecline::StoredWildcard {
-                schema: "sales".to_string(),
-                table: "ord*".to_string(),
-                column: "email".to_string(),
+            Err(ExplainTagDecline::StoredFoldDivergent {
+                schema: "saleſ".to_string(),
+                table: "orders".to_string(),
+                column: String::new(),
             }),
             "the FIRST offender in the ordered list is the one the page names"
         );
 
-        let mut lookups = FakeTagLookups::new(&fold_first, &[]);
+        let mut lookups = FakeTagLookups::new(&column_first, &[]);
         let got = resolved_tags_for_target(
             &mut lookups,
             &target(Some("sales"), Some("orders"), Some("email")),
@@ -3344,45 +3286,50 @@ mod tag_resolution_tests {
                 column: "emaıl".to_string(),
             }),
             "and with the same two rows in the other order it is the other one — \
-             so this pins first-wins, not a preference between the classes"
+             so this pins first-wins rather than a preference between the levels"
         );
     }
 
-    /// The ruling, per class, on the function that owns it. The end-to-end tests
-    /// above drive it through `resolved_tags_for_target`; these name the class, so
-    /// that a mutation which collapses two classes into one is visible as such.
+    /// The ruling on the function that owns it. The end-to-end tests above drive it
+    /// through `resolved_tags_for_target`; this one asks it directly, so that a
+    /// mutation which widens or narrows the predicate is visible here rather than
+    /// only through a decline.
+    ///
+    /// ⚠ **This was `stored_value_problem_rules_on_each_class_by_name` and asserted
+    /// three classes.** Migration 0166 took two of them into the schema, so the
+    /// rows that used to live here — `("", "orders", "")`, `("sales", "", "")`,
+    /// `("sal*s", "orders", "")`, `("sales", "orders", "ema?l")` — are now measured
+    /// against the real `CHECK` in `crates/egret-policy/tests/tag_resolution.rs`,
+    /// which is a stronger instrument than a direct call. What is still a RULING on
+    /// this side, and could still be got wrong here, is below: which characters
+    /// diverge, and which of the reproduced properties must NOT decline.
     #[test]
-    fn stored_value_problem_rules_on_each_class_by_name() {
-        use StoredValueProblem::*;
-        assert_eq!(stored_value_problem("sales", "orders", "email"), None);
+    fn a_coordinate_is_fold_divergent_only_where_the_two_folds_can_disagree() {
+        assert!(!stored_coordinate_is_fold_divergent(
+            "sales", "orders", "email"
+        ));
         // `column_name = ''` is migration 0081's table-level sentinel and the
-        // resolver's own second arm — the one emptiness that is REPRODUCED.
-        assert_eq!(stored_value_problem("sales", "orders", ""), None);
-        assert_eq!(stored_value_problem("", "orders", ""), Some(EmptyLevel));
-        assert_eq!(stored_value_problem("sales", "", ""), Some(EmptyLevel));
-        assert_eq!(
-            stored_value_problem("sal*s", "orders", ""),
-            Some(WildcardMetacharacter)
-        );
-        assert_eq!(
-            stored_value_problem("sales", "orders", "ema?l"),
-            Some(WildcardMetacharacter)
-        );
+        // resolver's own second arm — the one emptiness that is REPRODUCED, and the
+        // one 0166's CHECK deliberately still allows.
+        assert!(!stored_coordinate_is_fold_divergent("sales", "orders", ""));
         // ⚠ Fix round 2: an ordinary non-ASCII value is NOT a problem. The two
         // folds AGREE on every Vietnamese letter — measured over the precomposed
         // letters and the whole U+1EA0..U+1EF9 tone range by
         // `EgretCaseFoldAgreementTest::noVietnameseLetterIsInTheDivergentSet` — and
         // round 1 declined all of them, which in this deployment is a tag on
         // `người` refusing the whole catalog.
-        assert_eq!(
-            stored_value_problem("b\u{00e1}n_h\u{00e0}ng", "ng\u{01b0}\u{1edd}i", ""),
-            None
-        );
-        assert_eq!(
-            stored_value_problem("Ti\u{1ebf}ng", "TI\u{1ebe}NG", ""),
-            None
-        );
-        // The 25 that do diverge, one per mechanism.
+        assert!(!stored_coordinate_is_fold_divergent(
+            "b\u{00e1}n_h\u{00e0}ng",
+            "ng\u{01b0}\u{1edd}i",
+            ""
+        ));
+        assert!(!stored_coordinate_is_fold_divergent(
+            "Ti\u{1ebf}ng",
+            "TI\u{1ebe}NG",
+            ""
+        ));
+        // The 25 that do diverge, one per mechanism — and asked of each of the three
+        // LEVELS, since the predicate's job is to look at all three.
         for divergent in [
             "\u{0130}", // full lowercase is TWO code points
             "\u{0131}", // uppercases to ASCII `I`
@@ -3392,16 +3339,28 @@ mod tag_resolution_tests {
             "\u{00b5}", // micro sign
             "\u{1c80}", // Cyrillic rounded ve
         ] {
-            assert_eq!(
-                stored_value_problem(&format!("sa{divergent}les"), "orders", ""),
-                Some(FoldDivergentCharacter),
-                "{divergent:?} is in FOLD_DIVERGENT"
+            let odd = format!("sa{divergent}les");
+            assert!(
+                stored_coordinate_is_fold_divergent(&odd, "orders", ""),
+                "{divergent:?} in the SCHEMA is in FOLD_DIVERGENT"
+            );
+            assert!(
+                stored_coordinate_is_fold_divergent("sales", &odd, ""),
+                "{divergent:?} in the TABLE is in FOLD_DIVERGENT"
+            );
+            assert!(
+                stored_coordinate_is_fold_divergent("sales", "orders", &odd),
+                "{divergent:?} in the COLUMN is in FOLD_DIVERGENT"
             );
         }
         // Case is NOT a problem: it is reproduced by the resolver's fold.
-        assert_eq!(stored_value_problem("SALES", "ORDERS", "EMAIL"), None);
+        assert!(!stored_coordinate_is_fold_divergent(
+            "SALES", "ORDERS", "EMAIL"
+        ));
         // Whitespace is NOT a problem: both sides compare the value as given.
-        assert_eq!(stored_value_problem(" sales", "orders ", ""), None);
+        assert!(!stored_coordinate_is_fold_divergent(
+            " sales", "orders ", ""
+        ));
     }
 
     /// **The REQUEST side of the fold, which round 2 added and round 1 did not

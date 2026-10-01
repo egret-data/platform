@@ -4234,33 +4234,62 @@ async fn a_tag_policy_block_with_no_tags_recorded_answers_through_the_narrowing(
     );
 }
 
-/// **The fail-open the gate closes, end to end.** One assignment row with an
-/// empty `schema_name` ships as a `RangerServiceResource` naming
-/// `{catalog, schema}` — `ServiceTags::from_assignments` omits an empty level —
-/// which the engine's enricher treats as an ANCESTOR of `sales.orders` and
-/// Ranger ADMITS for a tag request. `resolved_tags_for_resource_via` cannot
-/// return it: its predicate is an exact `table_name = $3`. So the resolved set
-/// would be MISSING a tag the engine is enforcing, and an empty set is the
-/// licence to skip the tag phase entirely.
+/// **The fail-open the gate closes, end to end — and the half of it the DATABASE
+/// now closes instead.**
 ///
-/// `stored_value_problem` rules on exactly that coordinate
-/// (`StoredValueProblem::EmptyLevel`, one of its three classes), and
-/// `resolved_tags_for_target` declines before resolving anything. Remove the gate
-/// and this goes green-but-wrong in the fail-open direction.
+/// Two assertions, in the order the fail-open is now blocked:
 ///
-/// The row is storable today: `assign_resource_tag` validates nothing and
-/// migration 0081 has no `CHECK`, so `PUT …/resource-tags {"table": ""}` writes
-/// it. This test writes it the same way every other fixture here does.
+/// 1. **The empty-level row cannot be stored.** It used to be: `('sales','','')`
+///    ships as a `RangerServiceResource` naming `{catalog, schema}` —
+///    `ServiceTags::from_assignments` omits an empty level — which the engine's
+///    enricher treats as an ANCESTOR of `sales.orders` and Ranger ADMITS for a tag
+///    request, while `resolved_tags_for_resource_via`'s exact `table_name = $3`
+///    can never return it. So egret's set was MISSING a tag the engine enforces,
+///    and an empty set is the licence to skip the tag phase entirely. SP4d-2b
+///    detected that at read time; migration 0166's
+///    `catalog_tag_assignments_levels_are_present_and_literal` makes it
+///    unstorable, which is why this test now asserts the INSERT is refused and
+///    names the constraint that refused it. The remark this test used to carry —
+///    "the row is storable today: `assign_resource_tag` validates nothing and
+///    migration 0081 has no `CHECK`" — is exactly what stopped being true.
+/// 2. **The class the schema must NOT take still declines, end to end.** A
+///    character on which Postgres `lower()` and Java `equalsIgnoreCase` can
+///    disagree is a legitimate identifier, so it stays storable and stays gated in
+///    Rust. Before this task that class had NO end-to-end instrument: all three
+///    e2e declines went through the empty-level row. Remove the gate call and this
+///    half goes green-but-wrong in the fail-open direction.
 #[tokio::test]
-async fn an_assignment_below_no_table_declines_the_resolution_and_refuses() {
+async fn the_schema_refuses_the_empty_level_and_the_fold_gate_still_declines() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
     let (trino_id, _starrocks_id, catalog_id) = two_profile_catalog(&f, "explain-broadrow").await;
     bind_tag_service_with_one_policy(&f, trino_id, "anything").await;
 
-    // A SCHEMA-level assignment: `table_name = ''`, which is the level egret's
-    // storage has no convention for and its resolver cannot roll up.
-    assign_tag(&f, catalog_id, "sales", "", "").await;
+    // 1. A SCHEMA-level assignment: `table_name = ''`, the level egret's storage
+    //    has no convention for and its resolver cannot roll up. The DATABASE is
+    //    what refuses it now, for every writer — this raw `sqlx::query`, the
+    //    `PUT …/resource-tags` route, and `psql`.
+    let e = try_assign_tag(&f, catalog_id, "sales", "", "")
+        .await
+        .expect_err("migration 0166 must refuse a row with an empty table_name");
+    let named = match &e {
+        sqlx::Error::Database(d) => {
+            d.constraint() == Some("catalog_tag_assignments_levels_are_present_and_literal")
+        }
+        _ => false,
+    };
+    assert!(
+        named,
+        "the refusal must be migration 0166's CHECK, not a typo or a dropped \
+         connection: {e}"
+    );
+
+    // 2. …and the surviving class, which no CHECK may take: the Turkish dotless i
+    //    in a stored column name. `('sales','orders','emaıl')` is a row the
+    //    matcher's per-character fold and the resolver's full-string `lower()` can
+    //    disagree about, so neither direction of the comparison is safe and the
+    //    whole resolution must decline.
+    assign_tag(&f, catalog_id, "sales", "orders", "emaıl").await;
 
     let (status, body) = into_json(
         f.app()
@@ -4278,7 +4307,7 @@ async fn an_assignment_below_no_table_declines_the_resolution_and_refuses() {
     let verdict = access_for(profile_for(&body, "trino"), "select");
     assert_eq!(
         verdict["decision"]["kind"], "undecidable",
-        "a stored assignment egret cannot roll up must refuse, not be answered \
+        "a stored assignment egret cannot reproduce must refuse, not be answered \
          from a set it is missing from; body: {body}"
     );
     assert!(
@@ -4290,19 +4319,15 @@ async fn an_assignment_below_no_table_declines_the_resolution_and_refuses() {
         "no tags_unresolved cause in {body}"
     );
     // **Fix round 3: the REASON reaches the wire, and names the row.** The cause
-    // alone cannot say which of four states produced it — the page rendered one
-    // sentence for all four, naming a stored row that did not exist — so the
-    // response carries the reason and the coordinate beside it.
+    // alone cannot say which state produced it — the page rendered one sentence for
+    // every one of them, naming a stored row that did not exist — so the response
+    // carries the reason and the coordinate beside it.
     assert_eq!(
-        body["tag_resolution_declined"]["kind"], "stored_level_empty",
+        body["tag_resolution_declined"]["kind"], "stored_fold_divergent",
         "the decline's reason must reach the response; body: {body}"
     );
     assert_eq!(
-        body["tag_resolution_declined"]["schema"], "sales",
-        "body: {body}"
-    );
-    assert_eq!(
-        body["tag_resolution_declined"]["table"], "",
+        body["tag_resolution_declined"]["column"], "emaıl",
         "and the coordinate must be the offending one, so the page can name it; body: {body}"
     );
 }
@@ -4384,6 +4409,44 @@ async fn assign_tag(
     .await
     .expect("tag assignment");
     name
+}
+
+/// [`assign_tag`] without the `expect`, for the one test whose subject is the
+/// INSERT being REFUSED. Separate rather than making `assign_tag` return a
+/// `Result`: every other call site is asserting the row lands, and an ignored
+/// `Result` at any of them would be a silently missing fixture.
+async fn try_assign_tag(
+    f: &Fixture,
+    catalog_id: Uuid,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Result<(), sqlx::Error> {
+    let warehouse_id: Uuid =
+        sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+            .bind(catalog_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("catalog warehouse");
+    let tag_id: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+            .bind(unique("t3key"))
+            .bind(unique("t3tag"))
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("tag");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1,$2,$3,$4,$5)",
+    )
+    .bind(tag_id)
+    .bind(warehouse_id)
+    .bind(schema)
+    .bind(table)
+    .bind(column)
+    .execute(&f.db.pool)
+    .await
+    .map(|_| ())
 }
 
 /// The tag service the Trino profile's plugin embeds as `tagPolicies`, carrying

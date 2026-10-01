@@ -3352,6 +3352,11 @@ export type controlPlaneCatalogAssignResourceTagResponse200 = {
   status: 200
 }
 
+export type controlPlaneCatalogAssignResourceTagResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
 export type controlPlaneCatalogAssignResourceTagResponse401 = {
   data: ErrorBody
   status: 401
@@ -3370,7 +3375,7 @@ export type controlPlaneCatalogAssignResourceTagResponse500 = {
 export type controlPlaneCatalogAssignResourceTagResponseSuccess = (controlPlaneCatalogAssignResourceTagResponse200) & {
   headers: Headers;
 };
-export type controlPlaneCatalogAssignResourceTagResponseError = (controlPlaneCatalogAssignResourceTagResponse401 | controlPlaneCatalogAssignResourceTagResponse403 | controlPlaneCatalogAssignResourceTagResponse500) & {
+export type controlPlaneCatalogAssignResourceTagResponseError = (controlPlaneCatalogAssignResourceTagResponse400 | controlPlaneCatalogAssignResourceTagResponse401 | controlPlaneCatalogAssignResourceTagResponse403 | controlPlaneCatalogAssignResourceTagResponse500) & {
   headers: Headers;
 };
 

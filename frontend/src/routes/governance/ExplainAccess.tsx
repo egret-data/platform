@@ -205,7 +205,7 @@ function serviceDefIssuePhrase(i: WireServiceDefIssue): string {
  *
  * | cause | reaches | and the thing to act on |
  * |---|---|---|
- * | `tags_unresolved` | every target in THIS CATALOG for three of the four decline states, and THIS REQUEST ALONE for `target_fold_divergent` — which is why `tagDeclineScope` is two notes and not one | whichever of the four `tag_resolution_declined` names, each with its own remedy (⚠ this row said "one stored tag assignment names no schema or no table" while four states produced the cause — the fix-round-3 defect, surviving in a doc comment) |
+ * | `tags_unresolved` | every target in THIS CATALOG for `stored_fold_divergent`, and THIS REQUEST ALONE for `target_fold_divergent` — which is why `tagDeclineScope` is two notes and not one | whichever of the two `tag_resolution_declined` names, each with its own remedy (⚠ this row said "one stored tag assignment names no schema or no table" while FOUR states produced the cause — the fix-round-3 defect, surviving in a doc comment. There are two states now: migration 0166 made `stored_level_empty` and `stored_wildcard` unstorable) |
  * | `envelope_construct` / `policy_construct` with `tag_policies` | every target on THIS PROFILE | the tag download itself, which did not read |
  * | `tag_attachment_not_reproducible`, `tag_resource_not_reproducible`, `tag_policy_not_normalisable`, both arbitration causes | the tag or the policy the sentence already NAMES | nothing to add: the subject is in the sentence |
  */
@@ -279,11 +279,14 @@ function tagNormalisationProblemPhrase(p: WireTagNormalisationProblem): string {
 }
 
 /** The stored coordinate a decline is about, as a steward reads it: `sales.orders.email`,
- *  with an omitted level shown as `(none)` so an EMPTY one is visible rather than
- *  swallowed by a dot. The empty level is the whole subject of one of the four states. */
+ *  or `sales / orders / (the table itself)` for a table-level attachment.
+ *
+ *  ⚠ The `(none)` rendering for an empty SCHEMA or TABLE is gone with the states that
+ *  produced it: migration 0166 makes an empty schema or table unstorable, so the only
+ *  empty level that can reach here is `column`, which is 0081's table-level sentinel
+ *  and has always had its own wording. */
 function storedCoordinate(d: { schema: string; table: string; column: string }): string {
-  const level = (v: string) => (v === "" ? "(none)" : v);
-  return `${level(d.schema)} / ${level(d.table)} / ${d.column === "" ? "(the table itself)" : d.column}`;
+  return `${d.schema} / ${d.table} / ${d.column === "" ? "(the table itself)" : d.column}`;
 }
 
 const TARGET_LEVEL_LABEL: Record<ExplainTargetLevel, string> = {
@@ -291,35 +294,6 @@ const TARGET_LEVEL_LABEL: Record<ExplainTargetLevel, string> = {
   table: "table",
   column: "column",
 };
-
-/**
- * What to DO about a `stored_level_empty` row, named after the level that is
- * actually missing.
- *
- * **⚠ Task 8's browser gate, P6 — a weaker instance of the defect fix round 3
- * fixed.** The one remedy this state used to carry was "Re-store that assignment
- * on a table or a column", which is right when the empty level is the TABLE and
- * useless when it is the SCHEMA: measured on `('', 'orders', '')`, the page told a
- * steward to re-store on a table while the assignment was already on `orders`, so
- * following the instruction changes nothing. The coordinate was right and the
- * remedy was still narrower than the states it was shown for — which is the same
- * shape, one level down.
- *
- * `column` is NOT consulted: an empty column is migration 0081's table-level
- * sentinel and the one emptiness the resolver reproduces, so it is never what
- * raised this state.
- */
-function emptyLevelRemedy(d: { schema: string; table: string }): string {
-  const schemaEmpty = d.schema === "";
-  const tableEmpty = d.table === "";
-  if (schemaEmpty && tableEmpty) {
-    return "Re-store that assignment with the schema and table it belongs to";
-  }
-  if (schemaEmpty) {
-    return "Re-store that assignment with the schema it belongs to";
-  }
-  return "Re-store that assignment on a table or a column";
-}
 
 /**
  * Why egret declined to resolve this target's tags, as a sentence naming the thing
@@ -331,16 +305,19 @@ function emptyLevelRemedy(d: { schema: string; table: string }): string {
  * table or a column", when `EmptyLevel` was the only state that produced it. Rounds
  * 1 and 2 added three more states and left the sentence alone, so a steward whose
  * catalog held `('sales','*','')` was told about a row with no table — a row that
- * does not exist — and offered a remedy already satisfied. The four states have four
- * different remedies, which is exactly why `ExplainTagDecline` carries them apart
- * and why the handler stopped discarding the variant.
+ * does not exist — and offered a remedy already satisfied. The states have different
+ * remedies, which is exactly why `ExplainTagDecline` carries them apart and why the
+ * handler stopped discarding the variant.
+ *
+ * ⚠ **Two of the four arms are gone, and not because they were wrong.** Migration
+ * 0166 adds a `CHECK` to `catalog_tag_assignments` that makes an empty schema or
+ * table, and a `*` or `?` in any level, unstorable — so `stored_level_empty` and
+ * `stored_wildcard` are states the backend can no longer report and the wire enum no
+ * longer carries. A `case` for a `kind` that cannot arrive is the same defect as the
+ * stale sentence above, one level removed.
  */
 function tagDeclineSentence(d: ExplainTagDecline): string {
   switch (d.kind) {
-    case "stored_level_empty":
-      return `a tag assignment in this catalog is stored at ${storedCoordinate(d)}, and a level left empty there is one the engine applies to every resource beneath it while egret cannot match it to any. ${emptyLevelRemedy(d)}`;
-    case "stored_wildcard":
-      return `a tag assignment in this catalog is stored at ${storedCoordinate(d)}, whose “*” or “?” the engine matches against many resources by a rule egret's database cannot reproduce. Re-store that assignment on the exact table or column it is meant for`;
     case "stored_fold_divergent":
       return `a tag assignment in this catalog is stored at ${storedCoordinate(d)}, which carries a character whose upper- and lower-case forms egret's database and the engine's matcher need not agree on. Rename that resource, or re-store the assignment without it`;
     case "target_fold_divergent":
@@ -364,8 +341,6 @@ function tagDeclineSentence(d: ExplainTagDecline): string {
  */
 function tagDeclineScope(d: ExplainTagDecline): string {
   switch (d.kind) {
-    case "stored_level_empty":
-    case "stored_wildcard":
     case "stored_fold_divergent":
       return "This is not specific to your target: egret declines to resolve tags for the whole catalog while that assignment is stored this way, so every target in this catalog answers the same way until it changes.";
     case "target_fold_divergent":
@@ -379,7 +354,7 @@ function causeScopeNote(c: WireUndecidableCause, declined?: ExplainTagDecline): 
   if (c.kind === "tags_unresolved") {
     // ⚠ No note at all when the reason is absent, rather than round 1's
     // per-catalog claim: without `tag_resolution_declined` the REACH is unknown,
-    // and one of the four states is per-request. The backend sends the two
+    // and one of the two states is per-request. The backend sends the two
     // together — `tag_resolution_declined` is `Some` exactly when the handler
     // passed `resolved_tags: None`, which is the only production state raising
     // this cause — so the absent case is a payload egret does not produce.
@@ -437,9 +412,10 @@ function causeSentence(c: WireUndecidableCause, declined?: ExplainTagDecline): s
       // unconditional, because `explain` never resolved tags); fix round 3 moved
       // the REASON out of this sentence and into `tag_resolution_declined`,
       // because by then four states produced this cause and this sentence named
-      // only the first of them. The distinction the cause has always carried —
-      // "declined to resolve" is not "there are none", since an empty set would
-      // have been an ANSWER — stays here, where it is true of all four.
+      // only the first of them (two states since migration 0166). The distinction
+      // the cause has always carried — "declined to resolve" is not "there are
+      // none", since an empty set would have been an ANSWER — stays here, where it
+      // is true of every one of them.
       const head =
         "This profile's tag service carries policies that would be evaluated against this resource's tags, and egret declined to resolve them";
       const tail =

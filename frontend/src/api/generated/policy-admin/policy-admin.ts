@@ -792,6 +792,13 @@ export const getPolicyAdminCreateProfileUrl = () => {
 }
 
 /**
+ * `config` is stored VERBATIM, which makes this the one reachable surface that
+ * could pair a non-Trino `type` with a `tagService` — a state in which every tag
+ * policy under the profile is silently inert, because the tag download writes the
+ * resource level `schema` and only Trino's service-def has one. `create_service`
+ * refuses it (400); see `egret_policy::store`'s
+ * `refuse_tag_service_on_non_trino_profile` for the measurement and for the
+ * enumeration of every write path that can reach the state.
  * @summary POST /policies/services — create a policy profile (a Ranger service
 instance) of the given type. The manual analogue of Trino provisioning's
 auto-bind, so a StarRocks profile can exist without an egret-provisioned

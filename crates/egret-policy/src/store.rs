@@ -1159,8 +1159,8 @@ pub async fn resolved_tags_for_resource_via(
 /// `catalog_tag_assignments` rows carry — the stored coordinates, with no ruling
 /// applied.
 ///
-/// **The ruling is `egret_perm_compile`'s `stored_value_problem`, in Rust, and
-/// the split is deliberate.** Its one caller runs this BEFORE
+/// **The ruling is `egret_perm_compile`'s `stored_coordinate_is_fold_divergent`,
+/// in Rust, and the split is deliberate.** Its one caller runs this BEFORE
 /// [`resolved_tags_for_resource_via`] and declines the whole resolution while any
 /// coordinate is outside the population that resolver reproduces, so the two
 /// cannot come apart.
@@ -1184,10 +1184,22 @@ pub async fn resolved_tags_for_resource_via(
 /// returned set says a broader row was skipped — so no inspection of that set can
 /// detect it. It has to be detected on the stored data, which is what this reads.
 ///
-/// Such rows are writable today: `egret_bi::catalog_tags`' `assign_resource_tag`
-/// validates nothing, migration 0081 has no `CHECK`, and `NOT NULL` does not
-/// exclude `''`. One `CHECK` would retire both this read and its ruling — see
-/// open item B of the SP4d-2b plan. Unrepresentable beats unforgettable.
+/// **Such rows are no longer writable, and that retired two thirds of the ruling
+/// but NOT this read** — SP4d debt Task 3, migration 0166
+/// (`catalog_tag_assignments_levels_are_present_and_literal`, VALIDATED). It
+/// forbids an empty `schema_name`/`table_name` and `*`/`?` in any level, which is
+/// open item B of the SP4d-2b plan: unrepresentable beats unforgettable, and
+/// `egret_bi::catalog_tags`' write-side refusal makes the same shape a 400 rather
+/// than a constraint surfacing as a 500.
+///
+/// What a `CHECK` must NOT take is the third class, which is why this read stays: a
+/// stored value may carry one of the 25 code points on which Postgres `lower()` —
+/// the fold THIS module's resolver uses — and Java `equalsIgnoreCase` can disagree.
+/// Those are legitimate identifiers (a table named with a Greek `Σ` is real data a
+/// steward must be able to tag), and which of them diverge depends on the
+/// deployment's collation, so the state has to be detected at read time and
+/// declined rather than refused at the write. `stored_coordinate_is_fold_divergent`
+/// is the whole surviving ruling and migration 0166's text records the argument.
 ///
 /// # ⚠ Why the coordinates and not a `count(*)` with the predicate in SQL
 ///
@@ -1199,6 +1211,15 @@ pub async fn resolved_tags_for_resource_via(
 /// branch's migrations — so the miss could not have been caught by any test
 /// either. The rule is now one pure Rust function with the enumeration beside it
 /// and a test per class; this query returns facts.
+///
+/// ⚠ **Migration 0166 does put two of those classes into SQL, and that is not a
+/// reversal of this paragraph.** The objection was to a rule in THIS query's
+/// `WHERE` clause: unreachable from any test, because the shared test template is
+/// ahead of the branch's migrations. A `CHECK` is the opposite — it is in force for
+/// every writer, and `the_database_refuses_a_coordinate_the_resolver_cannot_
+/// reproduce` in `tests/tag_resolution.rs` exercises it by trying the INSERTs and
+/// reading back which constraint refused. What stayed in Rust is the one class that
+/// must be decided per read rather than per write.
 ///
 /// The cost is one row per distinct tagged `(schema, table, column)` in the
 /// catalog's warehouse, once per `explain` request (not per profile). `explain` is

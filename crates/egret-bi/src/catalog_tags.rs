@@ -66,6 +66,14 @@ impl CatalogTagRepo {
     /// tag-download plugin re-polls `download_tags` instead of 304-ing
     /// forever, and the compiled StarRocks masking policy set is never
     /// visible in a state this transaction hasn't fully applied yet.
+    ///
+    /// **Refuses an unresolvable coordinate up front** —
+    /// [`unresolvable_coordinate`], SP4d debt Task 3. Migration 0166 is what makes
+    /// the state impossible; this is what makes it a 400 naming the level instead
+    /// of that constraint surfacing as an opaque 500 (`BiError::Db` maps to
+    /// "internal error"). The two predicates are written to the same shape on
+    /// purpose: "two guards that must agree, written to different shapes" is a
+    /// defect this programme has produced four times.
     pub async fn assign_catalog(
         &self,
         tag_id: Uuid,
@@ -75,6 +83,9 @@ impl CatalogTagRepo {
         column: &str,
         assigned_by: Option<Uuid>,
     ) -> Result<(), BiApiError> {
+        if let Some(why) = unresolvable_coordinate(schema, table, column) {
+            return Err(crate::error::BiError::BadRequest(why).into());
+        }
         let mut tx = self
             .db
             .pool
@@ -289,6 +300,63 @@ impl CatalogTagRepo {
     }
 }
 
+/// Why this `(schema, table, column)` cannot be stored, or `None`.
+///
+/// **SP4d debt Task 3, and it is the write-side half of migration 0166's
+/// `catalog_tag_assignments_levels_are_present_and_literal`.** The constraint is
+/// what makes the state impossible; this exists so a caller is told WHICH level is
+/// wrong, with a 400, rather than meeting a constraint violation that
+/// `BiError::Db` renders as "internal error".
+///
+/// The two are keyed to the same shape deliberately — `schema <> ''` ↔
+/// `!schema.is_empty()`, `strpos(x, '*') = 0 AND strpos(x, '?') = 0` ↔
+/// `!x.contains(['*', '?'])` — because two guards that must agree, written to
+/// different shapes, is the defect this programme has produced four times. A guard
+/// here that refused LESS than the CHECK would turn into a 500; one that refused
+/// MORE would reject a row the database accepts, which no error message makes
+/// true.
+///
+/// # Why each level is ruled the way it is
+///
+/// * an empty `schema` or `table`: `ServiceTags::from_assignments` OMITS an empty
+///   level, so the row ships as a SHORTER Ranger service resource — `('sales','','')`
+///   as `{catalog, schema}` — which `RangerTagEnricher` admits as an ANCESTOR of
+///   everything beneath it while egret's own exact resolver can never return it.
+///   The engine would enforce a tag egret cannot see.
+/// * an empty `column`: **allowed, and that is the point.** It is migration 0081's
+///   documented table-level sentinel, it is what `assign_resource_tag` writes
+///   whenever the request omits `column`, and the resolver's second arm IS that
+///   ANCESTOR case. Refusing it would delete the table-level attachment feature.
+/// * `*` or `?` anywhere: `trino.json` declares `{"wildCard": true}` on all four
+///   resources, so the plugin matches those with `FilenameUtils.wildcardMatch` and
+///   no SQL predicate reproduces it. ⚠ A stated over-refusal: a quoted identifier
+///   MAY legally contain `*`, so a table genuinely named `ord*ers` cannot be
+///   tagged. Allowing it is worse — one such row makes `explain` decline for every
+///   target in the catalog — and the remedy would be a wildcard-equivalent
+///   resolver, not a looser guard here.
+///
+/// **`unassign_catalog` deliberately has no such check.** A `DELETE` is not
+/// constrained by the `CHECK`, and a deployment that somehow holds a bad row must
+/// be able to remove it through the API — which also bumps `tag_version` and
+/// recompiles, the two things a hand-written `DELETE` would skip.
+fn unresolvable_coordinate(schema: &str, table: &str, column: &str) -> Option<String> {
+    if schema.is_empty() {
+        return Some("schema must not be empty".to_string());
+    }
+    if table.is_empty() {
+        return Some("table must not be empty".to_string());
+    }
+    for (level, value) in [("schema", schema), ("table", table), ("column", column)] {
+        if value.contains(['*', '?']) {
+            return Some(format!(
+                "{level} must not contain `*` or `?`: the engine would match it as a \
+                 wildcard and egret could not resolve the tag"
+            ));
+        }
+    }
+    None
+}
+
 /// Build the shared `SELECT … {schema, table, column, tag}` statement. `predicate`
 /// is a trusted (never user-interpolated) WHERE clause over aliased `cta`/`t`. A
 /// single global-count subquery keeps `tag.assignment_count` meaningful without an
@@ -401,6 +469,7 @@ async fn list_resource_tags(
     request_body = ResourceTagBody,
     responses(
         (status = 200, description = "Tag assigned to the catalog resource (idempotent)", body = egret_core::Ack),
+        (status = 400, description = "The coordinate cannot be stored: an empty schema or table, or `*`/`?` in any level — see migration 0166", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
@@ -484,3 +553,58 @@ async fn unassign_resource_tag(
     components(schemas(ResourceTagDto, ResourceTagBody))
 )]
 pub struct CatalogTagsApi;
+
+#[cfg(test)]
+mod tests {
+    use super::unresolvable_coordinate;
+
+    /// **The write-side half of migration 0166, asserted by LEVEL.** This is the
+    /// guard that keeps a bad `PUT …/resource-tags` a 400 instead of the CHECK
+    /// surfacing as a 500, so what matters is that it refuses exactly the set the
+    /// constraint refuses — no more, no less. A mutation that drops any arm shows up
+    /// here; one that widens it (refusing an empty `column`) shows up in the
+    /// sentinel assertions below, which are the ones the product depends on.
+    #[test]
+    fn it_refuses_exactly_what_the_check_refuses() {
+        // The two empty levels, named so the caller knows which box to fix.
+        assert_eq!(
+            unresolvable_coordinate("", "orders", ""),
+            Some("schema must not be empty".to_string())
+        );
+        assert_eq!(
+            unresolvable_coordinate("sales", "", ""),
+            Some("table must not be empty".to_string())
+        );
+        // Both metacharacters, at each of the three levels.
+        for (schema, table, column, level) in [
+            ("sal*s", "orders", "", "schema"),
+            ("sale?", "orders", "", "schema"),
+            ("sales", "ord*", "", "table"),
+            ("sales", "order?", "", "table"),
+            ("sales", "orders", "ema*", "column"),
+            ("sales", "orders", "e?ail", "column"),
+        ] {
+            let got = unresolvable_coordinate(schema, table, column)
+                .unwrap_or_else(|| panic!("({schema:?}, {table:?}, {column:?}) must be refused"));
+            assert!(
+                got.starts_with(level),
+                "the message must name the offending LEVEL, got {got:?} for \
+                 ({schema:?}, {table:?}, {column:?})"
+            );
+        }
+
+        // ⚠ The sentinel. `column_name = ''` is migration 0081's table-level
+        // attachment and `assign_resource_tag` writes it whenever the request omits
+        // `column`, so a guard that refused every empty string would break the
+        // product — and would also refuse rows the CHECK accepts.
+        assert_eq!(unresolvable_coordinate("sales", "orders", ""), None);
+        assert_eq!(unresolvable_coordinate("sales", "orders", "email"), None);
+        // Case and non-ASCII are reproduced by the resolver's fold, not refused.
+        assert_eq!(unresolvable_coordinate("SALES", "ORDERS", "EMAIL"), None);
+        assert_eq!(unresolvable_coordinate("bán_hàng", "người", ""), None);
+        // And a fold-divergent value STORES: that class is a read-time decline in
+        // `egret_perm_compile`'s gate, never a write refusal, because the 25 code
+        // points are legitimate identifiers.
+        assert_eq!(unresolvable_coordinate("sales", "orders", "emaıl"), None);
+    }
+}

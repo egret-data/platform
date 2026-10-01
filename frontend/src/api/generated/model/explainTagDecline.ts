@@ -8,32 +8,32 @@
 import type { ExplainTargetLevel } from './explainTargetLevel';
 
 /**
- * Which of the four states made `explain` decline to resolve the target's tags
+ * Which of the two states made `explain` decline to resolve the target's tags
  * — see [`ExplainResponse::tag_resolution_declined`] and
- * [`stored_value_problem`].
+ * [`stored_coordinate_is_fold_divergent`].
  *
- * The four have four different remedies and two different REACHES, which is the
- * whole reason they are carried apart: three are properties of stored data and
- * hold for every target in the catalog until it changes; the fourth is a property
- * of the request and holds for nothing else.
+ * The two have two different REACHES, which is the whole reason they are carried
+ * apart: the first is a property of stored data and holds for every target in the
+ * catalog until that row changes; the second is a property of the request and
+ * holds for nothing else.
  *
- * Each stored variant carries the offending coordinate so the page can name the
+ * ⚠ **This carried FOUR variants until SP4d debt Task 3.** `StoredLevelEmpty` and
+ * `StoredWildcard` were the other two, and migration 0166's
+ * `catalog_tag_assignments_levels_are_present_and_literal` makes both states
+ * unrepresentable: no running egret can read such a row, so no response can
+ * report one. They are removed rather than left unreachable — an API variant a
+ * client must still branch on for a state that cannot occur is the same defect as
+ * a superseded comment. The enumeration of what the matcher does and the schema
+ * now forbids survives on [`stored_coordinate_is_fold_divergent`], which is where
+ * the next person needs it.
+ *
+ * The stored variant carries the offending coordinate so the page can name the
  * row to fix. That is a `policy:read` surface already — the response's `tags`
  * field reports attachments on the target — and naming no row is what produced
  * the measured defect: a sentence telling a steward to re-store an assignment
  * that was already stored on a table.
  */
 export type ExplainTagDecline = {
-  schema: string;
-  table: string;
-  column: string;
-  kind: 'stored_level_empty';
-} | {
-  schema: string;
-  table: string;
-  column: string;
-  kind: 'stored_wildcard';
-} | {
   schema: string;
   table: string;
   column: string;
