@@ -124,6 +124,139 @@ async fn a_column_scope_without_a_table_is_refused_by_the_database() {
     );
 }
 
+/// SP4d debt Task 12 — **a privilege escalation, and the control is half the
+/// test.**
+///
+/// `perm.grants` has forbidden a level SKIP since `0154_perm_model.sql`, and
+/// `a_column_scope_without_a_table_is_refused_by_the_database` above pins that.
+/// `schema_name = ''` IS that skip in enforcement terms — the compiled policy
+/// carries `"schema": {"values": [""]}`, `RangerAbstractResourceMatcher.init()`
+/// drops an empty policy value, and the level becomes `isMatchAny`, so the grant
+/// is enforced in every schema of the catalog (measured in
+/// `egret-perm-compile/tests/compile_grants.rs`,
+/// `an_empty_scope_level_would_be_enforced_in_every_schema`) — and
+/// `IS NOT NULL` could not see it.
+///
+/// **The two controls, both required.** A constraint that rejected every write
+/// would pass an empties-only test, so arm 1 writes the legal row the escalation
+/// imitates and asserts it is still ACCEPTED. And the NULL skip is asserted to
+/// still fail under its OWN constraint name, which is what proves `''` and NULL
+/// are two different shapes rather than one guard answering twice: before 0167
+/// the NULL insert was rejected by `grants_check` while the `''` insert was
+/// accepted, on the same connection. Keeping both arms here is what makes this a
+/// measurement rather than a probe that could not fail.
+#[tokio::test]
+async fn an_empty_scope_level_is_refused_by_the_database_and_so_is_the_null_skip() {
+    let Some(db) = test_db().await else { return };
+    let catalog_id = seed_catalog(&db.pool).await;
+
+    // CONTROL 1 — the legal row the escalation imitates. If this ever fails,
+    // 0167 is over-refusing and every arm below is meaningless.
+    sqlx::query(
+        "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name, table_name, \
+         column_name) VALUES ('allow', ARRAY['read'], $1, 'sales', 'orders', 'email')",
+    )
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .expect("a fully named path is the ordinary grant and must stay legal");
+
+    // CONTROL 2 — `*` at a level is a LEGITIMATE policy value and stays legal
+    // (migration 0167's own `'' AND NOT '*'` paragraph, and the plan's ruling).
+    // It reaches the same catalog-wide enforcement, which is stated there as a
+    // residual rather than closed here; a predicate that refused it would break
+    // a scope a steward writes on purpose.
+    sqlx::query(
+        "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name, table_name) \
+         VALUES ('allow', ARRAY['read'], $1, '*', 'orders')",
+    )
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .expect("`*` is a legitimate Ranger policy value and must stay writable");
+
+    // THE FINDING, at each of the three levels.
+    for (schema, table, column) in [
+        ("", Some("orders"), None), // the escalation: a table with no schema
+        ("", None, None),           // an empty tail level
+        ("sales", Some(""), None),  // the same shape one level down
+        ("sales", Some("orders"), Some("")),
+    ] {
+        let err = sqlx::query(
+            "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name, table_name, \
+             column_name) VALUES ('allow', ARRAY['read'], $1, $2, $3, $4)",
+        )
+        .bind(catalog_id)
+        .bind(schema)
+        .bind(table)
+        .bind(column)
+        .execute(&db.pool)
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("grants_scope_levels_are_named"),
+            "({schema:?}, {table:?}, {column:?}) must be refused by \
+             grants_scope_levels_are_named, got: {err}"
+        );
+    }
+
+    // CONTROL 3 — the NULL skip, which was ALREADY refused before 0167 existed.
+    // Its constraint name must still be the OLD one: if this row started failing
+    // under `grants_scope_levels_are_named` instead, the two shapes would have
+    // collapsed into one guard and the pair would no longer measure anything.
+    let err = sqlx::query(
+        "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name, table_name) \
+         VALUES ('allow', ARRAY['read'], $1, NULL, 'orders')",
+    )
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("\"grants_check\""),
+        "a NULL schema under a named table must still be refused by `grants_check`, the \
+         level-skip CHECK 0154 added — got: {err}"
+    );
+}
+
+/// The `perm.rules` half of 0167. Not the same severity — an empty level makes a
+/// mask or row filter cover every sibling at that level, which withholds MORE
+/// than the author wrote — but the same three columns, the same verbatim copy
+/// into `scope_to_resources`, and the same predicate. Measured accepted before
+/// 0167.
+#[tokio::test]
+async fn an_empty_rule_scope_level_is_refused_by_the_database() {
+    let Some(db) = test_db().await else { return };
+    let catalog_id = seed_catalog(&db.pool).await;
+
+    // CONTROL — the legal row.
+    sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, schema_name, \
+         table_name, column_name) VALUES ($1, 'mask', 'MASK', 'path', $2, 'sales', 'orders', \
+         'email')",
+    )
+    .bind(unique("perm_rule"))
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .expect("a fully named path mask must stay legal");
+
+    let err = sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, schema_name, \
+         table_name, column_name) VALUES ($1, 'mask', 'MASK', 'path', $2, '', 'orders', 'email')",
+    )
+    .bind(unique("perm_rule"))
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("rules_scope_levels_are_named"),
+        "an empty schema on a path rule must be refused by rules_scope_levels_are_named, \
+         got: {err}"
+    );
+}
+
 #[tokio::test]
 async fn rule_round_trips_with_its_exempt_subtract() {
     // The symmetric twin of `grant_round_trips_with_its_principal_subtract`:

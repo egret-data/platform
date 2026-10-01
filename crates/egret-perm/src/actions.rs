@@ -189,6 +189,59 @@ pub enum CompileError {
     /// `egret-perm-compile`'s `rules::ensure_row_filter_scope_is_a_table`).
     #[error("rule {rule:?} cannot be compiled as a row filter: {reason}")]
     UnfilterableRowFilterScope { rule: String, reason: String },
+    /// A `Scope` level is PRESENT but EMPTY (`Some("")`) — SP4d debt Task 12.
+    ///
+    /// # This is a privilege escalation, and it is a level SKIP the database
+    /// could not see
+    ///
+    /// `perm.grants` has carried `CHECK (schema_name IS NOT NULL OR table_name
+    /// IS NULL)` since `0154_perm_model.sql` because a path cannot skip a level.
+    /// `schema_name = ''` IS that skip — in enforcement terms it is exactly "a
+    /// table with no schema" — and `IS NOT NULL` cannot see it. Measured as a
+    /// pair, which is what makes it a measurement rather than a probe that could
+    /// not fail: `(schema_name = '', table_name = 'orders')` was **accepted**,
+    /// while `(schema_name = NULL, table_name = 'orders')` was **rejected** by
+    /// `grants_check` on the same connection.
+    ///
+    /// What the empty level then does:
+    /// `crate::grants::scope_to_resources` copies the level through verbatim, so
+    /// the compiled policy carries `"schema": {"values": [""]}`;
+    /// `RangerAbstractResourceMatcher.init()` **drops an empty policy value**
+    /// before a matcher is built for it; a level left with no matchers is
+    /// `isMatchAny`. Measured through `egret_ranger_eval::resource::match_resource`
+    /// (`tests/compile_grants.rs`,
+    /// `an_empty_scope_level_would_be_enforced_in_every_schema`): the artifact for
+    /// `sales.orders` with `sales` replaced by `""` matches a request for
+    /// `finance.orders.amount` at `MatchType::Self_`, while the unedited artifact
+    /// matches it at `MatchType::None`. A grant written for one schema was
+    /// enforced across the whole catalog, reachable by any `policy:update` caller.
+    ///
+    /// # `'*'` is NOT refused, deliberately
+    ///
+    /// A grant scoped to a whole catalog or schema is an ordinary thing a steward
+    /// writes, `scope_to_resources` emits `*` itself at every level the scope does
+    /// not name, and the compiled resources a steward reads are full of it. Only
+    /// `''` is wrong — it is the spelling that LOOKS like a named level. ⚠ The
+    /// consequence, measured in the same test and stated rather than hidden:
+    /// `(schema_name = '*', table_name = 'orders')` reaches the SAME catalog-wide
+    /// enforcement and stays legal, so this refusal closes the accidental door and
+    /// not the deliberate one.
+    ///
+    /// The keyed shape is `value.is_empty()`, one-for-one with
+    /// `migrations/0167_perm_scope_levels_are_named.sql`'s `<> ''`, because two
+    /// guards that must agree written to different shapes has produced a defect in
+    /// this programme four times. In particular this is NOT
+    /// `egret_ranger_eval::resource::requests_all_values`: that predicate is the
+    /// REQUEST-side rule and folds `""`, `"*"` and `null` together, and keying a
+    /// scope refusal to it would refuse `*`.
+    #[error(
+        "scope level `{level}` is present but empty — a level is a resource NAME. Ranger's \
+         `RangerAbstractResourceMatcher.init()` drops an empty policy value before building a \
+         matcher for it, so the level becomes `isMatchAny` and the policy is enforced at EVERY \
+         {level} under its parent rather than at the one named. Omit the level to scope to its \
+         parent, or name one"
+    )]
+    EmptyScopeLevel { level: &'static str },
     /// A rule's `exempt` set names something a masking/row-filter Ranger
     /// item cannot express: a non-empty `exempt.exclude` (those items carry
     /// no allow/deny-exception block the way an access-policy item does —

@@ -1359,6 +1359,131 @@ async fn patching_a_grant_into_an_uncompilable_shape_is_refused_and_changes_noth
     );
 }
 
+/// **SP4d debt Task 12 — the write-path 400, on the one path where only the Rust
+/// guard can produce it.**
+///
+/// `schema: ""` compiles to `"schema": {"values": [""]}`, Ranger's
+/// `init()` drops an empty policy value, and the level becomes `isMatchAny` — so
+/// the grant is enforced in every schema of the catalog
+/// (`compile_grants.rs::an_empty_scope_level_would_be_enforced_in_every_schema`).
+/// `perm.grants`' pre-existing level-skip CHECK could not see it, because `''` is
+/// not NULL.
+///
+/// **Why an ORPHAN catalog, and why the assertion is `400` and not "not 2xx".**
+/// Three guards can refuse this input and the test has to be pointed at one.
+/// `0167`'s CHECK would refuse the INSERT whatever happens in Rust, and on a
+/// catalog an engine reaches `compile_grant`'s own copy of the guard would refuse
+/// the recompile. An orphan catalog affects no profile, so
+/// `recompile_services_in_tx(&[])` validates nothing, and the only thing between
+/// the body and the database is `validate_grant_shape`. Remove it and this request
+/// still fails — but as a **500**, because the constraint catches it with a
+/// message naming a schema internal. Task 2 of this plan mutation-measured exactly
+/// that, which is why the status code is the assertion and the message is checked
+/// for the level name.
+///
+/// **The control is `'*'` in the same field**: it is a legitimate Ranger policy
+/// value — a steward scopes a grant to a whole catalog or schema routinely, and
+/// `scope_to_resources` emits `*` itself for every unnamed level — so a guard that
+/// refused it would break a real scope. It must be CREATED, 201. Without that arm
+/// a predicate refusing every non-literal would pass.
+#[tokio::test]
+async fn an_empty_scope_level_is_a_400_and_a_star_is_created() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "perm-empty-level").await;
+
+    let body_with = |schema: Value| {
+        json!({
+            "effect": "allow",
+            "actions": ["read"],
+            "scope": { "catalog_id": orphan, "schema": schema, "table": "orders", "column": null },
+            "principals": { "include": [{ "kind": "user", "ref": "analyst" }], "exclude": [] }
+        })
+    };
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(body_with(json!(""))),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an empty scope level must be a 400 from the write-path guard, not a 500 from \
+         the CHECK; body: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("schema"),
+        "the refusal must name the level the author has to fix; body: {body}"
+    );
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM perm.grants WHERE catalog_id = $1")
+        .bind(orphan)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count");
+    assert_eq!(stored, 0, "the refused create must have stored nothing");
+
+    // CONTROL: `*` is a real policy value and stays authorable.
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(body_with(json!("*"))),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "`*` at a level is a legitimate scope and must still be writable; body: {created}"
+    );
+    let grant_id = created["id"].as_str().expect("minted id").to_string();
+
+    // And the PATCH path runs the same guard, leaving the stored row alone.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/grants/{grant_id}"),
+                &token,
+                Some(body_with(json!(""))),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the patch path must refuse it too; body: {body}"
+    );
+    let schema: Option<String> =
+        sqlx::query_scalar("SELECT schema_name FROM perm.grants WHERE id = $1")
+            .bind(Uuid::parse_str(&grant_id).unwrap())
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("read back");
+    assert_eq!(
+        schema.as_deref(),
+        Some("*"),
+        "the refused patch must not have committed its own UPDATE"
+    );
+}
+
 /// **The half the recompile cannot cover.** A grant on a catalog no engine
 /// reaches affects no profile, so the recompile validates NOTHING — exactly as
 /// on the create path — and only the service-independent shape check can refuse

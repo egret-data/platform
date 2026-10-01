@@ -1040,6 +1040,62 @@ fn a_starrocks_tag_row_filter_addresses_the_table_and_not_the_column() {
     );
 }
 
+/// SP4d debt Task 12, the rule side. An empty path level is refused where the
+/// author can still fix it, and `'*'` is not.
+///
+/// **Not the same severity as the grant side, and the test says which way it
+/// fails.** `scope_to_resources` copies the level through verbatim and
+/// `RangerAbstractResourceMatcher.init()` drops an empty policy value, so the
+/// level becomes `isMatchAny` — on a mask or a row filter that means the control
+/// covers every sibling at that level, i.e. it withholds MORE than the author
+/// wrote. The grant-side instance of the same mechanism ALLOWS more, which is why
+/// that one is the escalation (`egret-perm/tests/store.rs` and
+/// `compile_grants.rs::an_empty_scope_level_would_be_enforced_in_every_schema`).
+///
+/// **The arm that would otherwise be missed:** `ensure_row_filter_scope_is_a_table`
+/// above counts `schema = ''` as a NAMED schema, so without this guard a row
+/// filter written `('', 'orders')` passes the very check whose job is to refuse a
+/// row-filter scope that is not exactly catalog + schema + table.
+#[test]
+fn an_empty_path_level_is_refused_on_a_rule_and_a_star_is_not() {
+    for (level, scope) in [
+        ("schema", scope_of(Some(""), Some("orders"), None)),
+        ("table", scope_of(Some("sales"), Some(""), None)),
+    ] {
+        let rf = rowfilter_rule_on_path(scope.clone(), "country = 'US'");
+        assert_eq!(
+            validate_rule_shape(&rf).unwrap_err(),
+            CompileError::EmptyScopeLevel { level },
+            "an empty `{level}` must be refused BEFORE \
+             ensure_row_filter_scope_is_a_table accepts it as named"
+        );
+        let m = mask_rule_on_path(scope, "MASK_HASH");
+        assert_eq!(
+            validate_rule_shape(&m).unwrap_err(),
+            CompileError::EmptyScopeLevel { level }
+        );
+    }
+    assert_eq!(
+        validate_rule_shape(&mask_rule_on_path(
+            scope_of(Some("sales"), Some("orders"), Some("")),
+            "MASK_HASH"
+        ))
+        .unwrap_err(),
+        CompileError::EmptyScopeLevel { level: "column" }
+    );
+
+    // `*` stays legal here for the same reason it does on a grant: it is a real
+    // Ranger policy value and the only honest rendering of "every child".
+    validate_rule_shape(&mask_rule_on_path(
+        scope_of(Some("*"), Some("orders"), Some("email")),
+        "MASK_HASH",
+    ))
+    .expect("`*` is a legitimate policy value");
+    // And a tag selector carries no path at all, so this refusal must not leak.
+    validate_rule_shape(&mask_rule_on_tag("pii", "MASK_HASH"))
+        .expect("a tag rule has no path scope to get wrong");
+}
+
 /// The write-time half: a shape the compiler can only render as a DIFFERENT
 /// control than the author wrote is refused where the author can still fix
 /// it, the way every other uncompilable shape is (`validate_rule_shape` runs

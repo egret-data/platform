@@ -97,8 +97,8 @@ use egret_policy::{starrocks_service_def, trino_service_def, COMPILER_RULE_PREFI
 use egret_perm::{CompileError, EngineType, PrincipalKind, PrincipalSet, Rule, RuleKind, Selector};
 
 use crate::grants::{
-    level, resource_level_names, scope_to_resources, validate_user_ref, PolicyTarget,
-    ROW_FILTER_LEVELS,
+    ensure_scope_levels_are_named, level, resource_level_names, scope_to_resources,
+    validate_user_ref, PolicyTarget, ROW_FILTER_LEVELS,
 };
 
 /// One column carrying the tag a rule selects on, resolved by the CALLER —
@@ -131,7 +131,15 @@ pub struct ResolvedNames<'a> {
 /// function's doc for why a write-time check is needed at all and how "service
 /// independent" is drawn.
 ///
-/// In: a `CUSTOM` mask expression that does not parse (`InvalidCustomMask`),
+/// In: a path selector naming a level as the EMPTY string
+/// (`EmptyScopeLevel` — SP4d debt Task 12; see
+/// [`crate::grants::ensure_scope_levels_are_named`] for the measurement and for
+/// why this is the rule side of a GRANT-side escalation rather than the same
+/// severity: an empty level makes a mask or row filter cover every sibling at
+/// that level, which withholds more than the author wrote instead of granting
+/// more, and `ensure_row_filter_scope_is_a_table` below would otherwise accept
+/// `schema = ''` as a named schema),
+/// a `CUSTOM` mask expression that does not parse (`InvalidCustomMask`),
 /// and an exempt set a masking/row-filter item cannot express — a non-empty
 /// `exempt.exclude`, a `Role`, the literal `public` group
 /// (`UnexpressibleExemption`), or an unexpanded principal kind. Out:
@@ -151,6 +159,9 @@ pub fn validate_rule_shape(r: &Rule) -> Result<(), CompileError> {
         if mask_type == "CUSTOM" {
             ensure_custom_mask_parses(&r.name, value_expr.as_deref().unwrap_or_default())?;
         }
+    }
+    if let Selector::Path(scope) = &r.selector {
+        ensure_scope_levels_are_named(scope)?;
     }
     ensure_row_filter_scope_is_a_table(r)?;
     exempt_principals(r)?;

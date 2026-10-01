@@ -369,6 +369,50 @@ pub(crate) fn scope_to_resources(
 /// cannot drift apart the way the mask and row-filter paths did.
 pub(crate) const ROW_FILTER_LEVELS: usize = 3;
 
+/// Refuse a [`Scope`] whose `schema`/`table`/`column` is PRESENT but EMPTY —
+/// SP4d debt Task 12, a privilege escalation in the permission model.
+///
+/// [`CompileError::EmptyScopeLevel`] carries the whole measurement: the
+/// accepted/rejected pair that proves `perm.grants`' level-skip CHECK could not
+/// see this, the `MatchType` the compiled artifact then earns in a schema it was
+/// never written for, and why `'*'` is deliberately NOT refused here. Read that
+/// before changing this predicate.
+///
+/// **Three call sites, and the asymmetry between them is deliberate.**
+/// [`validate_grant_shape`] runs it before a grant is stored (create, patch and
+/// the rolled-back preview all reach it), [`compile_grant`] runs it again
+/// because the compiler is the last point at which a wrong artifact becomes an
+/// enforced one and it is `pub` to callers that never went near the store, and
+/// `crate::rules::validate_rule_shape` runs it on a path selector's scope. It is
+/// NOT run inside `compile_rule`, matching
+/// `crate::rules::ensure_row_filter_scope_is_a_table` — the other scope-shape
+/// refusal, which is likewise an authoring-boundary one — because an empty level
+/// in a rule renders a mask or row filter that covers MORE than it was written
+/// for, which fails closed, while an empty level in a grant ALLOWS more.
+///
+/// `catalog` is absent from the loop and needs nothing: the value emitted at
+/// that level is `registry.catalogs.name`, and `0147_catalog_registry.sql` gives
+/// that column `CHECK (name ~ '^[a-z][a-z0-9_]{0,62}$')` — an allow-list under
+/// which the empty string is impossible. (`0166`'s comment records the same
+/// division of labour for the tag coordinate, including that weakening 0147's
+/// regex re-opens it.)
+pub(crate) fn ensure_scope_levels_are_named(scope: &Scope) -> Result<(), CompileError> {
+    for (level, value) in [
+        ("schema", scope.schema.as_deref()),
+        ("table", scope.table.as_deref()),
+        ("column", scope.column.as_deref()),
+    ] {
+        // Presence is tested here rather than folded into the predicate: an
+        // ABSENT level is the ordinary catalog- or schema-wide scope, and
+        // `scope_to_resources` renders it as `*` on purpose.
+        let Some(value) = value else { continue };
+        if value.is_empty() {
+            return Err(CompileError::EmptyScopeLevel { level });
+        }
+    }
+    Ok(())
+}
+
 /// The part of compiling a grant that needs **no service and no engine** —
 /// run at the authoring boundary, before the grant is stored (SP4a Task 9
 /// review, I-1).
@@ -385,7 +429,10 @@ pub(crate) const ROW_FILTER_LEVELS: usize = 3;
 /// and this is the one that does not need a service to detect.
 ///
 /// **What is in and what is out.** In: the checks that would fail against
-/// every service alike — a `User` ref that was never resolved to a bare
+/// every service alike — a scope level present but EMPTY
+/// ([`CompileError::EmptyScopeLevel`], SP4d debt Task 12: it is a level skip
+/// `perm.grants`' own CHECK could not see, and the compiled policy is enforced
+/// across the whole catalog), a `User` ref that was never resolved to a bare
 /// `users.username` (`UnusableUserRef`), and a principal kind NO compile can
 /// ever expand (`UnexpandedPrincipalKind` for `WorkspaceMembers`; a `role` is
 /// expanded at compile time and so is accepted here — see [`Expansion`]). Out: everything that depends on
@@ -400,6 +447,7 @@ pub(crate) const ROW_FILTER_LEVELS: usize = 3;
 /// compiled" gets a drift between them, and the drift is a grant that passes
 /// the gate and fails the compile.
 pub fn validate_grant_shape(g: &Grant) -> Result<(), CompileError> {
+    ensure_scope_levels_are_named(&g.scope)?;
     principal_item(&g.principals.include, g.effect, &[], Expansion::NotYet)?;
     principal_item(&g.principals.exclude, g.effect, &[], Expansion::NotYet)?;
     Ok(())
@@ -418,13 +466,19 @@ pub fn validate_grant_shape(g: &Grant) -> Result<(), CompileError> {
 /// `actions::CompileError`); `CompileError::UnusableUserRef` if a `User`
 /// principal's ref is empty or contains `@`; `CompileError::
 /// UnexpandedPrincipalKind` if any principal (include or exclude) is a
-/// `WorkspaceMembers` reference this compiler cannot yet expand.
+/// `WorkspaceMembers` reference this compiler cannot yet expand; and
+/// `CompileError::EmptyScopeLevel` if `g.scope` names a level as the empty
+/// string, which Ranger enforces as "every value at that level" — see
+/// [`ensure_scope_levels_are_named`], which runs here as well as at the
+/// authoring boundary.
 pub fn compile_grant(
     g: &Grant,
     catalog_name: &str,
     service: &str,
     e: EngineType,
 ) -> Result<AccessPolicyInput, CompileError> {
+    ensure_scope_levels_are_named(&g.scope)?;
+
     let mut accesses: Vec<String> = Vec::new();
     for action in &g.actions {
         for acc in engine_accesses(*action, e)? {
