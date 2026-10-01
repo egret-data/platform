@@ -89,7 +89,7 @@ def _app_id_for(workdir: Path, path: Path) -> str | None:
     """The app id if ``path`` is ``<workdir>/<uuid>.py``, else None."""
     if path.resolve().parent != workdir and path.parent.absolute() != workdir:
         return None
-    if not _APP_FILE.match(path.name):
+    if not _APP_FILE.fullmatch(path.name):
         return None
     return path.stem.lower()
 

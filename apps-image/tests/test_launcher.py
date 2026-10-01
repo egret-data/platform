@@ -100,7 +100,7 @@ def test_run_rejects_an_app_id_that_is_not_a_uuid(env, monkeypatch, capsys):
     assert "EGRET_APP_ID" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("version", ["../x", "v/1", "v?a=b", "v%2f1", "v 1", "v#1", "v.1"])
+@pytest.mark.parametrize("version", ["../x", "v/1", "v?a=b", "v%2f1", "v 1", "v#1", "v.1", "v1\n"])
 def test_run_rejects_a_version_id_that_could_change_the_url_path(env, monkeypatch, capsys, version):
     from egret_marimo.podapi import PodApi
 

@@ -111,9 +111,9 @@ def _check_env(mode: str, secrets: dict[str, str]) -> dict[str, str]:
     missing = [name for name in REQUIRED[mode] if not env.get(name)]
     if missing:
         raise LaunchError(EX_USAGE, f"missing required environment variable(s): {', '.join(missing)}")
-    if mode == "run" and not _UUID.match(env["EGRET_APP_ID"]):
+    if mode == "run" and not _UUID.fullmatch(env["EGRET_APP_ID"]):
         raise LaunchError(EX_USAGE, f"EGRET_APP_ID is not an app id: {env['EGRET_APP_ID']!r}")
-    if mode == "run" and not _VERSION_ID.match(env["EGRET_VERSION_ID"]):
+    if mode == "run" and not _VERSION_ID.fullmatch(env["EGRET_VERSION_ID"]):
         # It is put into the pod-API URL path as is.
         raise LaunchError(EX_USAGE, f"EGRET_VERSION_ID is not a version id: {env['EGRET_VERSION_ID']!r}")
     return env
