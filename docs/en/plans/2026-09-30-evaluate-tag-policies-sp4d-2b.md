@@ -80,6 +80,44 @@ implementer and the reviewer independently concluded that no further corpus
 extension should precede this. Tasks 6-8 do not extend the corpus, so they are not
 blocked; anything that does, is.
 
+### Item A (product, found by Task 7): tag attachments are emitted in TRINO's hierarchy
+
+`ServiceTags::from_assignments` hard-codes `catalog`/`schema`/`table`/`column` and
+`download_tags` takes **no engine argument** — but StarRocks' service-def has **no
+`schema` resource**. A StarRocks profile given a `tagService` therefore downloads
+attachments its own enricher drops, and **every tag policy in its block is silently
+inert**: not a wrong deny, no enforcement at all, and no error anywhere.
+
+Nothing egret auto-binds reaches it today (`bind_trino_profile` is the only auto-bind
+and filters `tp.type = 'trino'`), but **the policy-admin service-create route takes an
+arbitrary config**, so the state is hand-creatable rather than impossible. Task 7 made
+the mapping write the wire's literal keys so `explain` **reproduces** the drop instead
+of hiding it — which is the right interim behaviour and not a fix.
+
+This also **falsifies a claim in my own Task 7 brief**: I wrote that the D9 drop stays
+unreachable after this task. It does not.
+
+The fix is structural: a resource hierarchy is a property of the **engine**, not a
+constant, so anything emitting Ranger resource keys must take the engine or its
+service-def as an input.
+
+### Item B (product, found by Task 7): nothing constrains an empty tag-assignment level
+
+`ExplainRequest.target` is an `egret_perm::Scope` of plain `Option<String>` with no
+validator, and the handler's 400 tests an *absent* level, never an empty one. Measured:
+`{"schema":"","table":""}` reaches `request_resource` and the empty values are inserted
+as resource levels.
+
+The sharper half, which Task 7 found and my brief had not conceived: the **returned**
+row is not the dangerous one. A row stored `('sales','','')` ships as a
+`{catalog, schema}` service resource — an ANCESTOR of `sales.orders.email` that Ranger
+admits for a tag request — while the resolver's exact `table_name = $3` can **never
+return it**. So the set egret passes the evaluator is *missing a tag the engine
+enforces*, and an empty set is a licence to skip the tag phase: a **wrong confident
+verdict**, invisible to any inspection of the mapping's input. Task 7 added a gate
+(`assignments_outside_rolled_up_levels_via`) that declines while that count is
+non-zero. **One `CHECK` on `catalog_tag_assignments` would retire the gate.**
+
 ### Item 0b: the differential gate never runs automatically
 
 Measured 2026-10-01: `EGRET_TEST_RANGER_E2E` appears **nowhere** in CI config or the
