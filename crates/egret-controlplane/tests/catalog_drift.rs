@@ -80,6 +80,12 @@ const EXTRA_FILES: &[&str] = &[
     // in the Workflow seam's management router, using the
     // `WF_READ`/`WF_MANAGE`/`WF_USE_SECRETS` consts the scan resolves below.
     "../egret-workflow/src/routes.rs",
+    // `app:read` (run mode) and `app:write` (edit mode) are gated on the Data
+    // Apps query gateway via `authz::require` with the `APP_READ`/`APP_WRITE`
+    // consts. The caller holds an app-session bearer token, not a
+    // `WorkspaceContext`, so the gateway passes the core PEP its own
+    // `AuthTarget` rather than calling `Pdp::authorize` by hand.
+    "../egret-apps/src/gateway.rs",
 ];
 
 /// Gate function names whose permission-key argument (an inline

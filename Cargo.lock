@@ -2898,13 +2898,26 @@ name = "egret-apps"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "axum",
  "chrono",
+ "egret-audit",
+ "egret-auth",
+ "egret-config",
  "egret-core",
+ "egret-events",
  "egret-metastore",
+ "egret-query-api",
  "egret-test-db",
+ "egret-workspace",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "sqlparser",
  "sqlx",
  "tokio",
+ "tower",
  "uuid",
 ]
 

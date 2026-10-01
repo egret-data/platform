@@ -5,7 +5,21 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-egret-core = { workspace = true, features = ["token"] }
+# `http`: `Error` is the gateway's response type (its `IntoResponse` is the one
+# error shape the API returns).
+egret-core = { workspace = true, features = ["token", "http"] }
+egret-config.workspace = true
+# The gateway reaches engines only through the port, never `egret-query` itself.
+egret-query-api.workspace = true
+egret-audit.workspace = true
+# `WorkspaceRepo::disabled_features` — the `apps` feature switch.
+egret-workspace.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# `sql_sha256` in the audit detail: the SQL text itself is never logged.
+sha2.workspace = true
+hex.workspace = true
 egret-metastore.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
@@ -15,6 +29,12 @@ anyhow.workspace = true
 sqlparser.workspace = true
 
 [dev-dependencies]
+# The gateway tests run against the REAL Cedar PDP (`CedarPdp::build` needs an
+# `EventBus`), not a mocked decision.
+egret-auth.workspace = true
+egret-events.workspace = true
+tower.workspace = true
+async-trait.workspace = true
 egret-test-db.workspace = true
 tokio.workspace = true
 chrono.workspace = true
