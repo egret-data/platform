@@ -4661,9 +4661,10 @@ mod tests {
     }
 
     /// **A panic unwinding through the staging scope removes the directory**
-    /// (W5b Task 6: it holds a plugin task's rendered `task.json`, secrets
-    /// included). The workspace builds with `panic = "unwind"` (no profile
-    /// sets `abort`), so `Drop` runs on unwind; this pins it.
+    /// (W5b Task 6, when it held a plugin task's rendered `task.json`; since
+    /// W9a Task 5 inputs stream and the directory holds copied-out OUTPUT
+    /// files). The workspace builds with `panic = "unwind"` (no profile sets
+    /// `abort`), so `Drop` runs on unwind; this pins it.
     #[test]
     fn a_panic_unwinding_through_the_staging_scope_removes_the_directory() {
         let task = leased(1_700_000_000);

@@ -36,10 +36,10 @@
 //!
 //! # Where a secret's value goes, and where it does not
 //!
-//! Into `task.json`'s `properties` and `mask` only -- an input file, `docker cp` from a
-//! 0700 staging directory that removes itself however its scope ends
-//! (`commands::StagingDir`), or an in-memory tar over `pods/exec` on
-//! Kubernetes (`k8s::transfer::pack`). **Never** into the argv, the env,
+//! Into `task.json`'s `properties` and `mask` only -- an input file, streamed
+//! as a tar into `docker cp -`'s stdin or the `pods/exec` stdin on
+//! Kubernetes (`storage::transfer::write_tar`, W9a Task 5), never written to
+//! the worker's disk. **Never** into the argv, the env,
 //! the image, or the pod spec: the command reads the file by
 //! `$WORKING_DIR`. Every FAILED reason this handler writes is passed
 //! through [`crate::logs::mask`] with the resolved values: the host's
