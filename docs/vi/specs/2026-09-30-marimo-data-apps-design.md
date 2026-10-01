@@ -561,6 +561,15 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
    đăng nhập egret đã hết hạn nhưng chưa xoá có phải chặn token app không; cột `impersonator` trên
    `app_sessions` trước khi mint token khi đang impersonate; kiểm `session_idle_secs <=
    session_absolute_secs` lúc khởi động; chỉ audit lời gọi bắt đầu khoá rate limit, không audit mọi 429.
+   Từ review cuối của P3: các endpoint phía pod ở §5.3 và việc mint token pod; proxy còn chặn
+   `/api/ai/*`, `/terminal`, `/api/kernel/copy` và `/api/kernel/rename` (image cũng từ chối copy/rename vào
+   draft, nhưng proxy mới là ranh giới); token tới pod qua `secretKeyRef`; tini làm PID 1; deployment xử
+   lý mã thoát của launcher (64 = env sai, không khởi động lại; 65 = có file config bị từ chối, cấp
+   `emptyDir` mới; 69 = lấy phiên bản thất bại, thử lại); kernel chạy dưới uid khác với server (hoặc
+   `PR_SET_DUMPABLE=0` tạm thời) để cell không đọc được token của server; config mới chỉ khoá `ai` và
+   `rtc_v2` — các khoá PEP 723 / venv / runtime vẫn mở; tải lại khi WebSocket cũ còn kết nối cần tải lại
+   lần hai; endpoint `egret.databases()`; chạy lại test hợp đồng marimo, e2e và kiểm kê route mỗi lần
+   nâng marimo.
 5. **P5 — Chế độ run.** Launcher theo phiên bản, UI publish/versions/khôi phục, trang xem app; launcher
    kernel (warm pool hoặc fork server), mức trần session mỗi pod, giới hạn bộ nhớ và UX lúc mở session
    đặt theo số đo trên kind (§6.3). **Mục tiêu khởi động (D15):** tiêu chí nghiệm thu = người xem mới trên

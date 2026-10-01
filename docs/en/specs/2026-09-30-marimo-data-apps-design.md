@@ -564,6 +564,15 @@ never merged; automated Playwright, single run per case, macOS dev laptop under 
    an expired-but-undeleted egret login session must stop its app tokens; an `impersonator` column on
    `app_sessions` before any token is minted under impersonation; check `session_idle_secs <=
    session_absolute_secs` at boot; audit only the call that starts a rate-limit lockout, not every 429.
+   From the P3 final review: the pod endpoints of §5.3 and pod-token minting; the proxy also blocks
+   `/api/ai/*`, `/terminal`, `/api/kernel/copy` and `/api/kernel/rename` (the image refuses copy/rename
+   into a draft too, but the proxy is the boundary); tokens reach the pod via `secretKeyRef`; tini as
+   PID 1; the deployment acts on the launcher's exit codes (64 = bad env, do not restart; 65 = refused
+   config file, give a fresh `emptyDir`; 69 = version fetch failed, retry); the kernel runs as a separate
+   uid from the server (or `PR_SET_DUMPABLE=0` as a stopgap) so a cell cannot read the server's tokens;
+   only `ai` and `rtc_v2` are locked in config — the PEP 723 / venv / runtime keys are still open; a
+   reload while the old WebSocket is still connected needs a second reload; the `egret.databases()`
+   endpoint; re-run the marimo contract tests, e2e and route inventory on every marimo upgrade.
 5. **P5 — Run mode.** Per-version launcher, publish/versions/restore UI, the viewer page; the kernel
    launcher (warm pool or fork server), the per-pod session cap, memory limit and session-start UX set
    from measurements on kind (§6.3). **Start-up targets (D15):** acceptance = a new viewer on a warm pod
