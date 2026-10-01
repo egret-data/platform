@@ -604,7 +604,12 @@
      "error": "io.pebbletemplates.pebble.error.PebbleException: File not found for URI: kestra:///w9a/storage/ff-main/executions/2G1i2hGvCOdQ5cwWChXwwu/tasks/w/7OVKIEshTCsplHlZ1AZYZK/nope.txt ({{ fileSize('kestra:///w9a/storage/ff-main/executions/' ~ execution.id ~ '/tasks/w/' ~ taskrun.id ~ '/nope.txt') }}:1)"
     },
     "fileExists": {
-     "value": "false"
+     "error": "NotLookedUp",
+     "basis": "chosen",
+     "why": "user ruling 2026-10-01 (spec §7.2): the measured probe assembles its URI at render (a literal URI prefix `~ execution.id ~` `~ taskrun.id ~` the file name); egret resolves only URIs present whole in the flow source or a render-context value before the render, so this exact template is an error naming the URI ('was not looked up … assembled while rendering'). Given the WHOLE URI (a literal or a context value) egret answers Kestra's false (Unreadable::Missing): storage_render::an_assembled_uri_not_in_the_snapshot_is_an_error_saying_why",
+     "kestra": {
+      "value": "false"
+     }
     },
     "isFileEmpty": {
      "error": "io.pebbletemplates.pebble.error.PebbleException: File not found for URI: kestra:///w9a/storage/ff-main/executions/2G1i2hGvCOdQ5cwWChXwwu/tasks/w/5DykBAGuDTUL8xg1yaEqt/nope.txt ({{ isFileEmpty('kestra:///w9a/storage/ff-main/executions/' ~ execution.id ~ '/tasks/w/' ~ taskrun.id ~ '/nope.txt') }}:1)"
@@ -2637,7 +2642,7 @@
   "output_directory": "measured",
   "script_output_files_map": "measured",
   "input_files_uri": "measured",
-  "file_functions": "measured, except the cells marked chosen (unrelated_same_namespace × 4, not_utf8.read); values are the rendered strings of a Return task's `format`",
+  "file_functions": "measured, except the cells marked chosen (unrelated_same_namespace × 4, not_utf8.read, missing_in_own.fileExists); values are the rendered strings of a Return task's `format`",
   "file_input": "measured, except the cells marked chosen (allowed_file_extensions, file_as_string.kestra_uri_of_other_execution, file_as_string.kestra_uri_naming_no_file)",
   "file_api": "measured, except the cells marked chosen (other_execution.*, loop_iteration_file_via_root, dotdot, files.bin.preview)",
   "plugin_storage": "measured",
@@ -2718,9 +2723,13 @@
    {
     "path": "store_outputs.egret",
     "why": "spec §4.3/§9.2: a deterministic name so a re-claim overwrites its own object; text Ion through ionfmt. Kestra's name is random and its file binary"
+   },
+   {
+    "path": "file_functions.missing_in_own.fileExists",
+    "why": "user ruling 2026-10-01 (spec §7.2): the measured probe assembles its URI at render (a literal URI prefix `~ execution.id ~` `~ taskrun.id ~` the file name); egret resolves only URIs present whole in the flow source or a render-context value before the render, so this exact template is an error naming the URI ('was not looked up … assembled while rendering'). Given the WHOLE URI (a literal or a context value) egret answers Kestra's false (Unreadable::Missing): storage_render::an_assembled_uri_not_in_the_snapshot_is_an_error_saying_why"
    }
   ],
-  "rule": "a cell carrying \"basis\": \"chosen\" holds EGRET's answer (the spec's), with Kestra's measured answer under \"kestra\"; error tokens are plan Task 3's Unreadable variants (NotReadable, Malformed, Missing) plus NotUtf8 for spec §7.2's non-UTF-8 read error. Every other cell is Kestra's measured answer, which egret matches"
+  "rule": "a cell carrying \"basis\": \"chosen\" holds EGRET's answer (the spec's), with Kestra's measured answer under \"kestra\"; error tokens are plan Task 3's Unreadable variants (NotReadable, Malformed, Missing) plus NotUtf8 for spec §7.2's non-UTF-8 read error, plus NotLookedUp for a URI assembled at render (the 2026-10-01 snapshot ruling). Every other cell is Kestra's measured answer, which egret matches"
  },
  "raw_records": {
   "plugins_listing": {
