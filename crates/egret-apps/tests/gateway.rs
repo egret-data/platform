@@ -17,6 +17,7 @@ use egret_audit::AuditEvent;
 use egret_config::AppsConfig;
 use egret_core::{ColumnMeta, Error, TabularResult, UserId, WorkspaceId};
 use egret_metastore::Db;
+use egret_query_api::Param;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Receiver;
 use tower::ServiceExt;
@@ -33,12 +34,17 @@ type Call = (Uuid, Uuid, UserId, String, usize);
 #[derive(Default)]
 struct FakePort {
     calls: Mutex<Vec<Call>>,
+    /// The `params` of each `execute_as_with_params` call (not of `execute_as`).
+    param_calls: Mutex<Vec<Vec<Param>>>,
     errors: Mutex<VecDeque<Error>>,
 }
 
 impl FakePort {
     fn calls(&self) -> Vec<Call> {
         self.calls.lock().unwrap().clone()
+    }
+    fn param_calls(&self) -> Vec<Vec<Param>> {
+        self.param_calls.lock().unwrap().clone()
     }
     fn queue_error(&self, e: Error) {
         self.errors.lock().unwrap().push_back(e);
@@ -100,9 +106,10 @@ impl egret_query_api::QueryExecPort for FakePort {
         database_id: Uuid,
         principal: UserId,
         sql: &str,
-        _params: &[egret_query_api::Param],
+        params: &[Param],
         limits: egret_query_api::Limits,
     ) -> Result<TabularResult, Error> {
+        self.param_calls.lock().unwrap().push(params.to_vec());
         self.record(ws, database_id, principal, sql, limits.max_rows)
     }
 }
@@ -117,7 +124,6 @@ struct User {
 struct Fixture {
     db: Db,
     ws_a: Uuid,
-    ws_b: Uuid,
     app: Uuid,
     viewer: User,
     editor: User,
@@ -127,6 +133,39 @@ struct Fixture {
     port: Arc<FakePort>,
     audit_rx: Receiver<AuditEvent>,
     router: axum::Router,
+    cfg: AppsConfig,
+}
+
+/// The gateway over a FRESH `CedarPdp` — it snapshots grants at build time, so
+/// it must be built after every grant a test relies on.
+async fn build_router(
+    db: &Db,
+    port: Arc<FakePort>,
+    cfg: AppsConfig,
+) -> (axum::Router, Receiver<AuditEvent>) {
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let (audit, audit_rx) = egret_audit::AuditSink::new(64);
+    let st = AppsState {
+        db: db.clone(),
+        pdp,
+        query: port,
+        audit,
+        sessions: AppSessionRepo::new(db.clone()),
+        limiter: egret_core::ratelimit::RateLimiter::new(
+            cfg.rate_max,
+            cfg.rate_window_secs,
+            cfg.rate_window_secs,
+        ),
+        cfg,
+    };
+    let router = axum::Router::new()
+        .nest("/api", egret_apps::gateway_router())
+        .with_state(st);
+    (router, audit_rx)
 }
 
 async fn insert_user(db: &Db) -> Uuid {
@@ -239,35 +278,12 @@ impl Fixture {
         let trino_prod = insert_database(&db, ws_a, "trino_prod", "trino").await;
         insert_database(&db, ws_b, "b_only", "trino").await;
 
-        // Built AFTER the grants: `CedarPdp` snapshots policies at build time.
-        let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
-            egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
-                .await
-                .expect("build CedarPdp"),
-        );
         let port = Arc::new(FakePort::default());
-        let (audit, audit_rx) = egret_audit::AuditSink::new(64);
-        let st = AppsState {
-            db: db.clone(),
-            pdp,
-            query: port.clone(),
-            audit,
-            sessions: AppSessionRepo::new(db.clone()),
-            limiter: egret_core::ratelimit::RateLimiter::new(
-                cfg.rate_max,
-                cfg.rate_window_secs,
-                cfg.rate_window_secs,
-            ),
-            cfg,
-        };
-        let router = axum::Router::new()
-            .nest("/api", egret_apps::gateway_router())
-            .with_state(st);
+        let (router, audit_rx) = build_router(&db, port.clone(), cfg.clone()).await;
 
         Self {
             db,
             ws_a,
-            ws_b,
             app,
             viewer,
             editor,
@@ -276,6 +292,23 @@ impl Fixture {
             port,
             audit_rx,
             router,
+            cfg,
+        }
+    }
+
+    /// Rebuild the router (and its PDP snapshot) after adding grants. Same port.
+    async fn rebuild(&mut self) {
+        let (router, audit_rx) = build_router(&self.db, self.port.clone(), self.cfg.clone()).await;
+        self.router = router;
+        self.audit_rx = audit_rx;
+    }
+
+    /// A fresh user with a live login session.
+    async fn new_user(&self) -> User {
+        let id = insert_user(&self.db).await;
+        User {
+            id,
+            login_sid: insert_login_session(&self.db, id).await,
         }
     }
 
@@ -351,6 +384,48 @@ impl Fixture {
         }
         out
     }
+}
+
+/// A workspace role holding exactly `perms`.
+async fn custom_role(db: &Db, perms: &[&str]) -> Uuid {
+    let role: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (scope, name, description) VALUES ('workspace', $1, 'test') RETURNING id",
+    )
+    .bind(format!("test_apps_{}", Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .expect("role");
+    for p in perms {
+        sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
+            .bind(role)
+            .bind(p)
+            .execute(&db.pool)
+            .await
+            .expect("perm");
+    }
+    role
+}
+
+/// `principal_type` is `user` or `group`.
+async fn grant(db: &Db, principal_type: &str, principal: Uuid, role: Uuid, ws: Uuid) {
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ($1, $2, $3, 'workspace', $4)",
+    )
+    .bind(principal_type)
+    .bind(principal)
+    .bind(role)
+    .bind(ws)
+    .execute(&db.pool)
+    .await
+    .expect("grant");
+}
+
+fn mutation(ev: &AuditEvent) -> &Value {
+    let AuditEvent::Mutation { detail, .. } = ev else {
+        panic!("expected Mutation, got {ev:?}");
+    };
+    detail
 }
 
 fn error_text(body: &Value) -> String {
@@ -524,88 +599,20 @@ async fn case08_viewer_edit_is_403() {
 /// pins the second check on its own (a ws_editor holds both, so case 9 cannot).
 #[tokio::test]
 async fn case08b_edit_without_query_run_is_403() {
-    let f = Fixture::new().await;
-    // A custom role with app:write only, granted after the fixture: rebuild.
-    let user = insert_user(&f.db).await;
-    let role: Uuid = sqlx::query_scalar(
-        "INSERT INTO roles (scope, name, description) VALUES ('workspace', $1, 'test') RETURNING id",
-    )
-    .bind(format!("test_apps_{}", Uuid::new_v4().simple()))
-    .fetch_one(&f.db.pool)
-    .await
-    .expect("role");
-    for p in ["app:read", "app:write"] {
-        sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
-            .bind(role)
-            .bind(p)
-            .execute(&f.db.pool)
-            .await
-            .expect("perm");
-    }
-    sqlx::query(
-        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
-         VALUES ('user', $1, $2, 'workspace', $3)",
-    )
-    .bind(user)
-    .bind(role)
-    .bind(f.ws_a)
-    .execute(&f.db.pool)
-    .await
-    .expect("grant");
-    let author = User {
-        id: user,
-        login_sid: insert_login_session(&f.db, user).await,
-    };
-    // The PDP snapshot predates this grant; a fresh fixture state is needed.
-    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
-        egret_auth::pdp::CedarPdp::build(f.db.clone(), &egret_events::EventBus::new())
-            .await
-            .expect("build CedarPdp"),
-    );
-    let (audit, _rx) = egret_audit::AuditSink::new(64);
-    let port = Arc::new(FakePort::default());
-    let st = AppsState {
-        db: f.db.clone(),
-        pdp,
-        query: port.clone(),
-        audit,
-        sessions: AppSessionRepo::new(f.db.clone()),
-        limiter: egret_core::ratelimit::RateLimiter::new(20, 2, 2),
-        cfg: AppsConfig::default(),
-    };
-    let router = axum::Router::new()
-        .nest("/api", egret_apps::gateway_router())
-        .with_state(st);
+    let mut f = Fixture::new().await;
+    let author = f.new_user().await;
+    let role = custom_role(&f.db, &["app:read", "app:write"]).await;
+    grant(&f.db, "user", author.id, role, f.ws_a).await;
+    f.rebuild().await;
 
-    let send = |token: String| {
-        let router = router.clone();
-        async move {
-            router
-                .oneshot(
-                    Request::post("/api/apps/query")
-                        .header("authorization", format!("Bearer {token}"))
-                        .body(Body::from(
-                            json!({"database": "trino_prod", "sql": "SELECT 1"}).to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-                .status()
-        }
-    };
     // Run mode works for this role (sanity: the grant is live in the PDP)...
-    assert_eq!(
-        send(f.mint(&author, AppMode::Run).await).await,
-        StatusCode::OK
-    );
+    let run = f.mint(&author, AppMode::Run).await;
+    assert_eq!(f.select1(&run).await.0, StatusCode::OK);
     // ...edit mode does not, for want of query:run alone.
+    let edit = f.mint(&author, AppMode::Edit).await;
+    assert_eq!(f.select1(&edit).await.0, StatusCode::FORBIDDEN);
     assert_eq!(
-        send(f.mint(&author, AppMode::Edit).await).await,
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        port.calls().len(),
+        f.port.calls().len(),
         1,
         "only the run-mode call reached the port"
     );
@@ -639,7 +646,6 @@ async fn case10_foreign_and_missing_database_are_identical_404() {
     assert_eq!(foreign.0, StatusCode::NOT_FOUND, "{}", foreign.1);
     assert_eq!(foreign, missing);
     assert!(f.port.calls().is_empty());
-    let _ = f.ws_b;
 }
 
 /// 11: writes and multi-statement batches are refused with a reason.
@@ -748,6 +754,13 @@ async fn case15_success_body_and_audit() {
     assert_eq!(*actor, Some(f.viewer.id));
     assert_eq!(*workspace_id, Some(f.ws_a));
     assert_eq!(detail["outcome"], "ok");
+    assert!(
+        detail["version_id"].is_string(),
+        "run token pins a version: {detail}"
+    );
+    assert_eq!(detail["database"], "trino_prod");
+    assert_eq!(detail["row_count"], 1);
+    assert!(detail["duration_ms"].is_u64(), "{detail}");
     let expected_hash = {
         use sha2::Digest;
         hex::encode(sha2::Sha256::digest(sql.as_bytes()))
@@ -823,4 +836,193 @@ async fn case18_unsupported_engine_is_400() {
         "{body}"
     );
     assert!(f.port.calls().is_empty());
+}
+
+/// Fix round 1: an archived workspace is gone — the same 404 as a deleted app,
+/// and audited as `not_found`.
+#[tokio::test]
+async fn archived_workspace_is_404_like_a_missing_app() {
+    let mut f = Fixture::new().await;
+    let token = f.viewer_run().await;
+    let deleted_app_body = {
+        let other = f.viewer_run().await;
+        assert_eq!(f.select1(&other).await.0, StatusCode::OK, "live first");
+        f.exec("UPDATE analytics.apps SET deleted_at = now() WHERE id = $1")
+            .await;
+        let r = f.select1(&other).await;
+        f.exec("UPDATE analytics.apps SET deleted_at = NULL WHERE id = $1")
+            .await;
+        r
+    };
+    f.drain_audit();
+
+    sqlx::query("UPDATE workspaces SET status = 'archived' WHERE id = $1")
+        .bind(f.ws_a)
+        .execute(&f.db.pool)
+        .await
+        .expect("archive");
+    let archived = f.select1(&token).await;
+    assert_eq!(archived.0, StatusCode::NOT_FOUND, "{}", archived.1);
+    assert_eq!(
+        archived, deleted_app_body,
+        "indistinguishable from a deleted app"
+    );
+    let events = f.drain_audit();
+    assert_eq!(events.len(), 1);
+    assert_eq!(mutation(&events[0])["outcome"], "not_found");
+    assert_eq!(f.port.calls().len(), 1, "only the pre-archive call ran");
+}
+
+/// Fix round 1: a 429 on a resolved session is audited as `rate_limited`, with
+/// no database or SQL hash (the body was never read).
+#[tokio::test]
+async fn rate_limited_call_is_audited() {
+    let mut f = Fixture::with_cfg(AppsConfig {
+        rate_max: 1,
+        rate_window_secs: 60,
+        ..AppsConfig::default()
+    })
+    .await;
+    let token = f.viewer_run().await;
+    assert_eq!(f.select1(&token).await.0, StatusCode::OK);
+    assert_eq!(f.select1(&token).await.0, StatusCode::TOO_MANY_REQUESTS);
+    let events = f.drain_audit();
+    assert_eq!(events.len(), 2, "{events:?}");
+    let d = mutation(&events[1]);
+    assert_eq!(d["outcome"], "rate_limited");
+    assert_eq!(d["database"], "");
+    assert!(d["sql_sha256"].is_null(), "{d}");
+}
+
+/// Fix round 1: an unparseable body on a resolved session is 400, audited as
+/// `invalid`. (Before a session resolves, a 401 is not audited — case 1.)
+#[tokio::test]
+async fn unparseable_body_is_400_and_audited() {
+    let mut f = Fixture::new().await;
+    let token = f.viewer_run().await;
+    let (s, body) = f
+        .send_raw(
+            Request::post("/api/apps/query")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from("{not json"))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(error_text(&body).contains("invalid request body"), "{body}");
+    let events = f.drain_audit();
+    assert_eq!(events.len(), 1);
+    let d = mutation(&events[0]);
+    assert_eq!(d["outcome"], "invalid");
+    assert_eq!(d["database"], "");
+    assert!(d["sql_sha256"].is_null(), "{d}");
+    assert!(f.port.calls().is_empty());
+
+    // An unauthenticated junk body is 401 and leaves no audit row.
+    let (s, _) = f
+        .send_raw(
+            Request::post("/api/apps/query")
+                .body(Body::from("{not json"))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert!(f.drain_audit().is_empty());
+}
+
+/// Fix round 1: bound parameters reach `execute_as_with_params`, typed; an
+/// integer above i64::MAX is refused rather than rounded through f64.
+#[tokio::test]
+async fn params_are_bound_and_out_of_range_integers_refused() {
+    let f = Fixture::new().await;
+    let token = f.viewer_run().await;
+    let (s, body) = f
+        .query(
+            &token,
+            json!({"database": "trino_prod", "sql": "SELECT ?, ?, ?, ?, ?",
+                   "params": [null, true, 7, 1.5, "x"]}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(
+        f.port.param_calls(),
+        vec![vec![
+            Param::Null,
+            Param::Bool(true),
+            Param::I64(7),
+            Param::F64(1.5),
+            Param::Str("x".into()),
+        ]]
+    );
+
+    let (s, body) = f
+        .send_raw(
+            Request::post("/api/apps/query")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(format!(
+                    r#"{{"database":"trino_prod","sql":"SELECT ?","params":[{}]}}"#,
+                    u64::MAX
+                )))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(error_text(&body).contains("out of range"), "{body}");
+    assert_eq!(f.port.calls().len(), 1, "the refused call never ran");
+}
+
+/// Fix round 1: the auth scheme is case-insensitive (RFC 7235).
+#[tokio::test]
+async fn bearer_scheme_is_case_insensitive() {
+    let f = Fixture::new().await;
+    let token = f.viewer_run().await;
+    for scheme in ["bearer", "BEARER"] {
+        let (s, body) = f
+            .send_raw(
+                Request::post("/api/apps/query")
+                    .header("authorization", format!("{scheme} {token}"))
+                    .body(Body::from(
+                        json!({"database": "trino_prod", "sql": "SELECT 1"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(s, StatusCode::OK, "{scheme}: {body}");
+    }
+    let (s, _) = f
+        .send_raw(
+            Request::post("/api/apps/query")
+                .header("authorization", "bearer x")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+/// Fix round 1: a grant held through a GROUP authorizes a run token — pins the
+/// gateway's `user_groups` load into the PDP subject.
+#[tokio::test]
+async fn group_grant_authorizes_a_run_token() {
+    let mut f = Fixture::new().await;
+    let member = f.new_user().await;
+    let group: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(format!("apps_gw_{}", Uuid::new_v4().simple()))
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("group");
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(member.id)
+        .bind(group)
+        .execute(&f.db.pool)
+        .await
+        .expect("membership");
+    let role = custom_role(&f.db, &["app:read"]).await;
+    grant(&f.db, "group", group, role, f.ws_a).await;
+    f.rebuild().await;
+
+    let token = f.mint(&member, AppMode::Run).await;
+    let (s, body) = f.select1(&token).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(f.port.calls()[0].2, UserId(member.id));
 }

@@ -10,8 +10,9 @@
 //! 1. token → 401. Before the body is even parsed, so an unauthenticated caller
 //!    learns nothing (not even whether its JSON was well-formed) and spends no
 //!    one's rate-limit quota.
-//! 2. per-token rate limit → 429.
-//! 3. user still `active`, workspace has `apps` on, app not deleted → 401/403/404.
+//! 2. per-token rate limit → 429. Every outcome from here on is audited.
+//! 3. user still `active` → 401; app not deleted and its workspace `active` →
+//!    404; workspace has `apps` on → 403.
 //! 4. PDP: run mode needs `app:read` on the app; edit mode needs `app:write` on
 //!    the app AND `query:run` on the workspace (an author writes arbitrary SQL;
 //!    a viewer only runs a published app, so `ws_viewer` — which lacks
@@ -61,6 +62,8 @@ async fn query(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<TabularResult>> {
+    // A 401 before a session resolves is NOT audited: there is no user, app or
+    // workspace to attribute it to, only an unverified string.
     let token = bearer(&headers).ok_or(Error::Unauthorized)?;
     let idle = Duration::from_secs(st.cfg.session_idle_secs);
     let sess = st
@@ -68,23 +71,31 @@ async fn query(
         .resolve(token, idle)
         .await?
         .ok_or(Error::Unauthorized)?;
+    let started = Instant::now();
+    // From here on every outcome is audited: the session names who and what.
     // `check` is true when the call is ALLOWED.
     if !st.limiter.check(&sess.id.to_string()) {
-        return Err(Error::TooManyRequests);
+        let outcome = Err(Error::TooManyRequests);
+        audit(&st, &sess, None, &outcome, started.elapsed());
+        return outcome.map(Json);
     }
-
-    let req: QueryRequest = serde_json::from_slice(&body)
-        .map_err(|e| Error::InvalidInput(format!("invalid request body: {e}")))?;
-    let started = Instant::now();
+    let req: QueryRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(e) => {
+            let outcome = Err(Error::InvalidInput(format!("invalid request body: {e}")));
+            audit(&st, &sess, None, &outcome, started.elapsed());
+            return outcome.map(Json);
+        }
+    };
     let outcome = run(&st, &sess, &req).await;
-    audit(&st, &sess, &req, &outcome, started.elapsed());
+    audit(&st, &sess, Some(&req), &outcome, started.elapsed());
     outcome.map(Json)
 }
 
 async fn run(st: &AppsState, sess: &AppSession, req: &QueryRequest) -> Result<TabularResult> {
     ensure_user_active(st, sess.user_id).await?;
-    ensure_feature_enabled(st, sess.workspace_id).await?;
     let folder_id = app_folder(st, sess).await?;
+    ensure_feature_enabled(st, sess.workspace_id).await?;
     authorize(st, sess, folder_id).await?;
     let (database_id, engine) = database_by_name(st, sess.workspace_id, &req.database).await?;
     let dialect = EngineDialect::from_engine(&engine)
@@ -120,12 +131,16 @@ async fn run(st: &AppsState, sess: &AppSession, req: &QueryRequest) -> Result<Ta
     }
 }
 
+/// The auth scheme is case-insensitive (RFC 7235 §2.1); the token is not.
 fn bearer(headers: &HeaderMap) -> Option<&str> {
-    headers
+    let value = headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
+        .ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then_some(token.trim())
 }
 
 /// A token outlives nothing about its user: disabling the user kills it at once.
@@ -153,12 +168,16 @@ async fn ensure_feature_enabled(st: &AppsState, ws: WorkspaceId) -> Result<()> {
     }
 }
 
-/// The app's folder (its PDP ancestry). `NotFound` if deleted or not in the
-/// token's workspace.
+/// The app's folder (its PDP ancestry). `NotFound` if the app is deleted, is
+/// not in the token's workspace, or that workspace is no longer `active` — an
+/// archived workspace is gone for the gateway exactly as it is for `WsContext`,
+/// and with the same 404 as a missing app.
 async fn app_folder(st: &AppsState, sess: &AppSession) -> Result<Option<Uuid>> {
     let row = sqlx::query(
-        "SELECT folder_id FROM analytics.apps \
-         WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL",
+        "SELECT a.folder_id FROM analytics.apps a \
+           JOIN workspaces w ON w.id = a.workspace_id \
+         WHERE a.id = $1 AND a.workspace_id = $2 AND a.deleted_at IS NULL \
+           AND w.status = 'active'",
     )
     .bind(sess.app_id)
     .bind(sess.workspace_id.0)
@@ -239,11 +258,18 @@ fn to_params(values: &[serde_json::Value]) -> Result<Vec<Param>> {
         .map(|v| match v {
             serde_json::Value::Null => Ok(Param::Null),
             serde_json::Value::Bool(b) => Ok(Param::Bool(*b)),
-            serde_json::Value::Number(n) => n
-                .as_i64()
-                .map(Param::I64)
-                .or_else(|| n.as_f64().map(Param::F64))
-                .ok_or_else(|| Error::InvalidInput("unsupported number".into())),
+            // An integer must fit i64; one above i64::MAX is refused rather
+            // than silently rounded through f64.
+            serde_json::Value::Number(n) => match n.as_i64() {
+                Some(i) => Ok(Param::I64(i)),
+                None => n
+                    .as_f64()
+                    .filter(|_| n.is_f64())
+                    .map(Param::F64)
+                    .ok_or_else(|| {
+                        Error::InvalidInput(format!("integer parameter {n} is out of range"))
+                    }),
+            },
             serde_json::Value::String(s) => Ok(Param::Str(s.clone())),
             _ => Err(Error::InvalidInput(
                 "params must be null, bool, number or string".into(),
@@ -252,12 +278,15 @@ fn to_params(values: &[serde_json::Value]) -> Result<Vec<Param>> {
         .collect()
 }
 
-/// One `Mutation` per resolved call. The SQL text is never recorded — only its
-/// SHA-256 — because a query can carry literals the viewer typed.
+/// One `Mutation` per call whose session resolved. The SQL text is never
+/// recorded — only its SHA-256 — because a query can carry literals the viewer
+/// typed. `req` is `None` when the call was refused before its body was read
+/// (rate limited) or the body did not parse: `database` is then empty and
+/// `sql_sha256` null.
 fn audit(
     st: &AppsState,
     sess: &AppSession,
-    req: &QueryRequest,
+    req: Option<&QueryRequest>,
     outcome: &Result<TabularResult>,
     took: Duration,
 ) {
@@ -268,6 +297,7 @@ fn audit(
         Err(Error::FeatureDisabled(_)) => ("feature_disabled", None, None),
         Err(Error::NotFound(_)) => ("not_found", None, None),
         Err(Error::InvalidInput(_)) => ("invalid", None, None),
+        Err(Error::TooManyRequests) => ("rate_limited", None, None),
         Err(_) => ("error", None, None),
     };
     st.audit.emit(egret_audit::AuditEvent::Mutation {
@@ -280,8 +310,8 @@ fn audit(
         detail: serde_json::json!({
             "mode": sess.mode.as_str(),
             "version_id": sess.version_id,
-            "database": req.database,
-            "sql_sha256": hex::encode(Sha256::digest(req.sql.as_bytes())),
+            "database": req.map_or("", |r| r.database.as_str()),
+            "sql_sha256": req.map(|r| hex::encode(Sha256::digest(r.sql.as_bytes()))),
             "outcome": label,
             "row_count": rows,
             "truncated": truncated,
