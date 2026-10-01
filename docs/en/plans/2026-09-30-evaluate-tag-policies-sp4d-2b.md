@@ -64,13 +64,22 @@ The two halves were fixed differently, on purpose:
   runs the opposite way from what the first round assumed: the empty-string class
   it gated is **unreachable from the form**, which sends `undefined` for an empty
   input.)
-* **wildcards and non-ASCII values DECLINE** — `stored_value_problem`
+* **wildcards DECLINE** — `stored_value_problem`
   (`egret-perm-compile/src/routes.rs`) refuses the resolution for the whole
   catalog. `FilenameUtils.wildcardMatch` is a backtracking token matcher and SQL
   `LIKE` is not that algorithm; standing up a second matcher is the trade this
-  package has declined three times. Non-ASCII declines because Postgres `lower()`
-  and Java `equalsIgnoreCase` are identical over ASCII and not provably identical
-  outside it, and neither direction of a disagreement is safe.
+  package has declined three times.
+* **and so do the 25 code points where the two FOLDS diverge** — fix round 2
+  measured which ones, by sweeping every defined code point in Unicode
+  (`EgretCaseFoldAgreementTest`): the Turkish `İ`/`ı`, the long `ſ`, Greek `Σ` and
+  final sigma with the Greek/Cyrillic variant letters, the micro sign, the
+  ypogegrammeni pair. **No Vietnamese letter is among them.** Round 1 declined
+  every non-ASCII value, which in this deployment is one tag on `người` refusing a
+  whole catalog — an over-refusal on an un-measured premise. The check is applied
+  to the REQUEST's values too, because `("ſ","s")` disagrees and the stored side
+  alone cannot see that. The Postgres half of the measurement is a stand-in and is
+  marked unverified; a `tr_TR` collation is the one deployment where the set would
+  be too narrow.
 
 **A `CHECK` on `catalog_tag_assignments` retires the whole mechanism** — the three
 classes are exactly "the stored value is a non-empty, wildcard-free, ASCII

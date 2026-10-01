@@ -1866,6 +1866,7 @@ impl ClearanceLookups for sqlx::PgConnection {
 /// | `target.schema` / `target.table` — PRESENCE | **yes** | `None` on either ⇒ `Some(empty)`, argued above. `Some("")` is NOT special-cased: with the gate clear no stored coordinate has an empty `schema_name` or `table_name`, so an empty request value matches nothing and the empty set is the right answer — the one shape that could arrive, a `('', '')` row, is exactly what [`StoredValueProblem::EmptyLevel`] refuses on |
 /// | `target.schema` / `target.table` / `target.column` — the VALUES' CASE | **yes, and ruled on since fix round 1** | the resolver folds both sides, so `SALES` against a row stored `sales` resolves. ⚠ This row did not exist, and its absence was the review's Critical: the values reach `request_resource` verbatim from `ScopePicker`'s free-text inputs, so differing case is what ORDINARY use produces — more reachable than the empty-string class that was gated |
 /// | `target.*` — the VALUES' SYNTAX | **no, and that is a ruling** | a `*` or `?` the OPERATOR types is a request value, and Ranger matches a request value literally: the wildcard lives on the POLICY side of `getMatchType`, never the request side. So a typed `*` names a resource called `*` and resolves nothing, which is correct. The syntax that matters is the STORED side's, ruled on in [`stored_value_problem`] |
+/// | `target.*` — a [`FOLD_DIVERGENT`] character | **yes, since fix round 2** | ⚠ the divergence is a property of the PAIR, not of the stored side: `("ſ", "s")` is measured disagreeing, so an ASCII stored value and an odd REQUEST value are the same fail-open. Checked with the same `fold_divergent` the stored side uses |
 /// | `target.column` | **yes** | `None` ⇒ `""`, which is migration 0081's "the table itself" convention in the REQUEST position, and is the value `resolved_tags_for_resource_via` is documented against |
 /// | `assignment_coordinates` + [`stored_value_problem`] | **yes, first** | any problem ⇒ `None`. Per CATALOG and not per request: the coordinate that breaks the equivalence is one the resolver cannot return, so there is nothing per-request to test it against |
 /// | `egret_policy::ResolvedTag::name` | **yes** | `tags.name`, which is what `from_assignments` puts in the wire tag's `type` and therefore what the engine matches. Never `tags.key` — live they differ for one of three tags |
@@ -1882,6 +1883,31 @@ async fn resolved_tags_for_target<L: TagLookups + Send>(
     // move above it: every argument on this function for why the resolution is
     // enricher-equivalent assumes it passed.
     //
+    // ── the REQUEST side of the fold, first ────────────────────────────────
+    //
+    // ⚠ **Fix round 2.** The gate used to ask only about STORED values, and that
+    // is not where the fold's divergence lives: the pair `("ſ", "s")` is measured
+    // DISAGREEING, so the stored value can be ordinary ASCII while the request
+    // carries the odd character. `fold_divergent` is the same predicate
+    // `stored_value_problem` applies, asked of the target's own three values.
+    //
+    // Checked BEFORE the `Some(empty)` shortcut below, which is strictly
+    // conservative: with no schema or table named, no stored attachment is
+    // SELF-or-ANCESTOR of the request whatever either fold does, so this costs an
+    // answer in a state that was already safe. Ordered this way on purpose — the
+    // alternative is an argument per branch, and a gate that has to be re-argued
+    // per branch is the shape that lost two classes in round 1.
+    if [
+        target.schema.as_deref(),
+        target.table.as_deref(),
+        target.column.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(fold_divergent)
+    {
+        return Ok(None);
+    }
     // `any`, not a count: one offending coordinate anywhere in the catalog is
     // enough, because the resolver's predicate is the same predicate for every
     // target in it.
@@ -1944,24 +1970,101 @@ enum StoredValueProblem {
     /// declined three times — the tag trie, the candidate rule, T4. So the state
     /// is detected and refused, fail-closed, with the page naming it.
     WildcardMetacharacter,
-    /// A byte outside `[\x20-\x7E]` in a stored value.
+    /// One of the 25 code points in [`FOLD_DIVERGENT`] — the characters on which
+    /// the resolver's fold and the matcher's fold can disagree.
     ///
-    /// The resolver folds case with Postgres `lower()`; the matcher folds with
-    /// Java `StringUtils.equalsIgnoreCase`, i.e. a per-character
-    /// `toUpperCase`/`toLowerCase` pair. **The two are identical over ASCII and
-    /// not provably identical outside it**: `lower()` is collation-driven full
-    /// Unicode case mapping, which can map one character to several and depends on
-    /// the database's collation, while Java's is per-character and locale-free.
-    /// Neither direction of a disagreement is safe — too wide invents a tag, too
-    /// narrow misses one — so a non-ASCII stored value declines instead of being
-    /// compared under a fold nobody has measured.
+    /// The resolver folds with Postgres `lower()`, a FULL-STRING Unicode lowercase;
+    /// the matcher folds with `StringUtils.equalsIgnoreCase`, a PER-CHARACTER
+    /// `toUpperCase`/`toLowerCase` pair after a length check. Two different
+    /// algorithms, so "the query reproduces the matcher" is a claim about where
+    /// they agree — and neither direction of a disagreement is safe: too wide
+    /// invents a tag the engine does not apply, too narrow misses one it does.
     ///
-    /// Carried cost, stated because it is real: a tag assignment on a table with
-    /// a non-ASCII name makes every `explain` in that catalog answer
-    /// `TagsUnresolved` on profiles with a tag block. **Falsified by** a measured
-    /// equivalence (a probe running both folds over a character corpus), which
-    /// would retire this variant.
-    NonAscii,
+    /// # ⚠ Fix round 2 narrowed this from "any non-ASCII value" by MEASURING
+    ///
+    /// Round 1 declined every non-ASCII stored value, on the un-measured premise
+    /// that the two folds "are not provably identical outside ASCII". In a
+    /// Vietnamese-language deployment that is a recurring over-refusal: one tag on
+    /// a table named `người` would have made every `explain` in that catalog answer
+    /// `TagsUnresolved`.
+    ///
+    /// The premise was much narrower than the gate.
+    /// `tests/ranger/src/test/java/EgretCaseFoldAgreementTest.java` sweeps **every
+    /// defined code point in Unicode** against three criteria (asymmetric 1:1
+    /// mapping, length-changing full lowercase, context-dependent full lowercase)
+    /// and finds **25**: the Turkish `İ`/`ı`, the long `ſ`, the Greek final sigma
+    /// and `Σ` itself, the Greek and Cyrillic variant letters, the micro sign, and
+    /// the Greek ypogegrammeni pair. **No Vietnamese letter is in it** — that test
+    /// asserts so directly, over both the precomposed letters and the whole
+    /// `U+1EA0..U+1EF9` tone-mark range — and neither is German `ß`, Cyrillic, or
+    /// the Kelvin sign. Named pairs in that table, measured: `("I","ı")`,
+    /// `("İ","i")`, `("ſ","s")`, `("Σ","ς")`, `("ΑΣ","ασ")` and `("µ","μ")`
+    /// DISAGREE; `("Tiếng","TIẾNG")`, `("người","NGƯỜI")`, `("ß","ẞ")`, `("Д","д")`
+    /// and `("K","k")` AGREE.
+    ///
+    /// # ⚠ One side of that measurement is a STAND-IN, and it is unverified
+    ///
+    /// The matcher's side is exact (`String.equalsIgnoreCase` is what
+    /// `StringUtils.equalsIgnoreCase` delegates to). The query's side is Java
+    /// `String.toLowerCase(Locale.ROOT)` standing in for Postgres `lower()`: both
+    /// implement Unicode's full `Lowercase_Mapping`, `SpecialCasing` entries and
+    /// the `Final_Sigma` rule included, and `Locale.ROOT` excludes the
+    /// locale-tailored mappings. **No Postgres runs in that harness**, so the set
+    /// is unverified on the database side exactly as the SQL half of the fold is.
+    /// **Falsified by** a collation that tailors case (`tr_TR` would move `I`/`i`
+    /// into the divergent set and is the one deployment where this gate would be
+    /// too narrow), or by an ICU/glibc difference on one of the 25.
+    FoldDivergentCharacter,
+}
+
+/// The 25 code points on which Postgres `lower()` and Java `equalsIgnoreCase` can
+/// disagree, DERIVED by a sweep over every defined code point in Unicode and
+/// asserted verbatim by
+/// `tests/ranger/src/test/java/EgretCaseFoldAgreementTest.java::theDisagreementSetIsExactlyTheOneTheGateEncodes`.
+///
+/// That test is the oracle: a code point in it and not here is a fail-open, one
+/// here and not in it is an over-refusal, and it fails on either. This list is
+/// therefore a measured constant reproduced in Rust, the same arrangement
+/// `egret_ranger_eval`'s `service_resource_validates` has with the drop table —
+/// not a second implementation of a rule.
+const FOLD_DIVERGENT: [char; 25] = [
+    '\u{00B5}', // MICRO SIGN — uppercases to Greek Mu, which lowercases to Greek mu
+    '\u{0130}', // LATIN CAPITAL LETTER I WITH DOT ABOVE — full lowercase is TWO code points
+    '\u{0131}', // LATIN SMALL LETTER DOTLESS I — uppercases to ASCII `I`
+    '\u{017F}', // LATIN SMALL LETTER LONG S — uppercases to ASCII `S`
+    '\u{0345}', // COMBINING GREEK YPOGEGRAMMENI
+    '\u{03A3}', // GREEK CAPITAL LETTER SIGMA — lowercase depends on the NEXT character
+    '\u{03C2}', // GREEK SMALL LETTER FINAL SIGMA
+    '\u{03D0}', // GREEK BETA SYMBOL
+    '\u{03D1}', // GREEK THETA SYMBOL
+    '\u{03D5}', // GREEK PHI SYMBOL
+    '\u{03D6}', // GREEK PI SYMBOL
+    '\u{03F0}', // GREEK KAPPA SYMBOL
+    '\u{03F1}', // GREEK RHO SYMBOL
+    '\u{03F5}', // GREEK LUNATE EPSILON SYMBOL
+    '\u{1C80}', // CYRILLIC SMALL LETTER ROUNDED VE
+    '\u{1C81}', // CYRILLIC SMALL LETTER LONG-LEGGED DE
+    '\u{1C82}', // CYRILLIC SMALL LETTER NARROW O
+    '\u{1C83}', // CYRILLIC SMALL LETTER WIDE ES
+    '\u{1C84}', // CYRILLIC SMALL LETTER TALL TE
+    '\u{1C85}', // CYRILLIC SMALL LETTER THREE-LEGGED TE
+    '\u{1C86}', // CYRILLIC SMALL LETTER TALL HARD SIGN
+    '\u{1C87}', // CYRILLIC SMALL LETTER TALL YAT
+    '\u{1C88}', // CYRILLIC SMALL LETTER UNBLENDED UK
+    '\u{1E9B}', // LATIN SMALL LETTER LONG S WITH DOT ABOVE
+    '\u{1FBE}', // GREEK PROSGEGRAMMENI
+];
+
+/// Whether `value` carries a character from [`FOLD_DIVERGENT`].
+///
+/// **Asked of BOTH sides of the comparison**, and that is a measurement rather
+/// than caution: the pair `("ſ", "s")` DISAGREES, so a stored value can be pure
+/// ASCII while the REQUEST is the odd one — gating only the stored side would have
+/// left exactly that pair open. `resolved_tags_for_target` checks the target's
+/// three values and `stored_value_problem` checks each stored coordinate; one
+/// predicate, two call sites, so they cannot drift.
+fn fold_divergent(value: &str) -> bool {
+    value.chars().any(|c| FOLD_DIVERGENT.contains(&c))
 }
 
 /// The ruling on ONE stored coordinate: `None` when
@@ -1982,7 +2085,8 @@ enum StoredValueProblem {
 /// | emptiness of `column` | the same omission, but it is migration 0081's documented table-level sentinel and the resolver's second arm IS that ANCESTOR case | **ruled fine** — the one emptiness that is reproduced |
 /// | `*` / `?` | `{"wildCard": true}` ⇒ `FilenameUtils.wildcardMatch` | [`StoredValueProblem::WildcardMetacharacter`] |
 /// | letter case | `{"ignoreCase": true}` ⇒ `equalsIgnoreCase` | **reproduced, not refused** — the resolver folds both sides, measured on the Ranger side by `EgretTagAttachmentMatchTypeTest` |
-/// | non-ASCII characters | `equalsIgnoreCase`'s per-character fold, which Postgres `lower()` does not provably equal | [`StoredValueProblem::NonAscii`] |
+/// | a character from [`FOLD_DIVERGENT`] | `equalsIgnoreCase`'s PER-CHARACTER fold versus `lower()`'s FULL-STRING one — the 25 code points on which the two can disagree, derived by a sweep over all of Unicode | [`StoredValueProblem::FoldDivergentCharacter`] |
+/// | any other non-ASCII character | the two folds AGREE on it, measured | **ruled fine** — ⚠ fix round 2 narrowed this from "all non-ASCII declines", which was an over-refusal on an un-measured premise in a Vietnamese-language deployment |
 /// | leading / trailing whitespace | none: the matcher compares the value as given, and so does the predicate — `' sales'` matches `' sales'` and nothing else on BOTH sides | **ruled fine**, and it is a ruling rather than an omission |
 /// | length, `NULL` | `NOT NULL` on all three columns (migration 0081); the matcher has no length rule | **ruled fine** |
 /// | `isExcludes` / `isRecursive` | not expressible: `from_assignments` writes `{"values": [v]}` and no flag, so the matcher's defaults (`false`) are what the enricher gets | **ruled fine**, and `ServiceTags::from_assignments` is what makes it so |
@@ -1998,8 +2102,8 @@ fn stored_value_problem(schema: &str, table: &str, column: &str) -> Option<Store
         if value.contains(['*', '?']) {
             return Some(StoredValueProblem::WildcardMetacharacter);
         }
-        if !value.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
-            return Some(StoredValueProblem::NonAscii);
+        if fold_divergent(value) {
+            return Some(StoredValueProblem::FoldDivergentCharacter);
         }
     }
     None
@@ -2614,9 +2718,15 @@ mod tag_resolution_tests {
                 ("sales", "orders", "ema*"),
                 "a wildcarded COLUMN is SELF, not ancestor",
             ),
+            // ⚠ Fix round 2 replaced this row. It used to be
+            // `("sales","orders","e\u{0301}mail")` — `e` plus a combining acute —
+            // on the round-1 rule that ANY non-ASCII value declines. The two folds
+            // AGREE on a combining mark, so that row now asserts the opposite of
+            // what it says; what diverges is the measured set, and `\u{0131}` (the
+            // Turkish dotless i, which uppercases to ASCII `I`) is a member.
             (
-                ("sales", "orders", "e\u{0301}mail"),
-                "a fold Postgres and Java need not agree on",
+                ("sales", "orders", "ema\u{0131}l"),
+                "a character the two folds disagree on",
             ),
         ] {
             let mut lookups = FakeTagLookups::new(&[coordinate], &[("pii", MatchType::Self_)]);
@@ -2693,11 +2803,93 @@ mod tag_resolution_tests {
             stored_value_problem("sales", "orders", "ema?l"),
             Some(WildcardMetacharacter)
         );
-        assert_eq!(stored_value_problem("sales", "ordérs", ""), Some(NonAscii));
+        // ⚠ Fix round 2: an ordinary non-ASCII value is NOT a problem. The two
+        // folds AGREE on every Vietnamese letter — measured over the precomposed
+        // letters and the whole U+1EA0..U+1EF9 tone range by
+        // `EgretCaseFoldAgreementTest::noVietnameseLetterIsInTheDivergentSet` — and
+        // round 1 declined all of them, which in this deployment is a tag on
+        // `người` refusing the whole catalog.
+        assert_eq!(
+            stored_value_problem("b\u{00e1}n_h\u{00e0}ng", "ng\u{01b0}\u{1edd}i", ""),
+            None
+        );
+        assert_eq!(
+            stored_value_problem("Ti\u{1ebf}ng", "TI\u{1ebe}NG", ""),
+            None
+        );
+        // The 25 that do diverge, one per mechanism.
+        for divergent in [
+            "\u{0130}", // full lowercase is TWO code points
+            "\u{0131}", // uppercases to ASCII `I`
+            "\u{017f}", // uppercases to ASCII `S`
+            "\u{03c2}", // final sigma
+            "\u{03a3}", // lowercase depends on the NEXT character
+            "\u{00b5}", // micro sign
+            "\u{1c80}", // Cyrillic rounded ve
+        ] {
+            assert_eq!(
+                stored_value_problem(&format!("sa{divergent}les"), "orders", ""),
+                Some(FoldDivergentCharacter),
+                "{divergent:?} is in FOLD_DIVERGENT"
+            );
+        }
         // Case is NOT a problem: it is reproduced by the resolver's fold.
         assert_eq!(stored_value_problem("SALES", "ORDERS", "EMAIL"), None);
         // Whitespace is NOT a problem: both sides compare the value as given.
         assert_eq!(stored_value_problem(" sales", "orders ", ""), None);
+    }
+
+    /// **The REQUEST side of the fold, which round 2 added and round 1 did not
+    /// have.** The divergence is a property of the PAIR: `("\u{017f}", "s")` is
+    /// measured DISAGREEING, so a catalog whose every stored coordinate is ordinary
+    /// ASCII is still unsafe for a target that carries one of the 25 — the stored
+    /// side cannot see it, and nothing else would have declined.
+    #[tokio::test]
+    async fn a_fold_divergent_character_in_the_target_declines_the_resolution() {
+        for value in ["\u{017f}ales", "\u{0131}", "\u{03a3}igma"] {
+            for target in [
+                target(Some(value), Some("orders"), Some("email")),
+                target(Some("sales"), Some(value), Some("email")),
+                target(Some("sales"), Some("orders"), Some(value)),
+            ] {
+                let mut lookups = FakeTagLookups::clean(&[("pii", MatchType::Self_)]);
+                let got = resolved_tags_for_target(&mut lookups, &target)
+                    .await
+                    .expect("no error");
+                assert!(
+                    got.is_none(),
+                    "a divergent character in the target must decline: {target:?}"
+                );
+                assert!(
+                    lookups.resolved_asked.is_empty(),
+                    "and decline before resolving: {target:?}"
+                );
+            }
+        }
+    }
+
+    /// …and the other half of that, which is the whole point of round 2: an
+    /// ORDINARY non-ASCII target resolves. Without this the request-side check is
+    /// indistinguishable from "decline anything with a diacritic", which is what
+    /// round 1 did and what this deployment cannot afford.
+    #[tokio::test]
+    async fn an_ordinary_vietnamese_target_still_resolves() {
+        let mut lookups = FakeTagLookups::new(
+            &[("b\u{00e1}n_h\u{00e0}ng", "ng\u{01b0}\u{1edd}i", "")],
+            &[("pii", MatchType::Self_)],
+        );
+        let got = resolved_tags_for_target(
+            &mut lookups,
+            &target(
+                Some("B\u{00c1}N_H\u{00c0}NG"),
+                Some("NG\u{01af}\u{1edc}I"),
+                None,
+            ),
+        )
+        .await
+        .expect("no error")
+        .expect("Vietnamese is not a reason to decline, in either case");
+        assert_eq!(got.as_slice().len(), 1);
     }
 
     /// The gate is the FIRST read, not a second opinion on a set already

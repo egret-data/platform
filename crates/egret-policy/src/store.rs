@@ -903,14 +903,32 @@ pub struct ResolvedTag {
 /// `RangerServiceResourceMatcher.getMatchType` — so the equivalence this
 /// predicate claims is measured on one side rather than asserted on both.
 ///
-/// `lower()` reproduces `equalsIgnoreCase` **over ASCII values**, which is the
-/// population `tag_assignment_coordinates_via`'s caller restricts the stored side
-/// to: Postgres' `lower()` is collation-driven full Unicode case mapping and
-/// Java's `equalsIgnoreCase` is a per-character `toUpperCase`/`toLowerCase` pair,
-/// and the two are identical for `[\x20-\x7E]` and not provably identical
-/// outside it. A non-ASCII stored value therefore DECLINES the resolution rather
-/// than being compared under a fold nobody measured — see
-/// [`tag_assignment_coordinates_via`].
+/// # ⚠ WHERE the two folds diverge is measured, and it is 25 code points
+///
+/// `lower()` is collation-driven FULL-STRING Unicode case mapping; Java's
+/// `equalsIgnoreCase` is a PER-CHARACTER `toUpperCase`/`toLowerCase` pair after a
+/// length check. Two algorithms, so this predicate reproduces the matcher only
+/// where they agree — and fix round 2 measured where that is, by sweeping every
+/// defined code point in Unicode:
+/// `tests/ranger/src/test/java/EgretCaseFoldAgreementTest.java` finds **25**
+/// divergent code points (the Turkish `İ`/`ı`, the long `ſ`, Greek `Σ`/final sigma
+/// and the Greek/Cyrillic variant letters, the micro sign, the ypogegrammeni
+/// pair), and **no Vietnamese letter is among them** — nor German `ß`, nor
+/// Cyrillic, nor the Kelvin sign.
+///
+/// `egret_perm_compile`'s `fold_divergent` declines the resolution for a value
+/// carrying one of those 25, on EITHER side of the comparison (the pair
+/// `("ſ","s")` disagrees, so an ASCII stored value with an odd request value is
+/// the same fail-open). Everything else folds here. ⚠ Fix round 1 declined every
+/// non-ASCII stored value instead, which in a Vietnamese-language deployment is
+/// one tag on `người` refusing a whole catalog — an over-refusal resting on an
+/// un-measured premise.
+///
+/// The Postgres half of that measurement is a STAND-IN (`String.toLowerCase(
+/// Locale.ROOT)`) and is **unverified**, exactly as this predicate itself is: no
+/// Postgres runs in that harness. A collation that tailors case (`tr_TR`) would
+/// move `I`/`i` into the divergent set and is the one deployment where the set is
+/// too narrow.
 ///
 /// # Three things this gets right that are each a silent fail-open
 ///

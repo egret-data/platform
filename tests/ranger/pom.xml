@@ -41,6 +41,14 @@
                  NEVER RUNS, and the suite stays green — which is how this entry came
                  to be added one run late. -->
             <include>EgretTagAttachmentMatchTypeTest.java</include>
+            <!-- SP4d-2b Task 7 fix round 2: measures WHERE Postgres `lower()` and Java
+                 `equalsIgnoreCase` can disagree, so the resolver's fold declines 25 code
+                 points instead of every non-ASCII value. Measures the JDK, not the jar. -->
+            <include>EgretCaseFoldAgreementTest.java</include>
+            <!-- …and the guard that makes the omission above impossible to repeat: it
+                 asserts this list names every .java in src/test/java, in both
+                 directions. -->
+            <include>EgretSurefireIncludesTest.java</include>
           </includes>
         </configuration>
       </plugin>
