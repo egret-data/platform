@@ -160,6 +160,40 @@ different assertion dies for each.
 
 ---
 
+### Task 8: `just check` forces a developer to disable 14 tests, permanently
+
+**Files:**
+- Modify: `justfile` (the `check` recipe's variable block at `:60`), and/or
+  `docker-compose.dev.yml`
+- Reference: `crates/egret-dataapi/tests/serving_shared_store.rs:54`
+
+**Found by Task 1's review, and it is the same defect class as the hole Task 1 fixed — but
+worse-shaped, because the recipe forces its own defeat.** `just check` decides the DB, ENGINE
+and DOCKER axes and leaves **`EGRET_ALLOW_STORE_SKIP` undecided**. That variable gates **all
+14** tests in `serving_shared_store.rs`. There is no Valkey in `docker-compose.dev.yml` and
+none in `.env`; only `ci.yml:28` supplies the URL — and the justfile itself records CI as out
+of quota, so `just check` **is** the gate. So without a Valkey the suite panics on 14 tests, a
+developer exports the opt-out to get work done, and from that moment **every** `just check`
+silently skips those 14 with the `eprintln!` swallowed.
+
+This is outside DG, and it is in scope anyway: `just check` is the gate that protects
+everything this plan touches, and a gate that makes its user disable part of itself does not
+protect anything. **Do not fix the dataapi tests** — that is a different piece of work.
+
+- [ ] **Step 1: Decide the axis in the recipe, the way the other three are decided.** Either
+provide a Valkey for the run, or set the opt-out explicitly in `check` so the skip is the
+recipe's stated choice rather than a developer's permanent workaround.
+- [ ] **Step 2: Whichever you choose, make the skip impossible to misread.** A swallowed
+`eprintln!` behind a green is the shape this programme has been caught by four times. If the
+tests are skipped, the recipe says so where a human reads it.
+- [ ] **Step 3: Check the remaining axes the same way.** The review read all eight `cargo test`
+lines in the justfile and found no DB-axis hole left — but it also noted the guard test matches
+the literal string `cargo test`, so a future `cargo nextest` recipe would slip past it. Widen
+the guard or record the bound.
+- [ ] **Step 4: Commit.**
+
+---
+
 ## Verification for every task
 
 `cargo test -p egret-ranger-eval --no-fail-fast` (baseline **262/0 across 10 binaries**; the flag matters, or cargo stops at the first failing binary and undercounts) · `cargo test -p egret-perm-compile` with `DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test` passed **explicitly** · `cargo check --workspace --all-targets` · `cargo fmt --all -- --check` · scoped `clippy -D warnings` (note `cargo clippy --workspace` is rc 101 on `crates/egret-workspace/src/members.rs:191,196`, byte-identical to `origin/main` — pre-existing, not yours) · the `--lib` drift gate · `just test-ranger-gates` · and in `frontend/`: `npx tsc --noEmit`, `npx eslint .`, and the ExplainAccess suite by its real path `src/routes/governance/__tests__/ExplainAccess.test.tsx` (a path missing `__tests__/` exits 0 with "No test files found").
