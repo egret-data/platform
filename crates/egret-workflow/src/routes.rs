@@ -1857,7 +1857,7 @@ async fn resume_execution(
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed — **or its flow is in the trash, or no longer exists at all**. A replay is a run of the flow and answers to the flow's current state.", body = egret_core::http::ErrorBody),
-        (status = 409, description = "The execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`). A replay of something still running would put two copies of one flow in flight with nothing recording that they are related — see the handler's doc for why no link column is available.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "The execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`). A replay of something still running would put two copies of one flow in flight at once.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -1873,7 +1873,7 @@ async fn resume_execution(
 /// trace."* Starting from the draft is what `POST .../flows/{id}/executions`
 /// is for, and the two routes exist to be different.
 ///
-/// # Why the replacement names no parent, which is NOT a choice
+/// # The link is `replayed_from_execution_id`, not a parent
 ///
 /// `replay::spawn_due` links its replacement with `parent_execution_id` set and
 /// `parent_run_ix` NULL. That slot is **one per execution and already spoken
@@ -1884,19 +1884,18 @@ async fn resume_execution(
 /// replay that took the slot would make a later retry-replay of the same
 /// execution fail a unique constraint, and a second manual replay fail one too.
 ///
-/// `start_execution` has no parent parameter and this task does not add one, so
-/// the replacement is unlinked: **the relationship between a manual replay and
-/// what it replays is in the audit trail and nowhere in the data.** Stated
-/// rather than discovered. What it would take is a link that is not that index's
-/// — a nullable `replayed_from` column of its own — which is a migration and a
-/// schema decision, not a route.
+/// So the replacement has no parent, and the link has a column of its own:
+/// `replayed_from_execution_id` (migration 0161, W9a spec §4.4 item 3), written
+/// here through `start_execution_in` in one transaction with the row. It is
+/// what lets a replay read its source's files (a replay copies its source's
+/// inputs verbatim, and those may be `kestra://` URIs of the source). The audit
+/// record still carries both ids.
 ///
 /// # Terminal only
 ///
-/// A non-terminal execution is refused (409) rather than replayed. With no link
-/// column there is nothing to tell an operator that two RUNNING executions of
-/// one flow are a replay and its original, and the narrow door cannot
-/// over-accept. `RunState::is_terminal` is the predicate — read through
+/// A non-terminal execution is refused (409) rather than replayed: two RUNNING
+/// executions of one flow, a replay and its original, would be in flight at
+/// once, and the narrow door cannot over-accept. `RunState::is_terminal` is the predicate — read through
 /// `worker::from_wire`, which is derived from `RunState::ALL`, so a state added
 /// to the enum is classified here without anyone remembering to come back.
 async fn replay_execution(
@@ -1940,22 +1939,38 @@ async fn replay_execution(
             source.execution.state
         )));
     }
-    let replacement = crate::worker::start_execution(
-        &st.db.pool,
-        ctx.workspace_id.0,
-        source.execution.flow_id,
-        &source.source,
-        source.execution.inputs,
+    let mut tx = st
+        .db
+        .pool
+        .begin()
+        .await
+        .map_err(|e| Error::Internal(e.into()))?;
+    let replacement = crate::worker::start_execution_in(
+        &mut tx,
+        crate::worker::NewExecution {
+            workspace_id: ctx.workspace_id.0,
+            flow_id: source.execution.flow_id,
+            source: &source.source,
+            inputs: source.execution.inputs,
+            trigger: None,
+            scheduled_date: None,
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
+            born_failed: false,
+            // The link (this handler's doc), committed with the row.
+            replayed_from_execution_id: Some(id),
+        },
     )
     .await?;
+    tx.commit().await.map_err(|e| Error::Internal(e.into()))?;
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ctx.workspace_id.0),
         "workflow_execution:replay",
         "workflow_execution",
         Some(replacement.to_string()),
-        // **Both ids, and the replayed one is the only record of the link.**
-        // See this handler's doc: no column carries it.
+        // Both ids; `replayed_from_execution_id` carries the link in the data.
         serde_json::json!({ "replayed_from": id, "replacement": replacement }),
     ));
     let detail = st.executions.get(ctx.workspace_id.0, replacement).await?;

@@ -1400,7 +1400,7 @@ fn random_port(_rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 /// `friendly-id`'s encoder passes `pad = 0` (no padding at all) and `ksuid`'s
 /// passes 27. That single argument is the whole difference between `id`'s
 /// variable length and `ksuid`'s constant one.
-fn base62(mut value: u128, pad: usize) -> String {
+pub(crate) fn base62(mut value: u128, pad: usize) -> String {
     let mut digits = Vec::new();
     while value > 0 {
         digits.push(BASE62[(value % 62) as usize]);

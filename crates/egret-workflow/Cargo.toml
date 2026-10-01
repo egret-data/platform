@@ -233,6 +233,16 @@ kube.workspace = true
 k8s-openapi.workspace = true
 futures-util.workspace = true
 
+# W9a Task 3: `storage::FileStore` holds the object store an execution's files
+# live in (the `S3Store` `egret-bin` already builds for query results). Was a
+# dev-dependency (the StarRocks live test's `EngineState`); the library now
+# uses it.
+egret-storage.workspace = true
+
+[features]
+# `storage::install_mem_for_tests` and `egret_storage::MemStore`.
+test-util = ["egret-storage/test-util"]
+
 [dev-dependencies]
 # minijinja moved to [dependencies] in W2 Task 3 (`runners::env` builds the
 # real environment). `runners::rewrite`'s tests still reach it as
@@ -267,8 +277,13 @@ egret-query.workspace = true
 # path never materialises a result set), the secret stores a `DatabaseRepo`
 # opens a connection's credentials through, and the engine-token minter the
 # delegation branch would resolve through (refused, so the branch being taken is
-# a failure rather than a silent mint).
-egret-storage.workspace = true
+# a failure rather than a silent mint). (`egret-storage` itself moved to
+# [dependencies] in W9a Task 3.)
+#
+# W9a Task 3: this crate's own `test-util` feature (`storage::install_mem_for_tests`,
+# `egret_storage::MemStore`) for its unit and integration tests, the pattern
+# `egret-storage`'s own Cargo.toml uses.
+egret-workflow = { path = ".", features = ["test-util"] }
 egret-secrets.workspace = true
 egret-analytics-api.workspace = true
 # `EGRET_TEST_STARROCKS_URL` is a URL, parsed the same way `egret-dataapi`'s live

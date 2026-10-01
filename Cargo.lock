@@ -3732,6 +3732,7 @@ dependencies = [
  "egret-secrets",
  "egret-storage",
  "egret-test-db",
+ "egret-workflow",
  "egret-workflow-api",
  "egret-workspace",
  "futures-util",

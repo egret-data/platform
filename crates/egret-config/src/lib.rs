@@ -700,6 +700,19 @@ pub struct WorkflowConfig {
     #[serde(default = "default_log_retention_days")]
     pub log_retention_days: u32,
 
+    /// **How long an ended execution's files are kept, in days (W9a spec §10);
+    /// `0` keeps them for ever.** Counted from the loop ROOT's end, so an
+    /// iteration's files live as long as its root's.
+    /// `EGRET_WORKFLOW__STORAGE_RETENTION_DAYS=30`.
+    #[serde(default = "default_storage_retention_days")]
+    pub storage_retention_days: u32,
+
+    /// `[workflow.storage]` -- where execution files live in the `[storage]`
+    /// bucket and how large they may be (W9a spec §3, §4.5).
+    /// `EGRET_WORKFLOW__STORAGE__MAX_FILE_BYTES=1073741824`.
+    #[serde(default)]
+    pub storage: WorkflowStorageConfig,
+
     /// The most log lines one task-run **attempt** stores (W11 decision D4).
     ///
     /// Past it the attempt keeps running and its further lines are not
@@ -782,6 +795,64 @@ pub struct WorkflowConfig {
     /// author-settable. `EGRET_WORKFLOW__PLUGIN_HOST__IMAGE=egret-plugin-host:dev`.
     #[serde(default)]
     pub plugin_host: PluginHostConfig,
+}
+
+/// `[workflow.storage]`: execution files (W9a spec §3, §4.5, §7.2). The
+/// bucket and its credentials are `[storage]`'s; this is the key prefix inside
+/// it and the caps.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowStorageConfig {
+    /// The key prefix: an execution file's key is
+    /// `{prefix}{workspace_id}/{ns-as-path}/{flow}/executions/{exec}/{tail}`.
+    /// Default `workflow/`.
+    #[serde(default = "default_workflow_storage_prefix")]
+    pub prefix: String,
+    /// The largest one file may be; crossing it fails the task naming the cap.
+    /// Default 1 GiB.
+    #[serde(default = "default_max_file_bytes")]
+    pub max_file_bytes: u64,
+    /// The most bytes one task run may write in all. Default 5 GiB.
+    #[serde(default = "default_max_task_bytes")]
+    pub max_task_bytes: u64,
+    /// The most bytes `read()` returns into a render. Default 10 MiB.
+    #[serde(default = "default_max_read_bytes")]
+    pub max_read_bytes: u64,
+}
+
+impl Default for WorkflowStorageConfig {
+    fn default() -> Self {
+        Self {
+            prefix: default_workflow_storage_prefix(),
+            max_file_bytes: default_max_file_bytes(),
+            max_task_bytes: default_max_task_bytes(),
+            max_read_bytes: default_max_read_bytes(),
+        }
+    }
+}
+
+fn default_workflow_storage_prefix() -> String {
+    "workflow/".to_string()
+}
+
+/// 1 GiB -- see [`WorkflowStorageConfig::max_file_bytes`].
+fn default_max_file_bytes() -> u64 {
+    1 << 30
+}
+
+/// 5 GiB -- see [`WorkflowStorageConfig::max_task_bytes`].
+fn default_max_task_bytes() -> u64 {
+    5 << 30
+}
+
+/// 10 MiB -- see [`WorkflowStorageConfig::max_read_bytes`].
+fn default_max_read_bytes() -> u64 {
+    10 << 20
+}
+
+/// `30` -- see [`WorkflowConfig::storage_retention_days`].
+fn default_storage_retention_days() -> u32 {
+    30
 }
 
 /// `[workflow.plugin_host]`: how egret runs the Kestra plugin host image (W5b
@@ -1244,6 +1315,8 @@ fn default_workflow() -> WorkflowConfig {
         scheduler_enabled: default_scheduler_enabled(),
         trigger_interval_secs: default_trigger_interval_secs(),
         log_retention_days: default_log_retention_days(),
+        storage_retention_days: default_storage_retention_days(),
+        storage: WorkflowStorageConfig::default(),
         log_run_max_lines: default_log_run_max_lines(),
         log_run_max_bytes: default_log_run_max_bytes(),
         plugin_configurations: PluginConfigurations::default(),
@@ -1508,6 +1581,22 @@ impl Config {
             if key_len < 32 {
                 return Err("secrets.master_key must be base64 of >=32 bytes".into());
             }
+        }
+        // W9a spec §15: a container runner moves files in and out of task pods
+        // through the `[storage]` bucket (the pod itself holds no credential),
+        // so it cannot start without one.
+        if self.workflow.container_runner != ContainerRunner::None
+            && (self.storage.bucket.is_empty()
+                || self.storage.access_key.is_empty()
+                || self.storage.secret_key.is_empty())
+        {
+            return Err(
+                "workflow.container_runner other than none requires [storage] bucket, \
+                        access_key and secret_key: execution files live there \
+                        (EGRET_STORAGE__BUCKET, EGRET_STORAGE__ACCESS_KEY, \
+                        EGRET_STORAGE__SECRET_KEY)"
+                    .into(),
+            );
         }
         if self.engine.max_rows == 0 || self.engine.query_timeout_secs == 0 {
             return Err("engine.max_rows and engine.query_timeout_secs must be >= 1".into());
@@ -1780,6 +1869,73 @@ values = { allowed-images = [] }
             }
             Ok(())
         });
+    }
+
+    /// W9a Task 3: `[workflow.storage]` and `storage_retention_days` have the
+    /// documented defaults on BOTH paths (the figment defaults layer and the
+    /// serde fallback), and every key is settable from the environment.
+    #[test]
+    fn workflow_storage_defaults_and_env() {
+        figment::Jail::expect_with(|_jail| {
+            let cfg: Config = Config::figment().extract()?;
+            let want = WorkflowStorageConfig {
+                prefix: "workflow/".into(),
+                max_file_bytes: 1_073_741_824,
+                max_task_bytes: 5_368_709_120,
+                max_read_bytes: 10_485_760,
+            };
+            assert_eq!(cfg.workflow.storage, want);
+            assert_eq!(cfg.workflow.storage_retention_days, 30);
+            assert_eq!(default_workflow().storage, want);
+            assert_eq!(default_workflow().storage_retention_days, 30);
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_WORKFLOW__STORAGE__PREFIX", "wf/");
+            jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_FILE_BYTES", "11");
+            jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_TASK_BYTES", "22");
+            jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_READ_BYTES", "33");
+            jail.set_env("EGRET_WORKFLOW__STORAGE_RETENTION_DAYS", "0");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.workflow.storage,
+                WorkflowStorageConfig {
+                    prefix: "wf/".into(),
+                    max_file_bytes: 11,
+                    max_task_bytes: 22,
+                    max_read_bytes: 33,
+                }
+            );
+            assert_eq!(cfg.workflow.storage_retention_days, 0);
+            Ok(())
+        });
+    }
+
+    /// W9a spec §15: a container runner needs `[storage]` at boot; `none`
+    /// does not. Each missing key is refused on its own, and the control
+    /// (all three set) passes.
+    #[test]
+    fn a_container_runner_requires_storage_at_boot() {
+        let with = |runner: ContainerRunner, bucket: &str, ak: &str, sk: &str| {
+            let mut cfg = Config::default();
+            cfg.workflow.container_runner = runner;
+            cfg.storage.bucket = bucket.into();
+            cfg.storage.access_key = ak.into();
+            cfg.storage.secret_key = sk.into();
+            cfg.validate()
+        };
+        for runner in [ContainerRunner::Docker, ContainerRunner::Kubernetes] {
+            assert_eq!(
+                with(runner, "b", "a", "s"),
+                Ok(()),
+                "{runner:?} with storage"
+            );
+            for (b, a, k) in [("", "a", "s"), ("b", "", "s"), ("b", "a", "")] {
+                let err = with(runner, b, a, k).expect_err("refused");
+                assert!(err.contains("[storage]"), "{err}");
+            }
+        }
+        assert_eq!(with(ContainerRunner::None, "", "", ""), Ok(()));
     }
 
     /// W5a Task 5: `container_runner` is `none` unless a deployment says

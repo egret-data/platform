@@ -1576,6 +1576,25 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     };
     let engine = Some(engine_state.clone());
 
+    // W9a: the workflow engine's execution files live in the SAME object store
+    // (this `S3Store`, the `[storage]` bucket -- one client, not a second one),
+    // under `workflow.storage.prefix`. Installed process-wide BEFORE the
+    // workflow runtime and router below, because `read()` runs inside `settle`,
+    // which none of its eight entry points can hand a store to
+    // (`egret_workflow::storage`'s module doc). Index lookups never go through
+    // it: they run on the caller's connection.
+    if egret_workflow::storage::install(std::sync::Arc::new(egret_workflow::storage::FileStore {
+        store: engine_state.storage.clone(),
+        bucket: config.storage.bucket.clone(),
+        prefix: config.workflow.storage.prefix.clone(),
+        caps: egret_workflow::storage::Caps::from(&config.workflow.storage),
+        retention_days: config.workflow.storage_retention_days,
+    }))
+    .is_err()
+    {
+        anyhow::bail!("the workflow file store was installed twice");
+    }
+
     let bi = Some(egret_bi::BiState {
         db: db.clone(),
         saved: egret_bi::SavedQueryRepo::new(db.clone()),

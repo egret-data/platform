@@ -1888,6 +1888,8 @@ pub async fn start_execution_with_trigger(
             execution_depth: 0,
             flow_trigger_event_id: None,
             born_failed: false,
+            // A manual replay calls `start_execution_in` itself with the link.
+            replayed_from_execution_id: None,
         },
     )
     .await?;
@@ -1932,6 +1934,11 @@ pub struct NewExecution<'a> {
     /// execution-level message column, so there is nowhere to keep it. The
     /// processor logs the render error at `warn` instead.
     pub born_failed: bool,
+    /// The manual replay's link (W9a spec §4.4 item 3): the execution
+    /// `POST .../executions/{id}/replay` replays, written to
+    /// `workflow.executions.replayed_from_execution_id` (migration 0161).
+    /// `None` for every other start. A replay reads its source chain's files.
+    pub replayed_from_execution_id: Option<Uuid>,
 }
 
 /// [`start_execution_with_trigger`]'s body, taking the caller's own `conn`
@@ -1953,6 +1960,7 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
         execution_depth,
         flow_trigger_event_id,
         born_failed,
+        replayed_from_execution_id,
     } = new;
 
     let flow = crate::spec::parse(source)
@@ -1964,9 +1972,9 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
         "INSERT INTO workflow.executions \
            (workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
             execution_trigger, scheduled_date, trigger_execution_id, execution_depth, \
-            flow_trigger_event_id) \
+            flow_trigger_event_id, replayed_from_execution_id) \
          VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, \
-                 $11) RETURNING id",
+                 $11, $12) RETURNING id",
     )
     .bind(workspace_id)
     .bind(flow_id)
@@ -1983,6 +1991,7 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
     .bind(trigger_execution_id)
     .bind(execution_depth)
     .bind(flow_trigger_event_id)
+    .bind(replayed_from_execution_id)
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;
