@@ -305,7 +305,7 @@ async fn spawn_one(
     // `executionDepth` is the parent's, and with `ExecutionKind.LOOP` -- the
     // kind `flow_trigger` reads off `loop_index` to refuse an iteration as a
     // Flow-trigger source. Read from the row for the same reason as `inputs`.
-    let id: Uuid = sqlx::query_scalar(
+    let (id, inputs): (Uuid, serde_json::Value) = sqlx::query_as(
         "INSERT INTO workflow.executions \
            (workspace_id, flow_id, namespace, flow_key, source, state, history, \
             parent_execution_id, parent_run_ix, loop_index, loop_value, inputs, \
@@ -313,7 +313,7 @@ async fn spawn_one(
          VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9, \
                  COALESCE((SELECT inputs FROM workflow.executions WHERE id = $6), '{}'::jsonb), \
                  (SELECT execution_depth FROM workflow.executions WHERE id = $6)) \
-         RETURNING id",
+         RETURNING id, inputs",
     )
     .bind(parent.workspace_id)
     .bind(parent.flow_id)
@@ -327,6 +327,27 @@ async fn spawn_one(
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;
+
+    // W9a spec §7.1: every execution-creating INSERT checks its FILE inputs.
+    // An iteration's are its parent's, already checked when the parent was
+    // created, and the parent is in the iteration's loop family -- so this
+    // passes, and a refusal means the copied value is no longer readable
+    // (its row gone), which no author can fix: an internal error, loudly.
+    if let Err(why) = crate::storage::inputs::check_file_inputs(
+        conn,
+        parent.workspace_id,
+        id,
+        &flow,
+        &inputs,
+        &[],
+    )
+    .await?
+    {
+        return Err(Error::Internal(anyhow::anyhow!(
+            "loop iteration {id} of execution {}: its copied inputs are refused: {why}",
+            parent.id
+        )));
+    }
 
     let ctx = claim::ExecutionCtx {
         id,

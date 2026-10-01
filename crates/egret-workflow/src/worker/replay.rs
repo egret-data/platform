@@ -265,6 +265,29 @@ pub(super) async fn spawn_due(
     .await
     .map_err(db_err)?;
 
+    // W9a spec §7.1: every execution-creating INSERT checks its FILE inputs.
+    // A replay's are its source's, already checked, and the source is on the
+    // replay's chain (`parent_execution_id` with no `loop_index`) -- so this
+    // passes; a refusal means a copied value is no longer readable, which no
+    // author can fix: an internal error, loudly.
+    let flow = crate::spec::parse(&ctx.source)
+        .map_err(|e| worker_err(WorkerError::Unplannable(child, e.message)))?;
+    if let Err(why) = crate::storage::inputs::check_file_inputs(
+        conn,
+        ctx.workspace_id,
+        child,
+        &flow,
+        &row.get::<Value, _>("inputs"),
+        &[],
+    )
+    .await?
+    {
+        return Err(Error::Internal(anyhow::anyhow!(
+            "replay {child} of execution {}: its copied inputs are refused: {why}",
+            ctx.id
+        )));
+    }
+
     let child_ctx = claim::ExecutionCtx {
         id: child,
         workspace_id: ctx.workspace_id,

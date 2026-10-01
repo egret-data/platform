@@ -35,6 +35,7 @@ import type {
   FlowVersionDto,
   LogPageDto,
   PublishFlowRequest,
+  StartExecutionMultipart,
   StartExecutionRequest,
   UpdateFlowRequest,
   ValidateFlowRequest,
@@ -608,7 +609,7 @@ export const getWorkflowReplayExecutionUrl = (workspace: string,
  * trace."* Starting from the draft is what `POST .../flows/{id}/executions`
  * is for, and the two routes exist to be different.
  *
- * # Why the replacement names no parent, which is NOT a choice
+ * # The link is `replayed_from_execution_id`, not a parent
  *
  * `replay::spawn_due` links its replacement with `parent_execution_id` set and
  * `parent_run_ix` NULL. That slot is **one per execution and already spoken
@@ -619,19 +620,25 @@ export const getWorkflowReplayExecutionUrl = (workspace: string,
  * replay that took the slot would make a later retry-replay of the same
  * execution fail a unique constraint, and a second manual replay fail one too.
  *
- * `start_execution` has no parent parameter and this task does not add one, so
- * the replacement is unlinked: **the relationship between a manual replay and
- * what it replays is in the audit trail and nowhere in the data.** Stated
- * rather than discovered. What it would take is a link that is not that index's
- * — a nullable `replayed_from` column of its own — which is a migration and a
- * schema decision, not a route.
+ * So the replacement has no parent, and the link has a column of its own:
+ * `replayed_from_execution_id` (migration 0161, W9a spec §4.4 item 3), written
+ * here through `start_execution_in` in one transaction with the row. It is
+ * what lets a replay read its source's files (a replay copies its source's
+ * inputs verbatim, and those may be `kestra://` URIs of the source). The audit
+ * record still carries both ids.
+ *
+ * # Not a loop iteration
+ *
+ * An iteration (`parent_execution_id` with a `loop_index`) is refused (400)
+ * naming its loop root: it is a part of the root's run, `replay::spawn_due`
+ * never replays one, and a replay of it would be a top-level run of the
+ * loop's body alone.
  *
  * # Terminal only
  *
- * A non-terminal execution is refused (409) rather than replayed. With no link
- * column there is nothing to tell an operator that two RUNNING executions of
- * one flow are a replay and its original, and the narrow door cannot
- * over-accept. `RunState::is_terminal` is the predicate — read through
+ * A non-terminal execution is refused (409) rather than replayed: two RUNNING
+ * executions of one flow, a replay and its original, would be in flight at
+ * once, and the narrow door cannot over-accept. `RunState::is_terminal` is the predicate — read through
  * `worker::from_wire`, which is derived from `RunState::ALL`, so a state added
  * to the enum is classified here without anyone remembering to come back.
  * @summary Run a finished execution again.
@@ -1450,15 +1457,30 @@ export type workflowStartFlowExecutionResponse409 = {
   status: 409
 }
 
+export type workflowStartFlowExecutionResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowStartFlowExecutionResponse415 = {
+  data: ErrorBody
+  status: 415
+}
+
 export type workflowStartFlowExecutionResponse500 = {
   data: ErrorBody
   status: 500
 }
 
+export type workflowStartFlowExecutionResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
 export type workflowStartFlowExecutionResponseSuccess = (workflowStartFlowExecutionResponse201) & {
   headers: Headers;
 };
-export type workflowStartFlowExecutionResponseError = (workflowStartFlowExecutionResponse400 | workflowStartFlowExecutionResponse401 | workflowStartFlowExecutionResponse403 | workflowStartFlowExecutionResponse404 | workflowStartFlowExecutionResponse409 | workflowStartFlowExecutionResponse500) & {
+export type workflowStartFlowExecutionResponseError = (workflowStartFlowExecutionResponse400 | workflowStartFlowExecutionResponse401 | workflowStartFlowExecutionResponse403 | workflowStartFlowExecutionResponse404 | workflowStartFlowExecutionResponse409 | workflowStartFlowExecutionResponse413 | workflowStartFlowExecutionResponse415 | workflowStartFlowExecutionResponse500 | workflowStartFlowExecutionResponse503) & {
   headers: Headers;
 };
 
@@ -1475,14 +1497,14 @@ export const getWorkflowStartFlowExecutionUrl = (workspace: string,
 
 export const workflowStartFlowExecution = async (workspace: string,
     id: string,
-    startExecutionRequest: StartExecutionRequest, options?: Parameters<typeof customInstance>[1]): Promise<workflowStartFlowExecutionResponse> => {
+    workflowStartFlowExecutionBody: StartExecutionRequest | StartExecutionMultipart, options?: Parameters<typeof customInstance>[1]): Promise<workflowStartFlowExecutionResponse> => {
 
   return customInstance<workflowStartFlowExecutionResponse>(getWorkflowStartFlowExecutionUrl(workspace,id),
   {
     ...options,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    body: JSON.stringify(startExecutionRequest)
+    method: 'POST'
+    ,
+    body: JSON.stringify(workflowStartFlowExecutionBody)
   }
 );}
 
@@ -1491,8 +1513,8 @@ export const workflowStartFlowExecution = async (workspace: string,
 
 
 export const getWorkflowStartFlowExecutionMutationOptions = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext> => {
 
 const mutationKey = ['workflowStartFlowExecution'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
@@ -1504,7 +1526,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowStartFlowExecution>>, {workspace: string;id: string;data: StartExecutionRequest}> = (props) => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowStartFlowExecution>>, {workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}> = (props) => {
           const {workspace,id,data} = props ?? {};
 
           return  workflowStartFlowExecution(workspace,id,data,requestOptions)
@@ -1518,15 +1540,15 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
   return  { mutationFn, ...mutationOptions }}
 
     export type WorkflowStartFlowExecutionMutationResult = NonNullable<Awaited<ReturnType<typeof workflowStartFlowExecution>>>
-    export type WorkflowStartFlowExecutionMutationBody = StartExecutionRequest
+    export type WorkflowStartFlowExecutionMutationBody = StartExecutionRequest | StartExecutionMultipart
     export type WorkflowStartFlowExecutionMutationError = ErrorBody
 
     export const useWorkflowStartFlowExecution = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof workflowStartFlowExecution>>,
         TError,
-        {workspace: string;id: string;data: StartExecutionRequest},
+        {workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart},
         TContext
       > => {
       return useMutation(getWorkflowStartFlowExecutionMutationOptions(options), queryClient);

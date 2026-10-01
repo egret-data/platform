@@ -1707,6 +1707,62 @@ fn start_inputs(body: Option<Json<StartExecutionRequest>>) -> EgretResult<serde_
     }
 }
 
+/// `POST .../flows/{id}/executions` as `multipart/form-data` (W9a spec §7.1,
+/// Kestra's shape) -- the schema is for the OpenAPI document only; the
+/// handler reads the parts one by one and never builds this type.
+///
+/// **Each part is named by an input id.** A part with a file name is that
+/// `FILE` input's file: it is streamed to
+/// `kestra:///{namespace}/{flow}/executions/{execution}/inputs/{input}/{file name}`
+/// and the input's value is that URI. Any other part is a text value. A part
+/// naming no declared input, or one named twice, is refused naming it.
+#[derive(utoipa::ToSchema)]
+pub struct StartExecutionMultipart(pub std::collections::BTreeMap<String, String>);
+
+/// The JSON body's cap on the start route: axum's own default, unchanged by
+/// W9a. The multipart cap is [`multipart_body_limit`].
+const MAX_JSON_START_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// The room a multipart body has beyond one file of `max_file_bytes`: its
+/// text parts, boundaries and headers (W9a spec §7.1, "the route's body limit
+/// follows `max_file_bytes`").
+pub const MULTIPART_OVERHEAD_BYTES: u64 = 1024 * 1024;
+
+/// One text part's cap. A text part is held in memory whole -- unlike a file,
+/// which is streamed -- so it has a cap of its own, far below the body's.
+pub const MAX_TEXT_PART_BYTES: usize = 1024 * 1024;
+
+/// `max_file_bytes` + [`MULTIPART_OVERHEAD_BYTES`], read from the installed
+/// store when the request arrives.
+fn multipart_body_limit(caps: crate::storage::Caps) -> usize {
+    usize::try_from(caps.max_file_bytes.saturating_add(MULTIPART_OVERHEAD_BYTES))
+        .unwrap_or(usize::MAX)
+}
+
+fn is_multipart(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("multipart/form-data"))
+}
+
+/// An error response in [`egret_core::http::ErrorBody`]'s shape, for the
+/// statuses `egret_core::Error` has no variant for (413, 503).
+fn refuse(status: StatusCode, error: String) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    (
+        status,
+        Json(egret_core::http::ErrorBody { error, code: None }),
+    )
+        .into_response()
+}
+
+fn core_refusal(e: Error) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    e.into_response()
+}
+
 #[utoipa::path(
     post,
     path = "/api/ws/{workspace}/workflows/flows/{id}/executions",
@@ -1715,42 +1771,98 @@ fn start_inputs(body: Option<Json<StartExecutionRequest>>) -> EgretResult<serde_
         WorkspacePath,
         ("id" = Uuid, Path, description = "Flow id"),
     ),
-    request_body = StartExecutionRequest,
+    request_body(
+        description = "The flow's `inputs`. **JSON** (`StartExecutionRequest`, at most 2 MiB): a `FILE` input's value must be a `kestra://` URI readable from the execution being created -- in practice one a `Subflow`, a `Flow` trigger or a replay passes on; any other string is refused naming the input. **`multipart/form-data`** (`StartExecutionMultipart`, at most `workflow.storage.max_file_bytes` + 1 MiB): each part is named by an input id; a part with a file name is that `FILE` input's file (its `allowedFileExtensions` enforced, at most `max_file_bytes`), stored as `inputs/{input}/{file name}` of the new execution; any other part is a text value (at most 1 MiB).",
+        content(
+            (StartExecutionRequest = "application/json"),
+            (StartExecutionMultipart = "multipart/form-data"),
+        ),
+    ),
     responses(
-        (status = 201, description = "The execution was created and driven as far as it goes without a worker; the body is its detail, read back after the start committed", body = ExecutionDto),
-        (status = 400, description = "`inputs` is not a JSON object, or the flow's stored source does not parse or plan", body = egret_core::http::ErrorBody),
+        (status = 201, description = "The execution was created and driven as far as it goes without a worker; the body is its detail, read back after the start committed. Its uploaded files and its row were committed in one transaction.", body = ExecutionDto),
+        (status = 400, description = "`inputs` is not a JSON object; the flow's stored source does not parse or plan; a `FILE` input's value is not a readable `kestra://` URI or its extension is not allowed; a multipart part names no declared input, names one twice, carries a file for a non-`FILE` input, or has a file name no storage URI can hold; or egret has no internal storage (`[storage]`) for an upload. The message names the input.", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough** — starting an execution is a write.", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such flow in this workspace, or it is in the trash. **A flow belonging to another workspace answers exactly this**, indistinguishably from one that never existed.", body = egret_core::http::ErrorBody),
         (status = 409, description = "The flow is disabled — by its `state` column or by its own YAML's `disabled: true`", body = egret_core::http::ErrorBody),
+        (status = 413, description = "An uploaded file is over `workflow.storage.max_file_bytes` (the message names the input and the cap), a text part is over 1 MiB, or the JSON body is over 2 MiB. Nothing is created.", body = egret_core::http::ErrorBody),
+        (status = 415, description = "A body with no `Content-Type`, or one that is neither `application/json` nor `multipart/form-data`. A body is never read as \"no body\".", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+        (status = 503, description = "Internal storage failed while an uploaded file was being stored. Nothing is created; the request can be retried.", body = egret_core::http::ErrorBody),
     ),
 )]
 async fn start_flow_execution(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
-    body: Option<Json<StartExecutionRequest>>,
-) -> EgretResult<(StatusCode, Json<ExecutionDto>)> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    req: axum::extract::Request,
+) -> std::result::Result<(StatusCode, Json<ExecutionDto>), axum::response::Response> {
+    use axum::extract::FromRequest as _;
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE)
+        .await
+        .map_err(core_refusal)?;
     // Scoping, the trash and both disabled doors, in the one place `replay`
     // also has to come through -- see [`startable_flow`] for the over-acceptance
     // that made it a function instead of a run of `if`s in this handler.
-    let flow = startable_flow(&st, ctx.workspace_id.0, id).await?;
-    let inputs = start_inputs(body)?;
-    // **`start_execution`, not a second creation path.** The webhook calls
-    // `start_execution_with_trigger` because it HAS a trigger record; an API
-    // start has none, and `start_execution` is that function with `None`
-    // already written in. Nothing about the row, the first settle or the
-    // transaction differs between the two callers.
-    let execution_id = crate::worker::start_execution(
-        &st.db.pool,
-        ctx.workspace_id.0,
-        Some(flow.id),
-        &flow.source,
-        inputs,
-    )
-    .await?;
+    // Before the body is read: a refused start stores nothing.
+    let flow = startable_flow(&st, ctx.workspace_id.0, id)
+        .await
+        .map_err(core_refusal)?;
+    let execution_id = if is_multipart(req.headers()) {
+        start_multipart(&st, ctx.workspace_id.0, &flow, req).await?
+    } else {
+        // The JSON body keeps axum's 2 MiB: the route's own limit is off
+        // (`DefaultBodyLimit::disable` in [`management_router`]) so that the
+        // multipart branch can follow `max_file_bytes`, and a JSON body is
+        // buffered whole, so it must not inherit that.
+        let req = req.map(|b| {
+            axum::body::Body::new(http_body_util::Limited::new(b, MAX_JSON_START_BODY_BYTES))
+        });
+        // **A body with no `Content-Type` is refused, not ignored** (W9a Task
+        // 7). `Option<Json>` reads "no Content-Type" as "no body" and starts
+        // with `{}` -- harmless while every client sent the header, and a
+        // silent empty start once one does not: the client orval generates
+        // for this route's TWO content types sends no `Content-Type` at all.
+        // A bodiless `POST` (no header, no bytes) still starts with `{}`.
+        let req = if req.headers().contains_key(axum::http::header::CONTENT_TYPE) {
+            req
+        } else {
+            let (parts, body) = req.into_parts();
+            let bytes = axum::body::to_bytes(body, usize::MAX).await.map_err(|_| {
+                refuse(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("the JSON body is over {MAX_JSON_START_BODY_BYTES} bytes"),
+                )
+            })?;
+            if !bytes.is_empty() {
+                return Err(refuse(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "a start's body needs a Content-Type: application/json or \
+                     multipart/form-data"
+                        .into(),
+                ));
+            }
+            axum::extract::Request::from_parts(parts, axum::body::Body::empty())
+        };
+        let body = Option::<Json<StartExecutionRequest>>::from_request(req, &st)
+            .await
+            .map_err(axum::response::IntoResponse::into_response)?;
+        let inputs = start_inputs(body).map_err(core_refusal)?;
+        // **`start_execution`, not a second creation path.** The webhook calls
+        // `start_execution_with_trigger` because it HAS a trigger record; an
+        // API start has none, and `start_execution` is that function with
+        // `None` already written in. A FILE input given here is checked by
+        // `start_execution_in` (`storage::inputs::check_file_inputs`).
+        crate::worker::start_execution(
+            &st.db.pool,
+            ctx.workspace_id.0,
+            Some(flow.id),
+            &flow.source,
+            inputs,
+        )
+        .await
+        .map_err(core_refusal)?
+    };
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ctx.workspace_id.0),
@@ -1767,8 +1879,226 @@ async fn start_flow_execution(
     // drives `advance()` to a fixed point inside its own transaction, so a
     // flow with no runnable task is already terminal by the time this returns
     // and a DTO built from `"CREATED"` would be a guess that is usually wrong.
-    let detail = st.executions.get(ctx.workspace_id.0, execution_id).await?;
+    let detail = st
+        .executions
+        .get(ctx.workspace_id.0, execution_id)
+        .await
+        .map_err(core_refusal)?;
     Ok((StatusCode::CREATED, Json(ExecutionDto::from(detail))))
+}
+
+/// The multipart start (W9a spec §7.1), in its order: the execution id is
+/// generated first; each file part is streamed to `inputs/{input}/{file}` of
+/// it ([`crate::storage::inputs::upload_input`]); then ONE transaction
+/// inserts the row, checks the FILE inputs, indexes the uploads and runs the
+/// first settle (`start_execution_in`). Any failure after an upload began
+/// deletes the execution's prefix, best effort: a start that never committed
+/// has no execution for the pruner to find. (A client that disconnects drops
+/// this future: the in-flight upload is aborted by `put_stream`'s guard and
+/// any finished one is left for the orphan sweep.)
+async fn start_multipart(
+    st: &WorkflowState,
+    workspace: Uuid,
+    flow: &crate::repo::FlowRow,
+    req: axum::extract::Request,
+) -> std::result::Result<Uuid, axum::response::Response> {
+    use axum::extract::FromRequest as _;
+    let Some(fs) = crate::storage::current() else {
+        return Err(core_refusal(Error::InvalidInput(
+            "an uploaded FILE input needs internal storage, and egret has none configured \
+             (the `[storage]` section of its configuration)"
+                .into(),
+        )));
+    };
+    let parsed = parse(&flow.source).map_err(|e| {
+        core_refusal(Error::InvalidInput(format!(
+            "the flow does not parse: {}",
+            e.message
+        )))
+    })?;
+    let limit = multipart_body_limit(fs.caps);
+    let req = req.map(|b| axum::body::Body::new(http_body_util::Limited::new(b, limit)));
+    let mut multipart = axum::extract::Multipart::from_request(req, &())
+        .await
+        .map_err(axum::response::IntoResponse::into_response)?;
+    let execution = Uuid::new_v4();
+    let mut uploading = false;
+    let started = read_parts_and_start(
+        st,
+        &fs,
+        workspace,
+        flow,
+        &parsed,
+        execution,
+        &mut multipart,
+        &mut uploading,
+    )
+    .await;
+    if started.is_err() && uploading {
+        let prefix = fs.execution_prefix(workspace, &parsed.namespace, &parsed.id, execution);
+        if let Err(e) = fs.store.delete_prefix(&prefix).await {
+            tracing::warn!(
+                prefix = %prefix,
+                error = %e,
+                "a refused start's uploaded files could not be deleted; the orphan sweep will"
+            );
+        }
+    }
+    started
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn read_parts_and_start(
+    st: &WorkflowState,
+    fs: &crate::storage::FileStore,
+    workspace: Uuid,
+    flow: &crate::repo::FlowRow,
+    parsed: &crate::models::Flow,
+    execution: Uuid,
+    multipart: &mut axum::extract::Multipart,
+    uploading: &mut bool,
+) -> std::result::Result<Uuid, axum::response::Response> {
+    use futures_util::StreamExt as _;
+    let bad = |m: String| core_refusal(Error::InvalidInput(m));
+    let mut inputs = serde_json::Map::new();
+    let mut files = Vec::new();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| refuse(e.status(), e.body_text()))?
+    {
+        let Some(name) = field.name().map(str::to_string) else {
+            return Err(bad(
+                "a multipart part has no name: each part is named by the input it is for".into(),
+            ));
+        };
+        let Some(input) = parsed.inputs.iter().find(|i| i.id == name) else {
+            return Err(bad(format!(
+                "the flow declares no input `{name}`: each multipart part is named by an input id"
+            )));
+        };
+        if inputs.contains_key(&name) {
+            return Err(bad(format!(
+                "input `{name}` is given by more than one part"
+            )));
+        }
+        let value = match field.file_name().map(str::to_string) {
+            Some(file_name) => {
+                *uploading = true;
+                let mut body = tokio_util::io::StreamReader::new(
+                    field.map(|chunk| chunk.map_err(std::io::Error::other)),
+                );
+                let stored = crate::storage::inputs::upload_input(
+                    fs,
+                    workspace,
+                    &parsed.namespace,
+                    &parsed.id,
+                    execution,
+                    input,
+                    &file_name,
+                    &mut body,
+                )
+                .await
+                .map_err(|e| upload_refusal(e, &name, fs.caps.max_file_bytes))?;
+                let uri = stored.uri.clone();
+                files.push(stored);
+                uri
+            }
+            None => read_text_part(field, &name).await?,
+        };
+        inputs.insert(name, serde_json::Value::String(value));
+    }
+    let mut tx = st
+        .db
+        .pool
+        .begin()
+        .await
+        .map_err(|e| core_refusal(Error::Internal(e.into())))?;
+    let id = crate::worker::start_execution_in(
+        &mut tx,
+        crate::worker::NewExecution {
+            workspace_id: workspace,
+            flow_id: Some(flow.id),
+            source: &flow.source,
+            inputs: serde_json::Value::Object(inputs),
+            trigger: None,
+            scheduled_date: None,
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
+            born_failed: false,
+            replayed_from_execution_id: None,
+            id: Some(execution),
+            input_files: files,
+        },
+    )
+    .await
+    .map_err(core_refusal)?;
+    tx.commit()
+        .await
+        .map_err(|e| core_refusal(Error::Internal(e.into())))?;
+    Ok(id)
+}
+
+/// A text part, whole, at most [`MAX_TEXT_PART_BYTES`], as UTF-8.
+async fn read_text_part(
+    mut field: axum::extract::multipart::Field<'_>,
+    name: &str,
+) -> std::result::Result<String, axum::response::Response> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| refuse(e.status(), e.body_text()))?
+    {
+        if bytes.len() + chunk.len() > MAX_TEXT_PART_BYTES {
+            return Err(refuse(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "Invalid value for input `{name}`: a text part is at most \
+                     {MAX_TEXT_PART_BYTES} bytes; upload a file for a FILE input"
+                ),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        core_refusal(Error::InvalidInput(format!(
+            "Invalid value for input `{name}`: a text part must be UTF-8"
+        )))
+    })
+}
+
+/// [`crate::storage::inputs::UploadError`] as the response: the caller's
+/// errors are 4xx naming the input, a store failure is a 503 (spec §11: not
+/// the caller's fault, and retryable). A body cut off by the route's own
+/// limit is the cap's refusal, the same as a file the reader saw cross it.
+fn upload_refusal(
+    e: crate::storage::inputs::UploadError,
+    input: &str,
+    cap: u64,
+) -> axum::response::Response {
+    use crate::storage::inputs::{too_large, UploadError};
+    match e {
+        UploadError::Author(m) => core_refusal(Error::InvalidInput(m)),
+        UploadError::TooLarge(m) => refuse(StatusCode::PAYLOAD_TOO_LARGE, m),
+        UploadError::Body { message, source } => {
+            let status = source
+                .get_ref()
+                .and_then(|e| e.downcast_ref::<axum::extract::multipart::MultipartError>())
+                .map(|m| m.status())
+                .unwrap_or(StatusCode::BAD_REQUEST);
+            if status == StatusCode::PAYLOAD_TOO_LARGE {
+                refuse(status, too_large(input, cap))
+            } else {
+                refuse(status, message)
+            }
+        }
+        UploadError::Store(m) => {
+            tracing::warn!(error = %m, "a FILE input upload failed in internal storage");
+            refuse(StatusCode::SERVICE_UNAVAILABLE, m)
+        }
+    }
 }
 
 #[utoipa::path(
@@ -1979,6 +2309,8 @@ async fn replay_execution(
             born_failed: false,
             // The link (this handler's doc), committed with the row.
             replayed_from_execution_id: Some(id),
+            id: None,
+            input_files: Vec::new(),
         },
     )
     .await?;
@@ -2019,7 +2351,10 @@ pub fn management_router() -> Router<WorkflowState> {
         )
         .route(
             "/ws/{workspace}/workflows/flows/{id}/executions",
-            post(start_flow_execution),
+            // The handler applies its own limit per content type -- 2 MiB for
+            // JSON, `max_file_bytes` + 1 MiB for multipart (W9a spec §7.1) --
+            // so the router's default is off here and only here.
+            post(start_flow_execution).layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route(
             "/ws/{workspace}/workflows/flows/{id}/versions",
@@ -2082,6 +2417,7 @@ pub fn management_router() -> Router<WorkflowState> {
         ExecutionDto,
         ExecutionPageDto,
         StartExecutionRequest,
+        StartExecutionMultipart,
         LogLevel,
         LogLineDto,
         LogPageDto,

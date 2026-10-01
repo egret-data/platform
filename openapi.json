@@ -27129,7 +27129,7 @@
           "workflow"
         ],
         "summary": "Run a finished execution again.",
-        "description": "# It is a start, deliberately, and from the FROZEN source\n\n`worker::start_execution` with `workflow.executions.source` and\n`workflow.executions.inputs` — the row's own copies, not a re-read of the\ndraft. `worker::replay::spawn_due` takes the same decision for the\n`CREATE_NEW_EXECUTION` replacement and states the reason: *\"a replay that\npicked up an edit made since would be a different flow with the same\ntrace.\"* Starting from the draft is what `POST .../flows/{id}/executions`\nis for, and the two routes exist to be different.\n\n# Why the replacement names no parent, which is NOT a choice\n\n`replay::spawn_due` links its replacement with `parent_execution_id` set and\n`parent_run_ix` NULL. That slot is **one per execution and already spoken\nfor**: migration 0138's `workflow_executions_loop_run_idx` is\n`UNIQUE (parent_execution_id, parent_run_ix, loop_index) NULLS NOT DISTINCT\nWHERE parent_execution_id IS NOT NULL`, so `(X, NULL, NULL)` can exist once,\nand `spawn_due` reads exactly that to answer \"it already exists\". A manual\nreplay that took the slot would make a later retry-replay of the same\nexecution fail a unique constraint, and a second manual replay fail one too.\n\n`start_execution` has no parent parameter and this task does not add one, so\nthe replacement is unlinked: **the relationship between a manual replay and\nwhat it replays is in the audit trail and nowhere in the data.** Stated\nrather than discovered. What it would take is a link that is not that index's\n— a nullable `replayed_from` column of its own — which is a migration and a\nschema decision, not a route.\n\n# Terminal only\n\nA non-terminal execution is refused (409) rather than replayed. With no link\ncolumn there is nothing to tell an operator that two RUNNING executions of\none flow are a replay and its original, and the narrow door cannot\nover-accept. `RunState::is_terminal` is the predicate — read through\n`worker::from_wire`, which is derived from `RunState::ALL`, so a state added\nto the enum is classified here without anyone remembering to come back.",
+        "description": "# It is a start, deliberately, and from the FROZEN source\n\n`worker::start_execution` with `workflow.executions.source` and\n`workflow.executions.inputs` — the row's own copies, not a re-read of the\ndraft. `worker::replay::spawn_due` takes the same decision for the\n`CREATE_NEW_EXECUTION` replacement and states the reason: *\"a replay that\npicked up an edit made since would be a different flow with the same\ntrace.\"* Starting from the draft is what `POST .../flows/{id}/executions`\nis for, and the two routes exist to be different.\n\n# The link is `replayed_from_execution_id`, not a parent\n\n`replay::spawn_due` links its replacement with `parent_execution_id` set and\n`parent_run_ix` NULL. That slot is **one per execution and already spoken\nfor**: migration 0138's `workflow_executions_loop_run_idx` is\n`UNIQUE (parent_execution_id, parent_run_ix, loop_index) NULLS NOT DISTINCT\nWHERE parent_execution_id IS NOT NULL`, so `(X, NULL, NULL)` can exist once,\nand `spawn_due` reads exactly that to answer \"it already exists\". A manual\nreplay that took the slot would make a later retry-replay of the same\nexecution fail a unique constraint, and a second manual replay fail one too.\n\nSo the replacement has no parent, and the link has a column of its own:\n`replayed_from_execution_id` (migration 0161, W9a spec §4.4 item 3), written\nhere through `start_execution_in` in one transaction with the row. It is\nwhat lets a replay read its source's files (a replay copies its source's\ninputs verbatim, and those may be `kestra://` URIs of the source). The audit\nrecord still carries both ids.\n\n# Not a loop iteration\n\nAn iteration (`parent_execution_id` with a `loop_index`) is refused (400)\nnaming its loop root: it is a part of the root's run, `replay::spawn_due`\nnever replays one, and a replay of it would be a top-level run of the\nloop's body alone.\n\n# Terminal only\n\nA non-terminal execution is refused (409) rather than replayed: two RUNNING\nexecutions of one flow, a replay and its original, would be in flight at\nonce, and the narrow door cannot over-accept. `RunState::is_terminal` is the predicate — read through\n`worker::from_wire`, which is derived from `RunState::ALL`, so a state added\nto the enum is classified here without anyone remembering to come back.",
         "operationId": "replay_execution",
         "parameters": [
           {
@@ -27172,7 +27172,7 @@
             }
           },
           "400": {
-            "description": "The **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans",
+            "description": "The execution is a **loop iteration** (replay its loop root instead); or the **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans",
             "content": {
               "application/json": {
                 "schema": {
@@ -27212,7 +27212,7 @@
             }
           },
           "409": {
-            "description": "The execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`). A replay of something still running would put two copies of one flow in flight with nothing recording that they are related — see the handler's doc for why no link column is available.",
+            "description": "The execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`). A replay of something still running would put two copies of one flow in flight at once.",
             "content": {
               "application/json": {
                 "schema": {
@@ -27845,10 +27845,16 @@
           }
         ],
         "requestBody": {
+          "description": "The flow's `inputs`. **JSON** (`StartExecutionRequest`, at most 2 MiB): a `FILE` input's value must be a `kestra://` URI readable from the execution being created -- in practice one a `Subflow`, a `Flow` trigger or a replay passes on; any other string is refused naming the input. **`multipart/form-data`** (`StartExecutionMultipart`, at most `workflow.storage.max_file_bytes` + 1 MiB): each part is named by an input id; a part with a file name is that `FILE` input's file (its `allowedFileExtensions` enforced, at most `max_file_bytes`), stored as `inputs/{input}/{file name}` of the new execution; any other part is a text value (at most 1 MiB).",
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/StartExecutionRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/StartExecutionMultipart"
               }
             }
           },
@@ -27856,7 +27862,7 @@
         },
         "responses": {
           "201": {
-            "description": "The execution was created and driven as far as it goes without a worker; the body is its detail, read back after the start committed",
+            "description": "The execution was created and driven as far as it goes without a worker; the body is its detail, read back after the start committed. Its uploaded files and its row were committed in one transaction.",
             "content": {
               "application/json": {
                 "schema": {
@@ -27866,7 +27872,7 @@
             }
           },
           "400": {
-            "description": "`inputs` is not a JSON object, or the flow's stored source does not parse or plan",
+            "description": "`inputs` is not a JSON object; the flow's stored source does not parse or plan; a `FILE` input's value is not a readable `kestra://` URI or its extension is not allowed; a multipart part names no declared input, names one twice, carries a file for a non-`FILE` input, or has a file name no storage URI can hold; or egret has no internal storage (`[storage]`) for an upload. The message names the input.",
             "content": {
               "application/json": {
                 "schema": {
@@ -27915,8 +27921,38 @@
               }
             }
           },
+          "413": {
+            "description": "An uploaded file is over `workflow.storage.max_file_bytes` (the message names the input and the cap), a text part is over 1 MiB, or the JSON body is over 2 MiB. Nothing is created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "A body with no `Content-Type`, or one that is neither `application/json` nor `multipart/form-data`. A body is never read as \"no body\".",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Internal storage failed while an uploaded file was being stored. Nothing is created; the request can be retried.",
             "content": {
               "application/json": {
                 "schema": {
@@ -38966,6 +39002,16 @@
             "description": "Size of the FE metadata PVC, as a k8s binary quantity (`\"20Gi\"`).\nOmitted ⇒ preserved on update, then\n`egret_engine_mgmt_api::DEFAULT_FE_META_STORAGE_SIZE`.",
             "default": null
           }
+        }
+      },
+      "StartExecutionMultipart": {
+        "type": "object",
+        "description": "`POST .../flows/{id}/executions` as `multipart/form-data` (W9a spec §7.1,\nKestra's shape) -- the schema is for the OpenAPI document only; the\nhandler reads the parts one by one and never builds this type.\n\n**Each part is named by an input id.** A part with a file name is that\n`FILE` input's file: it is streamed to\n`kestra:///{namespace}/{flow}/executions/{execution}/inputs/{input}/{file name}`\nand the input's value is that URI. Any other part is a text value. A part\nnaming no declared input, or one named twice, is refused naming it.",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "propertyNames": {
+          "type": "string"
         }
       },
       "StartExecutionRequest": {

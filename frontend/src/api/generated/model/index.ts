@@ -404,6 +404,7 @@ export * from './starRocksConfigBodyCnResources';
 export * from './starRocksConfigBodyFeConfig';
 export * from './starRocksConfigBodyFeResources';
 export * from './starRocksConfigBodyPod';
+export * from './startExecutionMultipart';
 export * from './startExecutionRequest';
 export * from './startImpersonation';
 export * from './startWsImpersonation';

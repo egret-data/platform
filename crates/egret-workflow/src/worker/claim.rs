@@ -1977,6 +1977,10 @@ pub async fn start_execution_with_trigger(
             born_failed: false,
             // A manual replay calls `start_execution_in` itself with the link.
             replayed_from_execution_id: None,
+            // Only the start route uploads FILE inputs, and it calls
+            // `start_execution_in` itself with the id it uploaded under.
+            id: None,
+            input_files: Vec::new(),
         },
     )
     .await?;
@@ -2026,6 +2030,15 @@ pub struct NewExecution<'a> {
     /// `workflow.executions.replayed_from_execution_id` (migration 0161).
     /// `None` for every other start. A replay reads its source chain's files.
     pub replayed_from_execution_id: Option<Uuid>,
+    /// The execution's id, when the caller had to know it before the row
+    /// existed (W9a Task 7: the start route streams uploaded FILE inputs to
+    /// `inputs/{input}/{file}` of this id first). `None` is the database's
+    /// `gen_random_uuid()`, as for every other start.
+    pub id: Option<Uuid>,
+    /// The FILE inputs uploaded for THIS execution (spec §7.1), indexed here
+    /// in the transaction that inserts the row. Empty for every start that
+    /// uploads nothing.
+    pub input_files: Vec<crate::storage::StoredFile>,
 }
 
 /// [`start_execution_with_trigger`]'s body, taking the caller's own `conn`
@@ -2048,6 +2061,8 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
         flow_trigger_event_id,
         born_failed,
         replayed_from_execution_id,
+        id,
+        input_files,
     } = new;
 
     let flow = crate::spec::parse(source)
@@ -2055,33 +2070,53 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
     let plan = build_plan(source)
         .map_err(|e| Error::InvalidInput(format!("the flow does not plan: {e}")))?;
 
+    let inputs = if inputs.is_object() {
+        inputs
+    } else {
+        serde_json::json!({})
+    };
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
-           (workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
+           (id, workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
             execution_trigger, scheduled_date, trigger_execution_id, execution_depth, \
             flow_trigger_event_id, replayed_from_execution_id) \
-         VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, \
-                 $11, $12) RETURNING id",
+         VALUES (COALESCE($13, gen_random_uuid()), $1, $2, $3, $4, $5, 'CREATED', \
+                 '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
     )
     .bind(workspace_id)
     .bind(flow_id)
     .bind(&flow.namespace)
     .bind(&flow.id)
     .bind(source)
-    .bind(if inputs.is_object() {
-        inputs
-    } else {
-        serde_json::json!({})
-    })
+    .bind(&inputs)
     .bind(trigger)
     .bind(scheduled_date)
     .bind(trigger_execution_id)
     .bind(execution_depth)
     .bind(flow_trigger_event_id)
     .bind(replayed_from_execution_id)
+    .bind(id)
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;
+
+    // W9a spec §7.1: a FILE input is a URI readable from THIS execution --
+    // checked now that the row exists (the readable set walks from it), in
+    // its transaction. A refusal is the caller's: the start route answers it,
+    // and a trigger's start is `scheduler::start::classify`'s `Refused`.
+    if let Err(why) = crate::storage::inputs::check_file_inputs(
+        conn,
+        workspace_id,
+        id,
+        &flow,
+        &inputs,
+        &input_files,
+    )
+    .await?
+    {
+        return Err(Error::InvalidInput(why));
+    }
+    crate::storage::index_input_files(conn, workspace_id, id, &input_files).await?;
 
     let ctx = ExecutionCtx {
         id,

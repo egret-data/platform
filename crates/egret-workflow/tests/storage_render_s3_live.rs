@@ -1,5 +1,6 @@
 //! W9a Task 4 fix round 1, C1: `read()` on a real `S3Store` (MinIO), with as
-//! many or more concurrent renders than tokio workers.
+//! many or more concurrent renders than tokio workers. W9a Task 7 adds two
+//! cases for an uploaded FILE input ([`upload_input_on_s3`]).
 //!
 //! A render runs on its own thread and the worker that spawned it waits in
 //! `join`; `read()` blocks that render thread on the runtime while S3's IO
@@ -21,7 +22,7 @@
 //! Needs `EGRET_TEST_S3_ENDPOINT` (+ `_KEY`, `_SECRET`, `_BUCKET`). Without it
 //! every case is reported **ignored**, never passed (`harness = false`, as
 //! `container_docker_live`). Objects go under a throwaway
-//! `w9a-t4-test/<uuid>/` prefix and are deleted ONE BY ONE by key at the end;
+//! `w9a-t4-test/<uuid>/` (Task 7: `w9a-t7-test/<uuid>/`) prefix and are deleted ONE BY ONE by key at the end;
 //! nothing here deletes by prefix.
 
 use std::collections::BTreeMap;
@@ -115,6 +116,62 @@ fn concurrent_reads(cfg: StorageConfig, workers: usize, renders: usize) -> Resul
     })
 }
 
+/// W9a Task 7: an uploaded FILE input on a real `S3Store`, through the
+/// multipart path (over `PART_BYTES`): `under_cap = true` stores it whole and
+/// `head` agrees; `false` is one byte over the cap, refused naming it, and
+/// the aborted upload leaves no object. Under a throwaway
+/// `w9a-t7-test/<uuid>/` prefix, deleted by key.
+fn upload_input_on_s3(cfg: StorageConfig, under_cap: bool) -> Result<(), String> {
+    use egret_workflow::storage::inputs::{upload_input, UploadError};
+    use tokio::io::AsyncReadExt as _;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(async move {
+        let bucket = cfg.bucket.clone();
+        let store = S3Store::new(&cfg).await.map_err(|e| e.to_string())?;
+        let cap = egret_storage::PART_BYTES as u64 + 1024 * 1024;
+        let fs = FileStore {
+            store: Arc::new(store),
+            bucket,
+            prefix: format!("w9a-t7-test/{}/", Uuid::new_v4()),
+            caps: Caps {
+                max_file_bytes: cap,
+                ..Caps::default()
+            },
+            retention_days: 30,
+        };
+        let input: egret_workflow::models::Input =
+            serde_norway::from_str("id: f\ntype: FILE\n").map_err(|e| e.to_string())?;
+        let size = if under_cap { cap } else { cap + 1 };
+        let execution = Uuid::new_v4();
+        let mut body = tokio::io::repeat(b'x').take(size);
+        let got = upload_input(
+            &fs, WS, "w9a.t7", "s3", execution, &input, "big.bin", &mut body,
+        )
+        .await;
+        let uri =
+            egret_workflow::storage::uri::input_uri("w9a.t7", "s3", execution, "f", "big.bin")?;
+        let object = fs.object_uri(WS, &uri)?;
+        let head = fs.store.head(&object).await.map_err(|e| e.to_string())?;
+        if head.is_some() {
+            // One by one, by key: never a prefix delete on a shared bucket.
+            fs.store.delete(&object).await.map_err(|e| e.to_string())?;
+        }
+        match (under_cap, got) {
+            (true, Ok(f)) if f.size == cap && head == Some(cap) && f.uri == uri => Ok(()),
+            (false, Err(UploadError::TooLarge(m)))
+                if m.contains(&cap.to_string()) && head.is_none() =>
+            {
+                Ok(())
+            }
+            (_, other) => Err(format!("under_cap={under_cap}: {other:?}, head {head:?}")),
+        }
+    })
+}
+
 type Case = fn(StorageConfig) -> Result<(), String>;
 
 fn cases() -> Vec<(&'static str, Case)> {
@@ -131,6 +188,14 @@ fn cases() -> Vec<(&'static str, Case)> {
         ("four_workers_eight_concurrent_reads_do_not_wedge", |c| {
             concurrent_reads(c, 4, 8)
         }),
+        (
+            "an_uploaded_file_input_is_stored_by_multipart_upload",
+            |c| upload_input_on_s3(c, true),
+        ),
+        (
+            "an_upload_over_the_cap_is_refused_and_leaves_no_object",
+            |c| upload_input_on_s3(c, false),
+        ),
     ]
 }
 

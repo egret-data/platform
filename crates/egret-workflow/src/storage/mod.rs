@@ -10,6 +10,9 @@
 //!   container, and the reader that takes them back out (spec §5).
 //! - [`collect`]: files out of a task container, streamed into the store
 //!   under the task run's prefix (spec §5, §6.2).
+//! - [`inputs`]: FILE inputs -- an uploaded file streamed to
+//!   `inputs/{input}/{file}`, and the readability check every
+//!   execution-creating INSERT runs on a FILE input given as a URI (spec §7.1).
 //! - this module: the [`FileStore`] (the object store, its bucket, prefix and
 //!   caps), the process-wide slot it is installed in, and the index writers.
 //!
@@ -26,6 +29,7 @@
 
 pub mod collect;
 pub mod index;
+pub mod inputs;
 pub mod scope;
 pub mod transfer;
 pub mod uri;

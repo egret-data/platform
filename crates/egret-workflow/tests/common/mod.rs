@@ -306,6 +306,40 @@ async fn send(
         .unwrap()
 }
 
+/// A request with a session for `user`, a `Content-Type` of the caller's
+/// choosing and a raw body -- for the multipart start route (W9a Task 7),
+/// which [`post`]'s JSON body cannot express. An empty `content_type`
+/// sends none.
+pub async fn send_raw(
+    app: &App,
+    method: &str,
+    path: &str,
+    user: UserId,
+    content_type: &str,
+    body: Vec<u8>,
+) -> axum::response::Response {
+    use tower::ServiceExt;
+    let token = app
+        .sessions
+        .create(user, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token;
+    let mut b = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("Cookie", format!("egret_session={token}"));
+    // An empty `content_type` sends no header at all.
+    if !content_type.is_empty() {
+        b = b.header("Content-Type", content_type);
+    }
+    app.router
+        .clone()
+        .oneshot(b.body(axum::body::Body::from(body)).unwrap())
+        .await
+        .unwrap()
+}
+
 pub async fn get(app: &App, path: &str, user: UserId) -> axum::response::Response {
     send(app, "GET", path, user, None).await
 }

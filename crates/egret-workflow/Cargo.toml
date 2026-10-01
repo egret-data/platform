@@ -81,7 +81,17 @@ egret-config.workspace = true
 # `{workspace}`, membership, and the feature-entitlement gate); `egret-auth`
 # for `SessionService`, which `WsContext` authenticates against; `egret-audit`
 # for the mutation trail every other management seam writes to.
-axum.workspace = true
+#
+# W9a Task 7: the `multipart` feature, for FILE inputs uploaded to
+# `POST .../flows/{id}/executions` (`routes::start_flow_execution`). It adds
+# ONE crate to the build, `multer` (axum's multipart parser), and nothing else
+# new: its own dependencies were already in the lock file.
+axum = { workspace = true, features = ["multipart"] }
+# W9a Task 7: `Limited`, the body limit the start route applies per content
+# type -- 2 MiB for JSON (axum's default, unchanged) and `max_file_bytes` plus
+# 1 MiB for multipart. Already in the tree under axum and a direct dependency
+# of a dozen sibling crates, so no new crate.
+http-body-util = "0.1"
 utoipa.workspace = true
 egret-workspace.workspace = true
 egret-auth.workspace = true
@@ -220,7 +230,12 @@ tracing.workspace = true
 # take from `egret-bin` -- one token cancelled on SIGINT stops every background
 # loop the binary started. Already a workspace dependency (egret-automation and
 # egret-kernel both take it), so this is a direct edge and no new crate.
-tokio-util.workspace = true
+#
+# W9a Task 7: the `io` feature, for `io::StreamReader` -- an uploaded part (a
+# stream of `Bytes`) read as the `AsyncRead` `storage::inputs::upload_input`
+# streams into the store. `egret-provisioner` already turns it on
+# (`crates/egret-provisioner/Cargo.toml`), so no new crate.
+tokio-util = { workspace = true, features = ["io"] }
 
 # W5a Task 4: `worker::k8s` is the Kubernetes task runner
 # (`io.kestra.plugin.ee.kubernetes.runner.Kubernetes`). Both crates are the

@@ -929,6 +929,8 @@ async fn start_fire(
             flow_trigger_event_id: Some(ev.id),
             born_failed: render_failure.is_some(),
             replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
         },
     )
     .await;
