@@ -1283,7 +1283,7 @@ pub enum UndecidableCause {
     /// | `isExcludes` | `egret-perm-compile`'s `grants::level()` hard-codes `is_excludes: false` on every level it builds, and it is the only constructor `scope_to_resources` uses | **yes**, by construction |
     /// | `isRecursive` | the same constructor hard-codes `is_recursive: false` | **yes**, by construction |
     /// | an EMPTY value (`""`) | `scope_to_resources` copies a scope level through verbatim, and `perm.grants` accepted `schema_name = ''` — so a `policy:update` caller could store one and the compiler emitted `{"values": [""]}`. **SP4d debt Task 12** closed it at three points keyed to one shape: `migrations/0167_perm_scope_levels_are_named.sql`'s CHECK, `grants::ensure_scope_levels_are_named` at the authoring boundary, and the same function inside `compile_grant` | **yes** since 0167 — and **NO** before it. The same empty value also made the LEVEL `isMatchAny`, so the grant was enforced catalog-wide; that half is the escalation, this row is only its trie consequence |
-    /// | a non-prefix wildcard in a VALUE (`*xyz`, `or?ers`) | `scope_to_resources` copies `scope.schema` / `scope.table` / `scope.column` into the policy **verbatim**. `validate_grant_shape` now refuses an EMPTY level (row above) and nothing else about the string: `*` and `?` are **deliberately** left legal, because a grant scoped to a whole catalog or schema is ordinary and `scope_to_resources` emits `*` itself for every unnamed level | **NO.** A grant scoped to a table named, or mistyped as, `ord*rs` compiles to exactly this shape |
+    /// | a non-prefix wildcard in a VALUE (`*xyz`, `or?ers`) | `scope_to_resources` copies `scope.schema` / `scope.table` / `scope.column` into the policy **verbatim**. `validate_grant_shape` refuses an EMPTY level (row above) and, since **SP4d debt Task 14**, a level that is a RUN OF `*` with a NAMED level beneath it (`grants::ensure_a_wildcard_level_has_nothing_named_beneath_it`, `migrations/0168`) — because that is the level skip `grants_check` already forbade, not because `*` is illegitimate. Nothing else about the string is refused: `*` with nothing named under it stays legal (a catalog- or schema-wide grant is ordinary, and `scope_to_resources` emits `*` itself for every unnamed level), and `?` and a non-prefix `*` are untouched | **NO.** A grant scoped to a table named, or mistyped as, `ord*rs` compiles to exactly this shape, and so does one scoped to `('sales', 'or?ers')` |
     ///
     /// So the honest statement is: two of the three shapes cannot come from
     /// egret's compiler because one constructor forbids them; the third can, and
@@ -1294,14 +1294,20 @@ pub enum UndecidableCause {
     /// live plugin.
     ///
     /// **What would falsify this table:** `grants::level()` ceasing to pin the
-    /// two flags, or a scope-content validator refusing `*` and `?`. ⚠ An earlier
-    /// round wrote the second of those as "a scope-content validator arriving
-    /// (which would move the third row to yes)", and that prediction is now
-    /// MEASURABLY wrong: one has arrived (`ensure_scope_levels_are_named`, SP4d
-    /// debt Task 12) and it moved the EMPTY row rather than the wildcard row,
-    /// because it refuses `''` only. A validator is not one thing, and naming the
-    /// class rather than the predicate is the same imprecision this doc keeps
-    /// correcting. It is NOT `scope_to_resources`'s `Access` arm and its
+    /// two flags, or a scope-content validator refusing `?` and a non-prefix `*`
+    /// ANYWHERE in a value. ⚠ An earlier round wrote the second of those as "a
+    /// scope-content validator arriving (which would move the third row to yes)",
+    /// and that prediction was MEASURABLY wrong — twice over. Two validators have
+    /// now arrived and NEITHER moved the wildcard row:
+    /// `ensure_scope_levels_are_named` (Task 12) moved the EMPTY row, because it
+    /// refuses `''` only; and
+    /// `ensure_a_wildcard_level_has_nothing_named_beneath_it` (Task 14) refuses a
+    /// whole-value run of `*` only when a level BELOW it is named, which leaves
+    /// every shape in this row — `*xyz`, `or?ers`, and a bare `*` at the deepest
+    /// named level — emittable. A validator is not one thing, and naming the class
+    /// rather than the predicate is the same imprecision this doc keeps
+    /// correcting; the second prediction was wrong in the same way as the first,
+    /// which is the reason to state the PREDICATE here and not a class. It is NOT `scope_to_resources`'s `Access` arm and its
     /// `*` fill — an earlier version of this cell said so, and that falsifier
     /// belonged to the key-count rule FIX ROUND 3 replaced: an egret ACCESS
     /// policy declaring fewer than four keys now matches at `ANCESTOR` and

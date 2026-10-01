@@ -97,8 +97,8 @@ use egret_policy::{starrocks_service_def, trino_service_def, COMPILER_RULE_PREFI
 use egret_perm::{CompileError, EngineType, PrincipalKind, PrincipalSet, Rule, RuleKind, Selector};
 
 use crate::grants::{
-    ensure_scope_levels_are_named, level, resource_level_names, scope_to_resources,
-    validate_user_ref, PolicyTarget, ROW_FILTER_LEVELS,
+    ensure_a_wildcard_level_has_nothing_named_beneath_it, ensure_scope_levels_are_named, level,
+    resource_level_names, scope_to_resources, validate_user_ref, PolicyTarget, ROW_FILTER_LEVELS,
 };
 
 /// One column carrying the tag a rule selects on, resolved by the CALLER —
@@ -138,7 +138,12 @@ pub struct ResolvedNames<'a> {
 /// severity: an empty level makes a mask or row filter cover every sibling at
 /// that level, which withholds more than the author wrote instead of granting
 /// more, and `ensure_row_filter_scope_is_a_table` below would otherwise accept
-/// `schema = ''` as a named schema),
+/// `schema = ''` as a named schema), a path selector that names a level BENEATH
+/// a match-any one (`NamedLevelUnderWildcard` — SP4d debt Task 14; see
+/// [`crate::grants::ensure_a_wildcard_level_has_nothing_named_beneath_it`], and
+/// the same asymmetry and the same `ensure_row_filter_scope_is_a_table` hole
+/// apply: it counts `schema = '*'` as a named schema exactly as it counted `''`
+/// as one),
 /// a `CUSTOM` mask expression that does not parse (`InvalidCustomMask`),
 /// and an exempt set a masking/row-filter item cannot express — a non-empty
 /// `exempt.exclude`, a `Role`, the literal `public` group
@@ -162,6 +167,7 @@ pub fn validate_rule_shape(r: &Rule) -> Result<(), CompileError> {
     }
     if let Selector::Path(scope) = &r.selector {
         ensure_scope_levels_are_named(scope)?;
+        ensure_a_wildcard_level_has_nothing_named_beneath_it(scope)?;
     }
     ensure_row_filter_scope_is_a_table(r)?;
     exempt_principals(r)?;
@@ -190,6 +196,18 @@ pub fn validate_rule_shape(r: &Rule) -> Result<(), CompileError> {
 /// check: a tag row filter is table-granular by construction on both engines
 /// (Trino's tag policy carries no path at all, and `column_resources` stops at
 /// `table`), so there is no scope for an author to get wrong.
+///
+/// ⚠ **`Some(_)` in the match below means "the level is PRESENT", not "the level
+/// NAMES something"**, and that is why two SP4d debt tasks had to run ahead of
+/// this function rather than widen it. `(Some(""), Some("orders"), None)` and
+/// `(Some("*"), Some("orders"), None)` both land on the `(Some(_), Some(_),
+/// None)` arm and are accepted here as "a table", while in enforcement terms
+/// both are a table with NO schema. [`validate_rule_shape`] runs
+/// [`crate::grants::ensure_scope_levels_are_named`] (Task 12) and
+/// [`crate::grants::ensure_a_wildcard_level_has_nothing_named_beneath_it`]
+/// (Task 14) BEFORE this call, so neither shape reaches it. Widening these arms
+/// instead would have put one rule in two places; the ORDER of the three calls
+/// in `validate_rule_shape` is what keeps it in one.
 fn ensure_row_filter_scope_is_a_table(r: &Rule) -> Result<(), CompileError> {
     let (RuleKind::RowFilter { .. }, Selector::Path(scope)) = (&r.kind, &r.selector) else {
         return Ok(());
@@ -238,6 +256,39 @@ fn ensure_row_filter_scope_is_a_table(r: &Rule) -> Result<(), CompileError> {
 /// `service` is the target Ranger service name stamped onto the body (for a
 /// tag policy, `tagify` overwrites it with `tag_service` regardless of what
 /// is passed here).
+///
+/// # The two SCOPE-SHAPE refusals run here as well as at the authoring boundary
+///
+/// A `Path` selector's scope goes through
+/// [`crate::grants::ensure_scope_levels_are_named`] (SP4d debt Task 12) and
+/// [`crate::grants::ensure_a_wildcard_level_has_nothing_named_beneath_it`] (SP4d
+/// debt Task 14), exactly as `compile_grant` does.
+///
+/// ⚠ **They did NOT run here until Task 14, and the reason they did not is worth
+/// keeping because it was half right.** Task 12 left `compile_rule` unguarded on
+/// a severity argument: an unnamed level makes a mask or row filter cover every
+/// sibling at that level, so a wrong rule artifact withholds MORE than the author
+/// wrote (fails closed) while a wrong grant artifact ALLOWS more (fails open).
+/// That argument is sound **about severity** and not sound **about a `pub` entry
+/// point**: `compile_rule` is public and can be handed a `Rule` built in Rust
+/// that never went near the store, such a caller got no refusal at all, and an
+/// artifact that withholds more than the author wrote is still a wrong artifact —
+/// it is a control the author cannot read off what they wrote. It is the same
+/// argument that put the guard inside `compile_grant` rather than only at the
+/// boundary, and the severity difference does not change whether a `pub` function
+/// should emit an artifact its own validator refuses.
+///
+/// **`ensure_row_filter_scope_is_a_table` deliberately stays at the authoring
+/// boundary only, and that is NOT the same omission.** Its argument is not about
+/// severity. The shapes it refuses — a row-filter scope naming a column, or
+/// stopping above the table — are shapes `0154` still permits in `perm.rules`, so
+/// rows written before that guard existed are STORABLE today; and
+/// `crate::grants::scope_to_resources`' `RowFilter` arm exists precisely to make
+/// such a row compile to something the plugin can still match instead of to a
+/// silent no-op (read that arm's comment). Moving the refusal into `compile_rule`
+/// would turn those stored rows uncompilable, which is a behaviour change rather
+/// than a consistency fix. The two guards above have no such population: since
+/// `0167` and `0168` nothing stored can carry either shape.
 pub fn compile_rule(
     r: &Rule,
     e: EngineType,
@@ -250,6 +301,17 @@ pub fn compile_rule(
     // Validated up front, before any engine/selector branching, so a rule
     // that cannot compile on ANY path is refused the same way regardless of
     // which one is taken.
+    //
+    // SP4d debt Task 14, step 5 (carried from Task 12's concern 3): the two
+    // scope-shape refusals run HERE too, not only in `validate_rule_shape` — see
+    // this function's doc for why the fail-closed severity argument that left
+    // them out does not answer "a `pub` entry point emits an artifact its own
+    // validator refuses", and for why `ensure_row_filter_scope_is_a_table` is a
+    // different case rather than the same omission.
+    if let Selector::Path(scope) = &r.selector {
+        ensure_scope_levels_are_named(scope)?;
+        ensure_a_wildcard_level_has_nothing_named_beneath_it(scope)?;
+    }
     if let RuleKind::Mask {
         mask_type,
         value_expr,

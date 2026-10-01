@@ -1160,7 +1160,7 @@ async fn list_grants(
     request_body = NewGrant,
     responses(
         (status = 201, description = "Grant created AND the profiles it affects recompiled, in one transaction"),
-        (status = 400, description = "The grant names a scope level as \"\" (Ranger's \"every value at that level\", not a resource name — it would be enforced across the whole catalog), or cannot be compiled for a profile it affects", body = ErrorBody),
+        (status = 400, description = "The grant names a scope level as \"\" (Ranger's \"every value at that level\", not a resource name — it would be enforced across the whole catalog), names a level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), or cannot be compiled for a profile it affects", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1210,7 +1210,7 @@ async fn create_grant(
                    the grant it replaces.",
     responses(
         (status = 200, description = "Grant updated AND every affected profile recompiled, in one transaction", body = CompileResponse),
-        (status = 400, description = "The patched grant names a scope level as \"\" (Ranger's \"every value at that level\", not a resource name), cannot be compiled, names no principal or no action, or is owned by the workspace-assignment sync", body = ErrorBody),
+        (status = 400, description = "The patched grant names a scope level as \"\" (Ranger's \"every value at that level\", not a resource name), names a level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), cannot be compiled, names no principal or no action, or is owned by the workspace-assignment sync", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such grant", body = ErrorBody),
@@ -1340,7 +1340,7 @@ async fn list_rules(
     request_body = NewRule,
     responses(
         (status = 201, description = "Rule created AND the profiles it affects recompiled, in one transaction"),
-        (status = 400, description = "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), or cannot be compiled for a profile it affects", body = ErrorBody),
+        (status = 400, description = "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), or cannot be compiled for a profile it affects", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1383,7 +1383,7 @@ async fn create_rule(
                    at all.",
     responses(
         (status = 200, description = "Rule updated AND every affected profile recompiled, in one transaction", body = CompileResponse),
-        (status = 400, description = "The patched rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), or cannot be compiled for a profile it affects", body = ErrorBody),
+        (status = 400, description = "The patched rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), or cannot be compiled for a profile it affects", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such rule", body = ErrorBody),

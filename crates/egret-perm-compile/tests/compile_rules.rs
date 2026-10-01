@@ -1086,14 +1086,212 @@ fn an_empty_path_level_is_refused_on_a_rule_and_a_star_is_not() {
 
     // `*` stays legal here for the same reason it does on a grant: it is a real
     // Ranger policy value and the only honest rendering of "every child".
+    //
+    // ⚠ This arm was `('*', 'orders', 'email')` when Task 12 wrote it, and SP4d
+    // debt Task 14 refuses THAT shape — a named level under a match-any one is the
+    // level skip `0154`'s CHECKs already forbid. `*` at the tail keeps the arm's
+    // original point, which is that 0167's predicate must not refuse `*`; the Task
+    // 14 shapes live in `a_wildcard_path_level_over_a_named_one_is_refused`.
     validate_rule_shape(&mask_rule_on_path(
-        scope_of(Some("*"), Some("orders"), Some("email")),
+        scope_of(Some("sales"), Some("orders"), Some("*")),
         "MASK_HASH",
     ))
     .expect("`*` is a legitimate policy value");
     // And a tag selector carries no path at all, so this refusal must not leak.
     validate_rule_shape(&mask_rule_on_tag("pii", "MASK_HASH"))
         .expect("a tag rule has no path scope to get wrong");
+}
+
+/// SP4d debt Task 14, the rule side. A path level BENEATH a match-any one is
+/// refused where the author can still fix it, and every wildcard with nothing
+/// named under it stays legal.
+///
+/// **Not the same severity as the grant side, and the test says which way it
+/// fails.** A match-any level makes a mask or row filter cover every sibling at
+/// that level — it withholds MORE than the author wrote. The grant-side instance
+/// of the same mechanism ALLOWS more, which is why that one is the escalation.
+///
+/// **The arm that would otherwise be missed, and it is the same hole Task 12
+/// found one spelling of:** `ensure_row_filter_scope_is_a_table` matches on
+/// `(Some(_), Some(_), None)`, i.e. on PRESENCE, so it counts `schema = '*'` as a
+/// NAMED schema exactly as it counted `''` as one. Without this guard running
+/// first, a row filter written `('*', 'orders')` passes the very check whose job
+/// is to refuse a row-filter scope that is not exactly catalog + schema + table.
+#[test]
+fn a_wildcard_path_level_over_a_named_one_is_refused() {
+    for (wildcard, wildcard_value, named, named_value, scope) in [
+        (
+            "schema",
+            "*",
+            "table",
+            "orders",
+            scope_of(Some("*"), Some("orders"), None),
+        ),
+        (
+            "schema",
+            "**",
+            "table",
+            "orders",
+            scope_of(Some("**"), Some("orders"), None),
+        ),
+        (
+            "table",
+            "*",
+            "column",
+            "email",
+            scope_of(Some("sales"), Some("*"), Some("email")),
+        ),
+    ] {
+        let expected = CompileError::NamedLevelUnderWildcard {
+            wildcard,
+            wildcard_value: wildcard_value.to_string(),
+            named,
+            named_value: named_value.to_string(),
+        };
+        // A row filter: the shape `ensure_row_filter_scope_is_a_table` would
+        // otherwise wave through as "a table".
+        let rf = rowfilter_rule_on_path(scope.clone(), "country = 'US'");
+        assert_eq!(
+            validate_rule_shape(&rf).unwrap_err(),
+            expected,
+            "a match-any `{wildcard}` must be refused BEFORE \
+             ensure_row_filter_scope_is_a_table accepts it as named"
+        );
+        let m = mask_rule_on_path(scope, "MASK_HASH");
+        assert_eq!(validate_rule_shape(&m).unwrap_err(), expected);
+    }
+
+    // The shapes that must stay authorable on a rule — a mask over every column
+    // of one table, a row filter over every table of every schema, and the prefix
+    // matcher that names a set rather than nothing.
+    for scope in [
+        scope_of(Some("sales"), Some("orders"), Some("*")),
+        scope_of(Some("sales"), Some("*"), Some("*")),
+        scope_of(Some("*"), Some("*"), Some("*")),
+        scope_of(Some("ord*"), Some("orders"), Some("email")),
+    ] {
+        validate_rule_shape(&mask_rule_on_path(scope.clone(), "MASK_HASH"))
+            .unwrap_or_else(|e| panic!("{scope:?} must stay authorable as a mask: {e}"));
+    }
+    // A row filter stops at `table`, so its legal wildcard shapes are its own.
+    for scope in [
+        scope_of(Some("*"), Some("*"), None),
+        scope_of(Some("sales"), Some("*"), None),
+        scope_of(Some("ord*"), Some("orders"), None),
+    ] {
+        validate_rule_shape(&rowfilter_rule_on_path(scope.clone(), "country = 'US'"))
+            .unwrap_or_else(|e| panic!("{scope:?} must stay authorable as a row filter: {e}"));
+    }
+
+    // And a tag selector carries no path at all, so this refusal must not leak.
+    validate_rule_shape(&mask_rule_on_tag("pii", "MASK_HASH"))
+        .expect("a tag rule has no path scope to get wrong");
+}
+
+/// **SP4d debt Task 14 step 5 (carried from Task 12's concern 3) — `compile_rule`
+/// is `pub`, and it now refuses both scope shapes itself.**
+///
+/// Task 12 left `compile_rule` unguarded on a severity argument: a match-any level
+/// makes a mask or row filter cover every sibling at that level, so the wrong rule
+/// artifact withholds MORE than the author wrote (fails closed) while the wrong
+/// grant artifact ALLOWS more. Sound about severity; it does not answer what a
+/// `pub` entry point should emit. A caller that builds a `Rule` in Rust and never
+/// goes near the store got no refusal at all, and an artifact that silently
+/// becomes a wider control than the author wrote is still a wrong artifact.
+///
+/// **This test dies alone for the `compile_rule` call site**, which
+/// `a_wildcard_path_level_over_a_named_one_is_refused` and
+/// `an_empty_path_level_is_refused_on_a_rule_and_a_star_is_not` cannot: they only
+/// reach `validate_rule_shape`.
+///
+/// **Both tokens, because they are two predicates.** `''` (Task 12) and a run of
+/// `*` above a named level (Task 14) are separate refusals that happen to share
+/// four call sites.
+///
+/// **The CONTROL is the legal rule compiling to a real body** in the same test,
+/// so a `compile_rule` that refused everything could not pass.
+#[test]
+fn compile_rule_refuses_the_scope_shapes_its_own_validator_refuses() {
+    let compile = |r: &Rule| {
+        compile_rule(
+            r,
+            EngineType::Trino,
+            "trino-1",
+            None,
+            &resolved("wh", None),
+            &[],
+            100,
+        )
+    };
+
+    // CONTROL — a fully named path mask compiles. If this failed, nothing below
+    // would mean anything.
+    let body = compile(&mask_rule_on_path(
+        scope_of(Some("sales"), Some("orders"), Some("email")),
+        "MASK_HASH",
+    ))
+    .expect("a fully named path mask is the ordinary rule");
+    assert_eq!(body.len(), 1);
+
+    // CONTROL — and so does a wildcard with nothing named beneath it, which is
+    // what keeps this from being "`*` is illegitimate".
+    compile(&mask_rule_on_path(
+        scope_of(Some("sales"), Some("orders"), Some("*")),
+        "MASK_HASH",
+    ))
+    .expect("every column of one table is an ordinary mask scope");
+
+    // Task 12's shape, at the compiler rather than the boundary.
+    assert_eq!(
+        compile(&mask_rule_on_path(
+            scope_of(Some(""), Some("orders"), Some("email")),
+            "MASK_HASH"
+        ))
+        .unwrap_err(),
+        CompileError::EmptyScopeLevel { level: "schema" },
+        "`compile_rule` is `pub` and must not emit an artifact `validate_rule_shape` refuses"
+    );
+
+    // Task 14's shape, at both levels, and a row filter as well as a mask so the
+    // guard is proven to run before the selector/kind branching.
+    assert_eq!(
+        compile(&mask_rule_on_path(
+            scope_of(Some("*"), Some("orders"), Some("email")),
+            "MASK_HASH"
+        ))
+        .unwrap_err(),
+        CompileError::NamedLevelUnderWildcard {
+            wildcard: "schema",
+            wildcard_value: "*".into(),
+            named: "table",
+            named_value: "orders".into(),
+        }
+    );
+    assert_eq!(
+        compile(&rowfilter_rule_on_path(
+            scope_of(Some("**"), Some("orders"), None),
+            "country = 'US'"
+        ))
+        .unwrap_err(),
+        CompileError::NamedLevelUnderWildcard {
+            wildcard: "schema",
+            wildcard_value: "**".into(),
+            named: "table",
+            named_value: "orders".into(),
+        }
+    );
+
+    // A TAG selector carries no path, so neither refusal may leak onto it — and a
+    // tag rule needs its own resolution, so this arm asserts the error is the TAG
+    // one rather than a scope one.
+    assert_eq!(
+        compile(&mask_rule_on_tag("pii", "MASK_HASH")).unwrap_err(),
+        CompileError::MissingTagName {
+            rule: "pii-hash".into()
+        },
+        "a tag rule has no path scope to get wrong; it must fail on its own missing \
+         resolution, not on a scope refusal"
+    );
 }
 
 /// The write-time half: a shape the compiler can only render as a DIFFERENT

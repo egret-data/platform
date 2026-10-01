@@ -378,17 +378,30 @@ pub(crate) const ROW_FILTER_LEVELS: usize = 3;
 /// never written for, and why `'*'` is deliberately NOT refused here. Read that
 /// before changing this predicate.
 ///
-/// **Three call sites, and the asymmetry between them is deliberate.**
-/// [`validate_grant_shape`] runs it before a grant is stored (create, patch and
-/// the rolled-back preview all reach it), [`compile_grant`] runs it again
-/// because the compiler is the last point at which a wrong artifact becomes an
-/// enforced one and it is `pub` to callers that never went near the store, and
-/// `crate::rules::validate_rule_shape` runs it on a path selector's scope. It is
-/// NOT run inside `compile_rule`, matching
-/// `crate::rules::ensure_row_filter_scope_is_a_table` — the other scope-shape
-/// refusal, which is likewise an authoring-boundary one — because an empty level
-/// in a rule renders a mask or row filter that covers MORE than it was written
-/// for, which fails closed, while an empty level in a grant ALLOWS more.
+/// A `*` IS refused in one shape, and by a different function:
+/// [`ensure_a_wildcard_level_has_nothing_named_beneath_it`] (SP4d debt Task 14)
+/// refuses a match-any level with a NAMED level under it, because that is the
+/// level skip `perm.grants`' own `grants_check` already forbids. It is a separate
+/// predicate on purpose — `''` is refused at every level unconditionally, a
+/// wildcard run only above a named level — and folding the two would be the
+/// `requests_all_values` mistake this variant's doc warns about.
+///
+/// **Four call sites: the authoring boundary and the compiler, on each of the two
+/// model types.** [`validate_grant_shape`] runs it before a grant is stored
+/// (create, patch and the rolled-back preview all reach it), [`compile_grant`]
+/// runs it again because the compiler is the last point at which a wrong artifact
+/// becomes an enforced one and it is `pub` to callers that never went near the
+/// store, and `crate::rules::validate_rule_shape` and
+/// `crate::rules::compile_rule` are the same pair on the rule side.
+///
+/// ⚠ **`compile_rule` was NOT a call site when Task 12 wrote this**, on the
+/// argument that an empty level in a rule renders a mask or row filter covering
+/// MORE than it was written for (fails closed) while in a grant it ALLOWS more.
+/// That argument is sound about severity and does not answer the question a `pub`
+/// entry point raises — SP4d debt Task 14 step 5 added the call and
+/// `crate::rules::compile_rule`'s doc carries the full reasoning, including why
+/// `crate::rules::ensure_row_filter_scope_is_a_table` staying boundary-only is a
+/// different case and not the same omission.
 ///
 /// `catalog` is absent from the loop and needs nothing: the value emitted at
 /// that level is `registry.catalogs.name`, and `0147_catalog_registry.sql` gives
@@ -408,6 +421,102 @@ pub(crate) fn ensure_scope_levels_are_named(scope: &Scope) -> Result<(), Compile
         let Some(value) = value else { continue };
         if value.is_empty() {
             return Err(CompileError::EmptyScopeLevel { level });
+        }
+    }
+    Ok(())
+}
+
+/// Whether Ranger reads this policy value as "every value at this level" by way
+/// of a WILDCARD run, rather than as a resource name.
+///
+/// **The class is a pure run of `*`, and that is the mechanism rather than a list
+/// of spellings.** `RangerAbstractResourceMatcher.buildResourceMatchers()` stops
+/// at the first match-any value and clears every matcher already built for the
+/// level, so the level matches everything;
+/// `egret_ranger_eval::resource::ValueMatcher::classify` reproduces the four
+/// matcher shapes it can produce, and `classify("**")` / `classify("***")` are
+/// the same match-any as `classify("*")` (pinned by that module's
+/// `classify_reproduces_rangers_four_matcher_shapes`). Keying on the literal
+/// `WILDCARD` alone would close one spelling and leave `"**"` reaching identical
+/// enforcement from the identical free-text field.
+///
+/// **`"ord*"` is deliberately NOT in the class.** It classifies to
+/// `ValueMatcher::StartsWith`, which names a SET of schemas: the level IS named,
+/// and a table under it is not a gap. `egret_perm::eval::glob_match` exists
+/// because such values are storable and the engine glob-matches them. Nor is
+/// `" "` — whitespace is a literal resource name, the same line
+/// `crate::routes::validate_explain_target` draws.
+///
+/// **`""` is match-any too and is NOT folded in here.** It is refused at every
+/// level unconditionally by [`ensure_scope_levels_are_named`], and this rule
+/// refuses a match-any level only when something is named beneath it — two
+/// different refusals, so one predicate cannot serve both. That is the same trap
+/// `CompileError::EmptyScopeLevel`'s doc records about
+/// `egret_ranger_eval::resource::requests_all_values`, which folds `null`, `""`
+/// and `"*"` together because it is the REQUEST-side rule.
+///
+/// Keyed one-for-one with `migrations/0168`'s `~ '^[*]+$'`.
+fn level_is_a_wildcard_run(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| b == b'*')
+}
+
+/// Refuse a [`Scope`] that names a level BENEATH a match-any one — SP4d debt
+/// Task 14, and the half `0167` deliberately left.
+///
+/// **A level may be a wildcard run only if every level below it is a wildcard
+/// run or absent.** [`CompileError::NamedLevelUnderWildcard`] carries the whole
+/// argument: that this is not "`*` is illegitimate", that `perm.grants`'
+/// `grants_check` already forbids naming a table without a schema and
+/// `schema_name = '*'` expresses precisely that, the `MatchType` the compiled
+/// artifact earns in a schema it was never written for, and the `ScopePicker`
+/// code path that makes this half reachable from the browser while `''` was not.
+/// Read it before changing this predicate.
+///
+/// **It is the authored-value form of [`scope_to_resources`]' own
+/// `wildcard_from_here` latch.** That latch renders `*` at every level below the
+/// first unnamed one, so no scope this compiler can emit carries a named level
+/// under an unnamed one; this function says the same thing about the values an
+/// author writes. What it does NOT refuse, and what the tests pin: a
+/// catalog-wide grant, a schema-wide grant, `('*','*')`,
+/// `('sales','orders','*')` — every shape where a wildcard has nothing named
+/// beneath it.
+///
+/// Four call sites, the same four as [`ensure_scope_levels_are_named`] and for the
+/// same reasons — `validate_grant_shape` and `compile_grant` on the grant side,
+/// `crate::rules::validate_rule_shape` and `crate::rules::compile_rule` on the
+/// rule side; `catalog` is out of the loop for the same measured reason too
+/// (`0147`'s `name` allow-list cannot hold a `*`).
+pub(crate) fn ensure_a_wildcard_level_has_nothing_named_beneath_it(
+    scope: &Scope,
+) -> Result<(), CompileError> {
+    let levels = [
+        ("schema", scope.schema.as_deref()),
+        ("table", scope.table.as_deref()),
+        ("column", scope.column.as_deref()),
+    ];
+    for (i, (wildcard, value)) in levels.iter().enumerate() {
+        // An ABSENT level is the ordinary catalog- or schema-wide scope, and
+        // `perm.grants`' own `grants_check` already refuses naming anything
+        // under it — this rule is about the levels that LOOK present.
+        let Some(value) = value else { continue };
+        if !level_is_a_wildcard_run(value) {
+            continue;
+        }
+        for (named, named_value) in &levels[i + 1..] {
+            let Some(named_value) = named_value else {
+                continue;
+            };
+            // A wildcard run beneath a wildcard run is not a gap: both levels
+            // are unnamed, and `scope_to_resources` would emit exactly this.
+            if level_is_a_wildcard_run(named_value) {
+                continue;
+            }
+            return Err(CompileError::NamedLevelUnderWildcard {
+                wildcard,
+                wildcard_value: value.to_string(),
+                named,
+                named_value: (*named_value).to_string(),
+            });
         }
     }
     Ok(())
@@ -448,6 +557,7 @@ pub(crate) fn ensure_scope_levels_are_named(scope: &Scope) -> Result<(), Compile
 /// the gate and fails the compile.
 pub fn validate_grant_shape(g: &Grant) -> Result<(), CompileError> {
     ensure_scope_levels_are_named(&g.scope)?;
+    ensure_a_wildcard_level_has_nothing_named_beneath_it(&g.scope)?;
     principal_item(&g.principals.include, g.effect, &[], Expansion::NotYet)?;
     principal_item(&g.principals.exclude, g.effect, &[], Expansion::NotYet)?;
     Ok(())
@@ -478,6 +588,7 @@ pub fn compile_grant(
     e: EngineType,
 ) -> Result<AccessPolicyInput, CompileError> {
     ensure_scope_levels_are_named(&g.scope)?;
+    ensure_a_wildcard_level_has_nothing_named_beneath_it(&g.scope)?;
 
     let mut accesses: Vec<String> = Vec::new();
     for action in &g.actions {

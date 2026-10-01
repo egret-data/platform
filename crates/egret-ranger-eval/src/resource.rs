@@ -279,6 +279,14 @@ pub fn trie_reproduces_matcher(policy_value: &str, wild_card: bool) -> bool {
         // runs at the authoring boundary AND inside `compile_grant`. Stated by
         // code path now, not by authorship; see
         // `crate::eval::UndecidableCause::ResourceCandidacyNotReproducible`'s table.
+        //
+        // The OTHER match-any spelling the compiler could emit is a run of `*`,
+        // and it does NOT reach this early return: `classify` sends it to the
+        // `None` arm below, which the trie reproduces. SP4d debt Task 14
+        // (`migrations/0168`, `ensure_a_wildcard_level_has_nothing_named_beneath_it`)
+        // refuses it only with a NAMED level beneath it — a level skip, not a trie
+        // question — so a bare `*` at the deepest named level is still ordinary
+        // compiler output and still handled there.
         return false;
     }
     match ValueMatcher::classify(policy_value, wild_card) {

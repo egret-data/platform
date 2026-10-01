@@ -1392,11 +1392,18 @@ async fn an_empty_scope_level_is_a_400_and_a_star_is_created() {
     let token = admin_session(&f).await;
     let orphan = orphan_catalog(&f, "perm-empty-level").await;
 
-    let body_with = |schema: Value| {
+    // ⚠ `table` is a parameter and not a constant because SP4d debt Task 14 made
+    // the `*` CONTROL's own shape matter: `('*', 'orders')` is now a 400 of its
+    // own (a named level under a match-any one is the level skip `grants_check`
+    // already forbids), so this test's control moved to `('*', '*')` — a wildcard
+    // with nothing named beneath it, which is what `0167` must not refuse.
+    // `a_wildcard_level_over_a_named_one_is_a_400_and_a_wildcard_tail_is_created`
+    // owns the moved shape.
+    let body_with = |schema: Value, table: Value| {
         json!({
             "effect": "allow",
             "actions": ["read"],
-            "scope": { "catalog_id": orphan, "schema": schema, "table": "orders", "column": null },
+            "scope": { "catalog_id": orphan, "schema": schema, "table": table, "column": null },
             "principals": { "include": [{ "kind": "user", "ref": "analyst" }], "exclude": [] }
         })
     };
@@ -1407,7 +1414,7 @@ async fn an_empty_scope_level_is_a_400_and_a_star_is_created() {
                 "POST",
                 "/perm/grants",
                 &token,
-                Some(body_with(json!(""))),
+                Some(body_with(json!(""), json!("orders"))),
             ))
             .await
             .unwrap(),
@@ -1440,7 +1447,7 @@ async fn an_empty_scope_level_is_a_400_and_a_star_is_created() {
                 "POST",
                 "/perm/grants",
                 &token,
-                Some(body_with(json!("*"))),
+                Some(body_with(json!("*"), json!("*"))),
             ))
             .await
             .unwrap(),
@@ -1460,7 +1467,7 @@ async fn an_empty_scope_level_is_a_400_and_a_star_is_created() {
                 "PATCH",
                 &format!("/perm/grants/{grant_id}"),
                 &token,
-                Some(body_with(json!(""))),
+                Some(body_with(json!(""), json!("orders"))),
             ))
             .await
             .unwrap(),
@@ -1479,6 +1486,133 @@ async fn an_empty_scope_level_is_a_400_and_a_star_is_created() {
             .expect("read back");
     assert_eq!(
         schema.as_deref(),
+        Some("*"),
+        "the refused patch must not have committed its own UPDATE"
+    );
+}
+
+/// **SP4d debt Task 14 over HTTP — the status code is the assertion.**
+///
+/// **Why an ORPHAN catalog, and why `400` and not "not 2xx".** Three guards can
+/// refuse this input and the test has to be pointed at one. `0168`'s CHECK would
+/// refuse the INSERT whatever happens in Rust, and on a catalog an engine reaches
+/// `compile_grant`'s own copy of the guard would refuse the recompile. An orphan
+/// catalog affects no profile, so `recompile_services_in_tx(&[])` validates
+/// nothing and the only thing between the body and the database is
+/// `validate_grant_shape`. Remove that call and this request still fails — but as
+/// a **500**, because the constraint catches it with a message naming a schema
+/// internal. Tasks 2, 3 and 12 mutation-measured exactly that, three times, which
+/// is why the status code is asserted and the body is checked for both level
+/// names.
+///
+/// **The control is a wildcard TAIL in the same field**, which must be CREATED,
+/// 201. This is the arm that keeps the fix from being "`*` is illegitimate": a
+/// steward scopes a grant to every table of every schema on purpose, and
+/// `scope_to_resources` emits that shape itself for an unnamed level. Without it
+/// a predicate refusing `*` outright would pass.
+#[tokio::test]
+async fn a_wildcard_level_over_a_named_one_is_a_400_and_a_wildcard_tail_is_created() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "perm-wildcard-gap").await;
+
+    let body_with = |schema: Value, table: Value| {
+        json!({
+            "effect": "allow",
+            "actions": ["read"],
+            "scope": { "catalog_id": orphan, "schema": schema, "table": table, "column": null },
+            "principals": { "include": [{ "kind": "user", "ref": "analyst" }], "exclude": [] }
+        })
+    };
+
+    // THE FINDING, as two ordinary keystrokes in `ScopePicker` produce it — and
+    // the second spelling, which keying on the literal `*` would have missed.
+    for schema in ["*", "**"] {
+        let (status, body) = into_json(
+            f.app()
+                .oneshot(req(
+                    "POST",
+                    "/perm/grants",
+                    &token,
+                    Some(body_with(json!(schema), json!("orders"))),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a match-any {schema:?} schema over a named table must be a 400 from the \
+             write-path guard, not a 500 from the CHECK; body: {body}"
+        );
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("schema") && error.contains("orders"),
+            "the refusal must name the match-any level AND what is named under it, so \
+             the author knows which to change; body: {body}"
+        );
+        assert!(
+            error.contains("does not express"),
+            "and it must read as consistency with the model's existing decision rather \
+             than as a new restriction; body: {body}"
+        );
+    }
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM perm.grants WHERE catalog_id = $1")
+        .bind(orphan)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count");
+    assert_eq!(stored, 0, "the refused creates must have stored nothing");
+
+    // CONTROL: a wildcard with nothing named beneath it is a real scope and stays
+    // authorable.
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(body_with(json!("*"), json!("*"))),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "`('*','*')` names nothing under a wildcard and must still be writable; \
+         body: {created}"
+    );
+    let grant_id = created["id"].as_str().expect("minted id").to_string();
+
+    // And the PATCH path runs the same guard, leaving the stored row alone.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/grants/{grant_id}"),
+                &token,
+                Some(body_with(json!("*"), json!("orders"))),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the patch path must refuse it too; body: {body}"
+    );
+    let table: Option<String> =
+        sqlx::query_scalar("SELECT table_name FROM perm.grants WHERE id = $1")
+            .bind(Uuid::parse_str(&grant_id).unwrap())
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("read back");
+    assert_eq!(
+        table.as_deref(),
         Some("*"),
         "the refused patch must not have committed its own UPDATE"
     );
