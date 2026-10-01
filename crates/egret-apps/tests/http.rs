@@ -581,9 +581,15 @@ async fn draft_put_over_one_mib_is_413_and_saves_nothing() {
         .put_draft(&id, &fx.editor, Some("\"1\""), &big[..MAX_SOURCE_BYTES])
         .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
-    // A body over the router's explicit 2 MiB limit is refused before the handler.
+    // A 1 MiB source of characters JSON must escape is 2 MiB of body plus the
+    // envelope: it must still reach the handler and save.
+    let quotes = "\"".repeat(MAX_SOURCE_BYTES);
+    let r = fx.put_draft(&id, &fx.editor, Some("\"2\""), &quotes).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body["revision"], json!(3));
+    // A body over the router's explicit 3 MiB limit is refused before the handler.
     let r = fx
-        .put_draft(&id, &fx.editor, Some("\"2\""), &"a".repeat(2 * 1024 * 1024))
+        .put_draft(&id, &fx.editor, Some("\"3\""), &"a".repeat(3 * 1024 * 1024))
         .await;
     assert_eq!(r.status, StatusCode::PAYLOAD_TOO_LARGE, "{}", r.body);
     assert!(
@@ -621,6 +627,50 @@ async fn publish_creates_a_version_and_honours_expected_revision() {
         json!(1),
         "the stale publish wrote nothing"
     );
+}
+
+/// A bare POST (no body, no content type) publishes the current draft.
+#[tokio::test]
+async fn publish_without_a_body_publishes_the_current_draft() {
+    let fx = Fixture::new().await;
+    let id = fx.create_app("a").await;
+    fx.put_draft(&id, &fx.editor, Some("1"), "two").await;
+    let r = fx
+        .call("POST", &fx.path(&format!("/{id}/publish")), &fx.editor, None)
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(r.body["version_no"], json!(1));
+    assert_eq!(r.body["from_revision"], json!(2));
+    // What the generated client sends for `appsPublish(ws, id)` / `(ws, id, null)`:
+    // a JSON content type with an empty body, or the literal `null`.
+    let ct = [("Content-Type", "application/json")];
+    let r = fx
+        .send("POST", &fx.path(&format!("/{id}/publish")), &fx.editor, None, &ct, true)
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(r.body["version_no"], json!(2));
+    let r = fx
+        .send(
+            "POST",
+            &fx.path(&format!("/{id}/publish")),
+            &fx.editor,
+            Some(Value::Null),
+            &[],
+            true,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(r.body["version_no"], json!(3));
+    // A body that is present but not an AppPublish is still refused.
+    let r = fx
+        .call(
+            "POST",
+            &fx.path(&format!("/{id}/publish")),
+            &fx.editor,
+            Some(json!({ "expected_revision": "two" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
 }
 
 // 11

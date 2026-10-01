@@ -13,6 +13,7 @@
 //! A trashed app is read-only: every route that changes it, other than
 //! `POST …/restore` itself, answers 409 until it is restored.
 
+use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, FromRef, Path, Query, State};
 use axum::http::header::{ETAG, IF_MATCH};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -44,9 +45,11 @@ const APP_READ: &str = "app:read";
 const APP_WRITE: &str = "app:write";
 
 /// The draft PUT carries up to 1 MiB of source inside JSON; escaping can grow it,
-/// so the body may be larger than the source. Explicit rather than axum's default
-/// (also 2 MB today) so the limit cannot move under this route.
-const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+/// so the body may be larger than the source (1 MiB of `"` is 2 MiB of JSON before
+/// the envelope). Explicit rather than axum's 2 MB default so the limit cannot
+/// move under this route; the handler's own 1 MiB check on the decoded source is
+/// what answers a JSON 413.
+const MAX_BODY_BYTES: usize = 3 * 1024 * 1024;
 
 const TRASHED: &str = "app is in the trash; restore it first";
 
@@ -240,6 +243,16 @@ pub struct AppPublish {
 pub struct AppStaleRevision {
     pub error: String,
     pub current_revision: i64,
+}
+
+/// The 409 body of draft PUT and publish: either the draft moved on
+/// ([`AppStaleRevision`], carrying `current_revision`) or the app is in the trash
+/// ([`ErrorBody`]). Documentation only — the handlers return one of the two.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum AppConflict {
+    Stale(AppStaleRevision),
+    Trashed(ErrorBody),
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -767,7 +780,7 @@ async fn draft_get(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing app:write on this app", body = ErrorBody),
         (status = 404, description = "No such app in this workspace", body = ErrorBody),
-        (status = 409, description = "Stale revision (reload current_revision), or the app is in the trash", body = AppStaleRevision),
+        (status = 409, description = "Stale revision (reload current_revision), or the app is in the trash", body = AppConflict),
         (status = 413, description = "Source exceeds 1 MiB", body = ErrorBody),
         (status = 428, description = "If-Match is missing", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -802,18 +815,32 @@ async fn draft_put(
     }
 }
 
+/// The publish body is optional: an empty body or JSON `null` publishes whatever
+/// the draft is now. Parsed by hand rather than with `Option<Json<_>>` because the
+/// generated client sends `Content-Type: application/json` even when it has no
+/// body (and `null` when given one), which axum's optional `Json` rejects.
+fn publish_body(body: &[u8]) -> AppsResult<AppPublish> {
+    let trimmed = body.trim_ascii();
+    if trimmed.is_empty() || trimmed == b"null" {
+        return Ok(AppPublish::default());
+    }
+    serde_json::from_slice(trimmed)
+        .map_err(|e| Error::InvalidInput(format!("invalid publish body: {e}")).into())
+}
+
 #[utoipa::path(
     post,
     path = "/api/ws/{workspace}/apps/{id}/publish",
     tag = "apps",
     params(WorkspacePath, ("id" = Uuid, Path, description = "App id")),
-    request_body = AppPublish,
+    request_body(content = Option<AppPublish>, description = "Optional: a bare POST (no body) publishes the current draft"),
     responses(
         (status = 201, description = "The draft published as a new version", body = AppVersionSummary),
+        (status = 400, description = "The body is not an AppPublish", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing app:write on this app", body = ErrorBody),
         (status = 404, description = "No such app in this workspace", body = ErrorBody),
-        (status = 409, description = "expected_revision is stale (reload current_revision), or the app is in the trash", body = AppStaleRevision),
+        (status = 409, description = "expected_revision is stale (reload current_revision), or the app is in the trash", body = AppConflict),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -821,8 +848,9 @@ async fn publish(
     State(st): State<AppsApiState>,
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
-    Json(b): Json<AppPublish>,
+    body: Bytes,
 ) -> AppsResult<(StatusCode, Json<AppVersionSummary>)> {
+    let b = publish_body(&body)?;
     let (obj, row) = app_object_ref(&st, &ctx, id).await?;
     require_object(&*st.pdp, &ctx, APP_WRITE, obj).await?;
     refuse_if_trashed(&row)?;
@@ -985,6 +1013,7 @@ async fn version_restore(
         AppDraftSaved,
         AppPublish,
         AppStaleRevision,
+        AppConflict,
         AppVersionSummary,
         AppVersion,
         ErrorBody,

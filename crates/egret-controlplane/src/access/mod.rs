@@ -1326,7 +1326,7 @@ struct WhoCanAccessQuery {
     path = "/api/control-plane/access/who-can-access",
     tag = "control-plane-access",
     params(
-        ("kind" = String, Query, description = "Object kind: chart | dashboard | dataset | notebook | saved_query | folder"),
+        ("kind" = String, Query, description = "Object kind: chart | dashboard | dataset | notebook | saved_query | folder | app"),
         ("id" = Uuid, Query, description = "Object UUID"),
     ),
     responses(
