@@ -2190,7 +2190,8 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         plugins,
         egret_workflow::plugins::prefixed_types().collect::<Vec<_>>()
     );
-    assert_eq!(plugins.len(), 5);
+    // W9a Task 9: nine, with Batch ×2, CopyIn and CopyOut re-admitted.
+    assert_eq!(plugins.len(), 9);
     assert_eq!(
         added,
         vec![
@@ -2202,7 +2203,7 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
             "io.kestra.plugin.scripts.shell.Script",
         ]
     );
-    assert_eq!(reg.type_ids().len(), core + 6 + 5);
+    assert_eq!(reg.type_ids().len(), core + 6 + 9);
     assert_eq!(default_runner, Some(RunnerKind::Docker));
     assert!(
         reg.orphan_sweep().is_some(),
