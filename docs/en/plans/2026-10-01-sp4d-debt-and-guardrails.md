@@ -20,9 +20,12 @@
 - **Clippy has a trap that will cost you an hour.** `clippy -p <pkg> -- -D warnings` **without
   `--no-deps`** applies `-D warnings` to path dependencies, so naming a crate that depends on a
   dirty one reproduces that crate's failure as if it were yours. Use `--no-deps`. And there are
-  **three** pre-existing clippy-dirty crates, not one: `egret-workspace`
-  (`src/members.rs:191,196`) and `egret-engine-mgmt` (`tests/routes.rs:113,168`,
-  `src/engines.rs:6964+`) are both byte-identical to `origin/main` on those lines.
+  **four** pre-existing clippy-dirty crates, not one: `egret-workspace`
+  (`src/members.rs:191,196`), `egret-engine-mgmt` (`tests/routes.rs:113,168`,
+  `src/engines.rs:6964+`) and **`egret-bi`** (`catalog_tags.rs:232`, `tags.rs:206,208,504`) — all
+  byte-identical to `origin/main` on those lines, so `just check`'s workspace clippy fails
+  independently of anything in this plan. **Each task so far has found one more; stop trusting
+  this list to be complete and measure the crate you touch.**
 - Mutations: `assert count == 1`, confirm each mutant COMPILES, restore by a plain write plus a SHA-256 compare. `cp -f` does **not** defeat the `cp -i` alias — it sits at the overwrite prompt, is auto-backgrounded, and the file stays mutated.
 
 ## Decided, not open
@@ -267,6 +270,28 @@ whether the value names anything.
 
 - [ ] **Step 5: Mutate each half separately** and confirm a different test dies for each.
 - [ ] **Step 6: Commit.**
+
+---
+
+### Task 10: nothing gates `openapi.json` against the generated client
+
+**Files:** the drift gate's neighbourhood (`crates/egret-server`), or `just check`
+
+**Found by Task 3.** The `--lib committed_openapi_json_is_current` gate compares the **committed
+spec** against a **freshly emitted** one. Nothing compares the committed spec against the
+**generated frontend client**. So Task 2's `3d8ee22a` updated `openapi.json` without running
+`npm run gen:api`, and the drift went unnoticed until Task 3's own regeneration caught up **two**
+doc sweeps at once.
+
+Same shape as plan item 0b and the `test-ranger-gates` hole: a gate exists, is green, and does not
+cover the thing a reader assumes it covers.
+
+- [ ] **Step 1: Make a stale client fail something** — regenerate to a temporary location and
+compare, or commit a digest of the spec beside the client. It must be runnable by `just check`
+without a network.
+- [ ] **Step 2: Prove it fails.** Hand-edit one generated file, run the gate, watch it go red,
+restore by checksum. A gate nobody has seen fail is what this plan keeps finding.
+- [ ] **Step 3: Commit.**
 
 ---
 
