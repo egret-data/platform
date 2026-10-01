@@ -394,21 +394,13 @@ async fn s3_store_overrides_all_four_streaming_methods() {
     assert!(not_default(s.delete_prefix(bad).await.err()));
 }
 
-fn raw_cfg_client_args(c: &StorageConfig) -> (String, String, String) {
-    (
-        c.endpoint.clone().unwrap(),
-        c.access_key.clone(),
-        c.secret_key.clone(),
-    )
-}
-
 async fn raw_client(c: &StorageConfig) -> aws_sdk_s3::Client {
-    let (ep, k, sec) = raw_cfg_client_args(c);
-    let creds = aws_credential_types::Credentials::new(k, sec, None, None, "t");
+    let creds =
+        aws_credential_types::Credentials::new(&c.access_key, &c.secret_key, None, None, "t");
     let shared = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(aws_config::Region::new("us-east-1"))
         .credentials_provider(creds)
-        .endpoint_url(ep)
+        .endpoint_url(c.endpoint.clone().unwrap())
         .load()
         .await;
     aws_sdk_s3::Client::from_conf(
@@ -481,9 +473,14 @@ async fn delete_prefix_refuses_an_empty_key_and_a_key_without_a_trailing_slash()
     store.put(&keep, vec![1]).await.unwrap();
     store.put(&inside, vec![1]).await.unwrap();
 
-    let bucket_root = format!("s3://{}/", c.bucket);
+    // Empty key: only against a bucket that does not exist, so a regression of the guard
+    // yields NoSuchBucket (the message would then lack the guard text), never a wipe.
+    let bucket_root = "s3://w9a-t2-no-such-bucket/".to_string();
     let e = store.delete_prefix(&bucket_root).await.unwrap_err();
-    assert!(e.to_string().contains(&bucket_root), "{e}");
+    assert!(
+        e.to_string().contains("needs a non-empty key") && e.to_string().contains(&bucket_root),
+        "{e}"
+    );
     let no_slash = format!("s3://{}/{p}a/b", c.bucket);
     let e = store.delete_prefix(&no_slash).await.unwrap_err();
     assert!(e.to_string().contains(&no_slash), "{e}");

@@ -108,3 +108,17 @@ pub(crate) fn check_delete_prefix(uri: &str) -> Result<(), StorageError> {
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::check_delete_prefix;
+
+    #[test]
+    fn delete_prefix_accepts_only_a_non_empty_key_ending_in_a_slash() {
+        for bad in ["s3://b", "s3://b/", "s3://b/a/b", "a/b/", ""] {
+            let e = check_delete_prefix(bad).unwrap_err().to_string();
+            assert!(e.contains(bad), "{e}");
+        }
+        assert!(check_delete_prefix("s3://b/a/b/").is_ok());
+    }
+}
