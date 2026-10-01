@@ -1372,6 +1372,8 @@ async fn a_stored_input_file_streams_into_the_container() {
                 "echo \"FOREIGN=$(tr -d '0-9a-f' < d/big.bin | wc -c | tr -d ' ')\"",
                 "echo \"HEAD=$(head -c 16 d/big.bin)\"",
                 "echo \"LITERAL=$(cat literal.txt)\"",
+                // Fix round 1, I1: real mtimes, 1980 or later (zipfile's floor).
+                "for f in d/big.bin d literal.txt; do [ \"$(stat -c %Y $f)\" -ge 315532800 ] && echo \"MTIME_OK $f\"; done",
             ],
         }),
     );
@@ -1398,6 +1400,9 @@ async fn a_stored_input_file_streams_into_the_container() {
         "FOREIGN=0",
         "HEAD=0123456789abcdef",
         "LITERAL=just contents",
+        "MTIME_OK d/big.bin",
+        "MTIME_OK d",
+        "MTIME_OK literal.txt",
     ] {
         assert!(
             texts.contains(&want.to_string()),
@@ -1409,6 +1414,123 @@ async fn a_stored_input_file_streams_into_the_container() {
         "the task never sees the URI: {texts:?}"
     );
     h.release(&t).await.expect("released");
+}
+
+/// **Fix round 1, I1, as the author meets it**: Python's `zipfile` refuses a
+/// file dated before 1980, so a staged input with mtime 0 could not be zipped
+/// (`ValueError: ZIP does not support timestamps before 1980`).
+async fn a_staged_input_file_can_be_zipped_by_python() {
+    let h = py();
+    let (t, rec) = recorded(
+        python::TYPE_ID,
+        serde_json::json!({
+            "inputFiles": {"data.txt": "staged"},
+            "script": "import os, zipfile\n\
+                       print('MTIME', int(os.stat('data.txt').st_mtime), flush=True)\n\
+                       with zipfile.ZipFile('out.zip', 'w') as z:\n\
+                       \x20   z.write('data.txt')\n\
+                       print('ZIP_OK', flush=True)\n",
+        }),
+    );
+    let out = h.run(&t).await.expect("no worker failure");
+    assert_eq!(
+        out.state,
+        egret_workflow::executor::RunState::Success,
+        "{out:?} {:?}",
+        rec.texts()
+    );
+    assert!(
+        rec.texts().contains(&"ZIP_OK".to_string()),
+        "{:?}",
+        rec.texts()
+    );
+    h.release(&t).await.expect("released");
+}
+
+/// **Fix round 1, M2: an object missing behind its index row fails the task
+/// naming the URI, and the container never starts**: the copy is refused
+/// before `start`, and `release` removes the created container.
+async fn a_missing_stored_object_fails_the_task_and_the_container_never_starts() {
+    let files = Arc::new(egret_workflow::storage::FileStore {
+        store: Arc::new(egret_storage::MemStore::new()),
+        bucket: "egret-test".into(),
+        prefix: "workflow/".into(),
+        caps: egret_workflow::storage::Caps::default(),
+        retention_days: 30,
+    });
+    let uri = format!(
+        "kestra:///w9a/t5/in-files/executions/{}/tasks/w/{}/gone.bin",
+        Uuid::new_v4(),
+        Uuid::new_v4()
+    );
+    // Indexed (in the snapshot) but never put in the store.
+    let snapshot = egret_workflow::storage::scope::Snapshot::from_parts(
+        BTreeMap::from([(
+            uri.clone(),
+            Ok(egret_workflow::storage::IndexedFile {
+                uri: uri.clone(),
+                execution_id: Uuid::new_v4(),
+                task_run_id: None,
+                size: 9,
+            }),
+        )]),
+        files.clone(),
+        suite_workspace(),
+        None,
+    );
+    use egret_config::{PluginConfiguration, PluginConfigurationValues, PluginConfigurations};
+    let h = Script::new(
+        egret_workflow::scripts::kind_of(container::TYPE_ID).expect("a script type"),
+        Arc::new(ScriptRuntime {
+            runner_kind: RunnerKind::Docker,
+            runner: Arc::new(DockerRunner::new().with_files(files.clone())),
+            plugin_configurations: PluginConfigurations(vec![PluginConfiguration {
+                r#type: RunnerKind::Docker.fqcn().to_string(),
+                values: PluginConfigurationValues {
+                    allowed_images: Some(vec!["*".into(), "*/*".into(), "*/*/*".into()]),
+                    allowed_types: None,
+                },
+            }]),
+            features: Arc::new(FixedFeatureState(true)),
+            files: Some(files.clone()),
+        }),
+    );
+    let (mut t, rec) = recorded(
+        container::TYPE_ID,
+        serde_json::json!({
+            "image": SHELL_IMAGE,
+            "inputFiles": {"gone.bin": uri},
+            "commands": ["echo STARTED"],
+        }),
+    );
+    t.render = egret_workflow::runners::RenderContext::new().with_files(snapshot.into_scope());
+    let out = h
+        .run(&t)
+        .await
+        .expect("a missing object is the task's failure, not the worker's");
+    assert_eq!(out.state, egret_workflow::executor::RunState::Failed);
+    let message = out.message.clone().expect("a message");
+    assert!(
+        message.contains(&uri) && message.contains("missing"),
+        "{message}"
+    );
+    assert!(
+        !rec.texts().contains(&"STARTED".to_string()),
+        "{:?}",
+        rec.texts()
+    );
+    let name = container_name(&t);
+    let state = std::process::Command::new("docker")
+        .args(["inspect", "--format", "{{.State.Status}}", &name])
+        .output()
+        .expect("docker inspect");
+    assert_eq!(
+        String::from_utf8_lossy(&state.stdout).trim(),
+        "created",
+        "the container exists and never started"
+    );
+    h.release(&t).await.expect("released");
+    assert!(!container_exists(&name), "release removed it");
 }
 
 type Case = fn() -> Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -1424,6 +1546,8 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
     vec![
         case!(a_container_runs_and_both_of_its_streams_reach_the_sink),
         case!(a_stored_input_file_streams_into_the_container),
+        case!(a_staged_input_file_can_be_zipped_by_python),
+        case!(a_missing_stored_object_fails_the_task_and_the_container_never_starts),
         case!(a_directory_named_as_an_output_file_does_not_wedge_the_worker),
         case!(a_dropped_future_leaves_the_container_running_and_cancel_is_what_stops_it),
         case!(docker_cancel_with_grace_lets_a_sigterm_trap_run),
