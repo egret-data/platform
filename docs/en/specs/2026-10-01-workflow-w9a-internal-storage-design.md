@@ -59,7 +59,7 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 - **Object key:** `{workflow.storage.prefix}{workspace_id}/{ns-as-path}/{flow}/executions/{exec}/{tail}` in the `[storage]` bucket. `workflow.storage.prefix` defaults to `workflow/`.
 - **URI a flow sees:** `kestra:///{ns-as-path}/{flow}/executions/{exec}/{tail}` — Kestra's form. **It carries no workspace**: egret maps a URI to a key by prefixing the workspace **of the running execution**, never a value read from the URI, so nothing in a URI can name another workspace.
 - `tail` is Kestra's: `inputs/{input}/{file}`, `tasks/{taskId}/{taskRunId}/{file}`, `trigger/{triggerId}/{file}`. Slugify and the output file name **scheme** follow Kestra exactly; Task 1 measures both on Kestra and pins them in a fixture (`oracle-exec/w9a-storage.json`). The output name hashes the file's absolute path in the pod, `/egret/working-dir/<rel>`; Kestra's working directory is random, so the hash cannot match Kestra's, only the scheme.
-- **`{exec}` is the loop root.** egret runs a loop iteration as a sub-execution (`parent_execution_id`); Kestra runs it inside the one execution. A file written inside an iteration therefore uses the id at the top of the chain of **loop iterations**, so its URI is the one Kestra would give. The walk follows `parent_execution_id` only while the row has a `loop_index`: a retry replay also sets `parent_execution_id` (with `loop_index` NULL) and the walk stops there.
+- **`{exec}` is the loop root — chosen; Kestra's URI differs.** egret runs a loop iteration as a sub-execution (`parent_execution_id`), and so does Kestra 2.0: Task 1 measured each iteration as an execution of kind `LOOP` (`w9a-storage.json` finding `loop_iteration_uri_is_the_iteration`). Inside a Kestra iteration `execution.id` renders the root's id, but a file the iteration writes carries the **iteration's** id, and `GET /executions/{root}/file` for it answers 301 to the iteration. egret keeps the loop root: a file written inside an iteration uses the id at the top of the chain of **loop iterations**, so its `{exec}` is not the one Kestra would give. The walk follows `parent_execution_id` only while the row has a `loop_index`: a retry replay also sets `parent_execution_id` (with `loop_index` NULL) and the walk stops there.
 - A URI is refused if its scheme is not `kestra`, if it holds `..`, or if it does not parse into the layout above.
 
 ## 4. Core
@@ -136,9 +136,9 @@ As §5. The W5a contents form is unchanged.
 
 | function | behaviour |
 |---|---|
-| `read(uri)` | the contents as UTF-8; non-UTF-8 is an error naming the URI; capped by `max_read_bytes` |
+| `read(uri)` | the contents as UTF-8; non-UTF-8 is an error naming the URI (chosen: Kestra replaces invalid bytes with U+FFFD, measured by Task 1); capped by `max_read_bytes` |
 | `fileSize(uri)` | from the index |
-| `fileExists(uri)` | from the index; an unreadable URI is an error (Task 1 measures Kestra's answer and the spec follows it) |
+| `fileExists(uri)` | from the index. Measured on Kestra (Task 1): a well-formed URI of the running execution that names no file answers `false`; a URI that does not parse, holds `..`, or has another scheme is an error. egret follows: *missing* (in the readable set, no row) is `false`; a URI outside the readable set is an error (chosen: Kestra OSS reads it, §2) |
 | `isFileEmpty(uri)` | from the index (`size == 0`) |
 
 - All four answer from the snapshot (§4.4). `fileURI` stays refused, now naming W9b; `kv` names W9c.
@@ -175,7 +175,7 @@ The catalog re-admits `postgresql.CopyIn`, `postgresql.CopyOut`, `postgresql.Bat
 
 ### 9.2 `egret.sql` with `fetch: STORE`
 
-`Fetch` gains `Store` (`egret.sql`'s own key is `fetch:`). The handler runs in egret, so it writes rows through `runners::ionfmt` into `put_stream` at `tasks/{taskId}/{taskRunId}/{name}.ion`, and its outputs are `{uri, size}` with `size` the row count — the shape of Kestra's `AbstractJdbcQuery` STORE outputs (Task 1 pins it). `{name}` is Kestra's if Task 1 finds it deterministic, else a fixed `result.ion` (§4.3 needs a re-claim to overwrite its own object). **Memory:** `QueryExecPort::execute_as_with_params` returns a whole `TabularResult`, so nothing streams through the port whatever the connector does (Task 1 records each connector's internal behaviour); STORE is capped by `Sql::max_rows` (`MAX_FETCH_ROWS`, 10 000) and fails at the cap exactly as `FETCH` does. **`egret.sql` is in no production registry** (§1): W9a tests the handler directly and on live StarRocks, and does not wire it.
+`Fetch` gains `Store` (`egret.sql`'s own key is `fetch:`). The handler runs in egret, so it writes rows through `runners::ionfmt` into `put_stream` at `tasks/{taskId}/{taskRunId}/{name}.ion`, and its outputs are `{uri, size}` with `size` the row count — the shape of Kestra's `AbstractJdbcQuery` STORE outputs (Task 1 pins it). Task 1 measured Kestra's name as random per run (`{random unsigned decimal}.ion`), so `{name}` is a fixed `result.ion` (§4.3 needs a re-claim to overwrite its own object). Kestra's STORE file is **binary** Ion 1.0, each row with its own version marker and symbol table, a timestamp as an annotated string (`LocalDateTime::"…"`); `ionfmt` writes Ion text, so the bytes cannot match (the fixture's `ion_rows` records Kestra's value per SQL type). **Memory:** `QueryExecPort::execute_as_with_params` returns a whole `TabularResult`, so nothing streams through the port whatever the connector does (Task 1 records each connector's internal behaviour); STORE is capped by `Sql::max_rows` (`MAX_FETCH_ROWS`, 10 000) and fails at the cap exactly as `FETCH` does. **`egret.sql` is in no production registry** (§1): W9a tests the handler directly and on live StarRocks, and does not wire it.
 
 ### 9.3 Core storage tasks and `Loop` over a file
 

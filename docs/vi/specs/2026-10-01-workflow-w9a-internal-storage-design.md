@@ -61,7 +61,7 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 - **Object key:** `{workflow.storage.prefix}{workspace_id}/{ns-as-path}/{flow}/executions/{exec}/{tail}` trong bucket `[storage]`. `workflow.storage.prefix` mặc định là `workflow/`.
 - **URI một flow thấy:** `kestra:///{ns-as-path}/{flow}/executions/{exec}/{tail}` — dạng của Kestra. **Nó không mang workspace**: egret ánh xạ một URI sang key bằng cách đặt tiền tố là workspace **của execution đang chạy**, không bao giờ là giá trị đọc từ URI, nên không gì trong một URI có thể chỉ tới workspace khác.
 - `tail` là của Kestra: `inputs/{input}/{file}`, `tasks/{taskId}/{taskRunId}/{file}`, `trigger/{triggerId}/{file}`. Slugify và **scheme** tên file output theo đúng Kestra; Task 1 đo cả hai trên Kestra và ghim vào một fixture (`oracle-exec/w9a-storage.json`). Tên output hash đường dẫn tuyệt đối của file trong pod, `/egret/working-dir/<rel>`; thư mục làm việc của Kestra là ngẫu nhiên, nên hash không thể khớp với của Kestra, chỉ scheme khớp.
-- **`{exec}` là loop root.** egret chạy một vòng lặp như sub-execution (`parent_execution_id`); Kestra chạy nó bên trong một execution duy nhất. Vì vậy một file ghi bên trong một vòng lặp dùng id ở đầu chuỗi **các vòng lặp**, để URI của nó là URI Kestra sẽ cho. Việc đi lên chỉ theo `parent_execution_id` khi dòng có `loop_index`: một replay do retry cũng đặt `parent_execution_id` (với `loop_index` NULL) và việc đi lên dừng ở đó.
+- **`{exec}` là loop root — lựa chọn; URI của Kestra khác.** egret chạy một vòng lặp như sub-execution (`parent_execution_id`), và Kestra 2.0 cũng vậy: Task 1 đo được mỗi vòng lặp là một execution loại `LOOP` (finding `loop_iteration_uri_is_the_iteration` trong `w9a-storage.json`). Bên trong một vòng lặp của Kestra, `execution.id` render ra id của root, nhưng file mà vòng lặp ghi mang id của **chính vòng lặp**, và `GET /executions/{root}/file` cho file đó trả về 301 sang vòng lặp. egret giữ loop root: một file ghi bên trong một vòng lặp dùng id ở đầu chuỗi **các vòng lặp**, nên `{exec}` của nó không phải cái Kestra sẽ cho. Việc đi lên chỉ theo `parent_execution_id` khi dòng có `loop_index`: một replay do retry cũng đặt `parent_execution_id` (với `loop_index` NULL) và việc đi lên dừng ở đó.
 - Một URI bị từ chối nếu scheme của nó không phải `kestra`, nếu nó chứa `..`, hoặc nếu nó không parse được vào bố cục trên.
 
 ## 4. Lõi
@@ -138,9 +138,9 @@ Như §5. Dạng nội dung của W5a không đổi.
 
 | hàm | hành vi |
 |---|---|
-| `read(uri)` | nội dung dạng UTF-8; không phải UTF-8 là lỗi nêu URI; bị chặn bởi `max_read_bytes` |
+| `read(uri)` | nội dung dạng UTF-8; không phải UTF-8 là lỗi nêu URI (lựa chọn: Kestra thay byte không hợp lệ bằng U+FFFD, Task 1 đo); bị chặn bởi `max_read_bytes` |
 | `fileSize(uri)` | từ index |
-| `fileExists(uri)` | từ index; một URI không đọc được là lỗi (Task 1 đo câu trả lời của Kestra và spec theo nó) |
+| `fileExists(uri)` | từ index. Đo trên Kestra (Task 1): một URI đúng dạng của execution đang chạy mà không chỉ tới file nào trả `false`; một URI không parse được, chứa `..`, hoặc có scheme khác là lỗi. egret theo đó: *thiếu* (trong tập đọc được, không có dòng) là `false`; một URI ngoài tập đọc được là lỗi (lựa chọn: Kestra OSS đọc được nó, §2) |
 | `isFileEmpty(uri)` | từ index (`size == 0`) |
 
 - Cả bốn trả lời từ snapshot (§4.4). `fileURI` vẫn bị từ chối, giờ nêu W9b; `kv` nêu W9c.
@@ -177,7 +177,7 @@ Catalog nhận lại `postgresql.CopyIn`, `postgresql.CopyOut`, `postgresql.Batc
 
 ### 9.2 `egret.sql` với `fetch: STORE`
 
-`Fetch` có thêm `Store` (key riêng của `egret.sql` là `fetch:`). Handler chạy trong egret, nên nó ghi các dòng qua `runners::ionfmt` vào `put_stream` tại `tasks/{taskId}/{taskRunId}/{name}.ion`, và outputs của nó là `{uri, size}` với `size` là số dòng — dạng của output STORE ở `AbstractJdbcQuery` của Kestra (Task 1 ghim nó). `{name}` là của Kestra nếu Task 1 thấy nó tất định, nếu không là `result.ion` cố định (§4.3 cần một lần re-claim ghi đè được object của chính nó). **Bộ nhớ:** `QueryExecPort::execute_as_with_params` trả về nguyên một `TabularResult`, nên không gì stream qua port dù connector làm gì (Task 1 ghi lại hành vi bên trong của từng connector); STORE bị chặn bởi `Sql::max_rows` (`MAX_FETCH_ROWS`, 10 000) và thất bại ở trần đúng như `FETCH`. **`egret.sql` không nằm trong registry production nào** (§1): W9a test handler trực tiếp và trên StarRocks sống, và không nối dây nó.
+`Fetch` có thêm `Store` (key riêng của `egret.sql` là `fetch:`). Handler chạy trong egret, nên nó ghi các dòng qua `runners::ionfmt` vào `put_stream` tại `tasks/{taskId}/{taskRunId}/{name}.ion`, và outputs của nó là `{uri, size}` với `size` là số dòng — dạng của output STORE ở `AbstractJdbcQuery` của Kestra (Task 1 ghim nó). Task 1 đo được tên của Kestra là ngẫu nhiên mỗi lần chạy (`{số thập phân không dấu ngẫu nhiên}.ion`), nên `{name}` là `result.ion` cố định (§4.3 cần một lần re-claim ghi đè được object của chính nó). File STORE của Kestra là Ion 1.0 **nhị phân**, mỗi dòng có version marker và bảng symbol riêng, timestamp là chuỗi có annotation (`LocalDateTime::"…"`); `ionfmt` ghi Ion dạng text, nên các byte không thể khớp (`ion_rows` trong fixture ghi giá trị của Kestra cho từng kiểu SQL). **Bộ nhớ:** `QueryExecPort::execute_as_with_params` trả về nguyên một `TabularResult`, nên không gì stream qua port dù connector làm gì (Task 1 ghi lại hành vi bên trong của từng connector); STORE bị chặn bởi `Sql::max_rows` (`MAX_FETCH_ROWS`, 10 000) và thất bại ở trần đúng như `FETCH`. **`egret.sql` không nằm trong registry production nào** (§1): W9a test handler trực tiếp và trên StarRocks sống, và không nối dây nó.
 
 ### 9.3 Task storage lõi và `Loop` trên một file
 
