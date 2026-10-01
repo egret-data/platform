@@ -1,7 +1,7 @@
 //! DB-gated PolicyStore service tests. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 use egret_metastore::Db;
 use egret_policy::{seed_tag, seed_trino, PolicyStore};
-use serde_json::json;
+use serde_json::{json, Value};
 
 async fn store() -> Option<PolicyStore> {
     Some(store_and_db().await?.0)
@@ -214,4 +214,157 @@ fn assert_constraint_violation(e: &sqlx::Error, what: &str) {
         named,
         "{what}: expected migration 0165's CHECK {NAME:?} to refuse, got: {e}"
     );
+}
+
+/// SP4d debt Task 2 fix round — **the clearing `UPDATE` in migration 0165, which
+/// the Rust suite could not otherwise reach.**
+///
+/// The migration deletes a `tagService` from every non-Trino profile and then adds
+/// the CHECK as VALID. A test cannot exercise that against the real table:
+/// `egret-test-db` migrates the template BEFORE any test runs, so by the time a
+/// test can insert a violating row the constraint is already in force and the
+/// clearing statement has already run on an empty table. "I cannot test it here"
+/// was a statement about the seam, so the seam moved: this reads the migration's
+/// OWN TEXT off disk, re-points it at a fixture table of the same shape, and runs
+/// it. A migration edited to drop the `UPDATE`, to narrow it, or to re-weaken the
+/// CHECK fails here.
+///
+/// The SQL is taken from the file rather than retyped, because a retyped copy is
+/// an oracle built from the same vocabulary as the thing it checks — it would
+/// agree with my understanding of the migration instead of with the migration.
+/// Only the table name is substituted.
+///
+/// One connection throughout: a `TEMP` table lives in the session, so running the
+/// statements on a different pooled connection would not see it.
+#[tokio::test]
+async fn migration_0165_clears_the_inert_key_then_validates_the_check() {
+    let Some((_s, db)) = store_and_db().await else {
+        eprintln!("skip");
+        return;
+    };
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../migrations/0165_tag_service_requires_schema_level.sql"
+    );
+    let sql = std::fs::read_to_string(path).expect("read migration 0165");
+    // Comments only; the two statements are what runs.
+    let body: String = sql
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        body.contains("config_jsonb - 'tagService'") && body.contains("ADD CONSTRAINT"),
+        "migration 0165 no longer carries both the clearing UPDATE and the CHECK; body={body}"
+    );
+    assert!(
+        !body.to_uppercase().contains("NOT VALID"),
+        "migration 0165's CHECK must be VALIDATED — a NOT VALID one leaves a row that \
+         makes `bump_bound_tag_versions`' bulk UPDATE fail for a whole warehouse; body={body}"
+    );
+    let fixture = body.replace("policy.authz_services", "t0165");
+
+    let mut conn = db.pool.acquire().await.expect("acquire");
+    sqlx::query(
+        "CREATE TEMP TABLE t0165 (
+             id bigserial PRIMARY KEY,
+             name text NOT NULL,
+             type text NOT NULL,
+             config_jsonb jsonb NOT NULL DEFAULT '{}'
+         )",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("create fixture");
+    // Every config shape the two predicates have to agree about.
+    sqlx::query(
+        "INSERT INTO t0165 (name, type, config_jsonb) VALUES
+           ('sr_dead',  'starrocks', '{\"tagService\":\"dead\",\"jdbc.url\":\"keep\"}'),
+           ('tr_live',  'trino',     '{\"tagService\":\"live\"}'),
+           ('sr_plain', 'starrocks', '{}'),
+           ('sr_null',  'starrocks', '{\"tagService\":null}'),
+           ('sr_num',   'starrocks', '5'),
+           ('sr_arr',   'starrocks', '[1,2]'),
+           ('sr_str',   'starrocks', '\"x\"'),
+           ('tag_num',  'tag',       '{\"tagService\":7}')",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("seed fixture");
+
+    // The migration itself. `ADD CONSTRAINT` without NOT VALID validates every
+    // existing row, so this failing IS the assertion that the clear was complete.
+    // `AssertSqlSafe` because the SQL is the committed migration's own text with one
+    // identifier substituted (`sqlx::query` takes `&'static str` since sqlx 0.9).
+    for stmt in fixture.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        sqlx::query(sqlx::AssertSqlSafe(stmt.to_owned()))
+            .execute(&mut *conn)
+            .await
+            .unwrap_or_else(|e| panic!("migration 0165 statement failed: {e}\n{stmt}"));
+    }
+
+    let rows: Vec<(String, Value)> =
+        sqlx::query_as("SELECT name, config_jsonb FROM t0165 ORDER BY id")
+            .fetch_all(&mut *conn)
+            .await
+            .expect("read back");
+    let got: std::collections::HashMap<String, Value> = rows.into_iter().collect();
+
+    // The dead key is gone and NOTHING ELSE in the config is.
+    assert_eq!(
+        got["sr_dead"],
+        json!({ "jdbc.url": "keep" }),
+        "the clear must delete only `tagService`"
+    );
+    // A non-string value is cleared too — the UPDATE is keyed on the same `->>` the
+    // CHECK uses, so it cannot leave a row the CHECK then rejects.
+    assert_eq!(
+        got["tag_num"],
+        json!({}),
+        "a numeric tagService must be cleared"
+    );
+    // Trino keeps its tag service; this is the shape `bind_trino_profile` writes.
+    assert_eq!(
+        got["tr_live"],
+        json!({ "tagService": "live" }),
+        "a trino profile's tagService must survive"
+    );
+    // Untouched rows stay byte-identical, including the scalar and array configs
+    // that `jsonb - text` would ERROR on if the WHERE clause ever let them through.
+    assert_eq!(got["sr_plain"], json!({}));
+    assert_eq!(got["sr_null"], json!({ "tagService": null }));
+    assert_eq!(got["sr_num"], json!(5));
+    assert_eq!(got["sr_arr"], json!([1, 2]));
+    assert_eq!(got["sr_str"], json!("x"));
+
+    // And the constraint is now in force on the fixture, in both directions.
+    for (sql, what) in [
+        (
+            "UPDATE t0165 SET type = 'starrocks' WHERE name = 'tr_live'",
+            "type flip",
+        ),
+        (
+            "UPDATE t0165 SET config_jsonb = '{\"tagService\":\"late\"}' WHERE name = 'sr_plain'",
+            "late tagService",
+        ),
+    ] {
+        let e = sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .unwrap_err_or_panic(what);
+        assert_constraint_violation(&e, what);
+    }
+}
+
+/// `Result::unwrap_err` needs `T: Debug`; this names the case in the panic instead.
+trait UnwrapErrOrPanic<E> {
+    fn unwrap_err_or_panic(self, what: &str) -> E;
+}
+impl<T, E> UnwrapErrOrPanic<E> for Result<T, E> {
+    fn unwrap_err_or_panic(self, what: &str) -> E {
+        match self {
+            Ok(_) => panic!("{what}: migration 0165's CHECK must have refused this"),
+            Err(e) => e,
+        }
+    }
 }
