@@ -13,6 +13,33 @@ them.
 
 **Spec:** `docs/en/specs/2026-09-30-evaluate-tag-policies-sp4d-2b-design.md`
 
+## The scope finding, raised by Task 8's live gate — read this before the PR
+
+**`explain` never calls `evaluate_data_mask` or `evaluate_row_filter`.** It answers
+ACCESS and nothing else. So the entire tag-**mask** and tag-**row-filter** half of this
+package — Task 2's two tag comparators, Task 3's sub-path arbitration and its
+`TagSubResultSplitByResourcePolicy` refusal, Task 4's refusals on those paths — is
+**reachable from no product surface**. Task 8 had to write a prediction tool to see it at
+all, and two of its findings (F3, F5) are symptoms of that one gap.
+
+This is not a defect in the evaluator; every one of those paths is measured correct
+against the real Java engine. It is a statement about what shipped: the package built
+more than the product can ask for. Say so plainly in the PR rather than letting the
+reader infer that `explain` reports what the crate can compute.
+
+**Item C (product, found by Task 8): a supported API call makes a whole table
+unreadable.** A tag-addressed `MASK` rule plus a **table-level** tag assignment makes
+Trino type-check the mask against **every column of the scanned table**, so `SELECT
+item`, `SELECT id` and even `count(*)` all fail — the table is unreadable, not masked.
+Reachable from two supported surfaces: `PUT …/resource-tags` with `column` absent, and
+`POST …/perm/rules` with a tag selector (which is how live policy 8799 exists).
+
+**Measured not-live today, and the reason is luck rather than design:** every live
+assignment is column-level on a `varchar`, every `id` is a `bigint`, and no `id` is
+tagged. It is one assignment away. Task 8's own follow-up measurement killed the obvious
+explanation — the row filter was a red herring; a clean table-level MASK with no row
+filter fails the same way.
+
 ## Open items — raised by Task 5, ranked
 
 ### Item A (NEW, Task 7, and the only CRITICAL one here): egret's tag download names `schema` for every engine, so tag-selected masks and clearances cannot reach StarRocks
