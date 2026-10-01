@@ -71,7 +71,7 @@ use egret_ranger_eval::eval::{
     AccessRequest, Decision, EngineConfig, TagServiceResource, UnenrichedTags,
 };
 use egret_ranger_eval::model::ServicePolicySet;
-use egret_ranger_eval::resource::RequestResource;
+use egret_ranger_eval::resource::{requests_all_values, RequestResource};
 use egret_ranger_eval::servicedef::ServiceDef;
 use sqlx::{Postgres, Transaction};
 
@@ -1805,25 +1805,6 @@ async fn explain(
     }))
 }
 
-/// Is this level value Ranger's **"every value at this level"** rather than a
-/// name?
-///
-/// `RangerAbstractResourceMatcher.isAllValuesRequested` is `null || "" || "*"`,
-/// and [`egret_ranger_eval::resource`]'s `LevelMatcher::is_match` reproduces it
-/// verbatim — `match resource_value { None => true, Some(v) => v.is_empty() || v
-/// == "*" }`. **This predicate is keyed to that one on purpose**: the absent case
-/// is the level-skip rule's business (and a legitimately absent TAIL level), so
-/// what is left for a value that is PRESENT is exactly the other two arms. If
-/// either side of this pairing changes, the other is wrong — the pairing is
-/// asserted directly in `all_values_requested_matches_the_evaluators_own_predicate`.
-///
-/// Whitespace is deliberately NOT included. `" "` is a literal value: the matcher
-/// compares it literally, so the verdict really is about a resource with that
-/// name, and refusing it would be a taste judgement rather than this rule.
-fn level_requests_all_values(value: &str) -> bool {
-    value.is_empty() || value == "*"
-}
-
 /// Everything `explain` refuses about its target's SHAPE, in one pure function
 /// so the rules sit together and can be exercised without a router.
 ///
@@ -1845,8 +1826,20 @@ fn level_requests_all_values(value: &str) -> bool {
 ///
 /// # 2. A level present as `""` or `"*"`
 ///
-/// Both are [`level_requests_all_values`] — Ranger's "every value at this
-/// level", not a name — and the measured consequences differ, which is why
+/// Both are [`egret_ranger_eval::resource::requests_all_values`] — Ranger's "every
+/// value at this level", not a name. **That is the evaluator's own exported rule
+/// and this guard CALLS it**, rather than spelling it out a second time: two
+/// guards that must agree, written to different shapes, is a defect this
+/// programme has measured four times, so the pairing is a call and not a
+/// convention (SP4d debt Task 4's fix round; it shipped as two tests naming each
+/// other, which was the weaker form). One mutation of that function now kills
+/// tests in BOTH crates — before the export, each mutation killed only the crate
+/// it was made in.
+///
+/// The `None` arm of the predicate belongs to rule 1 above, so this loop unwraps
+/// first: an absent TAIL level is a legitimate question answered by its parent.
+///
+/// The measured consequences of the two present forms differ, which is why
 /// neither may be answered:
 ///
 /// * `""` is where **egret's evaluator and the engine are known to
@@ -1879,6 +1872,11 @@ fn level_requests_all_values(value: &str) -> bool {
 ///
 /// Returning them as a 400 is the same argument the level skip already won: there
 /// is no engine request this shape corresponds to.
+///
+/// Whitespace is deliberately NOT refused, and that follows from the predicate
+/// rather than from taste: `" "` is not one of Ranger's three forms, so the
+/// matcher compares it literally and the verdict really is about a resource with
+/// that name.
 fn validate_explain_target(target: &Scope) -> Result<(), PermHttpError> {
     if target.schema.is_none() && (target.table.is_some() || target.column.is_some())
         || target.table.is_none() && target.column.is_some()
@@ -1896,16 +1894,20 @@ fn validate_explain_target(target: &Scope) -> Result<(), PermHttpError> {
         ("table", target.table.as_deref()),
         ("column", target.column.as_deref()),
     ] {
-        if value.is_some_and(level_requests_all_values) {
+        // Presence is tested HERE and not inside the predicate: `None` is one of
+        // Ranger's three all-values forms, and an absent level is rule 1's
+        // business — a target that names a schema and stops is the page's ordinary
+        // catalog-or-schema-wide question.
+        let Some(value) = value else { continue };
+        if requests_all_values(Some(value)) {
             return Err(PermHttpError::BadRequest(format!(
-                "a target's `{level}` is a resource NAME, and {:?} is Ranger's \
+                "a target's `{level}` is a resource NAME, and {value:?} is Ranger's \
                  \"every value at this level\" (`isAllValuesRequested` is null, \"\" or \
                  \"*\"). No engine request carries it: the plugin names the schema, table \
                  and column the query actually touched. Omit the level to ask about its \
                  parent instead — the verdict for \"all values\" is not the verdict for \
                  any one of them, and for \"\" egret's own evaluator is measured \
-                 disagreeing with the engine",
-                value.unwrap_or_default()
+                 disagreeing with the engine"
             )));
         }
     }
@@ -2912,7 +2914,7 @@ mod tests {
 /// likely to hide.
 #[cfg(test)]
 mod explain_target_tests {
-    use super::{level_requests_all_values, validate_explain_target, PermHttpError, Scope};
+    use super::{requests_all_values, validate_explain_target, PermHttpError, Scope};
     use uuid::Uuid;
 
     fn target(schema: Option<&str>, table: Option<&str>, column: Option<&str>) -> Scope {
@@ -2931,18 +2933,31 @@ mod explain_target_tests {
         }
     }
 
-    /// Ranger's own three forms, and nothing else. Both arms are load-bearing:
-    /// delete either from `level_requests_all_values` and a row here dies.
+    /// The domain this guard relies on, asserted against the EVALUATOR'S OWN
+    /// exported predicate — `egret_ranger_eval::resource::requests_all_values` —
+    /// because that is the function the guard calls. There is no local copy left
+    /// to agree with.
+    ///
+    /// The two present arms are load-bearing from here: delete either one in
+    /// `egret-ranger-eval` and three rows in THIS crate die, alongside the
+    /// `applyExcludes` probes in that crate. That cross-crate kill is the whole
+    /// reason the predicate is exported rather than re-spelled (coordinator
+    /// overrule of concern 3) — before it, one mutation killed only the crate it
+    /// was made in.
     #[test]
     fn all_values_requested_is_the_empty_string_and_the_star() {
-        assert!(level_requests_all_values(""));
-        assert!(level_requests_all_values("*"));
+        assert!(requests_all_values(Some("")));
+        assert!(requests_all_values(Some("*")));
+        // The `None` arm is part of the rule and NOT part of this guard: the loop
+        // in `validate_explain_target` unwraps first, because an absent level is
+        // the level-skip rule's business and an absent tail is answerable.
+        assert!(requests_all_values(None));
         // Everything else is a NAME, including the shapes that look like one of
         // the two but are not: Ranger's `isAllValuesRequested` is an equality
         // test, not a wildcard test.
         for name in ["sales", " ", "**", "*a", "a*", "\t", "0"] {
             assert!(
-                !level_requests_all_values(name),
+                !requests_all_values(Some(name)),
                 "{name:?} is a literal value the matcher compares literally"
             );
         }
@@ -3027,7 +3042,7 @@ mod explain_target_tests {
             // a second, divergent opinion about case.
             target(Some("SALES"), Some("Orders"), Some("AMOUNT")),
             // Whitespace and a `*` INSIDE a name are literals, not the all-values
-            // form — see `level_requests_all_values`.
+            // form — see `egret_ranger_eval::resource::requests_all_values`.
             target(Some(" "), Some("a*b"), Some("**")),
         ] {
             assert!(

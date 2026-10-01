@@ -69,9 +69,11 @@ pub enum MatchType {
 /// Ranger's `RangerAccessResource` allows a *collection* of values per
 /// element; this models the one-string-per-element shape a Trino or
 /// StarRocks request actually carries. An absent key is Ranger's `null`
-/// (the level is not part of the request); a key present with `""` is a
-/// request for all values at that level, exactly as
-/// `RangerAbstractResourceMatcher.isAllValuesRequested` treats it.
+/// (the level is not part of the request); a key present with `""` — or with
+/// `"*"` — is a request for all values at that level, exactly as
+/// [`requests_all_values`] treats it. **Which is why a caller that lets a human
+/// choose the value has to refuse those two**: see that function's own
+/// `# Why this is pub`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RequestResource {
     values: BTreeMap<String, String>,
@@ -373,6 +375,50 @@ pub fn level_excluded_by_trie(
     !LevelMatcher::build(level, def).is_match(Some(request_value))
 }
 
+/// `RangerAbstractResourceMatcher.isAllValuesRequested`: does this request
+/// element ask for **every value at its level** rather than naming one?
+///
+/// ```text
+/// boolean isAllValuesRequested(String resource) {
+///     return StringUtils.isEmpty(resource) || WILDCARD_ASTERISK.equals(resource);
+/// }
+/// ```
+///
+/// `null`, `""` and `"*"` alike — `isEmpty` covers the first two — and the three
+/// are **not interchangeable everywhere else**, which is why this is one function
+/// and not three comparisons at each use. [`LevelMatcher::is_match`] short-circuits
+/// on it *before reading any policy value*
+/// (`if (isMatchAny || (allValuesRequested && !isPrefixMatch))`), and
+/// [`LevelMatcher::apply_excludes`] keys its carve-out to the same flag, so losing
+/// an arm flips a non-match to a **match** on an excludes policy — the fail-open
+/// direction.
+///
+/// # Why this is `pub`
+///
+/// **`egret_perm_compile::routes::validate_explain_target` is the second guard
+/// that has to agree with this rule**, and it 400s an `explain` target whose level
+/// is present as `""` or `"*"` precisely because no engine request carries one.
+/// It used to spell the predicate out again in its own crate, with the agreement
+/// kept by a pair of tests that named each other. Two guards that must agree,
+/// written to different shapes, is a defect this programme has measured four
+/// times; exporting the rule makes the pairing structural instead of remembered
+/// (SP4d debt Task 4 raised it as a concern and its fix round settled it this way).
+///
+/// So this function is the rule, not a copy of it: `is_match` above calls it too,
+/// and there is no second spelling left to drift.
+///
+/// **A caller that only means a PRESENT value must test presence itself** — the
+/// `None` arm is deliberately part of the predicate (an absent request element is
+/// Ranger's `null`, and `isEmpty(null)` is true), and for `explain` an absent
+/// *tail* level is a legitimate question answered by its parent. That handler
+/// therefore unwraps first and asks about the value it has.
+pub fn requests_all_values(resource_value: Option<&str>) -> bool {
+    match resource_value {
+        None => true,
+        Some(v) => v.is_empty() || v == "*",
+    }
+}
+
 // ── The matcher itself ───────────────────────────────────────────────────
 
 /// One initialised `RangerDefaultPolicyResourceMatcher`.
@@ -649,11 +695,7 @@ impl LevelMatcher {
     /// `RangerDefaultResourceMatcher.getMatchType(...)` reduced to the
     /// `SELF` matching scope, then `applyExcludes`.
     fn is_match(&self, resource_value: Option<&str>) -> bool {
-        // `isAllValuesRequested`: null, "" or "*".
-        let all_values_requested = match resource_value {
-            None => true,
-            Some(v) => v.is_empty() || v == "*",
-        };
+        let all_values_requested = requests_all_values(resource_value);
 
         // `if (isMatchAny || (allValuesRequested && !isPrefixMatch)) { ret = isMatchAny ? SELF : NONE; }`
         // — `isPrefixMatch` is false at SELF scope, so a request for ALL
@@ -1128,19 +1170,18 @@ fn wildcard_match(pattern: &str, text: &str, ignore_case: bool) -> bool {
 mod tests {
     use super::*;
 
-    /// **`isAllValuesRequested` is a three-value predicate, and a SECOND guard is
-    /// keyed to it in another crate.** `RangerAbstractResourceMatcher` treats
-    /// `null`, `""` and `"*"` alike, and
-    /// `egret_perm_compile::routes::validate_explain_target` 400s an `explain`
-    /// target whose level is present as `""` or `"*"` for exactly that reason —
-    /// those are the two arms a PRESENT value can hit (the `null` arm is the
-    /// level-skip rule's business there). Deliberately paired, so:
+    /// **`isAllValuesRequested` is a three-value predicate, and a SECOND guard
+    /// CALLS it from another crate.** `egret_perm_compile::routes::validate_explain_target`
+    /// 400s an `explain` target whose level is present as `""` or `"*"`, and since
+    /// SP4d debt Task 4's fix round (concern 3, overruled) it does so through
+    /// [`requests_all_values`] itself — not through a second spelling. So the two
+    /// guards cannot drift, and what this test adds is the thing a shared function
+    /// still cannot give: **that the flag has an observable effect at all**, and in
+    /// which direction losing an arm fails.
     ///
-    /// **If this predicate changes, that guard is wrong, and vice versa.** The two
-    /// cannot be mechanically coupled across a crate boundary — `LevelMatcher` is
-    /// private and nothing public discriminates an all-values short-circuit from
-    /// an ordinary non-match — so this test is the coupling: it names the other
-    /// guard, and the rows below are the shape both must agree on.
+    /// ⚠ The earlier version of this comment said the two "cannot be mechanically
+    /// coupled across a crate boundary". That was a claim about this crate's public
+    /// surface, not about the rule, and it was answered by exporting the rule.
     ///
     /// Asserted through the observable consequence rather than the flag: against a
     /// literal policy value, Ranger's
