@@ -265,6 +265,20 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     // The number is a number, in a real sentence.
     expect(causes[0]).toHaveTextContent(/3 tag policies/);
     expect(causes[0]).not.toHaveTextContent(/TagPolicies|Unmodelled|\{/);
+    // ⚠ The WORDING, asserted since fix round 1 (Minor 2). SP4d-2b Task 3 made the
+    // evaluator evaluate the block, so "which egret does not evaluate yet" became a
+    // promise about a shipped feature; Task 7 swept it and nothing pinned the
+    // replacement, so a mutation restoring the superseded clause survived.
+    //
+    // **This arm is currently UNREACHABLE from the backend** — both envelope
+    // sweeps (`request_preamble` and `tag_candidates`) `continue` on
+    // `Unmodelled::TagPolicies(TagPolicyBlock::Policies(_))`, and `PolicyConstruct`
+    // carries only per-policy constructs — so this fixture is a payload egret does
+    // not produce today. The arm exists to keep `explain_wire.rs` exhaustive
+    // without a wildcard, and the assertion exists so its words cannot rot
+    // unnoticed; it is NOT evidence that a steward can reach this sentence.
+    expect(causes[0]).toHaveTextContent(/in a block that was not evaluated/i);
+    expect(causes[0]).not.toHaveTextContent(/does not evaluate yet/i);
     expect(causes[1]).toHaveTextContent(/super-user/i);
     expect(causes[2]).toHaveTextContent("ops-time-boxed");
     expect(causes[2]).toHaveTextContent(/validity schedule/i);
@@ -711,8 +725,13 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
                   kind: "undecidable",
                   why: [
                     {
+                      // ⚠ `unreadable`, not `policies` (fix round 1, Low 4): the
+                      // `policies` arm is unreachable from the backend, and the
+                      // note this test is about must be pinned on a payload egret
+                      // can actually produce. The count and its pluralisation are
+                      // pinned on the unreachable arm elsewhere, where they belong.
                       kind: "envelope_construct",
-                      construct: { kind: "tag_policies", block: { kind: "policies", count: 2 } },
+                      construct: { kind: "tag_policies", block: { kind: "unreadable" } },
                     },
                     { kind: "super_users_unknown" },
                   ],
@@ -731,7 +750,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
 
     const result = await screen.findByTestId("explain-result");
     const causes = within(result).getAllByTestId("undecidable-cause");
-    expect(causes[0]).toHaveTextContent(/2 tag policies/);
+    expect(causes[0]).toHaveTextContent(/could not read/i);
     // ⚠ Asserted on the SCOPE element, not through the <li>: the sentence and the
     // note are two claims and the <li> holds both, so an assertion through it is
     // satisfied by whichever of the two still carries the words (SP4d-2b Task 7 —

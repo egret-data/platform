@@ -792,7 +792,8 @@ pub async fn compiler_targeted_services_via(
 /// `explain` evaluates the artifact each engine downloads, and the tag set it
 /// hands the evaluator comes from [`resolved_tags_for_resource_via`] — which
 /// rolls the hierarchy up and returns `tags.name` — gated on
-/// [`assignments_outside_rolled_up_levels_via`]. What `explain` uses THIS for is
+/// [`tag_assignment_coordinates_via`] and `egret_perm_compile`'s
+/// `stored_value_problem`. What `explain` uses THIS for is
 /// the response's informational `tags` list — "what has egret got recorded on
 /// exactly this resource" — and nothing else. The two must not be merged: this
 /// one returns `tags.key`, which is a different value (live they differ for one
@@ -873,6 +874,44 @@ pub struct ResolvedTag {
 /// can express, and refuse other payload shapes by shape). Schema- and
 /// catalog-level tagging is a separate feature — a migration, a writer and a UI.
 ///
+/// # ⚠ The comparison is CASE-INSENSITIVE, because the matcher is
+///
+/// **SP4d-2b Task 7 fix round 1, and the review measured the fail-open.** This
+/// predicate was an exact, case-SENSITIVE `=` on all three levels. The enricher's
+/// comparison is not: all four of `trino.json`'s `catalog` / `schema` / `table` /
+/// `column` resources declare `RangerDefaultResourceMatcher` with
+/// `{"wildCard": true, "ignoreCase": true}`, and `ignoreCase` makes
+/// `RangerDefaultResourceMatcher` compare with `StringUtils.equalsIgnoreCase`.
+/// Measured on the real jar for the request `hive.sales.orders.email`: a row
+/// stored `('SALES','ORDERS','')` is `ANCESTOR` and admitted, and
+/// `('SALES','ORDERS','EMAIL')` is `SELF` and admitted — while this query
+/// returned NEITHER. egret would have reported "no tags" for a resource the
+/// engine is masking, and an empty set is the licence to skip the tag phase
+/// entirely.
+///
+/// **And that class comes out of ordinary use, not out of malformed data.**
+/// `ScopePicker` renders schema / table / column as free-text inputs and
+/// `request_resource` inserts them verbatim, so a steward typing `SALES` /
+/// `ORDERS` against rows stored `sales` / `orders` produced it with nothing
+/// wrong anywhere. Folding here REPRODUCES the matcher rather than declining
+/// around it, which is why this is a widened predicate and not another gate: a
+/// gate would have answered "cannot decide" to a steward who typed in the wrong
+/// case, for a question egret can answer.
+///
+/// `tests/ranger/src/test/java/EgretTagAttachmentMatchTypeTest.java` pins the
+/// Ranger half — every row above, measured against the real
+/// `RangerServiceResourceMatcher.getMatchType` — so the equivalence this
+/// predicate claims is measured on one side rather than asserted on both.
+///
+/// `lower()` reproduces `equalsIgnoreCase` **over ASCII values**, which is the
+/// population `tag_assignment_coordinates_via`'s caller restricts the stored side
+/// to: Postgres' `lower()` is collation-driven full Unicode case mapping and
+/// Java's `equalsIgnoreCase` is a per-character `toUpperCase`/`toLowerCase` pair,
+/// and the two are identical for `[\x20-\x7E]` and not provably identical
+/// outside it. A non-ASCII stored value therefore DECLINES the resolution rather
+/// than being compared under a fold nobody measured — see
+/// [`tag_assignment_coordinates_via`].
+///
 /// # Three things this gets right that are each a silent fail-open
 ///
 /// 1. **It returns `tags.name`, never `tags.key`.** The engine matches tag
@@ -904,20 +943,34 @@ pub async fn resolved_tags_for_resource_via(
     table: &str,
     column: &str,
 ) -> Result<Vec<ResolvedTag>, PolicyStoreError> {
-    // `a.column_name = $4` is the SELF arm; `a.column_name = ''` with a
-    // non-empty request column is the table-level ANCESTOR arm. A request that
-    // names the table ($4 = '') collapses the two into the one SELF arm, and a
-    // column attachment then matches NEITHER — that is the DESCENDANT
+    // `lower(a.column_name) = lower($4)` is the SELF arm; `a.column_name = ''`
+    // with a non-empty request column is the table-level ANCESTOR arm. A request
+    // that names the table ($4 = '') collapses the two into the one SELF arm, and
+    // a column attachment then matches NEITHER — that is the DESCENDANT
     // exclusion, and it is structural rather than a filter that could be
     // forgotten.
-    let rows = sqlx::query_as::<_, (String, String)>(
-        r#"SELECT DISTINCT t.name, a.column_name
+    //
+    // **`is_self` is computed in SQL, not in Rust, and that is the point.** It
+    // used to be `attached_column == column` out here, which was a SECOND
+    // comparison of the same two values under a different rule — and the moment
+    // the predicate folded case, the two disagreed: a row stored `EMAIL` matched
+    // the SELF arm in SQL and was then labelled `Ancestor` in Rust, which is a
+    // wrong match type and so a wrong mask ORDER. One comparison, one place.
+    //
+    // `DISTINCT` is over `(t.name, is_self)` — `RangerTagForEval`'s own equality
+    // (see point 2 above) — and no longer over the raw `column_name`, because two
+    // rows differing only in case are now ONE member of Ranger's set rather than
+    // two.
+    let rows = sqlx::query_as::<_, (String, bool)>(
+        r#"SELECT DISTINCT t.name, (lower(a.column_name) = lower($4)) AS is_self
            FROM registry.catalogs c
            JOIN catalog_tag_assignments a ON a.warehouse_id = c.warehouse_id
            JOIN tags t ON t.id = a.tag_id
-           WHERE c.id = $1 AND a.schema_name = $2 AND a.table_name = $3
-             AND (a.column_name = $4 OR a.column_name = '')
-           ORDER BY a.column_name DESC, t.name"#,
+           WHERE c.id = $1
+             AND lower(a.schema_name) = lower($2)
+             AND lower(a.table_name) = lower($3)
+             AND (lower(a.column_name) = lower($4) OR a.column_name = '')
+           ORDER BY is_self DESC, t.name"#,
     )
     .bind(catalog_id)
     .bind(schema)
@@ -928,9 +981,9 @@ pub async fn resolved_tags_for_resource_via(
 
     Ok(rows
         .into_iter()
-        .map(|(name, attached_column)| ResolvedTag {
+        .map(|(name, is_self)| ResolvedTag {
             name,
-            match_type: if attached_column == column {
+            match_type: if is_self {
                 MatchType::Self_
             } else {
                 // The only other row the query can return: `column_name = ''`
@@ -941,60 +994,73 @@ pub async fn resolved_tags_for_resource_via(
         .collect())
 }
 
-/// How many of this catalog's `catalog_tag_assignments` rows sit at a resource
-/// level [`resolved_tags_for_resource_via`]'s predicate **cannot roll up** —
-/// i.e. carry an empty `schema_name` or an empty `table_name`.
+/// Every distinct `(schema_name, table_name, column_name)` this catalog's
+/// `catalog_tag_assignments` rows carry — the stored coordinates, with no ruling
+/// applied.
 ///
-/// **Zero is the antecedent that makes passing
-/// `egret_ranger_eval::eval::AccessRequest::resolved_tags: Some(...)` sound**,
-/// and this exists because that antecedent is a property of the stored DATA, not
-/// of any one request. Its one caller is
-/// `egret_perm_compile`'s `resolved_tags_for_target`, which runs it BEFORE the
-/// resolver so the two cannot come apart.
+/// **The ruling is `egret_perm_compile`'s `stored_value_problem`, in Rust, and
+/// the split is deliberate.** Its one caller runs this BEFORE
+/// [`resolved_tags_for_resource_via`] and declines the whole resolution while any
+/// coordinate is outside the population that resolver reproduces, so the two
+/// cannot come apart.
 ///
-/// # ⚠ The fail-open this closes, which is a MISSED row and not a returned one
+/// # ⚠ What this exists for: a MISSED row, not a returned one
 ///
-/// **SP4d-2b Task 7.** [`resolved_tags_for_resource_via`] matches `schema_name`
-/// and `table_name` by exact equality, so for the request `sales.orders.email`
-/// it does not return a row stored `('sales', '', '')`. The engine's
-/// `RangerTagEnricher` does: `ServiceTags::from_assignments` omits an empty
-/// level, so that row ships as a `RangerServiceResource` whose
-/// `resourceElements` is `{catalog, schema}`, which is an ANCESTOR of the
-/// request and which Ranger ADMITS for a tag request. So egret would report "no
-/// tags" while the engine evaluates a tag policy through it — and an empty set
-/// is the licence to skip the tag phase entirely.
+/// **SP4d-2b Task 7.** [`resolved_tags_for_resource_via`] compares the three
+/// levels for EQUALITY (case-folded since fix round 1). The enricher does not
+/// compare at all — it builds a `RangerDefaultPolicyResourceMatcher` per tag
+/// service resource and asks `getMatchType`, which walks the hierarchy and
+/// answers `ANCESTOR` for a resource ABOVE the request. `ServiceTags::from_assignments`
+/// omits an empty level, so a row stored `('sales','','')` ships as
+/// `resourceElements = {catalog, schema}` — measured `ANCESTOR` of
+/// `hive.sales.orders.email` on the real jar, and `findMatchingTags` admits
+/// `ANCESTOR` at the default `ResourceMatchingScope.SELF`. That row can never come
+/// back from an equality predicate on `table_name`. So egret would hand the
+/// evaluator a set MISSING a tag the engine enforces, and an empty set is the
+/// licence to skip the tag phase entirely: a wrong confident verdict.
 ///
-/// That row is writable today: `egret_bi::catalog_tags`' `assign_resource_tag`
-/// validates nothing and `PUT …/resource-tags {"schema": "sales", "table": ""}`
-/// stores it (measured by SP4d-2b Task 4's re-review, which found the same hole
-/// one level up at `{"schema": "", "table": ""}`). Migration 0081 has no `CHECK`
-/// and `NOT NULL` does not exclude `''`.
+/// **The missed row is invisible to the resolver's RESULT** — nothing in the
+/// returned set says a broader row was skipped — so no inspection of that set can
+/// detect it. It has to be detected on the stored data, which is what this reads.
 ///
-/// **Why a count here rather than a filter inside the resolver.** The missed row
-/// is invisible to the resolver's RESULT — nothing in the returned set says a
-/// broader row was skipped — so no mapping over that set can detect it. Widening
-/// the resolver's predicate instead would make it return attachments whose
-/// `RangerDefaultPolicyResourceMatcher` match type egret has not measured
-/// (`{catalog, table, column}` straddles a hierarchy gap), i.e. it would trade a
-/// detectable refusal for a guessed match type. So the state is detected, and
-/// the caller declines to resolve for the whole catalog while it holds.
+/// Such rows are writable today: `egret_bi::catalog_tags`' `assign_resource_tag`
+/// validates nothing, migration 0081 has no `CHECK`, and `NOT NULL` does not
+/// exclude `''`. One `CHECK` would retire both this read and its ruling — see
+/// open item B of the SP4d-2b plan. Unrepresentable beats unforgettable.
+///
+/// # ⚠ Why the coordinates and not a `count(*)` with the predicate in SQL
+///
+/// **Fix round 1.** It WAS a `count(*)` whose `WHERE` clause carried the rule,
+/// and the rule was wrong: it covered the empty-level class and missed the
+/// wildcard and differing-case classes, both of which the review then measured as
+/// the same fail-open. A predicate in SQL cannot be unit-tested or mutated
+/// anywhere this branch can run — the shared test template is ahead of this
+/// branch's migrations — so the miss could not have been caught by any test
+/// either. The rule is now one pure Rust function with the enumeration beside it
+/// and a test per class; this query returns facts.
+///
+/// The cost is one row per distinct tagged `(schema, table, column)` in the
+/// catalog's warehouse, once per `explain` request (not per profile). `explain` is
+/// an interactive admin read, and `tagged_columns_for_service_via` already ships
+/// per-column rows on the compile path.
 ///
 /// Scoped exactly as the resolver is — `a.warehouse_id = c.warehouse_id` for
-/// `c.id = $1` — so a row this counts is a row that query could have returned,
-/// and a row in another warehouse (whose service resource names another
-/// catalog, never an ancestor of this one) is neither counted nor returned.
-pub async fn assignments_outside_rolled_up_levels_via(
+/// `c.id = $1` — so a coordinate this returns is one that query could have
+/// matched, and a row in another warehouse (whose service resource names another
+/// catalog, never an ancestor of this one) is neither returned here nor there.
+pub async fn tag_assignment_coordinates_via(
     conn: &mut sqlx::PgConnection,
     catalog_id: uuid::Uuid,
-) -> Result<i64, PolicyStoreError> {
-    Ok(sqlx::query_scalar::<_, i64>(
-        r#"SELECT count(*)
+) -> Result<Vec<(String, String, String)>, PolicyStoreError> {
+    Ok(sqlx::query_as::<_, (String, String, String)>(
+        r#"SELECT DISTINCT a.schema_name, a.table_name, a.column_name
            FROM registry.catalogs c
            JOIN catalog_tag_assignments a ON a.warehouse_id = c.warehouse_id
-           WHERE c.id = $1 AND (a.schema_name = '' OR a.table_name = '')"#,
+           WHERE c.id = $1
+           ORDER BY a.schema_name, a.table_name, a.column_name"#,
     )
     .bind(catalog_id)
-    .fetch_one(&mut *conn)
+    .fetch_all(&mut *conn)
     .await?)
 }
 

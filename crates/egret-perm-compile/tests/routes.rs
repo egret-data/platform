@@ -4224,9 +4224,10 @@ async fn a_tag_policy_block_with_no_tags_recorded_answers_through_the_narrowing(
 /// would be MISSING a tag the engine is enforcing, and an empty set is the
 /// licence to skip the tag phase entirely.
 ///
-/// `assignments_outside_rolled_up_levels_via` counts exactly that row, and
-/// `resolved_tags_for_target` declines before resolving anything. Remove the
-/// gate and this goes green-but-wrong in the fail-open direction.
+/// `stored_value_problem` rules on exactly that coordinate
+/// (`StoredValueProblem::EmptyLevel`, one of its three classes), and
+/// `resolved_tags_for_target` declines before resolving anything. Remove the gate
+/// and this goes green-but-wrong in the fail-open direction.
 ///
 /// The row is storable today: `assign_resource_tag` validates nothing and
 /// migration 0081 has no `CHECK`, so `PUT …/resource-tags {"table": ""}` writes

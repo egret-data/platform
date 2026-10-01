@@ -149,6 +149,70 @@ async fn column_attachment_against_a_column_request_is_self() {
     assert_eq!(got[0].match_type, MatchType::Self_);
 }
 
+/// **Test 1b — the fold, which fix round 1 of SP4d-2b Task 7 added.** The three
+/// levels are compared case-INSENSITIVELY, because the matcher is: all four of
+/// `trino.json`'s `catalog`/`schema`/`table`/`column` resources declare
+/// `{"wildCard": true, "ignoreCase": true}`, and `ignoreCase` makes
+/// `RangerDefaultResourceMatcher` compare with `equalsIgnoreCase`.
+///
+/// Measured on the real jar by
+/// `tests/ranger/src/test/java/EgretTagAttachmentMatchTypeTest.java`: a row stored
+/// `('SALES','ORDERS','EMAIL')` is `SELF` for the request `hive.sales.orders.email`
+/// and `('SALES','ORDERS','')` is `ANCESTOR` — both ADMITTED. Before the fold this
+/// query returned neither, so egret reported "no tags" for a resource the engine is
+/// masking, and an empty set is the licence to skip the tag phase entirely.
+///
+/// **And this is what ORDINARY use produces**, not malformed data: `ScopePicker`
+/// renders the three levels as free-text inputs and `request_resource` inserts them
+/// verbatim, so a steward typing `SALES` reached it with nothing wrong anywhere.
+/// That is why case is REPRODUCED here rather than refused by
+/// `egret_perm_compile::routes::stored_value_problem`, which is where the two
+/// classes the fold cannot reproduce — a wildcard metacharacter and a non-ASCII
+/// value — decline instead.
+///
+/// The two entries also prove the fold did not collapse the LEVELS: one tag at two
+/// case-shifted levels is still `SELF` + `ANCESTOR`, two members of Ranger's set.
+#[tokio::test]
+async fn the_three_levels_are_compared_case_insensitively() {
+    let Some(db) = db().await else {
+        eprintln!("skip");
+        return;
+    };
+    let pool = db.pool.clone();
+    let (wh_id, catalog_id) = seed_catalog(&pool).await;
+    let tag = seed_tag_row(
+        &pool,
+        &format!("pii-{}", Uuid::new_v4().simple()),
+        "FoldedName",
+    )
+    .await;
+    assign(&pool, tag, wh_id, "SALES", "ORDERS", "EMAIL").await;
+    assign(&pool, tag, wh_id, "SALES", "ORDERS", "").await;
+
+    let mut conn = pool.acquire().await.expect("acquire");
+    let got = resolved_tags_for_resource_via(&mut conn, catalog_id, "sales", "orders", "email")
+        .await
+        .expect("resolve");
+
+    assert_eq!(
+        got.len(),
+        2,
+        "both attachments resolve despite the case difference: {got:?}"
+    );
+    assert_eq!(got[0].name, "FoldedName");
+    assert_eq!(
+        got[0].match_type,
+        MatchType::Self_,
+        "the COLUMN attachment is SELF — `is_self` is computed by the same \
+         case-folded comparison the predicate uses, never by a second one in Rust"
+    );
+    assert_eq!(
+        got[1].match_type,
+        MatchType::Ancestor,
+        "and the TABLE attachment is still ANCESTOR: {got:?}"
+    );
+}
+
 /// Test 2 — the arm nothing else in the repo exercises. The tag is on the TABLE
 /// (`column_name = ''`) and the request names a column: `RangerTagEnricher`
 /// builds the matcher with the tag's resource in the POLICY position, so the

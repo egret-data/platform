@@ -61,9 +61,9 @@ use egret_perm::{
     PrincipalSet, Rule, RuleKind, Scope, Selector,
 };
 use egret_policy::{
-    assignments_outside_rolled_up_levels_via, catalog_names_for_ids_via, catalogs_for_service_via,
-    clearance_gates_for_tags_via, get_service_by_id_via, resolved_tags_for_resource_via,
-    services_for_catalog_via, tag_keys_by_ids_via, tag_keys_for_resource_via,
+    catalog_names_for_ids_via, catalogs_for_service_via, clearance_gates_for_tags_via,
+    get_service_by_id_via, resolved_tags_for_resource_via, services_for_catalog_via,
+    tag_assignment_coordinates_via, tag_keys_by_ids_via, tag_keys_for_resource_via,
     tag_names_for_keys_via, PolicyStore, ServiceRow,
 };
 use egret_policy_api::ServicePolicies;
@@ -1828,13 +1828,23 @@ impl ClearanceLookups for sqlx::PgConnection {
 /// Its predicate is `schema_name = $2 AND table_name = $3 AND (column_name = $4 OR
 /// column_name = '')`.
 ///
-/// So the set it returns is exactly the enricher's **provided every stored row is
-/// at one of those two levels**, i.e. has a non-empty `schema_name` and a
-/// non-empty `table_name`. [`TagLookups::rows_outside_the_rolled_up_levels`] is
-/// that precondition, and it is checked FIRST, for the catalog, before any
-/// resolution — see the ⚠ block on
-/// `egret_policy::assignments_outside_rolled_up_levels_via` for the fail-open it
-/// closes and why no mapping over the resolver's RESULT could close it instead.
+/// Its comparison is case-folded (fix round 1), which reproduces the matcher's
+/// `ignoreCase: true`; what it cannot reproduce is a stored value that is not a
+/// LITERAL. So the set it returns is exactly the enricher's **provided every
+/// stored coordinate in the catalog is one this predicate reproduces** — which is
+/// three conditions, not one, and [`stored_value_problem`] is where each is ruled
+/// on. [`TagLookups::assignment_coordinates`] reads them and this function checks
+/// them FIRST, for the whole catalog, before any resolution; see the ⚠ block on
+/// `egret_policy::tag_assignment_coordinates_via` for the fail-open that closes
+/// and why no mapping over the resolver's RESULT could close it instead.
+///
+/// ⚠ **The earlier version of this paragraph named ONE condition** ("provided
+/// every stored row is at one of those two levels"), and the review measured two
+/// more of the same shape — a `('sales','*','')` row and a `('SALES','ORDERS','')`
+/// row are both `ANCESTOR`-admitted on the real jar and neither was returned or
+/// counted. A proviso is only worth what its enumeration covers, which is why the
+/// enumeration now lives in one function with a test per class rather than in a
+/// SQL `WHERE` clause nothing here can run.
 ///
 /// With the precondition holding, a target that names no schema or no table is
 /// `Some(empty)` rather than a refusal, and that is an argument rather than a
@@ -1853,9 +1863,11 @@ impl ClearanceLookups for sqlx::PgConnection {
 /// | input | read | ruling |
 /// |---|---|---|
 /// | `target.catalog_id` | **yes** | scopes both reads, and scopes them identically (`a.warehouse_id = c.warehouse_id` for `c.id = $1`), so a row the gate counts is a row the resolver could return |
-/// | `target.schema` / `target.table` | **yes** | `None` on either ⇒ `Some(empty)`, argued above. `Some("")` is NOT special-cased: with the gate at zero no stored row has an empty `schema_name` or `table_name`, so an empty request value matches nothing and the empty set is the right answer — the one shape that could arrive, a `('', '')` row, is exactly what the gate refuses on |
+/// | `target.schema` / `target.table` — PRESENCE | **yes** | `None` on either ⇒ `Some(empty)`, argued above. `Some("")` is NOT special-cased: with the gate clear no stored coordinate has an empty `schema_name` or `table_name`, so an empty request value matches nothing and the empty set is the right answer — the one shape that could arrive, a `('', '')` row, is exactly what [`StoredValueProblem::EmptyLevel`] refuses on |
+/// | `target.schema` / `target.table` / `target.column` — the VALUES' CASE | **yes, and ruled on since fix round 1** | the resolver folds both sides, so `SALES` against a row stored `sales` resolves. ⚠ This row did not exist, and its absence was the review's Critical: the values reach `request_resource` verbatim from `ScopePicker`'s free-text inputs, so differing case is what ORDINARY use produces — more reachable than the empty-string class that was gated |
+/// | `target.*` — the VALUES' SYNTAX | **no, and that is a ruling** | a `*` or `?` the OPERATOR types is a request value, and Ranger matches a request value literally: the wildcard lives on the POLICY side of `getMatchType`, never the request side. So a typed `*` names a resource called `*` and resolves nothing, which is correct. The syntax that matters is the STORED side's, ruled on in [`stored_value_problem`] |
 /// | `target.column` | **yes** | `None` ⇒ `""`, which is migration 0081's "the table itself" convention in the REQUEST position, and is the value `resolved_tags_for_resource_via` is documented against |
-/// | `rows_outside_the_rolled_up_levels` | **yes, first** | non-zero ⇒ `None`. Per CATALOG and not per request: the row that breaks the equivalence is one the resolver cannot return, so there is nothing per-request to test it against |
+/// | `assignment_coordinates` + [`stored_value_problem`] | **yes, first** | any problem ⇒ `None`. Per CATALOG and not per request: the coordinate that breaks the equivalence is one the resolver cannot return, so there is nothing per-request to test it against |
 /// | `egret_policy::ResolvedTag::name` | **yes** | `tags.name`, which is what `from_assignments` puts in the wire tag's `type` and therefore what the engine matches. Never `tags.key` — live they differ for one of three tags |
 /// | `egret_policy::ResolvedTag::match_type` | **yes** | both the evaluator's admission test AND, here, the only surviving record of WHICH level the attachment was at — see [`attachment_for`] |
 /// | the engine (Trino / StarRocks) | **no** | and that is the ruling, not an omission: `ServiceTags::from_assignments` writes the keys `catalog`/`schema`/`table`/`column` for every service type. See [`attachment_for`] |
@@ -1869,10 +1881,15 @@ async fn resolved_tags_for_target<L: TagLookups + Send>(
     // THE GATE, first and before anything can return a set. Nothing below may
     // move above it: every argument on this function for why the resolution is
     // enricher-equivalent assumes it passed.
+    //
+    // `any`, not a count: one offending coordinate anywhere in the catalog is
+    // enough, because the resolver's predicate is the same predicate for every
+    // target in it.
     if conn
-        .rows_outside_the_rolled_up_levels(target.catalog_id)
+        .assignment_coordinates(target.catalog_id)
         .await?
-        > 0
+        .iter()
+        .any(|(schema, table, column)| stored_value_problem(schema, table, column).is_some())
     {
         return Ok(None);
     }
@@ -1891,6 +1908,101 @@ async fn resolved_tags_for_target<L: TagLookups + Send>(
         .map(|tag| attachment_for(tag, schema, table, column))
         .collect::<Option<Vec<_>>>()
         .map(UnenrichedTags::new))
+}
+
+/// Why one stored `catalog_tag_assignments` coordinate is outside the population
+/// `resolved_tags_for_resource_via` reproduces — see [`stored_value_problem`].
+///
+/// Each variant is a shape `ServiceTags::from_assignments` would put on the tag
+/// wire and `RangerTagEnricher.findMatchingTags` would ADMIT for a request the
+/// resolver's predicate does not return it for. They are kept apart because they
+/// have different remedies and because collapsing them into "malformed" would
+/// hide which test covers which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoredValueProblem {
+    /// An empty `schema_name` or `table_name`.
+    ///
+    /// `from_assignments` OMITS an empty level, so `('sales','','')` ships as
+    /// `resourceElements = {catalog, schema}` — measured `ANCESTOR` of
+    /// `hive.sales.orders.email` on the real jar — while the resolver's equality
+    /// on `table_name` can never return it. (`column_name = ''` is NOT this: it
+    /// is migration 0081's documented table-level sentinel and the resolver's own
+    /// second arm handles it.)
+    EmptyLevel,
+    /// A `*` or `?` anywhere in a stored value.
+    ///
+    /// `trino.json`'s four resources declare `{"wildCard": true}`, so the
+    /// enricher's matcher runs `FilenameUtils.wildcardMatch` and `('sales','*','')`
+    /// is `ANCESTOR` of `hive.sales.orders.email`, `('sales','ord*','')` likewise,
+    /// `('sales','orders','ema*')` is `SELF` — all measured, none returned by an
+    /// equality predicate.
+    ///
+    /// **This one DECLINES rather than being reproduced, and that is the trade.**
+    /// `wildcardMatch` is a token-based backtracking algorithm over `*`/`?`;
+    /// SQL `LIKE` is not that algorithm (`%`/`_`, no `?`, different escaping), and
+    /// standing up a second matcher implementation is the trade this package has
+    /// declined three times — the tag trie, the candidate rule, T4. So the state
+    /// is detected and refused, fail-closed, with the page naming it.
+    WildcardMetacharacter,
+    /// A byte outside `[\x20-\x7E]` in a stored value.
+    ///
+    /// The resolver folds case with Postgres `lower()`; the matcher folds with
+    /// Java `StringUtils.equalsIgnoreCase`, i.e. a per-character
+    /// `toUpperCase`/`toLowerCase` pair. **The two are identical over ASCII and
+    /// not provably identical outside it**: `lower()` is collation-driven full
+    /// Unicode case mapping, which can map one character to several and depends on
+    /// the database's collation, while Java's is per-character and locale-free.
+    /// Neither direction of a disagreement is safe — too wide invents a tag, too
+    /// narrow misses one — so a non-ASCII stored value declines instead of being
+    /// compared under a fold nobody has measured.
+    ///
+    /// Carried cost, stated because it is real: a tag assignment on a table with
+    /// a non-ASCII name makes every `explain` in that catalog answer
+    /// `TagsUnresolved` on profiles with a tag block. **Falsified by** a measured
+    /// equivalence (a probe running both folds over a character corpus), which
+    /// would retire this variant.
+    NonAscii,
+}
+
+/// The ruling on ONE stored coordinate: `None` when
+/// `resolved_tags_for_resource_via`'s predicate reproduces the enricher for it,
+/// and the reason otherwise.
+///
+/// # ⚠ Enumerated: every property of a stored value that reaches the comparison
+///
+/// A predicate the enricher applies and this list does not rule on is a
+/// fail-open, which is exactly how fix round 1 arrived: the first version of this
+/// gate ruled on emptiness alone and the review measured two more classes. **A
+/// new matcher option in `trino.json` or `starrocks.json`, or a new level in
+/// `from_assignments`, is a new row here.**
+///
+/// | property of the stored value | the matcher's rule | here |
+/// |---|---|---|
+/// | emptiness of `schema` / `table` | `from_assignments` omits the level; the shorter resource is an ANCESTOR the enricher admits | [`StoredValueProblem::EmptyLevel`] |
+/// | emptiness of `column` | the same omission, but it is migration 0081's documented table-level sentinel and the resolver's second arm IS that ANCESTOR case | **ruled fine** — the one emptiness that is reproduced |
+/// | `*` / `?` | `{"wildCard": true}` ⇒ `FilenameUtils.wildcardMatch` | [`StoredValueProblem::WildcardMetacharacter`] |
+/// | letter case | `{"ignoreCase": true}` ⇒ `equalsIgnoreCase` | **reproduced, not refused** — the resolver folds both sides, measured on the Ranger side by `EgretTagAttachmentMatchTypeTest` |
+/// | non-ASCII characters | `equalsIgnoreCase`'s per-character fold, which Postgres `lower()` does not provably equal | [`StoredValueProblem::NonAscii`] |
+/// | leading / trailing whitespace | none: the matcher compares the value as given, and so does the predicate — `' sales'` matches `' sales'` and nothing else on BOTH sides | **ruled fine**, and it is a ruling rather than an omission |
+/// | length, `NULL` | `NOT NULL` on all three columns (migration 0081); the matcher has no length rule | **ruled fine** |
+/// | `isExcludes` / `isRecursive` | not expressible: `from_assignments` writes `{"values": [v]}` and no flag, so the matcher's defaults (`false`) are what the enricher gets | **ruled fine**, and `ServiceTags::from_assignments` is what makes it so |
+///
+/// The REQUEST side is not this function's: see the `target.*` rows on
+/// [`resolved_tags_for_target`]. A `*` an operator types is a literal there,
+/// because `getMatchType` takes the wildcard from the POLICY position only.
+fn stored_value_problem(schema: &str, table: &str, column: &str) -> Option<StoredValueProblem> {
+    if schema.is_empty() || table.is_empty() {
+        return Some(StoredValueProblem::EmptyLevel);
+    }
+    for value in [schema, table, column] {
+        if value.contains(['*', '?']) {
+            return Some(StoredValueProblem::WildcardMetacharacter);
+        }
+        if !value.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
+            return Some(StoredValueProblem::NonAscii);
+        }
+    }
+    None
 }
 
 /// `egret_policy::ResolvedTag` → `egret_ranger_eval::eval::ResolvedTag`: two
@@ -1998,12 +2110,14 @@ fn attachment_for(
 /// Both methods are `-> impl Future + Send` rather than `async fn` for the reason
 /// on [`ClearanceLookups`]: the caller is an axum handler.
 trait TagLookups {
-    /// `assignments_outside_rolled_up_levels_via` — how many of this catalog's
-    /// tag assignments sit at a level the resolver's predicate cannot roll up.
-    fn rows_outside_the_rolled_up_levels(
+    /// `tag_assignment_coordinates_via` — every distinct
+    /// `(schema_name, table_name, column_name)` this catalog's tag assignments
+    /// carry. The RULING on them is [`stored_value_problem`]'s, in Rust, so that
+    /// it is testable and mutable; this is the fact.
+    fn assignment_coordinates(
         &mut self,
         catalog_id: Uuid,
-    ) -> impl std::future::Future<Output = Result<i64, PermHttpError>> + Send;
+    ) -> impl std::future::Future<Output = Result<Vec<(String, String, String)>, PermHttpError>> + Send;
 
     /// `resolved_tags_for_resource_via` — the enricher-equivalent set for ONE
     /// resource, as `(tags.name, MatchType)` pairs.
@@ -2018,11 +2132,11 @@ trait TagLookups {
 
 /// The production implementation: the two store queries, unchanged.
 impl TagLookups for sqlx::PgConnection {
-    async fn rows_outside_the_rolled_up_levels(
+    async fn assignment_coordinates(
         &mut self,
         catalog_id: Uuid,
-    ) -> Result<i64, PermHttpError> {
-        Ok(assignments_outside_rolled_up_levels_via(self, catalog_id).await?)
+    ) -> Result<Vec<(String, String, String)>, PermHttpError> {
+        Ok(tag_assignment_coordinates_via(self, catalog_id).await?)
     }
 
     async fn resolved_tags(
@@ -2368,7 +2482,10 @@ mod wiring_tests {
 
 #[cfg(test)]
 mod tag_resolution_tests {
-    use super::{attachment_for, resolved_tags_for_target, PermHttpError, Scope, TagLookups};
+    use super::{
+        attachment_for, resolved_tags_for_target, stored_value_problem, PermHttpError, Scope,
+        StoredValueProblem, TagLookups,
+    };
     use egret_ranger_eval::resource::MatchType;
     use uuid::Uuid;
 
@@ -2376,16 +2493,19 @@ mod tag_resolution_tests {
 
     /// Stands in for the two store reads, and records both.
     struct FakeTagLookups {
-        broad_rows: i64,
+        coordinates: Vec<(String, String, String)>,
         resolved: Vec<egret_policy::ResolvedTag>,
         gate_asked: Vec<Uuid>,
         resolved_asked: Vec<(Uuid, String, String, String)>,
     }
 
     impl FakeTagLookups {
-        fn new(broad_rows: i64, resolved: &[(&str, MatchType)]) -> Self {
+        fn new(coordinates: &[(&str, &str, &str)], resolved: &[(&str, MatchType)]) -> Self {
             Self {
-                broad_rows,
+                coordinates: coordinates
+                    .iter()
+                    .map(|(s, t, c)| ((*s).to_string(), (*t).to_string(), (*c).to_string()))
+                    .collect(),
                 resolved: resolved
                     .iter()
                     .map(|(name, match_type)| egret_policy::ResolvedTag {
@@ -2397,15 +2517,22 @@ mod tag_resolution_tests {
                 resolved_asked: Vec::new(),
             }
         }
+
+        /// One ordinary column-level assignment: the coordinate every test that
+        /// is not about the gate wants, so that "the gate let it through" is not
+        /// the vacuous case of there being nothing stored.
+        fn clean(resolved: &[(&str, MatchType)]) -> Self {
+            Self::new(&[("sales", "orders", "email")], resolved)
+        }
     }
 
     impl TagLookups for FakeTagLookups {
-        async fn rows_outside_the_rolled_up_levels(
+        async fn assignment_coordinates(
             &mut self,
             catalog_id: Uuid,
-        ) -> Result<i64, PermHttpError> {
+        ) -> Result<Vec<(String, String, String)>, PermHttpError> {
             self.gate_asked.push(catalog_id);
-            Ok(self.broad_rows)
+            Ok(self.coordinates.clone())
         }
 
         async fn resolved_tags(
@@ -2442,40 +2569,144 @@ mod tag_resolution_tests {
             .collect()
     }
 
-    /// **The fail-open this seam exists for.** One stored assignment with an
-    /// empty `schema_name` or `table_name` ships as a service resource the
-    /// enricher treats as an ANCESTOR of resources the exact-match resolver
-    /// never returns it for — so the resolved set would be MISSING a tag the
-    /// engine is enforcing, and an empty set is a licence to skip the tag phase.
-    /// Deleting the gate call, or weakening `> 0`, makes this test report a tag
-    /// set where it must report "did not resolve".
+    /// **The fail-open this seam exists for — all three classes of it.**
+    ///
+    /// Each row below is a stored coordinate the enricher's matcher ADMITS for the
+    /// target `catalog/sales/orders/email` and the resolver's equality predicate
+    /// can never return, so passing the resolved set would pass a set MISSING a tag
+    /// the engine enforces — and an empty set is the licence to skip the tag phase
+    /// entirely. Every one of them is measured on the real jar: the first by Task
+    /// 7's own probe, the wildcards and the mixed case by fix round 1's review and
+    /// now by `tests/ranger/.../EgretTagAttachmentMatchTypeTest.java`.
+    ///
+    /// ⚠ **Fix round 1 added the wildcard and non-ASCII rows.** The first version
+    /// of this gate ruled on emptiness alone, which is the LESS reachable class
+    /// (`ScopePicker` sends `undefined` for an empty input, so the form cannot
+    /// produce it), while a `*` in a stored value is one `PUT …/resource-tags`
+    /// away. Deleting a class from `stored_value_problem`, or dropping the gate
+    /// call, makes this test report a tag set where it must report "did not
+    /// resolve".
     #[tokio::test]
-    async fn one_row_outside_the_rolled_up_levels_declines_the_whole_resolution() {
-        let mut lookups = FakeTagLookups::new(1, &[("pii", MatchType::Self_)]);
-        let got = resolved_tags_for_target(&mut lookups, &target(Some("s"), Some("t"), Some("c")))
+    async fn every_unreproducible_stored_coordinate_declines_the_whole_resolution() {
+        for (coordinate, why) in [
+            (
+                ("sales", "", ""),
+                "a schema-level row ships as {catalog, schema}: ANCESTOR",
+            ),
+            (
+                ("", "", ""),
+                "a catalog-level row ships as {catalog}: ANCESTOR",
+            ),
+            (
+                ("sales", "*", ""),
+                "wildCard: true makes `*` match `orders`: ANCESTOR",
+            ),
+            (
+                ("sales", "ord*", ""),
+                "a wildcard PREFIX matches too: ANCESTOR",
+            ),
+            (("*", "*", ""), "both levels wildcarded: ANCESTOR"),
+            (
+                ("sales", "order?", ""),
+                "`?` is the other metacharacter: ANCESTOR",
+            ),
+            (
+                ("sales", "orders", "ema*"),
+                "a wildcarded COLUMN is SELF, not ancestor",
+            ),
+            (
+                ("sales", "orders", "e\u{0301}mail"),
+                "a fold Postgres and Java need not agree on",
+            ),
+        ] {
+            let mut lookups = FakeTagLookups::new(&[coordinate], &[("pii", MatchType::Self_)]);
+            let got = resolved_tags_for_target(
+                &mut lookups,
+                &target(Some("sales"), Some("orders"), Some("email")),
+            )
             .await
             .expect("no error");
-        assert!(
-            got.is_none(),
-            "a row the resolver cannot roll up must decline the narrowing, got {got:?}"
+            assert!(
+                got.is_none(),
+                "{coordinate:?} must decline the narrowing ({why}), got {got:?}"
+            );
+            assert_eq!(
+                lookups.gate_asked,
+                vec![Uuid::parse_str(CATALOG).unwrap()],
+                "the gate is asked, and asked about the target's catalog"
+            );
+            assert!(
+                lookups.resolved_asked.is_empty(),
+                "nothing may be resolved once the equivalence is known not to hold: {coordinate:?}"
+            );
+        }
+    }
+
+    /// **The class that must NOT be gated, and this is the test that keeps it
+    /// that way.** The matcher's `ignoreCase: true` is REPRODUCED — the resolver
+    /// folds both sides — so a row stored `SALES`/`ORDERS`/`EMAIL` is a coordinate
+    /// the predicate handles, not one it declines.
+    ///
+    /// Gating it instead would have been the obvious fourth class and it would be
+    /// wrong in a way no fail-open test catches: `ScopePicker` renders the three
+    /// levels as free-text inputs and `request_resource` inserts them verbatim, so
+    /// differing case is what ORDINARY use produces. A steward who typed `SALES`
+    /// would get "cannot decide" for a question egret can answer.
+    #[tokio::test]
+    async fn differing_case_is_reproduced_rather_than_declined() {
+        let mut lookups = FakeTagLookups::new(
+            &[("SALES", "ORDERS", "EMAIL")],
+            &[("pii", MatchType::Self_)],
         );
+        let got = resolved_tags_for_target(
+            &mut lookups,
+            &target(Some("sales"), Some("orders"), Some("email")),
+        )
+        .await
+        .expect("no error")
+        .expect("a case difference is not a reason to decline");
+        assert_eq!(got.as_slice().len(), 1, "and the tag still comes through");
         assert_eq!(
-            lookups.gate_asked,
-            vec![Uuid::parse_str(CATALOG).unwrap()],
-            "the gate is asked, and asked about the target's catalog"
-        );
-        assert!(
-            lookups.resolved_asked.is_empty(),
-            "nothing may be resolved once the equivalence is known not to hold"
+            lookups.resolved_asked.len(),
+            1,
+            "the resolver is asked — the fold is ITS job, not the gate's"
         );
     }
 
+    /// The ruling, per class, on the function that owns it. The end-to-end tests
+    /// above drive it through `resolved_tags_for_target`; these name the class, so
+    /// that a mutation which collapses two classes into one is visible as such.
+    #[test]
+    fn stored_value_problem_rules_on_each_class_by_name() {
+        use StoredValueProblem::*;
+        assert_eq!(stored_value_problem("sales", "orders", "email"), None);
+        // `column_name = ''` is migration 0081's table-level sentinel and the
+        // resolver's own second arm — the one emptiness that is REPRODUCED.
+        assert_eq!(stored_value_problem("sales", "orders", ""), None);
+        assert_eq!(stored_value_problem("", "orders", ""), Some(EmptyLevel));
+        assert_eq!(stored_value_problem("sales", "", ""), Some(EmptyLevel));
+        assert_eq!(
+            stored_value_problem("sal*s", "orders", ""),
+            Some(WildcardMetacharacter)
+        );
+        assert_eq!(
+            stored_value_problem("sales", "orders", "ema?l"),
+            Some(WildcardMetacharacter)
+        );
+        assert_eq!(stored_value_problem("sales", "ordérs", ""), Some(NonAscii));
+        // Case is NOT a problem: it is reproduced by the resolver's fold.
+        assert_eq!(stored_value_problem("SALES", "ORDERS", "EMAIL"), None);
+        // Whitespace is NOT a problem: both sides compare the value as given.
+        assert_eq!(stored_value_problem(" sales", "orders ", ""), None);
+    }
+
     /// The gate is the FIRST read, not a second opinion on a set already
-    /// fetched: with the gate clear the resolver is asked exactly once, with the
-    /// target's own four values and `column = ""` for a table-level target.
+    /// fetched: with every coordinate reproducible the resolver is asked exactly
+    /// once, with the target's own four values and `column = ""` for a
+    /// table-level target.
     #[tokio::test]
     async fn a_clear_gate_resolves_once_with_the_targets_own_levels() {
-        let mut lookups = FakeTagLookups::new(0, &[]);
+        let mut lookups = FakeTagLookups::clean(&[]);
         let got = resolved_tags_for_target(&mut lookups, &target(Some("s"), Some("t"), None))
             .await
             .expect("no error");
@@ -2500,10 +2731,8 @@ mod tag_resolution_tests {
     /// wire's values, not a `Default`.
     #[tokio::test]
     async fn self_maps_to_four_levels_and_ancestor_to_three() {
-        let mut lookups = FakeTagLookups::new(
-            0,
-            &[("pii", MatchType::Self_), ("ssn", MatchType::Ancestor)],
-        );
+        let mut lookups =
+            FakeTagLookups::clean(&[("pii", MatchType::Self_), ("ssn", MatchType::Ancestor)]);
         let got = resolved_tags_for_target(&mut lookups, &target(Some("s"), Some("t"), Some("c")))
             .await
             .expect("no error")
@@ -2542,7 +2771,7 @@ mod tag_resolution_tests {
     #[tokio::test]
     async fn a_target_above_the_table_narrows_to_the_empty_set() {
         for t in [target(None, None, None), target(Some("s"), None, None)] {
-            let mut lookups = FakeTagLookups::new(0, &[("pii", MatchType::Self_)]);
+            let mut lookups = FakeTagLookups::clean(&[("pii", MatchType::Self_)]);
             let got = resolved_tags_for_target(&mut lookups, &t)
                 .await
                 .expect("no error")
@@ -2560,8 +2789,9 @@ mod tag_resolution_tests {
     /// DOES return it — the predicate is an exact `schema_name = $2 AND
     /// table_name = $3`, so an empty request matches a row written empty. What
     /// keeps it out of the mapping is neither the query nor the schema: it is
-    /// `rows_outside_the_rolled_up_levels`, which counts exactly that row and
-    /// declines the whole resolution before any mapping happens. Nothing
+    /// `stored_value_problem`, which rules on exactly that coordinate
+    /// (`EmptyLevel`) and declines the whole resolution before any mapping
+    /// happens. Nothing
     /// constrains `explain`'s own `schema`/`table` strings — the handler's 400
     /// tests for an absent level, not an empty one — so this is reached by
     /// calling the mapping directly.
@@ -2604,7 +2834,7 @@ mod tag_resolution_tests {
             };
             assert!(attachment_for(&stored, "s", "t", "c").is_none(), "{mt:?}");
 
-            let mut lookups = FakeTagLookups::new(0, &[("ok", MatchType::Self_), ("bad", mt)]);
+            let mut lookups = FakeTagLookups::clean(&[("ok", MatchType::Self_), ("bad", mt)]);
             let got =
                 resolved_tags_for_target(&mut lookups, &target(Some("s"), Some("t"), Some("c")))
                     .await

@@ -214,6 +214,82 @@ public class EgretTagServiceResourceValidationTest {
         return resource;
     }
 
+    /**
+     * The same drop rule against {@code starrocks.json}, which is where it stops being inert.
+     *
+     * <p><b>SP4d-2b Task 7, Low 3.</b> This class measured the rule against {@code trino.json}
+     * only and reasoned about StarRocks through the mirror row
+     * {@code catalog,database,table,column} — a {@code database} key against the TRINO def. That
+     * is the right mechanism measured on the wrong def, and the claim that actually matters runs
+     * the other way: {@code ServiceTags::from_assignments} hard-codes the keys
+     * {@code catalog}/{@code schema}/{@code table}/{@code column} for EVERY service type
+     * ({@code download_tags} takes no engine argument), and {@code starrocks.json}'s middle level
+     * is {@code database} — there is no {@code schema} resource at all. So every attachment a
+     * StarRocks plugin downloads from egret names a level no hierarchy of its own def carries and
+     * is DROPPED, which makes every tag policy in that profile's block silently inert.
+     *
+     * <p>{@code egret-ranger-eval}'s {@code enriched_tags} reproduces that rather than hiding it,
+     * and {@code egret_perm_compile::routes::attachment_for} writes the wire's literal keys so
+     * that it can. Both of those are reasoning from THIS table, so the table has to exist in the
+     * committed harness rather than in a probe nobody will run again.
+     */
+    @Test
+    public void theStarRocksDefDropsEveryKeySetEgretActuallyWrites() throws Exception {
+        Map<String, String> expected = new LinkedHashMap<>();
+        // What `from_assignments` writes, for every engine: DROPPED here.
+        expected.put("catalog,schema,table,column", "dropped");
+        expected.put("catalog,schema,table", "dropped");
+        expected.put("catalog,schema", "dropped");
+        // The StarRocks vocabulary, which nothing in egret writes into a tag download.
+        expected.put("catalog,database,table,column", "kept");
+        expected.put("catalog,database", "kept");
+        // The subset test still applies: `catalog` alone is in the hierarchy.
+        expected.put("catalog", "kept");
+
+        RangerServiceDef def = starRocksServiceDef();
+        RangerServiceDefHelper helper = new RangerServiceDefHelper(def);
+        Method create = createMethod();
+
+        Map<String, String> measured = new LinkedHashMap<>();
+        for (String keys : expected.keySet()) {
+            measured.put(keys, invoke(create, serviceResource(keys), helper) == null ? "dropped" : "kept");
+        }
+
+        assertEquals(
+                "every key set containing `schema` must drop against the StarRocks def, and the "
+                        + "`database` ones must be kept — this is the table `enriched_tags` and "
+                        + "`attachment_for` both reason from",
+                expected,
+                measured);
+    }
+
+    private static RangerServiceDef starRocksServiceDef() throws Exception {
+        String json =
+                new String(
+                        Files.readAllBytes(
+                                Paths.get("../../crates/egret-policy/src/service-defs/starrocks.json")),
+                        "UTF-8");
+        RangerServiceDef def = JsonUtils.jsonToObject(json, RangerServiceDef.class);
+        assertNotNull("starrocks.json must parse through Ranger's own JsonUtils", def);
+        for (String name : Arrays.asList("catalog", "database", "table", "column")) {
+            assertNotNull(
+                    "the parsed def must carry `" + name + "`, or this table measures a stub",
+                    def.getResources().stream()
+                            .filter(r -> r.getName().equals(name))
+                            .findFirst()
+                            .orElse(null));
+        }
+        assertEquals(
+                "starrocks.json must have NO `schema` resource — the whole point of the rows above",
+                0,
+                def.getResources().stream().filter(r -> r.getName().equals("schema")).count());
+        // ⚠ RENAMED for the same reason as `trino-maskonly-synthetic` above: the
+        // `RangerServiceDefHelper` delegate cache is keyed on name + updateTime, so two defs that
+        // share a name share a delegate and this table would measure whichever was built first.
+        def.setName("starrocks-t7");
+        return def;
+    }
+
     private static RangerServiceDef trinoServiceDef() throws Exception {
         String json =
                 new String(

@@ -33,6 +33,14 @@
                  createRangerServiceResourceMatcher. The Rust side's
                  `service_resource_validates` reproduces this table. -->
             <include>EgretTagServiceResourceValidationTest.java</include>
+            <!-- SP4d-2b Task 7 fix round 1: measures the MatchType the enricher's
+                 matcher produces for one STORED assignment row, including the
+                 wildcard and differing-case rows whose absence from the resolver's
+                 predicate was the round's Critical. ⚠ This list is an allow-list,
+                 not a pattern: a new *Test.java that is not named here COMPILES AND
+                 NEVER RUNS, and the suite stays green — which is how this entry came
+                 to be added one run late. -->
+            <include>EgretTagAttachmentMatchTypeTest.java</include>
           </includes>
         </configuration>
       </plugin>

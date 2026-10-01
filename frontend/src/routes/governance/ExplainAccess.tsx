@@ -283,7 +283,12 @@ function causeScopeNote(c: WireUndecidableCause): string | null {
   const construct =
     c.kind === "envelope_construct" || c.kind === "policy_construct" ? c.construct : null;
   if (construct?.kind !== "tag_policies") return null;
-  return "This is not specific to your target: it is a property of the tag-policy download this profile received, so every access on every catalog this profile serves answers the same way until that download can be read.";
+  // ⚠ Worded for BOTH blocks it fires for (fix round 1, Low 4). It ended "until
+  // that download can be read", which is true of `unreadable` and false of
+  // `policies` — a block that WAS read. One note, two blocks: say the part that
+  // holds for both (it is a property of the download, not of the target) and
+  // leave the specific remedy to the sentence above, which names the block.
+  return "This is not specific to your target: it is a property of the tag-policy download this profile received, so every access on every catalog this profile serves answers the same way while that download is in this state.";
 }
 
 /**

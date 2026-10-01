@@ -43,7 +43,43 @@ tag policies reported as reaching nothing. Fixing the WRITER is a separate chang
 (per-engine level names in `from_assignments`, plus a decision about already-served
 tag versions).
 
-### Item B (NEW, Task 7): nothing constrains `explain`'s target strings
+### Item B (Task 7, WIDENED by fix round 1): nothing constrains what `catalog_tag_assignments` stores, and the gate now enumerates three classes to compensate
+
+**Fix round 1 found two more classes of the same fail-open**, both measured on the
+real jar by the review and now pinned in the harness
+(`tests/ranger/.../EgretTagAttachmentMatchTypeTest.java`). All four of
+`trino.json`'s levels declare `{"wildCard": true, "ignoreCase": true}`, so for the
+request `hive.sales.orders.email` the enricher ADMITS a row stored
+`('sales','*','')`, `('sales','ord*','')`, `('*','*','')`, `('sales','order?','')`,
+`('sales','orders','ema*')`, `('SALES','ORDERS','')` and
+`('SALES','ORDERS','EMAIL')` — and the resolver's literal, case-sensitive `=`
+returned none of them while the first version of the gate counted none of them.
+The two halves were fixed differently, on purpose:
+
+* **case is REPRODUCED** — `resolved_tags_for_resource_via` folds both sides. It
+  had to be reproduced rather than refused because this class comes out of
+  ORDINARY use: `ScopePicker` renders schema/table/column as free-text inputs and
+  `request_resource` inserts them verbatim, so a steward typing `SALES` would have
+  been told "cannot decide" for a question egret can answer. (Note the reachability
+  runs the opposite way from what the first round assumed: the empty-string class
+  it gated is **unreachable from the form**, which sends `undefined` for an empty
+  input.)
+* **wildcards and non-ASCII values DECLINE** — `stored_value_problem`
+  (`egret-perm-compile/src/routes.rs`) refuses the resolution for the whole
+  catalog. `FilenameUtils.wildcardMatch` is a backtracking token matcher and SQL
+  `LIKE` is not that algorithm; standing up a second matcher is the trade this
+  package has declined three times. Non-ASCII declines because Postgres `lower()`
+  and Java `equalsIgnoreCase` are identical over ASCII and not provably identical
+  outside it, and neither direction of a disagreement is safe.
+
+**A `CHECK` on `catalog_tag_assignments` retires the whole mechanism** — the three
+classes are exactly "the stored value is a non-empty, wildcard-free, ASCII
+literal". That is still the right end state, and still a data question (existing
+rows) rather than a Task 7 change. Unrepresentable beats unforgettable; a gate
+whose predicate enumerates the matcher's syntax is the shape that misses a class,
+which is precisely how this item got wider.
+
+### Item B2 (NEW, Task 7): nothing constrains `explain`'s target strings
 
 `ExplainRequest`'s `schema` / `table` / `column` are plain `Option<String>`. The
 handler's 400 refuses a level SKIP (`{schema: None, table: Some(_)}`) and nothing
@@ -115,7 +151,7 @@ admits for a tag request — while the resolver's exact `table_name = $3` can **
 return it**. So the set egret passes the evaluator is *missing a tag the engine
 enforces*, and an empty set is a licence to skip the tag phase: a **wrong confident
 verdict**, invisible to any inspection of the mapping's input. Task 7 added a gate
-(`assignments_outside_rolled_up_levels_via`) that declines while that count is
+(`tag_assignment_coordinates_via` + `stored_value_problem`) that declines while it is
 non-zero. **One `CHECK` on `catalog_tag_assignments` would retire the gate.**
 
 ### Item 0b: the differential gate never runs automatically
@@ -562,6 +598,12 @@ and a reader needs to know which is which.
 fail-open a surviving mutation found). Four things a reader of the steps above
 should know, because two of them correct the steps:
 
+0. **FIX ROUND 1 found that item 1 below was itself not sufficient.** The gate it
+   describes closed ONE of three classes; the wildcard and differing-case classes
+   were the same fail-open and the case class was reachable from the page's own
+   form. See open item B, which now carries all three and the two different fixes
+   they needed.
+
 1. **Step 1's "keep the shape refusal for anything else" is not sufficient**, and
    the insufficiency is a fail-open rather than an over-refusal. A row stored
    `('sales', '')` ships as a `{catalog, schema}` service resource, which the
@@ -570,8 +612,12 @@ should know, because two of them correct the steps:
    never return it. The resolved set would be MISSING a tag the engine enforces,
    and an empty set is a licence to skip the tag phase entirely. The shape refusal
    cannot see it: the row is not in the mapping's input. So
-   `assignments_outside_rolled_up_levels_via` counts exactly those rows per
-   catalog and `resolved_tags_for_target` declines before resolving anything.
+   `stored_value_problem` rules on exactly those coordinates per catalog
+   (`tag_assignment_coordinates_via` reads them) and `resolved_tags_for_target`
+   declines before resolving anything. Fix round 1 moved that ruling out of SQL
+   and into Rust, because a predicate in a `WHERE` clause can be neither
+   unit-tested nor mutated anywhere this branch can run — which is why its first
+   version's missing classes could not have been caught by a test either.
 2. **Step 1b, answered: nothing constrains them.** `explain`'s 400 tests for an
    ABSENT level, not an empty one, and `ExplainRequest`'s `schema`/`table`/
    `column` are plain `Option<String>` with no validator — `{"schema": "",
