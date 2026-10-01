@@ -230,6 +230,41 @@ pub struct AuditConfig {
     pub flush_interval_ms: u64,
 }
 
+/// `[apps]` — the Data Apps query gateway (`POST /api/apps/query`) and the
+/// per-marimo-session bearer tokens it accepts. Env: `EGRET_APPS__<KEY>`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppsConfig {
+    /// Row cap per gateway query. A request's own `max_rows` is clamped to it.
+    pub max_rows: usize,
+    /// Per-query engine timeout.
+    pub timeout_secs: u64,
+    /// An app token dies after this long unused (sliding).
+    pub session_idle_secs: u64,
+    /// An app token dies this long after minting, however busy.
+    pub session_absolute_secs: u64,
+    /// Gateway calls allowed per token per `rate_window_secs`.
+    pub rate_max: u32,
+    pub rate_window_secs: u64,
+}
+
+impl Default for AppsConfig {
+    fn default() -> Self {
+        Self {
+            max_rows: 10_000,
+            timeout_secs: 60,
+            session_idle_secs: 1_800,
+            session_absolute_secs: 28_800,
+            rate_max: 20,
+            rate_window_secs: 2,
+        }
+    }
+}
+
+/// Serde's fallback for an `[apps]` section a deployment's TOML predates.
+fn default_apps() -> AppsConfig {
+    AppsConfig::default()
+}
+
 /// The Data API's serving surface (P4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataApiConfig {
@@ -401,6 +436,9 @@ pub struct Config {
     /// deployment's TOML predates the section.
     #[serde(default = "default_starrocks")]
     pub starrocks: StarRocksSettings,
+    /// The Data Apps query gateway. Serde-defaulted like `data_api`.
+    #[serde(default = "default_apps")]
+    pub apps: AppsConfig,
 }
 
 /// `[starrocks]` — deployment-level overrides for how egret talks to
@@ -1329,6 +1367,7 @@ impl Default for Config {
             data_api: default_data_api(),
             workflow: default_workflow(),
             starrocks: default_starrocks(),
+            apps: default_apps(),
             audit: AuditConfig {
                 enabled: true,
                 retention_days: 90,
@@ -1429,6 +1468,36 @@ impl Config {
 #[allow(clippy::result_large_err)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apps_config_defaults() {
+        figment::Jail::expect_with(|_jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.apps,
+                AppsConfig {
+                    max_rows: 10_000,
+                    timeout_secs: 60,
+                    session_idle_secs: 1_800,
+                    session_absolute_secs: 28_800,
+                    rate_max: 20,
+                    rate_window_secs: 2,
+                }
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn apps_config_env_overrides() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_APPS__MAX_ROWS", "5");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.apps.max_rows, 5);
+            assert_eq!(cfg.apps.rate_max, 20, "unset keys keep their default");
+            Ok(())
+        });
+    }
 
     /// W5a: no plugin configuration by default -- which allows no image.
     #[test]
