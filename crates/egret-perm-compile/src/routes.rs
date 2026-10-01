@@ -866,7 +866,7 @@ async fn write_grant(
     // see [`confine_to_overlay_workspace`]. It lives here rather than in the three
     // handlers because this is the one implementation of a model write, which is
     // also why it takes the principal it has no other use for.
-    confine_to_overlay_workspace(&mut **tx, p, body.scope.catalog_id).await?;
+    confine_to_overlay_workspace(tx, p, body.scope.catalog_id).await?;
     if body.actions.is_empty() {
         return Err(PermHttpError::BadRequest(
             "a grant must name at least one action".into(),
@@ -916,7 +916,7 @@ async fn write_grant(
             // a grant can MOVE between catalogs, so a caller confined to one
             // workspace must also not be able to drag a *foreign* grant into its
             // own workspace — which is what confining only the body would allow.
-            confine_to_overlay_workspace(&mut **tx, p, old.scope.catalog_id).await?;
+            confine_to_overlay_workspace(tx, p, old.scope.catalog_id).await?;
             if !matches!(old.origin, GrantOrigin::Explicit) {
                 return Err(PermHttpError::BadRequest(
                     "this grant is derived from a workspace assignment and is owned by the \
@@ -1049,7 +1049,7 @@ async fn write_rule(
     p: &egret_core::Principal,
 ) -> Result<WriteOutcome, PermHttpError> {
     // Same containment, same position and same reason as [`write_grant`]'s.
-    confine_rule_selector(&mut **tx, p, &body.selector).await?;
+    confine_rule_selector(tx, p, &body.selector).await?;
     // `perm.rules.name` is `text NOT NULL UNIQUE` with no emptiness CHECK, and
     // the name is what every skip log, compile error and audit line identifies
     // the rule by. Refused here for the same reason a grant's empty `actions`
@@ -1067,7 +1067,7 @@ async fn write_rule(
             };
             // The patch's other end — a rule can be moved between selectors, so
             // see the twin comment in `write_grant`.
-            confine_rule_selector(&mut **tx, p, &old.selector).await?;
+            confine_rule_selector(tx, p, &old.selector).await?;
             affected_services_for_rule(tx, &old).await?
         }
         None => Vec::new(),
@@ -1278,7 +1278,7 @@ async fn delete_grant(
     };
     // The delete paths build no body, so the containment runs on the stored row —
     // see [`confine_to_overlay_workspace`].
-    confine_to_overlay_workspace(&mut *tx, &p, g.scope.catalog_id).await?;
+    confine_to_overlay_workspace(&mut tx, &p, g.scope.catalog_id).await?;
     let services = affected_services_for_grant(&mut tx, &g).await?;
     // Before the DELETE, never after — see `lock_services_in_tx`.
     lock_services_in_tx(&mut tx, &services).await?;
@@ -1453,7 +1453,7 @@ async fn delete_rule(
         return Err(PermHttpError::NotFound);
     };
     // Same as `delete_grant`'s.
-    confine_rule_selector(&mut *tx, &p, &r.selector).await?;
+    confine_rule_selector(&mut tx, &p, &r.selector).await?;
     let services = affected_services_for_rule(&mut tx, &r).await?;
     lock_services_in_tx(&mut tx, &services).await?;
     if !delete_rule_in_tx(&mut tx, id).await? {
