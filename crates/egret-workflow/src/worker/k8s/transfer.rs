@@ -34,7 +34,7 @@ use crate::storage::transfer::BLOCK;
 /// `storage::transfer::write_tar` is proven byte-identical to (W9a Task 5);
 /// uploads stream through `write_tar`. This file goes in Task 6.
 #[cfg(test)]
-pub fn pack(files: &BTreeMap<String, String>) -> Result<Vec<u8>, String> {
+pub fn pack(files: &BTreeMap<String, String>, mtime: u64) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for name in files.keys() {
@@ -49,11 +49,11 @@ pub fn pack(files: &BTreeMap<String, String>) -> Result<Vec<u8>, String> {
         }
     }
     for d in &dirs {
-        out.extend_from_slice(&header(d, 0, b'5', 0o755)?);
+        out.extend_from_slice(&header(d, 0, b'5', 0o755, mtime)?);
     }
     for (name, contents) in files {
         let bytes = contents.as_bytes();
-        out.extend_from_slice(&header(name, bytes.len() as u64, b'0', 0o644)?);
+        out.extend_from_slice(&header(name, bytes.len() as u64, b'0', 0o644, mtime)?);
         out.extend_from_slice(bytes);
         out.resize(out.len().next_multiple_of(BLOCK), 0);
     }
@@ -260,7 +260,7 @@ mod tests {
             ("a.txt".to_string(), "hello\n".to_string()),
             ("dir/sub/b.txt".to_string(), "x".repeat(700)),
         ]);
-        let tar = pack(&files).unwrap();
+        let tar = pack(&files, 0).unwrap();
         assert_eq!(tar.len() % BLOCK, 0);
         // Parent directories come first, then the files, in name order.
         let first = unpack_one(&tar, 1 << 20).unwrap();
@@ -279,10 +279,10 @@ mod tests {
     #[test]
     fn a_long_name_uses_the_ustar_prefix_and_an_impossible_one_is_refused() {
         let long = format!("{}/{}", "d".repeat(120), "f".repeat(90));
-        let tar = pack(&BTreeMap::from([(long.clone(), "z".to_string())])).unwrap();
+        let tar = pack(&BTreeMap::from([(long.clone(), "z".to_string())]), 0).unwrap();
         let h = &tar[BLOCK..2 * BLOCK];
         assert_eq!(name_of(h), long);
-        let err = pack(&BTreeMap::from([("f".repeat(101), String::new())])).unwrap_err();
+        let err = pack(&BTreeMap::from([("f".repeat(101), String::new())]), 0).unwrap_err();
         assert!(err.contains("too long"), "{err}");
     }
 
@@ -290,7 +290,7 @@ mod tests {
     fn an_empty_archive_is_no_entry_and_a_cut_one_is_an_error() {
         assert_eq!(unpack_one(&[], 10).unwrap(), None);
         assert_eq!(unpack_one(&[0u8; 1024], 10).unwrap(), None);
-        let tar = pack(&BTreeMap::from([("a".to_string(), "abc".to_string())])).unwrap();
+        let tar = pack(&BTreeMap::from([("a".to_string(), "abc".to_string())]), 0).unwrap();
         assert!(unpack_one(&tar[..BLOCK + 1], 10).is_err());
         let mut bad = tar.clone();
         bad[0] ^= 1;
@@ -303,13 +303,13 @@ mod tests {
         let mut tar = Vec::new();
         let name = "n".repeat(150);
         tar.extend_from_slice(
-            &header("././@LongLink", name.len() as u64 + 1, b'L', 0o644).unwrap(),
+            &header("././@LongLink", name.len() as u64 + 1, b'L', 0o644, 0).unwrap(),
         );
         let mut data = name.clone().into_bytes();
         data.push(0);
         data.resize(BLOCK, 0);
         tar.extend_from_slice(&data);
-        let mut link = header("short", 0, b'2', 0o777).unwrap();
+        let mut link = header("short", 0, b'2', 0o777, 0).unwrap();
         link[157..168].copy_from_slice(b"/etc/passwd");
         // Recompute the checksum for the edited header.
         link[148..156].copy_from_slice(b"        ");

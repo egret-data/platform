@@ -628,13 +628,6 @@ impl KubernetesRunner {
 
     async fn upload_once(&self, name: &str, cmds: &TaskCommands) -> Result<()> {
         let sources = cmds.tar_sources()?;
-        let bytes: u64 = sources
-            .values()
-            .map(|s| match s {
-                TarSource::Contents(c) => c.len() as u64,
-                TarSource::Stored(st) => st.size,
-            })
-            .sum();
         let out = self
             .exec_within(
                 name,
@@ -649,15 +642,10 @@ impl KubernetesRunner {
                 ],
                 Some(&sources),
                 64 * 1024,
-                upload_timeout(bytes),
+                Limit::Idle(UPLOAD_IDLE),
             )
             .await?;
-        if !out.success {
-            return Err(internal(
-                "extracting the input files in files-in",
-                out.stderr.trim(),
-            ));
-        }
+        extract_verdict(&out)?;
 
         // Kestra's `verifyFileUpload`: `wc -c < <file>` per file, compared
         // with what was sent.
@@ -849,12 +837,19 @@ impl KubernetesRunner {
         stdin: Option<&BTreeMap<String, TarSource<'_>>>,
         stdout_cap: usize,
     ) -> Result<ExecOut> {
-        self.exec_within(name, container, cmd, stdin, stdout_cap, EXEC_TIMEOUT)
-            .await
+        self.exec_within(
+            name,
+            container,
+            cmd,
+            stdin,
+            stdout_cap,
+            Limit::Total(EXEC_TIMEOUT),
+        )
+        .await
     }
 
-    /// [`exec`](Self::exec) under a given time limit -- the upload's grows
-    /// with the bytes it carries ([`upload_timeout`]).
+    /// [`exec`](Self::exec) under a given [`Limit`] -- the upload's is an
+    /// IDLE limit (fix round 1, I2): it runs as long as bytes keep moving.
     async fn exec_within(
         &self,
         name: &str,
@@ -862,19 +857,29 @@ impl KubernetesRunner {
         cmd: Vec<String>,
         stdin: Option<&BTreeMap<String, TarSource<'_>>>,
         stdout_cap: usize,
-        limit: Duration,
+        limit: Limit,
     ) -> Result<ExecOut> {
-        match tokio::time::timeout(
-            limit,
-            self.exec_inner(name, container, cmd, stdin, stdout_cap),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(_) => Err(internal(
-                &format!("exec in {container}"),
-                format!("no answer within {limit:?}"),
-            )),
+        let timed_out = |what: String| internal(&format!("exec in {container}"), what);
+        match limit {
+            Limit::Total(total) => match tokio::time::timeout(
+                total,
+                self.exec_inner(name, container, cmd, stdin, stdout_cap, None),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(_) => Err(timed_out(format!("no answer within {total:?}"))),
+            },
+            Limit::Idle(idle) => {
+                let progress = Progress::new();
+                let run = self.exec_inner(name, container, cmd, stdin, stdout_cap, Some(&progress));
+                match until_idle(run, &progress, idle).await {
+                    Some(r) => r,
+                    None => Err(timed_out(format!(
+                        "no byte moved for {idle:?} (the upload stalled)"
+                    ))),
+                }
+            }
         }
     }
 
@@ -885,6 +890,7 @@ impl KubernetesRunner {
         cmd: Vec<String>,
         stdin: Option<&BTreeMap<String, TarSource<'_>>>,
         stdout_cap: usize,
+        progress: Option<&Progress>,
     ) -> Result<ExecOut> {
         let ap = AttachParams::default()
             .container(container)
@@ -914,14 +920,25 @@ impl KubernetesRunner {
         let store = self.files.as_deref();
         let proc_ref = &proc;
         let write = async move {
-            let (Some(mut w), Some(files)) = (writer, stdin) else {
+            let (Some(w), Some(files)) = (writer, stdin) else {
                 return Ok(());
+            };
+            let mut w = ProgressWriter {
+                inner: w,
+                progress: progress.cloned(),
             };
             let wrote = match write_tar(&mut w, files, store).await {
                 Ok(()) => w.shutdown().await.map_err(TarError::Write),
                 Err(e) => Err(e),
             };
-            if wrote.is_err() {
+            if let Some(p) = progress {
+                p.touch();
+            }
+            // Our side stopped part-way (the author's object, or the store):
+            // `tar -x` would wait for the rest of the archive for ever. A
+            // WRITE failure is the other side ending -- it is not aborted, so
+            // its exit status still arrives and decides (fix round 1, I2).
+            if matches!(wrote, Err(TarError::Author(_) | TarError::Store(_))) {
                 proc_ref.abort();
             }
             wrote
@@ -938,18 +955,21 @@ impl KubernetesRunner {
         let status = if overflowed { None } else { status.await };
         let _ = proc.join().await;
         if !overflowed {
-            match wrote {
-                Ok(()) => {}
-                Err(TarError::Write(e)) => {
-                    return Err(internal("writing to the exec's stdin", e));
-                }
-                Err(e) => return Err(staging_error(e)),
-            }
+            judge_write(wrote, status.as_ref())?;
         }
         let success = status.as_ref().and_then(|s| s.status.as_deref()) == Some("Success");
+        let mut stderr = String::from_utf8_lossy(&stderr).into_owned();
+        if let Some(message) = status.as_ref().and_then(|s| s.message.as_deref()) {
+            if !success && !message.is_empty() {
+                if !stderr.is_empty() {
+                    stderr.push_str("; ");
+                }
+                stderr.push_str(message);
+            }
+        }
         Ok(ExecOut {
             stdout: out,
-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            stderr,
             success,
         })
     }
@@ -1430,12 +1450,127 @@ pub async fn sweep_orphans(
     Ok(deleted)
 }
 
-/// How long the upload exec may take: [`EXEC_TIMEOUT`], plus a second for
-/// every 8 MiB it carries -- a stored input may be up to
-/// `workflow.storage.max_file_bytes` (1 GiB by default), which a fixed two
-/// minutes would turn into a timeout, a worker error and a re-claim for ever.
-fn upload_timeout(bytes: u64) -> Duration {
-    EXEC_TIMEOUT + Duration::from_secs(bytes / (8 << 20))
+/// How long the upload may go without a byte moving before it is judged
+/// stalled (fix round 1, I2). Idle, not total: a 1 GiB stored input through
+/// the API server's exec takes as long as it takes, and a total limit would
+/// turn a slow-but-moving upload into a worker error and a re-claim for ever.
+const UPLOAD_IDLE: Duration = EXEC_TIMEOUT;
+
+/// An exec's time limit.
+#[derive(Clone, Copy, Debug)]
+enum Limit {
+    /// The whole exec.
+    Total(Duration),
+    /// No progress (a byte written to its stdin) for this long.
+    Idle(Duration),
+}
+
+/// When bytes last moved.
+#[derive(Clone, Debug)]
+struct Progress(std::sync::Arc<std::sync::Mutex<tokio::time::Instant>>);
+
+impl Progress {
+    fn new() -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(
+            tokio::time::Instant::now(),
+        )))
+    }
+    fn touch(&self) {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = tokio::time::Instant::now();
+    }
+    fn last(&self) -> tokio::time::Instant {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+/// An `AsyncWrite` that records [`Progress`] for every byte it accepts.
+struct ProgressWriter<W> {
+    inner: W,
+    progress: Option<Progress>,
+}
+
+impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for ProgressWriter<W> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let r = std::pin::Pin::new(&mut self.inner).poll_write(cx, buf);
+        if let std::task::Poll::Ready(Ok(n)) = &r {
+            if *n > 0 {
+                if let Some(p) = &self.progress {
+                    p.touch();
+                }
+            }
+        }
+        r
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// `fut`'s output, or `None` once `progress` has not moved for `idle`.
+async fn until_idle<F: std::future::Future>(
+    fut: F,
+    progress: &Progress,
+    idle: Duration,
+) -> Option<F::Output> {
+    tokio::pin!(fut);
+    loop {
+        let deadline = progress.last() + idle;
+        tokio::select! {
+            out = &mut fut => return Some(out),
+            _ = tokio::time::sleep_until(deadline) => {
+                if progress.last() + idle <= tokio::time::Instant::now() {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+/// What a failed write of the archive means, given how the exec ended (fix
+/// round 1, I2). Our own side stopping is [`staging_error`]'s split. A WRITE
+/// failure with a `Failure` status is the process in the pod ending (a
+/// `tar -x` that died): `Ok`, and its exit status decides, as for any
+/// command. Without a status the connection itself broke: egret's outage.
+fn judge_write(
+    wrote: std::result::Result<(), TarError>,
+    status: Option<&k8s_openapi::apimachinery::pkg::apis::meta::v1::Status>,
+) -> Result<()> {
+    match wrote {
+        Ok(()) => Ok(()),
+        Err(TarError::Write(_)) if status.and_then(|s| s.status.as_deref()) == Some("Failure") => {
+            Ok(())
+        }
+        Err(TarError::Write(e)) => Err(internal("writing to the exec's stdin", e)),
+        Err(e) => Err(staging_error(e)),
+    }
+}
+
+/// The verdict on `tar -x` in `files-in` (fix round 1, I2): the API server
+/// answered with the process's exit, so a failure is in the POD -- a full
+/// node disk, a name the helper's `tar` refuses -- and is the task's, as
+/// Docker's `classify` makes a `docker cp` the daemon answered. Calling it
+/// an outage would re-upload the same archive for ever, spending no attempt.
+fn extract_verdict(out: &ExecOut) -> Result<()> {
+    if out.success {
+        return Ok(());
+    }
+    Err(Error::InvalidInput(format!(
+        "the input files could not be extracted in the task pod ({FILES_IN}: tar -x failed): {}",
+        out.stderr.trim()
+    )))
 }
 
 fn internal(what: &str, e: impl std::fmt::Display) -> Error {
@@ -1901,6 +2036,125 @@ mod tests {
             took >= grace + CANCEL_WAIT_MARGIN - Duration::from_millis(100)
                 && took < grace + CANCEL_WAIT_MARGIN + Duration::from_secs(2),
             "{took:?}"
+        );
+    }
+
+    // ---- W9a Task 5 fix round 1, I2 ----------------------------------------
+
+    fn exec_status(status: &str) -> k8s_openapi::apimachinery::pkg::apis::meta::v1::Status {
+        k8s_openapi::apimachinery::pkg::apis::meta::v1::Status {
+            status: Some(status.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// A `tar -x` that died in the pod (the write broke because the process
+    /// ended, and the API server reported its Failure) is the TASK's error;
+    /// only a write with no status -- the connection broke -- is an outage.
+    #[test]
+    fn a_container_side_extract_failure_is_the_tasks_not_an_outage() {
+        let broke = || TarError::Write(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        // The write broke and the process FAILED: its exit decides...
+        judge_write(Err(broke()), Some(&exec_status("Failure"))).expect("the exit decides");
+        // ... and a failed extract is the task's failure, naming tar's words.
+        let out = ExecOut {
+            stdout: Vec::new(),
+            stderr: "tar: write error: No space left on device".into(),
+            success: false,
+        };
+        let err = extract_verdict(&out).expect_err("tar -x failed");
+        assert!(
+            matches!(&err, Error::InvalidInput(m) if m.contains("No space left on device")),
+            "{err:?}"
+        );
+        extract_verdict(&ExecOut {
+            stdout: Vec::new(),
+            stderr: String::new(),
+            success: true,
+        })
+        .expect("a successful extract");
+        // No status: the connection broke, egret's outage.
+        assert!(matches!(
+            judge_write(Err(broke()), None),
+            Err(Error::Internal(_))
+        ));
+        // Our own side stopping keeps staging_error's split.
+        assert!(matches!(
+            judge_write(
+                Err(TarError::Author("x".into())),
+                Some(&exec_status("Failure"))
+            ),
+            Err(Error::InvalidInput(_))
+        ));
+        assert!(matches!(
+            judge_write(Err(TarError::Store("x".into())), None),
+            Err(Error::Internal(_))
+        ));
+    }
+
+    /// A writer that accepts everything, slowly enough to be observed.
+    struct Sink;
+    impl tokio::io::AsyncWrite for Sink {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// The upload's limit is IDLE (scaled down here to real milliseconds): an
+    /// upload that keeps moving a byte every 100 ms runs 2 s -- nearly seven
+    /// times the 300 ms limit -- and finishes; one that stops moving is cut
+    /// once the limit passes with no byte.
+    #[tokio::test]
+    async fn a_slow_but_progressing_upload_is_not_timed_out_and_a_stalled_one_is() {
+        let idle = Duration::from_millis(300);
+        let progress = Progress::new();
+        let mut w = ProgressWriter {
+            inner: Sink,
+            progress: Some(progress.clone()),
+        };
+        let started = tokio::time::Instant::now();
+        let slow = async {
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                w.write_all(b"x").await.unwrap();
+            }
+            "finished"
+        };
+        assert_eq!(until_idle(slow, &progress, idle).await, Some("finished"));
+        assert!(started.elapsed() >= Duration::from_secs(2));
+
+        let progress = Progress::new();
+        let mut w = ProgressWriter {
+            inner: Sink,
+            progress: Some(progress.clone()),
+        };
+        let started = tokio::time::Instant::now();
+        let stalled = async {
+            w.write_all(b"x").await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            "never"
+        };
+        assert_eq!(until_idle(stalled, &progress, idle).await, None);
+        let took = started.elapsed();
+        assert!(
+            took >= idle && took < Duration::from_secs(5),
+            "cut after the idle limit: {took:?}"
         );
     }
 }

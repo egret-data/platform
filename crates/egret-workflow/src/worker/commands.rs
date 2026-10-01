@@ -2005,22 +2005,35 @@ impl DockerRunner {
             .map_err(|e| {
                 Error::Internal(anyhow::anyhow!("could not run `{} cp`: {e}", self.binary))
             })?;
+        // stderr is read BESIDE the write (fix round 1, M3): a `docker cp`
+        // that filled its stderr pipe before reading stdin would otherwise
+        // block, and the write with it. Kept to 64 KiB, the rest drained.
+        let stderr = child.stderr.take().expect("stderr piped");
+        let errs = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut kept = Vec::new();
+            let mut stderr = stderr;
+            let _ = (&mut stderr).take(64 * 1024).read_to_end(&mut kept).await;
+            let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+            kept
+        });
         let mut stdin = child.stdin.take().expect("stdin piped");
         let wrote = write_tar(&mut stdin, &sources, self.files.as_deref()).await;
-        // EOF for `docker cp`, whatever happened.
-        drop(stdin);
-        match wrote {
-            Ok(()) | Err(TarError::Write(_)) => {}
-            Err(e) => {
-                let _ = child.kill().await;
-                return Err(staging_error(e));
-            }
+        if let Err(e @ (TarError::Author(_) | TarError::Store(_))) = wrote {
+            // OUR side stopped part-way. `docker cp` is killed and reaped
+            // BEFORE its stdin closes: an end of file would hand it a
+            // cut-short archive to extract.
+            let _ = child.kill().await;
+            drop(stdin);
+            return Err(staging_error(e));
         }
-        let out = child.wait_with_output().await.map_err(io_err)?;
-        if !out.status.success() {
-            return Err(self
-                .classify("cp", &String::from_utf8_lossy(&out.stderr))
-                .await);
+        // EOF for `docker cp`. After a WRITE failure, `docker cp` stopped
+        // reading: its own exit, classified, says why.
+        drop(stdin);
+        let status = child.wait().await.map_err(io_err)?;
+        let err = errs.await.unwrap_or_default();
+        if !status.success() {
+            return Err(self.classify("cp", &String::from_utf8_lossy(&err)).await);
         }
         match wrote {
             // `docker cp` exited 0 having not read the whole archive.
@@ -2674,6 +2687,15 @@ pub(crate) fn relative_problem(rel: &str) -> Option<String> {
     if rel.starts_with('/') {
         return Some(format!(
             "{rel:?} is an absolute path; a file is named relative to {WORKING_DIR}"
+        ));
+    }
+    // W9a Task 5 fix round 1, M1: a NUL ends the name for every C-string
+    // reader (`tar`, the kernel) -- in a ustar prefix it would make
+    // `x\0/../..` read as something else than egret checked -- and no
+    // control character belongs in a file name a task is asked to read.
+    if rel.chars().any(char::is_control) {
+        return Some(format!(
+            "{rel:?} contains a control character; a file name may not"
         ));
     }
     if rel.split('/').any(|seg| seg == "..") {
@@ -4017,6 +4039,26 @@ mod tests {
 
     /// The pattern rules: `*`/`?` in the file name only; `**`, `[...]` and a
     /// wildcard directory are refused by name; the literal rules still hold.
+    /// W9a Task 5 fix round 1, M1: a NUL (or any control character) in a
+    /// name is refused -- a C-string reader stops at the NUL, so
+    /// `x\0/../../etc/passwd` would not be the name egret checked.
+    #[test]
+    fn a_control_character_in_a_file_name_is_refused() {
+        for bad in [
+            "a\0b",
+            "x\0/../../etc/passwd",
+            "a\nb.txt",
+            "tab\there",
+            "del\u{7f}",
+        ] {
+            let problem =
+                relative_problem(bad).unwrap_or_else(|| panic!("{bad:?} must be refused"));
+            assert!(problem.contains("control character"), "{problem}");
+        }
+        assert_eq!(relative_problem("plain name-1.txt"), None);
+        assert_eq!(relative_problem("d/caf\u{e9}.csv"), None);
+    }
+
     #[test]
     fn an_output_pattern_is_a_file_name_glob_and_nothing_wider() {
         assert_eq!(output_problem("*.csv"), None);
@@ -4778,6 +4820,185 @@ mod tests {
             "the dropped future left `docker cp` (pid {pid}) running"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- W9a Task 5 fix round 1: `docker cp -` --------------------------
+
+    /// A `docker` shim whose `cp` runs `cp_body` and whose `version` answers
+    /// (the daemon is up, so `classify` makes a failed `cp` the task's).
+    fn cp_shim(dir: &std::path::Path, cp_body: &str) -> String {
+        let shim = dir.join("docker-shim.sh");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 \x20 version) echo 28.4.0 ;;\n\
+                 \x20 cp) {cp_body} ;;\n\
+                 esac\n"
+            ),
+        )
+        .expect("write shim");
+        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o700);
+        }
+        std::fs::set_permissions(&shim, perms).expect("chmod");
+        shim.display().to_string()
+    }
+
+    /// An object store that answers every read, after `delay`, with an
+    /// unreachable-S3 error.
+    struct LateDown(std::time::Duration);
+
+    #[async_trait::async_trait]
+    impl egret_storage::ObjectStore for LateDown {
+        async fn put(
+            &self,
+            _: &str,
+            _: Vec<u8>,
+        ) -> std::result::Result<(), egret_storage::StorageError> {
+            unreachable!()
+        }
+        async fn get(&self, _: &str) -> std::result::Result<Vec<u8>, egret_storage::StorageError> {
+            unreachable!()
+        }
+        async fn delete(&self, _: &str) -> std::result::Result<(), egret_storage::StorageError> {
+            unreachable!()
+        }
+        async fn copy(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> std::result::Result<(), egret_storage::StorageError> {
+            unreachable!()
+        }
+        async fn list(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> std::result::Result<egret_storage::Listing, egret_storage::StorageError> {
+            unreachable!()
+        }
+        async fn get_stream(
+            &self,
+            _: &str,
+        ) -> std::result::Result<
+            Box<dyn tokio::io::AsyncBufRead + Send + Unpin>,
+            egret_storage::StorageError,
+        > {
+            tokio::time::sleep(self.0).await;
+            Err(egret_storage::StorageError::S3("connection refused".into()))
+        }
+    }
+
+    /// **A store failure part-way kills and reaps `docker cp` before its
+    /// stdin closes**: it never sees the end of a cut-short archive, and no
+    /// `docker cp` (nor its zombie) outlives the call.
+    #[tokio::test]
+    async fn a_store_failure_mid_copy_kills_docker_cp_before_its_stdin_closes() {
+        let dir = staging("cp-kill");
+        let pid = dir.join("pid");
+        let log = dir.join("log");
+        let shim = cp_shim(
+            &dir,
+            &format!(
+                "echo $$ > {pid}; cat > /dev/null; echo eof >> {log}",
+                pid = pid.display(),
+                log = log.display()
+            ),
+        );
+        let files = std::sync::Arc::new(crate::storage::FileStore {
+            store: std::sync::Arc::new(LateDown(std::time::Duration::from_millis(500))),
+            bucket: "egret-test".into(),
+            prefix: "workflow/".into(),
+            caps: crate::storage::Caps::default(),
+            retention_days: 30,
+        });
+        let runner = DockerRunner::with_binary(shim).with_files(files);
+        let cmds = TaskCommands {
+            stored_inputs: BTreeMap::from([(
+                "in.bin".to_string(),
+                StoredInput {
+                    uri: "kestra:///a/f/executions/x/in.bin".into(),
+                    object_uri: "s3://egret-test/x".into(),
+                    size: 3,
+                },
+            )]),
+            ..TaskCommands::default()
+        };
+        let err = runner
+            .copy_in(&cmds, "egret-run-x-1")
+            .await
+            .expect_err("the store is down");
+        assert!(matches!(err, Error::Internal(_)), "an outage: {err:?}");
+        let pid = std::fs::read_to_string(&pid).expect("the shim started");
+        let pid = pid.trim();
+        // Synchronously, before the runtime can reap anything else.
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .expect("ps");
+        let state = String::from_utf8_lossy(&ps.stdout).trim().to_string();
+        assert!(
+            state.is_empty(),
+            "`docker cp` (pid {pid}) outlived copy_in, state {state:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !log.exists(),
+            "`docker cp` saw the end of a cut-short archive: {:?}",
+            std::fs::read_to_string(&log)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A `docker cp` that stops reading and fails is classified, not an
+    /// outage**: the daemon answered, so its message is the task's.
+    #[tokio::test]
+    async fn a_docker_cp_that_fails_mid_archive_is_classified_like_any_docker_call() {
+        let dir = staging("cp-fail");
+        let shim = cp_shim(&dir, "echo 'Error: no space left on device' >&2; exit 1");
+        let runner = DockerRunner::with_binary(shim);
+        let cmds = TaskCommands {
+            // Over a pipe buffer, so the write itself fails.
+            input_files: BTreeMap::from([("big.txt".to_string(), "x".repeat(1 << 20))]),
+            ..TaskCommands::default()
+        };
+        let err = runner
+            .copy_in(&cmds, "egret-run-x-1")
+            .await
+            .expect_err("cp failed");
+        assert!(
+            matches!(&err, Error::InvalidInput(m) if m.contains("no space left on device")),
+            "{err:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Fix round 1, M3: a `docker cp` that writes a lot to stderr before it
+    /// reads stdin does not deadlock the copy.
+    #[tokio::test]
+    async fn a_chatty_docker_cp_does_not_deadlock_the_copy() {
+        let dir = staging("cp-chatty");
+        let shim = cp_shim(
+            &dir,
+            "head -c 300000 /dev/zero | tr '\\0' x >&2; cat > /dev/null",
+        );
+        let runner = DockerRunner::with_binary(shim);
+        let cmds = TaskCommands {
+            input_files: BTreeMap::from([("big.txt".to_string(), "x".repeat(1 << 20))]),
+            ..TaskCommands::default()
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            runner.copy_in(&cmds, "egret-run-x-1"),
+        )
+        .await
+        .expect("the copy must not deadlock on a full stderr pipe")
+        .expect("cp exited 0");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

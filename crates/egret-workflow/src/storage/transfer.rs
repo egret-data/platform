@@ -74,26 +74,46 @@ pub enum TarError {
 ///
 /// Every name is checked before the first byte is written, so an author's
 /// error never leaves half an archive behind it.
+///
+/// Every entry carries ONE modification time, this call's `now` (fix round
+/// 1, I1): W5a's `docker cp` of a staging directory carried real times, and
+/// Kestra's tar does; a 1970 mtime breaks readers such as Python's `zipfile`,
+/// which refuses times before 1980.
 pub async fn write_tar(
     out: &mut (dyn AsyncWrite + Send + Unpin),
     files: &BTreeMap<String, TarSource<'_>>,
     store: Option<&FileStore>,
 ) -> Result<(), TarError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    write_tar_at(out, files, store, now).await
+}
+
+/// [`write_tar`] with every entry's mtime `mtime` (seconds since the epoch).
+pub(crate) async fn write_tar_at(
+    out: &mut (dyn AsyncWrite + Send + Unpin),
+    files: &BTreeMap<String, TarSource<'_>>,
+    store: Option<&FileStore>,
+    mtime: u64,
+) -> Result<(), TarError> {
     let dirs = plan(files).map_err(TarError::Author)?;
     for d in &dirs {
-        let h = header(d, 0, b'5', 0o755).map_err(TarError::Author)?;
+        let h = header(d, 0, b'5', 0o755, mtime).map_err(TarError::Author)?;
         out.write_all(&h).await.map_err(TarError::Write)?;
     }
     for (name, source) in files {
         match source {
             TarSource::Contents(contents) => {
                 let bytes = contents.as_bytes();
-                let h = header(name, bytes.len() as u64, b'0', 0o644).map_err(TarError::Author)?;
+                let h = header(name, bytes.len() as u64, b'0', 0o644, mtime)
+                    .map_err(TarError::Author)?;
                 out.write_all(&h).await.map_err(TarError::Write)?;
                 out.write_all(bytes).await.map_err(TarError::Write)?;
                 pad(out, bytes.len() as u64).await?;
             }
-            TarSource::Stored(stored) => copy_stored(out, name, stored, store).await?,
+            TarSource::Stored(stored) => copy_stored(out, name, stored, store, mtime).await?,
         }
     }
     out.write_all(&ZEROS).await.map_err(TarError::Write)?;
@@ -108,6 +128,7 @@ async fn copy_stored(
     name: &str,
     stored: &StoredInput,
     store: Option<&FileStore>,
+    mtime: u64,
 ) -> Result<(), TarError> {
     let uri = &stored.uri;
     let Some(store) = store else {
@@ -130,7 +151,7 @@ async fn copy_stored(
         }
         Err(e) => return Err(TarError::Store(unavailable(uri, &e))),
     };
-    let h = header(name, stored.size, b'0', 0o644).map_err(TarError::Author)?;
+    let h = header(name, stored.size, b'0', 0o644, mtime).map_err(TarError::Author)?;
     out.write_all(&h).await.map_err(TarError::Write)?;
     let mut left = stored.size;
     while left > 0 {
@@ -225,7 +246,13 @@ fn plan(files: &BTreeMap<String, TarSource<'_>>) -> Result<BTreeSet<String>, Str
 }
 
 /// One ustar header block.
-pub(crate) fn header(name: &str, size: u64, kind: u8, mode: u32) -> Result<[u8; BLOCK], String> {
+pub(crate) fn header(
+    name: &str,
+    size: u64,
+    kind: u8,
+    mode: u32,
+    mtime: u64,
+) -> Result<[u8; BLOCK], String> {
     if size > MAX_USTAR_SIZE {
         return Err(format!(
             "the input file {name:?} is {size} bytes, over the {MAX_USTAR_SIZE} a ustar entry \
@@ -239,7 +266,7 @@ pub(crate) fn header(name: &str, size: u64, kind: u8, mode: u32) -> Result<[u8; 
     octal(&mut h[108..116], 0);
     octal(&mut h[116..124], 0);
     octal(&mut h[124..136], size);
-    octal(&mut h[136..148], 0);
+    octal(&mut h[136..148], mtime.min(MAX_USTAR_SIZE));
     h[156] = kind;
     h[257..263].copy_from_slice(b"ustar\0");
     h[263..265].copy_from_slice(b"00");
@@ -326,6 +353,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_tar_is_byte_identical_to_the_old_packer_for_contents() {
+        const MTIME: u64 = 1_700_000_000;
         let cases: Vec<BTreeMap<String, String>> = vec![
             BTreeMap::new(),
             BTreeMap::from([("a.txt".to_string(), "hello\n".to_string())]),
@@ -341,12 +369,16 @@ mod tests {
             ]),
         ];
         for files in cases {
-            let old = crate::worker::k8s::transfer::pack(&files).expect("the old packer");
+            // The old packer wrote mtime 0; both are given one fixed time.
+            let old = crate::worker::k8s::transfer::pack(&files, MTIME).expect("the old packer");
             let sources: BTreeMap<String, TarSource<'_>> = files
                 .iter()
                 .map(|(k, v)| (k.clone(), TarSource::Contents(v)))
                 .collect();
-            let new = tar_of(&sources, None).await.expect("write_tar");
+            let mut new = Vec::new();
+            write_tar_at(&mut new, &sources, None, MTIME)
+                .await
+                .expect("write_tar");
             assert_eq!(new, old, "the archive for {:?}", files.keys());
         }
     }
@@ -644,7 +676,7 @@ mod tests {
             out.is_empty(),
             "nothing is written before the names are checked"
         );
-        for bad in ["../x", "/etc/passwd", ""] {
+        for bad in ["../x", "/etc/passwd", "", "x\0/../../etc/passwd"] {
             let files = BTreeMap::from([(bad.to_string(), TarSource::Contents("y"))]);
             assert!(
                 matches!(tar_of(&files, None).await, Err(TarError::Author(_))),
@@ -655,7 +687,45 @@ mod tests {
         assert!(
             matches!(tar_of(&long, None).await, Err(TarError::Author(m)) if m.contains("too long"))
         );
-        assert!(header("x", MAX_USTAR_SIZE + 1, b'0', 0o644).is_err());
-        assert!(header("x", MAX_USTAR_SIZE, b'0', 0o644).is_ok());
+        assert!(header("x", MAX_USTAR_SIZE + 1, b'0', 0o644, 0).is_err());
+        assert!(header("x", MAX_USTAR_SIZE, b'0', 0o644, 0).is_ok());
+    }
+
+    /// Fix round 1, I1: every entry carries this archive's `now` -- one time
+    /// for all of them -- never 1970, which Python's `zipfile` refuses.
+    #[tokio::test]
+    async fn every_entry_carries_one_real_modification_time() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let tar = tar_of(
+            &BTreeMap::from([
+                ("a.txt".to_string(), TarSource::Contents("x")),
+                ("d/b.txt".to_string(), TarSource::Contents("y")),
+            ]),
+            None,
+        )
+        .await
+        .expect("write_tar");
+        let after = before + 60;
+        let mtimes: Vec<u64> = tar
+            .chunks(BLOCK)
+            .filter(|h| &h[257..262] == b"ustar")
+            .map(|h| {
+                let field = std::str::from_utf8(&h[136..147]).unwrap();
+                u64::from_str_radix(field, 8).unwrap()
+            })
+            .collect();
+        assert_eq!(mtimes.len(), 3, "d/, a.txt, d/b.txt");
+        // 1980-01-01, zipfile's floor.
+        const ZIP_EPOCH: u64 = 315_532_800;
+        for m in &mtimes {
+            assert!(*m >= before && *m <= after && *m >= ZIP_EPOCH, "{mtimes:?}");
+        }
+        assert!(
+            mtimes.windows(2).all(|w| w[0] == w[1]),
+            "one time: {mtimes:?}"
+        );
     }
 }
