@@ -852,6 +852,130 @@ async fn create_profile_makes_a_starrocks_service() {
     f.store.delete_service(svc.id).await.expect("cleanup");
 }
 
+/// SP4d debt Task 2 — **the reachable surface.** `POST /policies/services`
+/// stores `config` verbatim, so it is the one route that can hand a StarRocks
+/// profile a `tagService`. That profile would download tag attachments naming the
+/// resource level `schema`, which StarRocks' service-def does not have (its
+/// middle level is `database`), Ranger's own `RangerTagEnricher` drops every one
+/// of them, and every tag policy in the profile's `tagPolicies` block is
+/// SILENTLY inert — no masking, no row filtering, no error.
+///
+/// Asserted here as a 400 whose message NAMES the missing level (not merely
+/// "invalid"), and with the row absent afterwards: a refusal that still inserted
+/// would be the same silence with a nicer log line. The Trino arm is asserted in
+/// the same test so an over-refusal cannot hide behind the StarRocks one — that
+/// combination is exactly what `bind_trino_profile` writes on every engine
+/// create.
+#[tokio::test]
+async fn create_profile_refuses_a_tag_service_on_a_starrocks_profile() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sr_tagsvc", true).await;
+    egret_policy::seed_starrocks(&f.store)
+        .await
+        .expect("seed starrocks def");
+    egret_policy::seed_trino(&f.store)
+        .await
+        .expect("seed trino");
+    egret_policy::seed_tag(&f.store)
+        .await
+        .expect("seed tag def");
+
+    let tag_name = format!("tsg-{}", Uuid::new_v4().simple());
+    let tag_svc = f
+        .store
+        .create_service(&tag_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("create tag service");
+
+    let sr_name = format!("sr-tagsvc-{}", Uuid::new_v4().simple());
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies/services",
+                &token,
+                Some(serde_json::json!({
+                    "name": sr_name,
+                    "type": "starrocks",
+                    "config": { "tagService": tag_name },
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a starrocks profile carrying a tagService must be refused; body={body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("schema"),
+        "the 400 must name the level StarRocks lacks; body={body}"
+    );
+    assert!(
+        msg.contains("database"),
+        "the 400 must name StarRocks' actual middle level; body={body}"
+    );
+    assert!(
+        msg.contains("tagService"),
+        "the 400 must name the config key to remove; body={body}"
+    );
+    assert!(
+        f.store.get_service(&sr_name).await.is_err(),
+        "the refused profile must NOT have been inserted"
+    );
+
+    // Not an over-refusal: the Trino arm is the shape `bind_trino_profile` writes.
+    let trino_name = format!("tr-tagsvc-{}", Uuid::new_v4().simple());
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies/services",
+                &token,
+                Some(serde_json::json!({
+                    "name": trino_name,
+                    "type": "trino",
+                    "config": { "tagService": tag_name },
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "trino + tagService; body={body}");
+    let trino_svc = f.store.get_service(&trino_name).await.expect("created");
+    f.store.delete_service(trino_svc.id).await.expect("cleanup");
+
+    // And a StarRocks profile with NO tagService still creates.
+    let sr_ok = format!("sr-plain-{}", Uuid::new_v4().simple());
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies/services",
+                &token,
+                Some(serde_json::json!({ "name": sr_ok, "type": "starrocks" })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "starrocks, no tagService; body={body}"
+    );
+    let sr_svc = f.store.get_service(&sr_ok).await.expect("created");
+    f.store.delete_service(sr_svc.id).await.expect("cleanup");
+    f.store.delete_service(tag_svc.id).await.expect("cleanup");
+}
+
 /// DELETE /policies/services/{service} — an unbound profile deletes, taking its
 /// policies with it via `ON DELETE CASCADE` (a seeded policy proves no FK 500).
 #[tokio::test]

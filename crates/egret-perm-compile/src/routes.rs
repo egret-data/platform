@@ -2431,11 +2431,15 @@ fn stored_value_problem(schema: &str, table: &str, column: &str) -> Option<Store
 /// profile therefore answers with its tag policies correctly reported as reaching
 /// nothing. **The defect is in the writer** — tag-selected masks and clearances
 /// cannot reach a StarRocks engine at all — and it is recorded in Task 7's report,
-/// not papered over here. (Nothing egret auto-binds puts a `tagService` on a
-/// StarRocks profile: `bind_trino_profile` is the only writer and
-/// `tag_assignments_for_service` resolves the owning profile with
-/// `tp.type = 'trino'`. An operator can still set the config by hand, which is
-/// why this path has to be right rather than merely unused.)
+/// not papered over here.
+///
+/// **SP4d debt Task 2 closed the writer.** `PolicyStore::create_service` refuses a
+/// non-Trino profile carrying a `tagService`, and migration 0163's `CHECK
+/// (config_jsonb ->> 'tagService' IS NULL OR type = 'trino')` refuses it for every
+/// `INSERT` and every `UPDATE`, from Rust or from `psql`. The `CHECK` is `NOT
+/// VALID`, so a row hand-created BEFORE 0163 survives unscanned — that row is the
+/// remaining population, and it is why this path still has to be right rather
+/// than merely unused.
 ///
 /// # ⚠ Enumerated: the four fields with no column to come from
 ///

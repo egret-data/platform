@@ -7364,6 +7364,7 @@
           "policy-admin"
         ],
         "summary": "POST /policies/services — create a policy profile (a Ranger service\ninstance) of the given type. The manual analogue of Trino provisioning's\nauto-bind, so a StarRocks profile can exist without an egret-provisioned\nengine.",
+        "description": "`config` is stored VERBATIM, which makes this the one reachable surface that\ncould pair a non-Trino `type` with a `tagService` — a state in which every tag\npolicy under the profile is silently inert, because the tag download writes the\nresource level `schema` and only Trino's service-def has one. `create_service`\nrefuses it (400); see `egret_policy::store`'s\n`refuse_tag_service_on_non_trino_profile` for the measurement and for the\nenumeration of every write path that can reach the state.",
         "operationId": "create_profile",
         "requestBody": {
           "content": {
@@ -7387,7 +7388,7 @@
             }
           },
           "400": {
-            "description": "Invalid type or missing name",
+            "description": "Invalid type, missing name, or a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert)",
             "content": {
               "application/json": {
                 "schema": {
@@ -31995,7 +31996,7 @@
             "description": "Ranger service type: `\"trino\"` or `\"starrocks\"`."
           },
           "config": {
-            "description": "Optional service config (e.g. StarRocks JDBC coordinates). Stored verbatim."
+            "description": "Optional service config (e.g. StarRocks JDBC coordinates). Stored verbatim.\n\nA `tagService` key is accepted only when `type` is `\"trino\"` — see the\nhandler's doc comment."
           }
         }
       },

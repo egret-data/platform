@@ -1,0 +1,57 @@
+-- 0163_tag_service_requires_schema_level.sql
+-- SP4d debt Task 2. A policy profile may carry a `tagService` only when its
+-- service-def declares a `schema` resource — which, of the three seeded defs, is
+-- `trino` alone.
+--
+-- WHY A CONSTRAINT AND NOT ONLY A RUST REFUSAL. `ServiceTags::from_assignments`
+-- (egret-policy-api) hard-codes the `resourceElements` keys
+-- `catalog`/`schema`/`table`/`column` and `download_tags` calls it with no engine
+-- argument at all, while `starrocks.json`'s middle level is `database`, not
+-- `schema`. Ranger's own `RangerTagEnricher.processServiceTags` therefore drops
+-- every attachment a StarRocks profile downloads
+-- (`createRangerServiceResourceMatcher` returns null when no hierarchy in the
+-- resource def contains every key), and every tag policy in that profile's
+-- `tagPolicies` block is SILENTLY inert: no masking, no row filtering, no error,
+-- nothing in a log.
+--
+-- `PolicyStore::create_service` refuses the INSERT direction and is the only
+-- `INSERT INTO policy.authz_services` in any `src/`. The OTHER direction —
+-- flipping an existing Trino profile's `type` to `starrocks` while it already
+-- carries a `tagService`, or writing a `tagService` onto an existing StarRocks
+-- profile — has NO Rust writer to guard: no `UPDATE` of `type` or of
+-- `config_jsonb` exists anywhere in `src/` (measured, not assumed; see the
+-- enumeration on `refuse_tag_service_on_non_trino_profile`). A refusal cannot be
+-- added to a statement that does not exist, and "nothing writes it today" is not
+-- a bound. This CHECK is the bound: it holds for every INSERT and every UPDATE,
+-- from Rust, from a route added later, from `psql`, and from a test's raw
+-- `sqlx::query`.
+--
+-- THE PREDICATE. `config_jsonb ->> 'tagService' IS NULL` is true both when the
+-- key is absent and when its value is JSON `null`, and `->>` on a non-object
+-- `config_jsonb` yields NULL rather than erroring. `carries_tag_service` in
+-- `egret-policy/src/store.rs` is written to this exact shape, deliberately: two
+-- guards that must agree, written to different shapes, is the defect this
+-- programme has produced four times. A Rust refusal keyed on `as_str()` beside a
+-- CHECK keyed on `->>` would let `{"tagService": 7}` pass the route and surface
+-- the constraint as a 500.
+--
+-- NOT VALID: new and updated rows are fully enforced (Postgres only skips the
+-- initial whole-table scan), so a deployment that already holds a hand-created
+-- violating row upgrades instead of failing the migration. Measured on the live
+-- PostgreSQL 16.15 with this exact expression: a violating INSERT is refused, so
+-- is `SET type = 'starrocks'` on a tagService-carrying row, so is writing a
+-- tagService onto an existing starrocks row — AND so is any other UPDATE of a
+-- pre-existing violating row, a `policy_version` bump included. That last one is
+-- the operational consequence and it is deliberate: such a profile's next policy
+-- write fails loudly, naming this constraint, instead of quietly extending a tag
+-- block that enforces nothing. The fix is to clear its `tagService`.
+-- `egret-ranger-eval`'s `enriched_tags` reproduces the drop for that row rather
+-- than hiding it, which is why that fail-closed path stays.
+--
+-- WHEN THE MAPPING LANDS. Teaching everything that emits Ranger resource keys to
+-- take the engine (or its service-def) as an input is separate work: block now,
+-- map later. That change replaces this constraint and the Rust refusal together.
+ALTER TABLE policy.authz_services
+    ADD CONSTRAINT authz_services_tag_service_needs_schema_level
+    CHECK (config_jsonb ->> 'tagService' IS NULL OR type = 'trino')
+    NOT VALID;

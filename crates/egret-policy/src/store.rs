@@ -152,6 +152,116 @@ fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
     Ok(())
 }
 
+/// The `policy.authz_services.config_jsonb` key that links a resource profile to
+/// the TAG service its tag-based masks / row filters / clearances live in. Written
+/// by `bind_trino_profile` (engine-mgmt) and read by `download_policies` (as the
+/// `tagPolicies` block), [`PolicyStore::usable_tag_service`] and
+/// [`services_and_tag_services_via`].
+pub const TAG_SERVICE_CONFIG_KEY: &str = "tagService";
+
+/// Whether `config` carries a [`TAG_SERVICE_CONFIG_KEY`] at all.
+///
+/// Deliberately the SAME predicate as Postgres' `config_jsonb ->> 'tagService'
+/// IS NOT NULL`: the key is present AND its value is not JSON `null`. Migration
+/// 0163's `CHECK` is written with that expression and this function is written
+/// to match it, because the one failure this guard keeps reproducing in this
+/// programme is **two guards that must agree, written to different shapes** —
+/// here that would be a refusal keyed on `as_str()` (what `download_policies`
+/// reads) beside a `CHECK` keyed on `->>` (which also answers for a number, a
+/// bool, an object): a config of `{"tagService": 7}` would then pass one and
+/// trip the other, and the route would answer 500 instead of 400.
+///
+/// `->>` on a non-object `config_jsonb` (a bare `5`, `"x"`, `[]`) yields NULL
+/// rather than erroring — measured on the live PostgreSQL 16.15 — and
+/// `Value::get` on a non-object likewise yields `None`, so the two agree there
+/// too.
+fn carries_tag_service(config: &Value) -> bool {
+    !matches!(config.get(TAG_SERVICE_CONFIG_KEY), None | Some(Value::Null))
+}
+
+/// SP4d debt Task 2: refuse a profile that pairs a non-Trino `type` with a
+/// [`TAG_SERVICE_CONFIG_KEY`]. Pure (no DB access): the fact under test is the
+/// type string and the config JSON alone.
+///
+/// # The measurement
+///
+/// [`crate::ranger::dto::ServiceTags::from_assignments`] (`egret-policy-api/src/dto.rs`)
+/// writes the `resourceElements` keys `catalog` / `schema` / `table` / `column`,
+/// hard-coded, and `download_tags` calls it with **no engine argument at all**.
+/// Of the three seeded service-defs only `trino.json` declares a `schema`
+/// resource; `starrocks.json`'s middle level is `database`
+/// (`['catalog','database','table','column','view', …]`, measured against the
+/// embedded JSON). Ranger's own `RangerTagEnricher.processServiceTags` calls
+/// `createRangerServiceResourceMatcher`, which returns null when no hierarchy of
+/// any policy type in the resource service-def contains every key in the
+/// attachment — so for a StarRocks profile **every** attachment is DROPPED
+/// (`EgretTagServiceResourceValidationTest` measures exactly that on the real
+/// jar). The profile downloads the attachments, the enricher throws them away,
+/// and every tag policy in its `tagPolicies` block is **silently inert**: no
+/// masking, no row filtering, no error, nothing in a log.
+///
+/// Scoped to "only `trino` may carry one" rather than "`starrocks` may not",
+/// because the property that makes it serveable is the def declaring a `schema`
+/// resource, and a FOURTH service-def added without one must be refused by
+/// default instead of inheriting the silence. The per-engine resource-level
+/// mapping (teaching everything that emits Ranger resource keys to take the
+/// engine, or its service-def, as an input) is separate, deliberately
+/// out-of-scope work: **block now, map later.** When it lands, this refusal and
+/// migration 0163's `CHECK` are what it replaces.
+///
+/// # ⚠ Enumerated: every write path that can produce the state
+///
+/// The state is one row of `policy.authz_services` whose `type` is not `trino`
+/// and whose `config_jsonb` carries a `tagService`. Measured by grepping every
+/// `INSERT`/`UPDATE`/`DELETE` touching `policy.authz_services` across the
+/// workspace, not by authorship:
+///
+/// | # | write path | writes `type`? | writes `config_jsonb`? | ruling |
+/// |---|---|---|---|---|
+/// | 1 | [`PolicyStore::create_service`] — the **only** `INSERT INTO policy.authz_services` in any `src/` | yes, caller-supplied | yes, caller-supplied | **guarded here**, first statement, before the insert |
+/// | 1a | ↳ `create_profile`, `POST /policies/services` (`admin/mod.rs`) — arbitrary `type` AND arbitrary `config`, stored verbatim | — | — | the reachable surface; refused 400 via `PolicyStoreError::BadRequest` |
+/// | 1a′ | ↳↳ the console's own caller, `frontend/src/api/policies.ts::createProfile(name, type)` | — | sends NO `config` at all | cannot reach the state; the population for 1a is a direct API caller (a script, `curl`, or a `config` field added to the form later) |
+/// | 1b | ↳ `bind_trino_profile` (`egret-engine-mgmt/src/engines.rs`) — `("{name}_tag", "tag", {})` then `(name, "trino", {"tagService": …})` | — | — | passes: the only config-carrying call is `trino` |
+/// | 1c | ↳ `PolicyPort::create_service` (`egret-policy-api`) — the cross-seam trait; `port_impl.rs` delegates straight to #1 | — | — | reached by #1's guard, no second copy |
+/// | 2 | [`PolicyStore::delete_service`] | no | no | removes rows; cannot produce the state |
+/// | 3 | the five `SET policy_version = policy_version + 1` bumps in this file, and `egret-perm-compile`'s `trigger.rs` | no | no | cannot |
+/// | 4 | `egret_catalog_registry::tag_version`'s `SET tag_version = …` | no | no | cannot |
+/// | 5 | `egret-perm-compile`'s `trigger.rs` `SET origin = 'generated'` | no | no | cannot |
+/// | 6 | **an `UPDATE` of `type` or of `config_jsonb`** | — | — | **no such statement exists in any `src/` in this workspace.** So "change a profile's type to `starrocks` while it already carries a `tagService`" has no code path to refuse at today. Prose is not a bound, so the direction is closed in the SCHEMA instead: migration 0163's `CHECK` holds for every `INSERT` and every `UPDATE`, from Rust, from a future route, from `psql`, from a test's raw `sqlx::query` |
+///
+/// Row 6 is why this function is not the whole fix, and why a test that only
+/// drives #1a would be a green from a population that cannot exercise the other
+/// direction. `tests/store_services.rs` drives the raw `UPDATE`s directly.
+///
+/// **Falsified by** a fourth service-def, a second `INSERT INTO
+/// policy.authz_services`, or an `UPDATE` of `type`/`config_jsonb` appearing in
+/// `src/` — the first two must be re-ruled here, the third must come with its
+/// own call to this function on top of the `CHECK`.
+fn refuse_tag_service_on_non_trino_profile(
+    typ: &str,
+    config: &Value,
+) -> Result<(), PolicyStoreError> {
+    if typ == crate::service_def::TRINO_DEF_NAME || !carries_tag_service(config) {
+        return Ok(());
+    }
+    let lacks = if typ == crate::service_def::STARROCKS_DEF_NAME {
+        "StarRocks' service-def has no `schema` resource at all — its middle level is \
+         `database`"
+    } else {
+        "only Trino's service-def declares a `schema` resource"
+    };
+    Err(PolicyStoreError::BadRequest(format!(
+        "policy profile type {typ:?} cannot carry a {TAG_SERVICE_CONFIG_KEY:?}: the tag \
+         download (`ServiceTags::from_assignments`) writes the resource levels \
+         catalog/schema/table/column for every profile type, and {lacks}, so Ranger's own \
+         `RangerTagEnricher.processServiceTags` drops every attachment and EVERY tag policy \
+         in this profile's `tagPolicies` block would be silently inert — no masking, no row \
+         filtering, no error. Create the profile without {TAG_SERVICE_CONFIG_KEY:?}; a tag \
+         service is serveable only on a \"trino\" profile until the per-engine \
+         resource-level mapping lands."
+    )))
+}
+
 /// SP4a Task 8 (D4): refuse adding brand-new content to a profile the
 /// permission-model compiler has claimed (`origin = 'generated'`, migration
 /// 0155) — used only by `create_policy` and
@@ -357,12 +467,23 @@ impl PolicyStore {
         .await?)
     }
 
+    /// Insert a policy profile (a Ranger service instance). The **only**
+    /// `INSERT INTO policy.authz_services` in any `src/` — see
+    /// [`refuse_tag_service_on_non_trino_profile`]'s enumeration, which is why
+    /// this one guard covers every create path (the admin route, engine-mgmt's
+    /// auto-bind, and the `PolicyPort` trait that delegates here).
     pub async fn create_service(
         &self,
         name: &str,
         typ: &str,
         config: &Value,
     ) -> Result<ServiceRow, PolicyStoreError> {
+        // SP4d debt Task 2: pure, no DB needed, and it runs BEFORE the insert so
+        // the route answers 400 with the reason rather than letting migration
+        // 0163's `CHECK` surface as an opaque 500. The `CHECK` is not redundant
+        // with this — it is the only thing holding the `UPDATE` direction, which
+        // has no Rust writer to guard.
+        refuse_tag_service_on_non_trino_profile(typ, config)?;
         sqlx::query_as::<_, ServiceRow>(
             r#"INSERT INTO policy.authz_services (name, type, config_jsonb)
                VALUES ($1,$2,$3) RETURNING id, name, type, config_jsonb, policy_version, tag_version, origin"#,
@@ -1524,5 +1645,164 @@ impl PolicyStore {
                 p
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service_def::{
+        STARROCKS_SERVICE_DEF_JSON, TAG_SERVICE_DEF_JSON, TRINO_SERVICE_DEF_JSON,
+    };
+    use serde_json::json;
+
+    fn resource_names(def_json: &str) -> Vec<String> {
+        let def: Value = serde_json::from_str(def_json).expect("parse service-def");
+        def["resources"]
+            .as_array()
+            .expect("resources array")
+            .iter()
+            .map(|r| r["name"].as_str().expect("resource name").to_owned())
+            .collect()
+    }
+
+    /// **The measurement the refusal rests on, asserted against the embedded
+    /// JSON rather than quoted from a comment.** `ServiceTags::from_assignments`
+    /// writes `catalog`/`schema`/`table`/`column` for every profile type, so the
+    /// rule "only a `trino` profile may carry a `tagService`" is sound exactly
+    /// while `trino` is the only seeded def with a `schema` resource. A def
+    /// gaining or losing one fails HERE, which is the point: the next reader
+    /// gets a failing test, not a stale sentence.
+    #[test]
+    fn trino_is_the_only_seeded_service_def_with_a_schema_resource() {
+        let trino = resource_names(TRINO_SERVICE_DEF_JSON);
+        let starrocks = resource_names(STARROCKS_SERVICE_DEF_JSON);
+        let tag = resource_names(TAG_SERVICE_DEF_JSON);
+        assert!(
+            trino.iter().any(|r| r == "schema"),
+            "trino def must declare `schema`; got {trino:?}"
+        );
+        assert!(
+            !starrocks.iter().any(|r| r == "schema"),
+            "starrocks def must NOT declare `schema`; got {starrocks:?}"
+        );
+        assert!(
+            starrocks.iter().any(|r| r == "database"),
+            "starrocks' middle level is `database`; got {starrocks:?}"
+        );
+        assert!(
+            !tag.iter().any(|r| r == "schema"),
+            "the tag def must NOT declare `schema`; got {tag:?}"
+        );
+    }
+
+    /// Step 1's failing test: the refusal fires for a StarRocks profile and the
+    /// message NAMES the level StarRocks lacks, so an operator reading the 400
+    /// learns why rather than being told no.
+    #[test]
+    fn tag_service_on_a_starrocks_profile_is_refused_and_names_schema() {
+        let err = refuse_tag_service_on_non_trino_profile(
+            "starrocks",
+            &json!({ "tagService": "sr_tag" }),
+        )
+        .expect_err("a starrocks profile carrying a tagService must be refused");
+        assert!(
+            matches!(err, PolicyStoreError::BadRequest(_)),
+            "must be BadRequest (400), not a 409/500: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("schema"), "message must name `schema`: {msg}");
+        assert!(
+            msg.contains("database"),
+            "message must name StarRocks' actual middle level: {msg}"
+        );
+        assert!(
+            msg.contains("starrocks") && msg.contains("tagService"),
+            "message must name the type and the config key: {msg}"
+        );
+    }
+
+    /// The only combination that is serveable today.
+    #[test]
+    fn tag_service_on_a_trino_profile_is_allowed() {
+        refuse_tag_service_on_non_trino_profile("trino", &json!({ "tagService": "p_tag" })).expect(
+            "a trino profile carrying a tagService is exactly what bind_trino_profile writes",
+        );
+    }
+
+    /// Not an over-refusal: every StarRocks profile egret has today carries `{}`,
+    /// and `bind_trino_profile` writes `{}` for the `tag` service itself.
+    #[test]
+    fn a_non_trino_profile_without_a_tag_service_is_allowed() {
+        for config in [
+            json!({}),
+            json!({ "jdbc.url": "jdbc:mysql://fe:9030" }),
+            // JSON `null` is the one shape `config_jsonb ->> 'tagService'`
+            // answers NULL for even though the KEY is present — the refusal and
+            // the CHECK must agree on it, so it is asserted, not assumed.
+            json!({ "tagService": null }),
+        ] {
+            refuse_tag_service_on_non_trino_profile("starrocks", &config)
+                .unwrap_or_else(|e| panic!("must be allowed for {config}: {e}"));
+            refuse_tag_service_on_non_trino_profile("tag", &config)
+                .unwrap_or_else(|e| panic!("must be allowed for {config}: {e}"));
+        }
+    }
+
+    /// A `tag`-typed service pointing at another tag service is the same silent
+    /// inertness (the tag def has no `schema` either — see the measurement test),
+    /// and an unknown type is refused by DEFAULT rather than inheriting the
+    /// silence. `type` is `REFERENCES authz_service_defs(name)` so only a seeded
+    /// def can reach the row, but the predicate must not depend on that.
+    #[test]
+    fn every_non_trino_type_is_refused_not_just_starrocks() {
+        for typ in ["starrocks", "tag", "hive", ""] {
+            let err = match refuse_tag_service_on_non_trino_profile(
+                typ,
+                &json!({ "tagService": "whatever" }),
+            ) {
+                Ok(()) => panic!("type {typ:?} carrying a tagService must be refused"),
+                Err(e) => e,
+            };
+            assert!(
+                matches!(err, PolicyStoreError::BadRequest(_)),
+                "type {typ:?}: must be BadRequest, got {err:?}"
+            );
+            assert!(
+                err.to_string().contains("schema"),
+                "type {typ:?}: message must name the missing level: {err}"
+            );
+        }
+    }
+
+    /// The shape agreement with migration 0163's `CHECK (… config_jsonb ->>
+    /// 'tagService' IS NULL)`. `->>` answers non-NULL for a number, a bool, an
+    /// object and an array — none of which `download_policies`' `as_str()`
+    /// reads — so the Rust predicate must refuse them too, or a config of
+    /// `{"tagService": 7}` passes the route and trips the constraint as a 500.
+    #[test]
+    fn the_predicate_is_key_presence_exactly_like_postgres_right_arrow_arrow() {
+        for v in [
+            json!(7),
+            json!(true),
+            json!(""),
+            json!({ "nested": 1 }),
+            json!([1, 2]),
+        ] {
+            assert!(
+                carries_tag_service(&json!({ "tagService": v.clone() })),
+                "`->>` is non-NULL for {v}, so the refusal must see it too"
+            );
+            refuse_tag_service_on_non_trino_profile("starrocks", &json!({ "tagService": v }))
+                .expect_err("must be refused");
+        }
+        // A non-object `config_jsonb`: `->>` yields NULL rather than erroring
+        // (measured on PostgreSQL 16.15), and `Value::get` yields `None`.
+        for config in [json!(5), json!("x"), json!([]), json!(null)] {
+            assert!(
+                !carries_tag_service(&config),
+                "a non-object config carries no tagService: {config}"
+            );
+        }
     }
 }

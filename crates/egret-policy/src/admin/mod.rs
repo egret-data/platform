@@ -637,6 +637,9 @@ pub struct CreateProfileBody {
     /// Ranger service type: `"trino"` or `"starrocks"`.
     pub r#type: String,
     /// Optional service config (e.g. StarRocks JDBC coordinates). Stored verbatim.
+    ///
+    /// A `tagService` key is accepted only when `type` is `"trino"` — see the
+    /// handler's doc comment.
     #[serde(default)]
     pub config: serde_json::Value,
 }
@@ -653,6 +656,14 @@ pub struct CreatedProfile {
 /// instance) of the given type. The manual analogue of Trino provisioning's
 /// auto-bind, so a StarRocks profile can exist without an egret-provisioned
 /// engine.
+///
+/// `config` is stored VERBATIM, which makes this the one reachable surface that
+/// could pair a non-Trino `type` with a `tagService` — a state in which every tag
+/// policy under the profile is silently inert, because the tag download writes the
+/// resource level `schema` and only Trino's service-def has one. `create_service`
+/// refuses it (400); see `egret_policy::store`'s
+/// `refuse_tag_service_on_non_trino_profile` for the measurement and for the
+/// enumeration of every write path that can reach the state.
 #[utoipa::path(
     post,
     path = "/api/control-plane/policies/services",
@@ -660,7 +671,7 @@ pub struct CreatedProfile {
     request_body = CreateProfileBody,
     responses(
         (status = 200, description = "Profile created", body = CreatedProfile),
-        (status = 400, description = "Invalid type or missing name", body = ErrorBody),
+        (status = 400, description = "Invalid type, missing name, or a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
         (status = 409, description = "A profile with this name already exists", body = ErrorBody),

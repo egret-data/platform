@@ -408,10 +408,18 @@ mod tags {
     /// right answer here. The DEFECT is in the writer (tag-selected masks and
     /// clearances cannot reach a StarRocks engine at all); this function reproduces
     /// it rather than hiding it, and `attachment_for`'s own ⚠ block carries the
-    /// measurement. Nothing egret auto-binds reaches that state — `bind_trino_profile`
-    /// is the only writer of `tagService` and `tag_assignments_for_service` resolves
-    /// the owning profile with `tp.type = 'trino'` — so an operator setting the
-    /// config by hand is the population.
+    /// measurement.
+    ///
+    /// **SP4d debt Task 2 closed the writer, and the population this path still
+    /// serves is now exactly one row.** `PolicyStore::create_service` refuses a
+    /// non-Trino profile carrying a `tagService` (it is the only `INSERT INTO
+    /// policy.authz_services` in any `src/`), and migration 0163's `CHECK
+    /// (config_jsonb ->> 'tagService' IS NULL OR type = 'trino')` refuses it for
+    /// every `INSERT` and every `UPDATE` — including the `SET type = 'starrocks'`
+    /// direction, which has no Rust writer at all. That `CHECK` is `NOT VALID`, so
+    /// a row hand-created BEFORE 0163 survives unscanned: that row is the whole
+    /// remaining population, and this fail-closed reproduction is what keeps it
+    /// visible instead of silently inert. Do not weaken it to "unreachable".
     ///
     /// For a TRINO profile the drop is inert and provably so: the only level sets the
     /// mapping emits are `{catalog, schema, table}` and `{catalog, schema, table,
