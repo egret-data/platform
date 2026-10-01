@@ -2372,6 +2372,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         cfg: config.apps.clone(),
     });
 
+    // Data Apps management API (`/api/ws/{workspace}/apps…`): the same session
+    // service, workspace repo, authorizer, PDP, audit sink and Db as the notebook
+    // seam.
+    let apps_api = Some(egret_apps::AppsApiState {
+        store: egret_apps::store::AppStore::new(db.clone()),
+        db: db.clone(),
+        sessions: sessions.clone(),
+        workspaces: WorkspaceRepo::new(db.clone()),
+        authz: Authorizer::new(db.clone()),
+        pdp: pdp.clone(),
+        audit: audit_sink.clone(),
+    });
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
@@ -2411,6 +2424,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // this on and mistyped finds out at boot.
         workflow_webhooks_enabled: config.workflow.webhooks_enabled,
         apps,
+        apps_api,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

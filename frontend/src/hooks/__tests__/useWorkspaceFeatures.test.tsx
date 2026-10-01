@@ -41,6 +41,7 @@ describe("useWorkspaceFeatures", () => {
       "alerts",
       "data_api",
       "workflows",
+      "apps",
     ]);
   });
 
