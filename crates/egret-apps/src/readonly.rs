@@ -14,45 +14,30 @@
 //! `GenericDialect` / `MySqlDialect` lex more liberally than Trino / StarRocks, so
 //! the gate narrows them to forms both sides read alike and rejects the rest:
 //!
-//! - comments never nest and `/*! … */` is never expanded (dialect wrappers);
-//! - any `/*!` in the text is rejected before parsing, because MySQL-family
-//!   engines may execute the comment body;
+//! - any `/*!` in the text is rejected before parsing: MySQL-family engines
+//!   may execute the comment body, Trino ignores it, and both stock sqlparser
+//!   dialects expand it into SQL;
+//! - a `/* … */` comment containing `/*` is rejected: `GenericDialect` nests
+//!   comments and Trino does not, but without an inner `/*` nesting cannot
+//!   change where a comment ends;
 //! - after tokenizing, only plain string literals (`'…'`, plus `"…"` and `X'…'`
 //!   where the engine has them) and the engine's own identifier quoting are
 //!   allowed; `#` comments and (StarRocks) `--` without a following space are
 //!   rejected, because the two lexers disagree on whether they start a comment;
-//!   so is a `\r` inside a `--` comment (the engines end the comment there,
-//!   sqlparser only at `\n`).
+//!   so is a `\r` followed by anything but line breaks inside a `--` comment
+//!   (the engines end the comment at `\r`, sqlparser only at `\n`).
+//!
+//! The stock dialects are used deliberately: sqlparser's `derive_dialect!`
+//! wrapper reads the trait source from the cargo registry at compile time,
+//! which is not hermetic. These token rules make the two lexer flags that
+//! matter (comment nesting, `/*!` hints) unable to change what the gate sees.
 
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{Query, SetExpr, Statement, TableFactor, Visit, Visitor};
-use sqlparser::dialect::{derive_dialect, Dialect, GenericDialect, MySqlDialect};
+use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect};
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
-
-// Trino bracketed comments do not nest and `/*! … */` is an ordinary comment;
-// GenericDialect enables both. `preserve_type_id` keeps every
-// `dialect_of!(… is GenericDialect)` parser branch unchanged.
-derive_dialect!(
-    TrinoLexDialect,
-    GenericDialect,
-    preserve_type_id = true,
-    overrides = {
-        supports_nested_comments = false,
-        supports_multiline_comment_hints = false,
-    }
-);
-// MySqlDialect expands `/*! … */` into SQL; never do that (and see the `/*!` pre-check).
-derive_dialect!(
-    StarRocksLexDialect,
-    MySqlDialect,
-    preserve_type_id = true,
-    overrides = {
-        supports_nested_comments = false,
-        supports_multiline_comment_hints = false,
-    }
-);
 
 #[derive(Debug, Clone, Copy)]
 pub enum EngineDialect {
@@ -72,8 +57,8 @@ impl EngineDialect {
 
     fn dialect(self) -> Box<dyn Dialect> {
         match self {
-            Self::Trino => Box::new(TrinoLexDialect::new()),
-            Self::StarRocks => Box::new(StarRocksLexDialect::new()),
+            Self::Trino => Box::new(GenericDialect {}),
+            Self::StarRocks => Box::new(MySqlDialect {}),
         }
     }
 }
@@ -134,7 +119,7 @@ fn check_tokens(
     let tokens = Tokenizer::new(lexer, sql)
         .tokenize()
         .map_err(|e| ReadOnlyError::Unparseable(e.to_string()))?;
-    let mut prev_minus = false;
+    let mut prev_ends_dash = false;
     for token in &tokens {
         let ok = match (dialect, token) {
             (_, Token::SingleQuotedString(_) | Token::HexStringLiteral(_)) => true,
@@ -151,9 +136,19 @@ fn check_tokens(
                 }
                 // sqlparser ends a `--` comment only at `\n`; Trino and StarRocks
                 // also end it at `\r`, so text after a bare `\r` would run unseen.
-                if comment.contains('\r') {
+                // A trailing `\r` (CRLF line ending) is harmless: only line
+                // breaks follow it, so nothing runs unseen.
+                if comment.trim_end_matches(['\r', '\n']).contains('\r') {
                     return Err(ReadOnlyError::NotReadOnly(
                         "a carriage return inside a `--` comment",
+                    ));
+                }
+                true
+            }
+            (_, Token::Whitespace(Whitespace::MultiLineComment(body))) => {
+                if body.contains("/*") {
+                    return Err(ReadOnlyError::NotReadOnly(
+                        "a `/*` inside a block comment (nesting differs between engines)",
                     ));
                 }
                 true
@@ -183,15 +178,27 @@ fn check_tokens(
         if !ok {
             return Err(ReadOnlyError::NotReadOnly(QUOTING));
         }
-        // MySqlDialect lexes `--x` as two minus signs (MySQL needs `-- `); the
-        // StarRocks lexer may start a comment there and hide what follows.
-        let minus = matches!(token, Token::Minus);
-        if minus && prev_minus {
+        // MySqlDialect lexes `--x` as two tokens (MySQL needs `-- `): `-` `-`,
+        // `-` `->`, `-` `->>`, …; the StarRocks lexer may start a comment there
+        // and hide what follows. Reject any two adjacent tokens that join into
+        // `--`, and any operator token that contains it.
+        // Whitespace, words, numbers and the (already allow-listed) literals
+        // cannot form `--`; their rendered text would include quote contents.
+        let text = match token {
+            Token::Whitespace(_)
+            | Token::Word(_)
+            | Token::Number(..)
+            | Token::SingleQuotedString(_)
+            | Token::HexStringLiteral(_)
+            | Token::DoubleQuotedString(_) => String::new(),
+            t => t.to_string(),
+        };
+        if (prev_ends_dash && text.starts_with('-')) || text.contains("--") {
             return Err(ReadOnlyError::NotReadOnly(
                 "`--` not followed by whitespace",
             ));
         }
-        prev_minus = minus;
+        prev_ends_dash = text.ends_with('-');
     }
     Ok(())
 }
@@ -528,9 +535,9 @@ mod tests {
         }
     }
     #[test]
-    fn the_base_dialects_would_have_been_bypassed() {
-        // Pins why the wrappers and the pre-check exist: the stock dialects
-        // read these as a harmless SELECT.
+    fn the_gate_rejects_what_the_bare_parser_accepts() {
+        // Pins why the token rules and the pre-check exist: the stock dialects
+        // alone read these as one harmless SELECT; the gate refuses them.
         for (sql, base) in [
             (
                 "/* /* */ DELETE FROM t -- */ SELECT 1",
@@ -545,6 +552,7 @@ mod tests {
                 matches!(stmts.as_slice(), [Statement::Query(_)]),
                 "{sql}: {stmts:?}"
             );
+            gated(sql);
         }
     }
     #[test]
@@ -584,39 +592,45 @@ mod tests {
         }
     }
     #[test]
-    fn wrappers_parse_like_their_base_dialects() {
-        // derive_dialect! forwards every Dialect method; a forwarding gap would
-        // change parsing silently, so compare ASTs on comment-free SQL.
-        let corpus = [
-            "select a, count(*) from t where b > 1 group by a order by 2 desc limit 10",
-            "WITH x AS (SELECT * FROM t) SELECT * FROM x JOIN u ON x.id = u.id",
-            "SELECT * FROM t CROSS JOIN LATERAL (SELECT * FROM u) s",
-            "SELECT * FROM t CROSS JOIN UNNEST(t.arr) AS u(a)",
-            "SELECT a, CAST(b AS VARCHAR), x'AB', 'it''s' FROM t LIMIT 5",
-            "SHOW COLUMNS FROM t",
-            "DESCRIBE t",
-            "INSERT INTO t VALUES (1)",
-        ];
-        for sql in corpus {
-            let pairs: [(&dyn Dialect, &dyn Dialect); 2] = [
-                (&GenericDialect {}, &TrinoLexDialect::new()),
-                (&MySqlDialect {}, &StarRocksLexDialect::new()),
-            ];
-            for (base, wrapped) in pairs {
-                assert_eq!(
-                    format!("{:?}", Parser::parse_sql(base, sql)),
-                    format!("{:?}", Parser::parse_sql(wrapped, sql)),
-                    "{sql}"
-                );
-            }
+    fn a_slash_star_inside_a_block_comment_is_rejected() {
+        // With no `/*` inside a comment, nesting cannot move its end, so the
+        // stock dialects' nesting flag cannot matter.
+        // Balanced for a nesting lexer, so both dialects tokenize it and the
+        // comment rule (not a parse error) is what refuses it.
+        gated("SELECT 1 /* /* */ */");
+        gated("/* a /* b */ c */ SELECT 1");
+        // Unbalanced for a nesting lexer: unterminated under GenericDialect.
+        no("SELECT 1 /* a /* b */");
+        no("SELECT /* /* */ 1");
+        ok("SELECT /* a * b / c */ 1");
+        ok("SELECT 1 /* x */ /* y */");
+    }
+    #[test]
+    fn crlf_line_endings_are_fine_but_a_bare_cr_is_not() {
+        ok("SELECT 1 -- c\r\nUNION SELECT 2");
+        ok("SELECT 1 --\r\nFROM t");
+        ok("SELECT 1 -- c\r\n\r\nFROM t");
+        ok("SELECT 1 -- trailing\r\n");
+        gated("SELECT 1 -- c\rUNION SELECT 2");
+        gated("SELECT 1 -- c\r\rFROM t\n");
+    }
+    #[test]
+    fn dashes_that_join_into_a_comment_marker_are_rejected() {
+        for sql in [
+            "SELECT a-->1 FROM t",
+            "SELECT a-->>'x' FROM t",
+            "SELECT a --> 1 FROM t",
+            "SELECT 1 --x",
+            "SELECT 1--1",
+        ] {
+            let got = check_read_only(sql, StarRocks);
+            assert!(
+                matches!(got, Err(ReadOnlyError::NotReadOnly(_))),
+                "{sql} -> {got:?}"
+            );
         }
-        let trino: &dyn Dialect = &TrinoLexDialect::new();
-        assert!(trino.is::<GenericDialect>());
-        assert!(!trino.supports_nested_comments() && !trino.supports_multiline_comment_hints());
-        let sr: &dyn Dialect = &StarRocksLexDialect::new();
-        assert!(sr.is::<MySqlDialect>());
-        assert!(sr.supports_string_literal_backslash_escape());
-        assert!(!sr.supports_nested_comments() && !sr.supports_multiline_comment_hints());
+        ok("SELECT a - -1, a - (-1), a -> 'x' FROM t");
+        ok("SELECT '--x', \"a--b\" FROM t");
     }
     #[test]
     fn known_limitations_stay_rejected() {
