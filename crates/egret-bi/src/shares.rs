@@ -54,8 +54,10 @@ fn manage_action(kind: &str) -> Option<&'static str> {
     }
 }
 
-/// `manage_action` as the share/tag handlers need it: an unknown kind is a 404,
-/// like an unknown object.
+/// `manage_action` as the share/tag handlers need it. In practice an unknown kind
+/// never reaches here — `resolve` (via `object_ref`) rejects it first as
+/// `InvalidInput` — so the `NotFound` is only a backstop for a kind `object_table`
+/// knows but `manage_action` does not.
 fn manage_action_for(kind: &str) -> Result<&'static str, BiApiError> {
     manage_action(kind).ok_or_else(|| Error::NotFound("object kind".to_string()).into())
 }
