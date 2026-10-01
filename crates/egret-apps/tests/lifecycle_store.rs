@@ -587,3 +587,52 @@ async fn rows_from_another_workspace_are_invisible() {
     let a = st.get(fx.ws(), fx.uid(), app).await.unwrap().unwrap();
     assert_eq!((a.name.as_str(), a.deleted_at.is_none()), ("app", true));
 }
+
+/// `published_by ... ON DELETE SET NULL` is an UPDATE on an append-only table: the
+/// trigger must let exactly that UPDATE through, or no publisher could ever be deleted.
+/// Driven through the real `UserRepo::hard_delete`, not a hand-written DELETE.
+#[tokio::test]
+async fn deleting_a_publisher_keeps_their_versions_with_publisher_null() {
+    let fx = Fixture::new().await;
+    let tag = Uuid::new_v4().simple().to_string();
+    let publisher: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name, status, password_hash) \
+         VALUES ('local', $1, 'publisher', 'active', 'x') RETURNING id",
+    )
+    .bind(format!("apps_lc_pub_{tag}@egret.local"))
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert publisher");
+    let app = fx.store_app("by the publisher").await;
+    let st = fx.store();
+    let v = published(st.publish(app, UserId(publisher), None).await.unwrap());
+    assert_eq!(v.published_by, Some(publisher));
+
+    let deleted = egret_auth::users::UserRepo::new(fx.db.clone())
+        .hard_delete(UserId(publisher), fx.uid())
+        .await
+        .expect("a publisher can be deleted");
+    assert!(deleted.is_some(), "the user row was deleted");
+
+    let (by, source, no): (Option<Uuid>, String, i32) = sqlx::query_as(
+        "SELECT published_by, source, version_no FROM analytics.app_versions WHERE id = $1",
+    )
+    .bind(v.id)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("the version row survives");
+    assert_eq!(by, None);
+    assert_eq!(source, "by the publisher");
+    assert_eq!(no, v.version_no);
+
+    // The allowance is exact: nulling `published_by` while changing anything else
+    // is still an UPDATE of a published version.
+    let v2 = published(st.publish(app, fx.uid(), None).await.unwrap());
+    let r = sqlx::query(
+        "UPDATE analytics.app_versions SET published_by = NULL, source = 'tampered' WHERE id = $1",
+    )
+    .bind(v2.id)
+    .execute(&fx.db.pool)
+    .await;
+    assert_eq!(code(r), "23001");
+}
