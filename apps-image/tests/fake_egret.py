@@ -49,15 +49,20 @@ async def draft(request: Request) -> Response:
     sent = request.headers.get("if-match")
     if sent is None:
         return JSONResponse({"error": "If-Match required"}, status_code=428)
-    body = await request.body()
-    if len(body) > MAX_SOURCE:
+    try:
+        source = (await request.json())["source"]
+        if not isinstance(source, str):
+            raise TypeError
+    except (ValueError, KeyError, TypeError):
+        return JSONResponse({"error": 'body must be JSON {"source": "..."}'}, status_code=400)
+    if len(source.encode()) > MAX_SOURCE:
         return JSONResponse({"error": "source too large"}, status_code=413)
     if sent.strip('"') != str(d["revision"]):
         STATE.events.append({"kind": "draft_conflict", "app_id": app_id, "sent": sent})
         return JSONResponse(
             {"error": "stale revision", "current_revision": d["revision"]}, status_code=409
         )
-    d["source"] = body.decode()
+    d["source"] = source
     d["revision"] += 1
     STATE.events.append({"kind": "draft_saved", "app_id": app_id, "if_match": sent})
     return JSONResponse({"revision": d["revision"]})

@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from egret_marimo.client import GatewayError
+from egret_marimo.client import GatewayError, SessionExpired
 from egret_marimo.podapi import DraftConflict, PodApi
 
 
@@ -42,10 +42,45 @@ def test_get_version_returns_source(api):
     assert api.get_version("a1", "v1") == "y = 2"
 
 
-def test_oversized_put_maps_413(api):
+def test_put_body_is_json_source(api, egret):
+    api.put_draft("a1", 3, "x = 'é'")
+    assert egret.drafts["a1"]["source"] == "x = 'é'"
+
+
+def test_raw_text_put_rejected_by_fake(api, egret):
+    r = api._client.put(f"{egret.base_url}/api/apps/pod/apps/a1/draft", content="x = 9",
+                        headers={"authorization": "Bearer pod-t", "if-match": '"3"'})
+    assert 400 <= r.status_code < 500
+    assert egret.drafts["a1"]["source"] == "x = 1"
+
+
+def test_source_at_limit_ok_over_limit_413(api):
+    assert api.put_draft("a1", 3, "x" * (1024 * 1024)) == 4
     with pytest.raises(GatewayError) as e:
-        api.put_draft("a1", 3, "x" * (1024 * 1024 + 1))
+        api.put_draft("a1", 4, "x" * (1024 * 1024 + 1))
     assert e.value.status == 413
+
+
+def test_non_json_409_is_gateway_error(api):
+    def handler(request):
+        return httpx.Response(409, text="conflict")
+    p = PodApi("http://x", "t", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(GatewayError) as e:
+        p.put_draft("a1", 1, "s")
+    assert e.value.status == 409
+
+
+def test_pod_401_is_not_session_expired(egret):
+    with pytest.raises(GatewayError) as e:
+        PodApi(egret.base_url, "nope").get_draft("a1")
+    assert not isinstance(e.value, SessionExpired)
+    assert "reload" not in e.value.detail
+
+
+def test_unreachable_is_gateway_error():
+    with pytest.raises(GatewayError) as e:
+        PodApi("http://127.0.0.1:1", "t").get_draft("a1")
+    assert e.value.status == 0
 
 
 def test_missing_if_match_maps_428(egret):

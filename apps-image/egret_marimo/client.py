@@ -20,6 +20,11 @@ class SessionExpired(GatewayError):
         super().__init__(401, "session expired — reload the app")
 
 
+def transport_error(e: Exception) -> GatewayError:
+    """Network failure or timeout: no HTTP status exists, so status is 0."""
+    return GatewayError(0, f"egret unreachable: {type(e).__name__}: {e}")
+
+
 def error_for(response: httpx.Response) -> GatewayError:
     """Map a non-2xx response to the error every egret client raises."""
     if response.status_code == 401:
@@ -60,12 +65,15 @@ def _query(database: str, sql: str, params=()) -> dict:
     body = {"database": database, "sql": sql, "params": list(params)}
     if os.environ.get("EGRET_TEST_INCLUDE_PID"):
         body["pid"] = os.getpid()
-    r = httpx.post(
-        f"{_base()}/api/apps/query",
-        json=body,
-        headers={"authorization": f"Bearer {_session_token()}"},
-        timeout=GATEWAY_TIMEOUT_S,
-    )
+    try:
+        r = httpx.post(
+            f"{_base()}/api/apps/query",
+            json=body,
+            headers={"authorization": f"Bearer {_session_token()}"},
+            timeout=GATEWAY_TIMEOUT_S,
+        )
+    except httpx.TransportError as e:  # includes timeouts
+        raise transport_error(e) from e
     if not r.is_success:
         raise error_for(r)
     return r.json()

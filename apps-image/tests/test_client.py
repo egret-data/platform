@@ -88,3 +88,10 @@ def test_test_token_ignored_outside_pytest(monkeypatch):
     _stub_request(monkeypatch, None)
     with pytest.raises(RuntimeError):
         client._session_token()
+
+
+def test_unreachable_gateway_is_gateway_error(monkeypatch):
+    monkeypatch.setenv("EGRET_URL", "http://127.0.0.1:1")
+    with pytest.raises(GatewayError) as e:
+        sql("select 1", "db")
+    assert e.value.status == 0

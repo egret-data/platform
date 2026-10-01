@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from .client import error_for
+from .client import GatewayError, error_for, transport_error
 
 
 @dataclass
@@ -14,7 +14,7 @@ class Draft:
 
 
 class DraftConflict(Exception):
-    def __init__(self, current_revision: int) -> None:
+    def __init__(self, current_revision: int | None) -> None:
         super().__init__(f"draft is at revision {current_revision}")
         self.current_revision = current_revision
 
@@ -29,9 +29,18 @@ class PodApi:
         return f"{self._base}/api/apps/pod/apps/{app_id}/{tail}"
 
     def _send(self, method: str, url: str, **kw) -> httpx.Response:
-        r = self._client.request(method, url, headers=self._headers | kw.pop("headers", {}), **kw)
+        try:
+            r = self._client.request(method, url, headers=self._headers | kw.pop("headers", {}), **kw)
+        except httpx.TransportError as e:  # includes timeouts
+            raise transport_error(e) from e
         if r.status_code == 409:
-            raise DraftConflict(int(r.json()["current_revision"]))
+            try:
+                current = int(r.json()["current_revision"])
+            except (ValueError, KeyError, TypeError):
+                raise GatewayError(409, r.text) from None
+            raise DraftConflict(current)
+        if r.status_code == 401:
+            raise GatewayError(401, "pod token rejected")
         if not r.is_success:
             raise error_for(r)
         return r
@@ -44,8 +53,8 @@ class PodApi:
         r = self._send(
             "PUT",
             self._url(app_id, "draft"),
-            content=source.encode(),
-            headers={"if-match": f'"{expected_revision}"', "content-type": "text/x-python"},
+            json={"source": source},
+            headers={"if-match": f'"{expected_revision}"'},
         )
         return int(r.json()["revision"])
 
