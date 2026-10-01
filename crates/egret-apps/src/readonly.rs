@@ -5,12 +5,54 @@
 //! Ranger, not instead of it. Table functions are rejected because Trino's
 //! `TABLE(<catalog>.system.query(...))` passes arbitrary SQL — including writes —
 //! to the underlying database.
+//!
+//! # Lexer equivalence
+//!
+//! The gate is only sound if it sees the same tokens the engine executes: a
+//! comment or string the gate skips over but the engine runs (or the reverse)
+//! is a bypass, e.g. `/* /* */ DELETE FROM t -- */ SELECT 1`. sqlparser's
+//! `GenericDialect` / `MySqlDialect` lex more liberally than Trino / StarRocks, so
+//! the gate narrows them to forms both sides read alike and rejects the rest:
+//!
+//! - comments never nest and `/*! … */` is never expanded (dialect wrappers);
+//! - any `/*!` in the text is rejected before parsing, because MySQL-family
+//!   engines may execute the comment body;
+//! - after tokenizing, only plain string literals (`'…'`, plus `"…"` and `X'…'`
+//!   where the engine has them) and the engine's own identifier quoting are
+//!   allowed; `#` comments and (StarRocks) `--` without a following space are
+//!   rejected, because the two lexers disagree on whether they start a comment;
+//!   so is a `\r` inside a `--` comment (the engines end the comment there,
+//!   sqlparser only at `\n`).
 
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{Query, SetExpr, Statement, TableFactor, Visit, Visitor};
-use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect};
+use sqlparser::dialect::{derive_dialect, Dialect, GenericDialect, MySqlDialect};
 use sqlparser::parser::Parser;
+use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
+
+// Trino bracketed comments do not nest and `/*! … */` is an ordinary comment;
+// GenericDialect enables both. `preserve_type_id` keeps every
+// `dialect_of!(… is GenericDialect)` parser branch unchanged.
+derive_dialect!(
+    TrinoLexDialect,
+    GenericDialect,
+    preserve_type_id = true,
+    overrides = {
+        supports_nested_comments = false,
+        supports_multiline_comment_hints = false,
+    }
+);
+// MySqlDialect expands `/*! … */` into SQL; never do that (and see the `/*!` pre-check).
+derive_dialect!(
+    StarRocksLexDialect,
+    MySqlDialect,
+    preserve_type_id = true,
+    overrides = {
+        supports_nested_comments = false,
+        supports_multiline_comment_hints = false,
+    }
+);
 
 #[derive(Debug, Clone, Copy)]
 pub enum EngineDialect {
@@ -30,8 +72,8 @@ impl EngineDialect {
 
     fn dialect(self) -> Box<dyn Dialect> {
         match self {
-            Self::Trino => Box::new(GenericDialect {}),
-            Self::StarRocks => Box::new(MySqlDialect {}),
+            Self::Trino => Box::new(TrinoLexDialect::new()),
+            Self::StarRocks => Box::new(StarRocksLexDialect::new()),
         }
     }
 }
@@ -64,12 +106,94 @@ impl std::error::Error for ReadOnlyError {}
 
 /// Accepts `sql` only if it is exactly one statement that is positively known to read.
 pub fn check_read_only(sql: &str, dialect: EngineDialect) -> Result<(), ReadOnlyError> {
-    let stmts = Parser::parse_sql(&*dialect.dialect(), sql)
-        .map_err(|e| ReadOnlyError::Unparseable(e.to_string()))?;
+    // Anywhere, even inside a string literal: fail closed.
+    if sql.contains("/*!") {
+        return Err(ReadOnlyError::NotReadOnly(
+            "a MySQL-style executable comment (/*! … */)",
+        ));
+    }
+    let lexer = dialect.dialect();
+    check_tokens(sql, &*lexer, dialect)?;
+    let stmts =
+        Parser::parse_sql(&*lexer, sql).map_err(|e| ReadOnlyError::Unparseable(e.to_string()))?;
     if stmts.len() != 1 {
         return Err(ReadOnlyError::NotExactlyOne(stmts.len()));
     }
     check_statement(&stmts[0])
+}
+
+/// Rejects tokens whose extent the engine's lexer may draw differently from
+/// sqlparser's: string/identifier quoting forms other than the engine's plain
+/// ones, `#` comments, and (StarRocks) `--` glued to the next character.
+fn check_tokens(
+    sql: &str,
+    lexer: &dyn Dialect,
+    dialect: EngineDialect,
+) -> Result<(), ReadOnlyError> {
+    const QUOTING: &str = "a string or identifier quoting form the engine may read differently";
+    let tokens = Tokenizer::new(lexer, sql)
+        .tokenize()
+        .map_err(|e| ReadOnlyError::Unparseable(e.to_string()))?;
+    let mut prev_minus = false;
+    for token in &tokens {
+        let ok = match (dialect, token) {
+            (_, Token::SingleQuotedString(_) | Token::HexStringLiteral(_)) => true,
+            (EngineDialect::StarRocks, Token::DoubleQuotedString(_)) => true,
+            (_, Token::Word(w)) => matches!(
+                (dialect, w.quote_style),
+                (_, None)
+                    | (EngineDialect::Trino, Some('"'))
+                    | (EngineDialect::StarRocks, Some('`'))
+            ),
+            (_, Token::Whitespace(Whitespace::SingleLineComment { prefix, comment })) => {
+                if prefix != "--" {
+                    return Err(ReadOnlyError::NotReadOnly("a `#` comment"));
+                }
+                // sqlparser ends a `--` comment only at `\n`; Trino and StarRocks
+                // also end it at `\r`, so text after a bare `\r` would run unseen.
+                if comment.contains('\r') {
+                    return Err(ReadOnlyError::NotReadOnly(
+                        "a carriage return inside a `--` comment",
+                    ));
+                }
+                true
+            }
+            (
+                _,
+                Token::DoubleQuotedString(_)
+                | Token::TripleSingleQuotedString(_)
+                | Token::TripleDoubleQuotedString(_)
+                | Token::DollarQuotedString(_)
+                | Token::SingleQuotedByteStringLiteral(_)
+                | Token::DoubleQuotedByteStringLiteral(_)
+                | Token::TripleSingleQuotedByteStringLiteral(_)
+                | Token::TripleDoubleQuotedByteStringLiteral(_)
+                | Token::SingleQuotedRawStringLiteral(_)
+                | Token::DoubleQuotedRawStringLiteral(_)
+                | Token::TripleSingleQuotedRawStringLiteral(_)
+                | Token::TripleDoubleQuotedRawStringLiteral(_)
+                | Token::NationalStringLiteral(_)
+                | Token::QuoteDelimitedStringLiteral(_)
+                | Token::NationalQuoteDelimitedStringLiteral(_)
+                | Token::EscapedStringLiteral(_)
+                | Token::UnicodeStringLiteral(_),
+            ) => false,
+            _ => true,
+        };
+        if !ok {
+            return Err(ReadOnlyError::NotReadOnly(QUOTING));
+        }
+        // MySqlDialect lexes `--x` as two minus signs (MySQL needs `-- `); the
+        // StarRocks lexer may start a comment there and hide what follows.
+        let minus = matches!(token, Token::Minus);
+        if minus && prev_minus {
+            return Err(ReadOnlyError::NotReadOnly(
+                "`--` not followed by whitespace",
+            ));
+        }
+        prev_minus = minus;
+    }
+    Ok(())
 }
 
 fn check_statement(stmt: &Statement) -> Result<(), ReadOnlyError> {
@@ -373,6 +497,128 @@ mod tests {
         );
     }
     #[test]
+    fn lexer_differentials_are_rejected() {
+        // Nested comments: Trino ends a bracketed comment at the first `*/`.
+        gated("/* /* */ DELETE FROM t -- */ SELECT 1");
+        gated("/* /* */ DROP TABLE t -- */ SELECT 1");
+        gated("/* a /* b */ DROP TABLE t; -- */ SELECT 1");
+        // `/*! … */`: plain comment to Trino, executable to the MySQL family.
+        gated("/*! SELECT */ DELETE FROM t");
+        gated("/*!99999 SELECT */ DELETE FROM t");
+        gated("/*! DELETE FROM t */ SELECT 1");
+        gated("/*!50000 DELETE FROM t */ SELECT 1");
+        // `--` comment cut short by a bare carriage return in the engines.
+        gated(
+            "SELECT 1 -- c\rUNION SELECT * FROM TABLE(pg.system.query(query => 'DELETE FROM t'))",
+        );
+        gated("SELECT 1 -- c\r; DELETE FROM t");
+        // `#` comments: a comment to MySqlDialect, not to StarRocks.
+        let hash = check_read_only("SELECT 1 # c\nFROM t", StarRocks);
+        assert!(
+            matches!(hash, Err(ReadOnlyError::NotReadOnly(_))),
+            "{hash:?}"
+        );
+        // `--x`: two minus signs to MySqlDialect, a comment to the StarRocks lexer.
+        for sql in ["SELECT 1 --x", "SELECT 1--1", "SELECT a--b FROM t"] {
+            let got = check_read_only(sql, StarRocks);
+            assert!(
+                matches!(got, Err(ReadOnlyError::NotReadOnly(_))),
+                "{sql} -> {got:?}"
+            );
+        }
+    }
+    #[test]
+    fn the_base_dialects_would_have_been_bypassed() {
+        // Pins why the wrappers and the pre-check exist: the stock dialects
+        // read these as a harmless SELECT.
+        for (sql, base) in [
+            (
+                "/* /* */ DELETE FROM t -- */ SELECT 1",
+                &GenericDialect {} as &dyn Dialect,
+            ),
+            ("/*! SELECT */ DELETE FROM t", &GenericDialect {}),
+            ("/*! SELECT */ DELETE FROM t", &MySqlDialect {}),
+            ("SELECT 1 -- c\r; DELETE FROM t", &GenericDialect {}),
+        ] {
+            let stmts = Parser::parse_sql(base, sql).unwrap();
+            assert!(
+                matches!(stmts.as_slice(), [Statement::Query(_)]),
+                "{sql}: {stmts:?}"
+            );
+        }
+    }
+    #[test]
+    fn engine_lexing_is_respected() {
+        // Trino has no backslash escapes: `'a\'` is the string `a\`.
+        assert_eq!(check_read_only(r"SELECT 'a\' FROM t", Trino), Ok(()));
+        // StarRocks does: the quote is escaped, the literal never ends, and the
+        // engine would fail the same way.
+        assert!(matches!(
+            check_read_only(r"SELECT 'a\' FROM t", StarRocks),
+            Err(ReadOnlyError::Unparseable(_))
+        ));
+        ok("SELECT 'it''s', X'AB', \"a\" FROM t");
+        ok("SELECT 1 -- a comment with a space\nFROM t");
+        ok("SELECT 1 - -1");
+        ok("SELECT /*+ SET_VAR(a = 1) */ 1 /* trailing */");
+        assert_eq!(check_read_only("SELECT 1 --x", Trino), Ok(()));
+        assert_eq!(check_read_only("SELECT `a` FROM t", StarRocks), Ok(()));
+        // Quoting forms whose extent the engine may draw differently.
+        for sql in [
+            "SELECT E'a\\' FROM t",
+            "SELECT N'x'",
+            "SELECT b'x'",
+            "SELECT `a` FROM t",
+            "SELECT U&'x'",
+            "SELECT r'x'",
+            "SELECT q'[x]'",
+            "SELECT $$x$$",
+        ] {
+            assert!(check_read_only(sql, Trino).is_err(), "Trino accepted {sql}");
+        }
+        for sql in ["SELECT N'x'", "SELECT b'x'"] {
+            assert!(
+                check_read_only(sql, StarRocks).is_err(),
+                "StarRocks accepted {sql}"
+            );
+        }
+    }
+    #[test]
+    fn wrappers_parse_like_their_base_dialects() {
+        // derive_dialect! forwards every Dialect method; a forwarding gap would
+        // change parsing silently, so compare ASTs on comment-free SQL.
+        let corpus = [
+            "select a, count(*) from t where b > 1 group by a order by 2 desc limit 10",
+            "WITH x AS (SELECT * FROM t) SELECT * FROM x JOIN u ON x.id = u.id",
+            "SELECT * FROM t CROSS JOIN LATERAL (SELECT * FROM u) s",
+            "SELECT * FROM t CROSS JOIN UNNEST(t.arr) AS u(a)",
+            "SELECT a, CAST(b AS VARCHAR), x'AB', 'it''s' FROM t LIMIT 5",
+            "SHOW COLUMNS FROM t",
+            "DESCRIBE t",
+            "INSERT INTO t VALUES (1)",
+        ];
+        for sql in corpus {
+            let pairs: [(&dyn Dialect, &dyn Dialect); 2] = [
+                (&GenericDialect {}, &TrinoLexDialect::new()),
+                (&MySqlDialect {}, &StarRocksLexDialect::new()),
+            ];
+            for (base, wrapped) in pairs {
+                assert_eq!(
+                    format!("{:?}", Parser::parse_sql(base, sql)),
+                    format!("{:?}", Parser::parse_sql(wrapped, sql)),
+                    "{sql}"
+                );
+            }
+        }
+        let trino: &dyn Dialect = &TrinoLexDialect::new();
+        assert!(trino.is::<GenericDialect>());
+        assert!(!trino.supports_nested_comments() && !trino.supports_multiline_comment_hints());
+        let sr: &dyn Dialect = &StarRocksLexDialect::new();
+        assert!(sr.is::<MySqlDialect>());
+        assert!(sr.supports_string_literal_backslash_escape());
+        assert!(!sr.supports_nested_comments() && !sr.supports_multiline_comment_hints());
+    }
+    #[test]
     fn known_limitations_stay_rejected() {
         // Legitimate reads that sqlparser 0.63 cannot parse, or parses into a
         // shape the gate does not trust. They stay rejected: do not weaken the gate.
@@ -381,6 +627,8 @@ mod tests {
         no("SELECT * FROM t FOR TIMESTAMP AS OF TIMESTAMP '2024-01-01 00:00:00'");
         no("SELECT * FROM t MATCH_RECOGNIZE (PARTITION BY a ORDER BY b PATTERN (A) DEFINE A AS true)");
         no("SHOW FUNCTIONS");
+        // `/*!` is refused anywhere, even inside a string literal.
+        gated("SELECT '/*!' FROM t");
         // UNNEST passes for Trino, but the MySQL dialect parses it as a table function.
         let unnest = "SELECT * FROM t CROSS JOIN UNNEST(t.arr) AS u(a)";
         assert_eq!(check_read_only(unnest, Trino), Ok(()));

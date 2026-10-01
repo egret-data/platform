@@ -11,7 +11,8 @@ sqlx.workspace = true
 uuid.workspace = true
 anyhow.workspace = true
 # Used from Task 3 (the read-only gate); declared now so Cargo.lock changes once.
-sqlparser.workspace = true
+# `derive-dialect` builds the comment-safe dialect wrappers in `readonly.rs`.
+sqlparser = { workspace = true, features = ["derive-dialect"] }
 
 [dev-dependencies]
 egret-test-db.workspace = true
