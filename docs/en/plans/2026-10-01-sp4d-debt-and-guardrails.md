@@ -355,6 +355,38 @@ probe that simply could not fail. Reproduce the **pair**; a single accepted row 
 
 ---
 
+### Task 14 (NEXT): `*` above a named level bypasses a constraint that already exists
+
+**Files:** a migration (**0168**), `grants::ensure_scope_levels_are_named`'s neighbourhood
+
+**Found by Task 12, measured, and it is sharper than my own ruling.** I ruled `'*'` legitimate and
+warned against refusing it. That ruling stands for what it covers — a catalog-wide or schema-wide grant
+is an ordinary thing. But Task 12 measured that `(schema = '*', table = 'orders')` earns the
+**identical** `MatchType::Self_` on `finance.orders.amount` that `''` did — and unlike `''`, **it is
+reachable from the browser**: `ScopePicker`'s fields are free-text inputs whose
+`e.target.value || undefined` maps `""` to `undefined`, which is exactly why `''` never came from the
+UI, while `"*"` is truthy and passes straight through. So Task 12 closed the door the UI could not open
+and left open the one it can.
+
+**The sharp version is not "`*` is illegitimate".** It is that `grants_check` **already forbids naming a
+table without a schema**, and `schema_name = '*'` expresses precisely that — so **two guards in one
+table disagree about whether that scope exists**. egret's model has already decided `*/orders` is not
+expressible; `*` is a way around that decision, not a feature of it.
+
+- [ ] **Step 1: The rule is the authored-value form of `scope_to_resources`' own `wildcard_from_here`
+latch** — *a level may be `*` only if every level below it is `*` or absent*. Task 12 proposes it and
+did not implement it; it is right. Note what it does **not** refuse: a catalog-wide grant, a
+schema-wide grant, `('*','*')` — every shape where `*` has nothing named beneath it.
+- [ ] **Step 2: If someone wants `*/orders`, the answer is that the model does not express it** — by
+`grants_check`'s existing decision, not by a new opinion of ours. Say that where the error message is,
+so the refusal reads as consistency rather than as a restriction.
+- [ ] **Step 3: Both layers, keyed to one shape**, as Tasks 2, 3 and 12 did — and Task 12's standing
+third test arm plus the ⚠ paragraph in `0167` are where the measurement already lives.
+- [ ] **Step 4: `perm.rules` too.** Task 12 established the two tables are a verbatim copy of each
+other; leaving one is leaving half a fix.
+
+---
+
 ### Task 13: a ws-scoped overlay can reach another workspace's WRITE routes
 
 **Files:** `validate_impersonation_target` (interim), then a shared extractor/layer
