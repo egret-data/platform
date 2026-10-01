@@ -11,12 +11,18 @@
 //! file's claim about it: `catalog_tag_assignments` has no `CHECK`, `NOT NULL`
 //! does not exclude `''`, the assign routes validate nothing, and
 //! `from_assignments` omits an empty level — so `{"schema": "", "table": ""}`
-//! really does produce a one-level `resourceElements`. What makes the refusal
-//! inert is the READ path: **nothing constructs an
-//! `egret_ranger_eval::eval::ResolvedTag` outside this crate's tests**, and the
-//! `egret_policy::ResolvedTag` that Task 7 will map from is selected by exact
-//! `schema_name`/`table_name` equality, so a `('', '')` row cannot come back for
-//! a real resource. See the ⚠ block on `TagAttachmentProblem::ResourceLevels`.
+//! really does produce a one-level `resourceElements`.
+//!
+//! ⚠ **SP4d-2b Task 7 replaced what makes the LEVEL COUNT refusal inert, and
+//! this paragraph said the wrong thing twice.** It said nothing constructs an
+//! `egret_ranger_eval::eval::ResolvedTag` outside this crate's tests — Task 7's
+//! `egret_perm_compile::routes::attachment_for` now does — and it credited the
+//! exact `schema_name`/`table_name` equality with keeping a `('', '')` row out,
+//! which fix round 2 had already measured to be false (`resolved_tags_for_
+//! resource_via(…, "", "", "")` returns it). What keeps it out is the CALLER:
+//! `resolved_tags_for_target` counts rows with an empty `schema_name` or
+//! `table_name` for the catalog FIRST, and declines the whole resolution while
+//! any exists. See the ⚠ block on `TagAttachmentProblem::ResourceLevels`.
 //!
 //! Asserting the refusals anyway is what stops a hand-written `/tags/download`
 //! shim, an imported payload or a future egret feature from changing the answer
@@ -49,7 +55,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use egret_ranger_eval::eval::{
     evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, DenyReason,
     EngineConfig, MaskDecision, ResolvedTag, RowFilterDecision, TagAttachmentProblem,
-    TagNormalisationProblem, TagServiceResource, UndecidableCause,
+    TagNormalisationProblem, TagServiceResource, UndecidableCause, UnenrichedTags,
 };
 use egret_ranger_eval::model::{ServicePolicySet, Unmodelled};
 use egret_ranger_eval::resource::{MatchType, RequestResource};
@@ -147,7 +153,7 @@ fn request(tags: Vec<ResolvedTag>) -> AccessRequest {
             .with("table", "orders")
             .with("column", "id"),
         owner: None,
-        resolved_tags: Some(tags),
+        resolved_tags: Some(UnenrichedTags::new(tags)),
     }
 }
 

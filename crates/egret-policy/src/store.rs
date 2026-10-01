@@ -788,14 +788,15 @@ pub async fn compiler_targeted_services_via(
 ///
 /// SP4a Task 9 added this so `explain` could hand the resolved set to
 /// `egret_perm::eval::evaluate`, which does no I/O of its own. **SP4d-2a Task 5
-/// stopped doing that.** `explain` now evaluates the artifact each engine
-/// downloads and passes `AccessRequest::resolved_tags: None`, because the
-/// narrowing that field licenses is sound only for a resolution at least as
-/// broad as the enricher's and this one is not. What `explain` still uses this
-/// for is the response's informational `tags` list — "what has egret got
-/// recorded on exactly this resource" — and nothing else. A future caller
-/// wanting a tag set an evaluator may act on needs a different, roll-up-aware
-/// query, not this one.
+/// stopped doing that, and SP4d-2b Task 7 settled where each query belongs.**
+/// `explain` evaluates the artifact each engine downloads, and the tag set it
+/// hands the evaluator comes from [`resolved_tags_for_resource_via`] — which
+/// rolls the hierarchy up and returns `tags.name` — gated on
+/// [`assignments_outside_rolled_up_levels_via`]. What `explain` uses THIS for is
+/// the response's informational `tags` list — "what has egret got recorded on
+/// exactly this resource" — and nothing else. The two must not be merged: this
+/// one returns `tags.key`, which is a different value (live they differ for one
+/// of three tags) and the engine matches the name.
 pub async fn tag_keys_for_resource_via(
     conn: &mut sqlx::PgConnection,
     catalog_id: uuid::Uuid,
@@ -938,6 +939,63 @@ pub async fn resolved_tags_for_resource_via(
             },
         })
         .collect())
+}
+
+/// How many of this catalog's `catalog_tag_assignments` rows sit at a resource
+/// level [`resolved_tags_for_resource_via`]'s predicate **cannot roll up** —
+/// i.e. carry an empty `schema_name` or an empty `table_name`.
+///
+/// **Zero is the antecedent that makes passing
+/// `egret_ranger_eval::eval::AccessRequest::resolved_tags: Some(...)` sound**,
+/// and this exists because that antecedent is a property of the stored DATA, not
+/// of any one request. Its one caller is
+/// `egret_perm_compile`'s `resolved_tags_for_target`, which runs it BEFORE the
+/// resolver so the two cannot come apart.
+///
+/// # ⚠ The fail-open this closes, which is a MISSED row and not a returned one
+///
+/// **SP4d-2b Task 7.** [`resolved_tags_for_resource_via`] matches `schema_name`
+/// and `table_name` by exact equality, so for the request `sales.orders.email`
+/// it does not return a row stored `('sales', '', '')`. The engine's
+/// `RangerTagEnricher` does: `ServiceTags::from_assignments` omits an empty
+/// level, so that row ships as a `RangerServiceResource` whose
+/// `resourceElements` is `{catalog, schema}`, which is an ANCESTOR of the
+/// request and which Ranger ADMITS for a tag request. So egret would report "no
+/// tags" while the engine evaluates a tag policy through it — and an empty set
+/// is the licence to skip the tag phase entirely.
+///
+/// That row is writable today: `egret_bi::catalog_tags`' `assign_resource_tag`
+/// validates nothing and `PUT …/resource-tags {"schema": "sales", "table": ""}`
+/// stores it (measured by SP4d-2b Task 4's re-review, which found the same hole
+/// one level up at `{"schema": "", "table": ""}`). Migration 0081 has no `CHECK`
+/// and `NOT NULL` does not exclude `''`.
+///
+/// **Why a count here rather than a filter inside the resolver.** The missed row
+/// is invisible to the resolver's RESULT — nothing in the returned set says a
+/// broader row was skipped — so no mapping over that set can detect it. Widening
+/// the resolver's predicate instead would make it return attachments whose
+/// `RangerDefaultPolicyResourceMatcher` match type egret has not measured
+/// (`{catalog, table, column}` straddles a hierarchy gap), i.e. it would trade a
+/// detectable refusal for a guessed match type. So the state is detected, and
+/// the caller declines to resolve for the whole catalog while it holds.
+///
+/// Scoped exactly as the resolver is — `a.warehouse_id = c.warehouse_id` for
+/// `c.id = $1` — so a row this counts is a row that query could have returned,
+/// and a row in another warehouse (whose service resource names another
+/// catalog, never an ancestor of this one) is neither counted nor returned.
+pub async fn assignments_outside_rolled_up_levels_via(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: uuid::Uuid,
+) -> Result<i64, PolicyStoreError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        r#"SELECT count(*)
+           FROM registry.catalogs c
+           JOIN catalog_tag_assignments a ON a.warehouse_id = c.warehouse_id
+           WHERE c.id = $1 AND (a.schema_name = '' OR a.table_name = '')"#,
+    )
+    .bind(catalog_id)
+    .fetch_one(&mut *conn)
+    .await?)
 }
 
 /// `tags.key` for each of `tag_ids`, as `(id, key)` pairs — the reverse of the

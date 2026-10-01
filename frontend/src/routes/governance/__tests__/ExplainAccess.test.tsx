@@ -680,15 +680,21 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
   });
 
   /**
-   * **The blast radius, which the gate measured and asked to be stated rather
-   * than changed.** `explain` passes `resolved_tags: None` unconditionally, so a
-   * single tag-addressed rule or clearance anywhere turns EVERY verdict on every
-   * catalog the profile serves into `Undecidable` — in the gate's fixture, all
-   * seven Trino answers. The refusal is sound (the alternative fails open); the
-   * scale is what a steward needs to know, so it is said where they read it, and
-   * only on the cause it is true of.
+   * **The blast radius, REWRITTEN by SP4d-2b Task 7 rather than deleted.**
+   *
+   * SP4d-2a's gate measured that `explain` passed `resolved_tags: None`
+   * unconditionally, so a single tag-addressed rule or clearance anywhere turned
+   * every verdict on every catalog a profile serves into `Undecidable` — all
+   * seven Trino answers in that fixture. egret resolves the tags now and that
+   * state is gone, so the note may no longer claim an installation-wide reach it
+   * does not have: what is left is a property of this PROFILE's download.
+   *
+   * The sibling below pins the other surviving shape, `tags_unresolved`, whose
+   * reach is a CATALOG and whose remedy is a stored assignment. The two must not
+   * read alike — one note covering both would tell a steward to go looking in the
+   * wrong place — so the last assertion here compares them.
    */
-  test("a tag-policy refusal says its scope, and other causes do not borrow it", async () => {
+  test("a tag-download refusal says its scope, and other causes do not borrow it", async () => {
     mutateAsync.mockResolvedValueOnce({
       status: 200,
       data: {
@@ -727,9 +733,75 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     const causes = within(result).getAllByTestId("undecidable-cause");
     expect(causes[0]).toHaveTextContent(/2 tag policies/);
     expect(causes[0]).toHaveTextContent(/every catalog this profile serves/i);
-    expect(causes[0]).toHaveTextContent(/installation/i);
+    expect(causes[0]).toHaveTextContent(/tag-policy download this profile received/i);
+    // ⚠ The claim SP4d-2a's note made and Task 7 removed. A tag policy in a
+    // profile's block no longer costs every verdict in the installation an
+    // answer, so a note still saying so would be a measured statement that has
+    // become false — the defect class this package counts as equal to a
+    // superseded branch.
+    expect(causes[0]).not.toHaveTextContent(/installation/i);
     // Content-derived, not stapled onto every undecidable cause.
     expect(causes[1]).not.toHaveTextContent(/every catalog this profile serves/i);
+    expect(causes[1]).not.toHaveTextContent(/not specific to your target/i);
+  });
+
+  /**
+   * The second surviving shape, and the one Task 7 created: egret DOES resolve
+   * tags now, and declines for a whole catalog while an assignment in it is
+   * stored with no schema or no table. The note has to name the catalog (not the
+   * installation, not the profile) and the thing to fix, and it must not read
+   * like the download note above — `tsc` proves the switch exhaustive and proves
+   * nothing at all about two arms rendering distinguishable sentences.
+   */
+  test("an unresolved-tags refusal names the catalog and the assignment to fix", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "undecidable",
+                  why: [
+                    { kind: "tags_unresolved" },
+                    {
+                      kind: "envelope_construct",
+                      construct: { kind: "tag_policies", block: { kind: "unreadable" } },
+                    },
+                  ],
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const causes = within(result).getAllByTestId("undecidable-cause");
+    expect(causes).toHaveLength(2);
+
+    expect(causes[0]).toHaveTextContent(/whole catalog/i);
+    expect(causes[0]).toHaveTextContent(/every target in this catalog/i);
+    expect(causes[0]).toHaveTextContent(/no schema or no table/i);
+    // The reach is a catalog. Saying "this profile" would send a steward to the
+    // profile's tag download, which is the OTHER cause's subject.
+    expect(causes[0]).not.toHaveTextContent(/every catalog this profile serves/i);
+
+    // Two causes, two scopes, two remedies — and two different sentences.
+    expect(causes[1]).toHaveTextContent(/tag-policy download this profile received/i);
+    expect(causes[0].textContent).not.toEqual(causes[1].textContent);
   });
 
   /**
@@ -879,8 +951,14 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
 
     // `tags_unresolved`: the distinction it exists to make is "did not resolve"
     // versus "there are none", so the sentence has to carry it.
-    expect(causes[0]).toHaveTextContent(/did not resolve/i);
+    // Task 7 changed this sentence's MEANING, so the assertion moved with it:
+    // the cause is no longer "egret never resolves tags" but "egret declined,
+    // for this catalog, because of a stored assignment". The distinction it has
+    // always existed to make — declining is not finding none — is still asserted,
+    // because an empty set would have been an ANSWER.
+    expect(causes[0]).toHaveTextContent(/declined to resolve/i);
     expect(causes[0]).toHaveTextContent(/not the same as there being none/i);
+    expect(causes[0]).toHaveTextContent(/no schema or no table/i);
 
     // The four `tag_resource_not_reproducible` shapes have four different
     // remedies, so each must read differently and name its own policy.

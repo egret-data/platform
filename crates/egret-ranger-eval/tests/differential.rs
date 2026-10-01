@@ -155,7 +155,7 @@ use std::process::Command;
 use egret_ranger_eval::eval::{
     evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, EngineConfig,
     EngineType, MaskDecision, PluginVersion, ResolvedTag, RowFilterDecision, TagServiceResource,
-    UndecidableCause,
+    UndecidableCause, UnenrichedTags,
 };
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::{MatchType, RequestResource};
@@ -513,7 +513,7 @@ impl Case {
         if let Some(tags) = &self.request.resolved_tags {
             request.insert(
                 "tags".to_string(),
-                Value::Array(tags.iter().map(tag_to_json).collect()),
+                Value::Array(tags.as_slice().iter().map(tag_to_json).collect()),
             );
         }
         json!({
@@ -2050,7 +2050,7 @@ fn finish_case(f: Finish<'_>) -> Case {
     // reported reproducer from either era still reads.
     let resolved_tags = f.tags.map(|layer| {
         envelope.insert("tagPolicies".to_string(), layer.block);
-        layer.tags
+        UnenrichedTags::new(layer.tags)
     });
     let service_policies = Value::Object(envelope);
 
@@ -3011,7 +3011,12 @@ fn tag_facts(case: &Case) -> TagFacts {
     };
     facts.block_present = true;
 
-    let tags = case.request.resolved_tags.as_deref().unwrap_or_default();
+    let tags = case
+        .request
+        .resolved_tags
+        .as_ref()
+        .map(UnenrichedTags::as_slice)
+        .unwrap_or_default();
     // The ONE axis that is a property of the request alone, and intrinsically so:
     // an empty tag set has no tag for any policy to cover, and its whole content is
     // that `getLikelyMatchPolicyEvaluators` returns `EMPTY_LIST` and the phase is
@@ -4176,7 +4181,7 @@ fn check_measured_tag_crash(
                 .with("table", "orders")
                 .with("column", "id"),
             owner: None,
-            resolved_tags: Some(vec![ResolvedTag {
+            resolved_tags: Some(UnenrichedTags::new(vec![ResolvedTag {
                 name: "pii".to_string(),
                 match_type: MatchType::Self_,
                 attributes: BTreeMap::new(),
@@ -4189,7 +4194,7 @@ fn check_measured_tag_crash(
                         .collect(),
                     is_enabled: true,
                 },
-            }]),
+            }])),
         },
     };
 

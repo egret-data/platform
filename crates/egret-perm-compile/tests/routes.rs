@@ -2524,9 +2524,11 @@ async fn a_group_only_grant_is_refused_by_the_artifact_the_engine_downloads() {
 /// schema/table/column by exact equality. So the field now answers exactly one
 /// question — "what has egret got recorded on THIS resource" — which is what a
 /// steward asking why a mask did or did not apply needs, and it reaches the
-/// evaluator nowhere (`resolved_tags` is `None`; see
-/// `a_tag_policy_block_that_could_decide_makes_the_profile_undecidable` for the
-/// refusal that replaces it).
+/// evaluator nowhere. **SP4d-2b Task 7 did not change that**: the set the
+/// evaluator is handed comes from `resolved_tags_for_resource_via` through
+/// `resolved_tags_for_target`, which rolls the table level up and returns
+/// `tags.name` where this returns `tags.key` — two different values, which is
+/// why one query must not serve both.
 #[tokio::test]
 async fn explain_reports_the_tags_egret_has_recorded_on_the_target() {
     let Some(f) = setup().await else { return };
@@ -4152,26 +4154,206 @@ async fn a_target_that_skips_a_level_is_refused() {
     }
 }
 
-/// **Step 3b, pinned.** egret's tag resolution (`tag_keys_for_resource_via`)
-/// matches schema/table/column by exact equality with no hierarchy roll-up,
-/// while Ranger's `RangerTagEnricher` walks the hierarchy and emits ancestor
-/// tags a tag request admits. So egret cannot establish the antecedent
-/// `AccessRequest::resolved_tags`' narrowing needs, and this handler passes
-/// `None` — tier (c) refuses, and a profile whose `tagPolicies` block carries
-/// a policy stays `Undecidable`, naming the block and its count.
+/// **SP4d-2b Task 7: the refusal lifts, and this is where it is pinned.**
 ///
-/// This test exists to make the refusal a DECISION rather than an accident:
-/// change the handler to pass `Some(tag_keys_for_resource_via(...))` and this
-/// goes green-but-wrong in the fail-open direction, so it is written to fail
-/// the moment the refusal is dropped.
+/// SP4d-2a shipped `resolved_tags: None` unconditionally, so a profile whose tag
+/// service carried any policy at all answered `Undecidable` for EVERY access on
+/// EVERY catalog it serves. `explain` now resolves the tags, and here there are
+/// none recorded in this catalog at all — so the set is `Some(empty)`, which is
+/// Ranger's own measured narrowing (`getLikelyMatchPolicyEvaluators` returns
+/// `Collections.EMPTY_LIST` at its `isNotEmpty(tags)` branch) and the profile
+/// ANSWERS.
+///
+/// Three earlier versions of this test are worth knowing about, because each
+/// change was a narrowing rather than a weakening. It first asserted the
+/// evaluator refused the `tagPolicies` block on the ENVELOPE, naming its policy
+/// COUNT; SP4d-2b Task 3 made the block EVALUATED, so the refusal that stood was
+/// the phase's own `tags_unresolved`; Task 7 supplies the set, so what stands is
+/// an answer. What has to stay true is that an answer is never GUESSED — the two
+/// tests below pin the states that still refuse, and the empty set here is the
+/// one state where answering is a measurement.
 #[tokio::test]
-async fn a_tag_policy_block_that_could_decide_makes_the_profile_undecidable() {
+async fn a_tag_policy_block_with_no_tags_recorded_answers_through_the_narrowing() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
     let (trino_id, _starrocks_id, catalog_id) = two_profile_catalog(&f, "explain-tagblock").await;
+    bind_tag_service_with_one_policy(&f, trino_id, "anything").await;
 
-    // The tag service the Trino profile's plugin embeds as `tagPolicies`,
-    // carrying one policy — the shape `download_policies` actually serves.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain_body(catalog_id, "nobody")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let verdict = access_for(profile_for(&body, "trino"), "select");
+    assert_eq!(
+        verdict["decision"]["kind"], "denied",
+        "with no tag recorded on this catalog the tag phase is narrowed away and \
+         the resource policies answer; body: {body}"
+    );
+    // Said explicitly, because "denied" alone would also be satisfied by a
+    // verdict that reached the tag phase and found nothing: `tags_unresolved` is
+    // the cause this task exists to stop producing on this state.
+    assert!(
+        verdict["decision"]["why"].is_null(),
+        "a decided verdict carries no causes at all; body: {body}"
+    );
+
+    // The StarRocks profile alongside it has no tag service at all, and decides
+    // as it always did — the change is scoped to the profile that had the block.
+    assert_eq!(
+        access_for(profile_for(&body, "starrocks"), "select")["decision"]["kind"],
+        "denied",
+        "body: {body}"
+    );
+}
+
+/// **The fail-open the gate closes, end to end.** One assignment row with an
+/// empty `schema_name` ships as a `RangerServiceResource` naming
+/// `{catalog, schema}` — `ServiceTags::from_assignments` omits an empty level —
+/// which the engine's enricher treats as an ANCESTOR of `sales.orders` and
+/// Ranger ADMITS for a tag request. `resolved_tags_for_resource_via` cannot
+/// return it: its predicate is an exact `table_name = $3`. So the resolved set
+/// would be MISSING a tag the engine is enforcing, and an empty set is the
+/// licence to skip the tag phase entirely.
+///
+/// `assignments_outside_rolled_up_levels_via` counts exactly that row, and
+/// `resolved_tags_for_target` declines before resolving anything. Remove the
+/// gate and this goes green-but-wrong in the fail-open direction.
+///
+/// The row is storable today: `assign_resource_tag` validates nothing and
+/// migration 0081 has no `CHECK`, so `PUT …/resource-tags {"table": ""}` writes
+/// it. This test writes it the same way every other fixture here does.
+#[tokio::test]
+async fn an_assignment_below_no_table_declines_the_resolution_and_refuses() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (trino_id, _starrocks_id, catalog_id) = two_profile_catalog(&f, "explain-broadrow").await;
+    bind_tag_service_with_one_policy(&f, trino_id, "anything").await;
+
+    // A SCHEMA-level assignment: `table_name = ''`, which is the level egret's
+    // storage has no convention for and its resolver cannot roll up.
+    assign_tag(&f, catalog_id, "sales", "", "").await;
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain_body(catalog_id, "nobody")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let verdict = access_for(profile_for(&body, "trino"), "select");
+    assert_eq!(
+        verdict["decision"]["kind"], "undecidable",
+        "a stored assignment egret cannot roll up must refuse, not be answered \
+         from a set it is missing from; body: {body}"
+    );
+    assert!(
+        verdict["decision"]["why"]
+            .as_array()
+            .expect("why")
+            .iter()
+            .any(|c| c["kind"] == "tags_unresolved"),
+        "no tags_unresolved cause in {body}"
+    );
+}
+
+/// **The other half of the lift: a real tag, a real tag policy, a real answer.**
+/// A TABLE-level assignment is `SELF` for a request naming that table, the tag
+/// policy's `resources.tag.values` names that tag, and its deny item names the
+/// subject — so the engine's tag phase denies and so does `explain`. Before Task
+/// 7 this was `tags_unresolved`, which is the whole cost the task removes: the
+/// steward could not see that a tag policy was the thing deciding.
+#[tokio::test]
+async fn a_resolved_tag_lets_the_tag_policy_itself_decide() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (trino_id, _starrocks_id, catalog_id) = two_profile_catalog(&f, "explain-tagdecides").await;
+    let tag_name = assign_tag(&f, catalog_id, "sales", "orders", "").await;
+    bind_tag_service_with_one_policy(&f, trino_id, &tag_name).await;
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain_body(catalog_id, "nobody")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let verdict = access_for(profile_for(&body, "trino"), "select");
+    assert_eq!(
+        verdict["decision"]["kind"], "denied",
+        "the tag policy is what decides, and it must be able to; body: {body}"
+    );
+    assert_eq!(
+        verdict["decision"]["reason"], "deny_policy_item",
+        "and it decides through its deny item, not by nothing matching; body: {body}"
+    );
+}
+
+/// One `tags` row plus one `catalog_tag_assignments` row on this catalog's
+/// warehouse, returning `tags.name` — which is what the tag WIRE carries as the
+/// tag's `type` and therefore what a tag policy's `resources.tag.values` must
+/// name. Never `tags.key`: live the two differ, and that is the fail-open D3
+/// names.
+async fn assign_tag(
+    f: &Fixture,
+    catalog_id: Uuid,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> String {
+    let warehouse_id: Uuid =
+        sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+            .bind(catalog_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("catalog warehouse");
+    let name = unique("t7tag");
+    let tag_id: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+            .bind(unique("t7key"))
+            .bind(&name)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("tag");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1,$2,$3,$4,$5)",
+    )
+    .bind(tag_id)
+    .bind(warehouse_id)
+    .bind(schema)
+    .bind(table)
+    .bind(column)
+    .execute(&f.db.pool)
+    .await
+    .expect("tag assignment");
+    name
+}
+
+/// The tag service the Trino profile's plugin embeds as `tagPolicies`, carrying
+/// ONE ACCESS policy on `tag_value` that denies `nobody` — the shape
+/// `download_policies` actually serves.
+async fn bind_tag_service_with_one_policy(f: &Fixture, trino_id: i64, tag_value: &str) {
     egret_policy::seed_tag(&f.policy)
         .await
         .expect("seed tag def");
@@ -4197,9 +4379,12 @@ async fn a_tag_policy_block_that_could_decide_makes_the_profile_undecidable() {
                 "serviceType": "tag",
                 "policyType": 0,
                 "isEnabled": true,
-                "resources": { "tag": { "values": ["anything"], "isExcludes": false, "isRecursive": false } },
+                "resources": { "tag": { "values": [tag_value], "isExcludes": false, "isRecursive": false } },
                 "policyItems": [],
-                "denyPolicyItems": [],
+                "denyPolicyItems": [{
+                    "users": ["nobody"],
+                    "accesses": [{"type": "select", "isAllowed": true}],
+                }],
                 "allowExceptions": [],
                 "denyExceptions": [],
                 "isDenyAllElse": false,
@@ -4213,56 +4398,6 @@ async fn a_tag_policy_block_that_could_decide_makes_the_profile_undecidable() {
         .execute(&f.db.pool)
         .await
         .expect("bind the tag service");
-
-    let (status, body) = into_json(
-        f.app()
-            .oneshot(req(
-                "POST",
-                "/perm/explain",
-                &token,
-                Some(explain_body(catalog_id, "nobody")),
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "body: {body}");
-    let verdict = access_for(profile_for(&body, "trino"), "select");
-    assert_eq!(
-        verdict["decision"]["kind"], "undecidable",
-        "a `tagPolicies` block that could decide must refuse, not be guessed past; body: {body}"
-    );
-    // SP4d-2b Task 3 changed WHICH refusal this is, and it is worth reading the
-    // change carefully because it is not a weakening.
-    //
-    // The evaluator used to refuse the `tagPolicies` block itself, on the
-    // envelope, and the cause carried the block's policy COUNT. It now
-    // EVALUATES the block — so the count is no longer a refusal to report — and
-    // the refusal that stands is the phase's own first one: this handler still
-    // sends `resolved_tags: None`, and `None` is "the caller did not resolve",
-    // never the empty set. SP4d-2b Task 7 is what makes the handler send a real
-    // tag set, and THAT is the commit after which this profile answers.
-    //
-    // So the claim the test makes is unchanged — a profile whose tag service
-    // carries a policy does not get a guessed answer — and it now rests on the
-    // narrower fact.
-    let why = verdict["decision"]["why"].as_array().expect("why");
-    assert!(
-        why.iter().any(|c| c["kind"] == "tags_unresolved"),
-        "no tags_unresolved cause in {body}"
-    );
-    assert!(
-        !why.iter().any(|c| c["construct"]["kind"] == "tag_policies"),
-        "the envelope refusal for a decidable tag block must be gone; body: {body}"
-    );
-
-    // The StarRocks profile alongside it has no tag service at all, so it
-    // still decides — the refusal is scoped to the profile that earned it.
-    assert_eq!(
-        access_for(profile_for(&body, "starrocks"), "select")["decision"]["kind"],
-        "denied",
-        "body: {body}"
-    );
 }
 
 /// **The drift alarm, restored.** Rerouting `explain` through the artifact

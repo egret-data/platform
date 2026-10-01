@@ -42,7 +42,7 @@
 //! family rather than adding a key: SP4c may fold the hand-written policy
 //! editor away entirely, and a key added now would have to be retired twice.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use axum::extract::{FromRef, Path, State};
@@ -61,12 +61,15 @@ use egret_perm::{
     PrincipalSet, Rule, RuleKind, Scope, Selector,
 };
 use egret_policy::{
-    catalog_names_for_ids_via, catalogs_for_service_via, clearance_gates_for_tags_via,
-    get_service_by_id_via, services_for_catalog_via, tag_keys_by_ids_via,
-    tag_keys_for_resource_via, tag_names_for_keys_via, PolicyStore, ServiceRow,
+    assignments_outside_rolled_up_levels_via, catalog_names_for_ids_via, catalogs_for_service_via,
+    clearance_gates_for_tags_via, get_service_by_id_via, resolved_tags_for_resource_via,
+    services_for_catalog_via, tag_keys_by_ids_via, tag_keys_for_resource_via,
+    tag_names_for_keys_via, PolicyStore, ServiceRow,
 };
 use egret_policy_api::ServicePolicies;
-use egret_ranger_eval::eval::{AccessRequest, Decision, EngineConfig};
+use egret_ranger_eval::eval::{
+    AccessRequest, Decision, EngineConfig, TagServiceResource, UnenrichedTags,
+};
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::RequestResource;
 use egret_ranger_eval::servicedef::ServiceDef;
@@ -1365,11 +1368,13 @@ async fn preview(
 ///    route uses, not `list_policies`.** "What explain evaluated" and "what the
 ///    engine received" must not be able to drift.
 /// 2. **`roles` and `groups` are empty** — see [`ExplainSubject`].
-/// 3. **`resolved_tags` is `None`, deliberately.** See the block at the call
-///    site: egret cannot establish the antecedent the narrowing needs, so a
-///    profile whose `tagPolicies` block could decide comes back `Undecidable`
-///    naming that block, rather than answering confidently from a tag set
-///    narrower than `RangerTagEnricher`'s.
+/// 3. **`resolved_tags` carries egret's own resolution, and
+///    [`resolved_tags_for_target`] is what decides whether it may.** Until
+///    SP4d-2b Task 7 this was `None` unconditionally, which made every verdict on
+///    every catalog a profile serves `Undecidable` while that profile's tag block
+///    held any policy at all. It is now a real tag set for the one resolution
+///    shown enricher-equivalent, and still `None` — so still a refusal — for
+///    every state where it is not. The whole argument is on that function.
 /// 4. **A `write` explain is several evaluations**, one per Ranger access type
 ///    the action maps to on that engine, reported separately.
 #[utoipa::path(
@@ -1419,11 +1424,17 @@ async fn explain(
     }
     let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
 
-    // Reported for the steward, and NOT passed to the evaluator — see
-    // `ExplainResponse::tags` and the `resolved_tags` block below. Tags attach
-    // to tables and columns only, keyed `(warehouse_id, schema, table, column)`
-    // with `column = ''` meaning the table itself, so a target that names no
-    // table can carry none.
+    // Reported for the steward, and NOT what the evaluator is handed — see
+    // `ExplainResponse::tags`. This is `tags.key` on EXACTLY this resource
+    // ("what has egret got recorded here"); what the evaluator gets is
+    // `resolved_tags_for_target` below, which is `tags.name`, rolls the
+    // hierarchy up, and can decline. The two must not be merged: live the key
+    // and the name differ for one of three tags, and the engine matches the
+    // name.
+    //
+    // Tags attach to tables and columns only, keyed
+    // `(warehouse_id, schema, table, column)` with `column = ''` meaning the
+    // table itself, so a target that names no table can carry none.
     let tags = match (&body.target.schema, &body.target.table) {
         (Some(schema), Some(table)) => {
             tag_keys_for_resource_via(
@@ -1437,6 +1448,15 @@ async fn explain(
         }
         _ => Vec::new(),
     };
+
+    // ONE resolution for the whole response, not one per profile: the levels it
+    // synthesises are the literal `catalog`/`schema`/`table`/`column` keys
+    // `ServiceTags::from_assignments` writes, which do not vary by engine (that
+    // is a defect in the WRITER, ruled on in `attachment_for` — it is why a
+    // StarRocks profile's attachments are dropped by the enricher rather than
+    // renamed). The resolution is a property of the target, so computing it once
+    // also removes any way for two profiles to be answered from two tag sets.
+    let resolved_tags = resolved_tags_for_target(&mut *conn, &body.target).await?;
 
     let mut profiles: Vec<ExplainProfile> = Vec::new();
     for service_id in services_for_catalog_via(&mut conn, body.target.catalog_id).await? {
@@ -1533,27 +1553,15 @@ async fn explain(
                 // a decision that depends on one `Undecidable` rather than a
                 // guess in either direction.
                 owner: None,
-                // ⚠ **`None`, and it must stay `None` until egret's tag
-                // resolution is hierarchy-complete.** `Some(empty)` is a
-                // licence for `egret-ranger-eval` to skip its `tagPolicies`
-                // refusal, and that licence is sound only if the caller's tag
-                // resolution is at least as broad as
-                // `RangerTagEnricher`'s. egret's is not:
-                // `tag_keys_for_resource_via` matches schema/table/column by
-                // exact equality with no hierarchy roll-up, while the enricher
-                // walks the hierarchy and emits ancestor tags Ranger ADMITS for
-                // a tag request. So egret can report "no tags" for a column the
-                // engine is masking through a TABLE-level attachment. Every
-                // live tag assignment today is column-level, which is exactly
-                // how passing `tags` here would ship green and fail open. The
-                // cost of refusing is bounded and visible: a profile whose tag
-                // block carries a policy comes back `Undecidable` with the
-                // block and its policy COUNT named
-                // (`tests/routes.rs::a_tag_policy_block_that_could_decide_makes_the_profile_undecidable`
-                // pins it), which a steward can act on. Passing the existing
-                // resolution's result as if it were complete is the one thing
-                // that is not an option.
-                resolved_tags: None,
+                // egret's own resolution, or `None` where
+                // `resolved_tags_for_target` declined — never
+                // `tag_keys_for_resource_via`'s `tags`, which is the
+                // attribution list and is both the wrong identifier
+                // (`tags.key`) and the wrong breadth (no roll-up). `None` here
+                // still means "the caller did not resolve", which the evaluator
+                // refuses with `TagsUnresolved`; it is never the empty set,
+                // which is the measured narrowing.
+                resolved_tags: resolved_tags.clone(),
             };
             let decision =
                 egret_ranger_eval::eval::evaluate(&artifact, &request, &service_def, &config);
@@ -1794,6 +1802,237 @@ impl ClearanceLookups for sqlx::PgConnection {
         tag_key: &str,
     ) -> Result<Vec<(String, Vec<String>)>, PermHttpError> {
         Ok(clearance_gates_for_tags_via(self, &[tag_key.to_string()]).await?)
+    }
+}
+
+/// The tag set `explain` may hand
+/// [`egret_ranger_eval::eval::AccessRequest::resolved_tags`] for one target, or
+/// `None` where egret's resolution cannot be shown equivalent to
+/// `RangerTagEnricher`'s and the narrowing must therefore not be offered.
+///
+/// `None` costs an answer: the evaluator raises
+/// `UndecidableCause::TagsUnresolved` for any profile whose tag block holds a
+/// policy of the kind being decided. That is the price of the one thing that is
+/// not an option — handing the evaluator a set NARROWER than the enricher's,
+/// since `Some(empty)` is a licence to skip the tag phase outright
+/// (`getLikelyMatchPolicyEvaluators` returns `Collections.EMPTY_LIST` at its
+/// `isNotEmpty(tags)` branch).
+///
+/// # The equivalence, and the one precondition it rests on
+///
+/// `resolved_tags_for_resource_via` (SP4d-2b Task 1) reproduces
+/// `RangerTagEnricher.findMatchingTags` for the two levels egret's storage was
+/// designed to express: a COLUMN attachment is `SELF` for the request that names
+/// that column, and a TABLE attachment (`column_name = ''`) is `ANCESTOR` for a
+/// request naming any of its columns and `SELF` for the request naming the table.
+/// Its predicate is `schema_name = $2 AND table_name = $3 AND (column_name = $4 OR
+/// column_name = '')`.
+///
+/// So the set it returns is exactly the enricher's **provided every stored row is
+/// at one of those two levels**, i.e. has a non-empty `schema_name` and a
+/// non-empty `table_name`. [`TagLookups::rows_outside_the_rolled_up_levels`] is
+/// that precondition, and it is checked FIRST, for the catalog, before any
+/// resolution — see the ⚠ block on
+/// `egret_policy::assignments_outside_rolled_up_levels_via` for the fail-open it
+/// closes and why no mapping over the resolver's RESULT could close it instead.
+///
+/// With the precondition holding, a target that names no schema or no table is
+/// `Some(empty)` rather than a refusal, and that is an argument rather than a
+/// convenience: the request resource is then `{catalog}` or `{catalog, schema}`,
+/// every stored attachment is at `{catalog, schema, table[, column]}`, and a
+/// deeper attachment is a `DESCENDANT` — which `findMatchingTags` records and
+/// `RangerDefaultPolicyEvaluator.evaluate` then does NOT admit for a tag request
+/// at `ResourceMatchingScope.SELF` (see `tag_match_is_admitted`). The enricher
+/// resolves nothing for such a request either.
+///
+/// # ⚠ Enumerated: every input this reads, and every input it could read
+///
+/// A new field on any of these is a new row here, and the ruling belongs at this
+/// site rather than in a plan.
+///
+/// | input | read | ruling |
+/// |---|---|---|
+/// | `target.catalog_id` | **yes** | scopes both reads, and scopes them identically (`a.warehouse_id = c.warehouse_id` for `c.id = $1`), so a row the gate counts is a row the resolver could return |
+/// | `target.schema` / `target.table` | **yes** | `None` on either ⇒ `Some(empty)`, argued above. `Some("")` is NOT special-cased: with the gate at zero no stored row has an empty `schema_name` or `table_name`, so an empty request value matches nothing and the empty set is the right answer — the one shape that could arrive, a `('', '')` row, is exactly what the gate refuses on |
+/// | `target.column` | **yes** | `None` ⇒ `""`, which is migration 0081's "the table itself" convention in the REQUEST position, and is the value `resolved_tags_for_resource_via` is documented against |
+/// | `rows_outside_the_rolled_up_levels` | **yes, first** | non-zero ⇒ `None`. Per CATALOG and not per request: the row that breaks the equivalence is one the resolver cannot return, so there is nothing per-request to test it against |
+/// | `egret_policy::ResolvedTag::name` | **yes** | `tags.name`, which is what `from_assignments` puts in the wire tag's `type` and therefore what the engine matches. Never `tags.key` — live they differ for one of three tags |
+/// | `egret_policy::ResolvedTag::match_type` | **yes** | both the evaluator's admission test AND, here, the only surviving record of WHICH level the attachment was at — see [`attachment_for`] |
+/// | the engine (Trino / StarRocks) | **no** | and that is the ruling, not an omission: `ServiceTags::from_assignments` writes the keys `catalog`/`schema`/`table`/`column` for every service type. See [`attachment_for`] |
+/// | `tag_keys_for_resource_via`'s result | **no** | the attribution list: `tags.key`, exact-match only. Reusing it here is the fail-open D3 names |
+/// | `catalog_tag_assignments.warehouse_id`, `tags.id`, `tags.key` | **no** | not on the tag wire the plugin matches against |
+/// | the profile, its service def, its `tagService` | **no** | one resolution per TARGET answers every profile; nothing about a profile changes what the enricher would resolve for a resource. The def-dependent half — the enricher's DROP — is the evaluator's `enriched_tags`, which holds the resource def this function does not |
+async fn resolved_tags_for_target<L: TagLookups + Send>(
+    conn: &mut L,
+    target: &Scope,
+) -> Result<Option<UnenrichedTags>, PermHttpError> {
+    // THE GATE, first and before anything can return a set. Nothing below may
+    // move above it: every argument on this function for why the resolution is
+    // enricher-equivalent assumes it passed.
+    if conn
+        .rows_outside_the_rolled_up_levels(target.catalog_id)
+        .await?
+        > 0
+    {
+        return Ok(None);
+    }
+    let (Some(schema), Some(table)) = (target.schema.as_deref(), target.table.as_deref()) else {
+        // Not a shortcut — see the DESCENDANT argument in the doc above.
+        return Ok(Some(UnenrichedTags::new(Vec::new())));
+    };
+    let column = target.column.as_deref().unwrap_or("");
+    let resolved = conn
+        .resolved_tags(target.catalog_id, schema, table, column)
+        .await?;
+    // `collect::<Option<Vec<_>>>` so that ONE unmappable attachment declines the
+    // whole resolution rather than silently shipping a set with a hole in it.
+    Ok(resolved
+        .iter()
+        .map(|tag| attachment_for(tag, schema, table, column))
+        .collect::<Option<Vec<_>>>()
+        .map(UnenrichedTags::new))
+}
+
+/// `egret_policy::ResolvedTag` → `egret_ranger_eval::eval::ResolvedTag`: two
+/// fields in, six out, and every one of the four synthesised fields is a claim
+/// about what `ServiceTags::from_assignments` puts on the wire.
+///
+/// `None` means this attachment is not one this mapping models, which declines
+/// the whole resolution in [`resolved_tags_for_target`]. It is not reachable from
+/// `resolved_tags_for_resource_via`, whose two arms are `Self_` and `Ancestor`;
+/// it exists so that a third arm is a refusal and not a guess.
+///
+/// # Where the ATTACHMENT's own levels come from
+///
+/// The levels are a property of the attachment, and
+/// `egret_policy::ResolvedTag` carries only `name` and `match_type` — so the
+/// match type is where the level survives, and that is sound in exactly one
+/// direction:
+///
+/// | `match_type` | the attachment's stored coordinates | levels |
+/// |---|---|---|
+/// | `Self_` | the request's own `(schema, table, column)` — the `column_name = $4` arm matched | `catalog` + each of `schema` / `table` / `column` that is non-empty |
+/// | `Ancestor` | `(schema, table, '')` — the only other row the query can return is the TABLE-level one | `catalog`, `schema`, `table` |
+/// | `Descendant` / `SelfAndAllDescendants` / `None` | — | `None`: no arm of `resolved_tags_for_resource_via` produces one, and a producer that did would be one this mapping has not been measured against |
+///
+/// # ⚠ The keys are LITERAL, and for StarRocks that is a defect this mapping reproduces rather than hides
+///
+/// `from_assignments` writes `catalog` / `schema` / `table` / `column` for every
+/// service type (`egret-policy-api/src/dto.rs`, and `download_tags` calls it with
+/// no engine argument at all). StarRocks' service-def has no `schema` resource —
+/// its middle level is `database` — so a StarRocks profile carrying a
+/// `tagService` downloads attachments naming a level its own def does not know,
+/// and `RangerTagEnricher.processServiceTags` DROPS them:
+/// `createRangerServiceResourceMatcher` returns null when no hierarchy of any
+/// policy type contains every key, which
+/// `EgretTagServiceResourceValidationTest` measures on the real jar (the mirror
+/// row, `catalog,database,table,column` against the Trino def, is `dropped`).
+///
+/// So synthesising `resource_level_names(engine)` here would be a FAIL-OPEN: it
+/// would tell a steward the engine evaluates a tag policy that the engine's own
+/// enricher has thrown away. The mapping writes what the wire carries, the
+/// evaluator's `enriched_tags` drops it against the resource def, and a StarRocks
+/// profile therefore answers with its tag policies correctly reported as reaching
+/// nothing. **The defect is in the writer** — tag-selected masks and clearances
+/// cannot reach a StarRocks engine at all — and it is recorded in Task 7's report,
+/// not papered over here. (Nothing egret auto-binds puts a `tagService` on a
+/// StarRocks profile: `bind_trino_profile` is the only writer and
+/// `tag_assignments_for_service` resolves the owning profile with
+/// `tp.type = 'trino'`. An operator can still set the config by hand, which is
+/// why this path has to be right rather than merely unused.)
+///
+/// # ⚠ Enumerated: the four fields with no column to come from
+///
+/// | field | value | ruling |
+/// |---|---|---|
+/// | `attributes` | empty | `from_assignments` writes each tag as `{"type": name, "owner": 0}`. There is no attribute on the wire, so an empty map is the payload and not a default |
+/// | `options` | empty | likewise absent from the wire. Non-empty would REFUSE in `tag_candidates`, so inventing one would be an over-refusal |
+/// | `validity_periods` | `0` | likewise absent |
+/// | `attached_through.is_enabled` | `true` | `from_assignments` writes `"isEnabled": true` unconditionally. The field reaches no decision (`processServiceTags` never reads it, SP4d-2b D9); it is set to the wire's value so the inertness stays assertable |
+///
+/// A field added to `egret_ranger_eval::eval::ResolvedTag` is a compile error
+/// here — there is no `Default` — and a new row in the table above.
+fn attachment_for(
+    tag: &egret_policy::ResolvedTag,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Option<egret_ranger_eval::eval::ResolvedTag> {
+    use egret_ranger_eval::resource::MatchType;
+
+    let attached_column = match tag.match_type {
+        MatchType::Self_ => column,
+        MatchType::Ancestor => "",
+        MatchType::Descendant | MatchType::SelfAndAllDescendants | MatchType::None => return None,
+    };
+    // Exactly `from_assignments`' rule: `catalog` unconditionally, and each of
+    // the other three only when non-empty.
+    let levels: BTreeSet<String> = std::iter::once("catalog")
+        .chain((!schema.is_empty()).then_some("schema"))
+        .chain((!table.is_empty()).then_some("table"))
+        .chain((!attached_column.is_empty()).then_some("column"))
+        .map(str::to_owned)
+        .collect();
+    Some(egret_ranger_eval::eval::ResolvedTag {
+        name: tag.name.clone(),
+        match_type: tag.match_type,
+        attributes: BTreeMap::new(),
+        options: BTreeSet::new(),
+        validity_periods: 0,
+        attached_through: TagServiceResource {
+            levels,
+            is_enabled: true,
+        },
+    })
+}
+
+/// The two reads [`resolved_tags_for_target`] needs, behind a trait so that the
+/// GATE, the mapping and the wiring between them are testable with no database.
+///
+/// Same seam and same reason as [`ClearanceLookups`]: fix round 1 of Task 6
+/// measured that a `&mut PgConnection` parameter makes its call site reachable
+/// only from a DB-gated test, where a mutation that drops a call survives in
+/// silence. Dropping the gate call here would be a fail-open, so it is the first
+/// thing that had to be coverable.
+///
+/// Both methods are `-> impl Future + Send` rather than `async fn` for the reason
+/// on [`ClearanceLookups`]: the caller is an axum handler.
+trait TagLookups {
+    /// `assignments_outside_rolled_up_levels_via` — how many of this catalog's
+    /// tag assignments sit at a level the resolver's predicate cannot roll up.
+    fn rows_outside_the_rolled_up_levels(
+        &mut self,
+        catalog_id: Uuid,
+    ) -> impl std::future::Future<Output = Result<i64, PermHttpError>> + Send;
+
+    /// `resolved_tags_for_resource_via` — the enricher-equivalent set for ONE
+    /// resource, as `(tags.name, MatchType)` pairs.
+    fn resolved_tags(
+        &mut self,
+        catalog_id: Uuid,
+        schema: &str,
+        table: &str,
+        column: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<egret_policy::ResolvedTag>, PermHttpError>> + Send;
+}
+
+/// The production implementation: the two store queries, unchanged.
+impl TagLookups for sqlx::PgConnection {
+    async fn rows_outside_the_rolled_up_levels(
+        &mut self,
+        catalog_id: Uuid,
+    ) -> Result<i64, PermHttpError> {
+        Ok(assignments_outside_rolled_up_levels_via(self, catalog_id).await?)
+    }
+
+    async fn resolved_tags(
+        &mut self,
+        catalog_id: Uuid,
+        schema: &str,
+        table: &str,
+        column: &str,
+    ) -> Result<Vec<egret_policy::ResolvedTag>, PermHttpError> {
+        Ok(resolved_tags_for_resource_via(self, catalog_id, schema, table, column).await?)
     }
 }
 
@@ -2112,6 +2351,268 @@ mod wiring_tests {
             assert_eq!(got, want, "for {decision:?}");
             assert_eq!(lookups.tags_asked, Vec::<Uuid>::new(), "for {decision:?}");
             assert!(lookups.gates_asked.is_empty(), "for {decision:?}");
+        }
+    }
+}
+
+// ── the tag resolution, with no database ─────────────────────────────────
+//
+// SP4d-2b Task 7. Two things needed covering and neither could be reached from
+// a DB-gated test: that the GATE runs before any resolution (dropping that call
+// is a fail-open), and the `egret_policy::ResolvedTag` →
+// `egret_ranger_eval::eval::ResolvedTag` mapping, which synthesises four fields
+// out of nothing but a measurement of what `ServiceTags::from_assignments`
+// writes. `TagLookups` is the seam; the fake records what it was asked, because
+// "the resolver was never called" is a claim about behaviour that a test reading
+// only the return value cannot make.
+
+#[cfg(test)]
+mod tag_resolution_tests {
+    use super::{attachment_for, resolved_tags_for_target, PermHttpError, Scope, TagLookups};
+    use egret_ranger_eval::resource::MatchType;
+    use uuid::Uuid;
+
+    const CATALOG: &str = "33333333-3333-4333-8333-333333333333";
+
+    /// Stands in for the two store reads, and records both.
+    struct FakeTagLookups {
+        broad_rows: i64,
+        resolved: Vec<egret_policy::ResolvedTag>,
+        gate_asked: Vec<Uuid>,
+        resolved_asked: Vec<(Uuid, String, String, String)>,
+    }
+
+    impl FakeTagLookups {
+        fn new(broad_rows: i64, resolved: &[(&str, MatchType)]) -> Self {
+            Self {
+                broad_rows,
+                resolved: resolved
+                    .iter()
+                    .map(|(name, match_type)| egret_policy::ResolvedTag {
+                        name: (*name).to_string(),
+                        match_type: *match_type,
+                    })
+                    .collect(),
+                gate_asked: Vec::new(),
+                resolved_asked: Vec::new(),
+            }
+        }
+    }
+
+    impl TagLookups for FakeTagLookups {
+        async fn rows_outside_the_rolled_up_levels(
+            &mut self,
+            catalog_id: Uuid,
+        ) -> Result<i64, PermHttpError> {
+            self.gate_asked.push(catalog_id);
+            Ok(self.broad_rows)
+        }
+
+        async fn resolved_tags(
+            &mut self,
+            catalog_id: Uuid,
+            schema: &str,
+            table: &str,
+            column: &str,
+        ) -> Result<Vec<egret_policy::ResolvedTag>, PermHttpError> {
+            self.resolved_asked.push((
+                catalog_id,
+                schema.to_string(),
+                table.to_string(),
+                column.to_string(),
+            ));
+            Ok(self.resolved.clone())
+        }
+    }
+
+    fn target(schema: Option<&str>, table: Option<&str>, column: Option<&str>) -> Scope {
+        Scope {
+            catalog_id: Uuid::parse_str(CATALOG).unwrap(),
+            schema: schema.map(str::to_string),
+            table: table.map(str::to_string),
+            column: column.map(str::to_string),
+        }
+    }
+
+    fn levels(tag: &egret_ranger_eval::eval::ResolvedTag) -> Vec<&str> {
+        tag.attached_through
+            .levels
+            .iter()
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// **The fail-open this seam exists for.** One stored assignment with an
+    /// empty `schema_name` or `table_name` ships as a service resource the
+    /// enricher treats as an ANCESTOR of resources the exact-match resolver
+    /// never returns it for — so the resolved set would be MISSING a tag the
+    /// engine is enforcing, and an empty set is a licence to skip the tag phase.
+    /// Deleting the gate call, or weakening `> 0`, makes this test report a tag
+    /// set where it must report "did not resolve".
+    #[tokio::test]
+    async fn one_row_outside_the_rolled_up_levels_declines_the_whole_resolution() {
+        let mut lookups = FakeTagLookups::new(1, &[("pii", MatchType::Self_)]);
+        let got = resolved_tags_for_target(&mut lookups, &target(Some("s"), Some("t"), Some("c")))
+            .await
+            .expect("no error");
+        assert!(
+            got.is_none(),
+            "a row the resolver cannot roll up must decline the narrowing, got {got:?}"
+        );
+        assert_eq!(
+            lookups.gate_asked,
+            vec![Uuid::parse_str(CATALOG).unwrap()],
+            "the gate is asked, and asked about the target's catalog"
+        );
+        assert!(
+            lookups.resolved_asked.is_empty(),
+            "nothing may be resolved once the equivalence is known not to hold"
+        );
+    }
+
+    /// The gate is the FIRST read, not a second opinion on a set already
+    /// fetched: with the gate clear the resolver is asked exactly once, with the
+    /// target's own four values and `column = ""` for a table-level target.
+    #[tokio::test]
+    async fn a_clear_gate_resolves_once_with_the_targets_own_levels() {
+        let mut lookups = FakeTagLookups::new(0, &[]);
+        let got = resolved_tags_for_target(&mut lookups, &target(Some("s"), Some("t"), None))
+            .await
+            .expect("no error");
+        assert_eq!(got.map(|t| t.as_slice().len()), Some(0));
+        assert_eq!(
+            lookups.resolved_asked,
+            vec![(
+                Uuid::parse_str(CATALOG).unwrap(),
+                "s".to_string(),
+                "t".to_string(),
+                String::new()
+            )]
+        );
+    }
+
+    /// A COLUMN attachment and a TABLE attachment on one request, which is the
+    /// shape `resolved_tags_for_resource_via` returns for a column target, and
+    /// the two level sets `ServiceTags::from_assignments` writes for them. The
+    /// match type is the only record of which level the attachment was at, so
+    /// mapping `Ancestor` onto four levels (or `Self_` onto three) would ship a
+    /// provenance claim that is false — and the four synthesised fields are the
+    /// wire's values, not a `Default`.
+    #[tokio::test]
+    async fn self_maps_to_four_levels_and_ancestor_to_three() {
+        let mut lookups = FakeTagLookups::new(
+            0,
+            &[("pii", MatchType::Self_), ("ssn", MatchType::Ancestor)],
+        );
+        let got = resolved_tags_for_target(&mut lookups, &target(Some("s"), Some("t"), Some("c")))
+            .await
+            .expect("no error")
+            .expect("the gate is clear, so a set is offered");
+        let tags = got.as_slice();
+        assert_eq!(tags.len(), 2);
+
+        assert_eq!(tags[0].name, "pii");
+        assert_eq!(tags[0].match_type, MatchType::Self_);
+        assert_eq!(
+            levels(&tags[0]),
+            vec!["catalog", "column", "schema", "table"]
+        );
+
+        assert_eq!(tags[1].name, "ssn");
+        assert_eq!(tags[1].match_type, MatchType::Ancestor);
+        assert_eq!(levels(&tags[1]), vec!["catalog", "schema", "table"]);
+
+        for tag in tags {
+            assert!(tag.attributes.is_empty(), "no attribute is on the tag wire");
+            assert!(tag.options.is_empty(), "no option is on the tag wire");
+            assert_eq!(tag.validity_periods, 0, "no validity period is on the wire");
+            assert!(
+                tag.attached_through.is_enabled,
+                "`from_assignments` writes `isEnabled: true` unconditionally"
+            );
+        }
+    }
+
+    /// A target naming no table carries no attachment the enricher would admit —
+    /// every stored one is then `{catalog, schema, table[, column]}`, i.e. a
+    /// DESCENDANT of the request, which a tag request at
+    /// `ResourceMatchingScope.SELF` does not admit. So this is `Some(empty)`
+    /// (the measured narrowing: the tag phase is skipped) and NOT `None` (a
+    /// refusal), and the resolver is not asked at all.
+    #[tokio::test]
+    async fn a_target_above_the_table_narrows_to_the_empty_set() {
+        for t in [target(None, None, None), target(Some("s"), None, None)] {
+            let mut lookups = FakeTagLookups::new(0, &[("pii", MatchType::Self_)]);
+            let got = resolved_tags_for_target(&mut lookups, &t)
+                .await
+                .expect("no error")
+                .expect("the narrowing is offered, not refused");
+            assert!(got.as_slice().is_empty(), "for {t:?}");
+            assert!(lookups.resolved_asked.is_empty(), "for {t:?}");
+        }
+    }
+
+    /// **This input cannot arise from the live path today, and the test says so
+    /// rather than implying coverage that does not exist.** A `('', '')`
+    /// assignment row IS storable (`PUT …/resource-tags {"schema": "",
+    /// "table": ""}` — `assign_resource_tag` validates nothing and migration
+    /// 0081 has no `CHECK`) and `resolved_tags_for_resource_via(…, "", "", "")`
+    /// DOES return it — the predicate is an exact `schema_name = $2 AND
+    /// table_name = $3`, so an empty request matches a row written empty. What
+    /// keeps it out of the mapping is neither the query nor the schema: it is
+    /// `rows_outside_the_rolled_up_levels`, which counts exactly that row and
+    /// declines the whole resolution before any mapping happens. Nothing
+    /// constrains `explain`'s own `schema`/`table` strings — the handler's 400
+    /// tests for an absent level, not an empty one — so this is reached by
+    /// calling the mapping directly.
+    ///
+    /// The mapping is still written to be right for it: the levels follow
+    /// `from_assignments`' own rule (skip an empty level), so a `('', '')` row
+    /// becomes the one-level `{catalog}` attachment, and
+    /// `TagAttachmentProblem::ResourceLevels` is what answers in the evaluator
+    /// (pinned at `egret-ranger-eval/tests/tag_refusals.rs`). A mapping that
+    /// padded the levels out to four instead would turn a refusal into a
+    /// confident verdict.
+    #[test]
+    fn an_empty_schema_and_table_map_to_the_one_level_attachment_the_evaluator_refuses() {
+        let stored = egret_policy::ResolvedTag {
+            name: "pii".to_string(),
+            match_type: MatchType::Self_,
+        };
+        let got = attachment_for(&stored, "", "", "").expect("Self_ maps");
+        assert_eq!(levels(&got), vec!["catalog"]);
+        assert!(
+            got.attached_through.levels.len() < 3,
+            "fewer than three levels is what `tag_candidates` refuses on"
+        );
+    }
+
+    /// The three match types no arm of `resolved_tags_for_resource_via`
+    /// produces. They are a REFUSAL rather than a guess, and one of them
+    /// declines the whole set — a producer this mapping has not been measured
+    /// against must not have two of its tags trusted and one dropped.
+    #[tokio::test]
+    async fn an_unmodelled_match_type_declines_the_set_rather_than_being_dropped() {
+        for mt in [
+            MatchType::Descendant,
+            MatchType::SelfAndAllDescendants,
+            MatchType::None,
+        ] {
+            let stored = egret_policy::ResolvedTag {
+                name: "pii".to_string(),
+                match_type: mt,
+            };
+            assert!(attachment_for(&stored, "s", "t", "c").is_none(), "{mt:?}");
+
+            let mut lookups = FakeTagLookups::new(0, &[("ok", MatchType::Self_), ("bad", mt)]);
+            let got =
+                resolved_tags_for_target(&mut lookups, &target(Some("s"), Some("t"), Some("c")))
+                    .await
+                    .expect("no error");
+            assert!(
+                got.is_none(),
+                "one unmappable attachment must decline the whole set, not be skipped: {mt:?}"
+            );
         }
     }
 }

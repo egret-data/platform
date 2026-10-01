@@ -113,8 +113,18 @@ function unmodelledPhrase(u: WireUnmodelled): string {
     case "security_zones":
       return "security zones";
     case "tag_policies":
+      // ⚠ The `policies` arm is SUPERSEDED COPY kept alive only by the
+      // exhaustive mirror, and it said "which egret does not evaluate yet"
+      // until SP4d-2b Task 7 swept it. The evaluator evaluates the block as of
+      // Task 3 and both of its envelope sweeps now SKIP
+      // `TagPolicies(Policies(_))` by name, so this arm cannot be reached from
+      // the backend at all; the arm stays because `explain_wire.rs` mirrors the
+      // model exhaustively and a wildcard here is what that exhaustiveness
+      // exists to forbid. The wording is therefore what it would mean if a new
+      // code path ever did report it — a block that was NOT evaluated — and no
+      // longer a promise about a feature that has shipped.
       return u.block.kind === "policies"
-        ? `${u.block.count} tag ${u.block.count === 1 ? "policy" : "policies"} that could decide this, which egret does not evaluate yet`
+        ? `${u.block.count} tag ${u.block.count === 1 ? "policy" : "policies"} in a block that was not evaluated`
         : "a tag-policy block egret could not read";
     case "policy_deltas":
       return "incremental policy deltas";
@@ -179,14 +189,23 @@ function serviceDefIssuePhrase(i: WireServiceDefIssue): string {
 /**
  * How far a cause reaches, when that is wider than the request being explained.
  *
- * **Measured by the browser gate (2026-09-29), and stated rather than
- * changed.** `explain` passes `resolved_tags: None` unconditionally, so the
- * `tagPolicies` refusal is not about the target at all: while a profile's tag
- * block carries any policy, EVERY access on every catalog it serves comes back
- * undecidable — all seven Trino answers in the gate's fixture, from two tag
- * policies. The refusal is sound (deciding from egret's non-hierarchy-complete
- * tag resolution would fail open), but a steward reading one undecidable verdict
- * would otherwise think it was specific to their target.
+ * **SP4d-2b Task 7 rewrote this note, and the rewrite is the deliverable rather
+ * than a tidy-up.** SP4d-2a's browser gate (2026-09-29) measured that `explain`
+ * passed `resolved_tags: None` unconditionally, so ONE tag-addressed rule or
+ * clearance anywhere in the installation turned EVERY verdict on every catalog a
+ * profile serves into `Undecidable` — all seven Trino answers in that fixture,
+ * from two tag policies. **That sentence is now false.** `explain` resolves the
+ * tags, and a profile whose tag block carries policies answers.
+ *
+ * What is left is narrower and comes in two shapes a steward has to be able to
+ * tell apart, so they get two different notes — and the per-policy tag causes
+ * get none, because a scope note on them would overstate them:
+ *
+ * | cause | reaches | and the thing to act on |
+ * |---|---|---|
+ * | `tags_unresolved` | every target in THIS CATALOG, on every profile with a tag block | one stored tag assignment names no schema or no table |
+ * | `envelope_construct` / `policy_construct` with `tag_policies` | every target on THIS PROFILE | the tag download itself, which did not read |
+ * | `tag_attachment_not_reproducible`, `tag_resource_not_reproducible`, `tag_policy_not_normalisable`, both arbitration causes | the tag or the policy the sentence already NAMES | nothing to add: the subject is in the sentence |
  */
 /**
  * Why a tag policy's candidacy cannot be reproduced. The four shapes have four
@@ -258,10 +277,13 @@ function tagNormalisationProblemPhrase(p: WireTagNormalisationProblem): string {
 }
 
 function causeScopeNote(c: WireUndecidableCause): string | null {
+  if (c.kind === "tags_unresolved") {
+    return "This is not specific to your target: egret declines to resolve tags for a whole catalog while any tag assignment in it is stored with no schema or no table, so every target in this catalog answers the same way until that assignment names a table or a column.";
+  }
   const construct =
     c.kind === "envelope_construct" || c.kind === "policy_construct" ? c.construct : null;
   if (construct?.kind !== "tag_policies") return null;
-  return "This is not specific to your target: while this profile's tag block carries any policy at all, every access on every catalog this profile serves answers the same way, and one tag-addressed rule or clearance anywhere in the installation is enough to put a profile in this state.";
+  return "This is not specific to your target: it is a property of the tag-policy download this profile received, so every access on every catalog this profile serves answers the same way until that download can be read.";
 }
 
 /**
@@ -301,7 +323,14 @@ function causeSentence(c: WireUndecidableCause): string {
     case "plugin_version_mismatch":
       return `This profile declares ${PLUGIN_LABEL[c.declared]} but ${ENGINE_LABEL[c.engine]} is running ${PLUGIN_LABEL[c.measured]}, and the two evaluate differently.`;
     case "tags_unresolved":
-      return "This profile's tag service carries policies that would be evaluated against this resource's tags, and egret did not resolve them for this request — which is not the same as there being none, so no verdict here could be relied on.";
+      // ⚠ Rewritten by SP4d-2b Task 7 because the cause changed MEANING. It used
+      // to be unconditional — `explain` never resolved tags — so the sentence
+      // could only say "did not resolve". egret resolves them now, and this
+      // cause is what one specific recoverable state produces, so the sentence
+      // names that state and the remedy. The distinction it has always carried,
+      // "did not resolve" versus "there are none", stays: an empty set would
+      // have been an ANSWER.
+      return "This profile's tag service carries policies that would be evaluated against this resource's tags, and egret declined to resolve them: a tag assignment in this catalog is stored with no schema or no table, which the engine would apply to resources egret cannot match it to. “Declined to resolve” is not the same as there being none, so no verdict here could be relied on — re-store that assignment on a table or a column and this answers.";
     case "tag_resource_not_reproducible":
       return `Tag policy ${policyRef(c.policy_name, c.policy_id)} ${tagResourceProblemPhrase(c.problem)}, so egret cannot tell which tags the engine would run it for.`;
     case "tag_sub_policy_is_deny_capable":

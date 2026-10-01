@@ -85,7 +85,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use egret_ranger_eval::eval::{
     evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, DenyReason,
     EngineConfig, MaskDecision, PluginVersion, ResolvedTag, RowFilterDecision, TagServiceResource,
-    UndecidableCause,
+    UndecidableCause, UnenrichedTags,
 };
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::{MatchType, RequestResource};
@@ -159,7 +159,10 @@ fn request() -> AccessRequest {
             .with("table", "orders")
             .with("column", "id"),
         owner: None,
-        resolved_tags: Some(vec![column_tag("pii", MatchType::Self_)]),
+        resolved_tags: Some(UnenrichedTags::new(vec![column_tag(
+            "pii",
+            MatchType::Self_,
+        )])),
     }
 }
 

@@ -86,9 +86,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::eval::{
-    evaluate_tag_data_mask, evaluate_tag_policies, evaluate_tag_row_filter, AccessRequest,
-    DenyReason, MaskDecision, ResolvedTag, RowFilterDecision, TagDecision, TagResourceProblem,
-    TagServiceResource, UndecidableCause,
+    evaluate_tag_data_mask as evaluate_tag_data_mask_phase,
+    evaluate_tag_policies as evaluate_tag_policies_phase,
+    evaluate_tag_row_filter as evaluate_tag_row_filter_phase, AccessRequest, DenyReason,
+    EnrichedTags, MaskDecision, ResolvedTag, RowFilterDecision, TagDecision, TagResourceProblem,
+    TagServiceResource, UndecidableCause, UnenrichedTags,
 };
 use crate::model::{ServicePolicySet, TagPolicyBlock, Unmodelled};
 use crate::resource::{MatchType, RequestResource};
@@ -205,6 +207,63 @@ fn row_filter_for_public(expr: &str) -> Value {
 /// resolved set. The RESOURCE is irrelevant to the tag phase — Ranger builds a
 /// `RangerTagResource` holding only `{tag: <name>}` — and is realistic here so
 /// that it cannot accidentally be what a tag policy matched.
+/// The request's own set, presented to the phase as already enriched.
+///
+/// **SP4d-2b Task 7 made the enrichment ordering a type.** The phase now takes
+/// `Option<&EnrichedTags>`, which `crate::eval::enriched_tags` produces from the
+/// RESOURCE service-def — and these tests hold only the TAG def, because the
+/// enricher's drop is the COMPOSED evaluator's step and is pinned where it
+/// happens (`tests/tag_refusals.rs`, `tests/tag_tiers.rs`). So the fixture goes
+/// in unchanged, which is exactly what Task 2 did when the parameter was the
+/// request itself. The three adapters below keep that statement in ONE place
+/// instead of at thirty call sites, and the `Option` — "the caller did not
+/// resolve", never the empty set — is carried through untouched.
+fn enriched(request: &AccessRequest) -> Option<EnrichedTags> {
+    request
+        .resolved_tags
+        .as_ref()
+        .map(|tags| EnrichedTags::already_enriched(tags.as_slice().to_vec()))
+}
+
+fn evaluate_tag_policies(
+    policies: &ServicePolicySet,
+    request: &AccessRequest,
+    tag_service_def: &ServiceDef,
+) -> TagDecision {
+    evaluate_tag_policies_phase(
+        policies,
+        request,
+        enriched(request).as_ref(),
+        tag_service_def,
+    )
+}
+
+fn evaluate_tag_data_mask(
+    policies: &ServicePolicySet,
+    request: &AccessRequest,
+    tag_service_def: &ServiceDef,
+) -> MaskDecision {
+    evaluate_tag_data_mask_phase(
+        policies,
+        request,
+        enriched(request).as_ref(),
+        tag_service_def,
+    )
+}
+
+fn evaluate_tag_row_filter(
+    policies: &ServicePolicySet,
+    request: &AccessRequest,
+    tag_service_def: &ServiceDef,
+) -> RowFilterDecision {
+    evaluate_tag_row_filter_phase(
+        policies,
+        request,
+        enriched(request).as_ref(),
+        tag_service_def,
+    )
+}
+
 fn request(user: &str, tags: Option<Vec<ResolvedTag>>) -> AccessRequest {
     AccessRequest {
         user: user.to_string(),
@@ -217,7 +276,7 @@ fn request(user: &str, tags: Option<Vec<ResolvedTag>>) -> AccessRequest {
             .with("table", "orders")
             .with("column", "id"),
         owner: None,
-        resolved_tags: tags,
+        resolved_tags: tags.map(UnenrichedTags::new),
     }
 }
 

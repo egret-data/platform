@@ -169,26 +169,33 @@ pub struct AccessRequest {
     /// # ⚠ `None` MUST NOT be read as an empty set — that is fail-open
     ///
     /// `None` means the caller did not resolve tags, the same discipline
-    /// [`EngineConfig`]'s `Option` fields use, and it is kept distinct because
-    /// **egret cannot currently establish the antecedent the narrowing needs.**
-    /// The narrowing is sound only if the caller's tag resolution is at least
-    /// as broad as the enricher's, and egret's is not:
-    /// `tag_keys_for_resource_via` (`crates/egret-policy/src/store.rs`) matches
-    /// `schema_name` / `table_name` / `column_name` by **exact string
-    /// equality** with no hierarchy roll-up, so asked about `report.country` it
-    /// does not return a tag attached to the table `report`. Ranger's
-    /// `RangerTagEnricher` does the opposite: it walks the hierarchy and emits
-    /// ancestor tags carrying `MatchType::ANCESTOR`, which Ranger **admits**
-    /// for a tag request (unlike a resource request — see
-    /// [`crate::resource::MatchType::Ancestor`]). So egret can report "no
-    /// tags" for a column while the engine is enforcing a tag policy through
-    /// a tag attached to its table.
+    /// [`EngineConfig`]'s `Option` fields use, and it stays distinct from
+    /// `Some(empty)` because the narrowing is sound only if the caller's tag
+    /// resolution is at least as broad as the enricher's. Ranger's
+    /// `RangerTagEnricher` walks the hierarchy and emits ancestor tags carrying
+    /// `MatchType::ANCESTOR`, which Ranger **admits** for a tag request (unlike
+    /// a resource request — see [`crate::resource::MatchType::Ancestor`]), so a
+    /// caller matching by exact string equality can report "no tags" for a
+    /// column while the engine is enforcing a tag policy through a tag attached
+    /// to its table.
     ///
-    /// Every live tag assignment today is column-level, so the ancestor path
-    /// is not exercised by current data — which is exactly how treating `None`
-    /// as empty would ship green and wrong. This crate therefore only
-    /// **offers** the narrowing; whether passing `Some` is sound is a property
-    /// of the caller, decided in SP4d-2a Task 5, not of this type.
+    /// ⚠ **This paragraph used to say egret could not establish that antecedent
+    /// at all, and cited `tag_keys_for_resource_via`.** Both halves moved. That
+    /// function is the ATTRIBUTION query and was never the one a caller would
+    /// pass; SP4d-2b Task 1 wrote `resolved_tags_for_resource_via`, which rolls
+    /// the table level up and returns `tags.name`; and SP4d-2b Task 7's
+    /// `resolved_tags_for_target` (`egret-perm-compile/src/routes.rs`) gates that
+    /// on the one stored shape it cannot roll up and passes `Some` otherwise. So
+    /// egret establishes the antecedent today for the levels its storage was
+    /// designed to express, and declines — `None` — for every state where it
+    /// cannot.
+    ///
+    /// Live tag assignments are table- and column-level, so the schema- and
+    /// catalog-level ancestor paths are not exercised by current data — which is
+    /// exactly how treating `None` as empty, or passing an exact-match set as
+    /// complete, would ship green and wrong. This crate therefore still only
+    /// **offers** the narrowing; whether passing `Some` is sound remains a
+    /// property of the caller, not of this type.
     ///
     /// # Why each entry carries a [`MatchType`] and why this is not a `Set`
     ///
@@ -202,7 +209,98 @@ pub struct AccessRequest {
     /// because **the caller's order is not authoritative** — the phase applies
     /// Ranger's three comparators itself — and de-duplicates on
     /// [`ResolvedTag::identity`], which is `RangerTagForEval`'s own.
-    pub resolved_tags: Option<Vec<ResolvedTag>>,
+    ///
+    /// # Why the newtype
+    ///
+    /// SP4d-2b Task 7. This was a bare `Option<Vec<ResolvedTag>>`, and the
+    /// ordering obligation phase 1 is under — evaluate the set
+    /// `RangerTagEnricher.processServiceTags` LEFT, not the one the caller
+    /// handed in — was a convention held at two call sites. See
+    /// [`UnenrichedTags`].
+    pub resolved_tags: Option<UnenrichedTags>,
+}
+
+/// The tag set the CALLER resolved, as the caller resolved it — i.e. BEFORE
+/// `RangerTagEnricher.processServiceTags` has dropped anything from it. The only
+/// thing that can be put in [`AccessRequest::resolved_tags`].
+///
+/// # ⚠ Why this is a newtype: it makes "the phase read the UN-enriched set" unrepresentable
+///
+/// **SP4d-2b Task 7, carried from Task 4 rather than churning these sites
+/// twice.** Phase 1 must evaluate the set `processServiceTags` left behind, not
+/// the one the caller supplied: Ranger's order is
+/// `RangerDefaultRequestProcessor.preProcess` → the enricher writes the
+/// surviving set into the request context → `evaluateTagPolicies` reads it back
+/// out (`RangerAccessRequestUtil.getRequestTagsFromContext`, offset 104).
+///
+/// Until this task nothing STRUCTURALLY held that order. [`evaluate`] and
+/// [`evaluate_sub`] each cloned the request with the enriched set into a second
+/// binding, and then every phase function took an `&AccessRequest` that might be
+/// either one: ONE field with two meanings, told apart only by which local the
+/// author passed. That is the two-guards-must-agree shape this package has been
+/// bitten by three times, and nothing would have failed if a future edit had
+/// passed `request` where `tag_request` was meant — the tag set would simply
+/// have been the un-dropped one.
+///
+/// Now the phase takes `Option<&`[`EnrichedTags`]`>`, which only
+/// [`enriched_tags`] produces. There is no `AccessRequest` in flight carrying an
+/// enriched set, and no way to reach the phase without having run the enricher.
+/// `None` still means "the caller did not resolve", through the `Option`
+/// [`enriched_tags`] preserves — never the empty set, which is the measured
+/// narrowing.
+///
+/// [`UnenrichedTags::as_slice`] exists for a CALLER that has to read back what
+/// it supplied (the differential harness serialises it into the Java case file).
+/// **Nothing in `src/` calls it and nothing in `src/` may**: inside the phase the
+/// parameter's type is the whole guard, so reaching through
+/// `request.resolved_tags` there would be visibly reaching for the wrong set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnenrichedTags(Vec<ResolvedTag>);
+
+impl UnenrichedTags {
+    /// The one constructor. Deliberately not a `From<Vec<_>>` impl: putting a
+    /// tag set in a request is the caller making the soundness claim documented
+    /// on [`AccessRequest::resolved_tags`], and that is worth naming at the site
+    /// rather than performing by coercion.
+    pub fn new(tags: Vec<ResolvedTag>) -> Self {
+        Self(tags)
+    }
+
+    /// What the caller supplied, for a caller reading back its own input. See
+    /// the ⚠ block above for why no code in `src/` uses this.
+    pub fn as_slice(&self) -> &[ResolvedTag] {
+        &self.0
+    }
+}
+
+/// [`UnenrichedTags`] after the one surviving effect of
+/// `RangerTagEnricher.processServiceTags` on a decision — the attachment DROP.
+/// [`enriched_tags`] is the only producer outside this crate's own tests, which
+/// is what makes the enrichment ordering a type and not a convention.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EnrichedTags(Vec<ResolvedTag>);
+
+impl EnrichedTags {
+    /// The measured narrowing's antecedent: with no tag surviving the enricher,
+    /// `getLikelyMatchPolicyEvaluators` returns `Collections.EMPTY_LIST` at its
+    /// `isNotEmpty(tags)` branch. Asked of the ENRICHED set on purpose — that is
+    /// the set Ranger reads back out of the context.
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn as_slice(&self) -> &[ResolvedTag] {
+        &self.0
+    }
+
+    /// **Test-only**, and the `#[cfg(test)]` is the point: `tag_eval_tests`
+    /// drives the phase directly and holds no RESOURCE service-def to enrich
+    /// against, so it presents its fixture as already enriched. No production
+    /// path can reach this — [`enriched_tags`] is the only other producer.
+    #[cfg(test)]
+    pub(crate) fn already_enriched(tags: Vec<ResolvedTag>) -> Self {
+        Self(tags)
+    }
 }
 
 /// One tag ATTACHMENT the caller resolved for [`AccessRequest::resource`]: one
@@ -353,11 +451,14 @@ pub struct TagServiceResource {
     /// D2 exists to refuse (measured, before the fix:
     /// `Allowed { policy_id: Some(10), policy_name: "tag-allow" }`).
     ///
-    /// Unreachable then — no producer of a [`ResolvedTag`] exists outside this
-    /// crate's tests — but SP4d-2b Task 7 writes the mapping that first
-    /// populates this field, so the fix is the TYPE rather than a second check
-    /// beside the first: a duplicate key is now unrepresentable, and the count
-    /// and the key set cannot drift apart again. `resourceElements` is a
+    /// Unreachable when it was fixed — no producer of a [`ResolvedTag`] existed
+    /// outside this crate's tests — and **SP4d-2b Task 7 then wrote that
+    /// producer**: `egret_perm_compile`'s `attachment_for` builds this set from
+    /// `ServiceTags::from_assignments`' own rule (`catalog`, plus each of
+    /// `schema`/`table`/`column` that is non-empty), so it cannot emit a
+    /// duplicate — but the fix is still the TYPE and not a second check beside
+    /// the first: the count and the key set cannot drift apart again whatever
+    /// the next producer does. `resourceElements` is a
     /// `Map<String, RangerPolicyResource>` on the wire, so a set loses nothing;
     /// the payload's key ORDER was never read by anything.
     pub levels: BTreeSet<String>,
@@ -1107,25 +1208,33 @@ pub enum TagAttachmentProblem {
     /// What actually makes this refusal inert is two facts about the READ path,
     /// both falsifiable:
     ///
-    /// 1. **Nothing constructs a [`ResolvedTag`] outside this crate's own
-    ///    tests.** The single production `AccessRequest`
-    ///    (`egret-perm-compile/src/routes.rs`) passes `resolved_tags: None`.
-    /// 2. When SP4d-2b Task 7 wires one up, it will map from
-    ///    `egret_policy::ResolvedTag` — a DIFFERENT two-field type
-    ///    (`egret-policy/src/store.rs`) — whose producer
-    ///    `resolved_tags_for_resource_via` selects on
-    ///    `schema_name = $2 AND table_name = $3` by exact equality, so a row
-    ///    storing `('', '')` comes back only for a REQUEST that also names an
-    ///    empty schema and table.
+    /// **⚠ SP4d-2b TASK 7 REPLACED BOTH OF THEM.** A producer of
+    /// [`ResolvedTag`] now exists — `egret_perm_compile`'s `attachment_for`,
+    /// mapping from the two-field `egret_policy::ResolvedTag` — so fact 1 is
+    /// gone, and fact 2 (the query's exact `schema_name = $2 AND table_name =
+    /// $3`) was never a bound: FIX ROUND 2 had already measured that
+    /// `resolved_tags_for_resource_via(conn, id, "", "", "")` returns a `('',
+    /// '')` row and that nothing in the query stops it. What makes the refusal
+    /// inert today is ONE fact, on the caller, and it is falsifiable:
     ///
-    /// ⚠ FIX ROUND 2 sharpened fact 2, because the earlier wording ("cannot be
-    /// returned for any real resource") credited the QUERY with a guarantee that
-    /// is the REQUEST's: `resolved_tags_for_resource_via(conn, id, "", "", "")`
-    /// returns that row, and nothing in the query stops it. What keeps it out is
-    /// that `explain`'s caller builds the request from a resource an operator
-    /// named. **Task 7 owns that mapping and therefore owns this**: if it can be
-    /// reached with an empty schema or table, a one-level attachment arrives and
-    /// this refusal — not the query — is what answers.
+    /// 1. **`resolved_tags_for_target` (`egret-perm-compile/src/routes.rs`) runs
+    ///    `assignments_outside_rolled_up_levels_via` FIRST, for the catalog, and
+    ///    declines the whole resolution when any row has an empty `schema_name`
+    ///    or `table_name`** — which is exactly the row that would produce a
+    ///    one- or two-level attachment. So the mapping is never reached with
+    ///    one. That gate exists for a bigger reason than this refusal: such a
+    ///    row is an ANCESTOR of resources the exact-match query never returns it
+    ///    for, i.e. a MISSED tag, which no inspection of the mapping's input
+    ///    could detect.
+    ///
+    /// The mapping is nonetheless written to be right for it — it follows
+    /// `from_assignments`' own skip-an-empty-level rule, so a `('', '')` row
+    /// becomes the `{catalog}` attachment this refusal answers, rather than
+    /// being padded out to four levels — and
+    /// `routes.rs::an_empty_schema_and_table_map_to_the_one_level_attachment_the_evaluator_refuses`
+    /// pins that, saying in its own doc that the input cannot arise from the
+    /// live path. **Falsified by** removing the gate, or by a second producer
+    /// (a `/tags/download` reader, an import, a shim) that has none.
     ///
     /// **The refusal is what protects the verdict, not the schema.** It is
     /// falsified by a producer that reads a `/tags/download` payload instead of
@@ -1442,7 +1551,7 @@ pub enum Decision {
 /// | [`UndecidableCause::EvalOrderAmbiguous`] (from this loop) | a tag DENY plus a `hasDeny` band above its priority holding both an allower and a denier | offset 469's `>=` reading a `policyPriority` an allowing band member just raised | a download where deny-capable resource policies share a priority above a clearance tag policy's — no corpus generates a tag block, so the rate is UNMEASURED |
 /// | [`UndecidableCause::ResourceCandidacyNotReproducible`] | a policy matching `NONE` everywhere whose every declared request level is `isExcludes`, `isRecursive` or a non-prefix wildcard, positioned where 553 fires | the three shapes [`crate::resource::level_excluded_by_trie`] declines to reason from — the ⚠ table on that variant says which of them `grants::level()` forbids and which (the wildcard) **nothing** forbids | `grants::level()` ceasing to pin `is_excludes`/`is_recursive` false, or a scope-content validator arriving |
 /// | [`UndecidableCause::TagSubResultSplitByResourcePolicy`] (from `evaluate_sub`) | a tag mask/filter that yields plus a resource policy Ranger reaches that also yields | offsets 11-88 writing the DATA unconditionally and the identity only `if (!isAllowed)` | nothing today; the shape needs a tag block, which no corpus generates |
-/// | [`UndecidableCause::TagAttachmentNotReproducible`] (raised in [`tag_candidates`], on a set THIS function enriched) | a tag ATTACHMENT carrying `options`, `validityPeriods`, or a service resource naming fewer than three levels — and only for a tag whose match type the evaluator admits, in a download whose tag block holds a policy of the kind being decided | **Nothing constructs a [`ResolvedTag`] outside this crate's own tests**, so no code path in this repository reaches it at all: the single production `AccessRequest` (`egret-perm-compile/src/routes.rs`) passes `resolved_tags: None`, and so does `examples/live_gate.rs`. FIX ROUND 1 corrected two things here: this row used to name `egret_policy::resolved_tags_for_resource_via` as "the only producer of a `ResolvedTag`", which produces a DIFFERENT two-field `egret_policy::ResolvedTag` (`egret-policy/src/store.rs`) and is not a producer of this type; and it used to say the shape is unemittable because `catalog_tag_assignments` is `NOT NULL`, which is FALSE — see the ⚠ block on [`TagAttachmentProblem::ResourceLevels`] for the payload the review built and where the real inertness comes from | a producer of THIS type: Task 7's `egret_policy::ResolvedTag` → [`ResolvedTag`] mapping (which must synthesise all four new fields), a `/tags/download` payload reader, an import, a shim. **Stated as unreachable-today on purpose**: this is a refusal built to be inert, and calling it "rare" would hide that nothing exercises it but its own tests |
+/// | [`UndecidableCause::TagAttachmentNotReproducible`] (raised in [`tag_candidates`], on a set THIS function enriched) | a tag ATTACHMENT carrying `options`, `validityPeriods`, or a service resource naming fewer than three levels — and only for a tag whose match type the evaluator admits, in a download whose tag block holds a policy of the kind being decided | ⚠ **SP4d-2b TASK 7: a producer now exists and this row is no longer "unreachable at all".** `egret_perm_compile`'s `attachment_for` maps the two-field `egret_policy::ResolvedTag` into this type for every `explain` on a target naming a schema and a table. Which of the three problems can arrive is now a per-problem question, and the answer is on each variant: `Options` and `ValidityPeriods` cannot (`ServiceTags::from_assignments` writes a wire tag as `{"type", "owner"}` and nothing else, so the mapping synthesises them empty); `ResourceLevels` cannot either, but for a CALLER reason — `resolved_tags_for_target` runs `assignments_outside_rolled_up_levels_via` first and declines the resolution for the whole catalog while a row with an empty `schema_name` or `table_name` exists. FIX ROUND 1 corrected two earlier versions of this row: it named `resolved_tags_for_resource_via` as a producer of THIS type (it produces the other one), and it credited `catalog_tag_assignments`' `NOT NULL` with a guarantee it does not give | the gate going away, a second producer (a `/tags/download` reader, an import, a shim), or `from_assignments` learning to write `attributes`/`options`/`validityPeriods`. **What exercises it is still only this crate's own tests plus `routes.rs`' mapping unit tests** — no corpus generates a tag block, so the RATE is unmeasured |
 /// | the other tag-phase refusals | see the ⚠ tables on [`evaluate_tag_policies`] | — | — |
 ///
 /// **None of these rates is measured on a corpus**, and that is the honest state
@@ -1493,25 +1602,20 @@ pub fn evaluate(
     // `enriched` first, and the phase reads only that: Ranger's own order is
     // `RangerDefaultRequestProcessor.preProcess` → the enricher writes the tag
     // set into the request context → `evaluateTagPolicies` reads it back out
-    // (`RangerAccessRequestUtil.getRequestTagsFromContext`, offset 104). So
-    // rewriting the request is the data flow, not a workaround for one. It is
-    // held apart from `request` because the RESOURCE phase below must keep
-    // reading the caller's request: it consults no tag set, and a binding that
-    // quietly served both would hide which phase the enrichment can reach.
-    let enriched;
-    let tag_request = match enriched_tags(request, service_def) {
-        None => request,
-        Some(tags) => {
-            enriched = AccessRequest {
-                resolved_tags: Some(tags),
-                ..request.clone()
-            };
-            &enriched
-        }
-    };
-    let tag = match tag_phase_input(policies, tag_request, service_def) {
+    // (`RangerAccessRequestUtil.getRequestTagsFromContext`, offset 104).
+    //
+    // ⚠ SP4d-2b Task 7 made that order a TYPE. This used to clone `request`
+    // with the enriched set into a second `AccessRequest` and hand the phase
+    // whichever of the two bindings was right; the phase now takes
+    // `Option<&EnrichedTags>`, which only `enriched_tags` can produce, so the
+    // enrichment cannot be skipped and the RESOURCE phase below cannot
+    // accidentally be handed an enriched request. See `UnenrichedTags`.
+    let enriched = enriched_tags(request, service_def);
+    let tag = match tag_phase_input(policies, enriched.as_ref(), service_def) {
         None => TagDecision::NotDetermined,
-        Some(tag_service_def) => evaluate_tag_policies(policies, tag_request, &tag_service_def),
+        Some(tag_service_def) => {
+            evaluate_tag_policies(policies, request, enriched.as_ref(), &tag_service_def)
+        }
     };
     if let TagDecision::Undecidable { why: tag_why } = &tag {
         merge_causes(&mut why, tag_why);
@@ -2097,7 +2201,7 @@ enum SuperUser {
 /// would announce the day it is set.
 fn tag_policies_can_decide(
     block: &TagPolicyBlock,
-    request: &AccessRequest,
+    tags: Option<&EnrichedTags>,
     service_def: &ServiceDef,
     tag_service_def: &ServiceDef,
 ) -> bool {
@@ -2114,11 +2218,7 @@ fn tag_policies_can_decide(
             {
                 return false;
             }
-            if request
-                .resolved_tags
-                .as_ref()
-                .is_some_and(|tags| tags.is_empty())
-            {
+            if tags.is_some_and(EnrichedTags::is_empty) {
                 return false;
             }
             true
@@ -2318,33 +2418,43 @@ fn trie_excludes(
 ///
 /// # Reach, by code path
 ///
-/// **Nothing reaches the drop, because nothing constructs a [`ResolvedTag`]
-/// outside this crate's own tests.** The single production `AccessRequest`
-/// (`egret-perm-compile/src/routes.rs`) passes `resolved_tags: None`; so does
-/// `examples/live_gate.rs`.
+/// ⚠ **SP4d-2b TASK 7 MADE THE DROP LIVE, and this row used to say it was
+/// unreachable.** `egret_perm_compile`'s `attachment_for` is a producer, and the
+/// levels it synthesises are `ServiceTags::from_assignments`' own LITERAL keys —
+/// `catalog` / `schema` / `table` / `column` — because that is what
+/// `download_tags` serves, for every service type, with no engine argument at
+/// all.
 ///
-/// When SP4d-2b Task 7 wires one up it will map from
-/// `egret_policy::ResolvedTag` — a DIFFERENT two-field type in
-/// `egret-policy/src/store.rs`, carrying only `name` and `match_type`, which this
-/// row previously misnamed as a producer of the type above. That type's producer
-/// `resolved_tags_for_resource_via` selects `schema_name` / `table_name` /
-/// `column_name` from `catalog_tag_assignments`, so the levels Task 7 can
-/// synthesise from it are three or four names that are in both Trino's and
-/// StarRocks' access hierarchy and the subset test cannot fail for them.
+/// So the drop fires, and it fires for a real configuration: **StarRocks' def has
+/// no `schema` resource** (its middle level is `database`), so for a StarRocks
+/// profile carrying a `tagService` every attachment fails
+/// `service_resource_validates` and the whole tag set vanishes — which is what the
+/// real `processServiceTags` does with that payload too, and is therefore the
+/// right answer here. The DEFECT is in the writer (tag-selected masks and
+/// clearances cannot reach a StarRocks engine at all); this function reproduces
+/// it rather than hiding it, and `attachment_for`'s own ⚠ block carries the
+/// measurement. Nothing egret auto-binds reaches that state — `bind_trino_profile`
+/// is the only writer of `tagService` and `tag_assignments_for_service` resolves
+/// the owning profile with `tp.type = 'trino'` — so an operator setting the
+/// config by hand is the population.
 ///
-/// What WOULD land here is an attachment read off a `/tags/download` payload: a
-/// StarRocks `database` level paired with a Trino def, a level a service-def
-/// version dropped, or a hand-written shim. **Falsified by** any producer of
-/// [`ResolvedTag`] that is not Task 7's mapping over that query.
-fn enriched_tags(request: &AccessRequest, service_def: &ServiceDef) -> Option<Vec<ResolvedTag>> {
+/// For a TRINO profile the drop is inert and provably so: the only level sets the
+/// mapping emits are `{catalog, schema, table}` and `{catalog, schema, table,
+/// column}`, both of which are the subset test's own hierarchy. **Falsified by**
+/// the mapping learning to emit another level set, or a second producer (a
+/// `/tags/download` reader, an import, a shim).
+fn enriched_tags(request: &AccessRequest, service_def: &ServiceDef) -> Option<EnrichedTags> {
     let resolved = request.resolved_tags.as_ref()?;
-    Some(
+    // `.0` is THE reader of `UnenrichedTags`' contents in `src/` — see the ⚠
+    // block on that type. Everything downstream of here sees `EnrichedTags`.
+    Some(EnrichedTags(
         resolved
+            .0
             .iter()
             .filter(|tag| service_resource_validates(&tag.attached_through.levels, service_def))
             .cloned()
             .collect(),
-    )
+    ))
 }
 
 /// `createRangerServiceResourceMatcher != null`: some policy type has a
@@ -2403,7 +2513,7 @@ fn service_resource_validates(levels: &BTreeSet<String>, service_def: &ServiceDe
 /// the block tier its own length implies.
 fn tag_phase_input(
     policies: &ServicePolicySet,
-    request: &AccessRequest,
+    tags: Option<&EnrichedTags>,
     service_def: &ServiceDef,
 ) -> Option<ServiceDef> {
     let declared = policies.unmodelled.iter().find_map(|c| match c {
@@ -2422,8 +2532,7 @@ fn tag_phase_input(
     // `ServiceDef::parse` as the resource def so there is one enricher
     // predicate, not two.
     let tag_service_def = ServiceDef::parse(&policies.tag_service_def);
-    tag_policies_can_decide(&block, request, service_def, &tag_service_def)
-        .then_some(tag_service_def)
+    tag_policies_can_decide(&block, tags, service_def, &tag_service_def).then_some(tag_service_def)
 }
 
 /// Append phase-1 causes to the composed `why`, without repeating one the
@@ -3209,22 +3318,13 @@ fn evaluate_sub(
     // `evaluateTagPolicies` runs for every policy type, so a tag mask decides a
     // mask request exactly as a tag deny decides an access one. The priority
     // comes back with the result because the arbitration below compares it.
-    // `enriched_tags` first, for the reason written out in `evaluate`.
-    let enriched;
-    let tag_request = match enriched_tags(request, service_def) {
-        None => request,
-        Some(tags) => {
-            enriched = AccessRequest {
-                resolved_tags: Some(tags),
-                ..request.clone()
-            };
-            &enriched
-        }
-    };
-    let tag = match tag_phase_input(policies, tag_request, service_def) {
+    // `enriched_tags` first, for the reason written out in `evaluate` — and
+    // since Task 7 the phase's own parameter type is what holds that order.
+    let enriched = enriched_tags(request, service_def);
+    let tag = match tag_phase_input(policies, enriched.as_ref(), service_def) {
         None => None,
         Some(tag_service_def) => {
-            match evaluate_tag_sub(kind, policies, tag_request, &tag_service_def) {
+            match evaluate_tag_sub(kind, policies, request, enriched.as_ref(), &tag_service_def) {
                 Err(tag_why) => {
                     merge_causes(&mut why, &tag_why);
                     None
@@ -3627,10 +3727,16 @@ struct TagCandidate<'a> {
 pub(crate) fn evaluate_tag_policies(
     policies: &ServicePolicySet,
     request: &AccessRequest,
+    tags: Option<&EnrichedTags>,
     tag_service_def: &ServiceDef,
 ) -> TagDecision {
-    let candidates = match tag_candidates(DecisionKind::Access, policies, request, tag_service_def)
-    {
+    let candidates = match tag_candidates(
+        DecisionKind::Access,
+        policies,
+        request,
+        tags,
+        tag_service_def,
+    ) {
         Err(why) => return TagDecision::Undecidable { why },
         Ok(c) => c,
     };
@@ -3748,9 +3854,16 @@ pub(crate) fn evaluate_tag_policies(
 pub(crate) fn evaluate_tag_data_mask(
     policies: &ServicePolicySet,
     request: &AccessRequest,
+    tags: Option<&EnrichedTags>,
     tag_service_def: &ServiceDef,
 ) -> MaskDecision {
-    match evaluate_tag_sub(DecisionKind::DataMask, policies, request, tag_service_def) {
+    match evaluate_tag_sub(
+        DecisionKind::DataMask,
+        policies,
+        request,
+        tags,
+        tag_service_def,
+    ) {
         Err(why) => MaskDecision::Undecidable { why },
         Ok(None) => MaskDecision::NoMask,
         Ok(Some((SubResult::Mask(m), _))) => MaskDecision::Masked(m),
@@ -3766,9 +3879,16 @@ pub(crate) fn evaluate_tag_data_mask(
 pub(crate) fn evaluate_tag_row_filter(
     policies: &ServicePolicySet,
     request: &AccessRequest,
+    tags: Option<&EnrichedTags>,
     tag_service_def: &ServiceDef,
 ) -> RowFilterDecision {
-    match evaluate_tag_sub(DecisionKind::RowFilter, policies, request, tag_service_def) {
+    match evaluate_tag_sub(
+        DecisionKind::RowFilter,
+        policies,
+        request,
+        tags,
+        tag_service_def,
+    ) {
         Err(why) => RowFilterDecision::Undecidable { why },
         Ok(None) => RowFilterDecision::NoFilter,
         Ok(Some((SubResult::RowFilter(f), _))) => RowFilterDecision::Filtered(f),
@@ -3841,9 +3961,10 @@ fn evaluate_tag_sub(
     kind: DecisionKind,
     policies: &ServicePolicySet,
     request: &AccessRequest,
+    tags: Option<&EnrichedTags>,
     tag_service_def: &ServiceDef,
 ) -> Result<Option<(SubResult, i32)>, Vec<UndecidableCause>> {
-    let candidates = tag_candidates(kind, policies, request, tag_service_def)?;
+    let candidates = tag_candidates(kind, policies, request, tags, tag_service_def)?;
     let implied = tag_service_def.implied_access_grants();
     if let Some(why) = tag_priority_arbitration(kind, &candidates, request, &implied) {
         return Err(why);
@@ -4037,6 +4158,7 @@ fn tag_candidates<'a>(
     kind: DecisionKind,
     policies: &'a ServicePolicySet,
     request: &AccessRequest,
+    tags: Option<&EnrichedTags>,
     tag_service_def: &ServiceDef,
 ) -> Result<Vec<TagCandidate<'a>>, Vec<UndecidableCause>> {
     let mut why: Vec<UndecidableCause> = Vec::new();
@@ -4206,10 +4328,16 @@ fn tag_candidates<'a>(
         )]);
     }
 
-    let Some(resolved) = request.resolved_tags.as_ref() else {
+    let Some(resolved) = tags else {
         // A block with policies this decision would evaluate, and no tag set
         // to evaluate them against. `None` is "the caller did not resolve",
         // which must not be read as the empty set that narrows.
+        //
+        // ⚠ The `None` arrives as this parameter and NOT off
+        // `request.resolved_tags`, which is `UnenrichedTags` and which this
+        // function must never read — see the ⚠ block on that type. The
+        // `Option` is preserved across the enricher by `enriched_tags`, so
+        // "the caller did not resolve" survives enrichment unchanged.
         return Err(vec![UndecidableCause::TagsUnresolved]);
     };
 
@@ -4241,7 +4369,7 @@ fn tag_candidates<'a>(
     // only return between here and the `why` check at the end, and it is
     // reachable only when no tag is admitted — which is precisely the state in
     // which this sweep has nothing to say.
-    for tag in resolved {
+    for tag in resolved.as_slice() {
         if !tag_match_is_admitted(tag.match_type) {
             continue;
         }
@@ -4287,7 +4415,7 @@ fn tag_candidates<'a>(
     // that differs.
     let mut seen: BTreeSet<_> = BTreeSet::new();
     let mut admitted: Vec<&ResolvedTag> = Vec::new();
-    for tag in resolved {
+    for tag in resolved.as_slice() {
         if !seen.insert(tag.identity()) {
             continue;
         }
