@@ -926,8 +926,12 @@ pub struct ResolvedTag {
 ///    Ranger's set — and MASK evaluators are ordered by
 ///    `MATCH_TYPE_COMPARATOR` (ascending `SELF < SELF_AND_ALL_DESCENDANTS <
 ///    ANCESTOR`), so collapsing them would silently reorder masks and change
-///    the masking answer. The `DISTINCT` below is over `(name, level)`, which is
-///    exactly `RangerTagForEval`'s own equality — never over the name alone.
+///    the masking answer. The `DISTINCT` below is over `(name, is_self)` — the
+///    LEVEL as a boolean, which is exactly `RangerTagForEval`'s own equality for
+///    the two levels this storage can express — never over the name alone. ⚠ Fix
+///    round 1 narrowed it from `(name, column_name)`: with the comparison folded,
+///    two rows differing only in case are ONE member of Ranger's set, and keeping
+///    the raw value in the key would have invented a second one.
 /// 3. **A column attachment is EXCLUDED from a table-level request.** That is
 ///    `DESCENDANT`, which the enricher rejects; returning it would fail closed
 ///    on `explain` and still disagree with the engine.
