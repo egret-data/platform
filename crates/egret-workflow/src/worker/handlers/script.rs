@@ -1201,16 +1201,14 @@ mod tests {
                 .run(&in_files_task(&files, &uri, Err(why.clone())))
                 .await
                 .expect("the author's failure, not the worker's");
+            let calls = spy.seen.lock().unwrap().len();
+            assert_eq!(calls, 0, "the runner was called {calls} time(s) for {why:?}");
             assert_eq!(out.state, RunState::Failed, "{why:?}");
             let message = out.message.expect("a message");
             assert!(message.contains(&uri), "{message}");
             assert!(
                 message.contains("`inputFiles` \"d/nested.txt\""),
                 "{message}"
-            );
-            assert!(
-                spy.seen.lock().unwrap().is_empty(),
-                "no runner is called for {why:?}"
             );
         }
         // A URI assembled at render is not in the snapshot: refused too.
