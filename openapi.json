@@ -27845,7 +27845,7 @@
           }
         ],
         "requestBody": {
-          "description": "The flow's `inputs`. **JSON** (`StartExecutionRequest`, at most 2 MiB): a `FILE` input's value must be a `kestra://` URI readable from the execution being created -- in practice one a `Subflow`, a `Flow` trigger or a replay passes on; any other string is refused naming the input. **`multipart/form-data`** (`StartExecutionMultipart`, at most `workflow.storage.max_file_bytes` + 1 MiB): each part is named by an input id; a part with a file name is that `FILE` input's file (its `allowedFileExtensions` enforced, at most `max_file_bytes`), stored as `inputs/{input}/{file name}` of the new execution; any other part is a text value (at most 1 MiB).",
+          "description": "The flow's `inputs`. **JSON** (`StartExecutionRequest`, at most 2 MiB): a `FILE` input's value must be a `kestra://` URI readable from the execution being created -- in practice one a `Subflow`, a `Flow` trigger or a replay passes on; any other string is refused naming the input. **`multipart/form-data`** (`StartExecutionMultipart`; one start carries at most `workflow.storage.max_file_bytes` + 1 MiB in total, and each part's headers at most 64 KiB): each part is named by an input id; a part with a file name is that `FILE` input's file (its `allowedFileExtensions` enforced, at most `max_file_bytes`), stored as `inputs/{input}/{file name}` of the new execution; any other part is a text value (at most 1 MiB).",
           "content": {
             "application/json": {
               "schema": {
@@ -39006,12 +39006,10 @@
       },
       "StartExecutionMultipart": {
         "type": "object",
-        "description": "`POST .../flows/{id}/executions` as `multipart/form-data` (W9a spec §7.1,\nKestra's shape) -- the schema is for the OpenAPI document only; the\nhandler reads the parts one by one and never builds this type.\n\n**Each part is named by an input id.** A part with a file name is that\n`FILE` input's file: it is streamed to\n`kestra:///{namespace}/{flow}/executions/{execution}/inputs/{input}/{file name}`\nand the input's value is that URI. Any other part is a text value. A part\nnaming no declared input, or one named twice, is refused naming it.",
+        "description": "`POST .../flows/{id}/executions` as `multipart/form-data`. **Each part is named by an input id.** A part with a file name is that `FILE` input's file: it is streamed to `kestra:///{namespace}/{flow}/executions/{execution}/inputs/{input}/{file name}` and the input's value is that URI. Any other part is a text value. A part naming no declared input, or one named twice, is refused naming it. One start carries at most `workflow.storage.max_file_bytes` + 1 MiB in total.",
         "additionalProperties": {
-          "type": "string"
-        },
-        "propertyNames": {
-          "type": "string"
+          "type": "string",
+          "format": "binary"
         }
       },
       "StartExecutionRequest": {

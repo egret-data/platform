@@ -151,7 +151,12 @@ pub(super) async fn spawn_all(
             ))
         })?;
         for (r, index) in batch.iter().zip(indices) {
-            out.push(spawn_one(conn, ctx, parent_run, r.task, index, &r.value).await?);
+            match spawn_one(conn, ctx, parent_run, r.task, index, &r.value).await? {
+                Some(id) => out.push(id),
+                // The loop run was failed (a copied FILE input no longer
+                // readable): no further iteration of it is started.
+                None => break,
+            }
         }
     }
     Ok(out)
@@ -261,7 +266,7 @@ async fn spawn_one(
     task: TaskIx,
     index: usize,
     value: &str,
-) -> Result<Uuid> {
+) -> Result<Option<Uuid>> {
     let loop_id = parent
         .plan
         .tasks
@@ -305,6 +310,9 @@ async fn spawn_one(
     // `executionDepth` is the parent's, and with `ExecutionKind.LOOP` -- the
     // kind `flow_trigger` reads off `loop_index` to refuse an iteration as a
     // Flow-trigger source. Read from the row for the same reason as `inputs`.
+    // In a savepoint, for `subflow::spawn_one`'s reason: the FILE-input check
+    // below needs the row and may refuse it.
+    let mut sp = sqlx::Connection::begin(&mut *conn).await.map_err(db_err)?;
     let (id, inputs): (Uuid, serde_json::Value) = sqlx::query_as(
         "INSERT INTO workflow.executions \
            (workspace_id, flow_id, namespace, flow_key, source, state, history, \
@@ -324,30 +332,41 @@ async fn spawn_one(
     .bind(parent_run as i32)
     .bind(index as i32)
     .bind(value)
-    .fetch_one(&mut *conn)
+    .fetch_one(&mut *sp)
     .await
     .map_err(db_err)?;
 
     // W9a spec §7.1: every execution-creating INSERT checks its FILE inputs.
     // An iteration's are its parent's, already checked when the parent was
     // created, and the parent is in the iteration's loop family -- so this
-    // passes, and a refusal means the copied value is no longer readable
-    // (its row gone), which no author can fix: an internal error, loudly.
-    if let Err(why) = crate::storage::inputs::check_file_inputs(
-        conn,
+    // passes unless a copied value is no longer readable (its index row
+    // pruned by retention, spec §10). That **fails the loop run naming the
+    // input** (fix round 1, M4) -- the iteration's row rolled back -- rather
+    // than erring the worker, which would re-claim the run for ever.
+    let checked = crate::storage::inputs::check_file_inputs(
+        &mut sp,
         parent.workspace_id,
         id,
         &flow,
         &inputs,
         &[],
     )
-    .await?
-    {
-        return Err(Error::Internal(anyhow::anyhow!(
-            "loop iteration {id} of execution {}: its copied inputs are refused: {why}",
-            parent.id
-        )));
+    .await?;
+    if let Err(why) = checked {
+        sp.rollback().await.map_err(db_err)?;
+        Box::pin(super::subflow::complete(
+            conn,
+            parent.id,
+            parent_run,
+            &[RunState::Failed],
+            None,
+            Some(&format!("loop iteration {index}: {why}")),
+            claim::Stack::Nested(parent.depth),
+        ))
+        .await?;
+        return Ok(None);
     }
+    sp.commit().await.map_err(db_err)?;
 
     let ctx = claim::ExecutionCtx {
         id,
@@ -380,7 +399,7 @@ async fn spawn_one(
     // graph. It is not a cycle in the data — a sub-flow is strictly smaller
     // than the flow it came from, since it is one `Loop`'s `tasks:` list.
     Box::pin(claim::settle(conn, &ctx, &empty, &mut state, Tick(0), None)).await?;
-    Ok(id)
+    Ok(Some(id))
 }
 
 /// One sub-execution has reached a terminal state: tell the loop that spawned

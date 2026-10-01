@@ -281,8 +281,10 @@ async fn id_of(res: axum::response::Response) -> Uuid {
 }
 
 async fn refusal(res: axum::response::Response, status: u16) -> String {
-    assert_eq!(res.status(), status);
-    common::json(res).await["error"]
+    let got = res.status();
+    let body = common::json(res).await;
+    assert_eq!(got, status, "{body}");
+    body["error"]
         .as_str()
         .expect("an error message")
         .to_string()
@@ -578,7 +580,13 @@ async fn a_file_over_max_file_bytes_is_refused_naming_the_cap() {
     let res = fx
         .upload(flow2, &[Part::Text("a", &half), Part::Text("b", &half)])
         .await;
-    assert_eq!(res.status(), 413);
+    // M1: the message is about the BODY, not about one file.
+    let msg = refusal(res, 413).await;
+    let limit = CAP + 1024 * 1024;
+    assert!(
+        msg.contains("request body is over") && msg.contains(&limit.to_string()),
+        "{msg}"
+    );
     assert_eq!(fx.executions().await, 1, "only the at-the-cap start");
 }
 
@@ -994,4 +1002,374 @@ async fn a_start_with_no_content_type_is_json_and_an_unsupported_type_is_415() {
     .await;
     assert_eq!(res.status(), 415);
     assert_eq!(fx.executions().await, 2, "only the two accepted starts");
+}
+
+// ── Fix round 1 ─────────────────────────────────────────────────────────────
+
+/// `bytes` as a streamed body of `chunk`-byte pieces, and how many bytes the
+/// server has pulled from it so far -- the stream is lazy, so the count is
+/// what was READ, not what was built.
+fn counted(
+    bytes: Vec<u8>,
+    chunk: usize,
+) -> (axum::body::Body, Arc<std::sync::atomic::AtomicUsize>) {
+    use futures_util::StreamExt as _;
+    let pulled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let p = pulled.clone();
+    let chunks: Vec<Vec<u8>> = bytes.chunks(chunk).map(<[u8]>::to_vec).collect();
+    let stream = futures_util::stream::iter(chunks).map(move |c| {
+        p.fetch_add(c.len(), std::sync::atomic::Ordering::SeqCst);
+        Ok::<_, std::io::Error>(axum::body::Bytes::from(c))
+    });
+    (axum::body::Body::from_stream(stream), pulled)
+}
+
+const HEADER_CAP: usize = egret_workflow::routes::MAX_MULTIPART_HEADER_BYTES;
+
+/// **I1: a part header that never ends, and a body with no boundary at all,
+/// are refused after a bounded read** -- not buffered up to the body limit.
+/// multer keeps the preamble and a part's headers in memory until it finds
+/// the boundary or `CRLFCRLF`; the route caps what may be pulled while it
+/// looks. Both bodies are 900 KiB, under this binary's body limit (4 KiB + 1
+/// MiB), so without the cap they are read whole. The control: a legitimate
+/// upload streamed in the same 1 KiB pieces starts.
+#[tokio::test]
+async fn an_unterminated_part_header_or_a_missing_boundary_is_refused_after_a_bounded_read() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.flow(&reader_flow("headers", NS, "")).await;
+    let ct = format!("multipart/form-data; boundary={BOUNDARY}");
+    let mut no_crlfcrlf =
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"f\"; X-Pad: ").into_bytes();
+    no_crlfcrlf.resize(900 * 1024, b'a');
+    let no_boundary = vec![b'x'; 900 * 1024];
+    for (what, body) in [
+        ("an unterminated header", no_crlfcrlf),
+        ("no boundary", no_boundary),
+    ] {
+        let (body, pulled) = counted(body, 1024);
+        let res =
+            common::send_body(&fx.app, "POST", &fx.start_path(flow), fx.user, &ct, body).await;
+        let msg = refusal(res, 400).await;
+        assert!(msg.contains(&HEADER_CAP.to_string()), "{what}: {msg}");
+        let read = pulled.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            read <= HEADER_CAP + 16 * 1024,
+            "{what}: {read} bytes pulled, the cap is {HEADER_CAP}"
+        );
+    }
+    assert_eq!(fx.executions().await, 0);
+    assert!(fx.objects().await.is_empty());
+
+    let file = vec![b'y'; CAP as usize];
+    let (body, _) = counted(
+        multipart_body(&[Part::Text("t", "x"), Part::File("f", "ok.txt", &file)]),
+        1024,
+    );
+    let res = common::send_body(&fx.app, "POST", &fx.start_path(flow), fx.user, &ct, body).await;
+    assert_eq!(
+        res.status(),
+        201,
+        "a legitimate upload in 1 KiB pieces starts"
+    );
+
+    // The second control: a legitimate 900 KiB part arriving as ONE ready
+    // chunk. multer drains every ready chunk before it parses the headers, so
+    // a budget that counted pulls without pacing them refused this.
+    let text = "z".repeat(900 * 1024);
+    let res = fx
+        .upload(
+            flow,
+            &[Part::Text("t", &text), Part::File("f", "ok.txt", b"ok")],
+        )
+        .await;
+    assert_eq!(res.status(), 201, "a large part in one chunk starts");
+}
+
+/// **I2: the multipart path checks the caller and the flow BEFORE it reads a
+/// byte of the body**: (a) a member without `workflow:manage` (403), (b)
+/// another workspace's flow id (404), (c) a disabled flow (409). Each leaves
+/// no object under either workspace's prefix, no execution, and an unread
+/// body.
+#[tokio::test]
+async fn the_multipart_path_checks_the_caller_and_the_flow_before_reading_the_body() {
+    let Some(fx) = fx().await else { return };
+    let (theirs, owner) = common::seed_workspace(&fx.db).await;
+    let (_, reader) = common::seed_workspace(&fx.db).await;
+    common::grant(&fx.db, fx.ws, reader, &["workflow:read"]).await;
+    let mine = fx.flow(&reader_flow("authz", NS, "")).await;
+    let foreign = common::seed_flow(
+        &fx.db,
+        theirs,
+        owner,
+        &reader_flow("authz", NS, ""),
+        "draft",
+    )
+    .await;
+    let off = common::seed_flow(
+        &fx.db,
+        fx.ws,
+        fx.user,
+        &reader_flow("off", NS, ""),
+        "disabled",
+    )
+    .await;
+    // Built after the grants: the PDP loads its policies once.
+    let app = common::app(&fx.db).await;
+    let ct = format!("multipart/form-data; boundary={BOUNDARY}");
+    let body = || multipart_body(&[Part::File("f", "a.txt", b"must not land")]);
+
+    for (who, user, flow, status) in [
+        ("without workflow:manage", reader, mine, 403),
+        ("another workspace's flow", fx.user, foreign, 404),
+        ("a disabled flow", fx.user, off, 409),
+    ] {
+        let (b, pulled) = counted(body(), 16);
+        let res = common::send_body(
+            &app,
+            "POST",
+            &format!("/api/ws/{}/workflows/flows/{flow}/executions", fx.ws),
+            user,
+            &ct,
+            b,
+        )
+        .await;
+        assert_eq!(res.status(), status, "{who}");
+        assert_eq!(
+            pulled.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{who}: body read"
+        );
+    }
+    assert_eq!(fx.executions().await, 0);
+    assert_eq!(common::execution_count(&fx.db, theirs).await, 0);
+    assert!(fx.objects().await.is_empty(), "{:?}", fx.objects().await);
+    let theirs_listing = fx
+        .fs
+        .store
+        .list(&format!("workflow/{theirs}/"), None)
+        .await
+        .unwrap();
+    assert!(theirs_listing.objects.is_empty());
+
+    // The control: the same body, by the manager, to the live flow, starts.
+    let (b, _) = counted(body(), 16);
+    assert_eq!(
+        common::send_body(&app, "POST", &fx.start_path(mine), fx.user, &ct, b)
+            .await
+            .status(),
+        201
+    );
+}
+
+/// **M2: a headerless body that fails to arrive is a 400, and only a body
+/// over the JSON limit is a 413.**
+#[tokio::test]
+async fn a_headerless_body_error_is_400_and_only_the_limit_is_413() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.flow(&reader_flow("headerless", NS, "")).await;
+    let broken = futures_util::stream::iter(vec![
+        Ok(axum::body::Bytes::from_static(b"{\"inputs\":")),
+        Err(std::io::Error::other("the client went away")),
+    ]);
+    let res = common::send_body(
+        &fx.app,
+        "POST",
+        &fx.start_path(flow),
+        fx.user,
+        "",
+        axum::body::Body::from_stream(broken),
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    let big = vec![b' '; 2 * 1024 * 1024 + 1];
+    let res = common::send_raw(&fx.app, "POST", &fx.start_path(flow), fx.user, "", big).await;
+    assert_eq!(res.status(), 413);
+    assert_eq!(fx.executions().await, 0);
+}
+
+/// **M4: a loop iteration whose copied FILE input is no longer readable --
+/// its index row pruned by retention -- FAILS THE LOOP RUN naming the input**,
+/// and the worker's tick answers `Ok` (no poison pill re-claimed for ever).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loop_whose_copied_file_input_was_pruned_fails_its_run_naming_the_input() {
+    let Some(fx) = fx().await else { return };
+    let src = format!(
+        "id: loop-pruned\nnamespace: {NS}\ninputs:\n  - id: f\n    type: FILE\n\
+         tasks:\n  - id: first\n    type: io.kestra.plugin.core.log.Log\n    message: before\n\
+         \x20 - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\"]'\n    tasks:\n\
+         \x20     - id: r\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
+    );
+    let flow = fx.flow(&src).await;
+    let res = fx
+        .upload(flow, &[Part::File("f", "p.txt", b"pruned")])
+        .await;
+    assert_eq!(res.status(), 201);
+    let root = id_of(res).await;
+    prune_index(&fx, root).await;
+    fx.drain().await;
+    let (state, _, msg) = fx.run(root, "each").await;
+    let msg = msg.unwrap_or_default();
+    assert_eq!(state, "FAILED", "{msg}");
+    assert!(
+        msg.contains("input `f`") && msg.contains("does not exist"),
+        "{msg}"
+    );
+    let iterations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.executions WHERE parent_execution_id = $1",
+    )
+    .bind(root)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(iterations, 0, "the refused iteration's row is rolled back");
+    assert_eq!(fx.state_of(root).await, "FAILED");
+}
+
+/// **M4, the retry replay**: a `CREATE_NEW_EXECUTION` retry whose copied FILE
+/// input was pruned FAILS the run naming the input instead of replaying, and
+/// the tick answers `Ok`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_replay_whose_copied_file_input_was_pruned_fails_the_run_naming_the_input() {
+    let Some(fx) = fx().await else { return };
+    let src = format!(
+        "id: retry-pruned\nnamespace: {NS}\ninputs:\n  - id: f\n    type: FILE\n\
+         retry:\n  behavior: CREATE_NEW_EXECUTION\n  type: constant\n  maxAttempts: 3\n  interval: PT0S\n\
+         tasks:\n  - id: fail\n    type: io.kestra.plugin.core.execution.Fail\n"
+    );
+    let flow = fx.flow(&src).await;
+    let res = fx
+        .upload(flow, &[Part::File("f", "p.txt", b"pruned")])
+        .await;
+    assert_eq!(res.status(), 201);
+    let root = id_of(res).await;
+    prune_index(&fx, root).await;
+    fx.drain().await;
+    egret_workflow::worker::resume(&fx.db.pool, root)
+        .await
+        .expect("a resume is Ok");
+    let (state, _, msg) = fx.run(root, "fail").await;
+    let msg = msg.unwrap_or_default();
+    assert_eq!(state, "FAILED", "{msg}");
+    assert!(
+        msg.contains("input `f`") && msg.contains("does not exist"),
+        "{msg}"
+    );
+    let replays: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.executions WHERE parent_execution_id = $1",
+    )
+    .bind(root)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(replays, 0, "no replay was created");
+}
+
+/// Retention pruned the execution's index rows (spec §10's pruner, simulated).
+async fn prune_index(fx: &Fx, execution: Uuid) {
+    let n = sqlx::query("DELETE FROM workflow.execution_files WHERE execution_id = $1")
+        .bind(execution)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(n, 1, "the uploaded file's row");
+}
+
+/// **Verified, not changed: a webhook whose rendered FILE input is not a
+/// readable URI is a 4xx naming the input, never a 500**
+/// (`start_execution_in`'s `InvalidInput` through the webhook's `?`).
+#[tokio::test]
+async fn a_webhook_whose_file_input_is_not_a_readable_uri_is_a_4xx() {
+    let Some(fx) = fx().await else { return };
+    let src = format!(
+        "id: hooked\nnamespace: {NS}\ninputs:\n  - id: f\n    type: FILE\n\
+         triggers:\n  - id: hook\n    type: io.kestra.plugin.core.trigger.Webhook\n    key: hook-key\n    \
+         inputs:\n      f: \"not a uri\"\n\
+         tasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    );
+    fx.flow(&src).await;
+    let hooks = common::webhook_app(&fx.db).await;
+    let res = common::anon(
+        &hooks,
+        "POST",
+        &format!(
+            "/workflows/v1/{}/executions/webhook/{NS}/hooked/hook-key",
+            fx.ws
+        ),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    let msg = refusal(res, 400).await;
+    assert!(msg.contains("input `f`"), "{msg}");
+    assert_eq!(fx.executions().await, 0);
+}
+
+/// **Verified, not changed: a Flow trigger whose FILE input is not readable
+/// is a deterministic refusal** (`scheduler::start::classify(InvalidInput)`
+/// = `Refused` → `Fate::Broken`): nothing fires, and the event is done with
+/// that listener after ONE pass -- it is not kept for a retry.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flow_trigger_with_an_unreadable_file_input_is_refused_once_not_retried() {
+    let Some(fx) = fx().await else { return };
+    sqlx::query("DELETE FROM workflow.flow_trigger_events")
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+    let src_flow = format!(
+        "id: src-bad\nnamespace: {NS}\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    );
+    let source = fx.flow(&src_flow).await;
+    let listener_src = format!(
+        "id: listener-bad\nnamespace: {NS}\ninputs:\n  - id: f\n    type: FILE\n\
+         triggers:\n  - id: on_done\n    type: io.kestra.plugin.core.trigger.Flow\n    \
+         states: [SUCCESS]\n    when: \"{{{{ flow.id == 'src-bad' }}}}\"\n    inputs:\n      f: \"not a uri\"\n\
+         tasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    );
+    let listener = fx.flow(&listener_src).await;
+    let res = fx.start_json(source, json!({})).await;
+    assert_eq!(res.status(), 201);
+    fx.drain().await;
+    let report = egret_workflow::flow_trigger::process_events(&fx.db.pool)
+        .await
+        .expect("a pass");
+    assert_eq!(report.fired, 0, "{report:?}");
+    assert_eq!(report.errored, 1, "{report:?}");
+    let fired: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workflow.executions WHERE flow_id = $1")
+            .bind(listener)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(fired, 0);
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.flow_trigger_events")
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        left, 0,
+        "the event is done with the listener: not kept for a retry"
+    );
+}
+
+/// **M3: the multipart schema's values are binary**, so a generated client
+/// can send a file, and the document says one start carries at most
+/// `max_file_bytes` + 1 MiB in total (M1).
+#[test]
+fn the_multipart_schema_has_binary_values_and_the_body_cap_is_documented() {
+    let doc = serde_json::to_value(egret_workflow::openapi()).unwrap();
+    let schema = &doc["components"]["schemas"]["StartExecutionMultipart"];
+    assert_eq!(
+        schema["additionalProperties"]["type"],
+        json!("string"),
+        "{schema}"
+    );
+    assert_eq!(
+        schema["additionalProperties"]["format"],
+        json!("binary"),
+        "{schema}"
+    );
+    let op = &doc["paths"]["/api/ws/{workspace}/workflows/flows/{id}/executions"]["post"];
+    let described = op["requestBody"]["description"].as_str().unwrap();
+    assert!(described.contains("in total"), "{described}");
 }

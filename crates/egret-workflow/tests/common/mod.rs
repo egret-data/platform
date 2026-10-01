@@ -340,6 +340,37 @@ pub async fn send_raw(
         .unwrap()
 }
 
+/// [`send_raw`] with the body given as an `axum::body::Body` -- a stream, so
+/// a test can count how much of it the server pulled, or make it fail.
+pub async fn send_body(
+    app: &App,
+    method: &str,
+    path: &str,
+    user: UserId,
+    content_type: &str,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    use tower::ServiceExt;
+    let token = app
+        .sessions
+        .create(user, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token;
+    let mut b = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("Cookie", format!("egret_session={token}"));
+    if !content_type.is_empty() {
+        b = b.header("Content-Type", content_type);
+    }
+    app.router
+        .clone()
+        .oneshot(b.body(body).unwrap())
+        .await
+        .unwrap()
+}
+
 pub async fn get(app: &App, path: &str, user: UserId) -> axum::response::Response {
     send(app, "GET", path, user, None).await
 }

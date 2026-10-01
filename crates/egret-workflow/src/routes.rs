@@ -1716,8 +1716,197 @@ fn start_inputs(body: Option<Json<StartExecutionRequest>>) -> EgretResult<serde_
 /// `kestra:///{namespace}/{flow}/executions/{execution}/inputs/{input}/{file name}`
 /// and the input's value is that URI. Any other part is a text value. A part
 /// naming no declared input, or one named twice, is refused naming it.
-#[derive(utoipa::ToSchema)]
+///
+/// The values are `format: binary` (fix round 1, M3), so a generated client
+/// types a part as a file (`Blob`) rather than JSON. A text part is a binary
+/// value too on the wire: multipart carries bytes either way.
 pub struct StartExecutionMultipart(pub std::collections::BTreeMap<String, String>);
+
+impl utoipa::PartialSchema for StartExecutionMultipart {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        use utoipa::openapi::schema::{KnownFormat, ObjectBuilder, SchemaFormat, Type};
+        ObjectBuilder::new()
+            .description(Some(
+                "`POST .../flows/{id}/executions` as `multipart/form-data`. **Each part is \
+                 named by an input id.** A part with a file name is that `FILE` input's file: \
+                 it is streamed to \
+                 `kestra:///{namespace}/{flow}/executions/{execution}/inputs/{input}/{file name}` \
+                 and the input's value is that URI. Any other part is a text value. A part \
+                 naming no declared input, or one named twice, is refused naming it. One start \
+                 carries at most `workflow.storage.max_file_bytes` + 1 MiB in total.",
+            ))
+            .additional_properties(Some(
+                ObjectBuilder::new()
+                    .schema_type(Type::String)
+                    .format(Some(SchemaFormat::KnownFormat(KnownFormat::Binary))),
+            ))
+            .into()
+    }
+}
+
+impl utoipa::ToSchema for StartExecutionMultipart {}
+
+/// Does `e`, or anything in its `source()` chain, say a body limit was
+/// crossed? (`http_body_util::LengthLimitError`, however many boxes deep.)
+fn is_length_limit(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur = Some(e);
+    while let Some(err) = cur {
+        if err.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        cur = err.source();
+    }
+    false
+}
+
+/// What [`HeaderBudget`] observed, shared with the handler that drives the
+/// multipart parser.
+#[derive(Default)]
+struct MultipartGate {
+    /// Set by the handler while it awaits the next part's headers.
+    in_headers: std::sync::atomic::AtomicBool,
+    /// Bytes pulled since `in_headers` was last set.
+    pulled: std::sync::atomic::AtomicUsize,
+    /// The header budget was crossed.
+    header_overflow: std::sync::atomic::AtomicBool,
+    /// The route's body limit was crossed.
+    body_limit: std::sync::atomic::AtomicBool,
+}
+
+impl MultipartGate {
+    fn start_headers(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.pulled.store(0, SeqCst);
+        self.in_headers.store(true, SeqCst);
+    }
+    fn end_headers(&self) {
+        self.in_headers
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The body multer reads, in pieces of at most [`HEADER_BUDGET_PIECE_BYTES`]:
+/// while the handler awaits the next part's headers, more than
+/// [`MAX_MULTIPART_HEADER_BYTES`] pulled is an error (fix round 1, I1).
+///
+/// multer keeps the preamble and a part's headers in memory until it finds
+/// the boundary or `CRLFCRLF`, re-scanning its whole buffer on each pull, and
+/// axum's `Multipart` exposes none of multer's `Constraints` -- none of which
+/// bounds the headers anyway (they are per field and per stream). Without
+/// this, an unterminated header is held up to the whole body limit
+/// (`max_file_bytes` + 1 MiB, 1 GiB by default) per request. The pieces are
+/// what make the count tight: a part's headers can be followed in the same
+/// network chunk by its data, so at most one piece of data is counted with
+/// them.
+///
+/// **One piece per poll.** multer's `StreamBuffer::poll_stream` pulls every
+/// chunk the body has READY into its buffer before it parses anything -- a
+/// fast client (or an in-memory body) is drained whole into multer's memory
+/// on the first `next_field`. So after each piece this answers `Pending` once,
+/// waking itself: multer then parses what it holds, and its buffer grows by
+/// at most one piece per poll, while looking for headers and while a part's
+/// data is read alike.
+struct HeaderBudget {
+    inner: std::pin::Pin<
+        Box<
+            dyn futures_util::Stream<Item = std::result::Result<axum::body::Bytes, axum::Error>>
+                + Send,
+        >,
+    >,
+    pending: axum::body::Bytes,
+    gate: Arc<MultipartGate>,
+    /// A piece was just handed out: the next poll answers `Pending` (and wakes
+    /// itself) once. See the type's doc.
+    yielded: bool,
+}
+
+/// See [`HeaderBudget`].
+const HEADER_BUDGET_PIECE_BYTES: usize = 8 * 1024;
+
+impl futures_util::Stream for HeaderBudget {
+    type Item = std::result::Result<axum::body::Bytes, axum::Error>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::sync::atomic::Ordering::SeqCst;
+        use std::task::Poll;
+        let this = self.get_mut();
+        if this.yielded {
+            this.yielded = false;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        while this.pending.is_empty() {
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(Err(e))) => {
+                    if is_length_limit(&e) {
+                        this.gate.body_limit.store(true, SeqCst);
+                    }
+                    return Poll::Ready(Some(Err(e)));
+                }
+                Poll::Ready(Some(Ok(b))) => this.pending = b,
+            }
+        }
+        let n = this.pending.len().min(HEADER_BUDGET_PIECE_BYTES);
+        let piece = this.pending.split_to(n);
+        if this.gate.in_headers.load(SeqCst)
+            && this.gate.pulled.fetch_add(n, SeqCst) + n > MAX_MULTIPART_HEADER_BYTES
+        {
+            this.gate.header_overflow.store(true, SeqCst);
+            return Poll::Ready(Some(Err(axum::Error::new(std::io::Error::other(
+                "a multipart part's headers are over the route's budget",
+            )))));
+        }
+        this.yielded = true;
+        Poll::Ready(Some(Ok(piece)))
+    }
+}
+
+/// A multipart error as the response, read through what the gate saw first:
+/// the header budget (400), the body limit (413, naming the limit -- M1),
+/// else the parser's own status, where a read failure it cannot classify
+/// (500 in axum) is the request's (400).
+fn multipart_refusal(
+    gate: &MultipartGate,
+    limit: usize,
+    status: StatusCode,
+    text: String,
+) -> axum::response::Response {
+    use std::sync::atomic::Ordering::SeqCst;
+    if gate.header_overflow.load(SeqCst) {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "a multipart part's headers (or the preamble before the first boundary) are over \
+                 {MAX_MULTIPART_HEADER_BYTES} bytes; a part needs its headers ended by a blank \
+                 line and the body its boundary"
+            ),
+        );
+    }
+    if gate.body_limit.load(SeqCst) {
+        return refuse(StatusCode::PAYLOAD_TOO_LARGE, body_too_large(limit));
+    }
+    if status.is_server_error() {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            format!("the multipart body could not be read: {text}"),
+        );
+    }
+    refuse(status, text)
+}
+
+/// M1: the refusal for a body over the route's limit -- about the REQUEST,
+/// not one file.
+fn body_too_large(limit: usize) -> String {
+    format!(
+        "the request body is over {limit} bytes: one start carries at most \
+         workflow.storage.max_file_bytes + 1 MiB in total"
+    )
+}
 
 /// The JSON body's cap on the start route: axum's own default, unchanged by
 /// W9a. The multipart cap is [`multipart_body_limit`].
@@ -1727,6 +1916,13 @@ const MAX_JSON_START_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// text parts, boundaries and headers (W9a spec §7.1, "the route's body limit
 /// follows `max_file_bytes`").
 pub const MULTIPART_OVERHEAD_BYTES: u64 = 1024 * 1024;
+
+/// What the route lets multer pull while it looks for the next part's
+/// headers (and, for the first part, the preamble before the first
+/// boundary): multer keeps those bytes in memory until it finds `CRLFCRLF` or
+/// the boundary, so without a cap an unterminated header is buffered up to
+/// the whole body limit (W9a Task 7 fix round 1, I1).
+pub const MAX_MULTIPART_HEADER_BYTES: usize = 64 * 1024;
 
 /// One text part's cap. A text part is held in memory whole -- unlike a file,
 /// which is streamed -- so it has a cap of its own, far below the body's.
@@ -1772,7 +1968,7 @@ fn core_refusal(e: Error) -> axum::response::Response {
         ("id" = Uuid, Path, description = "Flow id"),
     ),
     request_body(
-        description = "The flow's `inputs`. **JSON** (`StartExecutionRequest`, at most 2 MiB): a `FILE` input's value must be a `kestra://` URI readable from the execution being created -- in practice one a `Subflow`, a `Flow` trigger or a replay passes on; any other string is refused naming the input. **`multipart/form-data`** (`StartExecutionMultipart`, at most `workflow.storage.max_file_bytes` + 1 MiB): each part is named by an input id; a part with a file name is that `FILE` input's file (its `allowedFileExtensions` enforced, at most `max_file_bytes`), stored as `inputs/{input}/{file name}` of the new execution; any other part is a text value (at most 1 MiB).",
+        description = "The flow's `inputs`. **JSON** (`StartExecutionRequest`, at most 2 MiB): a `FILE` input's value must be a `kestra://` URI readable from the execution being created -- in practice one a `Subflow`, a `Flow` trigger or a replay passes on; any other string is refused naming the input. **`multipart/form-data`** (`StartExecutionMultipart`; one start carries at most `workflow.storage.max_file_bytes` + 1 MiB in total, and each part's headers at most 64 KiB): each part is named by an input id; a part with a file name is that `FILE` input's file (its `allowedFileExtensions` enforced, at most `max_file_bytes`), stored as `inputs/{input}/{file name}` of the new execution; any other part is a text value (at most 1 MiB).",
         content(
             (StartExecutionRequest = "application/json"),
             (StartExecutionMultipart = "multipart/form-data"),
@@ -1829,11 +2025,20 @@ async fn start_flow_execution(
             req
         } else {
             let (mut parts, body) = req.into_parts();
-            let bytes = axum::body::to_bytes(body, usize::MAX).await.map_err(|_| {
-                refuse(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    format!("the JSON body is over {MAX_JSON_START_BODY_BYTES} bytes"),
-                )
+            // Only the limit is a 413 (fix round 1, M2); a body that fails to
+            // arrive is the request's, a 400.
+            let bytes = axum::body::to_bytes(body, usize::MAX).await.map_err(|e| {
+                if is_length_limit(&e) {
+                    refuse(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        format!("the JSON body is over {MAX_JSON_START_BODY_BYTES} bytes"),
+                    )
+                } else {
+                    refuse(
+                        StatusCode::BAD_REQUEST,
+                        format!("the request body could not be read: {e}"),
+                    )
+                }
             })?;
             if !bytes.is_empty() {
                 parts.headers.insert(
@@ -1916,7 +2121,16 @@ async fn start_multipart(
         )))
     })?;
     let limit = multipart_body_limit(fs.caps);
-    let req = req.map(|b| axum::body::Body::new(http_body_util::Limited::new(b, limit)));
+    let gate = Arc::new(MultipartGate::default());
+    let req = req.map(|b| {
+        let limited = axum::body::Body::new(http_body_util::Limited::new(b, limit));
+        axum::body::Body::from_stream(HeaderBudget {
+            inner: Box::pin(limited.into_data_stream()),
+            pending: axum::body::Bytes::new(),
+            gate: gate.clone(),
+            yielded: false,
+        })
+    });
     let mut multipart = axum::extract::Multipart::from_request(req, &())
         .await
         .map_err(axum::response::IntoResponse::into_response)?;
@@ -1930,6 +2144,8 @@ async fn start_multipart(
         &parsed,
         execution,
         &mut multipart,
+        &gate,
+        limit,
         &mut uploading,
     )
     .await;
@@ -1955,17 +2171,25 @@ async fn read_parts_and_start(
     parsed: &crate::models::Flow,
     execution: Uuid,
     multipart: &mut axum::extract::Multipart,
+    gate: &MultipartGate,
+    limit: usize,
     uploading: &mut bool,
 ) -> std::result::Result<Uuid, axum::response::Response> {
     use futures_util::StreamExt as _;
     let bad = |m: String| core_refusal(Error::InvalidInput(m));
     let mut inputs = serde_json::Map::new();
     let mut files = Vec::new();
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| refuse(e.status(), e.body_text()))?
-    {
+    loop {
+        // The header budget is spent only here, while multer looks for the
+        // next part's headers (I1); a part's data is bounded by its own caps.
+        gate.start_headers();
+        let next = multipart.next_field().await;
+        gate.end_headers();
+        let Some(field) =
+            next.map_err(|e| multipart_refusal(gate, limit, e.status(), e.body_text()))?
+        else {
+            break;
+        };
         let Some(name) = field.name().map(str::to_string) else {
             return Err(bad(
                 "a multipart part has no name: each part is named by the input it is for".into(),
@@ -1998,12 +2222,12 @@ async fn read_parts_and_start(
                     &mut body,
                 )
                 .await
-                .map_err(|e| upload_refusal(e, &name, fs.caps.max_file_bytes))?;
+                .map_err(|e| upload_refusal(e, gate, limit))?;
                 let uri = stored.uri.clone();
                 files.push(stored);
                 uri
             }
-            None => read_text_part(field, &name).await?,
+            None => read_text_part(field, &name, gate, limit).await?,
         };
         inputs.insert(name, serde_json::Value::String(value));
     }
@@ -2043,12 +2267,14 @@ async fn read_parts_and_start(
 async fn read_text_part(
     mut field: axum::extract::multipart::Field<'_>,
     name: &str,
+    gate: &MultipartGate,
+    limit: usize,
 ) -> std::result::Result<String, axum::response::Response> {
     let mut bytes = Vec::new();
     while let Some(chunk) = field
         .chunk()
         .await
-        .map_err(|e| refuse(e.status(), e.body_text()))?
+        .map_err(|e| multipart_refusal(gate, limit, e.status(), e.body_text()))?
     {
         if bytes.len() + chunk.len() > MAX_TEXT_PART_BYTES {
             return Err(refuse(
@@ -2071,13 +2297,13 @@ async fn read_text_part(
 /// [`crate::storage::inputs::UploadError`] as the response: the caller's
 /// errors are 4xx naming the input, a store failure is a 503 (spec §11: not
 /// the caller's fault, and retryable). A body cut off by the route's own
-/// limit is the cap's refusal, the same as a file the reader saw cross it.
+/// limit is the BODY's refusal, naming that limit (M1).
 fn upload_refusal(
     e: crate::storage::inputs::UploadError,
-    input: &str,
-    cap: u64,
+    gate: &MultipartGate,
+    limit: usize,
 ) -> axum::response::Response {
-    use crate::storage::inputs::{too_large, UploadError};
+    use crate::storage::inputs::UploadError;
     match e {
         UploadError::Author(m) => core_refusal(Error::InvalidInput(m)),
         UploadError::TooLarge(m) => refuse(StatusCode::PAYLOAD_TOO_LARGE, m),
@@ -2087,11 +2313,7 @@ fn upload_refusal(
                 .and_then(|e| e.downcast_ref::<axum::extract::multipart::MultipartError>())
                 .map(|m| m.status())
                 .unwrap_or(StatusCode::BAD_REQUEST);
-            if status == StatusCode::PAYLOAD_TOO_LARGE {
-                refuse(status, too_large(input, cap))
-            } else {
-                refuse(status, message)
-            }
+            multipart_refusal(gate, limit, status, message)
         }
         UploadError::Store(m) => {
             tracing::warn!(error = %m, "a FILE input upload failed in internal storage");

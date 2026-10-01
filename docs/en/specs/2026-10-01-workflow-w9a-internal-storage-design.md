@@ -239,6 +239,7 @@ Namespace files, `nsfile://` and `fileURI` (W9b); the KV store (W9c); `PurgeStor
 ## 15. Known limits
 
 - A flow reads only its own execution's, its loop family's (its loop root and every iteration under it) and its trigger execution's files and that trigger's loop family's, and a replay its source chain's (§2, §4.4). One trigger level only: a file of the trigger's own trigger is refused (2026-10-01 ruling).
+- A `Subflow` or `Flow` trigger fired from a **manual replay** that passes the copied `{{ inputs.f }}` is refused: that URI names the replay's source, and the child's readable set follows its trigger's loop family but not its trigger's replay chain (the 2026-10-01 ruling covers the loop family only, §4.4 item 5).
 - A file written inside a `Loop` iteration carries the iteration's id, as in Kestra (§3, the user's ruling); the file API serves it through any id of the loop family, with no redirect (§8).
 - `allowedFileExtensions` is enforced; the Kestra artifact does not enforce it (Task 1), so such a flow passes on Kestra and fails on egret (§2).
 - Kestra's plugins write binary Ion; every egret reader must accept it. `egret.sql` STORE writes Ion text, which Kestra's readers accept as measured for `Write` output; `ionfmt`'s own bytes were not measured on Kestra (§2, §9.2).

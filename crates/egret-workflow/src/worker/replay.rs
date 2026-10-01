@@ -167,7 +167,7 @@ pub(super) async fn spawn_due(
     // delay loop calls `executionService.replay(execution, flow, null, null,
     // empty)` -- a null `taskRunId` -- so the replay is of the whole flow and
     // the delay's own `taskRunId` is never read on this path.
-    let Some(_run) = due_run(state, now) else {
+    let Some(run) = due_run(state, now) else {
         return Ok(());
     };
     // A nested `settle` is not the artifact's delay loop; see the module doc's
@@ -231,6 +231,9 @@ pub(super) async fn spawn_due(
     // more than the interval on every hop.
     let child_offset = offset.saturating_add(now.0.max(0));
 
+    // In a savepoint, for `subflow::spawn_one`'s reason: the FILE-input check
+    // below needs the row and may refuse it.
+    let mut sp = sqlx::Connection::begin(&mut *conn).await.map_err(db_err)?;
     let child: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
            (workspace_id, flow_id, namespace, flow_key, source, state, history, \
@@ -261,32 +264,45 @@ pub(super) async fn spawn_due(
     // bumped), so `executionDepth` carries over. A replay is the same link in
     // a chain, not a new one.
     .bind(row.get::<i32, _>("execution_depth"))
-    .fetch_one(&mut *conn)
+    .fetch_one(&mut *sp)
     .await
     .map_err(db_err)?;
 
     // W9a spec §7.1: every execution-creating INSERT checks its FILE inputs.
     // A replay's are its source's, already checked, and the source is on the
     // replay's chain (`parent_execution_id` with no `loop_index`) -- so this
-    // passes; a refusal means a copied value is no longer readable, which no
-    // author can fix: an internal error, loudly.
+    // passes unless a copied value is no longer readable (its index row
+    // pruned by retention, spec §10). That **fails the retried run naming
+    // the input** (fix round 1, M4) -- no replay is created, and the run is no
+    // longer `RETRIED`, so no later settle tries again -- rather than erring
+    // the worker, which would re-claim it for ever.
     let flow = crate::spec::parse(&ctx.source)
         .map_err(|e| worker_err(WorkerError::Unplannable(child, e.message)))?;
-    if let Err(why) = crate::storage::inputs::check_file_inputs(
-        conn,
+    let checked = crate::storage::inputs::check_file_inputs(
+        &mut sp,
         ctx.workspace_id,
         child,
         &flow,
         &row.get::<Value, _>("inputs"),
         &[],
     )
-    .await?
-    {
-        return Err(Error::Internal(anyhow::anyhow!(
-            "replay {child} of execution {}: its copied inputs are refused: {why}",
-            ctx.id
-        )));
+    .await?;
+    if let Err(why) = checked {
+        sp.rollback().await.map_err(db_err)?;
+        return Box::pin(super::subflow::complete(
+            conn,
+            ctx.id,
+            run,
+            &[RunState::Failed],
+            None,
+            Some(&format!(
+                "the CREATE_NEW_EXECUTION retry cannot replay: {why}"
+            )),
+            claim::Stack::Nested(ctx.depth),
+        ))
+        .await;
     }
+    sp.commit().await.map_err(db_err)?;
 
     let child_ctx = claim::ExecutionCtx {
         id: child,

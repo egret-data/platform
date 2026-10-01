@@ -164,9 +164,8 @@ pub async fn upload_input(
     Ok(StoredFile { uri, size })
 }
 
-/// The refusal for a file over `cap`, naming the input and the cap. Shared
-/// with the route, whose body limit can cut a part off before this reader
-/// sees the byte that crosses the cap.
+/// The refusal for a file over `cap`, naming the input and the cap. (A body
+/// over the route's own limit is the route's refusal, naming that limit.)
 pub fn too_large(input: &str, cap: u64) -> String {
     format!(
         "Invalid value for input `{input}`: the file is over the {cap} bytes one file may be \

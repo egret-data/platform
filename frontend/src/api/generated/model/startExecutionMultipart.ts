@@ -7,14 +7,6 @@
  */
 
 /**
- * `POST .../flows/{id}/executions` as `multipart/form-data` (W9a spec §7.1,
- * Kestra's shape) -- the schema is for the OpenAPI document only; the
- * handler reads the parts one by one and never builds this type.
- *
- * **Each part is named by an input id.** A part with a file name is that
- * `FILE` input's file: it is streamed to
- * `kestra:///{namespace}/{flow}/executions/{execution}/inputs/{input}/{file name}`
- * and the input's value is that URI. Any other part is a text value. A part
- * naming no declared input, or one named twice, is refused naming it.
+ * `POST .../flows/{id}/executions` as `multipart/form-data`. **Each part is named by an input id.** A part with a file name is that `FILE` input's file: it is streamed to `kestra:///{namespace}/{flow}/executions/{execution}/inputs/{input}/{file name}` and the input's value is that URI. Any other part is a text value. A part naming no declared input, or one named twice, is refused naming it. One start carries at most `workflow.storage.max_file_bytes` + 1 MiB in total.
  */
-export interface StartExecutionMultipart {[key: string]: string}
+export interface StartExecutionMultipart {[key: string]: Blob}

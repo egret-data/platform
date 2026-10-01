@@ -241,6 +241,7 @@ Namespace files, `nsfile://` và `fileURI` (W9b); KV store (W9c); `PurgeStorage`
 ## 15. Giới hạn đã biết
 
 - Một flow chỉ đọc file của execution của chính nó, của họ vòng lặp của nó (loop root và mọi vòng lặp dưới nó), của trigger execution của nó và của họ vòng lặp của trigger đó, và một replay đọc file của chuỗi nguồn của nó (§2, §4.4). Chỉ một cấp trigger: file của trigger của chính trigger bị từ chối (phán quyết 2026-10-01).
+- Một `Subflow` hay trigger `Flow` được bắn từ một **replay thủ công** mà chuyển `{{ inputs.f }}` đã sao chép thì bị từ chối: URI đó chỉ tới nguồn của replay, và tập đọc được của execution con đi theo họ vòng lặp của trigger nhưng không theo chuỗi replay của trigger (phán quyết 2026-10-01 chỉ phủ họ vòng lặp, §4.4 mục 5).
 - Một file ghi bên trong một vòng lặp `Loop` mang id của chính vòng lặp, như trong Kestra (§3, phán quyết của người dùng); API file phục vụ nó qua bất kỳ id nào của họ vòng lặp, không redirect (§8).
 - `allowedFileExtensions` được thực thi; artifact Kestra không thực thi nó (Task 1), nên một flow như vậy chạy được trên Kestra và thất bại trên egret (§2).
 - Plugin của Kestra ghi Ion nhị phân; mọi bộ đọc của egret phải nhận nó. STORE của `egret.sql` ghi Ion text, thứ mà bộ đọc của Kestra nhận như đã đo với output của `Write`; byte do chính `ionfmt` ghi chưa được đo trên Kestra (§2, §9.2).

@@ -899,7 +899,7 @@ fn guess_state(
 /// `type_id` for a `TaskKind::Executable`, so `claim`'s `type_id IS NOT NULL`
 /// predicate cannot take it and there is no token to check. The serialisation
 /// is the execution's own `FOR NO KEY UPDATE`, which `claim::load` takes here.
-async fn complete(
+pub(super) async fn complete(
     conn: &mut PgConnection,
     execution_id: Uuid,
     run: RunIx,
