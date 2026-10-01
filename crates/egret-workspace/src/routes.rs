@@ -1062,10 +1062,12 @@ pub struct StartWsImpersonation {
 /// Guards run in a deliberate order so a caller learns nothing before its own
 /// authority is proven: (1) not already impersonating; (2) caller is `ws_admin`
 /// here or a platform_admin; (3) the shared target guards (not-self, reason
-/// non-empty, target exists, target holds NO platform-scoped role grant —
+/// non-empty, target exists, and — because the overlay THIS endpoint writes is
+/// workspace-scoped — the target holds NO platform-scoped role grant at all;
 /// `validate_impersonation_target`, and read its ⚠ paragraph: that third guard is
 /// what stops this endpoint minting a scoped overlay with platform authority,
-/// which no `/api/control-plane` route confines); (4) the target is a
+/// which no `/api/control-plane` route confines, and it is deliberately WIDER here
+/// than on the platform endpoint); (4) the target is a
 /// MEMBER of this workspace and is NOT itself a `ws_admin` of it. Step-up re-auth
 /// then mirrors the platform endpoint: a local caller re-enters their password; an
 /// OIDC caller gets a `409` with an authorize URL whose sealed intent carries this
@@ -1080,7 +1082,7 @@ pub struct StartWsImpersonation {
         (status = 200, description = "Impersonation started; the session now resolves to the target, scoped to this workspace"),
         (status = 400, description = "Bad target / empty reason", body = ErrorBody),
         (status = 401, description = "Not authenticated, or wrong step-up password", body = ErrorBody),
-        (status = 403, description = "Not a ws_admin, already impersonating, target not a member, target is a ws_admin here, or the target holds a platform-scoped role grant (any platform role, not just platform_admin)", body = ErrorBody),
+        (status = 403, description = "Not a ws_admin, already impersonating, target not a member, target is a ws_admin here, or the target holds ANY platform-scoped role grant — wider than the platform endpoint's rule, because the overlay this one writes is workspace-scoped and no /api/control-plane route confines such an overlay", body = ErrorBody),
         (status = 409, description = "OIDC caller: re-authenticate at `authorize_url`, then the callback creates the overlay"),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -1118,6 +1120,10 @@ async fn ws_impersonate_start(
         ctx.principal.user_id,
         target,
         &reason,
+        // `Some`: the overlay this endpoint writes is confined to THIS workspace,
+        // which is what makes the wide target rule apply here and not on the
+        // platform endpoint.
+        Some(ctx.workspace_id),
     )
     .await
     .map_err(AuthError)?;

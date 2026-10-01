@@ -268,15 +268,23 @@ export function MembersPanel({ workspaceId }: { workspaceId: string }) {
         // for groups: the backend rejects all four, but a visible-then-403
         // action reads as a bug rather than a rule.
         //
-        // ⚠ There is now a FIFTH case the backend rejects that this cannot hide:
-        // a member holding ANY platform-scoped role grant, not just
-        // `platform_admin` (SP4d debt Task 13 — a ws-scoped overlay over a
-        // platform `data_steward` could write permission grants on any
-        // workspace's catalog, because no `/api/control-plane` route confines
-        // one). Such a member still shows the action and gets a 403. Hiding it
-        // needs a new field on the member DTO — `is_platform_admin` is the only
-        // platform fact the row carries, and it answers a narrower question —
-        // which is a backend change this task did not take.
+        // ⚠ There is a FIFTH case the backend rejects that this cannot hide, and
+        // it is a DECIDED wart rather than an oversight: a member holding ANY
+        // platform-scoped role grant, not just `platform_admin`. SP4d debt Task 13
+        // — a ws-scoped overlay over a platform `data_steward` could write
+        // permission grants on any workspace's catalog, because no
+        // `/api/control-plane` route confines such an overlay — so
+        // `POST /api/ws/{workspace}/impersonate` now refuses that target. This
+        // panel is the ws_admin surface, so the affected population is exactly a
+        // ws_admin looking at a platform-role holder, which is the case we WANT
+        // refused; seeing the refusal teaches something true about the boundary.
+        //
+        // Hiding it would need a new field on the member DTO: `is_platform_admin`
+        // is the only platform fact the row carries and it answers a narrower
+        // question (and its `EXISTS` is not group-aware, so a user whose GROUP
+        // holds a platform role reports `false`). Growing the DTO was ruled out of
+        // Task 13 deliberately. The platform endpoint keeps the narrow rule, so
+        // nothing changed for `/api/admin/impersonate`.
         const canImpersonate =
           m.principal_type === "user" &&
           !isSelf(m) &&

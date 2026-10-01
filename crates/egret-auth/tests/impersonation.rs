@@ -416,6 +416,7 @@ async fn a_service_account_cannot_be_impersonated() {
         admin,
         human,
         "debugging",
+        None,
     )
     .await
     .expect("a human target must still be impersonable");
@@ -430,6 +431,7 @@ async fn a_service_account_cannot_be_impersonated() {
         admin,
         svc,
         "debugging",
+        None,
     )
     .await
     .expect_err("a service account must not be impersonable");
@@ -465,8 +467,26 @@ async fn a_service_account_cannot_be_impersonated() {
 /// fixture that proved only "a row exists" would pass against a guard keyed to
 /// something else entirely.
 ///
-/// Both legs are asserted — a target with no platform grant must still validate —
-/// so this cannot pass against a guard that refuses every target.
+/// # All four cells, because the permissive arm is the load-bearing one
+///
+/// The rule is keyed to the `intended_scope` of the overlay about to be written,
+/// not to the target alone, so the table has two dimensions and this test drives
+/// every cell:
+///
+/// | target | `intended_scope = Some(ws)` (ws_admin path) | `intended_scope = None` (platform path) |
+/// |---|---|---|
+/// | holds NO platform role | **Ok** | **Ok** |
+/// | holds a platform `data_steward`-shaped role | **Forbidden** | **Ok** |
+///
+/// The bottom-right cell is the one a future tightening would silently delete: a
+/// `platform_admin` already holds strictly more than any steward (PDP bypass), so
+/// refusing that target prevents no escalation and removes the support path of
+/// reproducing what a steward sees. Nothing else in this suite notices a guard that
+/// merely refuses MORE, which is why it is asserted here rather than left to prose.
+///
+/// A `platform_admin` target is refused under **both** scopes — the rule that
+/// predates this task, re-asserted at the end so the permissive cell above reads as
+/// a narrowing of the guard and not as its removal.
 #[tokio::test]
 async fn a_target_holding_any_platform_role_grant_is_refused() {
     let Some(db) = connect().await else {
@@ -481,21 +501,21 @@ async fn a_target_holding_any_platform_role_grant_is_refused() {
     );
     let admin = seed_user(&db).await;
 
-    // Leg 1: an ordinary member, no platform grant of any kind. Nothing about
-    // impersonation changed for this target, and if it had, leg 2 would be
-    // meaningless.
+    // Row 1: an ordinary member with no platform grant of any kind, under BOTH
+    // scopes. Nothing about impersonation changed for this target, and if it had,
+    // the rest of the test would be meaningless.
     let plain = seed_user(&db).await;
-    egret_auth::impersonation::validate_impersonation_target(
-        &users,
-        &sessions,
-        admin,
-        plain,
-        "debugging",
-    )
-    .await
-    .expect("a target with no platform role grant must still be impersonable");
+    for scope in [None, Some(egret_core::WorkspaceId(uuid::Uuid::new_v4()))] {
+        egret_auth::impersonation::validate_impersonation_target(
+            &users, &sessions, admin, plain, "debugging", scope,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!("a target with no platform role grant must be impersonable at scope {scope:?}: {e:?}")
+        });
+    }
 
-    // Leg 2: the escalating target. A platform-scoped role carrying
+    // Row 2: the escalating target. A platform-scoped role carrying
     // `policy:update` — the shape migration 0059's `data_steward` has, built here
     // with its own role so the test does not depend on the seed's contents.
     let target = seed_user(&db).await;
@@ -547,19 +567,70 @@ async fn a_target_holding_any_platform_role_grant_is_refused() {
         resolved.platform_roles
     );
 
+    // Row 2, ws-scoped: REFUSED. This is the cell that closes the chain.
     let err = egret_auth::impersonation::validate_impersonation_target(
         &users,
         &sessions,
         admin,
         target,
         "debugging",
+        Some(egret_core::WorkspaceId(uuid::Uuid::new_v4())),
     )
     .await
-    .expect_err("a target holding a platform-scoped role grant must not be impersonable");
+    .expect_err(
+        "a ws-scoped overlay must not be minted over a holder of platform authority: \
+         no /api/control-plane route confines one",
+    );
     assert!(
         matches!(err, egret_core::Error::Forbidden),
         "expected Forbidden, got: {err:?}"
     );
+
+    // Row 2, platform-scoped: PERMITTED, and this arm is what the fix round
+    // restored. The caller on that path is already a `platform_admin`, who holds
+    // strictly more than this target, so refusing it prevented no escalation and
+    // removed a support path.
+    egret_auth::impersonation::validate_impersonation_target(
+        &users,
+        &sessions,
+        admin,
+        target,
+        "debugging",
+        None,
+    )
+    .await
+    .expect(
+        "a platform-scoped overlay MAY target a platform-permission holder who is \
+         not a platform_admin — a platform_admin already holds strictly more",
+    );
+
+    // Now make that same target a platform_admin: refused under BOTH scopes, which
+    // is the rule that predates this task.
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $1, id, 'platform', NULL FROM roles \
+         WHERE scope = 'platform' AND name = 'platform_admin'",
+    )
+    .bind(target.0)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    for scope in [None, Some(egret_core::WorkspaceId(uuid::Uuid::new_v4()))] {
+        let err = egret_auth::impersonation::validate_impersonation_target(
+            &users,
+            &sessions,
+            admin,
+            target,
+            "debugging",
+            scope,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, egret_core::Error::Forbidden),
+            "a platform_admin target must be refused at scope {scope:?}, got: {err:?}"
+        );
+    }
 }
 
 // ── HTTP endpoint tests: the platform-admin impersonation start/exit surface ──

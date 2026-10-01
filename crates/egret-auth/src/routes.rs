@@ -293,7 +293,7 @@ async fn session_id_from_jar(st: &AuthState, jar: &CookieJar) -> Result<uuid::Uu
         (status = 200, description = "Impersonation started; the session now resolves to the target"),
         (status = 400, description = "Bad target / empty reason", body = ErrorBody),
         (status = 401, description = "Not authenticated, or wrong step-up password", body = ErrorBody),
-        (status = 403, description = "Not a platform admin, already impersonating, or the target holds a platform-scoped role grant (any platform role, not just platform_admin)", body = ErrorBody),
+        (status = 403, description = "Not a platform admin, already impersonating, or target is an admin. A target holding a NON-admin platform role (a `data_steward`, say) is permitted here: the overlay this endpoint writes is platform-scoped, and the caller already holds strictly more than the target", body = ErrorBody),
         (status = 409, description = "OIDC admin: re-authenticate at `authorize_url`, then the callback creates the overlay", body = OidcStepUp),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -315,15 +315,19 @@ async fn impersonate_start(
         return Err(AuthError(Error::Forbidden));
     }
     // 3. Parse the target and run the SHARED target guards (not-self, reason
-    //    non-empty, target exists, target holds no platform-scoped role grant).
-    //    Same guard set the OIDC callback and the ws_admin start (Task 9) reuse.
+    //    non-empty, target exists, target-not-platform-admin). Same guard set the
+    //    OIDC callback and the ws_admin start (Task 9) reuse — with the WIDER
+    //    platform-authority rule applying only there, because the overlay this
+    //    endpoint writes is platform-scoped. See `validate_impersonation_target`.
     let target = UserId(
         body.target_user_id
             .parse::<uuid::Uuid>()
             .map_err(|_| AuthError(Error::InvalidInput("invalid target_user_id".into())))?,
     );
     let reason = body.reason.trim().to_string();
-    validate_impersonation_target(&st.users, &st.sessions, p.user_id, target, &reason)
+    // `None`: the overlay this endpoint writes is platform-scoped, so the target
+    // rule is the narrow one (not a `platform_admin`). See that function's ⚠.
+    validate_impersonation_target(&st.users, &st.sessions, p.user_id, target, &reason, None)
         .await
         .map_err(AuthError)?;
     // 4. Step-up re-authentication of the ADMIN. A local admin re-enters their

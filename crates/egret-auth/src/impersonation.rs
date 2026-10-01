@@ -13,14 +13,19 @@ use crate::users::UserRepo;
 /// intended scope) may target `target_user_id`. Enforces the target-facing
 /// invariants shared by **every** impersonation entry point: not self, reason
 /// non-empty, target exists, the target is not a service account (a machine
-/// principal must never end up inside an interactive session), and the target
-/// **holds no platform-scoped role grant at all** (platform authority is
-/// off-limits so an overlay can never be used to borrow it).
+/// principal must never end up inside an interactive session), and a
+/// platform-authority rule that depends on `intended_scope` — see the ⚠ paragraph
+/// at that check.
 ///
-/// It deliberately does **not** check the caller's own authority (platform-admin
-/// vs ws-admin) — that differs per entry point and the caller enforces it first,
-/// before reaching here. Returns `Ok(())` or the domain [`Error`] that maps to the
-/// right HTTP status (`InvalidInput` → 400, `Forbidden` → 403).
+/// `intended_scope` is the `workspace_scope` the overlay about to be written will
+/// carry: `Some(ws)` for the ws_admin entry point, `None` for the platform one.
+/// It is **not** the caller's authority — this function still does not check that,
+/// because it differs per entry point and the caller enforces it first, before
+/// reaching here. It is the *reach* of the overlay being created, which is what
+/// decides how much the target may hold.
+///
+/// Returns `Ok(())` or the domain [`Error`] that maps to the right HTTP status
+/// (`InvalidInput` → 400, `Forbidden` → 403).
 ///
 /// Used by the platform start endpoint (Task 7), the OIDC step-up callback
 /// (Task 8), and the ws_admin start endpoint (Task 9) so the guard set stays
@@ -31,6 +36,7 @@ pub async fn validate_impersonation_target(
     impersonator_id: UserId,
     target_user_id: UserId,
     reason: &str,
+    intended_scope: Option<WorkspaceId>,
 ) -> Result<()> {
     if target_user_id == impersonator_id {
         return Err(Error::InvalidInput("cannot impersonate yourself".into()));
@@ -55,8 +61,12 @@ pub async fn validate_impersonation_target(
             "cannot impersonate a service account".into(),
         ));
     }
-    // Target must hold NO platform-scoped role grant — not merely not be a
-    // `platform_admin`.
+    // Platform authority, by the REACH of the overlay about to be written.
+    //
+    // * A **ws-scoped** overlay (`intended_scope = Some(ws)`) may target nobody
+    //   holding any platform-scoped role grant at all.
+    // * A **platform-scoped** overlay (`None`) keeps the original narrower rule:
+    //   not a `platform_admin`.
     //
     // ⚠ **This used to read `.any(|r| r == "platform_admin")`, and that was a
     // privilege escalation with a measured path, SP4d debt Task 13.** The chain,
@@ -79,8 +89,26 @@ pub async fn validate_impersonation_target(
     // ⇒ a `ws_admin` of A impersonated a member of A holding `data_steward` and
     // then *created a permission grant on a catalog of workspace B*, which
     // compiles into the Ranger artifact B's engine downloads. Refusing the target
-    // here removes the escalation at its source, for every entry point and every
-    // platform route at once, instead of at each consumer.
+    // here removes the escalation at its source, for every platform route at once,
+    // instead of at each consumer.
+    //
+    // **Why the rule is keyed to `intended_scope` and not applied to both arms.**
+    // The first version of this fix applied the wide rule unconditionally, and that
+    // was wrong on the platform path: the caller there is already a
+    // `platform_admin`, whose PDP bypass means they hold strictly more than any
+    // `data_steward`, so refusing that target prevents no escalation and removes a
+    // real support path (reproducing what a steward sees). The escalation this
+    // guard exists for is a **ws-scoped** overlay acquiring platform authority that
+    // no `/api/control-plane` route confines — so the condition is the overlay's
+    // reach, which is the thing that differs, rather than a second predicate
+    // somewhere else or a wide rule that costs the platform path for nothing.
+    //
+    // ⚠ **The permissive arm is load-bearing and is asserted in both directions**
+    // (`a_target_holding_any_platform_role_grant_is_refused`, which drives all four
+    // cells of {scope, no scope} × {plain target, platform-role target}). A future
+    // tightening that collapsed the `match` to the wide rule would be invisible
+    // without it: nothing else in the suite notices a guard that merely refuses
+    // more.
     //
     // **Why ANY platform role and not "any platform role carrying a
     // permission".** `platform_roles` is the same query that populates
@@ -101,7 +129,11 @@ pub async fn validate_impersonation_target(
     // is the shape the rest of this function already has, and a per-entry-point
     // parameter would be the second predicate this guard exists to avoid.
     let target_roles = sessions.platform_roles_of(target_user_id).await?;
-    if !target_roles.is_empty() {
+    let refuse = match intended_scope {
+        Some(_) => !target_roles.is_empty(),
+        None => target_roles.iter().any(|r| r == "platform_admin"),
+    };
+    if refuse {
         return Err(Error::Forbidden);
     }
     Ok(())

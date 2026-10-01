@@ -2017,12 +2017,27 @@ fn validate_explain_target(target: &Scope) -> Result<(), PermHttpError> {
 ///   `catalog_admin_router`, `engine_mgmt_router`, `control_plane_router`).
 ///
 /// All three are closed at the SOURCE instead, by
-/// `egret_auth::impersonation::validate_impersonation_target` refusing a target
-/// that holds any platform-scoped role grant — which is what makes a scoped
-/// overlay unable to satisfy the `policy:read`/`policy:update` gate above this
-/// function at all. **That is the load-bearing guard and this one is the second
-/// line**, kept because it is the only one that would still hold if a future entry
-/// point wrote a scoped overlay row without going through that validator.
+/// `egret_auth::impersonation::validate_impersonation_target` refusing a
+/// ws-scoped overlay over a target that holds any platform-scoped role grant —
+/// which is what makes such an overlay unable to satisfy the
+/// `policy:read`/`policy:update` gate above this function at all.
+///
+/// ⚠ **Consequence, recorded because it changes how the tests here should be
+/// read: this guard is UNREACHABLE in production, and so is every refusal it
+/// performs.** With no platform-scoped role grant a scoped overlay's principal
+/// cannot pass `require()` on this router, so nothing here can fire unless some
+/// future entry point writes a `workspace_scope = Some(_)` overlay row WITHOUT
+/// going through that validator. Nothing does today. **The measured protection on
+/// this surface is `validate_impersonation_target`; this function is defence in
+/// depth**, kept because it is the only half that would still hold in that future,
+/// and because it is keyed to a different relation
+/// (`registry.catalog_workspaces`) than the validator is.
+///
+/// That is why `a_workspace_scoped_overlay_is_confined_to_that_workspaces_catalogs`
+/// reaches this code only through a helper that writes the overlay row directly,
+/// and why **its row 1 — the overlay's own workspace answered — is a statement
+/// about this function, not a production claim**: production never gets a scoped
+/// overlay here to answer for.
 async fn confine_to_overlay_workspace(
     conn: &mut sqlx::PgConnection,
     p: &egret_core::Principal,

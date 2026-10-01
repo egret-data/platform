@@ -319,7 +319,7 @@
             }
           },
           "403": {
-            "description": "Not a platform admin, already impersonating, or the target holds a platform-scoped role grant (any platform role, not just platform_admin)",
+            "description": "Not a platform admin, already impersonating, or target is an admin. A target holding a NON-admin platform role (a `data_steward`, say) is permitted here: the overlay this endpoint writes is platform-scoped, and the caller already holds strictly more than the target",
             "content": {
               "application/json": {
                 "schema": {
@@ -22084,7 +22084,7 @@
           "workspace-members"
         ],
         "summary": "`POST /api/ws/{workspace}/impersonate` — a `ws_admin` of `{workspace}` (or a\nplatform_admin) starts impersonating a MEMBER of that workspace. The resulting\noverlay is **workspace-scoped**: `WsContext` confines it to `{workspace}` even\nthough the target may belong to others (see the containment guard there).",
-        "description": "Guards run in a deliberate order so a caller learns nothing before its own\nauthority is proven: (1) not already impersonating; (2) caller is `ws_admin`\nhere or a platform_admin; (3) the shared target guards (not-self, reason\nnon-empty, target exists, target holds NO platform-scoped role grant —\n`validate_impersonation_target`, and read its ⚠ paragraph: that third guard is\nwhat stops this endpoint minting a scoped overlay with platform authority,\nwhich no `/api/control-plane` route confines); (4) the target is a\nMEMBER of this workspace and is NOT itself a `ws_admin` of it. Step-up re-auth\nthen mirrors the platform endpoint: a local caller re-enters their password; an\nOIDC caller gets a `409` with an authorize URL whose sealed intent carries this\n`workspace_id`, and the overlay is created by the OIDC callback.",
+        "description": "Guards run in a deliberate order so a caller learns nothing before its own\nauthority is proven: (1) not already impersonating; (2) caller is `ws_admin`\nhere or a platform_admin; (3) the shared target guards (not-self, reason\nnon-empty, target exists, and — because the overlay THIS endpoint writes is\nworkspace-scoped — the target holds NO platform-scoped role grant at all;\n`validate_impersonation_target`, and read its ⚠ paragraph: that third guard is\nwhat stops this endpoint minting a scoped overlay with platform authority,\nwhich no `/api/control-plane` route confines, and it is deliberately WIDER here\nthan on the platform endpoint); (4) the target is a\nMEMBER of this workspace and is NOT itself a `ws_admin` of it. Step-up re-auth\nthen mirrors the platform endpoint: a local caller re-enters their password; an\nOIDC caller gets a `409` with an authorize URL whose sealed intent carries this\n`workspace_id`, and the overlay is created by the OIDC callback.",
         "operationId": "ws_impersonate_start",
         "parameters": [
           {
@@ -22132,7 +22132,7 @@
             }
           },
           "403": {
-            "description": "Not a ws_admin, already impersonating, target not a member, target is a ws_admin here, or the target holds a platform-scoped role grant (any platform role, not just platform_admin)",
+            "description": "Not a ws_admin, already impersonating, target not a member, target is a ws_admin here, or the target holds ANY platform-scoped role grant — wider than the platform endpoint's rule, because the overlay this one writes is workspace-scoped and no /api/control-plane route confines such an overlay",
             "content": {
               "application/json": {
                 "schema": {

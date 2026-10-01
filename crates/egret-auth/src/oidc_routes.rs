@@ -288,14 +288,18 @@ pub async fn complete_impersonation_step_up(
             .into_response();
     }
     let target = UserId(intent.target_user_id);
-    // (3) Re-run the shared target guards (not-self / target-exists / target holds
-    //     no platform-scoped role grant).
+    // (3) Re-run the shared target guards (not-self / target-exists / platform
+    //     authority, by the intent's own scope — see below).
     if let Err(e) = validate_impersonation_target(
         &st.users,
         &st.sessions,
         authenticated,
         target,
         &intent.reason,
+        // The sealed intent's own scope: this one callback completes BOTH the
+        // platform step-up (`None`) and the ws_admin one (`Some(ws)`), so the
+        // target rule it applies must follow the intent rather than the route.
+        intent.workspace_id.map(WorkspaceId),
     )
     .await
     {
