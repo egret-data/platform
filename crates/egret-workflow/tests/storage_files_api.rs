@@ -906,6 +906,22 @@ async fn a_deeply_nested_ion_file_is_not_previewable_and_the_server_lives() {
     assert_eq!(fx.preview(e, &ok, None).await.1["rows"], json!([{"a": 1}]));
 }
 
+/// Fix round 2: valid rows whose blobs hold `//` (a quarter of 1 KiB blobs
+/// do) preview whole; the round-1 depth scan took `//` for a comment and
+/// refused this file as too deep after 24 rows.
+#[tokio::test]
+async fn rows_with_slashes_in_their_blobs_preview_whole() {
+    let Some(fx) = fx().await else { return };
+    let e = fx.exec(Link::default()).await;
+    let rows = "{a:{{ab//cA==}}, b:[1]}\n".repeat(60);
+    let uri = fx.file(e, "blobs.ion", rows.as_bytes()).await;
+    let (status, body) = fx.preview(e, &uri, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["previewable"], true, "{body}");
+    assert_eq!(body["rows"].as_array().unwrap().len(), 60);
+    assert_eq!(body["rows"][59], json!({"a": "ab//cA==", "b": [1]}));
+}
+
 /// Fix round 1, M5: once the page is full, a store error on the one-past
 /// peek is not a 503; before the page is full it still is.
 #[tokio::test]

@@ -267,23 +267,36 @@ impl Scan {
 }
 
 /// Text Ion: `[`, `(` and `{` open, `]`, `)` and `}` close, outside strings,
-/// quoted symbols, long strings and comments.
+/// quoted symbols, long strings, lobs and comments -- **as `ion-rs` 1.0.1
+/// tokenises them** (fix round 2; each rule below was probed on it):
 ///
-/// **It may count too deep, never too shallow.** Inside a comment an opening
-/// bracket still counts and a closing one does not, so whether `//` inside an
-/// s-expression is a comment or an operator, the count is at least the
-/// reader's. `{{` (a lob) counts two levels for its one.
+/// - `//` and `/*` start a comment, which is skipped whole, unless the `/`
+///   directly follows an operator character (`!#%&*+-./;<=>?@^`|~`): then it
+///   is part of an s-expression operator (`(+// [])` is `('+//' [])`, and
+///   `(+// ''' … ''')` an operator followed by a long string). Outside an
+///   s-expression an operator character before `//` is a syntax error, where
+///   the reader stops anyway.
+/// - `{{` opens a lob, which is not a level: a blob's base64 (`/` and `+`
+///   included) is data, a clob's `"…"` and `'''…'''` keep their string rules,
+///   and `}}` closes it. Its first `{` is counted until the second is seen,
+///   so the scan is never behind the reader.
+///
+/// What the reader would refuse (a malformed lob, a stray `}`) may be
+/// scanned differently: the reader stops at the fault and parses nothing
+/// after it.
 #[derive(Default)]
 struct TextScan {
     depth: usize,
     state: Text,
+    /// The last byte scanned in `Normal` was an operator character.
+    after_operator: bool,
 }
 
 #[derive(Clone, Copy, Default)]
 enum Text {
     #[default]
     Normal,
-    /// A `/` in `Normal`: a comment may start.
+    /// A `/` not after an operator character: a comment may start.
     Slash,
     Str,
     StrEscape,
@@ -299,6 +312,42 @@ enum Text {
     LineComment,
     /// Inside `/*…*/`; `true` right after a `*`.
     BlockComment(bool),
+    /// A `{` (counted as a level): a struct, or the start of `{{`.
+    Brace,
+    /// Inside `{{…}}`, between its strings.
+    Lob,
+    LobStr,
+    LobStrEscape,
+    /// `'` or `''` inside a lob: the start of a clob's `'''`.
+    LobQuote(u8),
+    LobLong(u8),
+    LobLongEscape,
+    /// One `}` inside a lob.
+    LobClose,
+}
+
+fn is_operator(b: u8) -> bool {
+    matches!(
+        b,
+        b'!' | b'#'
+            | b'%'
+            | b'&'
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'/'
+            | b';'
+            | b'<'
+            | b'='
+            | b'>'
+            | b'?'
+            | b'@'
+            | b'^'
+            | b'`'
+            | b'|'
+            | b'~'
+    )
 }
 
 impl TextScan {
@@ -311,11 +360,17 @@ impl TextScan {
     }
 
     fn normal(&mut self, b: u8) -> Result<Text, Trip> {
+        let after_operator = self.after_operator;
+        self.after_operator = false;
         Ok(match b {
             b'"' => Text::Str,
             b'\'' => Text::Quote1,
-            b'/' => Text::Slash,
-            b'[' | b'(' | b'{' => {
+            b'/' if !after_operator => Text::Slash,
+            b'{' => {
+                self.open()?;
+                Text::Brace
+            }
+            b'[' | b'(' => {
                 self.open()?;
                 Text::Normal
             }
@@ -323,18 +378,24 @@ impl TextScan {
                 self.depth = self.depth.saturating_sub(1);
                 Text::Normal
             }
-            _ => Text::Normal,
+            _ => {
+                self.after_operator = is_operator(b);
+                Text::Normal
+            }
         })
     }
 
     fn feed(&mut self, b: u8) -> Result<(), Trip> {
-        let opens = matches!(b, b'[' | b'(' | b'{');
         self.state = match self.state {
             Text::Normal => self.normal(b)?,
             Text::Slash => match b {
                 b'/' => Text::LineComment,
                 b'*' => Text::BlockComment(false),
-                _ => self.normal(b)?,
+                // The `/` was an operator (`(a / b)`).
+                _ => {
+                    self.after_operator = true;
+                    self.normal(b)?
+                }
             },
             Text::Str => match b {
                 b'\\' => Text::StrEscape,
@@ -364,26 +425,50 @@ impl TextScan {
                 _ => Text::Long(0),
             },
             Text::LongEscape => Text::Long(0),
-            Text::LineComment => {
-                if opens {
-                    self.open()?;
+            Text::LineComment => match b {
+                b'\n' | b'\r' => Text::Normal,
+                _ => Text::LineComment,
+            },
+            Text::BlockComment(star) => match b {
+                b'/' if star => Text::Normal,
+                _ => Text::BlockComment(b == b'*'),
+            },
+            Text::Brace => match b {
+                // `{{`: a lob, not a level.
+                b'{' => {
+                    self.depth -= 1;
+                    Text::Lob
                 }
-                if matches!(b, b'\n' | b'\r') {
-                    Text::Normal
-                } else {
-                    Text::LineComment
-                }
-            }
-            Text::BlockComment(star) => {
-                if star && b == b'/' {
-                    Text::Normal
-                } else {
-                    if opens {
-                        self.open()?;
-                    }
-                    Text::BlockComment(b == b'*')
-                }
-            }
+                _ => self.normal(b)?,
+            },
+            Text::Lob => match b {
+                b'"' => Text::LobStr,
+                b'\'' => Text::LobQuote(1),
+                b'}' => Text::LobClose,
+                _ => Text::Lob,
+            },
+            Text::LobStr => match b {
+                b'\\' => Text::LobStrEscape,
+                b'"' => Text::Lob,
+                _ => Text::LobStr,
+            },
+            Text::LobStrEscape => Text::LobStr,
+            Text::LobQuote(n) => match b {
+                b'\'' if n == 2 => Text::LobLong(0),
+                b'\'' => Text::LobQuote(n + 1),
+                _ => Text::Lob,
+            },
+            Text::LobLong(quotes) => match b {
+                b'\\' => Text::LobLongEscape,
+                b'\'' if quotes == 2 => Text::Lob,
+                b'\'' => Text::LobLong(quotes + 1),
+                _ => Text::LobLong(0),
+            },
+            Text::LobLongEscape => Text::LobLong(0),
+            Text::LobClose => match b {
+                b'}' => Text::Normal,
+                _ => Text::Lob,
+            },
         };
         Ok(())
     }
@@ -443,7 +528,21 @@ fn var_uint(acc: u64, b: u8) -> Result<(u64, bool), Trip> {
 }
 
 impl BinaryScan {
+    /// A value of `len` bytes from here must end inside its container: a
+    /// length that runs past it is refused before the reader sees the byte
+    /// that completes it (fix round 2 -- `ion-rs` subtracts such lengths
+    /// unchecked; in a debug build that panics).
+    fn fits(&self, len: u64) -> Result<(), Trip> {
+        match self.stack.last() {
+            Some(f) if self.pos.saturating_add(len) > f.end => Err(Trip::Malformed(
+                "a binary Ion value runs past the container that holds it".into(),
+            )),
+            _ => Ok(()),
+        }
+    }
+
     fn open(&mut self, kind: Kind, len: u64) -> Result<Binary, Trip> {
+        self.fits(len)?;
         // `self.pos` is already past the byte that ended the header.
         self.stack.push(Frame {
             end: self.pos + len,
@@ -455,17 +554,18 @@ impl BinaryScan {
         Ok(Binary::Item)
     }
 
-    fn skip(len: u64) -> Binary {
-        if len == 0 {
+    fn skip(&self, len: u64) -> Result<Binary, Trip> {
+        self.fits(len)?;
+        Ok(if len == 0 {
             Binary::Item
         } else {
             Binary::Skip(len)
-        }
+        })
     }
 
     fn after_length(&mut self, len: u64, then: Then) -> Result<Binary, Trip> {
         match then {
-            Then::Skip => Ok(Self::skip(len)),
+            Then::Skip => self.skip(len),
             Then::Open(kind) => self.open(kind, len),
         }
     }
@@ -481,7 +581,7 @@ impl BinaryScan {
             0 | 2..=10 => match l {
                 15 => Binary::Item,
                 14 => Binary::Length(0, Then::Skip),
-                _ => Self::skip(l),
+                _ => self.skip(l)?,
             },
             // bool: its value is in the descriptor.
             1 => Binary::Item,
@@ -541,7 +641,15 @@ impl BinaryScan {
                 (acc, false) => Binary::Length(acc, then),
             },
             Binary::AnnotationsLength(acc) => match var_uint(acc, b)? {
-                (len, true) => Self::skip(len),
+                // At least one annotation, and room for the value after them.
+                (len, true) => {
+                    if len == 0 || self.fits(len.saturating_add(1)).is_err() {
+                        return Err(Trip::Malformed(
+                            "a binary Ion annotation wrapper's annotations do not fit in it".into(),
+                        ));
+                    }
+                    self.skip(len)?
+                }
                 (acc, false) => Binary::AnnotationsLength(acc),
             },
             Binary::Skip(1) => Binary::Item,
@@ -859,6 +967,96 @@ mod tests {
             let (_, stop) = read_values(cursor(hiding.clone()), 10);
             assert!(matches!(stop, Stop::TooDeep(_)), "{hiding:.40}: {stop:?}");
         }
+    }
+
+    /// Fix round 2: `/` inside a blob is base64, not a comment. The round-1
+    /// scan took `ab//cA==` for a comment, stopped counting closing brackets
+    /// to the end of the line, and refused 60 valid rows as too deep after 24.
+    #[test]
+    fn blob_and_clob_rows_with_slashes_read_whole() {
+        let row = "{a:{{ab//cA==}}, b:[1], c:{{\"//]]]\"}}, d:{{'''x//''' ''']]'''}}}\n";
+        let (rows, stop) = read_values(cursor(row.repeat(600)), 1000);
+        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert_eq!(rows.len(), 600);
+        assert_eq!(
+            rows[599],
+            json!({"a": "ab//cA==", "b": [1], "c": "Ly9dXV0=", "d": "eC8vXV0="})
+        );
+    }
+
+    /// Fix round 2: comments are skipped whole, brackets in them included.
+    #[test]
+    fn comments_are_skipped_whole() {
+        for (row, want) in [
+            ("(a // b [c]\n)\n", json!(["a"])),
+            ("/* [[[[ ]] */ {a:1}\n", json!({"a": 1})),
+            ("// [[[[\n{a:1}\n", json!({"a": 1})),
+            ("[1, /* ((( */ 2]\n", json!([1, 2])),
+        ] {
+            let (rows, stop) = read_values(cursor(row.repeat(600)), 1000);
+            assert!(matches!(stop, Stop::End), "{row:?}: {stop:?}");
+            assert_eq!(rows.len(), 600, "{row:?}");
+            assert_eq!(rows[599], want, "{row:?}");
+        }
+    }
+
+    /// Fix round 2: right after an operator character, `/` is part of an
+    /// s-expression operator, not a comment (`ion-rs`: `(+// [])` is
+    /// `('+//' [])`). Read as a comment, the long string after it would hide
+    /// the nesting inside it and the closing brackets before it would lower
+    /// the count -- a scan behind the reader.
+    #[test]
+    fn a_slash_after_an_operator_is_an_operator() {
+        let (rows, stop) = read_values(cursor("(a+// [c]) (a / [b])"), 10);
+        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert_eq!(
+            rows,
+            vec![json!(["a", "+//", ["c"]]), json!(["a", "/", ["b"]])]
+        );
+        let hidden = format!(
+            "(+// ''' \n ]]] ''' {}{})",
+            "[".repeat(MAX_DEPTH),
+            "]".repeat(MAX_DEPTH)
+        );
+        let (_, stop) = read_values(cursor(hidden), 10);
+        assert!(matches!(stop, Stop::TooDeep(_)), "{stop:?}");
+    }
+
+    /// Fix round 2: a binary length that runs past its container is refused
+    /// before the reader sees it. `ion-rs` subtracts an annotation wrapper's
+    /// lengths unchecked (`binary_buffer.rs:408`), which panics in a debug
+    /// build and wraps in release.
+    #[test]
+    fn binary_lengths_past_their_container_are_refused() {
+        for (name, tail) in [
+            (
+                "annotations longer than the wrapper",
+                &[0xE3, 0x85, 0x81, 0x21, 0x05][..],
+            ),
+            ("no annotations", &[0xE3, 0x80, 0x21, 0x05][..]),
+            (
+                "a value past its list",
+                &[0xB2, 0xE5, 0x81, 0x84, 0x21, 0x05][..],
+            ),
+            (
+                "a string past its struct",
+                &[0xD2, 0x84, 0x85, b'a', b'b'][..],
+            ),
+        ] {
+            let mut bytes = vec![0xE0, 0x01, 0x00, 0xEA];
+            bytes.extend(tail);
+            let (rows, stop) = read_values(cursor(bytes), 10);
+            assert!(rows.is_empty(), "{name}");
+            assert!(
+                matches!(&stop, Stop::Failed(m) if m.contains("binary Ion")),
+                "{name}: {stop:?}"
+            );
+        }
+        // Control: a well-formed annotated value inside a list reads.
+        let ok = vec![0xE0, 0x01, 0x00, 0xEA, 0xB5, 0xE4, 0x81, 0x84, 0x21, 0x05];
+        let (rows, stop) = read_values(cursor(ok), 10);
+        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert_eq!(rows, vec![json!([5])]);
     }
 
     /// A reader that hands out at most `chunk` bytes a call, as the store does.
