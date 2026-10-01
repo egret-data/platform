@@ -13,6 +13,8 @@
 //! - [`inputs`]: FILE inputs -- an uploaded file streamed to
 //!   `inputs/{input}/{file}`, and the readability check every
 //!   execution-creating INSERT runs on a FILE input given as a URI (spec §7.1).
+//! - [`ion`]: the Ion reader (text or binary) behind the preview.
+//! - [`routes`]: the execution file API -- download, metas, preview (spec §8).
 //! - this module: the [`FileStore`] (the object store, its bucket, prefix and
 //!   caps), the process-wide slot it is installed in, and the index writers.
 //!
@@ -30,6 +32,8 @@
 pub mod collect;
 pub mod index;
 pub mod inputs;
+pub mod ion;
+pub mod routes;
 pub mod scope;
 pub mod transfer;
 pub mod uri;

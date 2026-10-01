@@ -15,6 +15,9 @@
 //! GET    /api/ws/{workspace}/workflows/executions
 //! GET    /api/ws/{workspace}/workflows/executions/{id}
 //! GET    /api/ws/{workspace}/workflows/executions/{id}/logs
+//! GET    /api/ws/{workspace}/workflows/executions/{id}/file          (storage::routes)
+//! GET    /api/ws/{workspace}/workflows/executions/{id}/file/metas
+//! GET    /api/ws/{workspace}/workflows/executions/{id}/file/preview
 //! POST   /api/ws/{workspace}/workflows/executions/{id}/resume
 //! POST   /api/ws/{workspace}/workflows/executions/{id}/replay
 //! ```
@@ -1968,7 +1971,7 @@ fn core_refusal(e: Error) -> axum::response::Response {
         ("id" = Uuid, Path, description = "Flow id"),
     ),
     request_body(
-        description = "The flow's `inputs`. **JSON** (`StartExecutionRequest`, at most 2 MiB): a `FILE` input's value must be a `kestra://` URI readable from the execution being created -- in practice one a `Subflow`, a `Flow` trigger or a replay passes on; any other string is refused naming the input. **`multipart/form-data`** (`StartExecutionMultipart`; one start carries at most `workflow.storage.max_file_bytes` + 1 MiB in total, and each part's headers at most 64 KiB): each part is named by an input id; a part with a file name is that `FILE` input's file (its `allowedFileExtensions` enforced, at most `max_file_bytes`), stored as `inputs/{input}/{file name}` of the new execution; any other part is a text value (at most 1 MiB).",
+        description = "The flow's `inputs`. **JSON** (`StartExecutionRequest`, at most 2 MiB): a `FILE` input's value must be a `kestra://` URI readable from the execution being created -- in practice one a `Subflow`, a `Flow` trigger or a replay passes on; any other string is refused naming the input. **`multipart/form-data`** (`StartExecutionMultipart`; one start carries at most `workflow.storage.max_file_bytes` + 1 MiB in total, and each part's headers at most 64 KiB): each part is named by an input id; a part with a file name is that `FILE` input's file (its `allowedFileExtensions` enforced, at most `max_file_bytes`), stored as `inputs/{input}/{file name}` of the new execution; any other part is a text value (at most 1 MiB). **A multipart caller must build the body itself** as a `FormData` (one entry per input id, a `File`/`Blob` for each `FILE` input) and send it with the browser's own `multipart/form-data; boundary=…` header: the generated client serialises this operation's `data` with `JSON.stringify` and sets no `Content-Type`, which reaches the JSON branch.",
         content(
             (StartExecutionRequest = "application/json"),
             (StartExecutionMultipart = "multipart/form-data"),
@@ -2595,6 +2598,18 @@ pub fn management_router() -> Router<WorkflowState> {
             get(get_execution_logs),
         )
         .route(
+            "/ws/{workspace}/workflows/executions/{id}/file",
+            get(crate::storage::routes::download_execution_file),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/file/metas",
+            get(crate::storage::routes::execution_file_metas),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/file/preview",
+            get(crate::storage::routes::preview_execution_file),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/{id}/resume",
             post(resume_execution),
         )
@@ -2619,6 +2634,9 @@ pub fn management_router() -> Router<WorkflowState> {
         list_executions,
         get_execution,
         get_execution_logs,
+        crate::storage::routes::download_execution_file,
+        crate::storage::routes::execution_file_metas,
+        crate::storage::routes::preview_execution_file,
         start_flow_execution,
         resume_execution,
         replay_execution,
@@ -2642,6 +2660,8 @@ pub fn management_router() -> Router<WorkflowState> {
         LogLevel,
         LogLineDto,
         LogPageDto,
+        crate::storage::routes::FileMetasDto,
+        crate::storage::routes::FilePreviewDto,
     )),
     tags((name = "workflow", description = "Flow drafts and published versions (W1)"))
 )]

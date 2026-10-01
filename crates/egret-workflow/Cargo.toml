@@ -188,6 +188,12 @@ unicode-normalization = "0.1"
 # control characters -- and its `Writer`/`ValueWriter` are `pub(crate)`, so
 # none of that is configurable. `runners::ionfmt` writes the format directly
 # instead; its module doc carries the table.
+#
+# W9a Task 8: the READER of `ion-rs` 1.0.1 is now used (`storage::ion`), for
+# the file API's preview: Kestra's STORE files are BINARY Ion with a version
+# marker per row and no lines, and `ionfmt::read_ion` refuses the timestamps
+# and blobs they hold. Nothing above changes: egret still writes Ion itself.
+ion-rs = "=1.0.1"
 jaq-core = "3.1"
 jaq-std = "3.0"
 jaq-json = "2.0"
@@ -235,7 +241,7 @@ tracing.workspace = true
 # stream of `Bytes`) read as the `AsyncRead` `storage::inputs::upload_input`
 # streams into the store. `egret-provisioner` already turns it on
 # (`crates/egret-provisioner/Cargo.toml`), so no new crate.
-tokio-util = { workspace = true, features = ["io"] }
+tokio-util = { workspace = true, features = ["io", "io-util"] }
 
 # W5a Task 4: `worker::k8s` is the Kubernetes task runner
 # (`io.kestra.plugin.ee.kubernetes.runner.Kubernetes`). Both crates are the
@@ -360,4 +366,10 @@ harness = false
 # reported IGNORED (never passed) without it -- the same hand-rolled main.
 [[test]]
 name = "storage_render_s3_live"
+harness = false
+
+# W9a Task 8: a 64 MiB download through the execution file API, from MinIO,
+# gated on EGRET_TEST_S3_ENDPOINT and reported IGNORED without it.
+[[test]]
+name = "storage_files_api_s3_live"
 harness = false
