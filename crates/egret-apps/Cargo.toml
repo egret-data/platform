@@ -23,6 +23,7 @@ hex.workspace = true
 egret-metastore.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
+chrono.workspace = true
 anyhow.workspace = true
 # The read-only gate (src/readonly.rs). Workspace features only (`visitor`): `derive-dialect`
 # reads sqlparser's source from the cargo registry at compile time, which is not hermetic.
@@ -37,4 +38,3 @@ tower.workspace = true
 async-trait.workspace = true
 egret-test-db.workspace = true
 tokio.workspace = true
-chrono.workspace = true

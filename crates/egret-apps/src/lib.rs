@@ -2,6 +2,8 @@
 pub mod gateway;
 pub mod readonly;
 pub mod session;
+pub mod store;
+pub mod template;
 
 pub use gateway::{gateway_router, QueryRequest};
 

@@ -2,7 +2,11 @@
 //! foreign keys P1 deferred. Schema section: every guarantee here is the
 //! database's, asserted by the exact SQLSTATE a violating statement gets.
 
+use egret_apps::store::{AppStore, PublishOutcome, SaveOutcome, MAX_SOURCE_BYTES};
+use egret_apps::template::new_app_source;
+use egret_core::{Error, UserId, WorkspaceId};
 use egret_metastore::Db;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 struct Fixture {
@@ -303,4 +307,243 @@ async fn deleting_a_folder_uncategorizes_its_apps() {
             .await
             .unwrap();
     assert_eq!(folder_id, None);
+}
+
+// ---------------------------------------------------------------------------
+// Store section: AppStore over the real schema.
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    fn store(&self) -> AppStore {
+        AppStore::new(self.db.clone())
+    }
+    fn ws(&self) -> WorkspaceId {
+        WorkspaceId(self.ws)
+    }
+    fn uid(&self) -> UserId {
+        UserId(self.user)
+    }
+    /// An app made through the store (so it has a rev-1 draft).
+    async fn store_app(&self, source: &str) -> Uuid {
+        self.store()
+            .create(self.ws(), self.uid(), "app", "", None, source)
+            .await
+            .expect("create")
+            .id
+    }
+}
+
+fn published(o: PublishOutcome) -> egret_apps::store::VersionSummary {
+    match o {
+        PublishOutcome::Published(v) => v,
+        PublishOutcome::Stale { current_revision } => panic!("stale at {current_revision}"),
+    }
+}
+
+#[tokio::test]
+async fn create_makes_an_app_with_a_rev1_draft_from_the_template() {
+    let fx = Fixture::new().await;
+    let src = new_app_source(Some("lake"));
+    let app = fx
+        .store()
+        .create(fx.ws(), fx.uid(), "My app", "d", None, &src)
+        .await
+        .unwrap();
+    assert_eq!(app.name, "My app");
+    assert_eq!(app.draft_revision, 1);
+    assert_eq!(app.latest_version_no, None);
+    assert!(!app.bookmarked);
+    let draft = fx.store().draft(app.id).await.unwrap().unwrap();
+    assert_eq!(draft.revision, 1);
+    assert_eq!(draft.source, src);
+}
+
+#[tokio::test]
+async fn save_draft_bumps_revision_and_refuses_stale() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+    assert_eq!(
+        st.save_draft(app, fx.uid(), 1, "first").await.unwrap(),
+        SaveOutcome::Saved { revision: 2 }
+    );
+    assert_eq!(
+        st.save_draft(app, fx.uid(), 1, "second").await.unwrap(),
+        SaveOutcome::Stale {
+            current_revision: 2
+        }
+    );
+    let d = st.draft(app).await.unwrap().unwrap();
+    assert_eq!((d.source.as_str(), d.revision), ("first", 2));
+}
+
+#[tokio::test]
+async fn save_draft_over_limit_is_an_error_not_a_save() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let big = "a".repeat(MAX_SOURCE_BYTES + 1);
+    let err = fx
+        .store()
+        .save_draft(app, fx.uid(), 1, &big)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    let d = fx.store().draft(app).await.unwrap().unwrap();
+    assert_eq!((d.source.as_str(), d.revision), ("v1", 1));
+    // Exactly the limit is accepted.
+    let ok = "a".repeat(MAX_SOURCE_BYTES);
+    assert_eq!(
+        fx.store().save_draft(app, fx.uid(), 1, &ok).await.unwrap(),
+        SaveOutcome::Saved { revision: 2 }
+    );
+}
+
+#[tokio::test]
+async fn publish_numbers_versions_and_honours_expected_revision() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("a").await;
+    let st = fx.store();
+    let v1 = published(st.publish(app, fx.uid(), None).await.unwrap());
+    assert_eq!((v1.version_no, v1.from_revision), (1, Some(1)));
+    assert_eq!(v1.published_by, Some(fx.user));
+    st.save_draft(app, fx.uid(), 1, "b").await.unwrap();
+    match st.publish(app, fx.uid(), Some(1)).await.unwrap() {
+        PublishOutcome::Stale { current_revision } => assert_eq!(current_revision, 2),
+        other => panic!("expected stale, got {other:?}"),
+    }
+    let v2 = published(st.publish(app, fx.uid(), Some(2)).await.unwrap());
+    assert_eq!((v2.version_no, v2.from_revision), (2, Some(2)));
+    let nos: Vec<i32> = st
+        .versions(app)
+        .await
+        .unwrap()
+        .iter()
+        .map(|v| v.version_no)
+        .collect();
+    assert_eq!(nos, [2, 1], "newest first");
+}
+
+/// Two publishes on separate pool connections. Without the draft-row lock both read
+/// max=0 and one dies on `app_versions_app_no_key`; the race is narrow, so repeat it.
+#[tokio::test]
+async fn concurrent_publishes_get_distinct_numbers() {
+    let fx = Fixture::new().await;
+    let st = fx.store();
+    for i in 0..20 {
+        let app = fx.store_app("a").await;
+        let (a, b) = tokio::join!(
+            st.publish(app, fx.uid(), None),
+            st.publish(app, fx.uid(), None)
+        );
+        let mut nos = vec![
+            published(a.unwrap_or_else(|e| panic!("iteration {i}: {e:?}"))).version_no,
+            published(b.unwrap_or_else(|e| panic!("iteration {i}: {e:?}"))).version_no,
+        ];
+        nos.sort();
+        assert_eq!(nos, [1, 2], "iteration {i}");
+    }
+}
+
+#[tokio::test]
+async fn restore_republishes_old_source_as_a_new_version() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("a").await;
+    let st = fx.store();
+    let v1 = published(st.publish(app, fx.uid(), None).await.unwrap());
+    st.save_draft(app, fx.uid(), 1, "b").await.unwrap();
+    published(st.publish(app, fx.uid(), None).await.unwrap());
+    let v3 = st
+        .restore_version(app, v1.id, fx.uid())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(v3.version_no, 3);
+    assert_eq!(v3.restored_from, Some(v1.id));
+    assert_eq!(v3.from_revision, None);
+    assert_eq!(st.version(app, v3.id).await.unwrap().unwrap().source, "a");
+    // The draft is untouched by a restore.
+    let d = st.draft(app).await.unwrap().unwrap();
+    assert_eq!((d.source.as_str(), d.revision), ("b", 2));
+    // A version of another app is not restorable here.
+    let other = fx.store_app("x").await;
+    let ov = published(st.publish(other, fx.uid(), None).await.unwrap());
+    assert!(st
+        .restore_version(app, ov.id, fx.uid())
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn version_lookup_is_scoped_to_its_app() {
+    let fx = Fixture::new().await;
+    let app_a = fx.store_app("a").await;
+    let app_b = fx.store_app("b").await;
+    let st = fx.store();
+    let va = published(st.publish(app_a, fx.uid(), None).await.unwrap());
+    assert!(st.version(app_b, va.id).await.unwrap().is_none());
+    assert_eq!(st.version(app_a, va.id).await.unwrap().unwrap().source, "a");
+}
+
+#[tokio::test]
+async fn list_separates_trashed_and_marks_bookmarks() {
+    let fx = Fixture::new().await;
+    let st = fx.store();
+    let live = fx.store_app("a").await;
+    let gone = fx.store_app("b").await;
+    assert!(st.set_trashed(fx.ws(), gone, true).await.unwrap());
+    st.set_bookmark(fx.uid(), live, true).await.unwrap();
+    st.set_bookmark(fx.uid(), live, true).await.unwrap(); // idempotent
+
+    // The fixture's own `fx.app` (no draft, unbookmarked) is also live in this workspace.
+    let l = st.list(fx.ws(), fx.uid(), false).await.unwrap();
+    assert_eq!(
+        l.iter().map(|a| a.id).collect::<HashSet<_>>(),
+        HashSet::from([live, fx.app])
+    );
+    assert!(l.iter().find(|a| a.id == live).unwrap().bookmarked);
+    assert!(!l.iter().find(|a| a.id == fx.app).unwrap().bookmarked);
+    let t = st.list(fx.ws(), fx.uid(), true).await.unwrap();
+    assert_eq!(t.iter().map(|a| a.id).collect::<Vec<_>>(), [gone]);
+    assert!(t[0].deleted_at.is_some() && !t[0].bookmarked);
+    // Bookmarks are per user.
+    let other = UserId(Uuid::new_v4());
+    let any_bookmarked = |l: Vec<egret_apps::store::AppRow>| l.iter().any(|a| a.bookmarked);
+    assert!(!any_bookmarked(
+        st.list(fx.ws(), other, false).await.unwrap()
+    ));
+    st.set_bookmark(fx.uid(), live, false).await.unwrap();
+    assert!(!any_bookmarked(
+        st.list(fx.ws(), fx.uid(), false).await.unwrap()
+    ));
+    // get returns trashed apps too, with the latest version number once published.
+    assert!(st.get(fx.ws(), fx.uid(), gone).await.unwrap().is_some());
+    published(st.publish(live, fx.uid(), None).await.unwrap());
+    assert_eq!(
+        st.get(fx.ws(), fx.uid(), live)
+            .await
+            .unwrap()
+            .unwrap()
+            .latest_version_no,
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn rows_from_another_workspace_are_invisible() {
+    let fx = Fixture::new().await;
+    let st = fx.store();
+    let app = fx.store_app("a").await;
+    let other_ws = Fixture::new().await.ws();
+    assert!(st.get(other_ws, fx.uid(), app).await.unwrap().is_none());
+    assert!(!st.update(other_ws, app, Some("x"), None).await.unwrap());
+    assert!(!st.set_trashed(other_ws, app, true).await.unwrap());
+    assert!(!st.set_folder(other_ws, app, None).await.unwrap());
+    let listed = st.list(other_ws, fx.uid(), false).await.unwrap();
+    assert!(listed
+        .iter()
+        .all(|a| a.id != app && a.workspace_id == other_ws));
+    // Nothing changed in the owning workspace.
+    let a = st.get(fx.ws(), fx.uid(), app).await.unwrap().unwrap();
+    assert_eq!((a.name.as_str(), a.deleted_at.is_none()), ("app", true));
 }
