@@ -47,7 +47,24 @@ interface ResourceCoords {
   column?: string;
 }
 
-/** "Add tag" select: catalog tags not already assigned to this resource. */
+/**
+ * "Add tag" select: catalog tags not already assigned to this resource.
+ *
+ * ⚠ **The failure message is RENDERED, and that is load-bearing rather than
+ * polish** (SP4d debt Task 3, fix round, Minor 1). Migration 0166 made some
+ * coordinates unstorable and `assign_catalog` refuses them with a 400 naming the
+ * offending level — but the trade that justified the refusal was "a loud 400 at
+ * write time beats a silent decline at read time", and as first shipped this
+ * component had no `onError` and discarded the mutation result, so a steward
+ * tagging a table named `ord*ers` saw the trigger snap back to its placeholder and
+ * **nothing else**: the tag silently was not applied. That is the exact failure
+ * mode the refusal was supposed to trade away.
+ *
+ * `ApiError.from` puts the body's `error` field on `Error.message`, so the
+ * backend's own sentence — which names the level — is what shows. Rendering
+ * `assign.error` needs no `onError`: react-query already holds the last failure,
+ * and a thrown-away `mutate()` result is precisely what went wrong here.
+ */
 function AddCatalogTagSelect({
   warehouseId,
   schema,
@@ -61,27 +78,38 @@ function AddCatalogTagSelect({
   const [value, setValue] = useState("");
 
   return (
-    <Select
-      value={value}
-      onValueChange={(tagId) => {
-        assign.mutate({ schema, table, column: column ?? "", tag_id: tagId });
-        setValue("");
-      }}
-    >
-      <SelectTrigger className="h-8 w-56" aria-label="Add tag">
-        <SelectValue placeholder="Add tag…" />
-      </SelectTrigger>
-      <SelectContent>
-        {available.map((tag) => (
-          <SelectItem key={tag.id} value={tag.id}>
-            <span className="flex items-center gap-2">
-              <TagSwatch color={tag.color} />
-              {tag.name}
-            </span>
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <>
+      <Select
+        value={value}
+        onValueChange={(tagId) => {
+          assign.mutate({ schema, table, column: column ?? "", tag_id: tagId });
+          setValue("");
+        }}
+      >
+        <SelectTrigger className="h-8 w-56" aria-label="Add tag">
+          <SelectValue placeholder="Add tag…" />
+        </SelectTrigger>
+        <SelectContent>
+          {available.map((tag) => (
+            <SelectItem key={tag.id} value={tag.id}>
+              <span className="flex items-center gap-2">
+                <TagSwatch color={tag.color} />
+                {tag.name}
+              </span>
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {assign.isError ? (
+        <p
+          className="text-sm text-destructive"
+          role="alert"
+          data-testid="catalog-tag-assign-error"
+        >
+          Could not add that tag: {assign.error.message}
+        </p>
+      ) : null}
+    </>
   );
 }
 

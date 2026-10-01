@@ -2303,6 +2303,7 @@ fn fold_divergent(value: &str) -> bool {
 ///
 /// | property of the stored value | the matcher's rule | here |
 /// |---|---|---|
+/// | the `catalog` LEVEL — its emptiness and its syntax | `from_assignments` writes `catalog` **unconditionally** (`egret-policy-api/src/dto.rs`, no `is_empty()` guard), and `trino.json` declares `{"wildCard": true}` on it like the other three — so a catalog named `ord*` would be the same fail-open one level UP, and 0166 does not constrain it | **closed, by a DIFFERENT mechanism, and that is why this row exists** — the value is `registry.catalogs.name` (both readers join `registry.catalogs c` and select `c.name`), and `migrations/0147_catalog_registry.sql` gives that column `CHECK (name ~ '^[a-z][a-z0-9_]{0,62}$')`: an allow-list, so empty, `*` and `?` are all already impossible. ⚠ 0166 could NOT use that predicate for the other three levels — they hold FOREIGN-catalog identifiers where mixed case and non-ASCII are ordinary — so the catalog level is the one protected by an allow-list and the other three by a deny-list. Weakening 0147's regex re-opens this |
 /// | emptiness of `schema` / `table` | `from_assignments` omits the level, and the shorter resource is an ANCESTOR the enricher admits — `('sales','','')` ships as `{catalog, schema}`, measured ANCESTOR of `hive.sales.orders.email` on the real jar, and an equality predicate on `table_name` can never return it | **UNREPRESENTABLE since 0166** — `catalog_tag_assignments_levels_are_present_and_literal`. Not ruled on here, and not reachable |
 /// | emptiness of `column` | the same omission, but it is migration 0081's documented table-level sentinel and the resolver's second arm IS that ANCESTOR case | **ruled fine, and deliberately still writable** — the one emptiness that is reproduced, and the one 0166's predicate had to keep: a constraint forbidding every empty string would break the table-level attachment |
 /// | `*` / `?` | `{"wildCard": true}` on all four `trino.json` resources ⇒ `FilenameUtils.wildcardMatch`, a token-based backtracking matcher that SQL `LIKE` is not (`%`/`_`, no `?`, different escaping) | **UNREPRESENTABLE since 0166**, same constraint. Standing up a second matcher implementation is the trade this package has declined three times — the tag trie, the candidate rule, T4 — so the state is refused at the WRITE instead of reproduced |
@@ -2350,11 +2351,19 @@ fn fold_divergent(value: &str) -> bool {
 /// `String.toLowerCase(Locale.ROOT)` standing in for Postgres `lower()`: both
 /// implement Unicode's full `Lowercase_Mapping`, `SpecialCasing` entries and the
 /// `Final_Sigma` rule included, and `Locale.ROOT` excludes the locale-tailored
-/// mappings. **No Postgres runs in that harness**, so the set is unverified on the
-/// database side exactly as the SQL half of the fold is. **Falsified by** a
-/// collation that tailors case (`tr_TR` would move `I`/`i` into the divergent set
-/// and is the one deployment where this gate would be too narrow), or by an
-/// ICU/glibc difference on one of the 25.
+/// mappings. **No Postgres runs in that harness** — but ⚠ **the stand-in is not
+/// unverified, and the distinction is the point**: SP4d-2b cross-checked the derived
+/// pairs against a REAL PostgreSQL 16.15 / `en_US.utf8` by hand, and **51 of the 53
+/// disagree there too, with exactly two exceptions, both U+0130's and both
+/// conservative** (see the ⚠ block on [`FOLD_DIVERGENT`] for each). So this is a
+/// stand-in that has been MEASURED ONCE against the real thing with its divergences
+/// named, not a proxy standing alone — and nobody should re-open it believing
+/// otherwise. Building a Postgres connection into the Java harness is explicitly
+/// NOT wanted: this class's independent ground is that the 25 code points are
+/// legitimate identifiers, which does not depend on the proxy at all.
+/// **Falsified by** a collation that tailors case (`tr_TR` would move `I`/`i` into
+/// the divergent set and is the one deployment where this gate would be too narrow),
+/// or by an ICU/glibc difference on one of the 25.
 ///
 /// The REQUEST side is not this function's: see the `target.*` rows on
 /// [`resolved_tags_for_target`]. A `*` an operator types is a literal there,

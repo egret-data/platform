@@ -10,6 +10,12 @@ const catalogTagsMock = vi.fn();
 const resourceTagsMock = vi.fn();
 const assignMutate = vi.fn();
 const unassignMutate = vi.fn();
+/** The assign mutation's react-query state, so a test can put it in the FAILED
+ *  state the backend's 400 produces. `useAssignResourceTag`'s own job — turning
+ *  that 400 into this state — is measured with the real hook and a real
+ *  `apiJson` in `src/api/__tests__/catalogTags.test.tsx`; this file measures what
+ *  the component DOES with it. */
+let assignState: { isError: boolean; error: Error | null } = { isError: false, error: null };
 
 vi.mock("@/api/tags", () => ({
   useTags: () => catalogTagsMock(),
@@ -17,7 +23,7 @@ vi.mock("@/api/tags", () => ({
 
 vi.mock("@/api/catalogTags", () => ({
   useResourceTags: (...args: unknown[]) => resourceTagsMock(...args),
-  useAssignResourceTag: () => ({ mutate: assignMutate, isPending: false }),
+  useAssignResourceTag: () => ({ mutate: assignMutate, isPending: false, ...assignState }),
   useUnassignResourceTag: () => ({ mutate: unassignMutate, isPending: false }),
 }));
 
@@ -68,6 +74,7 @@ beforeEach(() => {
   resourceTagsMock.mockReset().mockReturnValue({ data: [], isLoading: false });
   assignMutate.mockReset();
   unassignMutate.mockReset();
+  assignState = { isError: false, error: null };
 });
 
 describe("CatalogTagEditor", () => {
@@ -154,6 +161,46 @@ describe("CatalogTagEditor", () => {
       column: "email",
       tag_id: "t1",
     });
+  });
+
+  /**
+   * **SP4d debt Task 3, fix round, Minor 1 — the ruling's justification, made true
+   * where a steward can see it.**
+   *
+   * Migration 0166 makes some coordinates unstorable and `assign_catalog` refuses
+   * them with a 400 that NAMES the offending level. The trade that justified
+   * refusing instead of storing-and-declining was "a loud 400 at write time beats a
+   * silent decline at read time" — and as first shipped this component had no
+   * `onError` and threw the mutation result away, so the only visible effect of a
+   * refusal was the trigger snapping back to its placeholder. The tag silently was
+   * not applied: the exact failure mode the refusal was supposed to trade away.
+   *
+   * The assertion is the backend's OWN SENTENCE, not a UI-authored one — the level
+   * name is the actionable half, and a frontend copy of it would be a fifth place
+   * for the predicate's wording to drift. Both arms are asserted, because an alert
+   * that renders unconditionally would pass the first half alone.
+   */
+  it("renders the backend's refusal, naming the level, when a coordinate cannot be stored", () => {
+    resourceTagsMock.mockReturnValue({ data: [], isLoading: false });
+    catalogTagsMock.mockReturnValue({ data: [tag({ id: "t1", name: "PII" })], isLoading: false });
+
+    // The happy path says nothing — so the assertion below can fail.
+    renderEditor({ column: "ord*ers" }).unmount();
+    expect(screen.queryByTestId("catalog-tag-assign-error")).not.toBeInTheDocument();
+
+    assignState = {
+      isError: true,
+      error: new Error("column must not contain `*` or `?`: the engine would match it as a wildcard and egret could not resolve the tag"),
+    };
+    renderEditor({ column: "ord*ers" });
+
+    const alert = screen.getByTestId("catalog-tag-assign-error");
+    expect(alert).toHaveTextContent(/could not add that tag/i);
+    expect(alert).toHaveTextContent(/column must not contain/i);
+    expect(alert).toHaveTextContent(/wildcard/i);
+    // Announced, not merely present: a steward who just picked from a Select is
+    // looking at the Select, not below it.
+    expect(alert).toHaveAttribute("role", "alert");
   });
 
   it("shows a muted hint when the catalog has no tags defined", () => {

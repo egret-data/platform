@@ -70,9 +70,23 @@
 --    the Rust constant as the single source of truth; a third copy in SQL is a
 --    third thing to drift.
 --
--- THE PREDICATE SHAPE, AND WHY IT IS NOT `registry.catalogs.name`'s. That column
--- carries `CHECK (name ~ '^[a-z][a-z0-9_]{0,62}$')` and it is the PRECEDENT FOR
--- THE SHAPE OF THE FIX ONLY. Copying its predicate here would be a severe defect:
+-- THE FOURTH LEVEL, which this constraint does NOT cover and does not need to.
+-- `ServiceTags::from_assignments` writes a `catalog` element UNCONDITIONALLY — no
+-- `is_empty()` guard, unlike the other three — and `trino.json` declares
+-- `{"wildCard": true}` on it too, so a catalog named `ord*` would be exactly this
+-- fail-open one level up. It is already closed, by a DIFFERENT mechanism: the value
+-- is `registry.catalogs.name` (both readers join `registry.catalogs c` and select
+-- `c.name`), and `0147_catalog_registry.sql` gives that column
+-- `CHECK (name ~ '^[a-z][a-z0-9_]{0,62}$')`, an ALLOW-list under which empty, `*`
+-- and `?` are all impossible. So the catalog level is guarded by an allow-list and
+-- these three by a deny-list, and WEAKENING 0147's REGEX RE-OPENS IT. The
+-- enumeration on `stored_coordinate_is_fold_divergent` carries this as a row, so it
+-- is not only in a migration nobody re-reads.
+--
+-- THE PREDICATE SHAPE, AND WHY IT IS NOT `registry.catalogs.name`'s. That same
+-- `CHECK (name ~ '^[a-z][a-z0-9_]{0,62}$')` is the PRECEDENT FOR THE SHAPE OF THE
+-- FIX — and, per the paragraph above, the actual guard one level up. But copying its
+-- PREDICATE down here would be a severe defect:
 -- these three columns hold identifiers from a FOREIGN catalog, so mixed case is
 -- ordinary (the resolver folds both sides on purpose, and
 -- `differing_case_is_reproduced_rather_than_declined` pins it) and non-ASCII is

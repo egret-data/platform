@@ -857,7 +857,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
       const sentence = within(cause).getByTestId("undecidable-cause-sentence");
       const scope = within(cause).getByTestId("undecidable-cause-scope");
 
-      // The cause's own distinction, true of all four and therefore in the head.
+      // The cause's own distinction, true of BOTH states and therefore in the head.
       expect(sentence).toHaveTextContent(/declined to resolve/i);
       expect(sentence).toHaveTextContent(/not the same as there being none/i);
       // …and this state's own subject and remedy.
@@ -883,7 +883,12 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
       view.unmount();
     }
 
-    expect(new Set(rendered).size).toBe(declines.length);
+    // ⚠ **The literal, not `declines.length`** — fix round, Minor 3. Written against
+    // the array's own length this assertion is self-referential: deleting a decline
+    // row shrinks both sides and the test stays green, which is the one thing it
+    // exists to prevent. `2` is the count the wire enum has, so dropping a state
+    // from `ExplainTagDecline` without revisiting this file fails here.
+    expect(new Set(rendered).size).toBe(2);
   });
 
   /**
@@ -891,7 +896,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * `tag_resolution_declined` is `Some` exactly when the handler passed
    * `resolved_tags: None`, which is the only production state raising this cause.
    * It is asserted anyway, and what it must NOT do is invent a reach: round 1's
-   * note claimed a per-catalog scope unconditionally, and one of the four states
+   * note claimed a per-catalog scope unconditionally, and one of the two states
    * is per-request, so with no reason the honest answer is no note at all.
    */
   test("an unresolved-tags cause with no reason renders the head and claims no reach", async () => {
