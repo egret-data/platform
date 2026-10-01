@@ -126,6 +126,11 @@ struct Fixture {
     /// A `tags.key` nothing else in the database uses, already on
     /// `sales.orders.email` in this fixture's warehouse.
     tag_key: String,
+    /// The same tag's `tags.name`, which is a DIFFERENT string on purpose: the
+    /// wire reports the name (what the engine matches tag policies on) and the
+    /// rule selectors take the key, so a fixture where they coincide cannot tell
+    /// a key/name confusion from a correct answer.
+    tag_name: String,
 }
 
 impl Fixture {
@@ -276,10 +281,11 @@ async fn setup() -> Option<Fixture> {
     .expect("attach catalog");
 
     let tag_key = unique("pii");
+    let tag_name = unique("PII");
     let tag_id: Uuid =
         sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
             .bind(&tag_key)
-            .bind(unique("PII"))
+            .bind(&tag_name)
             .fetch_one(&pool)
             .await
             .expect("tag");
@@ -315,6 +321,7 @@ async fn setup() -> Option<Fixture> {
         service_id: service.id,
         catalog_id,
         tag_key,
+        tag_name,
     })
 }
 
@@ -2516,21 +2523,25 @@ async fn a_group_only_grant_is_refused_by_the_artifact_the_engine_downloads() {
 /// supply them, because that would answer a question the caller had already
 /// decided.
 ///
-/// **What the field MEANS changed in SP4d-2a Task 5, and it is kept
-/// deliberately rather than left to rot.** `tags` used to be the input the
-/// model evaluator matched rule selectors against. It cannot mean that now:
-/// the engine's tags come from `RangerTagEnricher`, which walks the resource
-/// hierarchy and emits ancestor tags, while `tag_keys_for_resource_via` matches
-/// schema/table/column by exact equality. So the field now answers exactly one
-/// question — "what has egret got recorded on THIS resource" — which is what a
-/// steward asking why a mask did or did not apply needs, and it reaches the
-/// evaluator nowhere. **SP4d-2b Task 7 did not change that**: the set the
-/// evaluator is handed comes from `resolved_tags_for_resource_via` through
-/// `resolved_tags_for_target`, which rolls the table level up and returns
-/// `tags.name` where this returns `tags.key` — two different values, which is
-/// why one query must not serve both.
+/// # ⚠ SP4d-2b Task 8 (F4/F5) changed what this field IS, because the browser
+/// measured the old one lying
+///
+/// Through SP4d-2a Task 5 and SP4d-2b Task 7 this was `tag_keys_for_resource_via`
+/// — `tags.key`, matched on `(schema, table, column)` by exact equality — while
+/// the evaluator's set came from `resolved_tags_for_target`, which rolls the table
+/// level up and returns `tags.name`. The argument for keeping them apart was that
+/// they answer different questions. On a real Trino that argument failed twice in
+/// one run: a request denied **by a tag policy through a tag attached to the
+/// table above the column** rendered the deciding policy's name directly above
+/// "Tags egret has recorded on this resource — None.", and a target reported
+/// `Allowed` with "None." was one no query could read at all.
+///
+/// The field is now the evaluator's own set, read back out of it. This test
+/// therefore asserts the NAME (not the key), and that a column-level assignment
+/// reports `attached_at_column: true` — the half of the answer that tells a
+/// steward which row to change.
 #[tokio::test]
-async fn explain_reports_the_tags_egret_has_recorded_on_the_target() {
+async fn explain_reports_the_tag_set_the_evaluator_was_handed() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
     let mut body = explain_body(f.catalog_id, "analyst");
@@ -2546,8 +2557,10 @@ async fn explain_reports_the_tags_egret_has_recorded_on_the_target() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(
         body["tags"],
-        json!([f.tag_key]),
-        "sales.orders.email carries this fixture's tag; body: {body}"
+        json!([{ "name": f.tag_name, "attached_at_column": true }]),
+        "sales.orders.email carries this fixture's tag, reported by NAME and as a \
+         column-level attachment; the KEY is {} and must not appear; body: {body}",
+        f.tag_key
     );
     // And the tag did not become an evaluator input: this profile's download
     // carries no `tagPolicies` block, so the verdict is a decision rather than

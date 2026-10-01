@@ -63,8 +63,8 @@ use egret_perm::{
 use egret_policy::{
     catalog_names_for_ids_via, catalogs_for_service_via, clearance_gates_for_tags_via,
     get_service_by_id_via, resolved_tags_for_resource_via, services_for_catalog_via,
-    tag_assignment_coordinates_via, tag_keys_by_ids_via, tag_keys_for_resource_via,
-    tag_names_for_keys_via, PolicyStore, ServiceRow,
+    tag_assignment_coordinates_via, tag_keys_by_ids_via, tag_names_for_keys_via, PolicyStore,
+    ServiceRow,
 };
 use egret_policy_api::ServicePolicies;
 use egret_ranger_eval::eval::{
@@ -495,6 +495,38 @@ pub struct ExplainProfile {
     pub accesses: Vec<ExplainAccess>,
 }
 
+/// One tag egret resolved for the target, and **where the attachment that
+/// produced it lives** — which is the half of the answer F4 measured missing.
+///
+/// # ⚠ Why this is a bool and not the evaluator's `MatchType`
+///
+/// `MatchType` has five variants and `attachment_for` can produce only two:
+/// `Self_` for an attachment naming the column, `Ancestor` for one that stops at
+/// the table. Putting the enum on the wire would need a word for three states
+/// this path cannot reach — and inventing wire vocabulary for an unreachable
+/// state is how the `clearance_required` string got rendered raw for two
+/// releases.
+///
+/// So this reads back the field the mapping actually WROTE:
+/// `attached_through.levels` is exactly what `attachment_for` built from
+/// `from_assignments`' rule, and `column` is in it iff the attachment names the
+/// column. One datum, read once — not a second derivation from a parallel
+/// source, which is the two-comparisons defect this package has hit four times.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainResolvedTag {
+    /// `tags.name` — the identifier the tag download carries as the tag's `type`
+    /// and therefore the one the engine matches tag policies on. **Not
+    /// `tags.key`**, which is what this field used to report and which can
+    /// differ: live, the key and the name differ for one of three tags.
+    pub name: String,
+    /// `true` ⇒ the assignment names this column (Ranger `SELF`). `false` ⇒ it
+    /// stops at the table and reaches this resource as an `ANCESTOR`, so the row
+    /// to change is the TABLE's, not this column's. For a target that names no
+    /// column this is always `false` and says nothing extra — the attachment and
+    /// the target are the same resource.
+    pub attached_at_column: bool,
+}
+
 /// What `explain` answers with: one verdict block per profile serving the
 /// target's catalog, over the SERVED ARTIFACT.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -502,20 +534,39 @@ pub struct ExplainResponse {
     pub outcome: ExplainOutcome,
     /// Empty exactly when `outcome` is `no_profile_serves_the_catalog`.
     pub profiles: Vec<ExplainProfile>,
-    /// The tag keys **egret** resolved as attached to `target`, for the
-    /// steward's information only.
+    /// **The tag set the evaluator was handed** — the same
+    /// [`AccessRequest::resolved_tags`] every verdict below was computed from,
+    /// read back out of it.
     ///
-    /// **This is no longer an input to anything, and it is not a complete tag
-    /// set.** It used to be what the retired model evaluator matched rule
-    /// selectors against. Today the engine's own tags come from
-    /// `RangerTagEnricher`, which walks the resource hierarchy and emits
-    /// ANCESTOR tags, while `tag_keys_for_resource_via` matches
-    /// schema/table/column by exact equality with no roll-up. So this field
-    /// answers "what has egret got recorded on exactly this resource" — useful
-    /// when asking why a mask did or did not apply — and deliberately does NOT
-    /// reach `AccessRequest::resolved_tags`, whose narrowing would be unsound
-    /// given a set narrower than the enricher's. See the handler.
-    pub tags: Vec<String>,
+    /// # ⚠ This field used to be a different query, and the browser measured the
+    /// difference as a defect
+    ///
+    /// **Task 8's live gate, F4 and F5.** It was
+    /// `tag_keys_for_resource_via` — `tags.key`, matched on
+    /// `(schema, table, column)` by exact equality with no roll-up — while the
+    /// evaluator's set came from [`resolved_tags_for_target`], which rolls the
+    /// table level up and returns `tags.name`. Two queries, two vocabularies, one
+    /// heading. Measured on a real Trino: a target denied **by a tag policy,
+    /// through a tag attached to the table above it**, rendered the deciding
+    /// policy's name directly above "Tags egret has recorded on this resource —
+    /// None."; and a target the page called `Allowed` with "None." was one no
+    /// query could read, because the table-level tag masked every column. The
+    /// steward's question is *which tag, attached where*, and the handler already
+    /// held the answer.
+    ///
+    /// So the field is now **derived from the resolution itself**, which is what
+    /// removes the drift class rather than narrowing it: "what the page shows" and
+    /// "what was evaluated" are the same object, so they cannot disagree. The
+    /// exact-match query is no longer called from here.
+    ///
+    /// Empty means one of three things, and the response says which: the target
+    /// named no schema-and-table (nothing can be attached), the resolution
+    /// returned the empty set (an ANSWER — nothing is attached), or
+    /// [`ExplainResponse::tag_resolution_declined`] is `Some`, in which case
+    /// egret did not resolve at all and this list is empty because there is
+    /// nothing to report, not because nothing is attached. A client that renders
+    /// "none" for the third case is making the mistake F4 records.
+    pub tags: Vec<ExplainResolvedTag>,
     /// Why `explain` declined to resolve this target's tags — absent when it
     /// resolved them.
     ///
@@ -1536,31 +1587,6 @@ async fn explain(
     }
     let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
 
-    // Reported for the steward, and NOT what the evaluator is handed — see
-    // `ExplainResponse::tags`. This is `tags.key` on EXACTLY this resource
-    // ("what has egret got recorded here"); what the evaluator gets is
-    // `resolved_tags_for_target` below, which is `tags.name`, rolls the
-    // hierarchy up, and can decline. The two must not be merged: live the key
-    // and the name differ for one of three tags, and the engine matches the
-    // name.
-    //
-    // Tags attach to tables and columns only, keyed
-    // `(warehouse_id, schema, table, column)` with `column = ''` meaning the
-    // table itself, so a target that names no table can carry none.
-    let tags = match (&body.target.schema, &body.target.table) {
-        (Some(schema), Some(table)) => {
-            tag_keys_for_resource_via(
-                &mut conn,
-                body.target.catalog_id,
-                schema,
-                table,
-                body.target.column.as_deref().unwrap_or(""),
-            )
-            .await?
-        }
-        _ => Vec::new(),
-    };
-
     // ONE resolution for the whole response, not one per profile: the levels it
     // synthesises are the literal `catalog`/`schema`/`table`/`column` keys
     // `ServiceTags::from_assignments` writes, which do not vary by engine (that
@@ -1570,6 +1596,19 @@ async fn explain(
     // also removes any way for two profiles to be answered from two tag sets.
     let (resolved_tags, tag_resolution_declined) =
         explain_tag_inputs(resolved_tags_for_target(&mut *conn, &body.target).await?);
+    // `ExplainResponse::tags`, derived from the set above and from nothing else
+    // — Task 8's F4/F5. It was a second query (`tag_keys_for_resource_via`,
+    // `tags.key`, exact-match) and the browser measured the two disagreeing on a
+    // real engine: a tag-driven deny rendered beside "None". Reading the
+    // evaluator's own input back is what makes "what the page shows" and "what
+    // was evaluated" one object instead of two that must agree.
+    //
+    // `None` ⇒ empty, and the response's `tag_resolution_declined` is what says
+    // why; see that field's doc for the three ways this can be empty.
+    let tags = resolved_tags
+        .as_ref()
+        .map(resolved_tags_for_display)
+        .unwrap_or_default();
 
     let mut profiles: Vec<ExplainProfile> = Vec::new();
     for service_id in services_for_catalog_via(&mut conn, body.target.catalog_id).await? {
@@ -2032,6 +2071,16 @@ async fn resolved_tags_for_target<L: TagLookups + Send>(
     // `find_map`, not `any`: one offending coordinate anywhere in the catalog is
     // enough — the resolver's predicate is the same predicate for every target in
     // it — and the one that offends is the one the page has to name.
+    //
+    // ⚠ **WHICH one, when several offend: the FIRST in
+    // `tag_assignment_coordinates_via`'s order**, which is
+    // `ORDER BY schema_name, table_name, column_name`. Task 8 reported this as
+    // unpinned and was half wrong — the SQL has always carried that `ORDER BY`;
+    // what nothing pinned was the rule on THIS side, so `the_first_offending_
+    // coordinate_is_the_one_named` now asserts it with the same two offenders in
+    // both orders. The order is the database's collation's, so it is deterministic
+    // within a deployment rather than universal; a catalog with two broken
+    // assignments reports one of them and fixing it reveals the next.
     if let Some(decline) = conn
         .assignment_coordinates(target.catalog_id)
         .await?
@@ -2381,6 +2430,31 @@ fn attachment_for(
             is_enabled: true,
         },
     })
+}
+
+/// The evaluator's own tag set, as the steward reads it —
+/// [`ExplainResponse::tags`].
+///
+/// **Task 8's F4/F5 fix, and the direction matters.** This maps the set the
+/// evaluator was handed; it does not re-query, re-derive or re-order anything. So
+/// the page cannot show a tag the evaluator did not see, nor miss one it did,
+/// which is the whole class of defect the two-query arrangement produced.
+///
+/// `attached_at_column` is `attached_through.levels.contains("column")`, the
+/// field [`attachment_for`] wrote from `from_assignments`' rule — see
+/// [`ExplainResolvedTag`] for why that, and not `MatchType`, is on the wire.
+///
+/// Order is the resolution's order, which is
+/// `resolved_tags_for_resource_via`'s `ORDER BY`; nothing here sorts, because a
+/// second ordering rule is a second thing that can drift from the first.
+fn resolved_tags_for_display(tags: &UnenrichedTags) -> Vec<ExplainResolvedTag> {
+    tags.as_slice()
+        .iter()
+        .map(|t| ExplainResolvedTag {
+            name: t.name.clone(),
+            attached_at_column: t.attached_through.levels.iter().any(|l| l == "column"),
+        })
+        .collect()
 }
 
 /// The two reads [`resolved_tags_for_target`] needs, behind a trait so that the
@@ -2768,8 +2842,9 @@ mod wiring_tests {
 #[cfg(test)]
 mod tag_resolution_tests {
     use super::{
-        attachment_for, resolved_tags_for_target, stored_value_problem, ExplainTagDecline,
-        ExplainTargetLevel, PermHttpError, Scope, StoredValueProblem, TagLookups, UnenrichedTags,
+        attachment_for, resolved_tags_for_display, resolved_tags_for_target, stored_value_problem,
+        ExplainResolvedTag, ExplainTagDecline, ExplainTargetLevel, PermHttpError, Scope,
+        StoredValueProblem, TagLookups, UnenrichedTags,
     };
     use egret_ranger_eval::resource::MatchType;
     use uuid::Uuid;
@@ -3038,6 +3113,115 @@ mod tag_resolution_tests {
         assert!(
             declined.is_none(),
             "and reports no decline — the page keys the reason on this being present"
+        );
+    }
+
+    /// **Task 8's F4/F5.** `ExplainResponse::tags` is the evaluator's own set now,
+    /// and the field a steward acts on is `attached_at_column`: `true` says
+    /// "change this column's assignment", `false` says "change the TABLE's". The
+    /// browser measured the old field reporting "None." next to a deny driven by a
+    /// table-level attachment, so the ANCESTOR row here is the one that matters.
+    ///
+    /// Asserted through `attachment_for`, not by hand-building a `ResolvedTag`:
+    /// the bool reads back `attached_through.levels`, and building that literal
+    /// here would assert the mapping against itself.
+    #[test]
+    fn the_reported_tag_set_says_whether_the_attachment_names_the_column() {
+        let on_the_column = attachment_for(
+            &egret_policy::ResolvedTag {
+                name: "pii".to_string(),
+                match_type: MatchType::Self_,
+            },
+            "sales",
+            "orders",
+            "email",
+        )
+        .expect("SELF maps");
+        let on_the_table = attachment_for(
+            &egret_policy::ResolvedTag {
+                name: "ancdeny".to_string(),
+                match_type: MatchType::Ancestor,
+            },
+            "sales",
+            "orders",
+            "email",
+        )
+        .expect("ANCESTOR maps");
+
+        let reported =
+            resolved_tags_for_display(&UnenrichedTags::new(vec![on_the_column, on_the_table]));
+        assert_eq!(
+            reported,
+            vec![
+                ExplainResolvedTag {
+                    name: "pii".to_string(),
+                    attached_at_column: true,
+                },
+                ExplainResolvedTag {
+                    name: "ancdeny".to_string(),
+                    attached_at_column: false,
+                },
+            ],
+            "the column-level attachment reports true, the table-level one false, \
+             and the resolution's ORDER is preserved rather than re-sorted"
+        );
+    }
+
+    /// **Task 8, concern 4 — and the concern was half wrong, which is why this
+    /// test exists in this shape.**
+    ///
+    /// I reported that `assignment_coordinates`' row order was unpinned, so a
+    /// catalog with two differently-broken assignments would name one of them
+    /// arbitrarily. `tag_assignment_coordinates_via` has carried
+    /// `ORDER BY a.schema_name, a.table_name, a.column_name` all along, so the
+    /// SQL side was pinned before I said it was not. What was genuinely unpinned
+    /// is the RULE on this side: `find_map` takes the first offender, and nothing
+    /// said so or would have failed if it had become the last.
+    ///
+    /// Both orders are asserted, which is what makes this a test of the rule
+    /// rather than of the fixture: the SAME pair of offenders handed over in the
+    /// opposite order must name the OTHER row. A `find_map` changed to `.last()`
+    /// or to a per-class precedence fails one of the two.
+    #[tokio::test]
+    async fn the_first_offending_coordinate_is_the_one_named() {
+        // Two offenders of DIFFERENT classes, so the assertion cannot be satisfied
+        // by a rule that happens to prefer one class.
+        let wildcard_first = [("sales", "ord*", "email"), ("sales", "orders", "emaıl")];
+        let fold_first = [("sales", "orders", "emaıl"), ("sales", "ord*", "email")];
+
+        let mut lookups = FakeTagLookups::new(&wildcard_first, &[]);
+        let got = resolved_tags_for_target(
+            &mut lookups,
+            &target(Some("sales"), Some("orders"), Some("email")),
+        )
+        .await
+        .expect("no error");
+        assert_eq!(
+            got,
+            Err(ExplainTagDecline::StoredWildcard {
+                schema: "sales".to_string(),
+                table: "ord*".to_string(),
+                column: "email".to_string(),
+            }),
+            "the FIRST offender in the ordered list is the one the page names"
+        );
+
+        let mut lookups = FakeTagLookups::new(&fold_first, &[]);
+        let got = resolved_tags_for_target(
+            &mut lookups,
+            &target(Some("sales"), Some("orders"), Some("email")),
+        )
+        .await
+        .expect("no error");
+        assert_eq!(
+            got,
+            Err(ExplainTagDecline::StoredFoldDivergent {
+                schema: "sales".to_string(),
+                table: "orders".to_string(),
+                column: "emaıl".to_string(),
+            }),
+            "and with the same two rows in the other order it is the other one — \
+             so this pins first-wins, not a preference between the classes"
         );
     }
 

@@ -90,7 +90,7 @@ const TWO_PROFILES: ExplainResponse = {
       ],
     },
   ],
-  tags: ["pii"],
+  tags: [{ name: "pii", attached_at_column: true }],
 };
 
 let mutateAsync: ReturnType<typeof vi.fn>;
@@ -410,7 +410,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: ["pii"],
+        tags: [{ name: "pii", attached_at_column: true }],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -1078,7 +1078,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: ["pii"],
+        tags: [{ name: "pii", attached_at_column: true }],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -1216,7 +1216,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: ["pii"],
+        tags: [{ name: "pii", attached_at_column: true }],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -1336,7 +1336,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
             ],
           },
         ],
-        tags: ["pii"],
+        tags: [{ name: "pii", attached_at_column: true }],
       } satisfies ExplainResponse,
     });
     const user = userEvent.setup();
@@ -1371,6 +1371,195 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     // Five shapes, five sentences. Two that read alike would hide which remedy
     // applies.
     expect(new Set(causes.map((c) => c.textContent)).size).toBe(5);
+  });
+
+  /**
+   * **Task 8's browser gate, P6.** `stored_level_empty` fires for an empty SCHEMA
+   * as well as an empty table, and the one remedy it carried — "Re-store that
+   * assignment on a table or a column" — is useless for the schema case: measured
+   * on `('', 'orders', '')`, the page told a steward to re-store on a table while
+   * the assignment was already on `orders`. A remedy narrower than the states it
+   * is shown for is the exact defect fix round 3 fixed, one level down.
+   *
+   * All three shapes are asserted, because a remedy that names the schema
+   * unconditionally would be the same defect mirrored.
+   */
+  test("an empty-level decline names the level that is actually missing", async () => {
+    const rows = [
+      {
+        declined: { kind: "stored_level_empty", schema: "", table: "orders", column: "" },
+        expect: /re-store that assignment with the schema it belongs to/i,
+        reject: /on a table or a column/i,
+      },
+      {
+        declined: { kind: "stored_level_empty", schema: "sales", table: "", column: "" },
+        expect: /re-store that assignment on a table or a column/i,
+        reject: /with the schema it belongs to/i,
+      },
+      {
+        declined: { kind: "stored_level_empty", schema: "", table: "", column: "" },
+        expect: /re-store that assignment with the schema and table it belongs to/i,
+        reject: /on a table or a column/i,
+      },
+    ] as const;
+
+    for (const row of rows) {
+      mutateAsync.mockResolvedValueOnce({
+        status: 200,
+        data: {
+          outcome: "per_profile",
+          profiles: [
+            {
+              service_id: 11,
+              service_name: "egret-trino-prod",
+              engine: "trino",
+              accesses: [
+                {
+                  access_type: "select",
+                  decision: { kind: "undecidable", why: [{ kind: "tags_unresolved" }] },
+                  attribution: null,
+                },
+              ],
+            },
+          ],
+          tags: [],
+          tag_resolution_declined: row.declined,
+        } satisfies ExplainResponse,
+      });
+      const user = userEvent.setup();
+      const view = renderPage();
+      await submit(user);
+      const result = await screen.findByTestId("explain-result");
+      const sentence = within(result).getByTestId("undecidable-cause-sentence");
+      expect(sentence).toHaveTextContent(row.expect);
+      expect(sentence).not.toHaveTextContent(row.reject);
+      view.unmount();
+    }
+  });
+
+  /**
+   * **Task 8's browser gate, F4 — measured on a real Trino, twice.** The tag list
+   * was `tag_keys_for_resource_via`'s exact-match query while every verdict beside
+   * it came from the rolled-up resolution, so a request DENIED by a tag policy
+   * through a tag attached to the TABLE above the column rendered the deciding
+   * policy's name directly above "None.", and a target reported `Allowed` with
+   * "None." was one no query could read at all.
+   *
+   * The field is the evaluator's own set now, and the assertion that matters is
+   * `attached_at_column: false` reading as "on the table" — the half that says
+   * which row to change.
+   */
+  test("a tag that reaches this column from the table says so, beside the deny it caused", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "denied",
+                  policy_id: 60,
+                  policy_name: "tp-clearance-ancdeny",
+                  reason: "deny_policy_item",
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: [
+          { name: "ancdeny", attached_at_column: false },
+          { name: "pii", attached_at_column: true },
+        ],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    // The tag that decided it is NAMED, which is what "None." used to withhold.
+    expect(result).toHaveTextContent(/ancdeny/);
+    expect(result).toHaveTextContent(/on the table/i);
+    expect(result).toHaveTextContent(/pii/);
+    expect(result).toHaveTextContent(/on this column/i);
+    // And the old heading's claim is gone: this list IS what the verdict used.
+    expect(result).not.toHaveTextContent(/decide nothing here/i);
+    expect(result).not.toHaveTextContent(/not the set the engine would resolve/i);
+  });
+
+  /**
+   * **F4's second half.** A decline is not "none": `tag_resolution_declined` means
+   * egret did not resolve at all, and an empty list rendered as "None." there tells
+   * a steward nothing is attached when nobody looked. The reason is already beside
+   * the verdict; this block must not contradict it.
+   */
+  test("a declined resolution is not reported as the target carrying no tags", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: { kind: "undecidable", why: [{ kind: "tags_unresolved" }] },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: [],
+        tag_resolution_declined: {
+          kind: "stored_wildcard",
+          schema: "sales",
+          table: "ord*",
+          column: "email",
+        },
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    expect(result).toHaveTextContent(/not resolved/i);
+    expect(result).toHaveTextContent(/not the same as there being\s+none/i);
+    expect(result).not.toHaveTextContent(/^None\.$/m);
+  });
+
+  /**
+   * **Task 8's browser gate, F3.** The limits block rendered "mask and row-filter
+   * verdicts arrive with SP4d-2b" — on the SP4d-2b branch, where they do not
+   * arrive. No test could see it, because a test asserts the string and not whether
+   * the string is true. This one asserts the shape of the claim instead: the limit
+   * stands, and it is dated to NOTHING. A version number in this block is the
+   * defect, whatever number it is.
+   */
+  test("the access-only limit states itself and promises no release", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+    const result = await screen.findByTestId("explain-result");
+    const limits = within(result).getByTestId("honest-limits");
+
+    expect(limits).toHaveTextContent(/answers about ACCESS only/i);
+    // ⚠ No dated promise, in either direction: not this package, not a successor.
+    expect(limits).not.toHaveTextContent(/arrive with/i);
+    expect(limits).not.toHaveTextContent(/SP4d/i);
+    expect(limits).not.toHaveTextContent(/\bsp\d/i);
+    // And what replaces it is the consequence a steward can act on.
+    expect(limits).toHaveTextContent(/can still return masked values/i);
   });
 
   test("tags render honestly when the target carries none", async () => {

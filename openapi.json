@@ -34739,6 +34739,24 @@
           }
         }
       },
+      "ExplainResolvedTag": {
+        "type": "object",
+        "description": "One tag egret resolved for the target, and **where the attachment that\nproduced it lives** — which is the half of the answer F4 measured missing.\n\n# ⚠ Why this is a bool and not the evaluator's `MatchType`\n\n`MatchType` has five variants and `attachment_for` can produce only two:\n`Self_` for an attachment naming the column, `Ancestor` for one that stops at\nthe table. Putting the enum on the wire would need a word for three states\nthis path cannot reach — and inventing wire vocabulary for an unreachable\nstate is how the `clearance_required` string got rendered raw for two\nreleases.\n\nSo this reads back the field the mapping actually WROTE:\n`attached_through.levels` is exactly what `attachment_for` built from\n`from_assignments`' rule, and `column` is in it iff the attachment names the\ncolumn. One datum, read once — not a second derivation from a parallel\nsource, which is the two-comparisons defect this package has hit four times.",
+        "required": [
+          "name",
+          "attached_at_column"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "`tags.name` — the identifier the tag download carries as the tag's `type`\nand therefore the one the engine matches tag policies on. **Not\n`tags.key`**, which is what this field used to report and which can\ndiffer: live, the key and the name differ for one of three tags."
+          },
+          "attached_at_column": {
+            "type": "boolean",
+            "description": "`true` ⇒ the assignment names this column (Ranger `SELF`). `false` ⇒ it\nstops at the table and reaches this resource as an `ANCESTOR`, so the row\nto change is the TABLE's, not this column's. For a target that names no\ncolumn this is always `false` and says nothing extra — the attachment and\nthe target are the same resource."
+          }
+        }
+      },
       "ExplainResponse": {
         "type": "object",
         "description": "What `explain` answers with: one verdict block per profile serving the\ntarget's catalog, over the SERVED ARTIFACT.",
@@ -34761,9 +34779,9 @@
           "tags": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ExplainResolvedTag"
             },
-            "description": "The tag keys **egret** resolved as attached to `target`, for the\nsteward's information only.\n\n**This is no longer an input to anything, and it is not a complete tag\nset.** It used to be what the retired model evaluator matched rule\nselectors against. Today the engine's own tags come from\n`RangerTagEnricher`, which walks the resource hierarchy and emits\nANCESTOR tags, while `tag_keys_for_resource_via` matches\nschema/table/column by exact equality with no roll-up. So this field\nanswers \"what has egret got recorded on exactly this resource\" — useful\nwhen asking why a mask did or did not apply — and deliberately does NOT\nreach `AccessRequest::resolved_tags`, whose narrowing would be unsound\ngiven a set narrower than the enricher's. See the handler."
+            "description": "**The tag set the evaluator was handed** — the same\n[`AccessRequest::resolved_tags`] every verdict below was computed from,\nread back out of it.\n\n# ⚠ This field used to be a different query, and the browser measured the\ndifference as a defect\n\n**Task 8's live gate, F4 and F5.** It was\n`tag_keys_for_resource_via` — `tags.key`, matched on\n`(schema, table, column)` by exact equality with no roll-up — while the\nevaluator's set came from [`resolved_tags_for_target`], which rolls the\ntable level up and returns `tags.name`. Two queries, two vocabularies, one\nheading. Measured on a real Trino: a target denied **by a tag policy,\nthrough a tag attached to the table above it**, rendered the deciding\npolicy's name directly above \"Tags egret has recorded on this resource —\nNone.\"; and a target the page called `Allowed` with \"None.\" was one no\nquery could read, because the table-level tag masked every column. The\nsteward's question is *which tag, attached where*, and the handler already\nheld the answer.\n\nSo the field is now **derived from the resolution itself**, which is what\nremoves the drift class rather than narrowing it: \"what the page shows\" and\n\"what was evaluated\" are the same object, so they cannot disagree. The\nexact-match query is no longer called from here.\n\nEmpty means one of three things, and the response says which: the target\nnamed no schema-and-table (nothing can be attached), the resolution\nreturned the empty set (an ANSWER — nothing is attached), or\n[`ExplainResponse::tag_resolution_declined`] is `Some`, in which case\negret did not resolve at all and this list is empty because there is\nnothing to report, not because nothing is attached. A client that renders\n\"none\" for the third case is making the mistake F4 records."
           },
           "tag_resolution_declined": {
             "oneOf": [

@@ -187,6 +187,7 @@ export * from './explainAttribution';
 export * from './explainOutcome';
 export * from './explainProfile';
 export * from './explainRequest';
+export * from './explainResolvedTag';
 export * from './explainResponse';
 export * from './explainSubject';
 export * from './explainTagDecline';

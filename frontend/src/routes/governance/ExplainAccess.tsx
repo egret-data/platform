@@ -205,7 +205,7 @@ function serviceDefIssuePhrase(i: WireServiceDefIssue): string {
  *
  * | cause | reaches | and the thing to act on |
  * |---|---|---|
- * | `tags_unresolved` | every target in THIS CATALOG, on every profile with a tag block | one stored tag assignment names no schema or no table |
+ * | `tags_unresolved` | every target in THIS CATALOG for three of the four decline states, and THIS REQUEST ALONE for `target_fold_divergent` — which is why `tagDeclineScope` is two notes and not one | whichever of the four `tag_resolution_declined` names, each with its own remedy (⚠ this row said "one stored tag assignment names no schema or no table" while four states produced the cause — the fix-round-3 defect, surviving in a doc comment) |
  * | `envelope_construct` / `policy_construct` with `tag_policies` | every target on THIS PROFILE | the tag download itself, which did not read |
  * | `tag_attachment_not_reproducible`, `tag_resource_not_reproducible`, `tag_policy_not_normalisable`, both arbitration causes | the tag or the policy the sentence already NAMES | nothing to add: the subject is in the sentence |
  */
@@ -293,6 +293,35 @@ const TARGET_LEVEL_LABEL: Record<ExplainTargetLevel, string> = {
 };
 
 /**
+ * What to DO about a `stored_level_empty` row, named after the level that is
+ * actually missing.
+ *
+ * **⚠ Task 8's browser gate, P6 — a weaker instance of the defect fix round 3
+ * fixed.** The one remedy this state used to carry was "Re-store that assignment
+ * on a table or a column", which is right when the empty level is the TABLE and
+ * useless when it is the SCHEMA: measured on `('', 'orders', '')`, the page told a
+ * steward to re-store on a table while the assignment was already on `orders`, so
+ * following the instruction changes nothing. The coordinate was right and the
+ * remedy was still narrower than the states it was shown for — which is the same
+ * shape, one level down.
+ *
+ * `column` is NOT consulted: an empty column is migration 0081's table-level
+ * sentinel and the one emptiness the resolver reproduces, so it is never what
+ * raised this state.
+ */
+function emptyLevelRemedy(d: { schema: string; table: string }): string {
+  const schemaEmpty = d.schema === "";
+  const tableEmpty = d.table === "";
+  if (schemaEmpty && tableEmpty) {
+    return "Re-store that assignment with the schema and table it belongs to";
+  }
+  if (schemaEmpty) {
+    return "Re-store that assignment with the schema it belongs to";
+  }
+  return "Re-store that assignment on a table or a column";
+}
+
+/**
  * Why egret declined to resolve this target's tags, as a sentence naming the thing
  * to fix.
  *
@@ -309,7 +338,7 @@ const TARGET_LEVEL_LABEL: Record<ExplainTargetLevel, string> = {
 function tagDeclineSentence(d: ExplainTagDecline): string {
   switch (d.kind) {
     case "stored_level_empty":
-      return `a tag assignment in this catalog is stored at ${storedCoordinate(d)}, and a level left empty there is one the engine applies to every resource beneath it while egret cannot match it to any. Re-store that assignment on a table or a column`;
+      return `a tag assignment in this catalog is stored at ${storedCoordinate(d)}, and a level left empty there is one the engine applies to every resource beneath it while egret cannot match it to any. ${emptyLevelRemedy(d)}`;
     case "stored_wildcard":
       return `a tag assignment in this catalog is stored at ${storedCoordinate(d)}, whose “*” or “?” the engine matches against many resources by a rule egret's database cannot reproduce. Re-store that assignment on the exact table or column it is meant for`;
     case "stored_fold_divergent":
@@ -1107,13 +1136,36 @@ export default function ExplainAccess() {
             </div>
           )}
 
+          {/* ⚠ **Task 8's browser gate, F4 and F5 — this block used to say the
+              opposite of the truth.** It rendered `tag_keys_for_resource_via`'s
+              exact-match list under the heading a steward reads as "the tags that
+              decide this", and the browser caught it twice on a real Trino: a
+              request DENIED by a tag policy through a tag attached to the table
+              above it showed "None.", and a target shown `Allowed` with "None." was
+              one no query could read, because that table-level tag masked every
+              column. The server now sends the set the evaluator was handed, and
+              `attached_at_column` is the half that makes it actionable — it says
+              whether the row to change is this column's or the table's.
+
+              A decline is NOT "none": `tag_resolution_declined` means egret did not
+              resolve at all, and rendering "None." there is the F4 mistake in a
+              second place. It gets its own line, and the reason is already stated
+              beside the verdict above. */}
           <div className="space-y-1.5">
-            <Label>Tags egret has recorded on this resource</Label>
-            {result.tags.length > 0 ? (
+            <Label>Tags the engine resolves for this resource</Label>
+            {result.tag_resolution_declined ? (
+              <p className="text-xs text-muted-foreground">
+                Not resolved — see the reason above. This is not the same as there being
+                none.
+              </p>
+            ) : result.tags.length > 0 ? (
               <div className="flex flex-wrap gap-1">
                 {result.tags.map((t) => (
-                  <Badge key={t} variant="outline">
-                    {t}
+                  <Badge key={`${t.name}-${String(t.attached_at_column)}`} variant="outline">
+                    {t.name}
+                    <span className="ml-1 font-normal text-muted-foreground">
+                      {t.attached_at_column ? "on this column" : "on the table"}
+                    </span>
                   </Badge>
                 ))}
               </div>
@@ -1135,12 +1187,20 @@ export default function ExplainAccess() {
               teaches a reader to discount the ones that still do. */}
           <Alert data-testid="honest-limits">
             <AlertDescription className="space-y-1 text-xs">
+              {/* ⚠ **Rewritten by Task 8's browser gate (F4).** This said the tag
+                  list "decides nothing here" and is "not the set the engine would
+                  resolve", which was true of the exact-match query it used to
+                  render and is false of what the server sends now: that list IS the
+                  evaluator's input, rolled up the hierarchy, and every verdict above
+                  was computed from it. The limit that survives is the one that still
+                  holds — a target naming no table can carry none. */}
               <p>
-                Tags populate only when the target names both a schema and a table — a
-                catalog-only target always returns none. They are shown for information and
-                decide nothing here: the engine’s own enricher rolls tags up the resource
-                hierarchy and this list does not, so it is not the set the engine would
-                resolve.
+                The tags above are the set every verdict here was computed from, rolled up
+                the resource hierarchy the way the engine’s own enricher rolls it: a tag
+                marked <span className="italic">on the table</span> reaches this column
+                because the assignment names the table. They populate only when the target
+                names both a schema and a table — a catalog-only target carries none,
+                because assignments attach to tables and columns.
               </p>
               <p>
                 A policy that grants through a role, or through any group except{" "}
@@ -1158,13 +1218,25 @@ export default function ExplainAccess() {
                 does not hold, so this answers why the subject is allowed or refused as they
                 are — not what would happen if they held something else.
               </p>
+              {/* ⚠ **Task 8's browser gate, F3.** This paragraph used to end "mask
+                  and row-filter verdicts arrive with SP4d-2b" — rendered, on the
+                  SP4d-2b branch, where they do not arrive: `explain` calls neither
+                  `evaluate_data_mask` nor `evaluate_row_filter`, though the
+                  evaluator implements both and Task 8's live gate was built out of
+                  them. A promise dated to the version the reader is holding is the
+                  limit-that-no-longer-holds failure in its worst form, and the
+                  comment above this block already argued against it.
+
+                  So this states the limit and dates nothing. Replacing it with a
+                  new promise would reintroduce exactly the same defect the first
+                  time a package slipped. */}
               <p>
                 This answers about ACCESS only. A column the engine masks, or a table whose
                 rows it filters, is reported here exactly like one it does not: the verdict
-                says whether the read is permitted, never that what comes back is redacted.
-                The previous version of this page named the masking or filtering rule;
-                evaluating the served artifact answers access, and mask and row-filter
-                verdicts arrive with SP4d-2b.
+                says whether the read is permitted, never that what comes back is redacted —
+                so a target this page calls <span className="font-medium">Allowed</span> can
+                still return masked values, filtered rows, or an error from a mask the engine
+                cannot apply. Asking which takes the engine.
               </p>
               <p>
                 Each plugin polls for its policy set on an interval, so an engine can still
