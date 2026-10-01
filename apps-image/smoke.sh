@@ -19,7 +19,7 @@ docker build -t "$IMG" .
 
 if [ ! -x .venv/bin/python ]; then
   python3.12 -m venv .venv
-  .venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt -e .
+  .venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt -c constraints.txt -e .
 fi
 
 PORT="${FAKE_PORT:-18770}"
@@ -43,15 +43,15 @@ s.versions[(os.environ["APP"], os.environ["VER"])] = {"source": src}
 uvicorn.run(fake_egret.app, host="0.0.0.0", port=int(os.environ["PORT"]), log_level="warning")
 PY
 FAKE_PID=$!
-for _ in $(seq 1 30); do curl -fsS -o /dev/null "http://127.0.0.1:$PORT/api/apps/pod/apps/$APP/draft" -H "Authorization: Bearer $POD_TOKEN" && break; sleep 1; done
-curl -fsS -o /dev/null "http://127.0.0.1:$PORT/api/apps/pod/apps/$APP/draft" -H "Authorization: Bearer $POD_TOKEN" || fail "fake egret did not start"
+for _ in $(seq 1 30); do curl --max-time 5 -fsS -o /dev/null "http://127.0.0.1:$PORT/api/apps/pod/apps/$APP/draft" -H "Authorization: Bearer $POD_TOKEN" && break; sleep 1; done
+curl --max-time 5 -fsS -o /dev/null "http://127.0.0.1:$PORT/api/apps/pod/apps/$APP/draft" -H "Authorization: Bearer $POD_TOKEN" || fail "fake egret did not start"
 
 COMMON=(--add-host=host.docker.internal:host-gateway
   -e "EGRET_URL=http://host.docker.internal:$PORT" -e "EGRET_POD_TOKEN=$POD_TOKEN" -e "EGRET_MARIMO_TOKEN=$MARIMO_TOKEN")
 
 wait_page() { # url
   for _ in $(seq 1 120); do
-    code=$(curl -sL -c "$JAR" -b "$JAR" -o "$PAGE" -w '%{http_code}' "$1" || true)
+    code=$(curl --max-time 5 -sL -c "$JAR" -b "$JAR" -o "$PAGE" -w '%{http_code}' "$1" || true)
     [ "$code" = 200 ] && return 0
     sleep 1
   done
@@ -72,14 +72,26 @@ grep -qi marimo "$PAGE" || fail "run page is not marimo's"
 [ "$(docker exec egret-apps-smoke-run id -u)" = 1000 ] || fail "run container does not run as uid 1000"
 echo "run OK"
 
+# marimo prints its startup URL with ?access_token=<marimo token> unless run with -q.
+for n in egret-apps-smoke-edit egret-apps-smoke-run; do
+  logs=$(docker logs "$n" 2>&1)
+  grep -q "egret-apps: marimo" <<<"$logs" || fail "$n: launcher startup line missing from the log"
+  for secret in "$POD_TOKEN" "$MARIMO_TOKEN" "access_token="; do
+    if grep -qF -- "$secret" <<<"$logs"; then fail "$n: '$secret' is in the container log"; fi
+  done
+done
+echo "no tokens in logs OK"
+
 # A config file in /work would shadow the locked marimo config: the image must refuse (exit 65).
 for f in .marimo.toml pyproject.toml; do
   d=$(mktemp -d); : > "$d/$f"; chmod -R a+rX "$d"
   rc=0
   docker run --rm --name egret-apps-smoke-shadow -v "$d:/work:ro" "${COMMON[@]}" \
-    -e "EGRET_BASE_URL=/e/$POD_POD" "$IMG" edit >/dev/null 2>&1 || rc=$?
+    -e "EGRET_BASE_URL=/e/$POD_POD" "$IMG" edit >/dev/null 2>"$TMP/shadow.err" || rc=$?
   rm -rf "$d"
-  [ "$rc" = 65 ] || fail "$f in /work: expected exit 65, got $rc"
+  [ "$rc" = 65 ] || fail "$f in /work: expected exit 65, got $rc: $(cat "$TMP/shadow.err")"
+  grep -qF "egret-apps: refusing to start: /work/$f would override the locked marimo config" "$TMP/shadow.err" \
+    || fail "$f in /work: exit 65 without the launcher's refusal: $(cat "$TMP/shadow.err")"
   echo "refuses $f OK"
 done
 
