@@ -21,10 +21,15 @@ tracing.workspace = true
 url.workspace = true
 http.workspace = true
 uuid.workspace = true
+tokio.workspace = true
+
+[features]
+test-util = []
 
 [dev-dependencies]
 # One private, already-migrated database per test process, cloned from a
 # shared template. Replaces the shared `DATABASE_URL` database, which
 # nothing cleaned and every fixture paid for.
 egret-test-db.workspace = true
-tokio.workspace = true
+egret-storage = { path = ".", features = ["test-util"] }
+libc.workspace = true

@@ -3,6 +3,8 @@
 mod config;
 mod error;
 mod location;
+#[cfg(feature = "test-util")]
+mod mem;
 mod registry;
 mod s3;
 pub mod signer;
@@ -10,8 +12,13 @@ pub mod signer;
 pub use config::StorageConfig;
 pub use error::StorageError;
 pub use location::{table_base_location, table_metadata_location};
+#[cfg(feature = "test-util")]
+pub use mem::MemStore;
 pub use registry::{StorageConn, StorageConnInput, StorageRegistry, StorageRegistryError};
 pub use s3::S3Store;
+
+/// Multipart part size, and the size under which `put_stream` is a single PUT.
+pub const PART_BYTES: usize = 8 * 1024 * 1024;
 
 use async_trait::async_trait;
 
@@ -53,4 +60,36 @@ pub trait ObjectStore: Send + Sync {
     /// level appear in `objects`, common prefixes (virtual folders) in `folders`.
     /// When `delimiter` is `None` the listing is flat: all objects recursively.
     async fn list(&self, prefix: &str, delimiter: Option<&str>) -> Result<Listing, StorageError>;
+
+    /// A single PUT when the body is under PART_BYTES, else a multipart upload in
+    /// PART_BYTES parts, aborted on any error. Returns the bytes written.
+    async fn put_stream(
+        &self,
+        uri: &str,
+        body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+        size_hint: Option<u64>,
+    ) -> Result<u64, StorageError> {
+        let _ = (uri, body, size_hint);
+        Err(StorageError::Unsupported("put_stream"))
+    }
+
+    async fn get_stream(
+        &self,
+        uri: &str,
+    ) -> Result<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>, StorageError> {
+        let _ = uri;
+        Err(StorageError::Unsupported("get_stream"))
+    }
+
+    /// The object's size, `None` when absent.
+    async fn head(&self, uri: &str) -> Result<Option<u64>, StorageError> {
+        let _ = uri;
+        Err(StorageError::Unsupported("head"))
+    }
+
+    /// Deletes every object whose key starts with `uri`'s key. Returns how many.
+    async fn delete_prefix(&self, uri: &str) -> Result<u64, StorageError> {
+        let _ = uri;
+        Err(StorageError::Unsupported("delete_prefix"))
+    }
 }
