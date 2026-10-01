@@ -76,9 +76,9 @@ impl S3Store {
         upload_id: &str,
         body: &mut (dyn AsyncRead + Send + Unpin),
         buf: &mut Vec<u8>,
-        mut ended: bool,
     ) -> Result<u64, StorageError> {
         let err = |e: &dyn std::fmt::Display| StorageError::S3(format!("{uri}: {e}"));
+        let mut ended = false;
         let mut parts = Vec::new();
         let mut total = 0u64;
         loop {
@@ -277,7 +277,7 @@ impl ObjectStore for S3Store {
             .ok_or_else(|| err(&"no upload id returned"))?
             .to_string();
         match self
-            .upload_parts(uri, &bucket, &key, &upload_id, body, &mut buf, false)
+            .upload_parts(uri, &bucket, &key, &upload_id, body, &mut buf)
             .await
         {
             Ok(n) => Ok(n),
