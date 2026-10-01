@@ -135,7 +135,19 @@ async fn resident_memory_does_not_grow_with_the_file() {
     let _g = SERIAL.lock().await;
     let (c, store) = store_or_skip!();
     let uri = format!("s3://{}/{}huge.bin", c.bucket, prefix());
-    let total = 256 * MIB;
+    let total = 512 * MIB;
+
+    // Warm-up: pay the fixed costs (allocator arenas, connection, runtime threads) first, so
+    // the measurement below is growth WITH THE FILE, not the process's first-use cost.
+    let warm_uri = format!("s3://{}/{}warm.bin", c.bucket, prefix());
+    let mut warm = Gen {
+        pos: 0,
+        total: 40 * MIB,
+        fail_at: None,
+    };
+    store.put_stream(&warm_uri, &mut warm, None).await.unwrap();
+    assert_reads_back(&store, &warm_uri, 40 * MIB).await;
+    store.delete(&warm_uri).await.unwrap();
 
     let baseline = max_rss_bytes();
     let before = baseline;
@@ -155,21 +167,21 @@ async fn resident_memory_does_not_grow_with_the_file() {
     let streamed = max_rss_bytes().saturating_sub(before);
     store.delete(&uri).await.unwrap();
     assert!(
-        streamed < 64 * MIB,
-        "streaming 256 MiB grew RSS by {} MiB",
+        streamed < 128 * MIB,
+        "streaming 512 MiB grew RSS by {} MiB",
         streamed / MIB
     );
 
-    // Control: the Vec path must be visible to this instrument.
+    // Control: the Vec path (the whole file resident) must be visible to this instrument.
     let ctl_uri = format!("s3://{}/{}vec.bin", c.bucket, prefix());
-    let v = vec![1u8; (128 * MIB) as usize];
+    let v = vec![1u8; (512 * MIB) as usize];
     store.put(&ctl_uri, v).await.unwrap();
     // Against the pre-streaming baseline: RSS is a high-water mark, so growth is only
     // visible above whatever the streaming phase already reached.
     let grown = max_rss_bytes().saturating_sub(baseline);
     store.delete(&ctl_uri).await.unwrap();
     assert!(
-        grown >= 128 * MIB,
+        grown >= 256 * MIB,
         "control grew only {} MiB; instrument is blind",
         grown / MIB
     );
@@ -217,17 +229,19 @@ async fn a_failing_body_aborts_the_multipart_upload() {
         .send()
         .await
         .unwrap();
+    // MinIO lists open uploads only for an exact-key prefix (a directory prefix returns
+    // none even with the upload open), so both listings below use the exact key.
     let seen = raw
         .list_multipart_uploads()
         .bucket(&c.bucket)
-        .prefix(&p)
+        .prefix(&ctl_key)
         .send()
         .await
         .unwrap();
     assert_eq!(
         seen.uploads().len(),
         1,
-        "instrument is blind to open uploads"
+        "instrument is blind to open uploads: {seen:?}"
     );
     raw.abort_multipart_upload()
         .bucket(&c.bucket)
@@ -247,7 +261,7 @@ async fn a_failing_body_aborts_the_multipart_upload() {
     let ups = raw
         .list_multipart_uploads()
         .bucket(&c.bucket)
-        .prefix(&p)
+        .prefix(&key)
         .send()
         .await
         .unwrap();
