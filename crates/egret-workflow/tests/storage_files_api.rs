@@ -178,6 +178,14 @@ impl ObjectStore for ArcCounting {
                 start: 0,
                 generated: counter(&format!("{uri}#generated")),
             })
+        } else if let Some(keep) = fail_after(uri) {
+            // `….failN.<ext>`: the first N bytes, then an S3 read error.
+            let bytes = self.0.mem.get(uri).await?;
+            let head = bytes[..keep.min(bytes.len())].to_vec();
+            Box::new(tokio::io::BufReader::new(tokio::io::AsyncReadExt::chain(
+                std::io::Cursor::new(head),
+                FailingRead,
+            )))
         } else {
             self.0.mem.get_stream(uri).await?
         };
@@ -195,6 +203,28 @@ impl ObjectStore for ArcCounting {
 }
 
 struct ArcCounting(Arc<Counting>);
+
+/// `N` in a file name `….failN.<ext>`.
+fn fail_after(uri: &str) -> Option<usize> {
+    let name = uri.rsplit('/').next()?;
+    let rest = name.split(".fail").nth(1)?;
+    rest.split('.').next()?.parse().ok()
+}
+
+/// A read that fails as S3 does mid-body.
+struct FailingRead;
+
+impl AsyncRead for FailingRead {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(std::io::Error::other(
+            "s3://egret-test/…: connection reset",
+        )))
+    }
+}
 
 fn installed() -> Arc<FileStore> {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -624,8 +654,11 @@ async fn ion_preview_rows_match_the_artifact_and_max_rows_caps_at_5000() {
     let mut want = Vec::new();
     for r in o["egret_expected"]["ion_rows"].as_array().unwrap() {
         binary.extend(b64(r["bytes_b64"].as_str().unwrap()));
-        let (v, _) =
-            storage::ion::values_to_json(r["ion_text"].as_str().unwrap().as_bytes(), 1).unwrap();
+        let (v, _) = storage::ion::values_to_json(
+            std::io::Cursor::new(r["ion_text"].as_str().unwrap().to_string()),
+            1,
+        )
+        .unwrap();
         want.extend(v);
     }
     let uri = fx.file(e, "store.ion", &binary).await;
@@ -821,6 +854,83 @@ async fn a_store_outage_is_503_and_a_gone_object_is_404_never_naming_internals()
         .unwrap();
     assert_eq!(fx.get(ok, "file", &uri).await.status(), 404);
     assert_eq!(fx.get(ok, "file/preview", &uri).await.status(), 404);
+}
+
+/// Fix round 1, C1: a file nested past `ion::MAX_DEPTH` aborted the whole
+/// server on one preview. It is now `previewable: false`, text and binary,
+/// and the server answers the next request.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deeply_nested_ion_file_is_not_previewable_and_the_server_lives() {
+    let Some(fx) = fx().await else { return };
+    let e = fx.exec(Link::default()).await;
+    let text = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
+    let mut binary = vec![0xE0, 0x01, 0x00, 0xEA];
+    // 100_000 lists, each holding the next; sizes from the inside out.
+    let mut headers: Vec<Vec<u8>> = vec![vec![0xB0]];
+    let mut size = 1usize;
+    for _ in 1..100_000 {
+        let h = if size < 14 {
+            vec![0xB0 | size as u8]
+        } else {
+            let mut g = Vec::new();
+            let mut n = size;
+            while n > 0 {
+                g.push((n & 0x7F) as u8);
+                n >>= 7;
+            }
+            g.reverse();
+            *g.last_mut().unwrap() |= 0x80;
+            let mut h = vec![0xBE];
+            h.extend(g);
+            h
+        };
+        size += h.len();
+        headers.push(h);
+    }
+    for h in headers.iter().rev() {
+        binary.extend(h);
+    }
+    for (name, bytes) in [("deep.ion", text.into_bytes()), ("deep-bin.ion", binary)] {
+        let uri = fx.file(e, name, &bytes).await;
+        assert_eq!(
+            fx.preview(e, &uri, None).await,
+            (
+                200,
+                json!({"previewable": false, "rows": [], "truncated": false})
+            ),
+            "{name}"
+        );
+    }
+    // Still serving.
+    let ok = fx.file(e, "after.ion", b"{a:1}").await;
+    assert_eq!(fx.preview(e, &ok, None).await.1["rows"], json!([{"a": 1}]));
+}
+
+/// Fix round 1, M5: once the page is full, a store error on the one-past
+/// peek is not a 503; before the page is full it still is.
+#[tokio::test]
+async fn a_store_error_after_a_full_page_keeps_the_page() {
+    let Some(fx) = fx().await else { return };
+    let e = fx.exec(Link::default()).await;
+    // Each file yields its first bytes, then the store fails: "a\nb\n", and
+    // "1 2 3" (the Ion reader yields a value once it has seen the next one's
+    // first byte; the third never completes).
+    for (name, content, rows) in [
+        ("lines.fail4.txt", &b"a\nb\nc\n"[..], json!(["a", "b"])),
+        ("values.fail5.ion", &b"1 2 345"[..], json!([1, 2])),
+    ] {
+        let uri = fx.file(e, name, content).await;
+        assert_eq!(
+            fx.preview(e, &uri, Some(2)).await,
+            (
+                200,
+                json!({"previewable": true, "rows": rows, "truncated": true})
+            ),
+            "{name}"
+        );
+        // Control: a page of 3 needs the bytes the store failed to give.
+        assert_eq!(fx.preview(e, &uri, Some(3)).await.0, 503, "{name}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

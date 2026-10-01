@@ -34849,13 +34849,11 @@
         "properties": {
           "previewable": {
             "type": "boolean",
-            "description": "`false` for a file that is neither Ion nor text (no rows then)."
+            "description": "`false` (with no rows) for a file that is neither Ion nor UTF-8 text,\nIon that does not parse, or Ion nested deeper than 100 levels."
           },
           "rows": {
             "type": "array",
-            "items": {
-              "type": "object"
-            },
+            "items": {},
             "description": "`.ion`: one JSON value per top-level Ion value (a struct's null fields\nomitted, a timestamp as its Ion text, a decimal as a number). Anything\nelse: one string per line."
           },
           "truncated": {

@@ -77,12 +77,13 @@ pub struct FileMetasDto {
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct FilePreviewDto {
-    /// `false` for a file that is neither Ion nor text (no rows then).
+    /// `false` (with no rows) for a file that is neither Ion nor UTF-8 text,
+    /// Ion that does not parse, or Ion nested deeper than 100 levels.
     pub previewable: bool,
     /// `.ion`: one JSON value per top-level Ion value (a struct's null fields
     /// omitted, a timestamp as its Ion text, a decimal as a number). Anything
     /// else: one string per line.
-    #[schema(value_type = Vec<Object>)]
+    #[schema(value_type = Vec<serde_json::Value>)]
     pub rows: Vec<serde_json::Value>,
     /// More rows follow than `maxRows`, or the preview's byte budget
     /// (`workflow.storage.max_read_bytes`) ended the read.
@@ -365,11 +366,13 @@ pub(crate) async fn preview_execution_file(
         .rsplit_once('.')
         .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("ion"));
     let preview = if is_ion {
-        preview_ion(budget, max_rows, &state).await
+        preview_ion(budget, max_rows, &state, &file.uri).await
     } else {
         preview_lines(budget, max_rows, &state).await
     };
-    if let Some(e) = state.store_error() {
+    // A full page stands even if the store failed on the one-past peek.
+    let page_full = preview.rows.len() == max_rows;
+    if let Some(e) = state.store_error().filter(|_| !page_full) {
         tracing::error!(uri = %file.uri, error = %e, "internal storage failed during a preview");
         return Err(unavailable(format!(
             "{}: internal storage is unavailable; retry later",
@@ -387,16 +390,23 @@ fn not_previewable() -> FilePreviewDto {
     }
 }
 
-async fn preview_ion(budget: Budget, max_rows: usize, state: &BudgetState) -> FilePreviewDto {
-    // The Ion reader is synchronous: it runs on a blocking thread and pulls
-    // the store's stream through the bridge as it needs bytes.
+async fn preview_ion(
+    budget: Budget,
+    max_rows: usize,
+    state: &BudgetState,
+    uri: &str,
+) -> FilePreviewDto {
+    // The Ion reader is synchronous: `ion::read_values` runs it on its own
+    // thread, and this blocking task waits for it while the bridge pulls the
+    // store's stream as the reader needs bytes.
     let bridge = tokio_util::io::SyncIoBridge::new(budget);
-    let read = tokio::task::spawn_blocking(move || {
-        ion::read_values(std::io::BufReader::new(bridge), max_rows)
-    })
-    .await;
-    let Ok((rows, stop)) = read else {
-        return not_previewable();
+    let read = tokio::task::spawn_blocking(move || ion::read_values(bridge, max_rows)).await;
+    let (rows, stop) = match read {
+        Ok(read) => read,
+        Err(e) => {
+            tracing::error!(uri = %uri, error = %e, "the Ion preview's task failed");
+            return not_previewable();
+        }
     };
     match stop {
         ion::Stop::Full => FilePreviewDto {
@@ -416,6 +426,14 @@ async fn preview_ion(budget: Budget, max_rows: usize, state: &BudgetState) -> Fi
             truncated: true,
         },
         ion::Stop::Failed(_) => not_previewable(),
+        ion::Stop::TooDeep(why) => {
+            tracing::warn!(uri = %uri, "{why}");
+            not_previewable()
+        }
+        ion::Stop::Crashed(why) => {
+            tracing::error!(uri = %uri, error = %why, "the Ion reader failed");
+            not_previewable()
+        }
     }
 }
 
@@ -427,7 +445,8 @@ async fn preview_lines(budget: Budget, max_rows: usize, state: &BudgetState) -> 
         if rows.len() == max_rows {
             let more = match reader.fill_buf().await {
                 Ok(rest) => !rest.is_empty(),
-                Err(_) => state.exhausted(),
+                // The budget, or a store error, after a full page: more was there.
+                Err(_) => true,
             };
             return FilePreviewDto {
                 previewable: true,
@@ -566,6 +585,20 @@ mod tests {
              filename*=utf-8''a%22b%3Bc%2Fd%0D%0Ae%20%C3%A9.txt"
         );
         assert!(HeaderValue::from_str(&d).is_ok());
+    }
+
+    /// Fix round 1, I3: a row is a string, a number, null, an array or an
+    /// object, so its schema is any value -- never `type: object`.
+    #[test]
+    fn preview_rows_are_documented_as_any_value() {
+        let doc = serde_json::to_value(crate::routes::openapi()).unwrap();
+        let rows = &doc["components"]["schemas"]["FilePreviewDto"]["properties"]["rows"];
+        assert_eq!(rows["type"], "array", "{rows}");
+        let items = rows["items"].as_object().expect("an items schema");
+        assert!(
+            !items.contains_key("type") && !items.contains_key("$ref"),
+            "rows' items must accept any value: {rows}"
+        );
     }
 
     #[test]

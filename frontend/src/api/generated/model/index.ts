@@ -205,7 +205,6 @@ export * from './explainTargetLevel';
 export * from './featureDto';
 export * from './fileMetasDto';
 export * from './filePreviewDto';
-export * from './filePreviewDtoRowsItem';
 export * from './filter';
 export * from './filterOp';
 export * from './filterValue';

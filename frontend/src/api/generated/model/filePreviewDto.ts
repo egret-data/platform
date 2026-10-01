@@ -5,17 +5,19 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
-import type { FilePreviewDtoRowsItem } from './filePreviewDtoRowsItem';
 
 export interface FilePreviewDto {
-  /** `false` for a file that is neither Ion nor text (no rows then). */
+  /**
+     * `false` (with no rows) for a file that is neither Ion nor UTF-8 text,
+     * Ion that does not parse, or Ion nested deeper than 100 levels.
+     */
   previewable: boolean;
   /**
      * `.ion`: one JSON value per top-level Ion value (a struct's null fields
      * omitted, a timestamp as its Ion text, a decimal as a number). Anything
      * else: one string per line.
      */
-  rows: FilePreviewDtoRowsItem[];
+  rows: unknown[];
   /**
      * More rows follow than `maxRows`, or the preview's byte budget
      * (`workflow.storage.max_read_bytes`) ended the read.
