@@ -107,10 +107,18 @@ policies (`evaluateInlinePolicy`, `RangerInlinePolicyEvaluator`),
 * **No steward-facing surface warns at authoring time.** The refusal appears in
   `explain`, which a steward reaches only if they go looking.
 * **The 2.5.0 arm is not modelled**, so `explain` on Trino refuses rather than
-  answering. Modelling it is follow-up item 2 in `tests/ranger/README.md`, and it
-  requires the `accessTypeResults` audit named there — the resource path models a
-  different mechanism for the same map and is green over 4000 corpus cases, which
-  is an observation and not a proof.
+  answering. Modelling it is follow-up item **0** in `tests/ranger/README.md`, and
+  it requires the `accessTypeResults` audit named there.
+
+  ⚠ **Corrected 2026-10-01 by the whole-branch review.** This bullet used to add
+  that the resource path "models a different mechanism for the same map and is
+  green over 4000 corpus cases, which is an observation and not a proof". The
+  observation was FALSIFIED: the green was over a population the divergent shape
+  is absent from (the corpus levels every random resource ACCESS policy to
+  priority 0), and the divergence — a tag ALLOW under a strictly higher-priority
+  resource allow — was a confident over-DENY on both engines. It is now refused
+  (`AccessPriorityCompositeNotModelled`), and the audit was promoted from item 2
+  to item 0 because of it.
 
 ## How to reproduce
 

@@ -1054,11 +1054,20 @@ pub enum UndecidableCause {
     ///
     /// * the same `accessTypeResults` map is live on the RESOURCE path, where
     ///   this crate models a DIFFERENT mechanism (the engine loop's offsets
-    ///   469/505/529) and is green over 4000 corpus cases. The two coincide
-    ///   there — the engine loop shuts out a lower-priority evaluator before it
-    ///   can reach the map — but "green over 4000 cases" is not a proof, and a
-    ///   rule written here in terms of priority would be a SECOND model of one
-    ///   mechanism until that audit is done.
+    ///   469/505/529), so a rule written here in terms of priority would be a
+    ///   SECOND model of one mechanism until that audit is done.
+    ///
+    /// ⚠ **WHOLE-BRANCH REVIEW: the sentence that used to close that bullet was
+    /// FALSIFIED and is deleted rather than softened.** It read *"The two coincide
+    /// there — the engine loop shuts out a lower-priority evaluator before it can
+    /// reach the map — but 'green over 4000 cases' is not a proof"*. They do not
+    /// coincide, the green was over a population the shape is absent from (the
+    /// corpus levels every random resource policy to `policyPriority: 0`), and the
+    /// divergence was a confident over-deny on a shape reachable by one supported
+    /// API call. It is now refused by
+    /// [`UndecidableCause::AccessPriorityCompositeNotModelled`], whose doc carries
+    /// the measurement. **The two models were not in agreement; one of them was
+    /// untested.**
     ///
     /// And a fact that STRENGTHENS it rather than weakening it, which the first
     /// round missed: `evaluatePolicyItems` is near-identical between 2.5.0 and
@@ -1290,6 +1299,99 @@ pub enum UndecidableCause {
     TagAttachmentNotReproducible {
         tag: String,
         problem: TagAttachmentProblem,
+    },
+    /// The tag phase ALLOWED, and a resource ACCESS policy at a STRICTLY higher
+    /// `policyPriority` then allowed too — a shape whose arbitration runs through
+    /// `accessTypeResults` and is NOT modelled here.
+    ///
+    /// # ⚠ CRITICAL, found by the whole-branch review of SP4d-2b
+    ///
+    /// This is the resource-path instance of the same `accessTypeResults`
+    /// composite that [`UndecidableCause::TagPriorityArbitrationNotModelled`]
+    /// refuses on the tag path — and that variant's doc **asserted the two
+    /// coincide here**, on the strength of 4000 green corpus cases. They do not.
+    /// The corpus could not reach the shape because its generator levels every
+    /// random resource policy to `policyPriority: 0` (a deliberate, documented
+    /// hold-out), so "green over 4000 cases" was green over a population the
+    /// shape is absent from.
+    ///
+    /// MEASURED on both real engines, one download, byte-identical to both:
+    ///
+    /// ```text
+    /// tag ACCESS policy 901  @0  ALLOW  select / bob   on tag `pii`
+    /// resource policy p1 id 1 @1  ALLOW  select / bob   on c1.d1.t1.col1, isDenyAllElse
+    /// resource policy p2 id 2 @0  DENY   select / bob   on c1.d1.t1.col1
+    /// request: bob / select / c1.d1.t1.col1, tag `pii` at SELF
+    /// ```
+    ///
+    /// | | 2.5.0 | 2.8.0 |
+    /// |---|---|---|
+    /// | as above | **Allowed**, `policyId` 1 | **Allowed**, `policyId` 1 |
+    /// | control: the same, no `tagPolicies` block | Allowed, `policyId` 1 | Allowed, `policyId` 1 |
+    ///
+    /// Before this refusal this crate answered **`Denied`, policy 2** for the
+    /// first row at both versions. Same answer at both engines, so it is not a
+    /// version split; the tag ALLOW is the sole trigger, since the control agrees.
+    ///
+    /// # The mechanism, read at offsets in BOTH jars
+    ///
+    /// `RangerDefaultPolicyEvaluator.evaluatePolicyItems` does not write the
+    /// shared result directly. It builds a **fresh** per-access-type
+    /// `RangerAccessResult` that copies only the audit flags, so
+    /// `updateAccessResult`'s allow branch — guarded by
+    /// `if (!result.getIsAllowed())` — **always** passes on that fresh result and
+    /// therefore always writes `setPolicyPriority` and `setPolicyId`.
+    /// `getCompositeAccessResult` then calls `setAccessResultFrom`, which copies
+    /// `policyPriority` **unconditionally** into the shared result the engine loop
+    /// compares at offsets 469/505.
+    ///
+    /// So a resource ALLOW landing on a result the tag phase already allowed DOES
+    /// raise `policyPriority`, and the next lower-priority evaluator is shut out
+    /// at offset 505. This crate modelled the guard as written — "writes nothing"
+    /// — and so let the denier run. **The direction is always over-DENY**, which
+    /// is a confident wrong answer, not a safe one.
+    ///
+    /// # Why this REFUSES rather than models the composite
+    ///
+    /// Ruled by the coordinator, and the three reasons are recorded here because
+    /// a later reader will want to narrow it:
+    ///
+    /// * over-deny is still a confident wrong answer, and this crate's whole
+    ///   proposition is that it does not produce those, so refusing is the
+    ///   correct behaviour and not a dodge;
+    /// * the cost is near zero on egret-authored data — SP4d-2b Task 5 asserts
+    ///   `policyPriority == 0` on every compiled grant, rule, clearance and tag
+    ///   body, so only a HAND-AUTHORED override policy reaches the shape (it is
+    ///   reachable by one supported API call: `AccessPolicyInput.isOverride` on
+    ///   `POST /api/control-plane/policies` emits `policyPriority: 1`);
+    /// * every previous attempt to model this area from a reading has been
+    ///   corrected, twice against this implementer and once against the
+    ///   coordinator, so a refusal that can be proved beats a model that would be
+    ///   defended again next week.
+    ///
+    /// Modelling the composite is open item 0 in `tests/ranger/README.md`.
+    ///
+    /// # Why the two named policies are the tag policy and a resource policy
+    ///
+    /// The arm fires on `allowed && found.allowed && found.priority > priority`,
+    /// and `allowed` can only have come from the TAG phase there. `allowed`
+    /// becomes true inside the loop at one place only, which also sets
+    /// `priority = found.priority`; [`sort_eval_order`] is `policyPriority`
+    /// DESCENDING, so a later candidate's priority is `<= priority` and
+    /// `found.priority > priority` is then impossible. Asserted in debug builds
+    /// rather than left as prose.
+    AccessPriorityCompositeNotModelled {
+        /// The tag policy whose ALLOW the shared result was already carrying.
+        tag_policy_id: Option<i64>,
+        tag_policy_name: String,
+        /// Its `policyPriority`, which is what offsets 469/505 compare.
+        tag_priority: i32,
+        /// The strictly higher-priority resource policy that also allowed, and
+        /// whose priority Ranger composites onto the result where this crate does
+        /// not.
+        resource_policy_id: Option<i64>,
+        resource_policy_name: String,
+        resource_priority: i32,
     },
 }
 
@@ -1838,11 +1940,13 @@ pub fn evaluate(
     // policy id for an ACCESS decision, which is why the gate is green in spite of
     // it", and quoted `39 of 1972`. Both are superseded by SP4d-2b Task 5 (fix
     // round 1, RULING 3): the differential gate compares the reported ACCESS
-    // `policyId` on its own axis, 1578 of 1716 agree (91.96%) at the recorded
-    // seed, and the 138 that do not are a CLOSED allow-list of two classes — this
-    // one (36 cases) and the restore below (102) — each tested structurally on the
+    // `policyId` on its own axis, **1465 of 1602 agree (91.45%)** at the recorded
+    // seed, and the 137 that do not are a CLOSED allow-list of two classes — this
+    // one (47 cases) and the restore below (90) — each tested structurally on the
     // two policies the two sides named. Anything else fails the run with a
-    // reproducer. `tests/ranger/README.md` carries the table.
+    // reproducer. `tests/ranger/README.md` carries the table, and it is the only
+    // place in the tree that keeps a recorded-run count (whole-branch review: the
+    // README carried two conflicting sets and this file a third).
     sort_eval_order(&mut candidates);
 
     // ── the evaluator loop ─────────────────────────────────────────────
@@ -2028,9 +2132,23 @@ pub fn evaluate(
             // `RangerDefaultPolicyEvaluator.updateAccessResult`: the deny
             // branch (offsets 83-132) writes id, priority and reason
             // unconditionally; the allow branch (135-184) writes only
-            // `if (!result.getIsAllowed())`. So a resource ALLOW landing on a
-            // result the tag phase already allowed writes NOTHING — the tag
-            // policy stays the reported one, and `priority` does not move.
+            // `if (!result.getIsAllowed())`.
+            //
+            // ⚠ CRITICAL, whole-branch review of SP4d-2b. This comment used to
+            // continue *"So a resource ALLOW landing on a result the tag phase
+            // already allowed writes NOTHING — the tag policy stays the reported
+            // one, and `priority` does not move."* **That is false, and it was a
+            // confident over-DENY.** The guard is read against a FRESH
+            // per-access-type result out of `accessTypeResults`, not against the
+            // shared one, so it always passes and always writes; then
+            // `getCompositeAccessResult` → `setAccessResultFrom` copies
+            // `policyPriority` unconditionally onto the shared result. The next
+            // lower-priority evaluator is therefore shut out at offset 505 —
+            // where this crate let it run and deny.
+            //
+            // The measurement, the mechanism at offsets in both jars, and the
+            // ruling to refuse rather than model are on
+            // [`UndecidableCause::AccessPriorityCompositeNotModelled`].
             if !found.allowed {
                 allowed = false;
                 priority = found.priority;
@@ -2040,6 +2158,28 @@ pub fn evaluate(
                 allowed = true;
                 priority = found.priority;
                 outcome = Some(found);
+            } else if found.priority > priority {
+                // `allowed` can only be the TAG phase's here — see the variant's
+                // doc for the proof from [`sort_eval_order`]'s descending order.
+                debug_assert!(
+                    is_allowed_by_tags,
+                    "the composite refusal fired without a tag allow: \
+                     sort_eval_order is no longer priority-descending"
+                );
+                let (tag_policy_id, tag_policy_name) = tag_verdict
+                    .as_ref()
+                    .map(|o| (o.policy_id, o.policy_name.clone()))
+                    .unwrap_or((None, String::new()));
+                return Decision::Undecidable {
+                    why: vec![UndecidableCause::AccessPriorityCompositeNotModelled {
+                        tag_policy_id,
+                        tag_policy_name,
+                        tag_priority: priority,
+                        resource_policy_id: found.policy_id,
+                        resource_policy_name: found.policy_name.clone(),
+                        resource_priority: found.priority,
+                    }],
+                };
             }
         }
 
@@ -4223,23 +4363,43 @@ fn evaluate_tag_sub(
 /// or a row filter), because a candidate that decides nothing cannot occupy the
 /// `accessTypeResults` slot and so cannot be arbitrated against anything.
 ///
-/// # ⚠ It refuses a same-verdict set too, and that is REPORTED-ID fidelity
+/// # ⚠ It refuses a same-verdict set too, and the reason is the PRIORITY, not the id
 ///
-/// FIX ROUND 1, MINOR 5. The review is right that a deciding set whose members
-/// all ALLOW (or all DENY) cannot have its VERDICT changed by the arbitration —
-/// only the reported `policy_id` moves. The refusal is deliberately wider than
-/// the verdict requires, for the reason [`UndecidableCause::EvalOrderAmbiguous`]
-/// already gives on the mask path: *"a tie that all agree on is not a tie the
-/// caller can act wrongly on — but the reported policy id still differs, and this
-/// crate does not report a policy it cannot name."*
+/// FIX ROUND 1, MINOR 5 raised this; the **whole-branch review re-raised it,
+/// because the reason given was inconsistent with the rest of the crate** — it
+/// read *"a tie that all agree on is not a tie the caller can act wrongly on — but
+/// the reported policy id still differs, and this crate does not report a policy it
+/// cannot name"*, while the ACCESS path ships a DECLARED reported-id divergence
+/// allow-list (138 of 1716 compared ids at the recorded run) on exactly that cost.
+/// A crate cannot refuse here to protect id fidelity and declare it away there.
 ///
-/// [`TagDecision`] carries `policy_id` and `policy_name`, the composed evaluator
-/// reports them, and `explain` puts them in front of a steward, so naming the
-/// wrong tag policy sends that steward to a policy that did not decide. The
-/// differential gate measures reported-id fidelity on its own axis as of fix
-/// round 1's RULING 3, which is what makes this a cost that is counted rather
-/// than assumed: the alternative — narrowing to disagreeing verdicts — would
-/// trade a measured refusal for an unmeasured wrong id.
+/// The reason that holds does not mention the id at all. **[`TagDecision`] carries
+/// the winning policy's `policyPriority`, and that number is an INPUT to the
+/// resource phase**: [`tag_verdict_as_outcome`] puts it in `priority`, and offsets
+/// 469/505 compare it against every resource evaluator. A same-verdict set at two
+/// priorities therefore leaves the composed evaluator's shut-out window
+/// undetermined — which is a VERDICT uncertainty on the resource path, not an
+/// identity one. The whole-branch review's CRITICAL is what makes this concrete
+/// rather than theoretical: the same number, mis-modelled by one write, was a
+/// confident over-deny (see
+/// [`UndecidableCause::AccessPriorityCompositeNotModelled`]).
+///
+/// So the refusal is NOT wider than the verdict requires in the composed case, and
+/// narrowing it would need a model of when the priority cannot matter — a second
+/// model of the mechanism open item 0 exists to audit. The reported id is a
+/// secondary cost and is counted on the differential's own id axis rather than
+/// claimed here.
+///
+/// ⚠ What is still NOT measured, and the review is right about it: the
+/// same-verdict FRACTION of this refusal was never split out (30 of 1259 composed
+/// random cases at the recorded run, unsplit). Splitting it is the first thing
+/// open item 0 needs, because it is the size of the prize for modelling the
+/// arbitration. It is NOT split here for a structural reason rather than a
+/// preference: the differential sees only the cause payload, which carries ids,
+/// names and priorities and NOT the verdicts, so splitting the fraction means
+/// putting the agreement on the payload — a wire-shape change through
+/// `explain_wire.rs`, `openapi.json` and the frontend switch. That is handed to
+/// open item 0 with the rest of the audit instead of being half-done here.
 fn tag_priority_arbitration<'a>(
     kind: DecisionKind,
     candidates: &[TagCandidate<'a>],

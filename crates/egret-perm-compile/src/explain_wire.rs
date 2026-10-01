@@ -878,6 +878,45 @@ impl From<&UndecidableCause> for WireUndecidableCause {
                 resource_policy_id: *resource_policy_id,
                 resource_policy_name: resource_policy_name.clone(),
             },
+            // ⚠ **A DELIBERATE wire ALIAS, and the only one in this mirror.**
+            //
+            // `AccessPriorityCompositeNotModelled` is the whole-branch review's
+            // CRITICAL: the tag phase allowed and a strictly higher-priority
+            // RESOURCE policy allowed too, which Ranger arbitrates through the
+            // `accessTypeResults` map. That is the SAME map and the SAME unmodelled
+            // arbitration as `TagPriorityArbitrationNotModelled`, seen on the
+            // resource path instead of inside the tag phase, and the payload is the
+            // same three parallel lists — so it is carried on that wire shape
+            // rather than adding a schema.
+            //
+            // It is an alias and not a merge: the evaluator keeps the two causes
+            // APART, because they are refused for different reasons and only one of
+            // them is a measured over-deny.
+            //
+            // ⚠ **REQUIRED HAND-OFF, and it is a wrong word in front of a
+            // steward.** `ExplainAccess.tsx`'s sentence for this wire tag opens
+            // "Several tag policies at different priorities each decide this",
+            // which is false for this shape: one of the two policies is a RESOURCE
+            // policy. The names, the ids, the priorities and the remedy ("giving
+            // them the same priority makes this decidable") are all correct — the
+            // noun is not. Splitting the sentence needs `ExplainAccess.tsx`, the
+            // generated client and `openapi.json`, all of which were being edited
+            // concurrently when this landed, so it is handed off rather than raced.
+            // Until then the page understates WHICH policies are in contention; it
+            // does not misstate the decision, and before this it gave a confident
+            // wrong `Denied` with no refusal at all.
+            UndecidableCause::AccessPriorityCompositeNotModelled {
+                tag_policy_id,
+                tag_policy_name,
+                tag_priority,
+                resource_policy_id,
+                resource_policy_name,
+                resource_priority,
+            } => WireUndecidableCause::TagPriorityArbitrationNotModelled {
+                policy_ids: vec![*tag_policy_id, *resource_policy_id],
+                policy_names: vec![tag_policy_name.clone(), resource_policy_name.clone()],
+                priorities: vec![*tag_priority, *resource_priority],
+            },
             UndecidableCause::TagAttachmentNotReproducible { tag, problem } => {
                 WireUndecidableCause::TagAttachmentNotReproducible {
                     tag: tag.clone(),

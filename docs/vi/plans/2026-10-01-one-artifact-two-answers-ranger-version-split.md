@@ -105,8 +105,17 @@ và `getServiceDefHelper().getAllAccessTypes()` thay cho
 * **Không có mặt nào cảnh báo steward lúc soạn policy.** Từ chối chỉ xuất hiện
   trong `explain`, nơi steward chỉ tới nếu họ chủ động đi tìm.
 * **Nhánh 2.5.0 chưa được mô hình hoá**, nên `explain` trên Trino từ chối thay vì
-  trả lời. Việc mô hình hoá là mục tiếp theo số 2 trong `tests/ranger/README.md`, và
-  nó cần đúng phần audit nêu ở đó.
+  trả lời. Việc mô hình hoá là mục tiếp theo số **0** trong `tests/ranger/README.md`,
+  và nó cần đúng phần audit nêu ở đó.
+
+  ⚠ **Sửa 2026-10-01 bởi review toàn nhánh.** Bản tiếng Anh trước đây còn nói đường
+  resource "mô hình một cơ chế khác cho cùng cái map và xanh trên 4000 case", kèm lưu
+  ý đó là quan sát chứ không phải chứng minh. Quan sát ấy ĐÃ BỊ PHỦ ĐỊNH: cái xanh đó
+  nằm trên một tập hợp KHÔNG chứa hình dạng gây lệch (corpus ép mọi resource ACCESS
+  policy ngẫu nhiên về priority 0), và chỗ lệch — một tag ALLOW dưới một resource
+  allow ở priority cao hơn hẳn — là một câu trả lời DENY SAI và chắc chắn, trên cả hai
+  engine. Giờ nó TỪ CHỐI (`AccessPriorityCompositeNotModelled`), và phần audit được
+  nâng từ mục 2 lên mục 0 vì điều đó.
 
 ## Cách tái lập
 

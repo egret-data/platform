@@ -63,9 +63,19 @@
 //!   isAllowed, reason)` writes the policy's id, priority and reason
 //!   **unconditionally** on the deny branch (offsets 83-132, guarded only by
 //!   `matchType != DESCENDANT`) and **only `if (!result.getIsAllowed())`** on the
-//!   allow branch (offsets 135-184). So a resource ALLOW landing on a result a
-//!   tag policy already allowed writes nothing at all — the tag policy stays the
-//!   reported one — while a resource DENY always overwrites.
+//!   allow branch (offsets 135-184). A resource DENY therefore always overwrites.
+//!
+//!   ⚠ **WHOLE-BRANCH REVIEW: this bullet used to continue "So a resource ALLOW
+//!   landing on a result a tag policy already allowed writes nothing at all — the
+//!   tag policy stays the reported one". That is FALSE, and it was a confident
+//!   over-DENY.** The `if (!result.getIsAllowed())` guard is read against a FRESH
+//!   per-access-type result out of `accessTypeResults`, not against the shared
+//!   one, so it always passes; `getCompositeAccessResult` → `setAccessResultFrom`
+//!   then copies `policyPriority` unconditionally onto the shared result, and the
+//!   next lower-priority evaluator is shut out at offset 553's sibling, 505. That
+//!   shape now REFUSES
+//!   ([`UndecidableCause::AccessPriorityCompositeNotModelled`]) and is pinned by
+//!   `a_tag_allow_under_a_higher_priority_resource_allow_refuses` below.
 //!
 //! ## `hasResourcePolicies` is deliberately NOT modelled, and that is measured
 //!
@@ -502,6 +512,139 @@ fn a_tag_allow_shuts_out_a_lower_priority_resource_deny() {
     assert!(
         matches!(&d, Decision::Allowed { policy_name, .. } if policy_name == "tag-allow"),
         "a lower-priority resource deny must not reach a tag allow: {}",
+        named(&d)
+    );
+}
+
+// ── the accessTypeResults composite, offsets 469/505 read against a priority
+//    this crate does not raise (whole-branch review CRITICAL) ───────────────
+
+/// **The CRITICAL.** A tag ALLOW at priority 0, a resource policy at priority 1
+/// that also allows, and a resource policy at priority 0 that denies.
+///
+/// MEASURED on both real engines, which answer `Allowed, policyId 1` — and the
+/// control below shows the tag ALLOW is the sole trigger. This crate answered
+/// `Denied` by the priority-0 denier, because it modelled the allow branch's
+/// `if (!result.getIsAllowed())` guard as "writes nothing" and so never raised
+/// `policyPriority` to 1, leaving the denier inside offset 505's window.
+///
+/// It REFUSES rather than models the composite; the ruling and its three reasons
+/// are on the variant. This test is the JVM-free half of the pin — the
+/// differential's `check_measured_priority_composite` is the half that re-measures
+/// the engines.
+#[test]
+fn a_tag_allow_under_a_higher_priority_resource_allow_refuses() {
+    let mut allower = resource_policy(1, "p1", 1, "policyItems", select_for_alice());
+    allower["isDenyAllElse"] = json!(true);
+    let set = envelope(
+        json!([
+            allower,
+            resource_policy(2, "p2", 0, "denyPolicyItems", select_for_alice()),
+        ]),
+        json!([tag_policy(
+            10,
+            "tag-allow",
+            0,
+            0,
+            "policyItems",
+            select_for_alice()
+        )]),
+    );
+
+    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    let Decision::Undecidable { why } = &d else {
+        panic!(
+            "a tag allow under a strictly higher-priority resource allow must REFUSE: {}. \
+             `Denied` is the over-deny this refusal exists for; `Allowed` means the allow arm \
+             now writes unconditionally, which is a MODEL of the composite and needs open \
+             item 0's audit first",
+            named(&d)
+        );
+    };
+    assert!(
+        matches!(
+            why.as_slice(),
+            [UndecidableCause::AccessPriorityCompositeNotModelled {
+                tag_policy_id: Some(10),
+                resource_policy_id: Some(1),
+                tag_priority: 0,
+                resource_priority: 1,
+                ..
+            }]
+        ),
+        "the refusal must name the tag policy whose allow was standing and the resource policy \
+         whose priority Ranger composites, with both priorities: {why:?}"
+    );
+}
+
+/// The CONTROL for the test above: the same two resource policies with NO tag
+/// block. Both engines answer `Allowed, policyId 1`, and so must this crate —
+/// through the ordinary resource loop, where the allow arm DOES write because
+/// nothing had allowed yet.
+///
+/// Without this, "ranger allows" would be consistent with the resource policies
+/// alone and the finding would not be located on the tag ALLOW.
+#[test]
+fn the_same_two_resource_policies_with_no_tag_block_answer_allowed() {
+    let mut allower = resource_policy(1, "p1", 1, "policyItems", select_for_alice());
+    allower["isDenyAllElse"] = json!(true);
+    let set = envelope(
+        json!([
+            allower,
+            resource_policy(2, "p2", 0, "denyPolicyItems", select_for_alice()),
+        ]),
+        json!([]),
+    );
+
+    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(
+            &d,
+            Decision::Allowed {
+                policy_id: Some(1),
+                ..
+            }
+        ),
+        "the control must answer Allowed by policy 1: {}",
+        named(&d)
+    );
+}
+
+/// The refusal is NARROW: at one priority the composite writes a priority equal to
+/// the one already there, so nothing is shut out that this crate does not shut out,
+/// and the crate must still ANSWER.
+///
+/// This is the boundary the hold-out comment in `differential.rs` used to get
+/// wrong — it claimed an honest refusal here would also swallow T5's four rows.
+/// It does not: those are a tag DENY, and this arm only fires on a tag ALLOW.
+#[test]
+fn a_tag_allow_with_everything_at_one_priority_still_answers() {
+    let set = envelope(
+        json!([
+            resource_policy(1, "p1", 0, "policyItems", select_for_alice()),
+            resource_policy(2, "p2", 0, "denyPolicyItems", select_for_alice()),
+        ]),
+        json!([tag_policy(
+            10,
+            "tag-allow",
+            0,
+            0,
+            "policyItems",
+            select_for_alice()
+        )]),
+    );
+
+    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(
+            &d,
+            Decision::Denied {
+                policy_id: Some(2),
+                ..
+            }
+        ),
+        "with no priority gap the composite is a no-op for the arbitration, so the same-priority \
+         denier still decides and the crate must answer: {}",
         named(&d)
     );
 }

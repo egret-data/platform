@@ -96,59 +96,92 @@ phase generated for the first time:
 | Seed | `0x54d000007` (`EGRET_DIFF_SEED`, hex) |
 | Cases | **2000 per engine — 4000 total** (`EGRET_DIFF_CASES`) |
 | Versions | **2.5.0** against the Trino service-def, **2.8.0** against the StarRocks one |
-| Cases carrying a `tagPolicies` block | **1906 of 4000** |
-| Compared and agreeing | **3529** (88.2% of all cases) |
-| `Undecidable` outside the five declared refusals | **0** (asserted) |
-| Deliberate shapes | 584 eval-order duels (259 composed), 201 candidacy duels, 187 restore duels |
+| Cases carrying a `tagPolicies` block | **1908 of 4000** |
+| Compared and agreeing | **3468** (86.70% of all cases) |
+| `Undecidable` outside the six declared refusals | **0** (asserted) |
+| Deliberate shapes | 539 eval-order duels (250 composed), 193 candidacy duels, 176 restore duels, 141 version-split duels |
+| Reported ACCESS `policyId` fidelity | **1465 of 1602 = 91.45%**, the rest in the two declared divergences (47 + 90) |
 | Reported ACCESS `policyId` divergences outside the declared list | **0** (asserted) |
-| Wall time | ~48s including five Maven runs |
+| Wall time | **~79s** including seven Maven runs |
 
-### The five measured refusal rates, over FOUR populations
+⚠ **This table is the ONLY recorded set of counts in this file.** It carried two
+conflicting sets until the whole-branch review (1906 vs 1755 tag-carrying, 584 vs
+634 duels) with a third in `differential.rs`, and plan open item 1 is decided on
+these rates. Every later section now points here instead of restating. The numbers
+moved from the fix-round-2 report because the review added the
+`version_split_duel` draw, which takes cases the other draws would have had.
+
+### The six measured refusal rates, over FOUR populations
 
 ⚠ **Fix round 1 corrected these.** They were printed over two populations —
 "resource path" and "every tag-carrying case" — and the second denominator was
 30% cases CONSTRUCTED to hit the refusal being measured. Re-measured over the
 random half, the printed figures were wrong in BOTH directions, so it was not a
 bias a reader could correct by a factor. Every rate below is over exactly one of
-four populations, and **`composed, random` is the column a real download is in**.
+four populations.
+
+⚠ **The whole-branch review deleted the sentence that used to close that
+paragraph** — *"and `composed, random` is the column a real download is in"*. That
+is a coverage claim stronger than the data: a real download CAN carry an override
+policy (`AccessPolicyInput.isOverride` on `POST /api/control-plane/policies` emits
+`policyPriority: 1`) and this column cannot, because `policy`'s `level_priority`
+holds that shape out. `composed, random` is the column a real download **with no
+override ACCESS policy** is in. The hold-out now has its own printed counter, the
+`RANDOM composed ACCESS case with a resource policy above priority 0` axis, which
+reads **0** — so the gate STATES the hole instead of leaving it to be derived from
+two other columns.
 
 Recorded corpus, seed `0x54d000007`, 2000 cases per engine:
 
-| refusal | resource, random (1769) | resource, duel (325) | **composed, random (1259)** | composed, duel (647) |
+| refusal | resource, random (1803) | resource, duel (289) | **composed, random (1148)** | composed, duel (760) |
 |---|---|---|---|---|
-| `EvalOrderAmbiguous` | 99 = **5.60%** | 0 | **25 = 1.99%** | 107 = 16.54% |
-| `ResourceCandidacyNotReproducible` | 0 | 0 | **0 = 0%** | 191 = 29.52% |
-| `TagSubResultSplitByResourcePolicy` | 0 | 0 | **20 = 1.59%** | 0 |
-| `TagPriorityArbitrationNotModelled` | 0 | 0 | **30 = 2.38%** | 0 |
-| `TagDenyReopenedDiffersByPluginVersion` | 0 | 0 | **0** — see below | 0 |
+| `EvalOrderAmbiguous` | 104 = **5.77%** | 0 | **25 = 2.18%** | 96 = 12.63% |
+| `ResourceCandidacyNotReproducible` | 0 | 0 | **0 = 0%** | 184 = 24.21% |
+| `TagSubResultSplitByResourcePolicy` | 0 | 0 | **17 = 1.48%** | 0 |
+| `TagPriorityArbitrationNotModelled` | 0 | 0 | **23 = 2.00%** | 0 |
+| `TagDenyReopenedDiffersByPluginVersion` | 0 | 0 | **0** | 73 = 9.61% |
+| `AccessPriorityCompositeNotModelled` | 0 | 0 | **0** | 10 = 1.32% |
 
-Plus the three deliberate shapes against their own denominators, which is the
+Plus the four deliberate shapes against their own denominators, which is the
 only way their numbers mean anything:
 
-* **candidacy duels: 191 of 201 REFUSE (95.0%)**, and the refusal fires **zero**
+* **candidacy duels: 184 of 193 REFUSE (95.3%)**, and the refusal fires **zero**
   times outside them. Two numbers, not one: a download that does not carry the
   four-way conjunction never reaches this refusal, and one that does reaches it
   almost always. `explain` over a live plugin's download is the population that
   carries it — `scope_to_resources`' `Mask` arm does not fill unnamed levels with
   `*`, and an ordinary table-level grant from a download egret did not author has
   the same shape — so 95% is the rate to plan against, not 0%.
-* **composed eval-order duels: 152 of 259 agree** with the engine and the rest
+* **composed eval-order duels: 144 of 250 agree** with the engine and the rest
   refuse; **none disagree**. One in four is built with a tag ALLOW instead of a
   deny as the falsifier: under an allow offset 505's `>` lets the same-priority
   rival run after the allow, so the deny wins whichever ran first and the crate
   must NOT refuse — and does not.
-* **restore duels: 187 of 187 AGREE**, which is the point of that shape: it must
+* **restore duels: 176 of 176 AGREE**, which is the point of that shape: it must
   ANSWER, and reverting the trie-excluded-view skip turns the agreement into a
   disagreement. Two floors, one that it is generated and one that it still agrees.
+* **version-split duels: 79 generated at 2.5.0 of which 73 REFUSE (92.4%), and 62
+  generated at 2.8.0 of which 0 refuse.** Both halves are asserted, in opposite
+  directions, by `check_version_split_is_asymmetric`.
 
-⚠ **`TagDenyReopenedDiffersByPluginVersion` has NO corpus coverage at the
-recorded seed, and that is a consequence of narrowing it correctly.** It now
-fires only when this function would RETURN an allow under a tag deny; the restore
-duel's shape is the one row both versions answer the same way, and the composed
-duels are intercepted by the band refusal first. It is pinned instead by
-`a_tag_deny_is_reopened_by_a_strictly_higher_priority_resource_allow_on_2_8_0`,
-which asserts the 2.8.0 answer AND the refusal on `Some(2.5.0)` and on `None`.
-Its ceiling therefore guards nothing today; the unit test is what guards it.
+⚠ **`TagDenyReopenedDiffersByPluginVersion` used to have NO corpus coverage, and
+three places in the tree said the corpus guarded it.** `differential.rs`'s own doc
+claimed the 2.5.0/2.8.0 asymmetry *"is itself the assertion: a run where the two
+halves' rates were equal would mean the version input had stopped being read"* —
+and **no `assert!` anywhere compared the halves.** They were equal, at 0 == 0,
+which is that sentence's own stated failure condition; the only bound was a
+ceiling of 10‰ over a measured 0‰ that nothing could exceed. Nothing in the tree
+resisted someone deleting the `plugin_version` read with every gate green.
+
+It is real now. `version_split_duel` generates row 1 of T5's table — a tag DENY
+under a strictly higher-priority resource allow with NO deny items of its own, the
+one row the versions answer differently — and
+`check_version_split_is_asymmetric` asserts three things that each fail for a
+different reason: that the duel is still GENERATED (or 2 and 3 are vacuous, which
+is how the last version of this claim passed), that essentially ALL of them refuse
+at 2.5.0, and that NONE of them refuse at 2.8.0. The unit test
+`a_tag_deny_is_reopened_by_a_strictly_higher_priority_resource_allow_on_2_8_0`
+still pins the shape JVM-free.
 
 The two `EvalOrderAmbiguous` rates are genuinely different questions. Task 2
 established the refusal cannot arise in the tag phase alone (both tag comparators
@@ -176,10 +209,10 @@ is now its own reported axis:
 
 | | |
 |---|---|
-| ACCESS cases where both sides agreed on allow/deny and named an id | **1716** |
-| agreeing on the id | **1578 = 91.96%** |
-| declared divergence: same `(policyPriority, hasDeny)` band (`getEvalOrder()`) | 36 |
-| declared divergence: tag deny restored over a resource allow | 102 |
+| ACCESS cases where both sides agreed on allow/deny and named an id | **1602** |
+| agreeing on the id | **1465 = 91.45%** |
+| declared divergence: same `(policyPriority, hasDeny)` band (`getEvalOrder()`) | 47 |
+| declared divergence: tag deny restored over a resource allow | 90 |
 | **NOT on the declared list** | **0** (asserted) |
 
 The two declared shapes are an ALLOW-LIST, not a relaxation: each is a structural
@@ -194,12 +227,13 @@ exclusions removed. Whether the corpus still REACHES the shapes those fixes
 were written for is not a matter of opinion here — see the coverage table
 below, which is printed on every run and fails it when an axis thins out.
 
-**Exactly five refusals are counted and excluded from the comparison**, and the
-line they sit on either side of is deliberate: each of the five is about an ORDER,
-a CANDIDACY or a VERSION this crate does not reproduce, never about a construct it
-does not model. A construct refusal would mean the generator had drifted into
-shapes the evaluator declines to answer, which is the silent-green failure this
-whole file exists to prevent — so anything outside the five still fails the run.
+**Exactly six refusals are counted and excluded from the comparison**, and the
+line they sit on either side of is deliberate: each of the six is about an ORDER,
+a CANDIDACY, a PRIORITY ARBITRATION or a VERSION this crate does not reproduce,
+never about a construct it does not model. A construct refusal would mean the
+generator had drifted into shapes the evaluator declines to answer, which is the
+silent-green failure this whole file exists to prevent — so anything outside the
+six still fails the run.
 The classification is all-or-nothing per case (`only_declined`): a `why` mixing an
 admitted refusal with a construct refusal is a generator escape wearing a
 disguise, and reporting it as the admitted one would retire the escape check for
@@ -324,10 +358,20 @@ reproduces all six measured rows in both jars.
 **A refusal defended by a false reason is the thing this package has been bitten
 by five times**, so the reason that holds is the only one left: the same
 `accessTypeResults` map is live on the RESOURCE path, where this crate models a
-DIFFERENT mechanism (the engine loop at 469/505/529) and is green over 4000 corpus
-cases — the two coincide because the loop shuts out a lower-priority evaluator
-before it can reach the map, which is an observation and not a proof. A priority
-rule written in the tag phase would be a second model of one mechanism.
+DIFFERENT mechanism (the engine loop at 469/505/529), so a priority rule written in
+the tag phase would be a second model of one mechanism.
+
+⚠ **WHOLE-BRANCH REVIEW: the clause that used to close that sentence was
+FALSIFIED.** It said the crate "is green over 4000 corpus cases — the two coincide
+because the loop shuts out a lower-priority evaluator before it can reach the map".
+They do not coincide. The green was over a population the divergent shape is
+ABSENT from, because the corpus levels every random resource ACCESS policy to
+priority 0, and the divergence (T7 below) was a confident over-DENY. The
+coincidence held for every shape with no tag verdict and for every shape at one
+priority; it failed for a tag ALLOW under a higher-priority resource allow, which
+is the one shape that can leave `result` already-allowed at a priority BELOW a
+later allower's. **The two models were not in agreement; one of them was
+untested.**
 
 And a fact that STRENGTHENS that reason: `evaluatePolicyItems` is near-identical
 between the jars in the 366-573 region, so **this map cannot be what makes T5 a
@@ -375,7 +419,7 @@ rather than general. This crate reproduces 2.8.0 and refuses on 2.5.0 and on
 in the crate where an unstated plugin version costs an ACCESS answer, and it costs
 it because the engines genuinely disagree.
 
-### Two more gaps this gate measured and did NOT close (fix round 1)
+### Two more gaps this gate measured — one still open, one CLOSED by the whole-branch review
 
 Both were surfaced by the `restore_duel` shape, which exists because reverting
 T3's fix left the gate GREEN — the corpus had no coverage for it at all.
@@ -439,15 +483,67 @@ in lockstep. Only a tag ALLOW can leave `result` already-allowed at a priority B
 a later resource allower's.
 
 **This invalidates part of the resource loop's model, not just the tag phase's.**
-It is HELD OUT of the corpus rather than refused: the honest refusal ("a resource
-policy above the tag verdict's priority decides") would also refuse the four rows
-of T5's table this crate reproduces exactly on 2.8.0, plus the three unit tests
-that pin them. Random tag-carrying cases therefore emit `policyPriority: 0` on
-their resource ACCESS policies — **ACCESS only**, because levelling the mask and
-row-filter priorities took `TagSubResultSplitByResourcePolicy` from 19 corpus
-firings to 0, and a held-out shape that silently removes a refusal's only coverage
-is the silent green this file exists to prevent. Every DELIBERATE duel keeps its
-priorities.
+
+⚠ **WHOLE-BRANCH REVIEW: T7 is now REFUSED, and the reason it was only held out
+was wrong.** The paragraph that stood here said the honest refusal — *"a resource
+policy above the tag verdict's priority decides"* — would also swallow the four
+rows of T5's table and the three unit tests that pin them. **It does not.** T5's
+rows are a tag DENY; the arm that refuses T7 fires only when the tag phase
+ALLOWED, so the two are disjoint by construction and all three of those tests
+still answer. The refusal was drawn wider in the argument than it needed to be,
+and the shape shipped unrefused on that argument.
+
+What is refused, and what it cost:
+
+* `UndecidableCause::AccessPriorityCompositeNotModelled`, raised in `evaluate`'s
+  allow arm on `allowed && found.allowed && found.priority > priority`. `allowed`
+  there can only be the TAG phase's: it is set inside the loop at one place that
+  also sets `priority = found.priority`, and `sort_eval_order` is priority
+  DESCENDING, so a later candidate's priority is `<= priority`.
+* the direction was **always over-DENY** — a confident wrong answer, not a safe
+  one — and the shape is live-reachable by one supported API call
+  (`AccessPolicyInput.isOverride` emits `policyPriority: 1`).
+* the cost is near zero on egret-authored data: Task 5 asserts
+  `policyPriority == 0` on every compiled grant, rule, clearance and tag body, so
+  only a HAND-AUTHORED override policy reaches it. In the corpus it is 10 of 4000,
+  all in the composed-duel column.
+* the ruling was REFUSE, not model. Modelling is open item 0. The candidate model
+  is one token — making the allow arm write unconditionally — and the two-case
+  fixture cannot tell a correct model from a lucky one, which is exactly why it
+  waits for the audit.
+
+**The line was pinned in NEITHER direction before.** Mutating
+`} else if !allowed {` to `} else {` compiles and survived the whole suite, 259
+passed / 0 failed. Both mutants are now killed by
+`tag_arbitration.rs::a_tag_allow_under_a_higher_priority_resource_allow_refuses`
+(JVM-free) and by `differential.rs::check_measured_priority_composite`, which
+re-measures both real engines on the two cases below.
+
+MEASURED, one download, byte-identical to both engines:
+
+| | 2.5.0 | 2.8.0 |
+|---|---|---|
+| tag ACCESS 901 @0 ALLOW + resource `p1` id 1 @1 ALLOW `isDenyAllElse` + resource `p2` id 2 @0 DENY | **Allowed, `policyId` 1** | **Allowed, `policyId` 1** |
+| control: the same two resource policies, no `tagPolicies` block | Allowed, `policyId` 1 | Allowed, `policyId` 1 |
+
+Same answer at both versions, so it is not a version split; the control is what
+locates the trigger on the tag ALLOW.
+
+**The LEVELLING stays, and it is not a way of hiding the refusal.** Random
+tag-carrying cases still emit `policyPriority: 0` on their resource ACCESS
+policies — **ACCESS only**, because levelling the mask and row-filter priorities
+took `TagSubResultSplitByResourcePolicy` from 19 corpus firings to 0, and a
+held-out shape that silently removes a refusal's only coverage is the silent green
+this file exists to prevent. It stays because the resource-path rates this gate
+reports are rates over cases with no tag phase, and because un-levelling would
+replace a stated hole with a refusal rate that tells a reader less. What it costs
+is now COUNTED: the `RANDOM composed ACCESS case with a resource policy above
+priority 0` axis prints 0, with a floor of 0 that is a tripwire on the hold-out
+rather than a coverage demand. Getting that axis right took two measurements —
+the bare conjunction read 243‰ (every deliberate duel) and the
+population-scoped one still read 61‰ (the mask and row-filter policies, which are
+not in the ACCESS loop) — and both wrong versions would have read as healthy
+coverage of the shape that has none. Every DELIBERATE duel keeps its priorities.
 
 ### Follow-up work this left behind, with the rows to aim at
 
@@ -460,16 +556,28 @@ Named here rather than in a report nobody re-reads:
    review decoded all five of its arms from `javap -c` (see T4 above) and the rule
    reproduces six measured rows; what is missing is the resource-path audit, and
    T7 IS that audit's first result.
+
+   ⚠ **Two things that task now inherits, both added by the whole-branch review.**
+   First, T7 is REFUSED rather than wrong, so the task's deliverable is to replace
+   two refusals (`TagPriorityArbitrationNotModelled` and
+   `AccessPriorityCompositeNotModelled`) with one model — and the candidate model on
+   the resource path is a ONE-TOKEN change, making the allow arm write
+   unconditionally. The two-case fixture agrees with that model, which is exactly
+   why it is not enough: a fixture cannot tell a correct model from a lucky one, and
+   `setAccessResultFrom` copying `policyPriority` unconditionally also means it can
+   LOWER the priority, a direction nothing has measured.
+   Second, **the same-verdict FRACTION of `TagPriorityArbitrationNotModelled` is
+   still not split** (23 of 1148 composed-random cases, unsplit) and it is the size
+   of the prize. Splitting it needs the agreement on the cause payload, which is a
+   wire-shape change through `explain_wire.rs`, `openapi.json` and the frontend
+   switch — so it belongs in this task and not before it.
 1. **Model `normalizeAndPrunePolicyItems`' prefix strip** instead of refusing
    `TagNormalisationProblem::Namespaced{AccessType,MaskType}`. The rule is fully
    measured (see T1); what is not done is the two prunes it feeds and their
    interaction with `hasDeny()` and the tag comparators.
-2. **Model the `accessTypeResults` arbitration** (T4 and T5 are the same
-   mechanism seen twice). It is live on the RESOURCE path too, where this crate
-   models a different mechanism and is green over 4000 cases — the two coincide
-   because the engine loop shuts out a lower-priority evaluator before it reaches
-   the map, but that is an observation, not a proof, and the audit belongs in
-   whatever task models this.
+2. ~~**Model the `accessTypeResults` arbitration.**~~ Promoted to **item 0** above
+   by the whole-branch review: the "observation, not a proof" that used to sit here
+   was falsified by T7, and the audit is no longer deferrable.
 3. **A tag block missing `serviceName` or `serviceDef`.** `PolicyEngine.<init>`
    builds no tag repository unless `tagPolicies != null &&
    !isEmpty(getServiceName()) && getServiceDef() != null` (offsets 471-500), so
@@ -501,6 +609,19 @@ eye (`cp` is aliased to `cp -i` on this machine and silently refuses):
   verified by `shasum -a 256 -c` rather than by `git diff` — a bare diff proves
   *a* change landed, not *the* change, and `cp` is aliased to `cp -i` on this
   machine and silently refuses to overwrite.
+- **Both halves of the `accessTypeResults` composite arm** (whole-branch review).
+  The line this fixes — `} else if !allowed {` in `evaluate`'s allow arm — was
+  pinned in NEITHER direction before: mutating it to `} else {` compiles and
+  survived 259 passed / 0 failed. Two mutants, each compiled (0 errors) and each
+  restored by `shasum -a 256 -c`:
+  - `} else if found.priority > priority {` → `} else if false {`, removing the
+    refusal: **1 of 36 `tag_arbitration` tests failed**, JVM-free.
+  - `} else if !allowed {` → `} else if true {`, i.e. the allow arm writing
+    unconditionally — the coordinator's surviving mutant, which makes the refusal
+    arm dead: **1 of 36 failed**, JVM-free.
+
+  Neither needs Maven, which matters: the shape the corpus cannot generate is the
+  shape whose pin must not depend on the corpus.
 
 ## Declared divergences from the real engine
 
@@ -588,10 +709,10 @@ each is acceptable. Anything not on this list and not `Undecidable` is a bug.
 
   | | |
   |---|---|
-  | ACCESS cases where the verdicts agree and both sides named an id | **1716** |
-  | agreeing on the id | **1578 = 91.96%** |
-  | this divergence (same `(policyPriority, hasDeny)` band) | **36**, floor 4‰ |
-  | the restore divergence below | **102**, floor 12‰ |
+  | ACCESS cases where the verdicts agree and both sides named an id | **1602** |
+  | agreeing on the id | **1465 = 91.45%** |
+  | this divergence (same `(policyPriority, hasDeny)` band) | **47**, floor 5‰ |
+  | the restore divergence below | **90**, floor 11‰ |
   | anything else | **0**, and it FAILS the run with a reproducer |
 
   The allow/deny OUTCOME is unaffected (see the duels below). What keeps the gate
@@ -934,14 +1055,15 @@ varies is whether the ALLOWER also carries (non-matching) deny items.
 sorts `hasDeny` FIRST and only then by `getEvalOrder()`, which makes those two
 different questions.
 
-**634 duels in the recorded 4000-case corpus, 552 agreeing and the rest
-REFUSED — none disagreeing.** Task 5's claim survives a test that could have
+**539 duels in the recorded 4000-case corpus, 433 agreeing and the rest
+REFUSED — none disagreeing** (the counts are the recorded-run table's; this section
+no longer keeps a second set). Task 5's claim survives a test that could have
 killed it, and the `hasDeny` key in the comparator is why: it puts the denying
 policy first, so the engine loop's
 `if (ret.getIsAllowed()) { if (!evaluator.hasDeny()) break; }` cannot break
 past a same-priority deny.
 
-**260 of those duels are COMPOSED** (SP4d-2b Task 5): the same two resource
+**250 of those duels are COMPOSED** (SP4d-2b Task 5): the same two resource
 policies issued UNDER a tag verdict, at a priority strictly above the tag's. That
 is the one shape in which `getEvalOrder()` CAN decide an ACCESS outcome, and it is
 where the claim above stops holding — 178 of the 260 agree and the other 82
@@ -970,8 +1092,10 @@ no `column` on either engine, so a column-level request makes every row-filter
 policy an ANCESTOR match and yields no filter at all — the corpus would look
 green while testing nothing.
 
-**The tag phase, since SP4d-2b Task 5.** 1755 of the 4000 cases carry a
-`tagPolicies` block built from egret's own `tag.json`. 24 axes: a tag the block's
+**The tag phase, since SP4d-2b Task 5.** 1908 of the 4000 cases carry a
+`tagPolicies` block built from egret's own `tag.json` — the recorded-run table's
+count, which is the only one this file keeps. 27 axes (26 `tag:` plus the hold-out
+counter): a tag the block's
 policies REACH and one they cannot; all five match types, admitted (`SELF`,
 `SELF_AND_ALL_DESCENDANTS`, `ANCESTOR`) and not (`DESCENDANT`, `NONE` — generated
 BECAUSE they are not admitted, since a corpus without them cannot tell that rule

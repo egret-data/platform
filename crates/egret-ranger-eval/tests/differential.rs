@@ -134,13 +134,20 @@
 //! * [`UndecidableCause::TagPriorityArbitrationNotModelled`] — two tag policies
 //!   at different priorities both decide, and the
 //!   `RangerAccessRequestUtil.getAccessTypeResults` map settles which survives.
-//!   Task 5 measured that arbitration; it is refused rather than modelled
-//!   because its branch structure could not be read from a disassembly.
+//!   Task 5 measured that arbitration; it is refused rather than modelled, for the
+//!   reason on that variant.
+//! * [`UndecidableCause::AccessPriorityCompositeNotModelled`] — the SAME map on
+//!   the RESOURCE path: a tag ALLOW under a strictly higher-priority resource
+//!   allow. Found by the whole-branch review as a confident over-DENY; the
+//!   `RANDOM composed ACCESS case with a resource policy above priority 0` axis states which part of
+//!   the corpus can reach it and which cannot.
 //! * [`UndecidableCause::TagDenyReopenedDiffersByPluginVersion`] — the one
-//!   composed shape 2.5.0 and 2.8.0 answer DIFFERENTLY. It therefore fires on
-//!   the Trino half of this corpus and never on the StarRocks half, which is an
-//!   assertion in itself: equal rates would mean the version input had stopped
-//!   being read.
+//!   composed shape 2.5.0 and 2.8.0 answer DIFFERENTLY. It fires on the Trino half
+//!   of this corpus and never on the StarRocks half, and ⚠ **that asymmetry used to
+//!   be described here as "an assertion in itself" while no code compared the
+//!   halves — they were equal, at 0 == 0, the file's own failure condition.**
+//!   [`version_split_duel`] now generates the shape and
+//!   [`check_version_split_is_asymmetric`] is the assertion.
 //!
 //! The one measured version divergence — an `_any` request against an
 //! ANCESTOR-matching `isDenyAllElse` policy denies at 2.5.0 and does not at
@@ -475,6 +482,14 @@ struct Case {
     /// ANSWERS rather than refusing, so it has no rate — what it has is a floor,
     /// and the property it carries is that reverting T3 makes the gate RED.
     restore_duel: bool,
+    /// Built by [`version_split_duel`]: a tag DENY plus a strictly higher-priority
+    /// resource allow with NO deny items of its own — the one shape the two plugin
+    /// versions answer DIFFERENTLY, so it REFUSES at 2.5.0 and ANSWERS at 2.8.0.
+    ///
+    /// ⚠ It exists because [`Declined::TagDenyVersionSplit`] had 0/4000 coverage
+    /// while three places in the tree described an assertion guarding it. See
+    /// [`check_version_split_is_asymmetric`], which is that assertion, now real.
+    version_split_duel: bool,
     service_policies: Value,
     request: AccessRequest,
 }
@@ -1834,6 +1849,91 @@ fn restore_duel(
     )
 }
 
+/// A tag DENY under a strictly higher-priority resource ALLOW that has NO deny
+/// items of its own — row 1 of [`UndecidableCause::TagDenyReopenedDiffersByPluginVersion`]'s
+/// measured table, and the ONE shape the two plugin versions answer differently.
+///
+/// ⚠ **This exists because the refusal it reaches had 0/4000 coverage while three
+/// places in the tree said the corpus guarded it** (whole-branch review). The
+/// `restore_duel` is its near twin and differs in exactly one field: that one gives
+/// the allower deny items matching nobody, so `hasDeny()` is true, offset 553
+/// cannot determine, the loop runs out and the tag deny is RESTORED — both versions
+/// then answer Denied and the duel agrees. Take the deny items away and 553
+/// determines on the allow, the restore never runs, and the two versions part:
+/// 2.8.0 keeps the allow (this crate's model) and 2.5.0 does not.
+///
+/// So the expected behaviour is asymmetric BY ENGINE, which is the property
+/// [`check_version_split_is_asymmetric`] asserts:
+///
+/// * trino / ranger 2.5.0 → the crate REFUSES with
+///   [`Declined::TagDenyVersionSplit`];
+/// * starrocks / ranger 2.8.0 → the crate ANSWERS `Allowed` and is compared
+///   against the real engine, which is what keeps the 2.8.0 arm honest rather
+///   than merely unrefused.
+///
+/// The root level's request value is forced concrete for the same reason
+/// [`restore_duel`] forces it — see the ⚠ note there.
+fn version_split_duel(
+    rng: &mut Rng,
+    profile: &Profile,
+    shape: &Shape,
+    tag_def: &Value,
+) -> (Vec<Value>, TagLayer) {
+    let mut request_levels = shape.request_levels.clone();
+    if let Some((_, value)) = request_levels.first_mut() {
+        if value.is_empty() {
+            *value = "restore_root".to_string();
+        }
+    }
+    let exact: Value = Value::Object(
+        request_levels
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    json!({"values": [if value == "*" { "*" } else { value }]}),
+                )
+            })
+            .collect(),
+    );
+
+    // Priority 2 rather than 1 so the shape is the STRICTLY-higher one at more
+    // than the minimum gap: T5's table measures both rows and they agree, and a
+    // generator pinned to the smallest gap would hide a rule written as `== +1`.
+    let allower = json!({
+        "id": 1, "name": "vsplit-a-allow", "service": profile.service_name, "policyType": 0,
+        "isEnabled": true, "policyPriority": if rng.chance(1, 2) { 1 } else { 2 },
+        "resources": exact,
+        "policyItems": [{
+            "users": [shape.user], "groups": [], "roles": [],
+            "accesses": [{"type": shape.access_type, "isAllowed": true}],
+        }],
+        // NO `denyPolicyItems` and no `isDenyAllElse`: `hasDeny()` must be FALSE or
+        // offset 553 cannot determine and this becomes a restore duel instead.
+    });
+
+    let name = rng.pick(TAG_NAMES).to_string();
+    let match_type = *rng.pick(ADMITTED_TAG_MATCH_TYPES);
+    let tag = resolved_tag(rng, profile, &name, match_type);
+    let tag_policy = json!({
+        "id": TAG_POLICY_ID_BASE + 93, "name": "t-vsplit",
+        "service": profile.tag_service_name, "policyType": 0,
+        "isEnabled": true, "policyPriority": 0,
+        "resources": {"tag": {"values": [name]}},
+        "denyPolicyItems": [{
+            "users": [shape.user], "groups": [], "roles": [],
+            "accesses": [{"type": shape.access_type, "isAllowed": true}],
+        }],
+    });
+    (
+        vec![allower],
+        TagLayer {
+            block: tag_block(profile, tag_def, vec![tag_policy]),
+            tags: vec![tag],
+        },
+    )
+}
+
 /// The REQUEST a [`restore_duel`] is issued for, which differs from the shape's
 /// own in exactly one place — see the ⚠ note in `restore_duel`.
 fn restore_duel_request(shape: &Shape) -> Vec<(String, String)> {
@@ -1860,6 +1960,32 @@ fn generate_case(
     };
     let shape = build_shape(rng, profile, policy_type);
 
+    // One ACCESS case in fourteen is the deliberate VERSION-SPLIT duel — the only
+    // shape that reaches `TagDenyReopenedDiffersByPluginVersion` at all. Drawn
+    // FIRST so it cannot be starved by the three draws below, and so the floor on
+    // it is a floor on a draw and not on a residue.
+    if policy_type == 0 && rng.chance(1, 14) {
+        let (policies, tags) = version_split_duel(rng, profile, &shape, tag_def);
+        let shape = Shape {
+            request_levels: restore_duel_request(&shape),
+            ..shape
+        };
+        return finish_case(Finish {
+            profile,
+            service_def,
+            policies,
+            shape,
+            index,
+            policy_type,
+            duel: false,
+            composed_duel: false,
+            candidacy_duel: false,
+            restore_duel: false,
+            version_split_duel: true,
+            tags: Some(tags),
+        });
+    }
+
     // One ACCESS case in ten is the deliberate RESTORE duel — the only shape that
     // reaches T3's fix (RULING 1).
     if policy_type == 0 && rng.chance(1, 10) {
@@ -1879,6 +2005,7 @@ fn generate_case(
             composed_duel: false,
             candidacy_duel: false,
             restore_duel: true,
+            version_split_duel: false,
             tags: Some(tags),
         });
     }
@@ -1898,6 +2025,7 @@ fn generate_case(
             composed_duel: false,
             candidacy_duel: true,
             restore_duel: false,
+            version_split_duel: false,
             tags: Some(tags),
         });
     }
@@ -1919,6 +2047,7 @@ fn generate_case(
             composed_duel: true,
             candidacy_duel: false,
             restore_duel: false,
+            version_split_duel: false,
             tags: Some(tags),
         });
     }
@@ -1939,6 +2068,7 @@ fn generate_case(
             composed_duel: false,
             candidacy_duel: false,
             restore_duel: false,
+            version_split_duel: false,
             tags: None,
         });
     }
@@ -1952,27 +2082,39 @@ fn generate_case(
     // ⚠ **Decided BEFORE the resource policies, because a tag-carrying case
     // levels their priorities — a HELD-OUT shape with a measured reason (fix
     // round 1, finding T7).** A tag verdict plus resource ACCESS policies at two
-    // priorities is a shape this crate answers WRONGLY, and the mechanism is the
-    // `accessTypeResults` map that T4's doc already refuses to model: Ranger's
-    // `updateAccessResult` writes into a FRESH per-access-type result whose
-    // `isAllowed` is false, so a resource allow lands there and raises the
-    // slot's priority even when the shared result was already allowed by a tag
-    // policy — and `getCompositeAccessResult` then copies that priority back,
-    // shutting out lower-priority evaluators this crate still runs. Measured at
-    // ranger 2.8.0, corpus case `2.8.0-0848` at seed `0x54d000007`: a tag ALLOW
-    // at priority 0, an `isDenyAllElse` resource policy at 1 that allows, and a
-    // resource policy at 0 that denies — Ranger answers `Allowed, policyId 2`
-    // and this crate answers `Denied by p1`.
+    // priorities is a shape whose arbitration runs through the `accessTypeResults`
+    // map that T4's doc already refuses to model: Ranger's `updateAccessResult`
+    // writes into a FRESH per-access-type result whose `isAllowed` is false, so a
+    // resource allow lands there and raises the slot's priority even when the
+    // shared result was already allowed by a tag policy — and
+    // `getCompositeAccessResult` then copies that priority back, shutting out
+    // lower-priority evaluators this crate still runs. Measured at ranger 2.8.0,
+    // corpus case `2.8.0-0848` at seed `0x54d000007`: a tag ALLOW at priority 0, an
+    // `isDenyAllElse` resource policy at 1 that allows, and a resource policy at 0
+    // that denies — Ranger answers `Allowed, policyId 2` and this crate, at the
+    // time, answered `Denied by p1`.
     //
-    // It is HELD OUT rather than refused because the refusal that covers it
-    // honestly ("a resource policy above the tag verdict's priority decides")
-    // would also refuse the four rows of T5's table that this crate reproduces
-    // exactly on 2.8.0, and the three unit tests that pin them. That is the
-    // modelling task `tests/ranger/README.md` names as follow-up item 2, and the
-    // audit it needs is exactly this: the map is live on the RESOURCE path too.
-    // The DELIBERATE duels keep their priorities, so every shape this gate was
-    // pointed at is still generated — what is held out is the random
-    // combination.
+    // ⚠ **WHOLE-BRANCH REVIEW: this crate no longer answers it wrongly — it
+    // REFUSES** ([`UndecidableCause::AccessPriorityCompositeNotModelled`]), because
+    // the shape is reachable on a live engine by one supported API call and an
+    // over-deny is a confident wrong answer. Two things in the paragraph that used
+    // to stand here were wrong and are corrected rather than softened:
+    //
+    // * it said the refusal "would also refuse the four rows of T5's table that
+    //   this crate reproduces exactly on 2.8.0". It does not. T5's rows are a tag
+    //   DENY; this arm fires only when the tag phase ALLOWED, so the two are
+    //   disjoint by construction and all three pinning unit tests still answer.
+    // * it pointed at follow-up item 2. The audit is item 0.
+    //
+    // The LEVELLING stays, and is not a way of hiding the refusal. It is kept
+    // because the resource-path rates this gate reports — `EvalOrderAmbiguous`
+    // above all — are rates over cases with no tag phase, and because the random
+    // composed population is what a download with no override policy looks like.
+    // What the levelling costs is stated, counted and printed by the
+    // `RANDOM composed ACCESS case with a resource policy above priority 0` axis instead of being left
+    // for a reader to derive from two other columns. The DELIBERATE duels keep
+    // their priorities, so every shape this gate was pointed at is still
+    // generated.
     let tags = rng
         .chance(2, 5)
         .then(|| tag_layer(rng, profile, &shape, tag_def, policy_type));
@@ -2015,6 +2157,7 @@ fn generate_case(
         composed_duel: false,
         candidacy_duel: false,
         restore_duel: false,
+        version_split_duel: false,
         tags,
     })
 }
@@ -2034,6 +2177,7 @@ struct Finish<'a> {
     composed_duel: bool,
     candidacy_duel: bool,
     restore_duel: bool,
+    version_split_duel: bool,
     tags: Option<TagLayer>,
 }
 
@@ -2066,6 +2210,7 @@ fn finish_case(f: Finish<'_>) -> Case {
         composed_duel: f.composed_duel,
         candidacy_duel: f.candidacy_duel,
         restore_duel: f.restore_duel,
+        version_split_duel: f.version_split_duel,
         service_policies,
         request: AccessRequest {
             user: f.shape.user,
@@ -2129,11 +2274,27 @@ enum Declined {
     /// arbitration is the one that gets to spend it.
     TagPriorityArbitration,
     /// [`UndecidableCause::TagDenyReopenedDiffersByPluginVersion`] — the one
-    /// composed shape the two plugin versions answer differently. **It fires on
-    /// the 2.5.0 half of the corpus and never on the 2.8.0 half**, by
-    /// construction, which is itself the assertion: a run where the two halves'
-    /// rates were equal would mean the version input had stopped being read.
+    /// composed shape the two plugin versions answer differently.
+    ///
+    /// ⚠ **WHOLE-BRANCH REVIEW: this doc used to claim the asymmetry "is itself
+    /// the assertion", and NO SUCH ASSERTION EXISTED.** The two halves were equal,
+    /// at 0 == 0 — the file's own stated failure condition — with no floor, and a
+    /// ceiling of 10‰ over a measured 0‰ that nothing could exceed. Three places
+    /// in the tree described a guard that no code performed.
+    ///
+    /// It is real now: [`VERSION_SPLIT_DUELS`] generates the shape, and
+    /// [`check_version_split_is_asymmetric`] asserts a FLOOR on the 2.5.0 half and
+    /// ZERO on the 2.8.0 half, per engine, against the counts this tally holds.
     TagDenyVersionSplit,
+    /// [`UndecidableCause::AccessPriorityCompositeNotModelled`] — the tag phase
+    /// allowed and a strictly higher-priority resource policy allowed too, which
+    /// Ranger composites through `accessTypeResults` and this crate refuses.
+    ///
+    /// Admitted here rather than left to fail the run because the deliberate duels
+    /// DO vary resource priorities, so the shape is reachable there on purpose. The
+    /// random population cannot reach it at all — see the
+    /// `RANDOM composed ACCESS case with a resource policy above priority 0` axis.
+    AccessPriorityComposite,
 }
 
 impl Declined {
@@ -2144,6 +2305,7 @@ impl Declined {
             Declined::TagSubResultSplit => "TagSubResultSplitByResourcePolicy",
             Declined::TagPriorityArbitration => "TagPriorityArbitrationNotModelled",
             Declined::TagDenyVersionSplit => "TagDenyReopenedDiffersByPluginVersion",
+            Declined::AccessPriorityComposite => "AccessPriorityCompositeNotModelled",
         }
     }
 }
@@ -2157,6 +2319,7 @@ const DECLINED_KINDS: &[Declined] = &[
     Declined::TagSubResultSplit,
     Declined::TagPriorityArbitration,
     Declined::TagDenyVersionSplit,
+    Declined::AccessPriorityComposite,
 ];
 
 /// The CEILING on each refusal, in cases per thousand of the whole corpus.
@@ -2170,21 +2333,53 @@ const DECLINED_KINDS: &[Declined] = &[
 ///
 /// Over-refusal is the failure mode this crate is most likely to have and the one
 /// the brief says "produces no failing test", so it gets an assertion rather than
-/// a printed number. Each ceiling is ~2× the rate measured at the recorded seed,
-/// so ordinary seed variation cannot trip it while a doubling of any single
-/// refusal fails the run.
+/// a printed number.
+///
+/// ⚠ **WHOLE-BRANCH REVIEW: this doc claimed "~2× … so a doubling of any single
+/// refusal fails the run", and the ceilings did not have that property.** The
+/// measured multipliers were EvalOrder 2.1×, ResourceCandidacy 2.2×,
+/// **TagSubResultSplit 4.0×**, **TagPriorityArbitration 3.6×** — and
+/// TagDenyVersionSplit had NO multiplier at all, because it was 0‰ measured under
+/// a 10‰ ceiling, so a refusal that never fired could have fired 40 times per run
+/// and passed. Confirmed by injection: an exact doubling, 30 → 61 of 4000, stayed
+/// GREEN.
+///
+/// Two things were wrong, and they are fixed differently:
+///
+/// * the ARITHMETIC. At exactly 2× a doubling lands ON the ceiling and the test is
+///   `>`, so it passes. Every ceiling below is now **1.6×** the measured rate, so
+///   an exact doubling is strictly over it. Checked for each entry against the
+///   truncating integer `per_mille` the assertion actually computes, not against
+///   the real-valued rate.
+/// * the HONESTY about noise. The old sentence promised that seed variation could
+///   not trip these. At 1.6× that promise cannot be kept for the three refusals
+///   measured under ~25 cases in 4000: 1.6× is roughly two Poisson standard
+///   deviations there, and `AccessPriorityComposite` at 10 cases is the tightest.
+///   That is accepted rather than papered over — **at those counts a ceiling loose
+///   enough that noise cannot trip it is loose enough that a real regression
+///   cannot either.** On a trip the fix is to re-measure and re-record in the same
+///   commit, which the failure message says.
+///
+/// Measured at seed `0x54d000007`, 2000 cases per engine, after the whole-branch
+/// review's changes (the new `version_split_duel` draw moved every rate, which is
+/// why none of these numbers match the fix-round-2 report).
 const DECLINED_CEILINGS: &[(Declined, u32)] = &[
-    // measured 209/4000 = 52‰
-    (Declined::EvalOrder, 110),
-    // measured 253/4000 = 63‰, and bounded above by the candidacy-duel share of
-    // the corpus (~66‰) because it fires nowhere else.
-    (Declined::ResourceCandidacy, 140),
-    // measured 19/4000 = 5‰
-    (Declined::TagSubResultSplit, 20),
-    // measured 29/4000 = 7‰
-    (Declined::TagPriorityArbitration, 25),
-    // measured 0/4000, and 1/1600 at a smaller run. A ceiling of 10‰ is 40 cases.
-    (Declined::TagDenyVersionSplit, 10),
+    // measured 225/4000 = 56‰ → 1.60×. A doubling is 450 = 112‰.
+    (Declined::EvalOrder, 90),
+    // measured 184/4000 = 46‰ → 1.59×. Bounded above anyway by the candidacy-duel
+    // share of the corpus, because it fires nowhere else.
+    (Declined::ResourceCandidacy, 73),
+    // measured 17/4000 = 4‰ → 1.65×. A doubling is 34 = 8‰.
+    (Declined::TagSubResultSplit, 7),
+    // measured 23/4000 = 5‰ → 1.57×. A doubling is 46 = 11‰.
+    (Declined::TagPriorityArbitration, 9),
+    // measured 73/4000 = 18‰ → 1.59×, and no longer 0: `version_split_duel`
+    // generates the shape, so this entry bounds something that actually fires.
+    (Declined::TagDenyVersionSplit, 29),
+    // measured 10/4000 = 2‰ → 1.60×, the tightest entry in the table and the one
+    // most likely to flap on a seed change. See the ⚠ note above: that is the
+    // trade, not an oversight.
+    (Declined::AccessPriorityComposite, 4),
 ];
 
 fn declined_kind(cause: &UndecidableCause) -> Option<Declined> {
@@ -2201,6 +2396,9 @@ fn declined_kind(cause: &UndecidableCause) -> Option<Declined> {
         }
         UndecidableCause::TagDenyReopenedDiffersByPluginVersion { .. } => {
             Some(Declined::TagDenyVersionSplit)
+        }
+        UndecidableCause::AccessPriorityCompositeNotModelled { .. } => {
+            Some(Declined::AccessPriorityComposite)
         }
         _ => None,
     }
@@ -2365,15 +2563,18 @@ const ID_DIVERGENCES: &[(&str, &str, u32)] = &[
         "same (policyPriority, hasDeny) band — getEvalOrder() not reproduced",
         "tests/ranger/README.md, \"Declared divergences from the real engine\"; \
          eval.rs's sort_eval_order",
-        // measured 37/4000 = 9‰
-        4,
+        // measured 47/4000 = 11‰ after the whole-branch review's changes (37/4000 = 9‰
+        // before them). The floor is half the measured rate, as everywhere else here.
+        5,
     ),
     (
         "tag deny restored over a resource allow — setIsAllowed(false) keeps the last writer's id",
         "eval.rs's restore at offsets 599-632; the fixture is \
          tag_arbitration.rs::nothing_else_determines_so_the_tag_verdict_is_restored",
-        // measured 102/4000 = 25‰
-        12,
+        // measured 90/4000 = 22‰ after the whole-branch review's changes (102/4000 = 25‰
+        // before them — the new `version_split_duel` draw takes cases that would
+        // otherwise have been restore duels).
+        11,
     ),
 ];
 
@@ -2883,6 +3084,14 @@ const AXES: &[Axis] = &[
         only: None,
     },
     Axis {
+        name: "tag: version-split duel (T5's 2.5.0 arm reachable)",
+        // Drawn at 1 in 14 of the ACCESS cases; floor at roughly half the measured
+        // share. A floor rather than a printed count, because unlike the hold-out
+        // axis below this shape IS supposed to be generated.
+        min_per_mille: 16,
+        only: None,
+    },
+    Axis {
         name: "tag: candidacy duel (offset 553 reachable)",
         min_per_mille: 23,
         only: None,
@@ -2900,6 +3109,50 @@ const AXES: &[Axis] = &[
     Axis {
         name: "resource policy audit-disabled with NO items (NOT pruned)",
         min_per_mille: 21,
+        only: None,
+    },
+    // ⚠ WHOLE-BRANCH REVIEW. A floor of 0 that EXISTS, for the one conjunction
+    // this corpus deliberately does not generate.
+    //
+    // `policy`'s `level_priority` forces `policyPriority: 0` on every resource
+    // policy of a random tag-carrying case — a held-out shape with a measured
+    // reason (see [`generate_case`]). The consequence is not just that the shape
+    // is absent: with every resource policy at 0, a tag DENY determines before any
+    // resource evaluator runs and a tag ALLOW stands, so **the three-way
+    // arbitration at offsets 469/505 is exercised against a resource evaluator
+    // only in the `composed duel` column.** That is visible in the printed rates
+    // (`COMPOSED RANDOM` EvalOrder 1.91% / ResourceCandidacy 0.00% against the
+    // duel column's 16.54% / 29.52%) but it was only INFERABLE — nothing counted
+    // the conjunction, so nothing in the gate could state the hole. `policyPriority
+    // override` counts it over all cases (including the three in five with no tag
+    // phase) and `tag: policyPriority override` counts the TAG side; neither is
+    // this.
+    //
+    // ⚠ The scoping took TWO measurements to get right, and both wrong versions
+    // read as healthy coverage of the shape that has none — the
+    // `A correlated oracle is not an oracle` failure one step removed.
+    //
+    // * the bare conjunction counted 486 of 2000 = 243‰: every deliberate duel, all
+    //   four kinds of which build a tag block over a resource policy at priority 1
+    //   on purpose. Scoped to `Population::Composed`;
+    // * still 123 of 2000 = 61‰, because the levelling in [`generate_case`] is
+    //   **ACCESS only** (levelling the mask and row-filter priorities cost
+    //   `TagSubResultSplitByResourcePolicy` all of its coverage, 19 cases to 0), so
+    //   the mask and row-filter policies of a random tag-carrying case still carry
+    //   priority 1. They are not in the ACCESS loop and not in this hole.
+    //
+    // So the axis is the ACCESS conjunction in the random composed population,
+    // which is exactly the arbitration at offsets 469/505.
+    //
+    // The floor is 0 ON PURPOSE and must stay 0 while the levelling stands: the
+    // axis exists so the COUNT is printed beside the rates it explains. If someone
+    // un-levels [`policy`], this number becomes non-zero and the floor should then
+    // be re-measured — it is the tripwire on the hold-out, not a coverage demand.
+    // Same remedy the file already applies to `ID_DIVERGENCES`: declare the thing,
+    // print its count, and let a change in it be visible.
+    Axis {
+        name: "RANDOM composed ACCESS case with a resource policy above priority 0",
+        min_per_mille: 0,
         only: None,
     },
 ];
@@ -3540,6 +3793,10 @@ fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
         ("tag: composed eval-order duel", case.composed_duel),
         ("tag: restore duel (T3's skip reachable)", case.restore_duel),
         (
+            "tag: version-split duel (T5's 2.5.0 arm reachable)",
+            case.version_split_duel,
+        ),
+        (
             "tag: candidacy duel (offset 553 reachable)",
             case.candidacy_duel,
         ),
@@ -3554,6 +3811,26 @@ fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
         (
             "resource policy audit-disabled with NO items (NOT pruned)",
             resource_audit_pruneable,
+        ),
+        (
+            "RANDOM composed ACCESS case with a resource policy above priority 0",
+            // Read from the case rather than from `tags`, because the question is
+            // about the two BLOCKS standing together and not about any one
+            // policy's contents: a tag block that carries policies at all, and a
+            // resource policy the engine loop would place above the tag verdict.
+            //
+            // `Population::of(case) == Composed` is the scoping, and it is the same
+            // predicate the rates are grouped by — so this count and the column it
+            // explains cannot drift apart.
+            case.policy_type == 0
+                && Population::of(case) == Population::Composed
+                && case.service_policies["tagPolicies"]["policies"]
+                    .as_array()
+                    .is_some_and(|ps| !ps.is_empty())
+                && policies.iter().any(|p| {
+                    p["policyType"].as_i64().unwrap_or(0) == 0
+                        && p["policyPriority"].as_i64().unwrap_or(0) > 0
+                }),
         ),
     ]
 }
@@ -3672,7 +3949,11 @@ impl Population {
         // nothing and removes the coupling from the argument.
         match (
             tagged,
-            case.duel || case.composed_duel || case.candidacy_duel || case.restore_duel,
+            case.duel
+                || case.composed_duel
+                || case.candidacy_duel
+                || case.restore_duel
+                || case.version_split_duel,
         ) {
             (false, false) => Population::Resource,
             (false, true) => Population::ResourceDuel,
@@ -3721,6 +4002,13 @@ struct Tally {
     /// the agreement into a disagreement, which is the property it exists for.
     restore_duels: usize,
     restore_duels_agreeing: usize,
+    /// Deliberate [`version_split_duel`]s generated, and how many of them DECLINED
+    /// with [`Declined::TagDenyVersionSplit`]. Both are needed: the count alone
+    /// cannot tell "the generator stopped" from "the refusal stopped", and that
+    /// confusion is exactly what let this refusal sit at 0/4000 behind a described
+    /// guard.
+    version_split_duels: usize,
+    version_split_duels_declined: usize,
     /// Cases carrying a `tagPolicies` block.
     tagged: usize,
     /// How many cases fell in each [`Population`] — the denominators.
@@ -3773,6 +4061,8 @@ impl Tally {
         self.candidacy_duels_declined += other.candidacy_duels_declined;
         self.restore_duels += other.restore_duels;
         self.restore_duels_agreeing += other.restore_duels_agreeing;
+        self.version_split_duels += other.version_split_duels;
+        self.version_split_duels_declined += other.version_split_duels_declined;
         self.tagged += other.tagged;
         for (key, count) in &other.population {
             *self.population.entry(*key).or_default() += count;
@@ -3794,6 +4084,70 @@ impl Tally {
     }
 }
 
+/// The assertion three places in the tree already CLAIMED, now real.
+///
+/// ⚠ **WHOLE-BRANCH REVIEW.** `Declined::TagDenyVersionSplit`'s doc said the
+/// 2.5.0/2.8.0 asymmetry *"is itself the assertion: a run where the two halves'
+/// rates were equal would mean the version input had stopped being read"* — and no
+/// `assert!` anywhere compared the halves. The halves WERE equal, at 0 == 0, which
+/// is the file's own stated failure condition; the only bound was a ceiling of 10‰
+/// over a measured 0‰ that nothing could exceed. A described guard that no code
+/// performs is the shape that has cost this branch the most, so this function
+/// exists and is called once per engine.
+///
+/// Three things are asserted, and each fails for a different reason:
+///
+/// 1. the duel is still GENERATED — otherwise 2 and 3 are vacuous, which is how
+///    the last version of this claim passed;
+/// 2. at a plugin version that is NOT 2.8.0 the crate REFUSES essentially all of
+///    them — so deleting the `plugin_version` read turns this red;
+/// 3. at 2.8.0 it refuses NONE of them — so widening the refusal to cover the
+///    version this crate actually reproduces turns this red too.
+///
+/// The 90% slack in 2 is for a duel whose random tag name or match type makes the
+/// tag phase not decide at all; it is not slack on the version read, which 3 pins
+/// from the other side at exactly zero.
+fn check_version_split_is_asymmetric(profile: &Profile, tally: &Tally) {
+    let generated = tally.version_split_duels;
+    let declined = tally.version_split_duels_declined;
+    assert!(
+        generated * 60 >= tally.cases,
+        "ranger {}: only {generated} version-split duels in {} cases — the ONLY shape that \
+         reaches TagDenyReopenedDiffersByPluginVersion has stopped being generated, and every \
+         other assertion about that refusal is now vacuous",
+        profile.ranger_version,
+        tally.cases,
+    );
+    if profile.ranger_version == "2.8.0" {
+        assert_eq!(
+            declined, 0,
+            "ranger 2.8.0: {declined} of {generated} version-split duels REFUSED. 2.8.0 is the \
+             version this crate reproduces, so this shape must be ANSWERED and compared against \
+             the real engine — a refusal here means the version read has been widened past what \
+             was measured"
+        );
+    } else {
+        assert!(
+            declined * 10 >= generated * 9 && declined > 0,
+            "ranger {}: only {declined} of {generated} version-split duels refused. At a plugin \
+             version other than 2.8.0 this crate's model is MEASURED WRONG (it would reopen a \
+             deny 2.5.0 keeps), so a run that answers them is a run that has stopped reading \
+             EngineConfig::plugin_version",
+            profile.ranger_version,
+        );
+    }
+    eprintln!(
+        "differential: ranger {} — {declined} of {generated} version-split duels refused \
+         (expected {})",
+        profile.ranger_version,
+        if profile.ranger_version == "2.8.0" {
+            "NONE: 2.8.0 is the arm this crate reproduces"
+        } else {
+            "essentially all: 2.5.0's arm is unmodelled"
+        },
+    );
+}
+
 /// The refusal rates the package owes, each over the POPULATION it belongs to.
 ///
 /// A percentage with no denominator is the shape in which "unmeasured" and
@@ -3808,7 +4162,19 @@ impl Tally {
 /// a follow-up task has to budget for was the understated one.
 ///
 /// So every number here carries its numerator, its denominator and the name of
-/// its population, and **`COMPOSED RANDOM` is the column a real download is in**.
+/// its population.
+///
+/// ⚠ **WHOLE-BRANCH REVIEW: this doc used to close "and `COMPOSED RANDOM` is the
+/// column a real download is in". That is a coverage claim stronger than the
+/// data.** A real download CAN carry an override policy — one supported API call
+/// emits `policyPriority: 1` — and this column cannot: `policy`'s `level_priority`
+/// forces every resource policy of a random tag-carrying case to 0. So the
+/// three-way arbitration at offsets 469/505 is exercised against a resource
+/// evaluator only in the `composed duel` column, which the printed rates show
+/// (`COMPOSED RANDOM` EvalOrder 1.91% / ResourceCandidacy 0.00% against the duel
+/// column's 16.54% / 29.52%). `COMPOSED RANDOM` is the column a real download WITH
+/// NO OVERRIDE POLICY is in; the hold-out and its count are on the
+/// `RANDOM composed ACCESS case with a resource policy above priority 0` axis.
 fn report_rates(label: &str, tally: &Tally) {
     let pct = |n: usize, d: usize| -> String {
         if d == 0 {
@@ -3959,6 +4325,7 @@ fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
                 composed_duel: false,
                 candidacy_duel: false,
                 restore_duel: false,
+                version_split_duel: false,
                 policy_type: 0,
                 service_policies: service_policies(json!([{
                     "id": 1, "name": "f1", "service": "trino_prod", "policyType": 0,
@@ -4023,6 +4390,7 @@ fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
                 composed_duel: false,
                 candidacy_duel: false,
                 restore_duel: false,
+                version_split_duel: false,
                 policy_type: 1,
                 service_policies: service_policies(json!([
                     {
@@ -4134,6 +4502,193 @@ fn check_pinned_divergences(def_json: &Value, def: &ServiceDef, engine: &EngineC
 /// which the corpus itself does not do — `EgretTagServiceResourceValidationTest`
 /// already runs the same def at both versions, and nothing in this claim is
 /// about the resource def at all.
+/// The whole-branch review's CRITICAL, pinned on the two cases it was measured
+/// with, at both plugin versions.
+///
+/// ⚠ **The line this pins was pinned in NEITHER direction before.** Mutating
+/// `} else if !allowed {` in [`evaluate`]'s allow arm to `} else {` compiles and
+/// survived the whole suite, 259 passed / 0 failed — because nothing anywhere
+/// exercised a tag ALLOW under a strictly higher-priority resource allow. The
+/// corpus cannot reach it (`policy`'s `level_priority`), so the shape needs a
+/// hand-built fixture or it has no coverage at all.
+///
+/// Both mutants are now red:
+///
+/// * `} else {` makes the composite arm dead, so case A is ANSWERED and the
+///   refusal assertion below fails;
+/// * `found.priority > priority` → `false` removes the refusal, so case A is
+///   answered `Denied` by the low-priority denier and the same assertion fails.
+///
+/// Case B is the control that makes case A's cause legible: the SAME two resource
+/// policies with the `tagPolicies` block removed. Both engines answer
+/// `Allowed, policyId 1` for it, so the tag ALLOW is the sole trigger — without
+/// the control, "ranger allows" would be consistent with the resource policies
+/// alone and the finding would not be located.
+fn check_measured_priority_composite(
+    def_json: &Value,
+    tag_def_json: &Value,
+    def: &ServiceDef,
+    engine: &EngineConfig,
+) {
+    // `p1` at priority 1 ALLOWS and is `isDenyAllElse` (so `hasDeny()` is true and
+    // offset 553 cannot determine on it); `p2` at priority 0 DENIES the same thing.
+    // Ranger composites p1's priority onto the already-allowed result and shuts p2
+    // out at offset 505; this crate modelled the allow branch's `if (!isAllowed)`
+    // guard as "writes nothing" and let p2 deny.
+    let resource_policies = json!([
+        {
+            "id": 1, "name": "p1", "service": "trino_prod", "policyType": 0,
+            "isEnabled": true, "policyPriority": 1, "isDenyAllElse": true,
+            "resources": {
+                "catalog": {"values": ["hive"]}, "schema": {"values": ["sales"]},
+                "table": {"values": ["orders"]}, "column": {"values": ["id"]},
+            },
+            "policyItems": [{
+                "users": ["bob"], "groups": [], "roles": [],
+                "accesses": [{"type": "select", "isAllowed": true}],
+            }],
+        },
+        {
+            "id": 2, "name": "p2", "service": "trino_prod", "policyType": 0,
+            "isEnabled": true, "policyPriority": 0,
+            "resources": {
+                "catalog": {"values": ["hive"]}, "schema": {"values": ["sales"]},
+                "table": {"values": ["orders"]}, "column": {"values": ["id"]},
+            },
+            "denyPolicyItems": [{
+                "users": ["bob"], "groups": [], "roles": [],
+                "accesses": [{"type": "select", "isAllowed": true}],
+            }],
+        },
+    ]);
+    let tag_block = json!({
+        "serviceName": "trino_prod_tag",
+        "serviceId": 2,
+        "policyVersion": 1,
+        "serviceDef": tag_def_json,
+        "policies": [{
+            "id": 901, "name": "t901", "service": "trino_prod_tag", "policyType": 0,
+            "isEnabled": true, "policyPriority": 0,
+            "resources": {"tag": {"values": ["pii"]}},
+            "policyItems": [{
+                "users": ["bob"], "groups": [], "roles": [],
+                "accesses": [{"type": "select", "isAllowed": true}],
+            }],
+        }],
+    });
+    let request = |tagged: bool| AccessRequest {
+        user: "bob".to_string(),
+        groups: BTreeSet::new(),
+        roles: BTreeSet::new(),
+        access_type: "select".to_string(),
+        resource: RequestResource::new()
+            .with("catalog", "hive")
+            .with("schema", "sales")
+            .with("table", "orders")
+            .with("column", "id"),
+        owner: None,
+        resolved_tags: Some(UnenrichedTags::new(if tagged {
+            vec![ResolvedTag {
+                name: "pii".to_string(),
+                match_type: MatchType::Self_,
+                attributes: BTreeMap::new(),
+                options: BTreeSet::new(),
+                validity_periods: 0,
+                attached_through: TagServiceResource {
+                    levels: ["catalog", "schema", "table"]
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect(),
+                    is_enabled: true,
+                },
+            }]
+        } else {
+            Vec::new()
+        })),
+    };
+    let envelope = |tagged: bool| {
+        let mut e = Map::new();
+        e.insert("serviceName".to_string(), json!("trino_prod"));
+        e.insert("serviceId".to_string(), json!(1));
+        e.insert("policyVersion".to_string(), json!(1));
+        e.insert("serviceDef".to_string(), def_json.clone());
+        e.insert("policies".to_string(), resource_policies.clone());
+        if tagged {
+            e.insert("tagPolicies".to_string(), tag_block.clone());
+        }
+        Value::Object(e)
+    };
+    let build = |id: &str, tagged: bool| Case {
+        id: id.to_string(),
+        policy_type: 0,
+        duel: false,
+        composed_duel: false,
+        candidacy_duel: false,
+        restore_duel: false,
+        version_split_duel: false,
+        service_policies: envelope(tagged),
+        request: request(tagged),
+    };
+    let cases = vec![
+        build("pin-t7-a-tag-allow", true),
+        build("pin-t7-b-control", false),
+    ];
+
+    for (case, want_refusal) in cases.iter().zip([true, false]) {
+        let set: ServicePolicySet =
+            serde_json::from_value(case.service_policies.clone()).expect("parse t7 pin");
+        let mine = rust_outcome(case, &set, def, engine);
+        if want_refusal {
+            assert!(
+                matches!(&mine, Outcome::Declined(Declined::AccessPriorityComposite)),
+                "the tag ALLOW under a strictly higher-priority resource allow must REFUSE with \
+                 AccessPriorityCompositeNotModelled, not {mine:?}.\n  \
+                 `Denied` means the refusal was removed and the over-deny is back; `Allowed` \
+                 means the allow arm now writes unconditionally, which is a MODEL of the \
+                 accessTypeResults composite and needs the audit in open item 0 before it can \
+                 be trusted — the two-case fixture cannot tell a correct model from a lucky one"
+            );
+        } else {
+            assert_eq!(
+                mine,
+                Outcome::Access { allowed: true },
+                "the CONTROL — the same two resource policies with no tagPolicies block — must \
+                 answer Allowed. If it does not, case A's refusal is not located by the tag \
+                 ALLOW and the whole finding needs re-measuring"
+            );
+        }
+    }
+
+    for version in ["2.5.0", "2.8.0"] {
+        let verdicts = ask_ranger(&cases, "trino", version, "t7pin");
+        for (verdict, case) in verdicts.iter().zip(&cases) {
+            assert_eq!(
+                verdict.get("error").and_then(Value::as_str),
+                None,
+                "ranger {version} errored on {}: {verdict}",
+                case.id
+            );
+            assert_eq!(
+                (
+                    verdict.get("isAllowed").and_then(Value::as_bool),
+                    java_access_policy_id(verdict)
+                ),
+                (Some(true), Some(1)),
+                "ranger {version} was measured to answer `Allowed, policyId 1` for {} — BOTH \
+                 cases, at BOTH versions, which is what makes this a modelling gap and not a \
+                 version split. It did not, so the refusal this crate now carries is resting \
+                 on a measurement that no longer holds: re-measure before narrowing it.\n  \
+                 verdict: {verdict}",
+                case.id
+            );
+        }
+        eprintln!(
+            "differential: ranger {version} answers Allowed/policyId 1 for the tag ALLOW under a \
+             higher-priority resource allow, as measured"
+        );
+    }
+}
+
 fn check_measured_tag_crash(
     def_json: &Value,
     tag_def_json: &Value,
@@ -4147,6 +4702,7 @@ fn check_measured_tag_crash(
         composed_duel: false,
         candidacy_duel: false,
         restore_duel: false,
+        version_split_duel: false,
         service_policies: json!({
             "serviceName": "trino_prod",
             "serviceId": 1,
@@ -4479,6 +5035,9 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
         if case.restore_duel {
             tally.restore_duels += 1;
         }
+        if case.version_split_duel {
+            tally.version_split_duels += 1;
+        }
         if case.service_policies.get("tagPolicies").is_some() {
             tally.tagged += 1;
         }
@@ -4489,6 +5048,9 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
             *tally.declined.entry((*kind, population)).or_default() += 1;
             if case.candidacy_duel && *kind == Declined::ResourceCandidacy {
                 tally.candidacy_duels_declined += 1;
+            }
+            if case.version_split_duel && *kind == Declined::TagDenyVersionSplit {
+                tally.version_split_duels_declined += 1;
             }
             continue;
         }
@@ -4640,6 +5202,9 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
     // …and the one shape the corpus is forbidden to carry, whose absence from it
     // would otherwise be indistinguishable from the behaviour having gone away.
     check_measured_tag_crash(&pin_def_json, &load_tag_def(), &pin_def, &pin_engine);
+    // …and the whole-branch review's CRITICAL, which the corpus cannot reach
+    // because `policy`'s `level_priority` holds the shape out on purpose.
+    check_measured_priority_composite(&pin_def_json, &load_tag_def(), &pin_def, &pin_engine);
 
     let mut total = Tally::default();
     for profile in [trino(), starrocks()] {
@@ -4664,6 +5229,7 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
             tally.no_filter,
         );
         report_rates(&format!("ranger {}", profile.ranger_version), &tally);
+        check_version_split_is_asymmetric(&profile, &tally);
         total.absorb(&tally);
     }
 
@@ -4765,9 +5331,12 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
     // * the compared FRACTION catches a refusal spread thinly across every kind,
     //   which no per-kind ceiling can see.
     //
-    // Both are deliberately loose against the measured values. A ceiling that
-    // flaps gets deleted by the next person, which is worse than no ceiling —
-    // which is what this file had.
+    // ⚠ The per-kind ceilings are 1.6× measured, NOT "deliberately loose" as this
+    // comment used to say — at 2× a doubling lands on the ceiling and passes, which
+    // is what the whole-branch review proved by injection. The compared FRACTION
+    // below stays loose, because it is the one that has to absorb every kind's
+    // ordinary variation at once. See the ⚠ block on `DECLINED_CEILINGS` for what
+    // that costs at small counts and why it is accepted.
     assert_eq!(
         DECLINED_KINDS.len(),
         DECLINED_CEILINGS.len(),

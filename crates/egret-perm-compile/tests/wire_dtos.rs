@@ -569,6 +569,38 @@ fn cause_tag_priority_arbitration_keeps_names_and_priorities_in_step() {
     );
 }
 
+/// The whole-branch review's CRITICAL rides the arbitration wire shape as a
+/// DELIBERATE ALIAS, and this pins the mapping so it cannot drift silently.
+///
+/// The tag policy comes FIRST and the resource policy SECOND, in all three
+/// parallel lists. That order is what makes the page's sentence readable at all,
+/// and a swap would pair each name with the other's priority — the exact defect
+/// the three-list shape exists to avoid.
+///
+/// ⚠ The wire tag is `tag_priority_arbitration_not_modelled`, so the page's
+/// sentence calls the resource policy a tag policy. See the ⚠ hand-off note on
+/// the `From` arm in `explain_wire.rs`.
+#[test]
+fn cause_access_priority_composite_rides_the_arbitration_wire_shape() {
+    let cause = UndecidableCause::AccessPriorityCompositeNotModelled {
+        tag_policy_id: Some(901),
+        tag_policy_name: "clearance-allow".to_string(),
+        tag_priority: 0,
+        resource_policy_id: Some(1),
+        resource_policy_name: "override-grant".to_string(),
+        resource_priority: 1,
+    };
+    assert_eq!(
+        serde_json::to_value(WireUndecidableCause::from(&cause)).unwrap(),
+        serde_json::json!({
+            "kind": "tag_priority_arbitration_not_modelled",
+            "policy_ids": [901, 1],
+            "policy_names": ["clearance-allow", "override-grant"],
+            "priorities": [0, 1],
+        })
+    );
+}
+
 /// The version split names BOTH policies, and they are not interchangeable: one
 /// is the TAG policy that denies and one is the RESOURCE policy that allows, and
 /// a UI that swapped them would send a steward to the wrong service entirely.
