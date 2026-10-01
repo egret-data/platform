@@ -22,6 +22,10 @@
 //!
 //! `EGRET_TEST_KIND_CONTEXT=kind-<name>` runs it against another cluster
 //! (a temporary one) instead of `kind-egret`; load the two images there.
+//! `a_tar_x_that_dies_in_the_pod_fails_the_task` also needs
+//! `egret-w9a-t5-badtar:dev`: `egret-task-helper:dev` plus a
+//! `/usr/local/bin/tar` that, for `-x`, reads 4 KiB, prints
+//! `tar: write error: No space left on device` and exits 1.
 //!
 //! # It touches ONE namespace, and deletes it
 //!
@@ -566,6 +570,8 @@ async fn a_stored_input_file_streams_into_the_pod() {
         "tr -d '0-9a-f' < d/big.bin | wc -c | tr -d ' ' > foreign.txt",
         "head -c 16 d/big.bin > head.txt",
         "cp literal.txt lit.txt",
+        // Fix round 1, I1: real mtimes (W5a's pack wrote 0 here too).
+        "stat -c %Y d/big.bin > mtime.txt",
     ]);
     cmds.input_files = BTreeMap::from([("literal.txt".to_string(), "just contents".to_string())]);
     cmds.stored_inputs = BTreeMap::from([(
@@ -581,6 +587,7 @@ async fn a_stored_input_file_streams_into_the_pod() {
         "foreign.txt".into(),
         "head.txt".into(),
         "lit.txt".into(),
+        "mtime.txt".into(),
     ];
     let out = r
         .run(&t, &cmds, &k8s_spec(), &NoObserver)
@@ -588,8 +595,23 @@ async fn a_stored_input_file_streams_into_the_pod() {
         .expect("no worker failure");
     assert_eq!(out.exit_code, 0, "{out:?}");
     assert_eq!(out.failure, None, "{out:?}");
+    let mtime: u64 = out
+        .output_files
+        .get("mtime.txt")
+        .and_then(|m| m.trim().parse().ok())
+        .unwrap_or_else(|| panic!("{out:?}"));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(
+        mtime >= 315_532_800 && mtime <= now + 60 && mtime + 3600 >= now,
+        "the staged file carries the upload's time, not 1970: {mtime}"
+    );
+    let mut files_out = out.output_files.clone();
+    files_out.remove("mtime.txt");
     assert_eq!(
-        out.output_files,
+        files_out,
         BTreeMap::from([
             ("n.txt".to_string(), "12582912\n".to_string()),
             ("foreign.txt".to_string(), "0\n".to_string()),
@@ -599,6 +621,117 @@ async fn a_stored_input_file_streams_into_the_pod() {
     );
     r.release(&t, &k8s_spec()).await.expect("release");
     assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
+}
+
+/// The helper image whose `tar -x` reads 4 KiB and dies saying the disk is
+/// full (fix round 1, I2): `FROM egret-task-helper:dev` plus a
+/// `/usr/local/bin/tar` shim, built and loaded by hand (see the report).
+const BAD_TAR_HELPER: &str = "egret-w9a-t5-badtar:dev";
+
+/// **Fix round 1, I2: a `tar -x` that dies in the pod is the TASK's
+/// failure**, naming tar's words -- not an outage that re-uploads the same
+/// archive for ever with no attempt spent.
+async fn a_tar_x_that_dies_in_the_pod_fails_the_task() {
+    const SIZE: usize = 12 << 20;
+    let c = client().await;
+    let files = Arc::new(egret_workflow::storage::FileStore {
+        store: Arc::new(egret_storage::MemStore::new()),
+        bucket: "egret-test".into(),
+        prefix: "workflow/".into(),
+        caps: egret_workflow::storage::Caps::default(),
+        retention_days: 30,
+    });
+    let mut cfg = pod_config();
+    cfg.helper_image = BAD_TAR_HELPER.to_string();
+    let r = KubernetesRunner::new(runner_client().await, cfg, LogRepo::new(pool().await))
+        .with_files(files.clone());
+    let (t, _rec) = task();
+    let uri = format!(
+        "kestra:///w9a/t5/in-files/executions/{}/tasks/w/{}/big.bin",
+        Uuid::new_v4(),
+        Uuid::new_v4()
+    );
+    let object_uri = files.object_uri(t.workspace_id, &uri).unwrap();
+    files
+        .store
+        .put(&object_uri, vec![b'x'; SIZE])
+        .await
+        .unwrap();
+    let mut cmds = shell(&["echo never"]);
+    cmds.stored_inputs = BTreeMap::from([(
+        "big.bin".to_string(),
+        StoredInput {
+            uri,
+            object_uri,
+            size: SIZE as u64,
+        },
+    )]);
+    let started = std::time::Instant::now();
+    let got = tokio::time::timeout(
+        Duration::from_secs(120),
+        r.run(&t, &cmds, &k8s_spec(), &NoObserver),
+    )
+    .await
+    .expect("a dead tar ends the run promptly");
+    match &got {
+        Err(egret_core::Error::InvalidInput(m)) => assert!(
+            m.contains("No space left on device") && m.contains("tar -x"),
+            "{m}"
+        ),
+        other => panic!("the task's failure expected, not {other:?}"),
+    }
+    eprintln!("extract failure in {:?}: {got:?}", started.elapsed());
+    remove_pod(&c, &name_of(&t)).await;
+}
+
+/// **Fix round 1, M2: when OUR side stops part-way the exec is aborted**: an
+/// object shorter than its index row is the author's failure, at once --
+/// without the abort, `tar -x` waits for the rest of the archive until the
+/// idle limit and the run becomes an outage.
+async fn a_short_stored_object_aborts_the_upload_and_fails_the_task() {
+    let c = client().await;
+    let files = Arc::new(egret_workflow::storage::FileStore {
+        store: Arc::new(egret_storage::MemStore::new()),
+        bucket: "egret-test".into(),
+        prefix: "workflow/".into(),
+        caps: egret_workflow::storage::Caps::default(),
+        retention_days: 30,
+    });
+    let r = runner().await.with_files(files.clone());
+    let (t, _rec) = task();
+    let uri = format!(
+        "kestra:///w9a/t5/in-files/executions/{}/tasks/w/{}/short.bin",
+        Uuid::new_v4(),
+        Uuid::new_v4()
+    );
+    let object_uri = files.object_uri(t.workspace_id, &uri).unwrap();
+    files
+        .store
+        .put(&object_uri, vec![b'x'; 1000])
+        .await
+        .unwrap();
+    let mut cmds = shell(&["echo never"]);
+    cmds.stored_inputs = BTreeMap::from([(
+        "short.bin".to_string(),
+        StoredInput {
+            uri: uri.clone(),
+            object_uri,
+            size: 5000,
+        },
+    )]);
+    let started = std::time::Instant::now();
+    let got = tokio::time::timeout(
+        Duration::from_secs(60),
+        r.run(&t, &cmds, &k8s_spec(), &NoObserver),
+    )
+    .await
+    .expect("the aborted upload ends well inside the 120 s idle limit");
+    match &got {
+        Err(egret_core::Error::InvalidInput(m)) => assert!(m.contains(&uri), "{m}"),
+        other => panic!("the author's failure expected, not {other:?}"),
+    }
+    eprintln!("short object failed in {:?}", started.elapsed());
+    remove_pod(&c, &name_of(&t)).await;
 }
 
 /// A non-zero exit is the exit code, with the vars and the files it left.
@@ -1498,6 +1631,8 @@ fn cases() -> Vec<(&'static str, Case)> {
         case!(a_shell_command_runs_in_a_pod_and_the_pod_is_deleted),
         case!(input_and_output_files_round_trip),
         case!(a_stored_input_file_streams_into_the_pod),
+        case!(a_tar_x_that_dies_in_the_pod_fails_the_task),
+        case!(a_short_stored_object_aborts_the_upload_and_fails_the_task),
         case!(a_nonzero_exit_fails_and_keeps_outputs),
         case!(cancel_deletes_the_pod),
         case!(k8s_cancel_with_grace_waits_for_termination_then_release_deletes),
