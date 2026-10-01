@@ -901,6 +901,18 @@ async fn a_deeply_nested_ion_file_is_not_previewable_and_the_server_lives() {
             "{name}"
         );
     }
+    // Fix round 3: an unterminated `/*` in an s-expression hides nothing.
+    let unterminated = format!("(/* {}{})", "[".repeat(5000), "]".repeat(5000));
+    let uri = fx
+        .file(e, "unterminated.ion", unterminated.as_bytes())
+        .await;
+    assert_eq!(
+        fx.preview(e, &uri, None).await,
+        (
+            200,
+            json!({"previewable": false, "rows": [], "truncated": false})
+        )
+    );
     // Still serving.
     let ok = fx.file(e, "after.ion", b"{a:1}").await;
     assert_eq!(fx.preview(e, &ok, None).await.1["rows"], json!([{"a": 1}]));

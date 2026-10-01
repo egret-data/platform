@@ -266,20 +266,34 @@ impl Scan {
     }
 }
 
-/// Text Ion: `[`, `(` and `{` open, `]`, `)` and `}` close, outside strings,
-/// quoted symbols, long strings, lobs and comments -- **as `ion-rs` 1.0.1
-/// tokenises them** (fix round 2; each rule below was probed on it):
+/// Text Ion: `[`, `(` and `{` open a level and `]`, `)` and `}` close one.
 ///
-/// - `//` and `/*` start a comment, which is skipped whole, unless the `/`
-///   directly follows an operator character (`!#%&*+-./;<=>?@^`|~`): then it
-///   is part of an s-expression operator (`(+// [])` is `('+//' [])`, and
-///   `(+// ''' … ''')` an operator followed by a long string). Outside an
-///   s-expression an operator character before `//` is a syntax error, where
-///   the reader stops anyway.
+/// **Safety is structural: the scan skips only what it can prove is data** --
+/// a quoted string, a quoted symbol, a long string, a lob (fix round 3,
+/// controller ruling). Everything else counts its opening brackets, the
+/// inside of a comment included:
+///
+/// - Inside `//…` or `/*…*/` an opening bracket counts and a closing one does
+///   not. However `ion-rs` reads the comment, the scan is never behind it:
+///   `ion-rs` 1.0.1 reads a `/*` with no `*/` after it as an s-expression
+///   OPERATOR and parses what follows (`(/* [b])` is `('/*' [b])`), and the
+///   scan, still in its comment, counts every level of it. The price: a
+///   shallow file with many brackets in comments can be refused (Kestra writes
+///   no comments).
+/// - A comment ends where `ion-rs` ends one (probed): a line comment at `\n`
+///   or `\r`, a block comment at the first `*/` after its `/*`. Within a
+///   comment no quote starts a string.
+/// - `//` and `/*` start a comment unless the `/` directly follows an
+///   operator character (`!#%&*+-./;<=>?@^`|~`): there `ion-rs` reads it as
+///   part of an s-expression operator (`(+// [])` is `('+//' [])`), and code
+///   follows -- possibly a long string whose closing brackets must not count.
+///   Outside an s-expression an operator character before `//` is a syntax
+///   error, where the reader stops.
 /// - `{{` opens a lob, which is not a level: a blob's base64 (`/` and `+`
 ///   included) is data, a clob's `"…"` and `'''…'''` keep their string rules,
 ///   and `}}` closes it. Its first `{` is counted until the second is seen,
-///   so the scan is never behind the reader.
+///   so the scan is never behind the reader. Inside a comment `{{` is two
+///   opening brackets.
 ///
 /// What the reader would refuse (a malformed lob, a stray `}`) may be
 /// scanned differently: the reader stops at the fault and parses nothing
@@ -425,12 +439,21 @@ impl TextScan {
                 _ => Text::Long(0),
             },
             Text::LongEscape => Text::Long(0),
+            // In a comment an opening bracket still counts (see the type's doc).
             Text::LineComment => match b {
                 b'\n' | b'\r' => Text::Normal,
+                b'[' | b'(' | b'{' => {
+                    self.open()?;
+                    Text::LineComment
+                }
                 _ => Text::LineComment,
             },
             Text::BlockComment(star) => match b {
                 b'/' if star => Text::Normal,
+                b'[' | b'(' | b'{' => {
+                    self.open()?;
+                    Text::BlockComment(false)
+                }
                 _ => Text::BlockComment(b == b'*'),
             },
             Text::Brace => match b {
@@ -984,19 +1007,54 @@ mod tests {
         );
     }
 
-    /// Fix round 2: comments are skipped whole, brackets in them included.
+    /// Fix round 3: comments are not skipped. An opening bracket inside one
+    /// counts, a closing one does not, so rows with no brackets in their
+    /// comments read whole, and brackets in comments are an over-count -- a
+    /// shallow file can be refused, never a deep one let through.
     #[test]
-    fn comments_are_skipped_whole() {
+    fn comments_count_their_opening_brackets() {
         for (row, want) in [
-            ("(a // b [c]\n)\n", json!(["a"])),
-            ("/* [[[[ ]] */ {a:1}\n", json!({"a": 1})),
-            ("// [[[[\n{a:1}\n", json!({"a": 1})),
-            ("[1, /* ((( */ 2]\n", json!([1, 2])),
+            ("(a // b c\n)\n", json!(["a"])),
+            ("/* a note */ {a:1}\n", json!({"a": 1})),
+            ("// a note\n{a:1}\n", json!({"a": 1})),
+            ("[1, /* ]]] */ 2]\n", json!([1, 2])),
         ] {
             let (rows, stop) = read_values(cursor(row.repeat(600)), 1000);
             assert!(matches!(stop, Stop::End), "{row:?}: {stop:?}");
             assert_eq!(rows.len(), 600, "{row:?}");
             assert_eq!(rows[599], want, "{row:?}");
+        }
+        // The reviewer's FP2: each row leaves one level open in the count.
+        let fp2 = "(a // b [c]\n)\n";
+        let (rows, stop) = read_values(cursor(fp2.repeat(60)), 1000);
+        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert_eq!(rows.len(), 60);
+        let (_, stop) = read_values(cursor(fp2.repeat(600)), 1000);
+        assert!(matches!(stop, Stop::TooDeep(_)), "{stop:?}");
+    }
+
+    /// Fix round 3, C1 brought back by round 2: `ion-rs` reads a `/*` with no
+    /// `*/` after it as an s-expression operator and parses what follows. The
+    /// round-2 scan skipped it as a comment; 5000 levels after it aborted a
+    /// debug build. Every opening bracket after it now counts.
+    #[test]
+    fn an_unterminated_block_comment_hides_no_nesting() {
+        let deep = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+        for (name, text, rows_before) in [
+            ("101 levels", format!("(/* {})", deep(MAX_DEPTH + 1)), 0),
+            ("10 KB", format!("(/* {})", deep(5000)), 0),
+            ("100k levels", format!("(/* {})", deep(100_000)), 0),
+            ("after a row", format!("{{a:1}}\n(/* {})", deep(5000)), 1),
+            ("then a tail", format!("(a /* {}) /* tail", deep(5000)), 0),
+            (
+                "line comment, no newline",
+                format!("(a // {})", deep(5000)),
+                0,
+            ),
+        ] {
+            let (rows, stop) = read_values(cursor(text), 10);
+            assert_eq!(rows.len(), rows_before, "{name}");
+            assert!(matches!(stop, Stop::TooDeep(_)), "{name}: {stop:?}");
         }
     }
 
