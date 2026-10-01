@@ -56,6 +56,19 @@ Wire it into a job that has those — or, at minimum, make a plain run print som
 a human will not read as a pass. A gate that is not on the list is a gate nobody
 runs, and this one has the best hit rate in the package.
 
+### Item 2: the 3→2 residual on `required_roles` — one `SELECT EXISTS`
+
+Task 6 made `explain`'s clearance `required_roles` an `Option`, which separates "there
+was no `tags.key` to look a gate up by" (`None`) from "the lookup ran" (`Some`). That
+takes three indistinguishable facts down to two. The residual: `Some([])` still means
+either **no `classification_policies` row at all** or **a row that declares only
+groups**.
+
+One `SELECT EXISTS` separates them, and the distinction is worth having rather than
+tidy: a **deleted gate that is still enforcing** is exactly the drift a steward needs
+named, and today it renders identically to a gate that exists and grants nothing to
+roles. Raised by Task 6's implementer, which correctly judged it out of its own scope.
+
 ### Item 1: is the composed ACCESS path finished?
 
 **No, on the evidence.** Task 5's gate found **five** defects in
