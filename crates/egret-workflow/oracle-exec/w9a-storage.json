@@ -564,16 +564,36 @@
    },
    "unrelated_same_namespace": {
     "read": {
-     "value": "unrelated content"
+     "error": "NotReadable",
+     "basis": "chosen",
+     "why": "spec §2/§4.4: an unrelated execution of the same workspace is outside the readable set (Unreadable::NotReadable, plan Task 3); Kestra OSS reads it",
+     "kestra": {
+      "value": "unrelated content"
+     }
     },
     "fileSize": {
-     "value": "17"
+     "error": "NotReadable",
+     "basis": "chosen",
+     "why": "spec §2/§4.4: an unrelated execution of the same workspace is outside the readable set (Unreadable::NotReadable, plan Task 3); Kestra OSS reads it",
+     "kestra": {
+      "value": "17"
+     }
     },
     "fileExists": {
-     "value": "true"
+     "error": "NotReadable",
+     "basis": "chosen",
+     "why": "spec §2/§4.4: an unrelated execution of the same workspace is outside the readable set (Unreadable::NotReadable, plan Task 3); Kestra OSS reads it",
+     "kestra": {
+      "value": "true"
+     }
     },
     "isFileEmpty": {
-     "value": "false"
+     "error": "NotReadable",
+     "basis": "chosen",
+     "why": "spec §2/§4.4: an unrelated execution of the same workspace is outside the readable set (Unreadable::NotReadable, plan Task 3); Kestra OSS reads it",
+     "kestra": {
+      "value": "false"
+     }
     }
    },
    "missing_in_own": {
@@ -606,7 +626,12 @@
    },
    "not_utf8": {
     "read": {
-     "value": "���"
+     "error": "NotUtf8",
+     "basis": "chosen",
+     "why": "spec §7.2: read() of non-UTF-8 bytes is an error naming the URI; Kestra decodes lossily (U+FFFD)",
+     "kestra": {
+      "value": "���"
+     }
     },
     "fileSize": {
      "value": "4"
@@ -716,35 +741,51 @@
    "uri_tail": "inputs/f/hello.txt",
    "text_part_value": "text value",
    "allowed_file_extensions": {
+    "refused": true,
     "flow_declares": [
      ".txt"
     ],
-    "upload_bad_csv": {
-     "status": 200,
-     "inputs_f": "kestra:///w9a/storage/file-in/executions/5oCqhGh3ev2vKsTMlDJAUk/inputs/f/bad.csv",
-     "state": "SUCCESS"
-    },
-    "validate_endpoint_bad_csv": {
-     "status": 200,
-     "errors": []
-    },
-    "refused_by_artifact": false,
-    "code_message": "File type not allowed. Accepted extensions: .txt",
-    "code_ref": "kestra 96893b589 core/src/main/java/io/kestra/core/models/flows/input/FileInput.java:39-51 (FileInput.validate; the message at :47); never raised on the artifact",
-    "egret": "chosen: spec §7.1 enforces allowedFileExtensions; the message above is Kestra's source text, not an observed response"
+    "message": "File type not allowed. Accepted extensions: .txt",
+    "message_basis": "code: kestra 96893b589 core/src/main/java/io/kestra/core/models/flows/input/FileInput.java:39-51 (FileInput.validate; the message at :47); never raised on the artifact",
+    "basis": "chosen",
+    "why": "spec §7.1 enforces allowedFileExtensions; the artifact does not",
+    "kestra": {
+     "upload_bad_csv": {
+      "status": 200,
+      "inputs_f": "kestra:///w9a/storage/file-in/executions/5oCqhGh3ev2vKsTMlDJAUk/inputs/f/bad.csv",
+      "state": "SUCCESS"
+     },
+     "validate_endpoint_bad_csv": {
+      "status": 200,
+      "errors": []
+     },
+     "refused_by_artifact": false
+    }
    },
    "file_as_string": {
     "kestra_uri_of_other_execution": {
-     "status": 200,
-     "inputs_f": "kestra:///w9a/storage/ff-source/executions/1HWT5AYktpGARzgT1JPN8C/tasks/w/6BDG2d7u3xip5faIkkC0n9/13063279830369156001.txt",
-     "accepted": true,
-     "read_at_run": "f=kestra:///w9a/storage/ff-source/executions/1HWT5AYktpGARzgT1JPN8C/tasks/w/6BDG2d7u3xip5faIkkC0n9/13063279830369156001.txt | g=none | t=none | read=unrelated content"
+     "accepted": false,
+     "error": "NotReadable",
+     "basis": "chosen",
+     "why": "spec §7.1: a FILE input given as a string must be a kestra:// URI readable from the execution being created; an unrelated execution's is not",
+     "kestra": {
+      "status": 200,
+      "inputs_f": "kestra:///w9a/storage/ff-source/executions/1HWT5AYktpGARzgT1JPN8C/tasks/w/6BDG2d7u3xip5faIkkC0n9/13063279830369156001.txt",
+      "accepted": true,
+      "read_at_run": "f=kestra:///w9a/storage/ff-source/executions/1HWT5AYktpGARzgT1JPN8C/tasks/w/6BDG2d7u3xip5faIkkC0n9/13063279830369156001.txt | g=none | t=none | read=unrelated content"
+     }
     },
     "kestra_uri_naming_no_file": {
-     "status": 200,
-     "accepted": true,
-     "state": "FAILED",
-     "error_at_run": "io.pebbletemplates.pebble.error.PebbleException: File not found for URI: kestra:///w9a/storage/ff-source/executions/nope/tasks/w/x/y.txt (f={{ inputs.f }} | g={{ inputs.g ?? 'none' }} | t={{ inputs.t ?? 'none' }} | read={{ read(inputs.f) }}:1)"
+     "accepted": false,
+     "error": "Malformed",
+     "basis": "chosen",
+     "why": "spec §3/§7.1: the URI's {exec} is 'nope', not a UUID, so egret's parse refuses it at start (Unreadable::Malformed); Kestra accepts it and fails at run",
+     "kestra": {
+      "status": 200,
+      "accepted": true,
+      "state": "FAILED",
+      "error_at_run": "io.pebbletemplates.pebble.error.PebbleException: File not found for URI: kestra:///w9a/storage/ff-source/executions/nope/tasks/w/x/y.txt (f={{ inputs.f }} | g={{ inputs.g ?? 'none' }} | t={{ inputs.t ?? 'none' }} | read={{ read(inputs.f) }}:1)"
+     }
     },
     "plain_string": {
      "status": 422,
@@ -1049,16 +1090,24 @@
      },
      "preview": {
       "status": 200,
-      "headers": {
-       "X-Content-Type-Options": "nosniff",
-       "content-type": "application/json",
-       "content-length": "94"
-      },
       "body": {
-       "extension": "bin",
-       "type": "TEXT",
-       "content": "\u0000\u0001\u0002��binary",
-       "truncated": false
+       "previewable": false
+      },
+      "basis": "chosen",
+      "why": "spec §8: a file that is not .ion/.csv/.jsonl/.json/text is {previewable: false}; Kestra renders it as TEXT",
+      "kestra": {
+       "status": 200,
+       "headers": {
+        "X-Content-Type-Options": "nosniff",
+        "content-type": "application/json",
+        "content-length": "94"
+       },
+       "body": {
+        "extension": "bin",
+        "type": "TEXT",
+        "content": "\u0000\u0001\u0002��binary",
+        "truncated": false
+       }
       }
      }
     },
@@ -1227,66 +1276,87 @@
    "other_execution": {
     "uri": "kestra:///w9a/storage/ff-source/executions/5A1Nz6Gwjqo7oHNaCrjhfK/tasks/w/x5rNX9MVjjiMXBJ46XTBv/3291276764947046213.txt",
     "file": {
-     "status": 301,
-     "headers": {
-      "location": "/api/v1/main/executions/5A1Nz6Gwjqo7oHNaCrjhfK/file?path=kestra:///w9a/storage/ff-source/executions/5A1Nz6Gwjqo7oHNaCrjhfK/tasks/w/x5rNX9MVjjiMXBJ46XTBv/3291276764947046213.txt",
-      "X-Content-Type-Options": "nosniff",
-      "content-length": "0"
+     "status": 404,
+     "basis": "chosen",
+     "why": "spec §2/§8: no redirect; a file outside {id}'s loop family is 404",
+     "kestra": {
+      "status": 301,
+      "headers": {
+       "location": "/api/v1/main/executions/5A1Nz6Gwjqo7oHNaCrjhfK/file?path=kestra:///w9a/storage/ff-source/executions/5A1Nz6Gwjqo7oHNaCrjhfK/tasks/w/x5rNX9MVjjiMXBJ46XTBv/3291276764947046213.txt",
+       "X-Content-Type-Options": "nosniff",
+       "content-length": "0"
+      }
      }
     },
     "metas": {
-     "status": 301,
-     "headers": {
-      "location": "/api/v1/main/executions/5A1Nz6Gwjqo7oHNaCrjhfK/file/metas?path=kestra:///w9a/storage/ff-source/executions/5A1Nz6Gwjqo7oHNaCrjhfK/tasks/w/x5rNX9MVjjiMXBJ46XTBv/3291276764947046213.txt",
-      "X-Content-Type-Options": "nosniff",
-      "content-length": "0"
-     },
-     "body": ""
+     "status": 404,
+     "basis": "chosen",
+     "why": "spec §2/§8: no redirect; a file outside {id}'s loop family is 404",
+     "kestra": {
+      "status": 301,
+      "headers": {
+       "location": "/api/v1/main/executions/5A1Nz6Gwjqo7oHNaCrjhfK/file/metas?path=kestra:///w9a/storage/ff-source/executions/5A1Nz6Gwjqo7oHNaCrjhfK/tasks/w/x5rNX9MVjjiMXBJ46XTBv/3291276764947046213.txt",
+       "X-Content-Type-Options": "nosniff",
+       "content-length": "0"
+      },
+      "body": ""
+     }
     },
     "preview": {
-     "status": 301,
-     "headers": {
-      "location": "/api/v1/main/executions/5A1Nz6Gwjqo7oHNaCrjhfK/file/preview?path=kestra:///w9a/storage/ff-source/executions/5A1Nz6Gwjqo7oHNaCrjhfK/tasks/w/x5rNX9MVjjiMXBJ46XTBv/3291276764947046213.txt&encoding=UTF-8",
-      "X-Content-Type-Options": "nosniff",
-      "content-length": "0"
-     },
-     "body": ""
+     "status": 404,
+     "basis": "chosen",
+     "why": "spec §2/§8: no redirect; a file outside {id}'s loop family is 404",
+     "kestra": {
+      "status": 301,
+      "headers": {
+       "location": "/api/v1/main/executions/5A1Nz6Gwjqo7oHNaCrjhfK/file/preview?path=kestra:///w9a/storage/ff-source/executions/5A1Nz6Gwjqo7oHNaCrjhfK/tasks/w/x5rNX9MVjjiMXBJ46XTBv/3291276764947046213.txt&encoding=UTF-8",
+       "X-Content-Type-Options": "nosniff",
+       "content-length": "0"
+      },
+      "body": ""
+     }
     }
    },
    "loop_iteration_file_via_root": {
-    "root": "2G1i2hGvCOdQ5cwWChXwwu",
-    "iteration": "77sQ6gKNV9aTzN13CRo7lw",
-    "uri": "kestra:///w9a/storage/ff-main/executions/77sQ6gKNV9aTzN13CRo7lw/tasks/iter-write/5VOEu37QYyacAafxgBUFin/13731611245591839406.txt",
-    "requests": [
-     {
-      "request": "GET /api/v1/main/executions/2G1i2hGvCOdQ5cwWChXwwu/file?path=<iteration uri>",
-      "via": "root",
-      "status": 301,
-      "location": "/api/v1/main/executions/77sQ6gKNV9aTzN13CRo7lw/file?path=kestra:///w9a/storage/ff-main/executions/77sQ6gKNV9aTzN13CRo7lw/tasks/iter-write/5VOEu37QYyacAafxgBUFin/13731611245591839406.txt",
-      "body": ""
-     },
-     {
-      "request": "GET /api/v1/main/executions/2G1i2hGvCOdQ5cwWChXwwu/file/metas?path=<iteration uri>",
-      "via": "root",
-      "status": 301,
-      "location": "/api/v1/main/executions/77sQ6gKNV9aTzN13CRo7lw/file/metas?path=kestra:///w9a/storage/ff-main/executions/77sQ6gKNV9aTzN13CRo7lw/tasks/iter-write/5VOEu37QYyacAafxgBUFin/13731611245591839406.txt",
-      "body": ""
-     },
-     {
-      "request": "GET /api/v1/main/executions/77sQ6gKNV9aTzN13CRo7lw/file?path=<iteration uri>",
-      "via": "iteration",
-      "status": 200,
-      "location": null,
-      "body": "written in iteration"
-     },
-     {
-      "request": "GET /api/v1/main/executions/77sQ6gKNV9aTzN13CRo7lw/file/metas?path=<iteration uri>",
-      "via": "iteration",
-      "status": 200,
-      "location": null,
-      "body": "{\"size\":20}"
-     }
-    ]
+    "status": 200,
+    "body": "written in iteration",
+    "basis": "chosen",
+    "why": "spec §8 (user ruling 2026-10-01): any id of the loop family serves the family's files; Kestra answers 301 to the iteration",
+    "kestra": {
+     "root": "2G1i2hGvCOdQ5cwWChXwwu",
+     "iteration": "77sQ6gKNV9aTzN13CRo7lw",
+     "uri": "kestra:///w9a/storage/ff-main/executions/77sQ6gKNV9aTzN13CRo7lw/tasks/iter-write/5VOEu37QYyacAafxgBUFin/13731611245591839406.txt",
+     "requests": [
+      {
+       "request": "GET /api/v1/main/executions/2G1i2hGvCOdQ5cwWChXwwu/file?path=<iteration uri>",
+       "via": "root",
+       "status": 301,
+       "location": "/api/v1/main/executions/77sQ6gKNV9aTzN13CRo7lw/file?path=kestra:///w9a/storage/ff-main/executions/77sQ6gKNV9aTzN13CRo7lw/tasks/iter-write/5VOEu37QYyacAafxgBUFin/13731611245591839406.txt",
+       "body": ""
+      },
+      {
+       "request": "GET /api/v1/main/executions/2G1i2hGvCOdQ5cwWChXwwu/file/metas?path=<iteration uri>",
+       "via": "root",
+       "status": 301,
+       "location": "/api/v1/main/executions/77sQ6gKNV9aTzN13CRo7lw/file/metas?path=kestra:///w9a/storage/ff-main/executions/77sQ6gKNV9aTzN13CRo7lw/tasks/iter-write/5VOEu37QYyacAafxgBUFin/13731611245591839406.txt",
+       "body": ""
+      },
+      {
+       "request": "GET /api/v1/main/executions/77sQ6gKNV9aTzN13CRo7lw/file?path=<iteration uri>",
+       "via": "iteration",
+       "status": 200,
+       "location": null,
+       "body": "written in iteration"
+      },
+      {
+       "request": "GET /api/v1/main/executions/77sQ6gKNV9aTzN13CRo7lw/file/metas?path=<iteration uri>",
+       "via": "iteration",
+       "status": 200,
+       "location": null,
+       "body": "{\"size\":20}"
+      }
+     ]
+    }
    },
    "missing_in_own": {
     "file": {
@@ -1321,18 +1391,23 @@
     }
    },
    "dotdot": {
-    "status": 422,
-    "headers": {
-     "content-type": "application/problem+json",
-     "X-Content-Type-Options": "nosniff",
-     "content-length": "267"
-    },
-    "body": {
-     "type": "https://kestra.io/docs/api-reference/problems/invalid-argument",
-     "title": "Invalid argument",
+    "status": 404,
+    "basis": "chosen",
+    "why": "plan Task 8: anything resolve_readable_many does not answer Ok is 404 (a '..' URI is Malformed)",
+    "kestra": {
      "status": 422,
-     "detail": "File should be accessed with their full path and not using relative '..' path.",
-     "instance": "/api/v1/main/executions/EmwwmoRER9SgPl9m9lQEw/file"
+     "headers": {
+      "content-type": "application/problem+json",
+      "X-Content-Type-Options": "nosniff",
+      "content-length": "267"
+     },
+     "body": {
+      "type": "https://kestra.io/docs/api-reference/problems/invalid-argument",
+      "title": "Invalid argument",
+      "status": 422,
+      "detail": "File should be accessed with their full path and not using relative '..' path.",
+      "instance": "/api/v1/main/executions/EmwwmoRER9SgPl9m9lQEw/file"
+     }
     }
    },
    "unknown_execution": {
@@ -1361,7 +1436,8 @@
     },
     "outputs_error": null
    },
-   "ion_preview_source_text": "{ts:2025-12-03T12:00:00Z,dec:12.50,n:null,l:[1,[2,3],\"x\"],s:\"str\",f:1.5e0,b:true}\n{ts:2025-12-03T12:00:00.123+07:00,dec:-0.001,n:null,l:[],s:\"two\",f:2e0,b:false}\n{ts:2025-12-03,dec:1d2,n:null.int,l:[null],s:\"three\"}"
+   "ion_preview_source_text": "{ts:2025-12-03T12:00:00Z,dec:12.50,n:null,l:[1,[2,3],\"x\"],s:\"str\",f:1.5e0,b:true}\n{ts:2025-12-03T12:00:00.123+07:00,dec:-0.001,n:null,l:[],s:\"two\",f:2e0,b:false}\n{ts:2025-12-03,dec:1d2,n:null.int,l:[null],s:\"three\"}",
+   "preview_shape_note": "every other preview body in this key is KESTRA's FilePreview {extension,type,content,truncated}; egret's body is spec §8's (rows), so Task 8 compares the row values, not the envelope"
   },
   "plugin_storage": {
    "basis": "measured",
@@ -1654,7 +1730,12 @@
     "bytes_b64": "4AEA6umBg9aHtIFpgXTXiiEBi4JyMeABAOrpgYPWh7SBaYF014ohAouCcjLgAQDq6YGD1oe0gWmBdNeKIQOLgnIz",
     "ion_text": "{i:1,t:\"r1\"} {i:2,t:\"r2\"} {i:3,t:\"r3\"}"
    },
-   "egret": "random, so egret writes a deterministic name (spec §4.3 needs a re-claim to overwrite its own object); Task 10 names it"
+   "egret": {
+    "name": "result.ion",
+    "format": "Ion text written by runners::ionfmt",
+    "basis": "chosen",
+    "why": "spec §4.3/§9.2: a deterministic name so a re-claim overwrites its own object; text Ion through ionfmt. Kestra's name is random and its file binary"
+   }
   },
   "ion_rows": [
    {
@@ -2360,22 +2441,39 @@
     "flow_yaml": "id: core-foreign\nnamespace: w9a.storage\ninputs:\n  - id: other\n    type: STRING\ntasks:\n  - id: size_other\n    type: io.kestra.plugin.core.storage.Size\n    allowFailure: true\n    uri: \"{{ inputs.other }}\"\n  - id: delete_other\n    type: io.kestra.plugin.core.storage.Delete\n    allowFailure: true\n    uri: \"{{ inputs.other }}\"\n  - id: exists_other_after\n    type: io.kestra.plugin.core.debug.Return\n    allowFailure: true\n    format: \"{{ fileExists(inputs.other) }}\"\n",
     "uri": "kestra:///w9a/storage/ff-source/executions/4HmCFYVo6IC4qzsSszakYi/tasks/w/602xTWpNeSKLUXoabRuiX5/7940306488407200639.txt",
     "Size": {
-     "state": "SUCCESS",
-     "outputs": {
-      "size": 17
+     "state": "FAILED",
+     "error": "NotReadable",
+     "basis": "chosen",
+     "why": "spec §4.4: an unrelated execution's file is not readable",
+     "kestra": {
+      "state": "SUCCESS",
+      "outputs": {
+       "size": 17
+      }
      }
     },
     "Delete": {
-     "state": "SUCCESS",
-     "outputs": {
-      "uri": "kestra:///w9a/storage/ff-source/executions/4HmCFYVo6IC4qzsSszakYi/tasks/w/602xTWpNeSKLUXoabRuiX5/7940306488407200639.txt",
-      "deleted": true
+     "state": "FAILED",
+     "error": "NotReadable",
+     "basis": "chosen",
+     "why": "spec §9.3: Delete acts only on the running execution's loop family",
+     "kestra": {
+      "state": "SUCCESS",
+      "outputs": {
+       "uri": "kestra:///w9a/storage/ff-source/executions/4HmCFYVo6IC4qzsSszakYi/tasks/w/602xTWpNeSKLUXoabRuiX5/7940306488407200639.txt",
+       "deleted": true
+      }
      }
     },
     "fileExists_after": {
-     "state": "SUCCESS",
-     "outputs": {
-      "value": "false"
+     "error": "NotReadable",
+     "basis": "chosen",
+     "why": "spec §4.4: not readable, and egret's Delete did not remove it",
+     "kestra": {
+      "state": "SUCCESS",
+      "outputs": {
+       "value": "false"
+      }
      }
     },
     "source_download_after": {
@@ -2539,15 +2637,90 @@
   "output_directory": "measured",
   "script_output_files_map": "measured",
   "input_files_uri": "measured",
-  "file_functions": "measured; values are the rendered strings of a Return task's `format`",
-  "file_input": "measured, except allowed_file_extensions.code_message",
-  "file_api": "measured",
+  "file_functions": "measured, except the cells marked chosen (unrelated_same_namespace × 4, not_utf8.read); values are the rendered strings of a Return task's `format`",
+  "file_input": "measured, except the cells marked chosen (allowed_file_extensions, file_as_string.kestra_uri_of_other_execution, file_as_string.kestra_uri_naming_no_file)",
+  "file_api": "measured, except the cells marked chosen (other_execution.*, loop_iteration_file_via_root, dotdot, files.bin.preview)",
   "plugin_storage": "measured",
-  "store_outputs": "measured",
-  "ion_rows": "measured (ion_text decoded from the downloaded bytes by the artifact's own ion-java)",
-  "core_storage": "measured + schema",
+  "store_outputs": "measured; store_outputs.egret is chosen",
+  "ion_rows": "measured: KESTRA's values (ion_text decoded by the artifact's own ion-java from binary Ion). egret.sql STORE writes Ion text through ionfmt (chosen, spec §9.2), so compare decoded values, never bytes",
+  "core_storage": "measured + schema, except core_storage.other_execution.* (chosen)",
   "loop_over_ion": "measured",
-  "connector_streaming": "code (egret)"
+  "connector_streaming": "code (egret)",
+  "chosen_cells": [
+   {
+    "path": "file_functions.unrelated_same_namespace.read",
+    "why": "spec §2/§4.4: an unrelated execution of the same workspace is outside the readable set (Unreadable::NotReadable, plan Task 3); Kestra OSS reads it"
+   },
+   {
+    "path": "file_functions.unrelated_same_namespace.fileSize",
+    "why": "spec §2/§4.4: an unrelated execution of the same workspace is outside the readable set (Unreadable::NotReadable, plan Task 3); Kestra OSS reads it"
+   },
+   {
+    "path": "file_functions.unrelated_same_namespace.fileExists",
+    "why": "spec §2/§4.4: an unrelated execution of the same workspace is outside the readable set (Unreadable::NotReadable, plan Task 3); Kestra OSS reads it"
+   },
+   {
+    "path": "file_functions.unrelated_same_namespace.isFileEmpty",
+    "why": "spec §2/§4.4: an unrelated execution of the same workspace is outside the readable set (Unreadable::NotReadable, plan Task 3); Kestra OSS reads it"
+   },
+   {
+    "path": "file_functions.not_utf8.read",
+    "why": "spec §7.2: read() of non-UTF-8 bytes is an error naming the URI; Kestra decodes lossily (U+FFFD)"
+   },
+   {
+    "path": "file_input.allowed_file_extensions",
+    "why": "spec §7.1 enforces allowedFileExtensions; the artifact does not"
+   },
+   {
+    "path": "file_input.file_as_string.kestra_uri_of_other_execution",
+    "why": "spec §7.1: a FILE input given as a string must be a kestra:// URI readable from the execution being created; an unrelated execution's is not"
+   },
+   {
+    "path": "file_input.file_as_string.kestra_uri_naming_no_file",
+    "why": "spec §3/§7.1: the URI's {exec} is 'nope', not a UUID, so egret's parse refuses it at start (Unreadable::Malformed); Kestra accepts it and fails at run"
+   },
+   {
+    "path": "file_api.other_execution.file",
+    "why": "spec §2/§8: no redirect; a file outside {id}'s loop family is 404"
+   },
+   {
+    "path": "file_api.other_execution.metas",
+    "why": "spec §2/§8: no redirect; a file outside {id}'s loop family is 404"
+   },
+   {
+    "path": "file_api.other_execution.preview",
+    "why": "spec §2/§8: no redirect; a file outside {id}'s loop family is 404"
+   },
+   {
+    "path": "file_api.loop_iteration_file_via_root",
+    "why": "spec §8 (user ruling 2026-10-01): any id of the loop family serves the family's files; Kestra answers 301 to the iteration"
+   },
+   {
+    "path": "file_api.dotdot",
+    "why": "plan Task 8: anything resolve_readable_many does not answer Ok is 404 (a '..' URI is Malformed)"
+   },
+   {
+    "path": "file_api.files.bin.preview",
+    "why": "spec §8: a file that is not .ion/.csv/.jsonl/.json/text is {previewable: false}; Kestra renders it as TEXT"
+   },
+   {
+    "path": "core_storage.other_execution.Size",
+    "why": "spec §4.4: an unrelated execution's file is not readable"
+   },
+   {
+    "path": "core_storage.other_execution.Delete",
+    "why": "spec §9.3: Delete acts only on the running execution's loop family"
+   },
+   {
+    "path": "core_storage.other_execution.fileExists_after",
+    "why": "spec §4.4: not readable, and egret's Delete did not remove it"
+   },
+   {
+    "path": "store_outputs.egret",
+    "why": "spec §4.3/§9.2: a deterministic name so a re-claim overwrites its own object; text Ion through ionfmt. Kestra's name is random and its file binary"
+   }
+  ],
+  "rule": "a cell carrying \"basis\": \"chosen\" holds EGRET's answer (the spec's), with Kestra's measured answer under \"kestra\"; error tokens are plan Task 3's Unreadable variants (NotReadable, Malformed, Missing) plus NotUtf8 for spec §7.2's non-UTF-8 read error. Every other cell is Kestra's measured answer, which egret matches"
  },
  "raw_records": {
   "plugins_listing": {

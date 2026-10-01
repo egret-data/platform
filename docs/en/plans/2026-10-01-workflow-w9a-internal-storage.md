@@ -101,7 +101,7 @@ crates/egret-workflow/src/storage/transfer.rs                NEW  T5: streaming 
 crates/egret-workflow/src/storage/collect.rs                 NEW  T6: one collected entry -> put_stream -> StoredFile; caps
 crates/egret-workflow/src/storage/inputs.rs                  NEW  T7: FILE inputs (multipart parts, JSON URI check)
 crates/egret-workflow/src/storage/routes.rs                  NEW  T8: the three file routes
-crates/egret-workflow/src/storage/ion.rs                     NEW  T8: ion-rs line -> JSON (preview, Loop values)
+crates/egret-workflow/src/storage/ion.rs                     NEW  T8: ion-rs top-level values (text or binary) -> JSON (preview, Loop values)
 crates/egret-workflow/src/storage/prune.rs                   NEW  T13
 crates/egret-workflow/src/runners/files.rs                   NEW  T4: RenderFiles, FileScope, FILE_SCOPE
 crates/egret-workflow/src/runners/{env.rs,functions.rs,filters.rs,mod.rs}   MOD T4
@@ -545,6 +545,8 @@ impl Snapshot {
     // read -> contents; fileSize -> size; isFileEmpty -> size == 0; fileExists -> true
 }
 #[test] fn file_exists_on_a_missing_file_is_the_artifacts_answer() { /* w9a-storage.json file_functions.missing_in_own */ }
+// w9a-storage.json cells with "basis": "chosen" hold EGRET's answer (NotReadable, Malformed, Missing, NotUtf8) and
+// Kestra's under "kestra" (egret_expected_basis.rule): unrelated_same_namespace is NotReadable, not Kestra's value
 #[test] fn every_other_unreadable_uri_is_an_error_naming_it() { /* NotReadable, Malformed: all four functions */ }
 #[test] fn without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution() {}
 #[test] fn file_uri_names_w9b_and_kv_names_w9c() {}
@@ -824,8 +826,11 @@ pub fn extension_allowed(input: &crate::models::Input, file_name: &str) -> Resul
 **Interfaces:**
 
 ```rust
-// storage/ion.rs — ion-rs 1.0.1 `Element::read_one` (src/element/mod.rs:913), one value per line
-pub fn line_to_json(line: &str) -> Result<serde_json::Value, String>;   // the value shapes = w9a-storage.json file_api.preview
+// storage/ion.rs — ion-rs 1.0.1 reader over BYTES, one top-level value at a time, text OR binary Ion:
+// Kestra's STORE and item-task files are binary Ion 1.0 with a version marker and symbol table per row and no
+// lines (w9a-storage.json finding store_binary_ion); Write's and ionfmt's are text. Never split on '\n'.
+pub fn values_to_json(bytes: impl std::io::Read, max: usize) -> Result<(Vec<serde_json::Value>, bool /*truncated*/), String>;
+// the value shapes = w9a-storage.json file_api.files.ion.preview rows and ion_rows (decoded values)
 
 // storage/routes.rs
 #[derive(Deserialize, utoipa::IntoParams)] pub struct FileQuery { pub path: String }
@@ -863,7 +868,7 @@ pub fn line_to_json(line: &str) -> Result<serde_json::Value, String>;   // the v
   - Authorisation exactly as `GET …/executions/{id}/logs` (`routes.rs:1398-1422`): `WsContext`, `egret_core::authz::require(&*st.pdp, &ctx, WF_READ)`, `st.executions.get(ws, id)` for existence (a foreign id is 404).
   - The file: `resolve_readable_many(&mut conn, ws, &loop_family(&mut conn, ws, id).await?, &[path])` — the **one** function, with the readable set narrowed to `{id}`'s loop family (spec §8, chosen as the option consistent with §4.4); anything but `Ok` is 404 (§8: no redirect).
   - Download: `Body::from_stream(tokio_util::io::ReaderStream::new(get_stream(..)))`.
-  - Preview: read line by line up to `maxRows` and at most `max_read_bytes`; `.ion` through `ion::line_to_json`; `.csv`/`.jsonl`/`.json`/text as strings; else `{previewable: false, rows: []}`.
+  - Preview: up to `maxRows` and at most `max_read_bytes`; `.ion` through `ion::values_to_json` value by value (text or binary — add a test previewing a binary STORE file from `ion_rows`'s bytes); `.csv`/`.jsonl`/`.json`/text line by line as strings; else `{previewable: false, rows: []}`.
 - [ ] **Step 4: Run the tests to see them pass**; the OpenAPI test; `npm run gen:api && npm run lint && npm test`.
 - [ ] **Step 5: Mutations:** (a) the readable set widened to `readable_executions(id)` (`a_trigger_executions_file_is_404_through_this_id` dies); (d) the readable set narrowed to `[id]` (`any_id_of_the_loop_family_serves_the_familys_files` dies); (b) `maxRows` unclamped; (c) `Content-Disposition` unsanitised.
 - [ ] **Step 6: Commit** `feat(workflow): W9a Task 8 — download, metas and preview of an execution's files`.
@@ -942,7 +947,7 @@ pub(crate) fn write_ion_row(out: &mut String, columns: &[String], row: &[serde_j
 
 **Every predicate over `Fetch`** (a new variant): `outputs_for`'s `match fetch` (`sql.rs:539`) and its early `Fetch::None` return; the `Deserialize` spellings; the module doc (`:140-145`, *"`STORE` is deliberately absent … W9 owns"*). `git grep -n "Fetch::" -- crates/egret-workflow` lists them; the report names each.
 
-- [ ] **Step 1: Write the failing tests:** `store_writes_every_row_as_ion_and_outputs_uri_and_row_count`; `store_ion_matches_the_artifact_for_every_type_egret_can_carry` (`ion_rows`; a type egret's `TabularResult` cannot carry — `bytea`, `timestamptz` as text — is recorded as a divergence, not faked); `store_over_the_row_cap_fails_like_fetch_does` (`result.truncated`, the same message shape as `sql.rs:552-557`); `store_without_a_store_fails_naming_storage_before_the_statement_runs` (spy port: not called); the file is indexed through `Outcome.files`; live StarRocks: 50 000 rows STORE then `read()` of the first line.
+- [ ] **Step 1: Write the failing tests:** `store_writes_every_row_as_ion_and_outputs_uri_and_row_count`; `store_ion_matches_the_artifact_for_every_type_egret_can_carry` (`ion_rows`, compared as **decoded values** — Kestra's file is binary Ion from `FileSerde`, egret's is Ion text from `ionfmt` (spec §1, §9.2), so bytes never match; a type egret's `TabularResult` cannot carry — `bytea`, `timestamptz` as text — is recorded as a divergence, not faked); `store_over_the_row_cap_fails_like_fetch_does` (`result.truncated`, the same message shape as `sql.rs:552-557`); `store_without_a_store_fails_naming_storage_before_the_statement_runs` (spy port: not called); the file is indexed through `Outcome.files`; live StarRocks: 50 000 rows STORE then `read()` of the first line.
 - [ ] **Step 2: Run them to watch them fail.**
 - [ ] **Step 3: Implement.** The port returns a whole `TabularResult` (`egret-query-api/src/port.rs`), so STORE is bounded by `Sql::max_rows` (`MAX_FETCH_ROWS`, 10 000) exactly as FETCH is — "under its existing row limit" (§9.2). Task 1's `connector_streaming` goes into this handler's doc and into §15's known limit. The file name is `w9a-storage.json`'s `store_outputs` pattern if deterministic, else the fixed `result.ion` (§4.3 needs a re-claim to overwrite its own object), stated in the doc.
 - [ ] **Step 4: Run the tests to see them pass**, the live suite with `EGRET_TEST_STARROCKS_URL`.
@@ -971,7 +976,7 @@ pub struct Write; pub struct Size; pub struct Delete; pub struct PurgeCurrentExe
 - [ ] **Step 2: Run them to watch them fail.**
 - [ ] **Step 3: Implement.**
   - Inputs through `task.render.files()` (the snapshot); outputs written with `put_stream` under `task_prefix`, returned in `Outcome.files`.
-  - **`Loop` over a file** (§9.3): in `render_expressions`, for a `TaskKind::Loop` whose rendered value is a `kestra:///` URI, resolve it through the `Surface`'s snapshot, read it (`read_utf8`'s path, capped by `max_read_bytes`), parse each line with `storage::ion::line_to_json`, coalesce each record as `FlowableUtils.ionValueToString` does (a string as itself, a number's `toString`, `null` an error, anything else JSON), and put the **JSON array** in `rendered`. `advance()` is untouched and still pure. `loop_.rs`'s *"A NAMED GAP"* doc is rewritten to say where the file is read, dated.
+  - **`Loop` over a file** (§9.3): in `render_expressions`, for a `TaskKind::Loop` whose rendered value is a `kestra:///` URI, resolve it through the `Surface`'s snapshot, read its **bytes** (capped by `max_read_bytes`; not `read_utf8`, because a plugin's STORE file is binary Ion and not UTF-8), parse them with `storage::ion::values_to_json` one top-level value at a time, coalesce each record as `FlowableUtils.ionValueToString` does (a string as itself, a number's `toString`, `null` an error, anything else JSON), and put the **JSON array** in `rendered`. `advance()` is untouched and still pure. `loop_.rs`'s *"A NAMED GAP"* doc is rewritten to say where the file is read, dated.
   - **The cap.** §9.3 says *"capped by the existing loop-width limit"*; there is no such limit in the code (`git grep` of `executor/flowable/loop_.rs` and `worker/spawn.rs` finds none). This task caps by `max_read_bytes` on the file, the same cap as `read()`, and reports it as a spec correction.
 - [ ] **Step 4: Run the tests to see them pass**, then the ratchet: `cargo test -p egret-workflow --test executor executor_matches_golden -- --nocapture`. Delete from `baseline.txt` exactly the entries that now match (the ratchet fails otherwise), and record the number.
 - [ ] **Step 5: Mutations:** (a) `Delete` allowing any readable execution; (b) the store delete before the index delete; (c) the `null` record coalesced to `"null"`; (d) the file read without the cap.
@@ -1030,6 +1035,10 @@ pub async fn prune_pass(pool: &PgPool, fs: &FileStore, cfg: &StoragePruneConfig)
     // RUNNING, updated_at forced 400 days back, with rows: kept
 }
 #[tokio::test] async fn an_ended_execution_older_than_the_window_loses_objects_then_rows() {}
+#[tokio::test] async fn an_ended_iteration_of_a_running_root_keeps_its_files() {
+    // root RUNNING; its loop iteration SUCCESS with updated_at forced 400 days back and indexed files: kept,
+    // and a task after the loop still reads them. Then the root ends and ages past the window: root and iteration go together
+}
 #[tokio::test] async fn a_failed_store_delete_keeps_the_rows_and_the_next_pass_retries() {}
 #[tokio::test] async fn orphans_older_than_a_day_are_deleted_and_younger_ones_and_indexed_ones_are_kept() {}
 #[tokio::test] async fn zero_retention_starts_no_pruner() {}
@@ -1038,9 +1047,9 @@ pub async fn prune_pass(pool: &PgPool, fs: &FileStore, cfg: &StoragePruneConfig)
 ```
 
 - [ ] **Step 2: Run them to watch them fail.**
-- [ ] **Step 3: Implement.** "Ended" = state terminal (`RunState::ALL` filtered by `is_terminal`, the idiom of `ExecutionRepo::log_status`, `repo.rs:1085-1090`) and `updated_at < now() - make_interval(days => $n)`, over **executions with index rows** — an iteration's files are its own (spec §3), so iterations are pruned as executions, each by its own end. Per execution: `delete_prefix(execution_prefix)`, then `DELETE` its rows and set `files_pruned_at` in one statement; a failed `delete_prefix` leaves both. Orphans: for each execution pruned in this pass and each FAILED/KILLED execution ended more than 24 h ago with `files_swept_at IS NULL`, `list` its prefix, delete objects with no row whose `last_modified` is older than 24 h, set `files_swept_at`. Started from `spawn_with_logs` beside `spawn_pruner` (`runtime.rs:356-360`) when `storage::current()` is `Some` and retention > 0.
+- [ ] **Step 3: Implement.** "Ended" = state terminal (`RunState::ALL` filtered by `is_terminal`, the idiom of `ExecutionRepo::log_status`, `repo.rs:1085-1090`) and `updated_at < now() - make_interval(days => $n)`, over **loop roots** (rows with no `loop_index`) whose loop family has index rows — an iteration's files are under its own id (spec §3), but a loop family is pruned as one, **on its root's end** (spec §10): an iteration that ended while its root still runs keeps its files. Per root: for the root and every iteration under it (`storage::loop_family`), `delete_prefix(execution_prefix)`, then `DELETE` their rows and set `files_pruned_at` on each in one statement; a failed `delete_prefix` leaves all of them, and the next pass retries the family. Orphans: for each loop family pruned in this pass and each FAILED/KILLED loop root ended more than 24 h ago (with its iterations' prefixes) with `files_swept_at IS NULL`, `list` its prefix, delete objects with no row whose `last_modified` is older than 24 h, set `files_swept_at`. Started from `spawn_with_logs` beside `spawn_pruner` (`runtime.rs:356-360`) when `storage::current()` is `Some` and retention > 0.
 - [ ] **Step 4: Run the tests to see them pass.**
-- [ ] **Step 5: Mutations:** (a) the terminal predicate dropped; (b) rows deleted before the store; (c) the orphan age check removed; (d) `Pruned` reported as `Missing` (`fileExists` would then answer `false` silently).
+- [ ] **Step 5: Mutations:** (a) the terminal predicate dropped; (b) rows deleted before the store; (c) the orphan age check removed; (d) `Pruned` reported as `Missing` (`fileExists` would then answer `false` silently); (e) the candidate query over every ended execution instead of loop roots (`an_ended_iteration_of_a_running_root_keeps_its_files` dies).
 - [ ] **Step 6: Commit** `feat(workflow): W9a Task 13 — execution files are pruned 30 days after the execution ends`.
 
 ---
