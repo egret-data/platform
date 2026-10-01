@@ -20,8 +20,32 @@
 //!
 //! Not DB-gated: it reads a file in the repository and runs everywhere, including on a
 //! laptop with no Postgres.
+//!
+//! # The bound: which spellings of "run the tests" this can see
+//!
+//! Review round 2 found the scan matched the literal `cargo test` alone, so the first
+//! `cargo nextest run` recipe anyone adds would slip straight past it — a guard whose
+//! blind spot is a different invocation of the same thing. [`TEST_RUNNERS`] is now that
+//! bound, written as a list rather than left implicit in a `contains`, so widening it is
+//! an edit in one place and the gap is visible without reading the filter.
 
 use std::path::{Path, PathBuf};
+
+/// Every spelling of "run the Rust tests" this scan recognises.
+///
+/// `cargo test` was the only one until review round 2 pointed out that
+/// `cargo nextest run` — a drop-in this repo could adopt at any time — reads
+/// `EGRET_ALLOW_DB_SKIP` from the same environment and would have been invisible here.
+/// Both are prefixes, so `cargo nextest run …` and `cargo test --workspace …` match.
+///
+/// This list IS the guard's reach. Anything absent from it is unguarded, which is why it
+/// is a named constant the failure message can print rather than a string inside a filter.
+const TEST_RUNNERS: [&str; 2] = ["cargo test", "cargo nextest"];
+
+/// Whether a recipe line runs the test suite at all.
+fn runs_tests(line: &str) -> bool {
+    TEST_RUNNERS.iter().any(|r| line.contains(r))
+}
 
 /// `crates/egret-test-db` → the workspace root, which is where `justfile` lives.
 fn repo_root() -> PathBuf {
@@ -103,7 +127,7 @@ fn no_just_recipe_runs_cargo_test_with_the_skip_inherited() {
 
     let offenders: Vec<String> = logical
         .iter()
-        .filter(|(_, l)| l.contains("cargo test"))
+        .filter(|(_, l)| runs_tests(l))
         .map(|(n, l)| (n, expand(l, &vars)))
         .filter(|(_, l)| {
             !l.contains("env -u EGRET_ALLOW_DB_SKIP") && !l.contains("EGRET_ALLOW_DB_SKIP=")
@@ -113,25 +137,37 @@ fn no_just_recipe_runs_cargo_test_with_the_skip_inherited() {
 
     assert!(
         offenders.is_empty(),
-        "these `just` recipes run `cargo test` without deciding what happens to \
-         EGRET_ALLOW_DB_SKIP, so an exported one would silently make every DB-gated suite \
-         report `ok` having asserted nothing:\n{}\n\nPrefix the command with \
+        "these `just` recipes run the tests ({}) without deciding what happens to \
+         EGRET_ALLOW_DB_SKIP, so an exported one would make every DB-gated suite in their \
+         reach report `ok` having asserted nothing:\n{}\n\nPrefix the command with \
          `{{{{ no_db_skip }}}}` to run the tests for real, or set EGRET_ALLOW_DB_SKIP=1 on \
          the line if skipping is what the recipe is for (see `test-no-db`).",
+        TEST_RUNNERS.join(" / "),
         offenders.join("\n")
     );
 
     // The check has to be able to fail, and a scan whose pattern silently matches nothing
     // is the failure mode this repo has recorded most often. Two recipes are known to run
     // the suite; if that ever drops to zero the assertion above is vacuous.
-    let scanned = logical
-        .iter()
-        .filter(|(_, l)| l.contains("cargo test"))
-        .count();
+    let scanned = logical.iter().filter(|(_, l)| runs_tests(l)).count();
     assert!(
         scanned >= 2,
         "expected to have scanned at least the `check` and `test-no-db` recipes, found \
-         {scanned} `cargo test` lines — the scan is matching nothing and would pass \
-         whatever the justfile said"
+         {scanned} lines matching {TEST_RUNNERS:?} — the scan is matching nothing and would \
+         pass whatever the justfile said"
+    );
+
+    // And the reach itself, stated as an assertion rather than left to the list's spelling:
+    // a `cargo nextest` recipe must be SEEN by this scan. Without this the widening could be
+    // reverted to the single literal and nothing here would notice.
+    assert!(
+        runs_tests("    {{ no_db_skip }} cargo nextest run --workspace"),
+        "a `cargo nextest` recipe must be inside this guard's reach, or the next runner this \
+         repo adopts is unguarded in exactly the way `cargo test` once was"
+    );
+    assert!(
+        !runs_tests("    cargo build --workspace --all-targets"),
+        "and the scan must not claim every cargo invocation — a guard that flags `cargo \
+         build` gets widened by deleting it"
     );
 }

@@ -89,6 +89,16 @@ check:
 #
 # The jars come from Maven Central on first run and live in `~/.m2` after that.
 # `tests/ranger/README.md` is the runbook, including how to re-run a single seed.
+#
+# `{{ no_db_skip }}` on both lines, and the reason is narrower than it first looks —
+# recorded here because the commit that added it (7b78b854) claimed more. MEASURED:
+# `crates/egret-test-db/tests/every_test_recipe_refuses_the_skip.rs` failed naming these
+# two lines, and the rule it enforces is that no recipe may leave EGRET_ALLOW_DB_SKIP
+# undecided. NOT measured, and not true: that an exported opt-out made THESE two suites
+# vacuous. Neither `ranger_engine_gate.rs` nor `differential.rs` mentions
+# `egret_test_db`, `DATABASE_URL`, `sqlx::test` or any `EGRET_ALLOW_*` — they gate on
+# `EGRET_TEST_RANGER_E2E` alone, so the opt-out could not have reached them. The scrub is
+# the policy holding, not a vacuous green being fixed.
 test-ranger-gates:
     @echo "── Ranger gates (real jars, 2.5.0 + 2.8.0). Needs a JVM and Maven; a failure"
     @echo "   here means the differential did NOT run, which is the thing to know."

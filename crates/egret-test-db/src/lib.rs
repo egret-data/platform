@@ -49,6 +49,7 @@
 
 use egret_metastore::{Db, MIGRATOR};
 use sha2::{Digest, Sha256};
+use sqlx::migrate::MigrationType;
 
 /// The database this test process owns, cloned from a shared migrated template.
 ///
@@ -122,22 +123,37 @@ const TEMPLATE_PREFIX: &str = "egret_test_tmpl_";
 /// after the schema it holds makes the wrong template *unreachable* rather than unlikely,
 /// which is the only form of this fix that does not depend on everyone remembering.
 ///
-/// Computed once per process: the digest is over 162 checksums today and the answer cannot
+/// Computed once per process: the digest is over 162 migrations today and the answer cannot
 /// change while the binary runs.
 fn template_db() -> &'static str {
     static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     NAME.get_or_init(|| {
-        let set: Vec<(i64, &[u8])> = MIGRATOR
+        let set: Vec<(i64, u8, &[u8])> = MIGRATOR
             .migrations
             .iter()
-            .map(|m| (m.version, &*m.checksum))
+            .map(|m| (m.version, kind_bits(m.migration_type), &*m.checksum))
             .collect();
         template_db_name(&set)
     })
 }
 
-/// The template name for a migration set, from the `(version, checksum)` pairs `sqlx`
-/// already holds for every migration.
+/// A migration's TYPE, as the two facts that decide whether it reaches the schema.
+///
+/// # Why bits from the predicates and not the enum's discriminant
+///
+/// `MigrationType` is three variants today and is not `#[non_exhaustive]`, so `as u8` would
+/// work and would also be the wrong thing to write: a future sqlx that inserts a variant, or
+/// reorders them, renumbers every template on every machine, and a future sqlx that adds a
+/// variant with the same number as one of these silently merges two kinds. `is_reversible`
+/// and `is_down_migration` are the behaviour `Migrator::run` actually branches on, and they
+/// separate all three of today's variants: `Simple` → 0, `ReversibleUp` → 1,
+/// `ReversibleDown` → 3. `migration_kinds_are_distinguishable` asks the real enum.
+fn kind_bits(t: MigrationType) -> u8 {
+    u8::from(t.is_reversible()) | (u8::from(t.is_down_migration()) << 1)
+}
+
+/// The template name for a migration set, from the `(version, kind, checksum)` triples
+/// `sqlx` already holds for every migration — see [`kind_bits`] for the middle one.
 ///
 /// # Not `max(version)`
 ///
@@ -150,11 +166,38 @@ fn template_db() -> &'static str {
 /// silently re-running an edited migration, which is how two developers end up with
 /// different schemas under one name.
 ///
+/// # And not `(version, checksum)` either — the review round 2 gap
+///
+/// `(version, checksum)` is still not enough, because **the type is not in either of them**.
+/// Rename `migrations/0162_data_apps_permissions.sql` to `…_permissions.down.sql` without
+/// changing a byte: `sqlx` reads the type from the suffix and trims the suffix off
+/// `description`, so both trees yield the one entry `(162, Sha384(the same bytes))` and
+/// would have named the same template. But `Migrator::run` SKIPS
+/// `migration_type.is_down_migration()`, so the renamed tree's template never receives 162 —
+/// a branch on it would clone the other's schema. That is this task's own bug re-entered
+/// through a different door, so the type is folded in.
+///
+/// Unreachable today: `migrations/` holds no `.up.sql` or `.down.sql` at all. Fixed anyway,
+/// on the controller's ruling, because "unreachable today" is a claim about REACH, and reach
+/// claims have been wrong five times on this programme while the behaviour claim beside them
+/// was right. One line in the digest does not age; a bound written in a comment does.
+///
+/// # What is deliberately NOT in it
+///
+/// `no_tx` and `description` are the other two fields on `sqlx`'s `Migration`.
+/// `no_tx` is derived from a `-- no-transaction` line **inside the file**, so it is already
+/// inside the checksum. `description` is derived from the FILENAME, so renaming
+/// `0162_data_apps_permissions.sql` to `0162_app_perms.sql` changes it while changing no
+/// schema at all — folding that in would rebuild every developer's template for a rename.
+///
 /// Sorted first, so the name is a function of the SET rather than of the order the macro
-/// happened to list it in. Each entry is **length-framed**, so no amount of moving bytes
-/// between neighbouring checksums can produce a stream another set also produces —
-/// `a_name_cannot_be_reached_by_moving_bytes_between_migrations` constructs the pair that
-/// collides without the framing.
+/// happened to list it in. Each entry is **length-framed**. The frame is the correct
+/// contract for this signature — it is what makes the encoding injective over arbitrary
+/// `&[u8]` — and it is right for that reason rather than for a live bug:
+/// `a_name_cannot_be_reached_by_moving_bytes_between_migrations` constructs a pair that
+/// collides without it, and that pair is **not reachable from sqlx**, whose checksums are
+/// always 48 bytes (`Sha384` of the file). The framing earns its place as a property of the
+/// function, not as a fix to an observed defect.
 ///
 /// # Panics
 ///
@@ -163,7 +206,7 @@ fn template_db() -> &'static str {
 /// every DB-gated test in the workspace would then fail on a missing relation while the
 /// naming looked like it was working. A broken instrument must not be able to return a
 /// usable-looking answer, so this fails at the point of detection instead.
-fn template_db_name(migrations: &[(i64, &[u8])]) -> String {
+fn template_db_name(migrations: &[(i64, u8, &[u8])]) -> String {
     assert!(
         !migrations.is_empty(),
         "the embedded migration set is EMPTY, so there is nothing to name a test template \
@@ -174,12 +217,14 @@ fn template_db_name(migrations: &[(i64, &[u8])]) -> String {
          it — and see `every_migration_on_disk_is_embedded` in that crate."
     );
 
-    let mut set: Vec<(i64, &[u8])> = migrations.to_vec();
+    let mut set: Vec<(i64, u8, &[u8])> = migrations.to_vec();
     set.sort_unstable();
 
     let mut h = Sha256::new();
-    for (version, checksum) in &set {
+    for (version, kind, checksum) in &set {
         h.update(version.to_be_bytes());
+        // One fixed-width byte, so it needs no frame of its own.
+        h.update([*kind]);
         h.update((checksum.len() as u64).to_be_bytes());
         h.update(checksum);
     }
@@ -753,10 +798,17 @@ pub async fn url() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        dotenv_file_setting_from, opt_out_verdict, process_db_name, skip_verdict, template_db,
-        template_db_name, ALLOW_SKIP_VAR, CLONE_PATTERN, TEMPLATE_PREFIX,
+        dotenv_file_setting_from, kind_bits, opt_out_verdict, process_db_name, skip_verdict,
+        template_db, template_db_name, MigrationType, ALLOW_SKIP_VAR, CLONE_PATTERN,
+        TEMPLATE_PREFIX,
     };
     use std::path::{Path, PathBuf};
+
+    /// `kind_bits(MigrationType::Simple)` — the kind every migration in `migrations/` carries
+    /// today. A literal because `kind_bits` is not a `const fn` (`is_reversible` is not), and
+    /// `migration_kinds_are_distinguishable` asserts the two agree, so the literal cannot
+    /// drift from the function it stands for.
+    const SIMPLE: u8 = 0;
 
     /// A unique scratch directory, without a `tempfile` dependency this crate does not
     /// otherwise need. Removed by the caller; a leak here is a directory, not a database.
@@ -1024,10 +1076,18 @@ mod tests {
     /// the obvious key and it cannot tell any of these apart.
     #[test]
     fn two_migration_sets_that_share_a_head_name_different_templates() {
-        let base: &[(i64, &[u8])] = &[(1, b"aaa"), (2, b"bbb"), (3, b"ccc")];
+        let base: &[(i64, u8, &[u8])] = &[
+            (1, SIMPLE, b"aaa"),
+            (2, SIMPLE, b"bbb"),
+            (3, SIMPLE, b"ccc"),
+        ];
 
         // An EDITED migration in the middle: same versions, same count, same head.
-        let edited: &[(i64, &[u8])] = &[(1, b"aaa"), (2, b"edited"), (3, b"ccc")];
+        let edited: &[(i64, u8, &[u8])] = &[
+            (1, SIMPLE, b"aaa"),
+            (2, SIMPLE, b"edited"),
+            (3, SIMPLE, b"ccc"),
+        ];
         assert_ne!(
             template_db_name(base),
             template_db_name(edited),
@@ -1036,7 +1096,7 @@ mod tests {
         );
 
         // A cherry-pick: the head is present but a migration in the middle never ran.
-        let missing: &[(i64, &[u8])] = &[(1, b"aaa"), (3, b"ccc")];
+        let missing: &[(i64, u8, &[u8])] = &[(1, SIMPLE, b"aaa"), (3, SIMPLE, b"ccc")];
         assert_ne!(
             template_db_name(base),
             template_db_name(missing),
@@ -1045,7 +1105,12 @@ mod tests {
         );
 
         // And the ordinary case, a migration added on top.
-        let ahead: &[(i64, &[u8])] = &[(1, b"aaa"), (2, b"bbb"), (3, b"ccc"), (4, b"ddd")];
+        let ahead: &[(i64, u8, &[u8])] = &[
+            (1, SIMPLE, b"aaa"),
+            (2, SIMPLE, b"bbb"),
+            (3, SIMPLE, b"ccc"),
+            (4, SIMPLE, b"ddd"),
+        ];
         assert_ne!(
             template_db_name(base),
             template_db_name(ahead),
@@ -1055,15 +1120,25 @@ mod tests {
 
     /// A name must not be reachable by moving bytes between neighbouring migrations.
     ///
-    /// The pair below is an actual collision for the unframed digest — `version.to_be_bytes()
-    /// || checksum`, concatenated. `[(1, 0x0000000000000002)]` hashes the same sixteen bytes
-    /// as `[(1, b""), (2, b"")]`, because the first set's checksum IS the second set's second
-    /// version. Length-framing each entry is what separates them, and this is the test that
-    /// dies if the frame is removed — `assert_ne!` on two arbitrary sets would not.
+    /// The pair below collides under an unframed digest — `version || kind || checksum`,
+    /// concatenated. `[(1, SIMPLE, 0x…02)]` hashes the same bytes as
+    /// `[(1, SIMPLE, b""), (2, SIMPLE, b"")]`, because the first set's checksum IS the second
+    /// set's second version and kind. Length-framing is what separates them, and this is the
+    /// test that dies if the frame is removed — `assert_ne!` on two arbitrary sets would not.
+    ///
+    /// # ⚠ Narrowed by review round 2: this pair is NOT reachable from sqlx
+    ///
+    /// An earlier version of this comment called it "an actual collision", which was wider
+    /// than the measurement. `sqlx` sets every checksum to `Sha384` of the file bytes, so a
+    /// production checksum is **always 48 bytes** and a one-byte or empty one cannot occur.
+    /// The frame is still right, as the correct contract for a function whose signature
+    /// accepts an arbitrary `&[u8]` — injectivity is a property worth holding whether or not
+    /// today's only caller happens to stay inside the safe region. It is not a fix to an
+    /// observed defect, and this comment no longer implies it was.
     #[test]
     fn a_name_cannot_be_reached_by_moving_bytes_between_migrations() {
-        let absorbing: &[(i64, &[u8])] = &[(1, &2i64.to_be_bytes())];
-        let two_empty: &[(i64, &[u8])] = &[(1, b""), (2, b"")];
+        let absorbing: &[(i64, u8, &[u8])] = &[(1, SIMPLE, &2i64.to_be_bytes())];
+        let two_empty: &[(i64, u8, &[u8])] = &[(1, SIMPLE, b""), (2, SIMPLE, b"")];
         assert_ne!(
             template_db_name(absorbing),
             template_db_name(two_empty),
@@ -1080,14 +1155,22 @@ mod tests {
     /// the ~7 s this crate exists to pay once.
     #[test]
     fn the_same_migration_set_always_names_the_same_template() {
-        let forward: &[(i64, &[u8])] = &[(1, b"aaa"), (2, b"bbb"), (3, b"ccc")];
+        let forward: &[(i64, u8, &[u8])] = &[
+            (1, SIMPLE, b"aaa"),
+            (2, SIMPLE, b"bbb"),
+            (3, SIMPLE, b"ccc"),
+        ];
         assert_eq!(
             template_db_name(forward),
             template_db_name(forward),
             "the name must not depend on when it was asked for"
         );
 
-        let shuffled: &[(i64, &[u8])] = &[(3, b"ccc"), (1, b"aaa"), (2, b"bbb")];
+        let shuffled: &[(i64, u8, &[u8])] = &[
+            (3, SIMPLE, b"ccc"),
+            (1, SIMPLE, b"aaa"),
+            (2, SIMPLE, b"bbb"),
+        ];
         assert_eq!(
             template_db_name(forward),
             template_db_name(shuffled),
@@ -1099,9 +1182,77 @@ mod tests {
         // a deliberate edit here rather than a silent full rebuild for everybody.
         assert_eq!(
             template_db_name(forward),
-            "egret_test_tmpl_39b08ef8d42af15dd4d8f208ee2fa149",
+            "egret_test_tmpl_68247d1687949e664065c5a317091b52",
             "the digest changed shape; every developer rebuilds their template, which is \
              fine once and a bug if it happens by accident"
+        );
+    }
+
+    /// **The gap review round 2 found: `(version, checksum)` does not carry the TYPE.**
+    ///
+    /// Rename `migrations/0162_data_apps_permissions.sql` to `…_permissions.down.sql` and
+    /// change not one byte. `sqlx` reads the type from the suffix and trims the suffix off
+    /// `description`, so both trees produce the single entry `(162, Sha384(the same bytes))`.
+    /// Before the type was folded in, both named the SAME template — while `Migrator::run`
+    /// skips `is_down_migration()`, so the renamed tree's template never receives 162 and a
+    /// branch on it clones the other's schema. That is this crate's own bug, re-entered.
+    ///
+    /// Unreachable today — `migrations/` holds no `.up.sql` or `.down.sql` — and asserted
+    /// anyway, because a bound on reach is not a bound on behaviour.
+    #[test]
+    fn a_renamed_migration_of_a_different_type_names_a_different_template() {
+        let checksum: &[u8] = b"identical file bytes";
+        let simple: &[(i64, u8, &[u8])] = &[(162, kind_bits(MigrationType::Simple), checksum)];
+        let down: &[(i64, u8, &[u8])] =
+            &[(162, kind_bits(MigrationType::ReversibleDown), checksum)];
+        let up: &[(i64, u8, &[u8])] = &[(162, kind_bits(MigrationType::ReversibleUp), checksum)];
+
+        assert_ne!(
+            template_db_name(simple),
+            template_db_name(down),
+            "same version, byte-identical file, and only a `.down.sql` suffix between them — \
+             `Migrator::run` applies one and skips the other, so they are two schemas"
+        );
+        assert_ne!(
+            template_db_name(simple),
+            template_db_name(up),
+            "a `.up.sql` is applied like a `Simple` one TODAY, but the pair is not the same \
+             migration set, and treating them as one is a bound on sqlx's behaviour rather \
+             than on this function's"
+        );
+        assert_ne!(
+            template_db_name(up),
+            template_db_name(down),
+            "the up and down halves of one reversible migration are the two schemas this \
+             whole fold exists to separate"
+        );
+    }
+
+    /// The instrument behind that fold, asked of the real enum.
+    ///
+    /// `kind_bits` is derived from `is_reversible`/`is_down_migration` rather than from the
+    /// discriminant, so it cannot be read off the source — it has to be measured. The
+    /// mutation this kills is making `kind_bits` return a constant, which silently restores
+    /// the `(version, checksum)` behaviour while the fold still LOOKS present in the digest.
+    #[test]
+    fn migration_kinds_are_distinguishable() {
+        let simple = kind_bits(MigrationType::Simple);
+        let up = kind_bits(MigrationType::ReversibleUp);
+        let down = kind_bits(MigrationType::ReversibleDown);
+        assert_ne!(simple, up, "Simple vs ReversibleUp");
+        assert_ne!(simple, down, "Simple vs ReversibleDown");
+        assert_ne!(
+            up, down,
+            "ReversibleUp vs ReversibleDown — the one that decides whether \
+             `Migrator::run` applies the migration at all"
+        );
+        // Said as values too, so a future sqlx that changes what the predicates answer
+        // fails here rather than quietly renaming every template on every machine.
+        assert_eq!((simple, up, down), (0, 1, 3));
+        assert_eq!(
+            SIMPLE, simple,
+            "the fixtures' `SIMPLE` literal stands for this function's answer, and a literal \
+             that no longer does is a fixture asserting the wrong migration set"
         );
     }
 

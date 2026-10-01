@@ -284,9 +284,15 @@ fn the_tag_policy_carries_the_resolved_tag_name_not_the_selectors_key() {
 /// Round 1 closed it for tag bodies through `tag_service_routing.rs`, which needs a
 /// database; `clearance_starrocks.rs` covers the clearance path; this covers both
 /// arms of `build_tag_body` AND both arms of the resource path, with no database at
-/// all — which matters, because the shared `egret_test_template` is currently
-/// unusable on this branch and a DB-gated assertion that cannot run is not an
-/// assertion.
+/// all — which mattered because the shared `egret_test_template` was unusable on this
+/// branch when this test was written, and a DB-gated assertion that cannot run is not
+/// an assertion.
+///
+/// **That condition is gone** (SP4d debt Task 1): the test template is named after a
+/// digest of the migration set, so a branch cannot meet another branch's schema, and
+/// `tag_service_routing.rs` runs. This test is kept on its own merits — it covers the
+/// resource arms, which the DB-gated one does not — and the sentence is corrected
+/// rather than deleted because prose is the one thing nothing mechanical re-checks.
 ///
 /// Asserted on the EMITTED `policyPriority`, not on the `is_override` flag the four
 /// call sites in `rules.rs` hard-code, so it survives a refactor that renames or
