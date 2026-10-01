@@ -2081,7 +2081,7 @@ impl DockerRunner {
                 let mut reader = TarReader::new(&mut copy.stdout);
                 collect_declared(&fs, &to, rel, *from_glob, &mut reader, &mut so_far).await
             };
-            let finished = copy.finish(matches!(got, Ok(_))).await;
+            let finished = copy.finish(got.is_ok()).await;
             match got {
                 Ok(Some(file)) => {
                     result.output_files.insert(rel.clone(), file);
