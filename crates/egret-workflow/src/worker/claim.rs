@@ -1481,7 +1481,26 @@ async fn input_for(
 ) -> Result<(TaskInput, Budget)> {
     let mut conn = pool.acquire().await.map_err(db_err)?;
     let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No, Stack::Fresh).await?;
-    let surface = Surface::load(&mut conn, &ctx).await?;
+    let mut surface = Surface::load(&mut conn, &ctx).await?;
+    // W9a Task 4: the claimed run's OWN execution -- an iteration's id inside
+    // a `Loop` (spec §3), never the loop root -- reads through a snapshot of
+    // every URI in its source and render context. `task_prefix` is this run's
+    // baseUri; a builder error (a namespace or id no URI can carry) leaves it
+    // `None` here, and fails the task where a file is written (Task 6).
+    let task_prefix = surface.flow().and_then(|f| {
+        crate::storage::uri::task_prefix(&f.namespace, &f.id, c.execution_id, &c.task_id, c.id).ok()
+    });
+    let files = crate::storage::scope::scope_for(
+        &mut conn,
+        crate::storage::current(),
+        c.workspace_id,
+        c.execution_id,
+        &[&c.source],
+        &surface.snapshot_values(),
+        task_prefix,
+    )
+    .await?;
+    surface.attach_files(files);
     let run = usize::try_from(c.run_ix).map_err(|_| {
         worker_err(WorkerError::Corrupt(
             c.id,
@@ -1664,7 +1683,23 @@ pub(super) async fn settle(
     now: Tick,
     release: Option<Lease>,
 ) -> Result<()> {
-    let surface = Surface::load(conn, ctx).await?;
+    let mut surface = Surface::load(conn, ctx).await?;
+    // W9a Task 4: the snapshot every render of this settle reads files
+    // through -- `runIf`, the five tier-B expressions, the SLA, a subflow's
+    // inputs -- taken on `conn`, i.e. INSIDE the caller's transaction, which
+    // is the only connection that sees the index rows of the task this
+    // transaction has just finished.
+    let files = crate::storage::scope::scope_for(
+        conn,
+        crate::storage::current(),
+        ctx.workspace_id,
+        ctx.id,
+        &[&ctx.source],
+        &surface.snapshot_values(),
+        None,
+    )
+    .await?;
+    surface.attach_files(files);
     let mut marks = Marks::default();
     // The caller's own command -- a handler's terminal, or the `SetRunState` a
     // loop's completion applies -- is step `ctx.seq + 1`, and every round below

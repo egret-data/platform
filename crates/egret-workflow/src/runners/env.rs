@@ -117,6 +117,7 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
+use super::files::{FileScope, FileScopeObject, FILE_SCOPE};
 use super::filters;
 use super::functions;
 use super::rewrite::{rewrite, RewriteError};
@@ -324,8 +325,15 @@ pub enum RenderError {
 ///
 /// W2 does not build an execution context — that is W3's job (see the crate
 /// doc). This type is the shape W3 will fill.
+///
+/// **W9a Task 4: and the files it may read.** [`RenderContext::with_files`]
+/// attaches a [`FileScope`]; both render threads then bind it as the
+/// [`FILE_SCOPE`] global, and without one the four file functions refuse.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RenderContext(Vec<(String, MjValue)>);
+pub struct RenderContext {
+    bindings: Vec<(String, MjValue)>,
+    files: Option<FileScope>,
+}
 
 impl RenderContext {
     /// An empty context. A template that references any variable will fail
@@ -341,16 +349,27 @@ impl RenderContext {
     pub fn insert(&mut self, key: impl Into<String>, value: JsonValue) -> &mut Self {
         let key = key.into();
         let value = json_to_minijinja(&value);
-        match self.0.iter_mut().find(|(name, _)| *name == key) {
+        match self.bindings.iter_mut().find(|(name, _)| *name == key) {
             Some(slot) => slot.1 = value,
-            None => self.0.push((key, value)),
+            None => self.bindings.push((key, value)),
         }
         self
     }
 
     /// The bindings, in order, for callers that need to inspect them.
     pub fn bindings(&self) -> &[(String, MjValue)] {
-        &self.0
+        &self.bindings
+    }
+
+    /// The same bindings, with the files the four file functions read.
+    pub fn with_files(mut self, files: FileScope) -> Self {
+        self.files = Some(files);
+        self
+    }
+
+    /// The attached file scope, `None` where the four file functions refuse.
+    pub fn files(&self) -> Option<&FileScope> {
+        self.files.as_ref()
     }
 
     /// Builds a context from a JSON object.
@@ -386,7 +405,7 @@ impl RenderContext {
     /// than falling back to [`RenderContext::new`].
     pub fn from_json_object(value: &JsonValue) -> Option<Self> {
         let object = value.as_object()?;
-        Some(Self(
+        Some(Self::from_bindings(
             object
                 .iter()
                 .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
@@ -404,9 +423,27 @@ impl RenderContext {
         serde_json::from_str(json)
     }
 
+    fn from_bindings(bindings: Vec<(String, MjValue)>) -> Self {
+        Self {
+            bindings,
+            files: None,
+        }
+    }
+
     /// The context as one minijinja value: an order-preserving map object.
     fn to_minijinja(&self) -> MjValue {
-        MjValue::from_object(OrderedMap::new(self.0.clone()))
+        MjValue::from_object(OrderedMap::new(self.bindings.clone()))
+    }
+
+    /// Binds [`FILE_SCOPE`] when a scope is attached. Called by BOTH render
+    /// threads, after anything that could unbind it.
+    fn bind_files(&self, env: &mut Environment<'static>) {
+        if let Some(files) = &self.files {
+            env.add_global(
+                FILE_SCOPE,
+                MjValue::from_object(FileScopeObject(files.clone())),
+            );
+        }
     }
 }
 
@@ -856,7 +893,7 @@ impl<'de> Deserialize<'de> for RenderContext {
                 // is the one map in the crate that does not go through
                 // `OrderedMap`. `RenderContext::insert` has always collapsed a
                 // rebinding in place; the deserialiser did not.
-                Ok(RenderContext(last_value_wins(entries)))
+                Ok(RenderContext::from_bindings(last_value_wins(entries)))
             }
         }
 
@@ -866,7 +903,7 @@ impl<'de> Deserialize<'de> for RenderContext {
 
 impl From<BTreeMap<String, JsonValue>> for RenderContext {
     fn from(map: BTreeMap<String, JsonValue>) -> Self {
-        Self(
+        Self::from_bindings(
             map.iter()
                 .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
                 .collect(),
@@ -2104,6 +2141,8 @@ fn render_on_this_thread(
             cx.bindings().iter().map(|(name, _)| name.clone()).collect(),
         )),
     );
+    // W9a Task 4: after `extend`, for the same reason as the scope above.
+    cx.bind_files(&mut env);
     let env = env;
 
     // W2 Task 8 fix round 1: one budget for the whole render, shared by every
@@ -2298,6 +2337,10 @@ fn bind_on_this_thread(
             cx.bindings().iter().map(|(name, _)| name.clone()).collect(),
         )),
     );
+    // W9a Task 4: `egret.sql`'s `sql:` reads files too -- this thread is the
+    // second of the two, and a scope bound on only one of them is the defect
+    // `the_file_functions_render_inside_an_egret_sql_statement` exists for.
+    cx.bind_files(&mut env);
     // AFTER `environment()`, which sets `json_writer_formatter`. Order is the
     // whole of it: the other way round, Kestra's formatter would win and every
     // value would be written into the SQL.

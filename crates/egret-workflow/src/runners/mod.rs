@@ -38,6 +38,7 @@
 //!   shared environment keeps refusing it (see `secrets`' module doc).
 
 pub mod env;
+pub mod files;
 mod filters;
 mod functions;
 mod ionfmt;
@@ -57,6 +58,7 @@ mod yamlfmt;
 pub use env::{
     referenced_roots, render_str, render_str_guarded, GuardedRender, RenderContext, RenderError,
 };
+pub use files::{FileMeta, FileScope, FileUnavailable, RenderFiles};
 /// W9a: `storage::uri` builds Kestra's URIs from these two (`Slugify.of`, and
 /// the base62 of `IdUtils.from`).
 pub(crate) use filters::slugify_str;

@@ -4,6 +4,8 @@
 //! - [`uri`]: `kestra://` URIs, Kestra's layout (spec §3).
 //! - [`index`]: the readable set and [`index::resolve_readable_many`], **the
 //!   one function that decides whether a URI is readable** (spec §4.4).
+//! - [`scope`]: the render snapshot the four file functions read through
+//!   (spec §7.2), resolved before every render.
 //! - this module: the [`FileStore`] (the object store, its bucket, prefix and
 //!   caps), the process-wide slot it is installed in, and the index writers.
 //!
@@ -19,6 +21,7 @@
 //! [`current`].
 
 pub mod index;
+pub mod scope;
 pub mod uri;
 
 use std::sync::{Arc, OnceLock};

@@ -168,8 +168,22 @@ pub(super) fn register(env: &mut Environment<'static>) {
     env.add_function("printContext", fetch_context);
     env.add_function("tasksWithState", tasks_with_state);
 
-    // W2 Task 8's twelve refusals. See [`not_implemented`] for the message
-    // shape and why the oracle cannot check it.
+    // W9a Task 4: the four file functions, over the render's file scope.
+    env.add_function("read", |state: &State, rest: Rest<MjValue>| {
+        file_function(FileFunction::Read, state, rest)
+    });
+    env.add_function("fileSize", |state: &State, rest: Rest<MjValue>| {
+        file_function(FileFunction::Size, state, rest)
+    });
+    env.add_function("fileExists", |state: &State, rest: Rest<MjValue>| {
+        file_function(FileFunction::Exists, state, rest)
+    });
+    env.add_function("isFileEmpty", |state: &State, rest: Rest<MjValue>| {
+        file_function(FileFunction::IsEmpty, state, rest)
+    });
+
+    // W2 Task 8's refusals, eight since W9a Task 4. See [`not_implemented`]
+    // for the message shape and why the oracle cannot check it.
     for (name, refusal) in REFUSED {
         env.add_function(
             *name,
@@ -210,7 +224,7 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
      fields of the pod spec, readable by anyone with `get pods` in the task namespace, and \
      no other render (inputs, runIf, Log, triggers) resolves secrets.";
 
-/// The twelve names egret registers only to refuse, with what each is waiting
+/// The eight names egret registers only to refuse, with what each is waiting
 /// for and who owns it.
 ///
 /// **Two different kinds of absence, deliberately treated the same.** The
@@ -239,27 +253,17 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
 /// **Updated 2026-09-29 (W5b Task 4).** `secret` is no longer waiting for a
 /// package: it resolves on `kestra.*` plugin tasks and is
 /// [`Refusal::Confined`] everywhere else, with [`SECRET_REFUSAL`]'s reason.
+///
+/// **Updated 2026-10-01 (W9a Task 4): eight names now.** `read`, `fileSize`,
+/// `fileExists` and `isFileEmpty` are implemented ([`file_function`]) over
+/// the render's file scope; W9 split, so `fileURI` names W9b (namespace
+/// files) and `kv` W9c (the KV store). `http` is left naming W9: it is still
+/// in no package's contents (the programme spec's §9 note).
 const REFUSED: &[(&str, Refusal)] = &[
     // Registered with a null backing on the built engine.
     ("secret", Refusal::Confined(SECRET_REFUSAL)),
-    ("kv", not_yet("the namespace KV store", "W9")),
-    (
-        "read",
-        not_yet("internal storage and namespace files", "W9"),
-    ),
-    ("fileURI", not_yet("namespace files", "W9")),
-    (
-        "fileSize",
-        not_yet("internal storage and namespace files", "W9"),
-    ),
-    (
-        "fileExists",
-        not_yet("internal storage and namespace files", "W9"),
-    ),
-    (
-        "isFileEmpty",
-        not_yet("internal storage and namespace files", "W9"),
-    ),
+    ("kv", not_yet("the namespace KV store", "W9c")),
+    ("fileURI", not_yet("namespace files", "W9b")),
     ("http", not_yet("an outbound HTTP client", "W9")),
     // Not registered at all on the built engine: `@Inject @Nullable`, guarded.
     (
@@ -276,6 +280,97 @@ const REFUSED: &[(&str, Refusal)] = &[
 
 const fn not_yet(needs: &'static str, package: &'static str) -> Refusal {
     Refusal::NotYet { needs, package }
+}
+
+// ---------------------------------------------------------------------------
+// W9a Task 4: the file functions
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum FileFunction {
+    Read,
+    Size,
+    Exists,
+    IsEmpty,
+}
+
+impl FileFunction {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Size => "fileSize",
+            Self::Exists => "fileExists",
+            Self::IsEmpty => "isFileEmpty",
+        }
+    }
+}
+
+/// `ReadFileFunction`, `FileSizeFunction`, `FileExistsFunction` and
+/// `IsFileEmptyFunction` over a `kestra://` URI (W9a spec §7.2).
+///
+/// They answer from the render's [`FileScope`](super::files::FileScope),
+/// bound as the [`FILE_SCOPE`](super::files::FILE_SCOPE) global -- the pattern
+/// [`fetch_context`] uses for `CONTEXT_SCOPE_NAMES`. No scope means no running
+/// execution (a Flow trigger's `conditions`, a render outside a task run), and
+/// the four refuse by name.
+///
+/// The answers, `w9a-storage.json` `file_functions` cell by cell:
+///
+/// | the URI | `read` | `fileSize` | `fileExists` | `isFileEmpty` |
+/// |---|---|---|---|---|
+/// | readable, indexed | its text | its size | `true` | `size == 0` |
+/// | readable execution, no such file | error | error | **`false`** | error |
+/// | anything else | error | error | error | error |
+///
+/// A path with no scheme is a namespace file in Kestra, which W9b provides.
+fn file_function(
+    which: FileFunction,
+    state: &State,
+    rest: Rest<MjValue>,
+) -> Result<MjValue, MjError> {
+    let name = which.name();
+    let args = Args::new(rest);
+    let Some(path) = args.get("path", 0) else {
+        return Err(pebble_error(format!(
+            "The '{name}' function expects an argument 'path'."
+        )));
+    };
+    let Some(path) = path.as_str() else {
+        return Err(pebble_error(format!(
+            "The '{name}' function expects an argument 'path' with type string."
+        )));
+    };
+    let scope = state.lookup(super::files::FILE_SCOPE).and_then(|v| {
+        v.downcast_object_ref::<super::files::FileScopeObject>()
+            .map(|held| held.0.clone())
+    });
+    let Some(scope) = scope else {
+        return Err(pebble_error(format!(
+            "The '{name}' function needs a running execution: it reads the execution's files, \
+             and only a task run's render has them (a Flow trigger's conditions and inputs, \
+             for one, do not)."
+        )));
+    };
+    if !path.contains("://") {
+        return Err(pebble_error(format!(
+            "The '{name}' function cannot read '{path}': a path with no kestra:// scheme \
+             names a namespace file, which egret's W9b package provides."
+        )));
+    }
+    let failed = |message: &str| pebble_error(format!("The '{name}' function failed: {message}"));
+    let meta = match scope.0.lookup(path) {
+        Ok(meta) => meta,
+        Err(super::files::FileUnavailable::Missing(_)) if matches!(which, FileFunction::Exists) => {
+            return Ok(MjValue::from(false));
+        }
+        Err(why) => return Err(failed(why.message())),
+    };
+    Ok(match which {
+        FileFunction::Read => MjValue::from(scope.0.read_utf8(path).map_err(|m| failed(&m))?),
+        FileFunction::Size => MjValue::from(meta.size),
+        FileFunction::Exists => MjValue::from(true),
+        FileFunction::IsEmpty => MjValue::from(meta.size == 0),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3117,14 +3212,16 @@ mod tests {
     // evidence a refusal works, and it never will be. These are.
     // -----------------------------------------------------------------
 
-    /// The twelve names egret registers only to refuse, each asserted for its
+    /// The eight names egret registers only to refuse, each asserted for its
     /// **exact message**: the function's own name, what it needs, and the
     /// package that will implement it.
     ///
-    /// Pairs `function-secret`, `-kv`, `-read`, `-fileuri`, `-filesize`,
-    /// `-fileexists`, `-isfileempty`, `-http` (which were
-    /// `unported:task-8` until this task), and `function-render`,
-    /// `-renderonce`, `-errorlogs`, `-subflow`.
+    /// Pairs `function-secret`, `-kv`, `-fileuri`, `-http` (which were
+    /// `unported:task-8` until W2 Task 8), and `function-render`,
+    /// `-renderonce`, `-errorlogs`, `-subflow`. **W9a Task 4** took `read`,
+    /// `fileSize`, `fileExists` and `isFileEmpty` out (they answer from a
+    /// render's file scope, `file_functions` below) and gave `kv` and `fileURI`
+    /// their own packages, W9c and W9b.
     ///
     /// # These refuse unconditionally, and that is the honest answer
     ///
@@ -3142,20 +3239,16 @@ mod tests {
     ///
     /// The second of those is belt and braces rather than the discriminating
     /// assertion, and saying so is the honest version: unregistering the
-    /// twelve dies on the `contains(&want)` assert first, because
+    /// eight dies on the `contains(&want)` assert first, because
     /// `unknown function: secret is unknown` does not contain the sentence.
     /// It earns its place only for a *different* mutation — a refusal that
     /// forwards to minijinja's unknown-name error while still being
     /// registered — and it costs one line.
     #[test]
-    fn the_twelve_refusals_name_themselves_and_their_owner() {
+    fn the_eight_refusals_name_themselves_and_their_owner() {
         let expected = [
-            ("kv", "the namespace KV store", "W9"),
-            ("read", "internal storage and namespace files", "W9"),
-            ("fileURI", "namespace files", "W9"),
-            ("fileSize", "internal storage and namespace files", "W9"),
-            ("fileExists", "internal storage and namespace files", "W9"),
-            ("isFileEmpty", "internal storage and namespace files", "W9"),
+            ("kv", "the namespace KV store", "W9c"),
+            ("fileURI", "namespace files", "W9b"),
             ("http", "an outbound HTTP client", "W9"),
             ("render", "an execution context to render against", "W3"),
             ("renderOnce", "an execution context to render against", "W3"),
@@ -3714,5 +3807,252 @@ mod tests {
             "java.lang.Double"
         );
         assert_eq!(ok("{{ yaml(yaml=('1e5' | yaml)) }}"), "100000.0");
+    }
+
+    // -----------------------------------------------------------------
+    // W9a Task 4: the four file functions, over a fake scope.
+    // -----------------------------------------------------------------
+
+    mod file_functions {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        use crate::runners::env::{render_bound, render_str, RenderContext};
+        use crate::runners::files::{
+            FileMeta, FileScope, FileUnavailable, RenderFiles, FILE_SCOPE,
+        };
+
+        /// A `RenderFiles` over a map: what each URI resolves to, and its text.
+        #[derive(Default)]
+        struct Fake {
+            meta: BTreeMap<String, Result<FileMeta, FileUnavailable>>,
+            text: BTreeMap<String, String>,
+        }
+
+        impl Fake {
+            fn file(mut self, uri: &str, text: &str) -> Self {
+                self.meta.insert(
+                    uri.into(),
+                    Ok(FileMeta {
+                        size: text.len() as u64,
+                    }),
+                );
+                self.text.insert(uri.into(), text.into());
+                self
+            }
+            fn gone(mut self, uri: &str, why: FileUnavailable) -> Self {
+                self.meta.insert(uri.into(), Err(why));
+                self
+            }
+            fn cx(self) -> RenderContext {
+                RenderContext::new().with_files(FileScope(Arc::new(self)))
+            }
+        }
+
+        impl RenderFiles for Fake {
+            fn lookup(&self, uri: &str) -> Result<FileMeta, FileUnavailable> {
+                self.meta.get(uri).cloned().unwrap_or_else(|| {
+                    Err(FileUnavailable::Refused(format!("{uri} not in the fake")))
+                })
+            }
+            fn read_utf8(&self, uri: &str) -> Result<String, String> {
+                self.lookup(uri).map_err(|e| e.message().to_string())?;
+                Ok(self.text[uri].clone())
+            }
+            fn task_prefix(&self) -> Option<&str> {
+                None
+            }
+        }
+
+        const OWN: &str = "kestra:///w9a/storage/ff-main/executions/2G1i2hGvCOdQ5cwWChXwwu/tasks/w/6fG4Jp3jvbNakpAsBdWyGO/own.txt";
+        const EMPTY: &str = "kestra:///w9a/storage/ff-main/executions/2G1i2hGvCOdQ5cwWChXwwu/tasks/w/6fG4Jp3jvbNakpAsBdWyGO/empty.txt";
+        /// `file_functions.missing_in_own`'s URI, written LITERALLY (Kestra's
+        /// probe assembled it with `~ execution.id ~`, which egret's
+        /// snapshot ruling answers differently -- see `tests/storage_render.rs`).
+        const NOPE: &str = "kestra:///w9a/storage/ff-main/executions/2G1i2hGvCOdQ5cwWChXwwu/tasks/w/6fG4Jp3jvbNakpAsBdWyGO/nope.txt";
+
+        const FOUR: [&str; 4] = ["read", "fileSize", "fileExists", "isFileEmpty"];
+
+        fn call(name: &str, uri: &str, cx: &RenderContext) -> Result<String, String> {
+            render_str(&format!("{{{{ {name}('{uri}') }}}}"), cx).map_err(|e| e.to_string())
+        }
+
+        /// `w9a-storage.json` `file_functions.own` and `file_functions_extra.own_empty`,
+        /// each value the artifact's, and the argument passed both ways.
+        #[test]
+        fn the_four_functions_answer_from_the_scope() {
+            let cx = Fake::default()
+                .file(OWN, "own content")
+                .file(EMPTY, "")
+                .cx();
+            for (name, own, empty) in [
+                ("read", "own content", ""),
+                ("fileSize", "11", "0"),
+                ("fileExists", "true", "true"),
+                ("isFileEmpty", "false", "true"),
+            ] {
+                assert_eq!(call(name, OWN, &cx).as_deref(), Ok(own), "{name}");
+                assert_eq!(call(name, EMPTY, &cx).as_deref(), Ok(empty), "{name} empty");
+                assert_eq!(
+                    render_str(&format!("{{{{ {name}(path='{OWN}') }}}}"), &cx)
+                        .map_err(|e| e.to_string())
+                        .as_deref(),
+                    Ok(own),
+                    "{name}(path=…)"
+                );
+            }
+            // fileSize is a number, not text: it compares.
+            assert_eq!(
+                render_str(&format!("{{{{ fileSize('{OWN}') > 10 }}}}"), &cx).unwrap(),
+                "true"
+            );
+        }
+
+        /// `file_functions.missing_in_own`: `fileExists` is `false`, the other
+        /// three fail naming the URI.
+        #[test]
+        fn file_exists_on_a_missing_file_is_the_artifacts_answer() {
+            let cx = Fake::default()
+                .gone(
+                    NOPE,
+                    FileUnavailable::Missing(format!("{NOPE} does not exist")),
+                )
+                .cx();
+            assert_eq!(call("fileExists", NOPE, &cx).as_deref(), Ok("false"));
+            for name in ["read", "fileSize", "isFileEmpty"] {
+                let err = call(name, NOPE, &cx).unwrap_err();
+                assert!(
+                    err.contains(&format!("{NOPE} does not exist")),
+                    "{name}: {err}"
+                );
+                assert!(err.contains(&format!("'{name}'")), "{name}: {err}");
+            }
+        }
+
+        /// `file_functions.unrelated_same_namespace` (chosen: NotReadable) and
+        /// `file_functions.malformed`, `file_functions_extra.malformed_dotdot`
+        /// and `.malformed_scheme`: all four FAIL, `fileExists` included.
+        #[test]
+        fn every_other_unreadable_uri_is_an_error_naming_it() {
+            let unrelated = "kestra:///w9a/storage/ff-other/executions/3Hq/tasks/w/x/u.txt";
+            let malformed = "kestra:///not-an-execution-file.txt";
+            let dotdot = "kestra:///w9a/storage/ff-main/executions/2G1i2hGvCOdQ5cwWChXwwu/tasks/w/../../../../other/x.txt";
+            let cx = Fake::default()
+                .gone(
+                    unrelated,
+                    FileUnavailable::Refused(format!(
+                        "{unrelated} belongs to an execution this flow may not read"
+                    )),
+                )
+                .gone(
+                    malformed,
+                    FileUnavailable::Refused(format!(
+                        "{malformed} is not a storage URI egret can read: x"
+                    )),
+                )
+                .gone(
+                    dotdot,
+                    FileUnavailable::Refused(format!(
+                        "{dotdot} is not a storage URI egret can read: .."
+                    )),
+                )
+                .cx();
+            for uri in [unrelated, malformed, dotdot, "s3://bucket/key.txt"] {
+                for name in FOUR {
+                    let err = call(name, uri, &cx).unwrap_err();
+                    assert!(err.contains(uri), "{name}({uri}): {err}");
+                }
+            }
+        }
+
+        #[test]
+        fn without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution() {
+            for name in FOUR {
+                let err = call(name, OWN, &RenderContext::new()).unwrap_err();
+                assert!(
+                    err.contains(&format!("The '{name}' function needs a running execution")),
+                    "{name}: {err}"
+                );
+                assert!(!err.contains("is unknown"), "{name}: {err}");
+            }
+        }
+
+        #[test]
+        fn file_uri_names_w9b_and_kv_names_w9c() {
+            let cx = Fake::default().file(OWN, "own content").cx();
+            let err = render_str("{{ fileURI('a.txt') }}", &cx)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("namespace files") && err.contains("W9b"),
+                "{err}"
+            );
+            let err = render_str("{{ kv('k') }}", &cx).unwrap_err().to_string();
+            assert!(
+                err.contains("the namespace KV store") && err.contains("W9c"),
+                "{err}"
+            );
+        }
+
+        /// A path with no scheme is a namespace file in Kestra: W9b's, not
+        /// internal storage's.
+        #[test]
+        fn a_path_with_no_scheme_names_namespace_files_and_w9b() {
+            let cx = Fake::default().cx();
+            for name in FOUR {
+                let err = call(name, "data/x.csv", &cx).unwrap_err();
+                assert!(
+                    err.contains("data/x.csv") && err.contains("W9b"),
+                    "{name}: {err}"
+                );
+            }
+        }
+
+        /// No argument, and a non-string one.
+        #[test]
+        fn the_path_argument_is_required_and_a_string() {
+            let cx = Fake::default().cx();
+            for name in FOUR {
+                let err = render_str(&format!("{{{{ {name}() }}}}"), &cx)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    err.contains(&format!("The '{name}' function expects an argument 'path'")),
+                    "{err}"
+                );
+                let err = render_str(&format!("{{{{ {name}(42) }}}}"), &cx)
+                    .unwrap_err()
+                    .to_string();
+                assert!(err.contains("with type string"), "{err}");
+            }
+        }
+
+        /// The probes `the_context_scope_global_is_unreachable_from_a_template`
+        /// uses, aimed at [`FILE_SCOPE`] -- and `fetchContext()` does not
+        /// list it either, with a scope attached.
+        #[test]
+        fn the_file_scope_global_is_unreachable_from_a_template() {
+            assert!(FILE_SCOPE.contains(' '));
+            let cx = Fake::default().file(OWN, "own content").cx();
+            let message =
+                render_str(&format!("{{{{ {FILE_SCOPE} }}}}"), &cx).expect_err("must not parse");
+            assert!(message.to_string().contains("syntax error"), "{message}");
+            assert!(render_str("{{ egret }}", &cx).is_err());
+            let all = render_str("{{ fetchContext() }}", &cx).unwrap();
+            assert!(!all.contains("egret"), "{all}");
+            // The control: the scope IS bound on this render.
+            assert_eq!(call("fileSize", OWN, &cx).as_deref(), Ok("11"));
+        }
+
+        /// `egret.sql` renders `sql:` on the OTHER render thread
+        /// (`render_bound`); the scope must reach it too.
+        #[test]
+        fn the_file_functions_render_inside_an_egret_sql_statement() {
+            let cx = Fake::default().file(OWN, "own content").cx();
+            let (sql, binds) =
+                render_bound(&format!("SELECT {{{{ fileSize('{OWN}') }}}}"), &cx).unwrap();
+            assert_eq!(sql, "SELECT ?");
+            assert_eq!(binds, vec![serde_json::json!(11)]);
+        }
     }
 }

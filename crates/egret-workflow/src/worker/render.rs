@@ -70,7 +70,7 @@ use uuid::Uuid;
 use super::claim::ExecutionCtx;
 use crate::executor::{ExecutionState, Plan, RunIx, RunState, TaskKind, Tick};
 use crate::models::{Flow, InputType};
-use crate::runners::RenderContext;
+use crate::runners::{FileScope, RenderContext};
 
 /// Everything a render needs that lives outside `ExecutionState`, read once
 /// per [`settle`](super::claim::settle).
@@ -128,6 +128,11 @@ pub(super) struct Surface {
     started: std::collections::BTreeMap<usize, String>,
     /// Each run's surrogate id, by `run_ix`, as `taskrun.id` reads it.
     ids: std::collections::BTreeMap<usize, Uuid>,
+    /// W9a Task 4: the files the four file functions read, attached by
+    /// `settle` after [`Surface::load`] ([`Surface::attach_files`]). `None`
+    /// everywhere else -- notably [`execution_render_context`], so a Flow
+    /// trigger's `conditions` and `inputs` refuse them (spec §7.2).
+    files: Option<FileScope>,
 }
 
 /// One row's links upward, as `Surface::load`'s walk reads them.
@@ -528,7 +533,25 @@ impl Surface {
             own,
             started,
             ids,
+            files: None,
         })
+    }
+
+    /// Every JSON value of the render context a `kestra://` URI can arrive in
+    /// -- `inputs`, the outputs inherited from loop ancestors, this
+    /// execution's own outputs, `execution` and `item` -- for
+    /// `storage::scope::Snapshot::take`. The flow source is the caller's.
+    pub(super) fn snapshot_values(&self) -> Vec<&Value> {
+        let mut values = vec![&self.inputs, &self.execution];
+        values.extend(self.inherited.values());
+        values.extend(self.own.values());
+        values.extend(self.item.iter());
+        values
+    }
+
+    /// Attach the file scope every later [`Surface::context`] carries.
+    pub(super) fn attach_files(&mut self, files: FileScope) {
+        self.files = Some(files);
     }
 
     /// The flow this execution runs, as `load` parsed it.
@@ -705,7 +728,10 @@ impl Surface {
                 );
             }
         }
-        cx
+        match &self.files {
+            Some(files) => cx.with_files(files.clone()),
+            None => cx,
+        }
     }
 }
 
@@ -916,6 +942,7 @@ mod tests {
             own: std::collections::BTreeMap::new(),
             started: std::collections::BTreeMap::new(),
             ids: std::collections::BTreeMap::new(),
+            files: None,
         };
         let cx = surface.context(&plan, &state, None);
         let read = |name: &str| {
