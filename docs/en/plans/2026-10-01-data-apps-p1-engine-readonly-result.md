@@ -10,8 +10,8 @@ was changed.
 
 | Engine | Available | Mechanism | Recommendation |
 | --- | --- | --- | --- |
-| Trino 470 | Yes, per transaction (not a session property) | `START TRANSACTION READ ONLY`, then the statement in that transaction | Needs follow-up: adopt in P3/P4 only if the connector is given a transaction round-trip (see below); parser + Ranger remain the primary gate |
-| StarRocks 4.1.3 | No (variable is accepted and ignored) | none | Don't. Rely on the parser plus Ranger |
+| Trino 470 | Yes, per transaction (not a session property) | `START TRANSACTION READ ONLY`, then the statement in that transaction | Follow-up (not adopted in P1): would need a transaction round-trip in the connector (see below); parser + Ranger remain the primary gate |
+| StarRocks 4.1.3 | No (variable is accepted and ignored) | none | Don't. Rely on the parser plus Ranger. **Do NOT add `SET transaction_read_only` for StarRocks: `SHOW VARIABLES` reports it as true, and it enforces nothing - INSERT and DELETE still succeed.** |
 
 ## Where each measurement ran (and what could not)
 
@@ -112,6 +112,8 @@ round-trips are acceptable; until then the parser plus Ranger are the gate.
 
 ## StarRocks 4.1.3
 
+**Do NOT add `SET transaction_read_only` for StarRocks: `SHOW VARIABLES` reports it as true, and it enforces nothing - INSERT and DELETE still succeed.**
+
 Scratch database `p1_ro_probe_28978` created by me, with table `t (id INT)`. Each
 statement was run in one `mysql` session, `-vvv --force`:
 
@@ -130,7 +132,7 @@ statement was run in one `mysql` session, `-vvv --force`:
 `transaction_read_only = 1` still set, `DELETE FROM ...t WHERE id=5` also succeeded
 (`delete_... VISIBLE`) and `count(*)` dropped to 4. So `transaction_read_only` and its
 aliases exist for MySQL client compatibility and are **stored but not enforced**.
-`innodb_read_only` is a global that shows `true` already, which is equally inert.
+`innodb_read_only` is a global that already shows `true`; I set it at session level but did not retest with a write (unmeasured).
 
 Usable from egret: the connector opens `mysql_async::Conn::new` per `execute` and
 already issues one session statement (`EXECUTE AS` ... `WITH NO REVERT`,
