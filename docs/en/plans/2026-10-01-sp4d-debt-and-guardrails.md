@@ -295,6 +295,17 @@ restore by checksum. A gate nobody has seen fail is what this plan keeps finding
 
 ---
 
+## Pre-merge steps
+
+1. **Run migration 0166's own listing query** (`migrations/0166_…sql:124`) against any cluster that
+   may hold **hand-written** tag rows. 0166 is `VALID` with no clearing statement, deliberately, so
+   `migrate()` **aborts before the process serves** if such a row exists — which is the correct
+   behaviour and a bad surprise during an upgrade. A survey of **all 28 databases on this host**
+   found zero violating rows, and the only deployment is the local kind cluster whose database is on
+   this host, so this is covered. It stays on the list because "the only deployment is local" is a
+   claim about **reach**, and reach claims have been wrong five times on this programme while the
+   behaviour claim beside them was right.
+
 ## Open, not in this plan — named so it is not mistaken for closed
 
 **A StarRocks engine bound to a `trino`-typed profile that carries a `tagService` still
