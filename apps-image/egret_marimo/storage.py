@@ -34,6 +34,7 @@ from marimo._utils.http import HTTPException
 from .client import GatewayError
 from .podapi import DraftConflict, PodApi
 
+RENAME_MESSAGE = "An app cannot be renamed here: renaming is done in egret."
 CONFLICT_MESSAGE = "This draft was saved by someone else — reload to get the latest version."
 
 _APP_FILE = re.compile(
@@ -48,17 +49,26 @@ def _gateway_to_http(e: GatewayError) -> HTTPException:
 
 
 class EgretStorage(FilesystemStorage):
-    """marimo storage for one editor session: saves the draft to egret, then to the local file."""
+    """marimo storage for one editor session: saves the draft to egret, then to the local file.
 
-    def __init__(self, app_id: str, api: PodApi, base_revision: int) -> None:
+    It is bound to ONE file, ``<workdir>/<app_id>.py``: every write is a PUT of the bound
+    app's draft, so a write to any other path (marimo's copy endpoint writes the copy
+    through the source notebook's storage) is refused rather than saved over this draft.
+    Renaming is refused too (spec §5.1): an app's file name is its id, set by egret.
+    """
+
+    def __init__(self, app_id: str, api: PodApi, base_revision: int, app_file: Path) -> None:
         super().__init__()
         self.app_id = app_id
+        self.app_file = Path(app_file).resolve()
         self.api = api
         self.base_revision = base_revision
         # Set on the first 409; the session is then closed rather than resumed on reconnect.
         self.conflicted = False
 
     def write(self, path: Path, content: str) -> None:
+        if Path(path).resolve() != self.app_file:
+            raise HTTPException(403, f"only this app's draft can be saved here, not {Path(path).name}")
         try:
             new = self.api.put_draft(self.app_id, self.base_revision, content)
         except DraftConflict:
@@ -70,6 +80,9 @@ class EgretStorage(FilesystemStorage):
             raise _gateway_to_http(e) from e
         self.base_revision = new
         super().write(path, content)
+
+    def rename(self, old_path: Path, new_path: Path) -> None:
+        raise HTTPException(403, RENAME_MESSAGE)
 
 
 def _app_id_for(workdir: Path, path: Path) -> str | None:
@@ -113,7 +126,7 @@ def install_storage_patch(workdir: Path, api: PodApi) -> None:
             Path(resolved).write_text(draft.source, encoding="utf-8")
 
         manager = original_load(self, key, defaults)
-        manager.storage = EgretStorage(app_id, api, draft.revision)
+        manager.storage = EgretStorage(app_id, api, draft.revision, Path(resolved))
         return manager
 
     NotebookWorkspace._egret_original_load = original_load  # type: ignore[attr-defined]

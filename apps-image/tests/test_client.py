@@ -103,3 +103,11 @@ def test_unreachable_gateway_is_gateway_error(monkeypatch):
     with pytest.raises(GatewayError) as e:
         sql("select 1", "db")
     assert e.value.status == 0
+
+
+def test_package_exports_the_public_api():
+    import egret_marimo
+    from egret_marimo import client
+
+    assert egret_marimo.Connection is client.Connection
+    assert set(egret_marimo.__all__) == {"Connection", "GatewayError", "SessionExpired", "connect", "sql"}

@@ -1,6 +1,4 @@
-# pytest, starlette, uvicorn, playwright from the spike's uv.lock.
+# pytest and playwright from the spike's uv.lock. Install together with
+# `-r requirements.txt -c constraints.txt` (starlette, uvicorn, websockets are runtime deps).
 pytest==8.4.0
-starlette==0.46.2
-uvicorn==0.34.2
 playwright==1.52.0
-websockets==17.1

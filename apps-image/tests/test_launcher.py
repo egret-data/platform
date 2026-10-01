@@ -100,6 +100,20 @@ def test_run_rejects_an_app_id_that_is_not_a_uuid(env, monkeypatch, capsys):
     assert "EGRET_APP_ID" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("version", ["../x", "v/1", "v?a=b", "v%2f1", "v 1", "v#1", "v.1"])
+def test_run_rejects_a_version_id_that_could_change_the_url_path(env, monkeypatch, capsys, version):
+    from egret_marimo.podapi import PodApi
+
+    fetched = []
+    monkeypatch.setattr(PodApi, "get_version", lambda self, *a: fetched.append(a) or "")
+    monkeypatch.setenv("EGRET_APP_ID", APP)
+    monkeypatch.setenv("EGRET_VERSION_ID", version)
+    assert launcher.main(["run"]) == 64
+    assert "EGRET_VERSION_ID is not a version id" in capsys.readouterr().err
+    # Refused in phase 1, before the re-exec and before any request is built.
+    assert env["calls"]["exec"] == [] and env["calls"]["marimo"] == [] and fetched == []
+
+
 # --- the .marimo.toml guard --------------------------------------------------
 
 
@@ -145,7 +159,7 @@ def test_edit_argv_installs_storage_patch_only(env):
     assert launcher.main(["edit"]) == 0
     workdir = str(env["workdir"].resolve())
     assert env["calls"]["marimo"] == [[
-        "edit", workdir, "--host", "0.0.0.0", "--port", "2718", "--headless",
+        "-q", "edit", workdir, "--host", "0.0.0.0", "--port", "2718", "--headless",
         "--base-url", "/e/pod-1", "--token-password", "marimo-secret", "--skip-update-check",
     ]]
     assert [Path(a[0]) for a in env["calls"]["storage"]] == [Path(workdir)]
@@ -172,7 +186,7 @@ def test_run_fetches_the_version_once_and_installs_ipc_patch_only(env, egret, mo
     assert app_file.read_text() == "# version 7\n"
     assert fetched == [(APP, VERSION)]
     assert env["calls"]["marimo"] == [[
-        "run", str(app_file), "--host", "0.0.0.0", "--port", "2719", "--headless",
+        "-q", "run", str(app_file), "--host", "0.0.0.0", "--port", "2719", "--headless",
         "--base-url", f"/r/{VERSION}", "--token-password", "marimo-secret",
     ]]
     assert env["calls"]["ipc"] == [(SHIM,)]
@@ -214,8 +228,11 @@ def test_argv_parses_with_marimos_own_cli(env, egret, monkeypatch, mode):
     from marimo._cli.cli import main as marimo_main
 
     ctx = marimo_main.make_context("marimo", list(argv), resilient_parsing=False)
-    cmd = marimo_main.get_command(ctx, argv[0])
-    sub = cmd.make_context(argv[0], list(argv[1:]), parent=ctx)
+    # -q is marimo's GROUP option, so it must come before the subcommand to parse at all.
+    assert ctx.params["quiet"] is True
+    assert argv[0] == "-q" and argv[1] == mode
+    cmd = marimo_main.get_command(ctx, argv[1])
+    sub = cmd.make_context(argv[1], list(argv[2:]), parent=ctx)
     assert sub.params["headless"] is True
     assert sub.params["port"] == int(PORTS_FOR[mode])
     assert sub.params["base_url"] == os.environ["EGRET_BASE_URL"]

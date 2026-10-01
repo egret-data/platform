@@ -121,6 +121,31 @@ def test_resume_path_shape(tmp_path):
     assert "self.manager.maybe_resume_session(" in inspect.getsource(ws_session_connector)
 
 
+def test_session_members_the_resume_patch_reads():
+    """storage._is_conflicted / maybe_resume_session read these off each live session."""
+    from marimo._session.model import ConnectionState
+    from marimo._session.session import SessionImpl
+
+    assert callable(getattr(SessionImpl, "connection_state", None))
+    sig = inspect.signature(SessionImpl.connection_state)
+    assert list(sig.parameters) == ["self"]
+    assert sig.return_annotation in (ConnectionState, "ConnectionState")
+    # app_file_manager is an instance attribute, set from the constructor argument.
+    assert "app_file_manager" in inspect.signature(SessionImpl.__init__).parameters
+    assert "self.app_file_manager = app_file_manager" in inspect.getsource(SessionImpl.__init__)
+
+
+def test_copy_and_rename_go_through_storage():
+    """EgretStorage refuses foreign writes and renames; marimo must route both through it."""
+    from marimo._server.models.models import CopyNotebookRequest
+
+    copy = inspect.getsource(AppFileManager.copy)
+    assert "self.storage.write(destination, content)" in copy
+    assert "self.storage.rename(self._filename, new_path)" in inspect.getsource(AppFileManager.rename)
+    assert {"source", "destination"} <= set(CopyNotebookRequest.__struct_fields__)
+    assert list(inspect.signature(FilesystemStorage.rename).parameters) == ["self", "old_path", "new_path"]
+
+
 # --- Task 3: the run-mode IPC patch, the D14 shim, the locked config ---------
 
 

@@ -59,8 +59,8 @@ def launch(tmp_path, egret):
             EGRET_MARIMO_PORT=str(port),
             EGRET_TEST_INCLUDE_PID="1",  # the gateway records which kernel sent each query
             PYTEST_CURRENT_TEST="e2e",  # enables the test-only overrides and EGRET_TEST_INCLUDE_PID
-            **extra,
         )
+        env.update(extra)
         log = tmp_path / f"{mode}.log"
         proc = subprocess.Popen(
             [str(EGRET_APPS), mode], env=env, stdout=log.open("w"), stderr=subprocess.STDOUT,

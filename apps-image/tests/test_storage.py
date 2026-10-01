@@ -1,6 +1,7 @@
 """EgretStorage against marimo's real workspace and file manager (Task 2)."""
 
 import threading
+from pathlib import Path
 
 import pytest
 from marimo._ast.cell import CellConfig
@@ -271,3 +272,74 @@ def test_load_waits_for_the_notebook_file_lock(setup):
     release.set()
     assert done.wait(5)
     assert path.read_text() == notebook("x = 1")
+
+
+# --- spec §5.1: one storage writes one draft; renaming is egret's ---------------
+
+
+def _events(egret, kind: str) -> list[dict]:
+    return [e for e in egret.events if e["kind"] == kind]
+
+
+def test_copy_through_marimo_never_puts_another_files_content_into_the_draft(setup):
+    """marimo's copy endpoint writes the copy through the SOURCE notebook's storage."""
+    from marimo._server.models.models import CopyNotebookRequest
+
+    egret, workdir, _, ws = setup
+    m = ws.load(f"{APP}.py")
+    other = workdir / "other.py"
+    other.write_text(notebook("z = 'other'"))
+    before = dict(egret.drafts[APP])
+    with pytest.raises(HTTPException) as e:
+        m.copy(CopyNotebookRequest(source=str(other), destination=str(workdir / "copy.py")))
+    assert e.value.status_code == 403
+    assert egret.drafts[APP] == before
+    assert _events(egret, "draft_saved") == [] and _events(egret, "draft_conflict") == []
+    assert not (workdir / "copy.py").exists()
+    # The bound file still saves.
+    save(m, "x = 2")
+    assert egret.drafts[APP]["revision"] == 2
+
+
+def test_copy_of_the_app_itself_to_a_new_name_is_refused_too(setup):
+    from marimo._server.models.models import CopyNotebookRequest
+
+    egret, workdir, _, ws = setup
+    m = ws.load(f"{APP}.py")
+    with pytest.raises(HTTPException) as e:
+        m.copy(CopyNotebookRequest(source=str(workdir / f"{APP}.py"), destination=str(workdir / "dup.py")))
+    assert e.value.status_code == 403
+    assert egret.drafts[APP]["revision"] == 1 and _events(egret, "draft_saved") == []
+    assert not (workdir / "dup.py").exists()
+
+
+def test_rename_through_marimo_is_refused_and_moves_nothing(setup):
+    egret, workdir, _, ws = setup
+    m = ws.load(f"{APP}.py")
+    app_file = workdir / f"{APP}.py"
+    with pytest.raises(HTTPException) as e:
+        m.rename(str(workdir / "renamed.py"))
+    assert e.value.status_code == 403
+    assert "renaming is done in egret" in e.value.detail
+    assert app_file.read_text() == notebook("x = 1")
+    assert not (workdir / "renamed.py").exists()
+    assert m.path is not None and Path(m.path).resolve() == app_file.resolve()
+    assert egret.drafts[APP]["revision"] == 1 and _events(egret, "draft_saved") == []
+    save(m, "x = 2")  # still bound to, and saving, the app's draft
+    assert egret.drafts[APP]["revision"] == 2
+
+
+def test_write_to_any_path_but_the_bound_file_is_refused_before_egret_is_asked(setup, monkeypatch):
+    egret, workdir, api, ws = setup
+    m = ws.load(f"{APP}.py")
+    puts = []
+    monkeypatch.setattr(api, "put_draft", lambda *a: puts.append(a) or 99)
+    for path in (workdir / "x.py", workdir / "sub" / f"{APP}.py", workdir.parent / f"{APP}.py"):
+        with pytest.raises(HTTPException) as e:
+            m.storage.write(path, "content")
+        assert e.value.status_code == 403
+    assert puts == []
+    # A relative path to the bound file (the launcher chdirs to the workdir) is the bound file.
+    monkeypatch.chdir(workdir)
+    m.storage.write(Path(f"{APP}.py"), notebook("x = 5"))
+    assert len(puts) == 1 and m.storage.base_revision == 99

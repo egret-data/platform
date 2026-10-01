@@ -402,4 +402,4 @@ prune-target:
 
 # apps-image: unit/contract tests of egret_marimo (own venv, Python 3.12).
 apps-image-test:
-    cd apps-image && python3.12 -m venv .venv && .venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt -e . && .venv/bin/pytest -q
+    cd apps-image && python3.12 -m venv .venv && .venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt -c constraints.txt -e . && .venv/bin/pytest -q

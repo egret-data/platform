@@ -74,6 +74,7 @@ REQUIRED = {
     ],
 }
 
+_VERSION_ID = re.compile(r"^[A-Za-z0-9-]+$")
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
 
@@ -112,6 +113,9 @@ def _check_env(mode: str, secrets: dict[str, str]) -> dict[str, str]:
         raise LaunchError(EX_USAGE, f"missing required environment variable(s): {', '.join(missing)}")
     if mode == "run" and not _UUID.match(env["EGRET_APP_ID"]):
         raise LaunchError(EX_USAGE, f"EGRET_APP_ID is not an app id: {env['EGRET_APP_ID']!r}")
+    if mode == "run" and not _VERSION_ID.match(env["EGRET_VERSION_ID"]):
+        # It is put into the pod-API URL path as is.
+        raise LaunchError(EX_USAGE, f"EGRET_VERSION_ID is not a version id: {env['EGRET_VERSION_ID']!r}")
     return env
 
 
@@ -178,9 +182,11 @@ def build(mode: str, secrets: dict[str, str]) -> list[str]:
         install_run_mode_ipc_patch(shim)
         target = str(app_file)
 
+    # -q first (a marimo GROUP option): without it marimo prints its startup URL, which
+    # carries ``?access_token=<EGRET_MARIMO_TOKEN>``, to stdout, i.e. into the pod log.
     # Never --watch: in edit mode every load rewrites the app file from egret's draft.
     argv = [
-        mode, target,
+        "-q", mode, target,
         "--host", "0.0.0.0",
         "--port", port,
         "--headless",

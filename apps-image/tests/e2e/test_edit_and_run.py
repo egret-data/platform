@@ -8,7 +8,10 @@ import time
 import httpx
 import pytest
 
-from harness import APPS, MARIMO_TOKEN, POD_TOKEN, ROOT, assert_env_has_no_secrets, viewer_page, wait_until
+from harness import (
+    APPS, MARIMO_TOKEN, POD_TOKEN, assert_env_has_no_secrets, assert_log_has_no_secrets, recording_shim,
+    viewer_page, wait_until,
+)
 
 pytestmark = pytest.mark.e2e
 
@@ -31,12 +34,13 @@ def _wait_text(page, pattern: re.Pattern, timeout: float = 60) -> re.Match:
     return wait_until(lambda: pattern.search(_text(page)), timeout, f"{pattern.pattern!r} on the page", 0.25)
 
 
-def test_run_mode_one_kernel_process_and_token_per_viewer(egret, launch, proxy, browser):
+def test_run_mode_one_kernel_process_and_token_per_viewer(egret, launch, proxy, browser, tmp_path):
     """D7 + §4.1: each viewer's session has its own kernel process and queries with its own token."""
     _seed_viewers(egret)
     egret.versions[(APP, VERSION)] = {"source": (APPS / "viewer.py").read_text(), "version_no": 1}
+    shim, shim_log = recording_shim(tmp_path)
     t0 = time.monotonic()
-    server = launch("run", f"/r/{VERSION}", EGRET_APP_ID=APP, EGRET_VERSION_ID=VERSION)
+    server = launch("run", f"/r/{VERSION}", EGRET_APP_ID=APP, EGRET_VERSION_ID=VERSION, EGRET_VENV_SHIM=str(shim))
     t_ready = time.monotonic() - t0
     base = proxy(server.port, TOKENS)
 
@@ -54,8 +58,11 @@ def test_run_mode_one_kernel_process_and_token_per_viewer(egret, launch, proxy, 
 
         assert pids["alice"] != pids["bob"], f"one kernel process for both viewers: {pids}"
         assert server.proc.pid not in pids.values(), f"kernel ran in the server process {server.proc.pid}"
-        # The kernels were launched through the D14 shim venv, not a uv sandbox or a thread.
-        assert f"Using configured venv: {ROOT / 'venv-shim' / 'bin' / 'python'}" in server.output()
+        # The kernels were launched through the D14 shim venv, not a uv sandbox or a thread:
+        # one install probe and one kernel launch per viewer session.
+        calls = shim_log.read_text().splitlines()
+        assert calls.count("-m marimo._ipc.launch_kernel") == 2, calls
+        assert calls.count("-c import marimo, msgspec, zmq; print(marimo.__version__)") == 2, calls
         # Neither the server (re-exec'd with a clean env) nor a viewer's kernel can read the secrets.
         server_ps = assert_env_has_no_secrets(server.proc.pid, POD_TOKEN, MARIMO_TOKEN)
         assert "egret_marimo.launcher --internal run" in server_ps
@@ -69,6 +76,7 @@ def test_run_mode_one_kernel_process_and_token_per_viewer(egret, launch, proxy, 
             page.keyboard.press("ArrowRight")
             _wait_text(page, re.compile(rf"slider=2 pid={pids[user]} viewer={user}"))
 
+    assert_log_has_no_secrets(server.output(), "run")
     queries = list(egret.queries)
     for user, token in TOKENS.items():
         mine = [q for q in queries if q["token"] == token]
@@ -149,6 +157,7 @@ def test_edit_mode_save_conflict_reload_recover(egret, launch, proxy, browser):
         assert "external-3" in draft["source"] and "edited-4" in draft["source"]
         assert "edited-stale" not in draft["source"]
 
+    assert_log_has_no_secrets(server.output(), "edit")
     saves = [e for e in egret.events if e["kind"] == "draft_saved"]
     print(
         f"\n[e2e edit] server pid={server.proc.pid} ready {t_ready:.1f}s; "

@@ -3,8 +3,8 @@ ARG MARIMO_VERSION=0.25.0
 # The package is built from a separate dir: a pyproject.toml in /work, a parent of /work
 # or $HOME makes the launcher refuse to start (it would shadow the locked marimo config).
 WORKDIR /opt/egret-apps/src
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt constraints.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 COPY pyproject.toml ./
 COPY egret_marimo ./egret_marimo
 RUN pip install --no-cache-dir --no-deps . \
@@ -16,7 +16,7 @@ RUN chmod +x venv-shim/bin/python \
  && useradd --uid 1000 --create-home --home-dir /home/egret egret \
  && mkdir -p /work && chown -R 1000:1000 /home/egret /work \
  && python -c "import marimo,sys; sys.exit(marimo.__version__ != '${MARIMO_VERSION}')" \
- && cd /tmp && python -I -c "import egret_marimo,sys; sys.exit('/work' in egret_marimo.__file__)"
+ && cd /tmp && python -I -c "import egret_marimo,sys; sys.exit('site-packages' not in egret_marimo.__file__)"
 ENV HOME=/home/egret \
     XDG_CONFIG_HOME=/opt/egret-apps/config \
     MARIMO_SKIP_UPDATE_CHECK=1 \
