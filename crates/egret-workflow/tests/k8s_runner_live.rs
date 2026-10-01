@@ -1108,8 +1108,10 @@ async fn output_files_are_streamed_out_of_the_pod_byte_identical() {
         .map(|b| format!("{b:02x}"))
         .collect();
     assert_eq!(got, sha, "byte-identical to what main wrote");
-    let mut small = contents(&suite_files(), &t, &out).await;
-    small.remove("big.bin");
+    // big.bin is random bytes, judged by its SHA above; `contents` reads text.
+    let mut text_only = out.clone();
+    text_only.output_files.remove("big.bin");
+    let small = contents(&suite_files(), &t, &text_only).await;
     assert_eq!(
         small,
         BTreeMap::from([
