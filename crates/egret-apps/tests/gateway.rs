@@ -776,7 +776,8 @@ async fn case15_success_body_and_audit() {
 async fn case17_rate_limited_per_token() {
     let f = Fixture::with_cfg(AppsConfig {
         rate_max: 20,
-        rate_window_secs: 2,
+        // long window so 25 sequential DB calls cannot straddle a reset
+        rate_window_secs: 60,
         ..AppsConfig::default()
     })
     .await;

@@ -244,6 +244,8 @@ pub struct AppsConfig {
     pub session_absolute_secs: u64,
     /// Gateway calls allowed per token per `rate_window_secs`.
     pub rate_max: u32,
+    /// Window length. A 429 holds that token for one full window (the limiter's
+    /// lockout equals the window; see egret-bin `main.rs`).
     pub rate_window_secs: u64,
 }
 

@@ -195,5 +195,34 @@ async fn edit_mode_with_a_version_is_rejected_by_the_schema() {
     let repo = AppSessionRepo::new(fx.db.clone());
     let mut bad = fx.new_run();
     bad.mode = AppMode::Edit; // version_id is Some
-    assert!(repo.mint(&bad, IDLE, ABS).await.is_err());
+    assert_eq!(sqlstate(repo.mint(&bad, IDLE, ABS).await), "23514");
+}
+
+#[tokio::test]
+async fn session_workspace_must_match_the_apps_workspace() {
+    let fx = Fixture::new().await;
+    let other_ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'Other', $2, 'active') RETURNING id",
+    )
+    .bind(format!("apps-other-{}", Uuid::new_v4().simple()))
+    .bind(fx.user.0)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert other workspace");
+    let mut bad = fx.new_run();
+    bad.workspace_id = WorkspaceId(other_ws);
+    let repo = AppSessionRepo::new(fx.db.clone());
+    assert_eq!(sqlstate(repo.mint(&bad, IDLE, ABS).await), "23503");
+}
+
+/// SQLSTATE of the database error a failed `mint` carries.
+fn sqlstate(r: egret_core::Result<String>) -> String {
+    let egret_core::Error::Internal(e) = r.expect_err("mint must fail") else {
+        panic!("expected Internal");
+    };
+    e.downcast_ref::<sqlx::Error>()
+        .and_then(|e| e.as_database_error())
+        .and_then(|d| d.code().map(|c| c.to_string()))
+        .expect("database error with SQLSTATE")
 }

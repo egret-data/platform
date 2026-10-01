@@ -383,7 +383,7 @@ pub fn build_router(state: AppState) -> Router {
 
     if let Some(apps) = state.apps.clone() {
         // Data Apps gateway: bearer-token (per marimo session) callers inside app pods; no
-        // cookie is involved, so no CSRF layer (spec §4.2). Hand-gated for the `apps` feature.
+        // cookie is involved, so no CSRF layer (spec §4.2). Gated for the `apps` feature inside the handler.
         let gateway_group = Router::new()
             .nest("/api", egret_apps::gateway_router())
             .with_state(apps);
