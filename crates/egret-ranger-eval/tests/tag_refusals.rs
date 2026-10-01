@@ -1390,6 +1390,58 @@ fn the_tag_mask_crash_refuses_an_access_request_and_a_disabled_policy_too() {
     );
 }
 
+/// **…and the crash is not scoped to a REQUEST that carries a tag either.**
+///
+/// SP4d-2b Task 7, found by a surviving mutation. The two tests above both hand
+/// in `column_tag("pii")`, so both reach the phase through
+/// `tag_policies_can_decide`'s "a tag could decide" arm. An EMPTY resolved set
+/// takes the other arm — the measured narrowing, where
+/// `getLikelyMatchPolicyEvaluators` returns `Collections.EMPTY_LIST` at
+/// `isNotEmpty(tags)` — and that narrowing is a per-REQUEST fact, while this
+/// crash is a CONSTRUCTION-time one: `normalizeAndPrunePolicies` runs in
+/// `RangerPolicyRepository`'s constructor and the `NullPointerException`
+/// propagates out of `RangerPolicyEngineImpl.<init>`, before any request exists
+/// and whatever any request would carry. So there is no engine to narrow
+/// anything away from.
+///
+/// It became reachable from production in the same commit that found it: until
+/// Task 7 `explain` passed `resolved_tags: None` and the phase always ran, and
+/// `Some(empty)` is now its ORDINARY answer — every target in a catalog with no
+/// tag recorded on it.
+#[test]
+fn the_tag_mask_crash_refuses_an_empty_resolved_tag_set_too() {
+    let set = envelope(json!([
+        tag_policy(
+            22,
+            "tag-mask-null-empty-set",
+            1,
+            "dataMaskPolicyItems",
+            json!([{ "users": ["alice"], "accesses": [{"type": "select", "isAllowed": true}] }]),
+        ),
+        // Beside a policy that WOULD have allowed, so a refusal cannot be read
+        // as "nothing was there".
+        tag_policy(
+            10,
+            "tag-allow",
+            0,
+            "policyItems",
+            json!([{ "users": ["alice"], "accesses": [{"type": "select", "isAllowed": true}] }]),
+        ),
+    ]));
+
+    let d = evaluate(&set, &request(Vec::new()), &trino_def(), &no_superusers());
+    assert_eq!(
+        causes(&d),
+        vec![UndecidableCause::TagPolicyNotNormalisable {
+            policy_id: Some(22),
+            policy_name: "tag-mask-null-empty-set".to_string(),
+            problem: TagNormalisationProblem::MaskTypeAbsent,
+        }],
+        "an empty tag set narrows the per-request evaluator list away, never a \
+         constructor that threw before the request existed: {d:?}"
+    );
+}
+
 /// An access type carrying a `:` — the namespaced spelling a Ranger-authored
 /// tag policy uses (`trino:select`).
 ///

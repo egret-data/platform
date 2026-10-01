@@ -732,8 +732,13 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     const result = await screen.findByTestId("explain-result");
     const causes = within(result).getAllByTestId("undecidable-cause");
     expect(causes[0]).toHaveTextContent(/2 tag policies/);
-    expect(causes[0]).toHaveTextContent(/every catalog this profile serves/i);
-    expect(causes[0]).toHaveTextContent(/tag-policy download this profile received/i);
+    // ⚠ Asserted on the SCOPE element, not through the <li>: the sentence and the
+    // note are two claims and the <li> holds both, so an assertion through it is
+    // satisfied by whichever of the two still carries the words (SP4d-2b Task 7 —
+    // a mutation that emptied the sentence survived a suite that did this).
+    const scope0 = within(causes[0]).getByTestId("undecidable-cause-scope");
+    expect(scope0).toHaveTextContent(/every catalog this profile serves/i);
+    expect(scope0).toHaveTextContent(/tag-policy download this profile received/i);
     // ⚠ The claim SP4d-2a's note made and Task 7 removed. A tag policy in a
     // profile's block no longer costs every verdict in the installation an
     // answer, so a note still saying so would be a measured statement that has
@@ -792,16 +797,25 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     const causes = within(result).getAllByTestId("undecidable-cause");
     expect(causes).toHaveLength(2);
 
-    expect(causes[0]).toHaveTextContent(/whole catalog/i);
-    expect(causes[0]).toHaveTextContent(/every target in this catalog/i);
-    expect(causes[0]).toHaveTextContent(/no schema or no table/i);
+    const scope = within(causes[0]).getByTestId("undecidable-cause-scope");
+    expect(scope).toHaveTextContent(/whole catalog/i);
+    expect(scope).toHaveTextContent(/every target in this catalog/i);
+    expect(scope).toHaveTextContent(/no schema or no table/i);
     // The reach is a catalog. Saying "this profile" would send a steward to the
     // profile's tag download, which is the OTHER cause's subject.
-    expect(causes[0]).not.toHaveTextContent(/every catalog this profile serves/i);
+    expect(scope).not.toHaveTextContent(/every catalog this profile serves/i);
+
+    // And the SENTENCE carries the state and the remedy on its own — asserted
+    // apart from the note, which repeats neither.
+    const sentence = within(causes[0]).getByTestId("undecidable-cause-sentence");
+    expect(sentence).toHaveTextContent(/declined to resolve/i);
+    expect(sentence).toHaveTextContent(/no schema or no table/i);
+    expect(sentence).toHaveTextContent(/not the same as there being none/i);
 
     // Two causes, two scopes, two remedies — and two different sentences.
-    expect(causes[1]).toHaveTextContent(/tag-policy download this profile received/i);
-    expect(causes[0].textContent).not.toEqual(causes[1].textContent);
+    const scope1 = within(causes[1]).getByTestId("undecidable-cause-scope");
+    expect(scope1).toHaveTextContent(/tag-policy download this profile received/i);
+    expect(scope.textContent).not.toEqual(scope1.textContent);
   });
 
   /**
@@ -956,9 +970,10 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     // for this catalog, because of a stored assignment". The distinction it has
     // always existed to make — declining is not finding none — is still asserted,
     // because an empty set would have been an ANSWER.
-    expect(causes[0]).toHaveTextContent(/declined to resolve/i);
-    expect(causes[0]).toHaveTextContent(/not the same as there being none/i);
-    expect(causes[0]).toHaveTextContent(/no schema or no table/i);
+    const unresolved = within(causes[0]).getByTestId("undecidable-cause-sentence");
+    expect(unresolved).toHaveTextContent(/declined to resolve/i);
+    expect(unresolved).toHaveTextContent(/not the same as there being none/i);
+    expect(unresolved).toHaveTextContent(/no schema or no table/i);
 
     // The four `tag_resource_not_reproducible` shapes have four different
     // remedies, so each must read differently and name its own policy.

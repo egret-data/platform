@@ -667,8 +667,18 @@ function AccessRow({ verdict }: { verdict: AccessVerdict }) {
                 data-testid="undecidable-cause"
                 className="space-y-1 text-xs text-muted-foreground"
               >
-                <p>{causeSentence(cause)}</p>
-                {causeScopeNote(cause) && <p className="italic">{causeScopeNote(cause)}</p>}
+                {/* Two elements, two test ids, because they are two claims: the
+                    SENTENCE says what could not be decided and the NOTE says how
+                    far that reaches. A mutation that emptied one of them survived
+                    a suite asserting both through the <li> (SP4d-2b Task 7), which
+                    is the "harness can satisfy your assertion" shape — the
+                    containing node holds the other string. */}
+                <p data-testid="undecidable-cause-sentence">{causeSentence(cause)}</p>
+                {causeScopeNote(cause) && (
+                  <p data-testid="undecidable-cause-scope" className="italic">
+                    {causeScopeNote(cause)}
+                  </p>
+                )}
               </li>
             ))}
             {verdict.decision.why.length === 0 && (

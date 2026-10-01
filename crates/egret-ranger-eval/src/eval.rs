@@ -2201,10 +2201,21 @@ enum SuperUser {
 /// would announce the day it is set.
 fn tag_policies_can_decide(
     block: &TagPolicyBlock,
+    policies: &ServicePolicySet,
     tags: Option<&EnrichedTags>,
     service_def: &ServiceDef,
     tag_service_def: &ServiceDef,
 ) -> bool {
+    // ⚠ BEFORE either escape, and this ordering is the whole of SP4d-2b Task 7's
+    // fix: both escapes below are facts about what can RUN, and
+    // `tag_block_fails_to_load` is a fact about whether there is an engine to run
+    // anything at all. A block that throws in `RangerPolicyRepository`'s
+    // constructor answers nothing whatever the request's tags are and whatever
+    // the defs declare, so it must reach the phase and be reported. See that
+    // function for the measurement and for the mutation that found this.
+    if !tag_block_fails_to_load(policies).is_empty() {
+        return true;
+    }
     match block {
         // Not shown inert and not countable, so no narrowing applies: a shape
         // this reader does not understand gets the full refusal.
@@ -2494,6 +2505,66 @@ fn service_resource_validates(levels: &BTreeSet<String>, service_def: &ServiceDe
     })
 }
 
+/// The `tagPolicies` block constructs that make the plugin throw while BUILDING
+/// its policy engine, so that no request of any type is answered — one cause per
+/// offending policy, and empty when the block loads.
+///
+/// `normalizeAndPrunePolicies` runs in `RangerPolicyRepository`'s
+/// `ServicePolicies$TagPolicies` constructor — **no other constructor in either
+/// jar calls it** — so this is above `isEnabled`, above the policy-type filter
+/// and above every per-request consideration. The `NullPointerException` a null
+/// `dataMaskType` produces propagates out of `RangerPolicyEngineImpl.<init>`
+/// (measured on the real 2.5.0 and 2.8.0 engines by the differential gate, not
+/// read off the class). See [`TagNormalisationProblem::MaskTypeAbsent`].
+///
+/// # ⚠ Why this is a function and not a block inside [`tag_candidates`]
+///
+/// **SP4d-2b Task 7, found by a surviving mutation.** It WAS a block inside
+/// `tag_candidates`, which the phase reaches only after
+/// [`tag_policies_can_decide`] has said the block can decide — and that
+/// function's second escape is a per-REQUEST measurement (an empty resolved tag
+/// set makes `getLikelyMatchPolicyEvaluators` return `Collections.EMPTY_LIST` at
+/// `isNotEmpty(tags)`). A per-request narrowing cannot be allowed to skip a
+/// CONSTRUCTION-time failure: there is no engine for the narrowing to narrow
+/// anything away from. Measured before the fix, with an empty tag set and a tag
+/// mask policy carrying no `dataMaskType`: `Denied { NoPolicyMatched }`, with
+/// full confidence, against a plugin that is serving nothing at all.
+///
+/// So the gate consults this too, and both call sites run the SAME function
+/// rather than two checks that must agree — the pattern the envelope sweep in
+/// [`request_preamble`] and [`tag_candidates`] already uses, with
+/// [`dedup_causes`] collapsing the overlap. `tests/tag_refusals.rs` pins all
+/// three entries: a tag set that carries a tag, a disabled policy, and the empty
+/// set.
+///
+/// It became reachable from production in the commit that found it: until SP4d-2b
+/// Task 7 the one production `AccessRequest` passed `resolved_tags: None`, so the
+/// phase always ran; `Some(empty)` is now `explain`'s ordinary answer for a
+/// target with no tag recorded on it.
+fn tag_block_fails_to_load(policies: &ServicePolicySet) -> Vec<UndecidableCause> {
+    let mut why = Vec::new();
+    for policy in &policies.tag_policies {
+        for item in &policy.data_mask_policy_items {
+            let absent = match &item.data_mask_info {
+                // The key was absent or null on the wire, which Ranger's model
+                // class turns into an empty object with a null type — the F2
+                // substitution, reaching a caller that does not null-check.
+                None => true,
+                Some(info) => info.mask_type.is_none(),
+            };
+            if absent {
+                why.push(UndecidableCause::TagPolicyNotNormalisable {
+                    policy_id: policy.id,
+                    policy_name: policy.name.clone(),
+                    problem: TagNormalisationProblem::MaskTypeAbsent,
+                });
+                break;
+            }
+        }
+    }
+    why
+}
+
 /// Phase 1's gate: the tag service-def to evaluate the `tagPolicies` block
 /// against, or `None` when Ranger's tag phase provably cannot write to the
 /// shared result for this request.
@@ -2532,7 +2603,8 @@ fn tag_phase_input(
     // `ServiceDef::parse` as the resource def so there is one enricher
     // predicate, not two.
     let tag_service_def = ServiceDef::parse(&policies.tag_service_def);
-    tag_policies_can_decide(&block, tags, service_def, &tag_service_def).then_some(tag_service_def)
+    tag_policies_can_decide(&block, policies, tags, service_def, &tag_service_def)
+        .then_some(tag_service_def)
 }
 
 /// Append phase-1 causes to the composed `why`, without repeating one the
@@ -4248,25 +4320,7 @@ fn tag_candidates<'a>(
     // of `RangerPolicyEngineImpl.<init>`. There is no engine afterwards, so
     // there is no decision of any type to be had. See
     // [`TagNormalisationProblem::MaskTypeAbsent`].
-    for policy in &policies.tag_policies {
-        for item in &policy.data_mask_policy_items {
-            let absent = match &item.data_mask_info {
-                // The key was absent or null on the wire, which Ranger's model
-                // class turns into an empty object with a null type — the F2
-                // substitution, reaching a caller that does not null-check.
-                None => true,
-                Some(info) => info.mask_type.is_none(),
-            };
-            if absent {
-                why.push(UndecidableCause::TagPolicyNotNormalisable {
-                    policy_id: policy.id,
-                    policy_name: policy.name.clone(),
-                    problem: TagNormalisationProblem::MaskTypeAbsent,
-                });
-                break;
-            }
-        }
-    }
+    why.extend(tag_block_fails_to_load(policies));
     if !why.is_empty() {
         return Err(why);
     }
