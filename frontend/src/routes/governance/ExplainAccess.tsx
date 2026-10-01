@@ -1152,7 +1152,17 @@ export default function ExplainAccess() {
               second place. It gets its own line, and the reason is already stated
               beside the verdict above. */}
           <div className="space-y-1.5">
-            <Label>Tags the engine resolves for this resource</Label>
+            {/* ⚠ **The HEADING, narrowed — Task 8's fix round, the open question.**
+                "Tags the engine resolves for this resource" over-claimed, and the
+                measurement is in this fixture: a table-level target answers `[]`
+                while a column beneath it carries a tag, because a DESCENDANT
+                attachment is not one the enricher rolls up. The list is right —
+                it is what decides the request asked — and the label was wider than
+                the list, which is F3's defect class and round 3's. Naming the
+                request rather than "this resource" is the whole fix; the
+                alternative was a second query and a second list, which is what
+                F4/F5 were fixed to stop. */}
+            <Label>Tags that decide this request</Label>
             {result.tag_resolution_declined ? (
               <p className="text-xs text-muted-foreground">
                 Not resolved — see the reason above. This is not the same as there being
@@ -1201,6 +1211,23 @@ export default function ExplainAccess() {
                 because the assignment names the table. They populate only when the target
                 names both a schema and a table — a catalog-only target carries none,
                 because assignments attach to tables and columns.
+              </p>
+              {/* ⚠ The asymmetry a steward auditing a table would otherwise learn
+                  the hard way, and it is MEASURED rather than reasoned: asking
+                  about `sp4d1.t2` with no column answers an empty list while
+                  `sp4d1.t2.item` answers `pii`, because the enricher admits SELF and
+                  ANCESTOR attachments and not DESCENDANT ones. The engine behaves
+                  the same way — the live gate measured a tag-addressed row filter
+                  NOT firing at table granularity for a column-level tag — so this
+                  is the engine's rule showing through, not egret's gap. Said here
+                  because the list cannot say it: it is a true statement about what
+                  is ABSENT. */}
+              <p>
+                It is the set for the resource you asked about, and that cuts downwards:
+                a tag attached to a column does <span className="font-medium">not</span>{" "}
+                appear when you ask about its table, because the engine’s enricher reaches
+                up the hierarchy and never down. Auditing a table is therefore not the same
+                as auditing its columns — ask about the column to see a tag stored on it.
               </p>
               <p>
                 A policy that grants through a role, or through any group except{" "}

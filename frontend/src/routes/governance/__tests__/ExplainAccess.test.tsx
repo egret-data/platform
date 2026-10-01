@@ -1495,6 +1495,44 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
   });
 
   /**
+   * **Task 8's fix round — the open question, ruled on.** The heading said "Tags the
+   * engine resolves for this resource", which reads as a complete account of tag
+   * governance on the target and is not one: the list is the set for the REQUEST,
+   * and a tag attached to a column does not appear when the target is its table,
+   * because the engine's enricher admits SELF and ANCESTOR attachments and never
+   * DESCENDANT ones. Measured in the live fixture — `sp4d1.t2` with no column
+   * answers `[]` while `sp4d1.t2.item` answers `pii` — and the engine agrees, since
+   * the live gate measured a tag-addressed row filter NOT firing at table
+   * granularity for a column-level tag.
+   *
+   * The ruling was to fix the CLAIM and not the data: no second query, no second
+   * list, because one list derived from the evaluator's own input is the property
+   * F4/F5 were fixed to get. So the label names the request and one sentence names
+   * the asymmetry — and both are asserted here, because `tsc` proves neither and
+   * the heading is exactly the kind of sentence that gets widened again.
+   */
+  test("the tag list is labelled as the request's, and says what it does not reach", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+    const result = await screen.findByTestId("explain-result");
+
+    // The label: the REQUEST, not "this resource" and not anything that reads as
+    // every tag on the target.
+    expect(result).toHaveTextContent(/Tags that decide this request/i);
+    expect(result).not.toHaveTextContent(/Tags the engine resolves for this resource/i);
+    expect(result).not.toHaveTextContent(/Tags egret has recorded on this resource/i);
+
+    // And the asymmetry, in words, with the remedy attached.
+    const limits = within(result).getByTestId("honest-limits");
+    expect(limits).toHaveTextContent(/reaches up the hierarchy and never down/i);
+    expect(limits).toHaveTextContent(/ask about the column to see a tag stored on it/i);
+    // Auditing a table is not auditing its columns — the sentence a steward needs
+    // BEFORE they conclude a table carries nothing.
+    expect(limits).toHaveTextContent(/auditing a table is therefore not the same/i);
+  });
+
+  /**
    * **F4's second half.** A decline is not "none": `tag_resolution_declined` means
    * egret did not resolve at all, and an empty list rendered as "None." there tells
    * a steward nothing is attached when nobody looked. The reason is already beside
