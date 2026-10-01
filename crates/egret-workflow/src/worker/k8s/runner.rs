@@ -632,14 +632,7 @@ impl KubernetesRunner {
             .exec_within(
                 name,
                 FILES_IN,
-                vec![
-                    "tar".into(),
-                    "-x".into(),
-                    "-f".into(),
-                    "-".into(),
-                    "-C".into(),
-                    WORKING_DIR.into(),
-                ],
+                extract_command(),
                 Some(&sources),
                 64 * 1024,
                 Limit::Idle(UPLOAD_IDLE),
@@ -1556,6 +1549,25 @@ fn judge_write(
         Err(TarError::Write(e)) => Err(internal("writing to the exec's stdin", e)),
         Err(e) => Err(staging_error(e)),
     }
+}
+
+/// The upload's command in `files-in`: `tar -x`, then **drain the rest of
+/// stdin**, then exit with tar's status (fix round 1, I2).
+///
+/// Measured on kind (Kubernetes 1.33): when the exec's process dies with its
+/// stdin still open, the kubelet stops reading stdin and sends no status
+/// until stdin closes, so the upload stalls and only the idle limit ends it --
+/// as an outage. With the drain, a `tar -x` that dies part-way (a full disk)
+/// leaves `cat` reading to the end, and the status that follows carries
+/// tar's failure, which is the task's ([`extract_verdict`]).
+fn extract_command() -> Vec<String> {
+    vec![
+        "sh".into(),
+        "-c".into(),
+        "tar -x -f - -C \"$1\"; rc=$?; cat > /dev/null; exit $rc".into(),
+        "sh".into(),
+        WORKING_DIR.into(),
+    ]
 }
 
 /// The verdict on `tar -x` in `files-in` (fix round 1, I2): the API server
