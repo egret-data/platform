@@ -354,10 +354,10 @@ fn file_function(
              for one, do not)."
         )));
     };
-    if !path.contains("://") {
+    if !path.contains("://") || path.starts_with("nsfile://") {
         return Err(pebble_error(format!(
-            "The '{name}' function cannot read '{path}': a path with no kestra:// scheme \
-             names a namespace file, which egret's W9b package provides."
+            "The '{name}' function cannot read '{path}': a path with no scheme, or an \
+             nsfile:// URI, names a namespace file, which egret's W9b package provides."
         )));
     }
     let failed = |message: &str| pebble_error(format!("The '{name}' function failed: {message}"));
@@ -4006,6 +4006,19 @@ mod tests {
                 let err = call(name, "data/x.csv", &cx).unwrap_err();
                 assert!(
                     err.contains("data/x.csv") && err.contains("W9b"),
+                    "{name}: {err}"
+                );
+            }
+        }
+
+        /// M8: `nsfile://` names a namespace file in Kestra, W9b's like a bare path.
+        #[test]
+        fn an_nsfile_uri_names_namespace_files_and_w9b() {
+            let cx = Fake::default().cx();
+            for name in FOUR {
+                let err = call(name, "nsfile:///data/x.csv", &cx).unwrap_err();
+                assert!(
+                    err.contains("nsfile:///data/x.csv") && err.contains("W9b"),
                     "{name}: {err}"
                 );
             }

@@ -24,7 +24,7 @@
 //! `join`. That needs the multi-thread runtime (global constraints).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use egret_core::Result;
 use regex::Regex;
@@ -50,14 +50,18 @@ pub struct Snapshot {
     workspace: Uuid,
     handle: tokio::runtime::Handle,
     task_prefix: Option<String>,
+    /// The first store outage a read met (spec §11); see
+    /// [`RenderFiles::infrastructure_failure`].
+    outage: Mutex<Option<String>>,
 }
 
 impl Snapshot {
     /// Every `kestra:///…` string in `texts` (regex, whole run of non-space, non-quote chars)
     /// resolved at once through resolve_readable_many on `conn`.
     ///
-    /// `json` is walked: every string in it, at any depth, is searched the same
-    /// way. With no URI anywhere the database is not touched.
+    /// `json` is walked: a string that starts with `kestra:///` is taken
+    /// whole, and every other string, at any depth, is searched the same way.
+    /// With no URI anywhere the database is not touched.
     pub async fn take(
         conn: &mut PgConnection,
         store: Arc<FileStore>,
@@ -87,6 +91,7 @@ impl Snapshot {
             workspace,
             handle: tokio::runtime::Handle::current(),
             task_prefix,
+            outage: Mutex::new(None),
         })
     }
 
@@ -104,9 +109,9 @@ impl Snapshot {
         FileScope(Arc::new(self))
     }
 
-    /// For unit tests: a snapshot over a given resolution, no database.
-    #[cfg(test)]
-    pub(crate) fn from_parts(
+    /// For tests: a snapshot over a given resolution, no database.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn from_parts(
         files: BTreeMap<String, std::result::Result<IndexedFile, Unreadable>>,
         store: Arc<FileStore>,
         workspace: Uuid,
@@ -118,7 +123,15 @@ impl Snapshot {
             workspace,
             handle: tokio::runtime::Handle::current(),
             task_prefix,
+            outage: Mutex::new(None),
         }
+    }
+
+    /// Record an outage (the first one wins) and hand back its message.
+    fn outage(&self, message: String) -> String {
+        let mut held = self.outage.lock().unwrap_or_else(|p| p.into_inner());
+        held.get_or_insert_with(|| message.clone());
+        message
     }
 }
 
@@ -157,9 +170,20 @@ impl RenderFiles for Snapshot {
     }
 
     fn read_utf8(&self, uri: &str) -> std::result::Result<String, String> {
-        self.resolve(uri)?;
+        let file = self.resolve(uri)?;
         let object = self.store.object_uri(self.workspace, uri)?;
         let cap = self.store.caps.max_read_bytes;
+        let over_cap = || {
+            format!(
+                "{uri} is larger than workflow.storage.max_read_bytes ({cap} bytes): read() \
+                 returns the whole file as a string, so it reads only files up to that size"
+            )
+        };
+        // The index knows the size: refuse without a download (fix round 1,
+        // M7). The `cap + 1` guard below stays for an object larger than its row.
+        if file.size > cap {
+            return Err(over_cap());
+        }
         // `block_on` panics on a thread that is inside a runtime; the render
         // thread never is, and a caller that rendered on a tokio worker gets
         // an error rather than a panic.
@@ -169,13 +193,33 @@ impl RenderFiles for Snapshot {
                  thread, not on a runtime worker"
             ));
         }
+        // C1: on a current-thread runtime the one thread that drives the IO is
+        // the one waiting for this render, so a store read would never finish
+        // (it does on MemStore, which proves nothing about S3).
+        if self.handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err(format!(
+                "{uri} cannot be read: read() needs the multi-thread runtime, and this render \
+                 runs on a current-thread one, whose only thread is waiting for it"
+            ));
+        }
         let bytes = self.handle.block_on(async {
-            let stream = self
-                .store
-                .store
-                .get_stream(&object)
-                .await
-                .map_err(|e| format!("{uri} could not be read from storage: {e}"))?;
+            let stream = match self.store.store.get_stream(&object).await {
+                Ok(stream) => stream,
+                // The index has a row and the object is gone: a prune race or
+                // an orphaned row. The author's error, naming the URI.
+                Err(egret_storage::StorageError::NotFound(_)) => {
+                    return Err(format!(
+                        "{uri} is indexed but its object is missing from storage (it was \
+                         pruned, or never finished uploading)"
+                    ));
+                }
+                // Anything else is the store being unreachable: egret's outage.
+                Err(e) => {
+                    return Err(self.outage(format!(
+                        "{uri} could not be read: internal storage is unavailable: {e}"
+                    )))
+                }
+            };
             let mut bytes = Vec::new();
             // At most one byte past the cap: that byte is how a file over it is
             // told from one exactly at it, without reading the rest.
@@ -184,17 +228,25 @@ impl RenderFiles for Snapshot {
                 .read_to_end(&mut bytes)
                 .await
                 // A mid-body error from `get_stream` is a bare io::Error that
-                // does not name the URI (Task 2).
-                .map_err(|e| format!("{uri} could not be read from storage: {e}"))?;
+                // does not name the URI (Task 2), and it is an outage too.
+                .map_err(|e| {
+                    self.outage(format!(
+                        "{uri} could not be read: internal storage is unavailable: {e}"
+                    ))
+                })?;
             Ok::<_, String>(bytes)
         })?;
         if bytes.len() as u64 > cap {
-            return Err(format!(
-                "{uri} is larger than workflow.storage.max_read_bytes ({cap} bytes): read() \
-                 returns the whole file as a string, so it reads only files up to that size"
-            ));
+            return Err(over_cap());
         }
         decode_utf8(uri, bytes).map_err(|e| e.to_string())
+    }
+
+    fn infrastructure_failure(&self) -> Option<String> {
+        self.outage
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     fn task_prefix(&self) -> Option<&str> {
@@ -258,6 +310,11 @@ fn collect(text: &str, found: &mut BTreeSet<String>) {
 
 fn walk(value: &serde_json::Value, found: &mut BTreeSet<String>) {
     match value {
+        // A string that IS a URI is taken whole (fix round 1, I3): `uri::parse`
+        // accepts `'` and spaces, which end the regex's run in source text.
+        serde_json::Value::String(s) if s.starts_with(uri::SCHEME_PREFIX) => {
+            found.insert(s.clone());
+        }
         serde_json::Value::String(s) => collect(s, found),
         serde_json::Value::Array(items) => items.iter().for_each(|v| walk(v, found)),
         serde_json::Value::Object(map) => {
@@ -404,12 +461,19 @@ mod tests {
         }
     }
 
-    /// An object store whose body fails after a few bytes, as `S3Store`'s
-    /// can mid-download: a bare io::Error that does not name anything.
-    struct Breaks;
+    /// An object store that fails the way a real one can: the body breaks
+    /// after a few bytes (a bare io::Error naming nothing, as `S3Store`'s
+    /// can mid-download), the store is unreachable, the object is gone, or
+    /// (for the deadlock test) every read waits on the timer driver first.
+    enum Faulty {
+        MidBody,
+        Outage,
+        Gone,
+        SlowThen(Vec<u8>),
+    }
 
     #[async_trait::async_trait]
-    impl egret_storage::ObjectStore for Breaks {
+    impl egret_storage::ObjectStore for Faulty {
         async fn put(
             &self,
             _: &str,
@@ -439,14 +503,61 @@ mod tests {
         }
         async fn get_stream(
             &self,
-            _: &str,
+            uri: &str,
         ) -> std::result::Result<
             Box<dyn tokio::io::AsyncBufRead + Send + Unpin>,
             egret_storage::StorageError,
         > {
-            let broken = tokio::io::BufReader::new(HalfThenReset { sent: false });
-            Ok(Box::new(broken))
+            match self {
+                Self::MidBody => Ok(Box::new(tokio::io::BufReader::new(HalfThenReset {
+                    sent: false,
+                }))),
+                Self::Outage => Err(egret_storage::StorageError::S3(format!(
+                    "{uri}: dispatch failure: connection refused"
+                ))),
+                Self::Gone => Err(egret_storage::StorageError::NotFound(uri.to_string())),
+                Self::SlowThen(bytes) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    Ok(Box::new(std::io::Cursor::new(bytes.clone())))
+                }
+            }
         }
+    }
+
+    fn faulty(mode: Faulty) -> Arc<FileStore> {
+        Arc::new(FileStore {
+            store: Arc::new(mode),
+            bucket: "egret-test".into(),
+            prefix: "workflow/".into(),
+            caps: Caps::default(),
+            retention_days: 30,
+        })
+    }
+
+    fn indexed(
+        uri: &str,
+        size: u64,
+    ) -> BTreeMap<String, std::result::Result<IndexedFile, Unreadable>> {
+        BTreeMap::from([(
+            uri.to_string(),
+            Ok(IndexedFile {
+                uri: uri.to_string(),
+                execution_id: Uuid::from_u128(1),
+                task_run_id: Some(Uuid::from_u128(2)),
+                size,
+            }),
+        )])
+    }
+
+    /// Render `template` over `snapshot`, and say what the scope recorded.
+    fn render_recording(
+        template: &str,
+        snapshot: Snapshot,
+    ) -> (std::result::Result<String, String>, Option<String>) {
+        let scope = snapshot.into_scope();
+        let cx = RenderContext::new().with_files(scope.clone());
+        let out = render_str(template, &cx).map_err(|e| e.to_string());
+        (out, scope.0.infrastructure_failure())
     }
 
     /// Three bytes, then a bare `io::Error`.
@@ -469,26 +580,132 @@ mod tests {
         }
     }
 
+    /// Spec §11: an unreachable store is egret's outage, not the author's.
+    /// The render still fails naming the URI, and the scope RECORDS it, which
+    /// is what `settle` and the worker turn into an `Err`.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_store_error_mid_body_names_the_uri() {
-        let fs = Arc::new(FileStore {
-            store: Arc::new(Breaks),
-            bucket: "egret-test".into(),
-            prefix: "workflow/".into(),
-            caps: Caps::default(),
-            retention_days: 30,
-        });
+    async fn a_store_error_mid_body_names_the_uri_and_is_recorded_as_an_outage() {
         let uri = uri_of("x.txt");
-        let file = IndexedFile {
-            uri: uri.clone(),
-            execution_id: Uuid::from_u128(1),
-            task_run_id: Some(Uuid::from_u128(2)),
-            size: 9,
-        };
-        let snap = Snapshot::from_parts(BTreeMap::from([(uri.clone(), Ok(file))]), fs, WS, None);
+        for mode in [Faulty::MidBody, Faulty::Outage] {
+            let snap = Snapshot::from_parts(indexed(&uri, 9), faulty(mode), WS, None);
+            let (out, failure) = render_recording(&format!("{{{{ read('{uri}') }}}}"), snap);
+            let err = out.unwrap_err();
+            assert!(err.contains(&uri), "{err}");
+            let failure = failure.expect("an outage is recorded");
+            assert!(failure.contains(&uri), "{failure}");
+        }
+    }
+
+    /// An index row whose object is gone (a prune race, an orphaned row) is
+    /// the author's error naming the URI, and NOT an outage.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_indexed_file_whose_object_is_gone_is_the_authors_error_not_an_outage() {
+        let uri = uri_of("gone.txt");
+        let snap = Snapshot::from_parts(indexed(&uri, 9), faulty(Faulty::Gone), WS, None);
+        let (out, failure) = render_recording(&format!("{{{{ read('{uri}') }}}}"), snap);
+        let err = out.unwrap_err();
+        assert!(
+            err.contains(&uri) && err.contains("missing from storage"),
+            "{err}"
+        );
+        assert_eq!(failure, None);
+    }
+
+    /// M7: the index already knows the size, so a file over the cap is refused
+    /// without a download -- the object here does not even exist, and the
+    /// answer is still the cap.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_refuses_from_the_indexed_size_before_downloading() {
+        let uri = uri_of("big.txt");
+        let snap = Snapshot::from_parts(indexed(&uri, 5), store(4), WS, None);
         let err = render(&format!("{{{{ read('{uri}') }}}}"), snap).unwrap_err();
         assert!(
-            err.contains(&uri) && err.contains("connection reset"),
+            err.contains(&uri) && err.contains("max_read_bytes (4 bytes)"),
+            "{err}"
+        );
+    }
+
+    /// The `cap + 1` stream guard stays: an object larger than its index row
+    /// says is refused too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_stream_guard_refuses_an_object_larger_than_its_index_row() {
+        let fs = store(4);
+        let (uri, _) = put(&fs, "lies.txt", b"abcde").await;
+        let snap = Snapshot::from_parts(indexed(&uri, 4), fs, WS, None);
+        let err = render(&format!("{{{{ read('{uri}') }}}}"), snap).unwrap_err();
+        assert!(
+            err.contains(&uri) && err.contains("max_read_bytes (4 bytes)"),
+            "{err}"
+        );
+    }
+
+    /// I3: a JSON string that IS a URI is taken whole, `'` and spaces and all
+    /// -- `uri::parse` accepts both, and a FILE input's URI is not encoded.
+    #[test]
+    fn a_json_string_that_is_a_whole_uri_is_taken_whole() {
+        let mut found = BTreeSet::new();
+        let quoted = uri_of("it's a.csv");
+        walk(
+            &serde_json::json!({"outputFiles": {"it's a.csv": quoted.clone()}, "note": "see kestra:///x/y z"}),
+            &mut found,
+        );
+        assert!(found.contains(&quoted), "{found:?}");
+        assert!(
+            found.contains("kestra:///x/y"),
+            "a URI inside prose still goes through the regex: {found:?}"
+        );
+    }
+
+    /// C1: `read()` blocks the render thread on the runtime while a worker
+    /// waits in `join`. With every worker parked there and nothing driving
+    /// the timer/IO driver, the runtime wedged for good. One worker, four
+    /// concurrent renders, each read waiting on the timer driver; a std-thread
+    /// watchdog so a regression FAILS instead of hanging the suite.
+    #[test]
+    fn concurrent_reads_on_one_worker_do_not_wedge_the_runtime() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let out = rt.block_on(async {
+                let uri = uri_of("slow.txt");
+                let fs = faulty(Faulty::SlowThen(b"slow".to_vec()));
+                let mut renders = Vec::new();
+                for _ in 0..4 {
+                    let (uri, fs) = (uri.clone(), fs.clone());
+                    renders.push(tokio::spawn(async move {
+                        let snap = Snapshot::from_parts(indexed(&uri, 4), fs, WS, None);
+                        render(&format!("{{{{ read('{uri}') }}}}"), snap)
+                    }));
+                }
+                let mut all = Vec::new();
+                for r in renders {
+                    all.push(r.await.unwrap());
+                }
+                all
+            });
+            let _ = done.send(out);
+        });
+        let out = finished
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the runtime wedged: four renders on one worker did not finish in 20s");
+        assert_eq!(out, vec![Ok("slow".to_string()); 4]);
+    }
+
+    /// A current-thread runtime has no other thread to drive the store's IO
+    /// while its one thread waits for the render, so `read()` refuses there,
+    /// saying why, rather than hanging on S3 (and passing on MemStore).
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_on_a_current_thread_runtime_is_refused_saying_why() {
+        let fs = store(1 << 20);
+        let (uri, file) = put(&fs, "ct.txt", b"x").await;
+        let snap = Snapshot::from_parts(BTreeMap::from([(uri.clone(), file)]), fs, WS, None);
+        let err = render(&format!("{{{{ read('{uri}') }}}}"), snap).unwrap_err();
+        assert!(
+            err.contains(&uri) && err.contains("multi-thread runtime"),
             "{err}"
         );
     }

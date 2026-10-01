@@ -22,14 +22,17 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use egret_storage::{ObjectStore, StorageError};
 
 use egret_metastore::Db;
 use egret_workflow::render_str;
 use egret_workflow::storage::{self, index_task_files, uri, FileStore, StoredFile};
 use egret_workflow::worker::{
-    apply_outcome, claim, execution_render_context, start_execution, start_execution_in, Handlers,
-    NewExecution, Outcome,
+    apply_outcome, claim, execution_render_context, reap, start_execution, start_execution_in,
+    Handlers, NewExecution, Outcome,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -40,10 +43,68 @@ static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const NS: &str = "w9a.t4";
 
+/// While set, every read from the store fails as an unreachable S3 does
+/// (spec §11's outage). Tests take turns on [`SERIAL`], so one test's outage
+/// is nobody else's.
+static OUTAGE: AtomicBool = AtomicBool::new(false);
+
+/// `MemStore`, with [`OUTAGE`] in front of `get_stream`.
+struct Flaky(egret_storage::MemStore);
+
+#[async_trait::async_trait]
+impl ObjectStore for Flaky {
+    async fn put(&self, uri: &str, bytes: Vec<u8>) -> Result<(), StorageError> {
+        self.0.put(uri, bytes).await
+    }
+    async fn get(&self, uri: &str) -> Result<Vec<u8>, StorageError> {
+        self.0.get(uri).await
+    }
+    async fn delete(&self, uri: &str) -> Result<(), StorageError> {
+        self.0.delete(uri).await
+    }
+    async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError> {
+        self.0.copy(src, dst).await
+    }
+    async fn list(
+        &self,
+        prefix: &str,
+        delimiter: Option<&str>,
+    ) -> Result<egret_storage::Listing, StorageError> {
+        self.0.list(prefix, delimiter).await
+    }
+    async fn get_stream(
+        &self,
+        uri: &str,
+    ) -> Result<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>, StorageError> {
+        if OUTAGE.load(Ordering::SeqCst) {
+            return Err(StorageError::S3(format!(
+                "{uri}: dispatch failure: connection refused"
+            )));
+        }
+        self.0.get_stream(uri).await
+    }
+}
+
+/// The process-wide store, installed once: [`Flaky`] over a `MemStore`.
+fn installed() -> Arc<FileStore> {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = storage::install(Arc::new(FileStore {
+            store: Arc::new(Flaky(egret_storage::MemStore::new())),
+            bucket: "egret-test".to_string(),
+            prefix: "workflow/".to_string(),
+            caps: storage::Caps::default(),
+            retention_days: 30,
+        }));
+    });
+    storage::current().expect("installed above")
+}
+
 async fn setup() -> Option<(Db, Uuid, Arc<FileStore>)> {
     let db = common::db().await?;
     let (ws, _) = common::seed_workspace(&db).await;
-    Some((db, ws, storage::install_mem_for_tests()))
+    OUTAGE.store(false, Ordering::SeqCst);
+    Some((db, ws, installed()))
 }
 
 /// Tick until nothing is claimable.
@@ -110,6 +171,36 @@ async fn finish_writing(
     name: &str,
     bytes: &[u8],
 ) -> String {
+    let (file, applied) = write_and_apply(
+        pool,
+        fs,
+        ws,
+        flow_id,
+        task,
+        name,
+        Some(bytes),
+        |u| json!({ "uri": u }),
+    )
+    .await;
+    applied.expect("apply");
+    file
+}
+
+/// [`finish_writing`]'s body: `bytes: None` indexes a file whose object was
+/// never stored (a prune race, an orphaned row); `outputs` builds the
+/// outputs from the URI. Commits only when `apply_outcome` answered `Ok`,
+/// and returns that answer.
+#[allow(clippy::too_many_arguments)]
+async fn write_and_apply(
+    pool: &sqlx::PgPool,
+    fs: &FileStore,
+    ws: Uuid,
+    flow_id: &str,
+    task: &str,
+    name: &str,
+    bytes: Option<&[u8]>,
+    outputs: impl Fn(&str) -> serde_json::Value,
+) -> (String, egret_core::Result<()>) {
     let claimed = claim(pool, 1).await.expect("claim");
     assert_eq!(claimed.len(), 1, "exactly the writing run is claimable");
     let c = &claimed[0];
@@ -118,7 +209,9 @@ async fn finish_writing(
         "{}{name}",
         uri::task_prefix(NS, flow_id, c.execution_id, task, c.id).unwrap()
     );
-    put(fs, ws, &file, bytes).await;
+    if let Some(bytes) = bytes {
+        put(fs, ws, &file, bytes).await;
+    }
     let mut tx = pool.begin().await.unwrap();
     index_task_files(
         &mut tx,
@@ -126,16 +219,28 @@ async fn finish_writing(
         c.id,
         &[StoredFile {
             uri: file.clone(),
-            size: bytes.len() as u64,
+            size: bytes.map_or(3, |b| b.len() as u64),
         }],
     )
     .await
     .expect("index");
-    apply_outcome(&mut tx, c, &Outcome::succeeded_with(json!({ "uri": file })))
-        .await
-        .expect("apply");
-    tx.commit().await.unwrap();
-    file
+    let applied = apply_outcome(&mut tx, c, &Outcome::succeeded_with(outputs(&file))).await;
+    if applied.is_ok() {
+        tx.commit().await.unwrap();
+    }
+    (file, applied)
+}
+
+async fn attempts(pool: &sqlx::PgPool, execution: Uuid, task: &str) -> i32 {
+    sqlx::query_scalar(
+        "SELECT jsonb_array_length(attempts) FROM workflow.task_runs \
+          WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task)
+    .fetch_one(pool)
+    .await
+    .expect("attempts")
 }
 
 /// **The case a pool lookup gets WRONG.** `a`'s file is indexed in the
@@ -284,12 +389,13 @@ async fn a_loop_iteration_reads_a_file_its_root_wrote() {
 /// ruling); a task after the loop, in the root, still reads it -- the root's
 /// loop family holds every iteration.
 ///
-/// The root learns the URI through its `inputs` (rewritten once the iteration
-/// has written it): egret does not yet surface an iteration's outputs to the
-/// root, and a value of the render context is one of the two places a URI
-/// may come from.
+/// What this proves is the READABLE SET, not an authoring path: the root
+/// learns the URI through its `inputs`, rewritten by SQL once the iteration
+/// has written it, because egret does not surface an iteration's outputs to
+/// the root. Task 11 (the `Loop` STORE path, `executions/{iteration}/{n}.ion`)
+/// replaces the UPDATE with the real route a root reaches such a file by.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_task_after_the_loop_reads_a_file_an_iteration_wrote() {
+async fn the_roots_readable_set_holds_a_file_an_iteration_wrote() {
     let _turn = SERIAL.lock().await;
     let Some((db, ws, fs)) = setup().await else {
         return;
@@ -486,6 +592,235 @@ async fn an_assembled_uri_not_in_the_snapshot_is_an_error_saying_why() {
     assert_eq!(state, "FAILED", "{message}");
     assert!(
         message.contains(&built) && message.contains("assembled while rendering"),
+        "{message}"
+    );
+}
+
+/// I3: a URI that holds `'` and a space, as a FILE input's or an output
+/// file's can (`uri::parse` accepts both, `input_uri` does not encode), read
+/// through the outputs map. The regex alone would cut it at the quote and the
+/// read would fail as "assembled while rendering".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_uri_with_a_quote_and_a_space_is_read_whole_from_the_outputs() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let source = format!(
+        "id: quoted\nnamespace: {NS}\ntasks:\n\
+         \x20 - id: w\n    type: io.kestra.plugin.core.log.Log\n    message: w\n\
+         \x20 - id: r\n    type: io.kestra.plugin.core.debug.Return\n    \
+         format: \"{{{{ read(outputs.w.outputFiles[\\\"it's a.csv\\\"]) }}}}\"\n"
+    );
+    start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    let (file, applied) = write_and_apply(
+        &db.pool,
+        &fs,
+        ws,
+        "quoted",
+        "w",
+        "it's a.csv",
+        Some(b"a,b"),
+        |u| json!({ "outputFiles": { "it's a.csv": u } }),
+    )
+    .await;
+    applied.expect("apply");
+    assert!(file.ends_with("/it's a.csv"), "{file}");
+    drain(&db.pool).await;
+    let (state, outputs, message) = result_of(&db.pool, ws, "r").await;
+    assert_eq!(
+        (state.as_str(), outputs),
+        ("SUCCESS", Some(json!({"value": "a,b"}))),
+        "{message:?}"
+    );
+}
+
+fn writer_then(flow: &str, next: &str) -> String {
+    format!(
+        "id: {flow}\nnamespace: {NS}\ntasks:\n\
+         \x20 - id: w\n    type: io.kestra.plugin.core.log.Log\n    message: w\n{next}"
+    )
+}
+
+/// I2, the worker half: a store outage while a HANDLER's properties render is
+/// egret's outage (spec §11). The tick is an `Err`, the run keeps its lease
+/// and records nothing, no attempt is spent; once the lease lapses and the
+/// store is back, the same run is re-claimed and succeeds on its first
+/// attempt.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_outage_while_a_handler_renders_is_a_worker_error_and_spends_no_attempt() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let source = writer_then(
+        "outage_handler",
+        "  - id: r\n    type: io.kestra.plugin.core.debug.Return\n    \
+         format: \"{{ read(outputs.w.uri) }}\"\n",
+    );
+    let ex = start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    finish_writing(&db.pool, &fs, ws, "outage_handler", "w", "o.txt", b"back").await;
+    let before = attempts(&db.pool, ex, "r").await;
+
+    OUTAGE.store(true, Ordering::SeqCst);
+    let ticked = egret_workflow::worker::tick(&db.pool, 16, &Handlers::with_core_tasks()).await;
+    OUTAGE.store(false, Ordering::SeqCst);
+    let err = ticked.expect_err("an outage is the worker's error, not the task's");
+    assert!(err.to_string().contains("o.txt"), "{err}");
+    let (state, outputs, message) = result_of(&db.pool, ws, "r").await;
+    assert_eq!((state.as_str(), outputs, message), ("RUNNING", None, None));
+    assert_eq!(
+        attempts(&db.pool, ex, "r").await,
+        before,
+        "no attempt spent"
+    );
+
+    // The lease lapses; the run is re-claimed and finishes on that attempt.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(reap(&db.pool, std::time::Duration::ZERO).await.unwrap(), 1);
+    drain(&db.pool).await;
+    let (state, outputs, message) = result_of(&db.pool, ws, "r").await;
+    assert_eq!(
+        (state.as_str(), outputs),
+        ("SUCCESS", Some(json!({"value": "back"}))),
+        "{message:?}"
+    );
+    assert_eq!(attempts(&db.pool, ex, "r").await, before);
+}
+
+/// I2, the settle half: an outage while `settle` renders a `runIf` is an `Err`
+/// from `apply_outcome`, so the caller's transaction -- the finished task's
+/// outcome, its index rows, the successor -- rolls back whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_outage_while_settle_renders_rolls_the_whole_transaction_back() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let source = writer_then(
+        "outage_settle",
+        "  - id: b\n    type: io.kestra.plugin.core.log.Log\n    \
+         runIf: \"{{ read(outputs.w.uri) == 'x' }}\"\n    message: b\n",
+    );
+    let ex = start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    let before = attempts(&db.pool, ex, "w").await;
+    OUTAGE.store(true, Ordering::SeqCst);
+    let (file, applied) = write_and_apply(
+        &db.pool,
+        &fs,
+        ws,
+        "outage_settle",
+        "w",
+        "x.txt",
+        Some(b"x"),
+        |u| json!({ "uri": u }),
+    )
+    .await;
+    OUTAGE.store(false, Ordering::SeqCst);
+    let err = applied.expect_err("an outage in settle is an Err");
+    assert!(err.to_string().contains(&file), "{err}");
+    let (state, outputs, _) = result_of(&db.pool, ws, "w").await;
+    assert_eq!(
+        (state.as_str(), outputs),
+        ("RUNNING", None),
+        "w's outcome rolled back"
+    );
+    let indexed: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workflow.execution_files WHERE uri = $1")
+            .bind(&file)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(indexed, 0, "the index rows rolled back with it");
+    let b: Option<String> = sqlx::query_scalar(
+        "SELECT state FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'b'",
+    )
+    .bind(ex)
+    .fetch_optional(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(b, None, "and the successor was never created");
+    assert_eq!(
+        attempts(&db.pool, ex, "w").await,
+        before,
+        "no attempt spent"
+    );
+
+    // Store back, lease lapsed: the same run is finished again, and now `b` runs.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(reap(&db.pool, std::time::Duration::ZERO).await.unwrap(), 1);
+    finish_writing(&db.pool, &fs, ws, "outage_settle", "w", "x.txt", b"x").await;
+    assert_eq!(run_of(&db.pool, ex, "b").await.1, "RUNNING");
+    drain(&db.pool).await;
+}
+
+/// An index row whose object is gone stays the AUTHOR's error (spec §11), on
+/// both paths: the handler's run FAILS naming the URI, and a `runIf` that
+/// reads it fails its run -- neither is an `Err`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_indexed_file_whose_object_is_gone_fails_the_run_naming_the_uri() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let source = writer_then(
+        "gone_object",
+        "  - id: b\n    type: io.kestra.plugin.core.log.Log\n    \
+         runIf: \"{{ read(outputs.w.uri) == 'x' }}\"\n    message: b\n\
+         \x20 - id: r\n    type: io.kestra.plugin.core.debug.Return\n    \
+         format: \"{{ read(outputs.w.uri) }}\"\n",
+    );
+    let ex = start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    let (file, applied) = write_and_apply(
+        &db.pool,
+        &fs,
+        ws,
+        "gone_object",
+        "w",
+        "gone.txt",
+        None,
+        |u| json!({ "uri": u }),
+    )
+    .await;
+    applied.expect("a missing object is not an outage: settle answers Ok");
+    assert_eq!(run_of(&db.pool, ex, "b").await.1, "FAILED");
+    let _ = file;
+    // `b` failed, so the execution fails and `r` never runs. A second
+    // execution reaches the handler path.
+    let source = writer_then(
+        "gone_object_handler",
+        "  - id: r\n    type: io.kestra.plugin.core.debug.Return\n    \
+         format: \"{{ read(outputs.w.uri) }}\"\n",
+    );
+    start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    let (file, applied) = write_and_apply(
+        &db.pool,
+        &fs,
+        ws,
+        "gone_object_handler",
+        "w",
+        "gone.txt",
+        None,
+        |u| json!({ "uri": u }),
+    )
+    .await;
+    applied.expect("apply");
+    drain(&db.pool).await;
+    let (state, _, message) = result_of(&db.pool, ws, "r").await;
+    let message = message.unwrap_or_default();
+    assert_eq!(state, "FAILED", "{message}");
+    assert!(
+        message.contains(&file) && message.contains("missing from storage"),
         "{message}"
     );
 }

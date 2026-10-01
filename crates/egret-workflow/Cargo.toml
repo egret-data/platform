@@ -338,3 +338,11 @@ harness = false
 [[test]]
 name = "k8s_runner_live"
 harness = false
+
+# W9a Task 4 fix round 1: `read()` against MinIO (a real S3Store) on one, two
+# and four tokio workers with as many or more concurrent renders, under a
+# watchdog so a wedged runtime FAILS. Gated on EGRET_TEST_S3_ENDPOINT and
+# reported IGNORED (never passed) without it -- the same hand-rolled main.
+[[test]]
+name = "storage_render_s3_live"
+harness = false

@@ -541,12 +541,24 @@ impl Surface {
     /// -- `inputs`, the outputs inherited from loop ancestors, this
     /// execution's own outputs, `execution` and `item` -- for
     /// `storage::scope::Snapshot::take`. The flow source is the caller's.
+    ///
+    /// `labels` too (fix round 1, M5), though today every label but
+    /// `system.correlationId` comes from the flow source the caller already
+    /// passes. `vars` and `flow` are the source's own text.
     pub(super) fn snapshot_values(&self) -> Vec<&Value> {
-        let mut values = vec![&self.inputs, &self.execution];
+        let mut values = vec![&self.inputs, &self.execution, &self.labels];
         values.extend(self.inherited.values());
         values.extend(self.own.values());
         values.extend(self.item.iter());
         values
+    }
+
+    /// The outage a read of this surface's scope met, if any (spec §11):
+    /// `settle` turns it into an `Err` so its transaction rolls back.
+    pub(super) fn files_outage(&self) -> Option<String> {
+        self.files
+            .as_ref()
+            .and_then(|f| f.0.infrastructure_failure())
     }
 
     /// Attach the file scope every later [`Surface::context`] carries.

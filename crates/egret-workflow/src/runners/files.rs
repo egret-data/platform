@@ -46,6 +46,13 @@ pub trait RenderFiles: Send + Sync {
     fn read_utf8(&self, uri: &str) -> Result<String, String>;
     /// This run's baseUri (`…/tasks/{task}/{taskRunId}/`), None outside a task run.
     fn task_prefix(&self) -> Option<&str>;
+    /// The first store OUTAGE a read met, naming the URI (spec §11): not the
+    /// author's error, so `settle` and the worker turn it into an `Err` (the
+    /// lease lapses, the run is re-claimed, no attempt is spent) instead of
+    /// the failed render it also caused. `None` when every read was answered.
+    fn infrastructure_failure(&self) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

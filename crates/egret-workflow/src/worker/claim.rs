@@ -1240,6 +1240,23 @@ async fn run_one(
             return Ok(Committed::LeaseLost);
         }
     };
+    // Spec §11 (fix round 1, I2): a read this handler's render made met a
+    // store OUTAGE. The outcome it produced (a failed render, as a rule) is not
+    // the task's: return `Err` and record nothing, as for a handler `Err` --
+    // the lease lapses, the run is re-claimed, no attempt is spent. No
+    // failed-attempt line either, for the same reason.
+    if let Some(outage) = input
+        .render
+        .files()
+        .and_then(|f| f.0.infrastructure_failure())
+    {
+        input.log.finish().await;
+        return Err(Error::Internal(anyhow::anyhow!(
+            "run {} of execution {}: {outage}",
+            c.id,
+            c.execution_id
+        )));
+    }
     if let Ok(Outcome {
         state: RunState::Failed,
         message: Some(message),
@@ -1490,12 +1507,17 @@ async fn input_for(
     let task_prefix = surface.flow().and_then(|f| {
         crate::storage::uri::task_prefix(&f.namespace, &f.id, c.execution_id, &c.task_id, c.id).ok()
     });
+    // `taskrun.value` (fix round 1, M5): a loop iteration's value, which a
+    // rendered `values:` can make a URI no source text holds.
+    let texts: Vec<&str> = std::iter::once(c.source.as_str())
+        .chain(c.value.as_deref())
+        .collect();
     let files = crate::storage::scope::scope_for(
         &mut conn,
         crate::storage::current(),
         c.workspace_id,
         c.execution_id,
-        &[&c.source],
+        &texts,
         &surface.snapshot_values(),
         task_prefix,
     )
@@ -1689,12 +1711,15 @@ pub(super) async fn settle(
     // inputs -- taken on `conn`, i.e. INSIDE the caller's transaction, which
     // is the only connection that sees the index rows of the task this
     // transaction has just finished.
+    let texts: Vec<&str> = std::iter::once(ctx.source.as_str())
+        .chain(state.runs.iter().filter_map(|r| r.value.as_deref()))
+        .collect();
     let files = crate::storage::scope::scope_for(
         conn,
         crate::storage::current(),
         ctx.workspace_id,
         ctx.id,
-        &[&ctx.source],
+        &texts,
         &surface.snapshot_values(),
         None,
     )
@@ -1826,6 +1851,17 @@ pub(super) async fn settle(
             // `oracle-exec/README.md`'s coverage statement, item 16.
             subflow::on_child_terminal(conn, ctx.id, terminal, ctx.depth).await?;
         }
+    }
+    // Spec §11 (fix round 1, I2): a render this settle ran met a store OUTAGE.
+    // It failed a run above, and that failure is not the author's: an `Err`
+    // here rolls the caller's whole transaction back -- `apply_outcome`'s
+    // write included -- so the lease lapses and the run is re-claimed with no
+    // attempt spent, exactly as a handler `Err` is.
+    if let Some(outage) = surface.files_outage() {
+        return Err(Error::Internal(anyhow::anyhow!(
+            "execution {}: {outage}",
+            ctx.id
+        )));
     }
     Ok(())
 }

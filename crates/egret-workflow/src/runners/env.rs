@@ -2032,21 +2032,48 @@ fn render_guarded_with(
     // scoped borrow and not a copy -- `render_context_crosses_a_thread`
     // pins that, because the day it stops being true this has to become a
     // serialise-and-rebuild and nothing else would say so.
-    std::thread::scope(|scope| {
-        let worker = std::thread::Builder::new()
-            .name("egret-render".to_string())
-            .stack_size(RENDER_STACK_BYTES)
-            .spawn_scoped(scope, || {
-                render_on_this_thread(template, cx, forbidden, extend, passes)
-            })
-            .map_err(|e| RenderError::Template(format!("could not start a render thread: {e}")))?;
-        match worker.join() {
-            Ok(result) => result,
-            // A panic below is still a panic -- it is resumed on this thread
-            // when the scope ends, so `tests/oracle.rs`'s guard still sees it.
-            Err(_) => Err(RenderError::Template("the render panicked".to_string())),
-        }
+    off_the_runtime(|| {
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("egret-render".to_string())
+                .stack_size(RENDER_STACK_BYTES)
+                .spawn_scoped(scope, || {
+                    render_on_this_thread(template, cx, forbidden, extend, passes)
+                })
+                .map_err(|e| {
+                    RenderError::Template(format!("could not start a render thread: {e}"))
+                })?;
+            match worker.join() {
+                Ok(result) => result,
+                // A panic below is still a panic -- it is resumed on this thread
+                // when the scope ends, so `tests/oracle.rs`'s guard still sees it.
+                Err(_) => Err(RenderError::Template("the render panicked".to_string())),
+            }
+        })
     })
+}
+
+/// Run `join`-on-a-render-thread `f` so the runtime keeps running under it.
+///
+/// **W9a Task 4 fix round 1, C1.** A render can block its own thread on the
+/// runtime (`read()`, `storage::scope::Snapshot::read_utf8`), and the thread
+/// that spawned the render waits in `join`. On a tokio WORKER that join used
+/// to park the worker with its core, so with every worker parked nothing
+/// drove the IO and timer drivers and the runtime wedged for good -- measured
+/// with one worker and one render, and with 2/2 and 4/4.
+/// `block_in_place` hands this worker's core to another thread first.
+///
+/// Only on the multi-thread runtime: `block_in_place` panics on a
+/// current-thread one, which has no other thread to hand anything to --
+/// `read()` refuses there instead (`Snapshot::read_utf8`). Off any runtime
+/// this is just `f()`.
+fn off_the_runtime<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
 }
 
 /// The top-level names a template refers to, as the PARSER sees them.
@@ -2311,16 +2338,20 @@ pub(crate) fn render_bound(
     // out anyway: the value of this function is that ONE code path produces
     // both halves of the answer, and a second path that produces `(text, [])`
     // is a second place for the two to disagree about what "no values" means.
-    std::thread::scope(|scope| {
-        let worker = std::thread::Builder::new()
-            .name("egret-render-bound".to_string())
-            .stack_size(RENDER_STACK_BYTES)
-            .spawn_scoped(scope, || bind_on_this_thread(template, cx))
-            .map_err(|e| RenderError::Template(format!("could not start a render thread: {e}")))?;
-        match worker.join() {
-            Ok(result) => result,
-            Err(_) => Err(RenderError::Template("the render panicked".to_string())),
-        }
+    off_the_runtime(|| {
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("egret-render-bound".to_string())
+                .stack_size(RENDER_STACK_BYTES)
+                .spawn_scoped(scope, || bind_on_this_thread(template, cx))
+                .map_err(|e| {
+                    RenderError::Template(format!("could not start a render thread: {e}"))
+                })?;
+            match worker.join() {
+                Ok(result) => result,
+                Err(_) => Err(RenderError::Template("the render panicked".to_string())),
+            }
+        })
     })
 }
 
