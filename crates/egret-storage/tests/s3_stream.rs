@@ -137,7 +137,8 @@ async fn resident_memory_does_not_grow_with_the_file() {
     let uri = format!("s3://{}/{}huge.bin", c.bucket, prefix());
     let total = 256 * MIB;
 
-    let before = max_rss_bytes();
+    let baseline = max_rss_bytes();
+    let before = baseline;
     let mut body = Gen {
         pos: 0,
         total,
