@@ -53,6 +53,12 @@ pub struct QueryRequest {
     pub max_rows: Option<usize>,
 }
 
+/// `POST /apps/query` (mounted at `/api/apps/query`, outside the CSRF layer).
+///
+/// Deliberately **not** in the OpenAPI document, like `/metrics`: it is an
+/// internal app-pod → egret endpoint authenticated by a per-marimo-session
+/// bearer token, with no frontend caller. Annotating it would make
+/// `npm run gen:api` generate a client nothing uses.
 pub fn gateway_router() -> Router<AppsState> {
     Router::new().route("/apps/query", post(query))
 }

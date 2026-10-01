@@ -91,6 +91,9 @@ pub struct AppState {
     /// unaffected: turning this off stops webhook traffic and nothing else,
     /// which is the same split `flows.state = 'disabled'` makes per flow.
     pub workflow_webhooks_enabled: bool,
+    /// Data Apps query gateway (`POST /api/apps/query`), called with a
+    /// per-marimo-session bearer token from inside app pods; `None` in unit tests.
+    pub apps: Option<egret_apps::AppsState>,
 }
 
 impl AppState {
@@ -121,6 +124,7 @@ impl AppState {
             // security review says "do not expose", so the default has to be
             // the side of that sentence.
             workflow_webhooks_enabled: false,
+            apps: None,
         }
     }
 
@@ -165,6 +169,14 @@ impl AppState {
     #[must_use]
     pub fn with_workflow_webhooks(mut self) -> Self {
         self.workflow_webhooks_enabled = true;
+        self
+    }
+
+    /// Attach the Data Apps gateway to an otherwise-empty test state, so a test
+    /// can prove through the COMPOSED router that the gateway is mounted and is
+    /// not behind the CSRF layer (same reasoning as [`Self::with_dataapi`]).
+    pub fn with_apps(mut self, apps: egret_apps::AppsState) -> Self {
+        self.apps = Some(apps);
         self
     }
 }
@@ -367,6 +379,15 @@ pub fn build_router(state: AppState) -> Router {
             .nest("/api", egret_kernel::kernel_callback_router())
             .with_state(kernel);
         router = router.merge(callback_group);
+    }
+
+    if let Some(apps) = state.apps.clone() {
+        // Data Apps gateway: bearer-token (per marimo session) callers inside app pods; no
+        // cookie is involved, so no CSRF layer (spec §4.2). Hand-gated for the `apps` feature.
+        let gateway_group = Router::new()
+            .nest("/api", egret_apps::gateway_router())
+            .with_state(apps);
+        router = router.merge(gateway_group);
     }
 
     if let Some(cp) = state.control_plane.clone() {
