@@ -86,6 +86,10 @@ const EXTRA_FILES: &[&str] = &[
     // `WorkspaceContext`, so the gateway passes the core PEP its own
     // `AuthTarget` rather than calling `Pdp::authorize` by hand.
     "../egret-apps/src/gateway.rs",
+    // `app:read` / `app:write` (Data Apps P2) on the cookie-session app API:
+    // `authz::require` for list/create and `require_object` on every `{id}` route,
+    // with the same `APP_READ`/`APP_WRITE` consts.
+    "../egret-apps/src/routes.rs",
     // `app:manage` (Data Apps P2) is gated by the object-share API through
     // `require_object(manage_action(kind))`; `manage_action` is a literal table
     // of every share kind's manage key, listed in `PERM_TABLE_FNS`.
