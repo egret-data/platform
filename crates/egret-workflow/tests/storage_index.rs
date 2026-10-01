@@ -88,7 +88,7 @@ async fn write_file(db: &Db, ws: Uuid, execution: Uuid, name: &str, size: u64) -
     let run = task_run(db, execution).await;
     let uri = format!(
         "{}{name}",
-        uri::task_prefix(NS, FLOW, execution, "Write_It", run)
+        uri::task_prefix(NS, FLOW, execution, "Write_It", run).unwrap()
     );
     let mut conn = db.pool.acquire().await.unwrap();
     index_task_files(
@@ -176,12 +176,23 @@ async fn a_loop_iteration_resolves_to_its_root_and_a_retry_replay_does_not() {
 /// The chain of spec §4.4: root R (trigger T), retry-replay R1 of R, manual
 /// replay R2 of R1 (trigger T2); loop iterations I and I2 of R2. J is an
 /// iteration of the chain link R1 and is EXCLUDED (spec §4.4: the replay
-/// chain's own loop iterations are not in the set); U is unrelated.
+/// chain's own loop iterations are not in the set); U is unrelated. T was
+/// itself triggered by T0, and T0 is EXCLUDED: the trigger rule is one level
+/// (fix round 1 M2).
 #[tokio::test]
 async fn readable_covers_own_root_trigger_retry_replay_and_manual_replay_chain() {
     let Some(db) = common::db().await else { return };
     let (ws, _) = common::seed_workspace(&db).await;
-    let t = root(&db, ws).await;
+    let t0 = root(&db, ws).await;
+    let t = exec(
+        &db,
+        ws,
+        Link {
+            trigger: Some(t0),
+            ..Link::default()
+        },
+    )
+    .await;
     let t2 = root(&db, ws).await;
     let r = exec(
         &db,
@@ -248,6 +259,10 @@ async fn readable_covers_own_root_trigger_retry_replay_and_manual_replay_chain()
         "a replay chain link's own iteration is not readable"
     );
     assert!(!got.contains(&u));
+    assert!(
+        !got.contains(&t0),
+        "a trigger's own trigger is not readable: one level"
+    );
     // From the root, the same set: the root's family holds both iterations.
     assert_eq!(
         sorted(readable_executions(&mut conn, ws, r2).await.unwrap()),
@@ -335,7 +350,10 @@ async fn a_file_written_in_an_iteration_is_indexed_under_the_iteration() {
 
     // A URI naming the ROOT for the iteration's task run is egret's own bug.
     let run = task_run(&db, i).await;
-    let wrong = format!("{}x", uri::task_prefix(NS, FLOW, r2, "Write_It", run));
+    let wrong = format!(
+        "{}x",
+        uri::task_prefix(NS, FLOW, r2, "Write_It", run).unwrap()
+    );
     let mut conn = db.pool.acquire().await.unwrap();
     let err = index_task_files(
         &mut conn,
@@ -353,7 +371,7 @@ async fn a_file_written_in_an_iteration_is_indexed_under_the_iteration() {
     // So is a URI naming another task run of the right execution.
     let other_run = format!(
         "{}x",
-        uri::task_prefix(NS, FLOW, i, "Write_It", Uuid::new_v4())
+        uri::task_prefix(NS, FLOW, i, "Write_It", Uuid::new_v4()).unwrap()
     );
     assert!(index_task_files(
         &mut conn,
@@ -382,7 +400,7 @@ async fn a_file_written_in_an_iteration_is_indexed_under_the_iteration() {
     assert_eq!(sizes, vec![9]);
 
     // Input files: no task run, and only `inputs/` URIs of the execution.
-    let input = uri::input_uri(NS, FLOW, r2, "file1", "data.csv");
+    let input = uri::input_uri(NS, FLOW, r2, "file1", "data.csv").unwrap();
     index_input_files(
         &mut conn,
         ws,
@@ -407,7 +425,10 @@ async fn a_file_written_in_an_iteration_is_indexed_under_the_iteration() {
             size: 4
         }
     );
-    let not_input = format!("{}z", uri::task_prefix(NS, FLOW, r2, "t", Uuid::new_v4()));
+    let not_input = format!(
+        "{}z",
+        uri::task_prefix(NS, FLOW, r2, "t", Uuid::new_v4()).unwrap()
+    );
     assert!(index_input_files(
         &mut conn,
         ws,
@@ -419,7 +440,7 @@ async fn a_file_written_in_an_iteration_is_indexed_under_the_iteration() {
     )
     .await
     .is_err());
-    let other_exec = uri::input_uri(NS, FLOW, i, "file1", "data.csv");
+    let other_exec = uri::input_uri(NS, FLOW, i, "file1", "data.csv").unwrap();
     assert!(index_input_files(
         &mut conn,
         ws,
@@ -443,7 +464,7 @@ async fn write_file_for_run(
 ) -> String {
     let uri = format!(
         "{}{name}",
-        uri::task_prefix(NS, FLOW, execution, "Write_It", run)
+        uri::task_prefix(NS, FLOW, execution, "Write_It", run).unwrap()
     );
     let mut conn = db.pool.acquire().await.unwrap();
     index_task_files(
@@ -497,7 +518,7 @@ async fn the_same_uri_in_two_workspaces_resolves_to_the_callers_row_only() {
     let ea = root(&db, a).await;
     let eb = root(&db, b).await;
     let ec = root(&db, c).await;
-    let uri = uri::input_uri(NS, FLOW, ea, "f", "x.txt");
+    let uri = uri::input_uri(NS, FLOW, ea, "f", "x.txt").unwrap();
     for (ws, e, size) in [(a, ea, 1_i64), (b, eb, 2)] {
         // Raw: B's row names B's execution with A's URI, which no writer of
         // egret's would produce -- that is the point of the probe.
@@ -630,13 +651,78 @@ async fn the_manual_replay_route_records_its_source() {
         .contains(&done));
 }
 
+/// User ruling (fix round 1): the manual replay route refuses a loop
+/// iteration, naming its loop root, as `replay::spawn_due` never replays one;
+/// the root itself still replays (the control). No execution is created by
+/// the refusal.
+#[tokio::test]
+async fn the_manual_replay_route_refuses_a_loop_iteration_and_replays_its_root() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+    let source = format!(
+        "id: replay-iter\nnamespace: {NS}\ntasks:\n  \
+         - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    );
+    let flow = common::seed_flow(&db, ws, user, &source, "draft").await;
+    let insert = |parent: Option<Uuid>| {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO workflow.executions \
+               (workspace_id, flow_id, namespace, flow_key, source, state, history, \
+                parent_execution_id, parent_run_ix, loop_index, loop_value) \
+             VALUES ($1, $2, $3, 'replay-iter', $4, 'SUCCESS', '[\"CREATED\",\"SUCCESS\"]'::jsonb, \
+                     $5, $6, $7, $8) RETURNING id",
+        )
+        .bind(ws)
+        .bind(flow)
+        .bind(NS)
+        .bind(source.clone())
+        .bind(parent)
+        .bind(parent.map(|_| 0))
+        .bind(parent.map(|_| 2))
+        .bind(parent.map(|_| "v".to_string()))
+        .fetch_one(&db.pool)
+    };
+    let root = insert(None).await.unwrap();
+    let iteration = insert(Some(root)).await.unwrap();
+    let app = common::app(&db).await;
+    let before = common::execution_count(&db, ws).await;
+
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{iteration}/replay"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    let body = common::json(res).await.to_string();
+    assert!(body.contains("iteration 2 of a Loop"), "{body}");
+    assert!(
+        body.contains(&format!("replay its loop root {root}")),
+        "{body}"
+    );
+    assert_eq!(
+        common::execution_count(&db, ws).await,
+        before,
+        "nothing started"
+    );
+
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{root}/replay"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 201, "the loop root replays");
+}
+
 #[tokio::test]
 async fn the_composite_fk_refuses_a_file_row_naming_another_workspaces_execution() {
     let Some(db) = common::db().await else { return };
     let (a, _) = common::seed_workspace(&db).await;
     let (b, _) = common::seed_workspace(&db).await;
     let eb = root(&db, b).await;
-    let uri = uri::input_uri(NS, FLOW, eb, "f", "x");
+    let uri = uri::input_uri(NS, FLOW, eb, "f", "x").unwrap();
     let insert = |ws: Uuid| {
         sqlx::query(
             "INSERT INTO workflow.execution_files (workspace_id, execution_id, uri, size) \
@@ -706,6 +792,20 @@ async fn the_composite_fk_refuses_a_file_row_naming_another_workspaces_execution
     link(other, eb)
         .await
         .expect("the control: a top-level replay of its own workspace");
+
+    // Fix round 1 I2: the replay link has its partial index.
+    let def: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes \
+          WHERE schemaname = 'workflow' AND indexname = 'workflow_executions_replayed_from_idx'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("the index exists");
+    assert!(
+        def.contains("(replayed_from_execution_id)")
+            && def.contains("WHERE (replayed_from_execution_id IS NOT NULL)"),
+        "{def}"
+    );
 }
 
 #[tokio::test]

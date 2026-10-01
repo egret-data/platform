@@ -57,11 +57,16 @@ pub struct ExecUri {
 /// spelling -- any other spelling would not round-trip and so would not match
 /// the index row egret wrote; and a tail that is not one of the four layouts.
 ///
+/// Also refused: `\`, `?`, `#` and control characters anywhere in the path.
+///
 /// `{exec}` is the FIRST `executions` segment, at index 2 or later, followed by
-/// a UUID. The parse is total over what egret writes, and
-/// `parse(u)?.to_uri() == u` for every `u` it accepts, so the object key (built
-/// from the URI's path) and the readability decision (made on `{exec}`) are
-/// about the same string.
+/// a UUID, and `parse(u)?.to_uri() == u` for every `u` it accepts, so the
+/// object key (built from the URI's path) and the readability decision (made
+/// on `{exec}`) are about the same string. **The parse is NOT total over every
+/// namespace publish accepts** (`a..b`, `a.`, or one holding
+/// `executions.<uuid>`): egret's builders read each URI back through this
+/// function ([`checked`]) and refuse one it would refuse or misread, as the
+/// author's error.
 pub fn parse(uri: &str) -> Result<ExecUri, String> {
     let Some(path) = uri.strip_prefix(SCHEME_PREFIX) else {
         return Err(format!(
@@ -75,6 +80,21 @@ pub fn parse(uri: &str) -> Result<ExecUri, String> {
     }
     if segments.iter().any(|s| *s == ".." || *s == ".") {
         return Err("it has a '.' or '..' path segment".to_string());
+    }
+    // Defence in depth before a pod's `outputDirectory` paths are indexed
+    // (Task 6): `\` (a separator elsewhere), `?` and `#` (a URI's query and
+    // fragment) and control characters never belong to a file name egret
+    // writes. `%` stays legal: Kestra keeps an uploaded name verbatim and the
+    // artifact measured `inputs/f/a%20b.txt` (`w9a-storage.json`
+    // `file_input.filenames.percent20`). Nothing in egret percent-decodes a
+    // URI, so `%2e%2e` is a literal segment, never `..`.
+    if let Some(c) = path
+        .chars()
+        .find(|c| matches!(c, '\\' | '?' | '#') || c.is_control())
+    {
+        return Err(format!(
+            "it holds the character {c:?}, which no execution file URI may"
+        ));
     }
     let mut saw_executions = false;
     let mut found = None;
@@ -198,49 +218,150 @@ fn execution_base(namespace: &str, flow_id: &str, execution: Uuid) -> String {
 ///
 /// `kestra:///{ns}/{flow-slug}/executions/{exec}/tasks/{task-slug}/{taskRunId}/`
 /// (`StorageContext.Task`); ends with `/`.
+///
+/// `Err` is the AUTHOR's error (see [`checked`]): the namespace, flow or task
+/// id gives a URI egret's own [`parse`] would refuse or misread. The task
+/// fails naming it; it is never `Error::Internal`, which inside the commit
+/// transaction would fence the run and re-claim it for ever.
 pub fn task_prefix(
     namespace: &str,
     flow_id: &str,
     execution: Uuid,
     task_id: &str,
     task_run: Uuid,
-) -> String {
-    format!(
+) -> Result<String, String> {
+    let prefix = format!(
         "{}tasks/{}/{}/",
         execution_base(namespace, flow_id, execution),
         slugify_str(task_id),
         task_run.hyphenated()
-    )
+    );
+    // A prefix is not a file URI (it ends with `/`); the check reads back a
+    // file under it.
+    let probe = format!("{prefix}{PROBE_FILE}");
+    checked(
+        &probe,
+        execution,
+        &Tail::Task {
+            task_slug: slugify_str(task_id),
+            task_run: task_run.hyphenated().to_string(),
+            file: PROBE_FILE.to_string(),
+        },
+        &format!("namespace {namespace:?}, flow {flow_id:?} and task {task_id:?}"),
+    )?;
+    Ok(prefix)
 }
+
+const PROBE_FILE: &str = "file";
 
 /// `kestra:///{ns}/{flow-slug}/executions/{exec}/inputs/{input}/{file}`
 /// (`StorageContext.Input`: the input's name and the file's are NOT slugified).
+/// `Err` as [`task_prefix`]'s.
 pub fn input_uri(
     namespace: &str,
     flow_id: &str,
     execution: Uuid,
     input: &str,
     file: &str,
-) -> String {
-    format!(
+) -> Result<String, String> {
+    let uri = format!(
         "{}inputs/{input}/{file}",
         execution_base(namespace, flow_id, execution)
-    )
+    );
+    checked(
+        &uri,
+        execution,
+        &Tail::Input {
+            input: input.to_string(),
+            file: file.to_string(),
+        },
+        &format!("namespace {namespace:?}, flow {flow_id:?}, input {input:?} and file {file:?}"),
+    )?;
+    Ok(uri)
 }
 
 /// `kestra:///{ns}/{flow-slug}/executions/{exec}/{file}` ([`Tail::Execution`]).
-pub fn execution_file_uri(namespace: &str, flow_id: &str, execution: Uuid, file: &str) -> String {
-    format!("{}{file}", execution_base(namespace, flow_id, execution))
+/// `Err` as [`task_prefix`]'s.
+pub fn execution_file_uri(
+    namespace: &str,
+    flow_id: &str,
+    execution: Uuid,
+    file: &str,
+) -> Result<String, String> {
+    let uri = format!("{}{file}", execution_base(namespace, flow_id, execution));
+    checked(
+        &uri,
+        execution,
+        &Tail::Execution {
+            file: file.to_string(),
+        },
+        &format!("namespace {namespace:?}, flow {flow_id:?} and file {file:?}"),
+    )?;
+    Ok(uri)
 }
 
 /// `{task_prefix}{id_utils_from(abs_path)}-{basename with ' ' -> '+'}` (FilesService.java:94-97).
-pub fn output_file_uri(task_prefix: &str, abs_path: &str) -> String {
+/// `task_prefix` is one [`task_prefix`] built; `Err` as its, naming the file.
+pub fn output_file_uri(task_prefix: &str, abs_path: &str) -> Result<String, String> {
     let basename = abs_path.rsplit('/').next().unwrap_or(abs_path);
-    format!(
-        "{task_prefix}{}-{}",
-        id_utils_from(abs_path),
-        basename.replace(' ', "+")
-    )
+    let name = format!("{}-{}", id_utils_from(abs_path), basename.replace(' ', "+"));
+    let uri = format!("{task_prefix}{name}");
+    let what = format!("output file {abs_path:?}");
+    let under = parse(&format!("{task_prefix}{PROBE_FILE}"))
+        .map_err(|reason| refusal(&what, task_prefix, &reason))?;
+    let Tail::Task {
+        task_slug,
+        task_run,
+        ..
+    } = under.tail
+    else {
+        return Err(refusal(&what, task_prefix, "it is not a task's prefix"));
+    };
+    checked(
+        &uri,
+        under.execution,
+        &Tail::Task {
+            task_slug,
+            task_run,
+            file: name,
+        },
+        &what,
+    )?;
+    Ok(uri)
+}
+
+/// **Every URI egret builds is read back before it is used**: `parse(built)`
+/// must name the same writing execution and the same tail, and print back the
+/// same string. A namespace like `a..b` (an empty segment), `a.` (a trailing
+/// one) or `x.y.executions.<uuid>` with a flow `tasks` (an earlier
+/// `executions/<uuid>` than the writer's) passes publish but would be refused
+/// or misread here, and an index writer would then refuse the row inside the
+/// commit transaction. Refusing it when the URI is built makes it the
+/// author's error, a failed task naming it, instead.
+fn checked(built: &str, execution: Uuid, tail: &Tail, what: &str) -> Result<(), String> {
+    let parsed = parse(built).map_err(|reason| refusal(what, built, &reason))?;
+    if parsed.execution != execution {
+        return Err(refusal(
+            what,
+            built,
+            &format!(
+                "it reads back as a file of execution {}, not of {execution}",
+                parsed.execution
+            ),
+        ));
+    }
+    if parsed.tail != *tail || parsed.to_uri() != built {
+        return Err(refusal(
+            what,
+            built,
+            "it reads back as a different file of the execution",
+        ));
+    }
+    Ok(())
+}
+
+fn refusal(what: &str, built: &str, reason: &str) -> String {
+    format!("{what}: the storage URI {built} cannot be read back: {reason}")
 }
 
 #[cfg(test)]
@@ -298,17 +419,22 @@ mod tests {
         for row in &all {
             let s = |k: &str| row[k].as_str().unwrap().to_string();
             let (exec, run) = (Uuid::from_u128(1), Uuid::from_u128(2));
-            let prefix = task_prefix(&s("namespace"), &s("flow_id"), exec, &s("task_id"), run)
-                .replace(&exec.to_string(), &s("execution_id"))
-                .replace(&run.to_string(), &s("task_run_id"));
+            let prefix =
+                task_prefix(&s("namespace"), &s("flow_id"), exec, &s("task_id"), run).unwrap();
+            // Built over egret's UUIDs (the builders read their URI back, and
+            // Kestra's base62 ids are not UUIDs), then Kestra's ids put in.
+            let kestra_ids = |u: String| {
+                u.replace(&exec.to_string(), &s("execution_id"))
+                    .replace(&run.to_string(), &s("task_run_id"))
+            };
             let got = match s("source").as_str() {
                 "outputFiles" => {
                     by_source.0 += 1;
-                    output_file_uri(&prefix, &s("absolute_path"))
+                    kestra_ids(output_file_uri(&prefix, &s("absolute_path")).unwrap())
                 }
                 "outputDirectory" => {
                     by_source.1 += 1;
-                    format!("{prefix}{}", s("rel_path"))
+                    kestra_ids(format!("{prefix}{}", s("rel_path")))
                 }
                 other => panic!("unknown source {other}"),
             };
@@ -387,16 +513,119 @@ mod tests {
         assert_eq!(accepted.execution.to_string(), id);
     }
 
+    /// Fix round 1 M3: `\`, `?`, `#` and control characters are refused
+    /// anywhere in the path. `%` and `+` are legal: Kestra's measured URIs hold
+    /// both, and the scan below is the evidence (a zero beside a count).
+    #[test]
+    fn parse_refuses_separator_query_fragment_and_control_characters() {
+        let id = "0e9a7b4c-3f53-4f0b-9b3e-8d1f2a6c7e10";
+        for bad in ["a\\b", "a?b", "a#b", "a\nb", "a\u{7f}b", "a\tb", "a\0b"] {
+            let uri = format!("kestra:///ns/f/executions/{id}/inputs/f/{bad}");
+            let err = parse(&uri).expect_err(&uri);
+            assert!(err.contains("character"), "{uri:?}: {err}");
+            let ns = format!("kestra:///n{bad}s/f/executions/{id}/inputs/f/x");
+            assert!(parse(&ns).is_err(), "{ns:?}");
+        }
+        for good in ["a+b.txt", "a%20b.txt", "café.txt", "a b.txt"] {
+            let uri = format!("kestra:///ns/f/executions/{id}/inputs/f/{good}");
+            assert!(parse(&uri).is_ok(), "{uri}");
+        }
+        // Every `kestra:///` string in the fixture: how many, and how many hold
+        // a refused character.
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oracle-exec/w9a-storage.json"),
+        )
+        .unwrap();
+        let fixture: Value = serde_json::from_str(&text).unwrap();
+        let mut uris = std::collections::BTreeSet::new();
+        fn walk(v: &Value, out: &mut std::collections::BTreeSet<String>) {
+            match v {
+                Value::String(s) => {
+                    for (i, _) in s.match_indices(SCHEME_PREFIX) {
+                        let end = s[i..]
+                            .find(|c: char| c.is_whitespace() || "'\")}".contains(c))
+                            .map_or(s.len(), |n| i + n);
+                        out.insert(s[i..end].to_string());
+                    }
+                }
+                Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+                Value::Object(o) => o.values().for_each(|x| walk(x, out)),
+                _ => {}
+            }
+        }
+        walk(&fixture, &mut uris);
+        let refused: Vec<&String> = uris
+            .iter()
+            .filter(|u| {
+                u.chars()
+                    .any(|c| matches!(c, '\\' | '?' | '#') || c.is_control())
+            })
+            .collect();
+        assert_eq!((uris.len(), refused.len()), (116, 0), "{refused:?}");
+        assert!(uris.iter().any(|u| u.contains('%')) && uris.iter().any(|u| u.contains('+')));
+    }
+
+    /// Fix round 1 I1: a namespace that passes publish
+    /// (`^[a-z0-9][a-z0-9._-]*`) but whose URI egret's own parser would refuse
+    /// or misread is refused when the URI is BUILT, naming the namespace --
+    /// never handed to an index writer, where it would be `Error::Internal`.
+    #[test]
+    fn builders_refuse_a_uri_their_parser_would_refuse_or_misread() {
+        let (e, r) = (Uuid::new_v4(), Uuid::new_v4());
+        let other = Uuid::new_v4();
+        let tricky = format!("x.y.executions.{other}");
+        for (ns, flow) in [("a..b", "f"), ("a.", "f"), (tricky.as_str(), "tasks")] {
+            let errs = [
+                task_prefix(ns, flow, e, "t", r).unwrap_err(),
+                input_uri(ns, flow, e, "i", "x.csv").unwrap_err(),
+                execution_file_uri(ns, flow, e, "0.ion").unwrap_err(),
+            ];
+            for err in errs {
+                assert!(err.contains(&format!("namespace {ns:?}")), "{err}");
+                assert!(err.contains("cannot be read back"), "{err}");
+            }
+        }
+        // The misread is the dangerous one: it parses, as ANOTHER execution.
+        let built = format!("kestra:///x/y/executions/{other}/tasks/executions/{e}/inputs/i/x");
+        assert_eq!(parse(&built).unwrap().execution, other);
+        let err = input_uri(&tricky, "tasks", e, "i", "x").unwrap_err();
+        assert!(err.contains(&format!("not of {e}")), "{err}");
+        // The controls: the same builders over a plain namespace.
+        assert!(task_prefix("a.b", "f", e, "t", r).is_ok());
+        assert!(input_uri("a.b", "f", e, "i", "x.csv").is_ok());
+        assert!(execution_file_uri("a.b", "f", e, "0.ion").is_ok());
+        // An input name or file that would split differently, or a bad character.
+        assert!(input_uri("a.b", "f", e, "i/j", "x").is_err());
+        assert!(input_uri("a.b", "f", e, "i", "x?y").is_err());
+        assert!(execution_file_uri("a.b", "f", e, "d/0.ion").is_err());
+        // Output files: the name is built from the pod's path.
+        let tp = task_prefix("a.b", "f", e, "t", r).unwrap();
+        assert!(output_file_uri(&tp, "/egret/working-dir/ok.txt").is_ok());
+        for bad in [
+            "/egret/working-dir/a#b",
+            "/egret/working-dir/a\nb",
+            "/egret/working-dir/a?b",
+        ] {
+            let err = output_file_uri(&tp, bad).unwrap_err();
+            assert!(err.contains("output file"), "{err}");
+        }
+        assert!(output_file_uri("kestra:///not-a-prefix/", "/x").is_err());
+    }
+
     #[test]
     fn parse_to_uri_round_trips() {
         let (e, r) = (Uuid::new_v4(), Uuid::new_v4());
-        let tp = task_prefix("w9a.storage", "Out_Files.Case-", e, "Shell_Task-", r);
+        let tp = task_prefix("w9a.storage", "Out_Files.Case-", e, "Shell_Task-", r).unwrap();
         let uris = [
-            input_uri("a.b.c", "My Flow", e, "file1", "data.csv"),
-            output_file_uri(&tp, "/egret/working-dir/a b.txt"),
+            input_uri("a.b.c", "My Flow", e, "file1", "data.csv").unwrap(),
+            output_file_uri(&tp, "/egret/working-dir/a b.txt").unwrap(),
             format!("{tp}deep/d.txt"),
             format!("kestra:///w9a/f/executions/{e}/trigger/my-trigger/x.json"),
-            execution_file_uri("ns", "f", e, "0.ion"),
+            execution_file_uri("ns", "f", e, "0.ion").unwrap(),
+            // Kestra kept an uploaded `a%20b.txt` verbatim (`w9a-storage.json`
+            // `file_input.filenames.percent20`): `%` is legal and not decoded.
+            input_uri("ns", "f", e, "f", "a%20b.txt").unwrap(),
+            input_uri("ns", "f", e, "f", "%2e%2e").unwrap(),
             // A namespace segment named `executions` is still a namespace.
             format!("kestra:///a/executions/f/executions/{e}/inputs/i/f"),
         ];

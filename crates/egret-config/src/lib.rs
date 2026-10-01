@@ -820,6 +820,33 @@ pub struct WorkflowStorageConfig {
     pub max_read_bytes: u64,
 }
 
+impl WorkflowStorageConfig {
+    /// The boot check (W9a fix round 1 M4), called from [`Config::validate`]:
+    /// `prefix` is a non-empty key prefix ending with `/` and not starting
+    /// with one (an object key has no leading `/`, and without the trailing
+    /// one `workflow` and `workflowX/` would share keys), and every cap is at
+    /// least 1. Each refusal names its key.
+    pub fn validate(&self) -> Result<(), String> {
+        let p = &self.prefix;
+        if p.is_empty() || !p.ends_with('/') || p.starts_with('/') {
+            return Err(format!(
+                "workflow.storage.prefix {p:?} must be non-empty, end with '/' and not start \
+                 with '/' (e.g. \"workflow/\"; EGRET_WORKFLOW__STORAGE__PREFIX)"
+            ));
+        }
+        for (key, value) in [
+            ("max_file_bytes", self.max_file_bytes),
+            ("max_task_bytes", self.max_task_bytes),
+            ("max_read_bytes", self.max_read_bytes),
+        ] {
+            if value == 0 {
+                return Err(format!("workflow.storage.{key} must be at least 1"));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for WorkflowStorageConfig {
     fn default() -> Self {
         Self {
@@ -1584,7 +1611,10 @@ impl Config {
         }
         // W9a spec §15: a container runner moves files in and out of task pods
         // through the `[storage]` bucket (the pod itself holds no credential),
-        // so it cannot start without one.
+        // so it cannot start without one. NOTE: `Config::validate` runs for
+        // EVERY `egret` subcommand that loads config (`main.rs`, before the
+        // dispatch), so this also gates `egret migrate` and `egret init`, not
+        // only `serve`.
         if self.workflow.container_runner != ContainerRunner::None
             && (self.storage.bucket.is_empty()
                 || self.storage.access_key.is_empty()
@@ -1598,6 +1628,7 @@ impl Config {
                     .into(),
             );
         }
+        self.workflow.storage.validate()?;
         if self.engine.max_rows == 0 || self.engine.query_timeout_secs == 0 {
             return Err("engine.max_rows and engine.query_timeout_secs must be >= 1".into());
         }
@@ -1909,6 +1940,30 @@ values = { allowed-images = [] }
             assert_eq!(cfg.workflow.storage_retention_days, 0);
             Ok(())
         });
+    }
+
+    /// W9a fix round 1 M4: `[workflow.storage]` is checked at boot, each
+    /// refusal naming its key; the default passes (the control).
+    #[test]
+    fn workflow_storage_is_validated_at_boot() {
+        let check = |f: &dyn Fn(&mut WorkflowStorageConfig)| {
+            let mut cfg = Config::default();
+            f(&mut cfg.workflow.storage);
+            cfg.validate()
+        };
+        assert_eq!(check(&|_| {}), Ok(()));
+        assert_eq!(check(&|s| s.prefix = "wf/nested/".into()), Ok(()));
+        for bad in ["", "workflow", "/workflow/", "/"] {
+            let err = check(&|s| s.prefix = bad.into()).expect_err(bad);
+            assert!(err.contains("workflow.storage.prefix"), "{bad:?}: {err}");
+        }
+        let err = check(&|s| s.max_file_bytes = 0).unwrap_err();
+        assert!(err.contains("workflow.storage.max_file_bytes"), "{err}");
+        let err = check(&|s| s.max_task_bytes = 0).unwrap_err();
+        assert!(err.contains("workflow.storage.max_task_bytes"), "{err}");
+        let err = check(&|s| s.max_read_bytes = 0).unwrap_err();
+        assert!(err.contains("workflow.storage.max_read_bytes"), "{err}");
+        assert_eq!(check(&|s| s.max_read_bytes = 1), Ok(()));
     }
 
     /// W9a spec §15: a container runner needs `[storage]` at boot; `none`

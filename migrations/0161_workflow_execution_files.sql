@@ -60,3 +60,11 @@ ALTER TABLE workflow.executions
     CHECK (replayed_from_execution_id IS DISTINCT FROM id),
   ADD CONSTRAINT workflow_executions_replayed_from_is_not_a_child
     CHECK (replayed_from_execution_id IS NULL OR parent_execution_id IS NULL);
+
+-- What `readable_executions` walks for the replay chain: "which execution is
+-- this one the replay of" is answered from the row itself, but the pruner and
+-- a delete look the other way ("is anything a replay of X"), and an FK with
+-- no index under it makes every delete of an executions row scan the table.
+CREATE INDEX workflow_executions_replayed_from_idx
+  ON workflow.executions (replayed_from_execution_id)
+  WHERE replayed_from_execution_id IS NOT NULL;

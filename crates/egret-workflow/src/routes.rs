@@ -1853,7 +1853,7 @@ async fn resume_execution(
     ),
     responses(
         (status = 201, description = "A NEW execution, started from the replayed one's frozen source and inputs. The body is the new execution, not the old one — read its `id`.", body = ExecutionDto),
-        (status = 400, description = "The **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The execution is a **loop iteration** (replay its loop root instead); or the **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed — **or its flow is in the trash, or no longer exists at all**. A replay is a run of the flow and answers to the flow's current state.", body = egret_core::http::ErrorBody),
@@ -1891,6 +1891,13 @@ async fn resume_execution(
 /// inputs verbatim, and those may be `kestra://` URIs of the source). The audit
 /// record still carries both ids.
 ///
+/// # Not a loop iteration
+///
+/// An iteration (`parent_execution_id` with a `loop_index`) is refused (400)
+/// naming its loop root: it is a part of the root's run, `replay::spawn_due`
+/// never replays one, and a replay of it would be a top-level run of the
+/// loop's body alone.
+///
 /// # Terminal only
 ///
 /// A non-terminal execution is refused (409) rather than replayed: two RUNNING
@@ -1905,6 +1912,18 @@ async fn replay_execution(
 ) -> EgretResult<(StatusCode, Json<ExecutionDto>)> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
     let source = st.executions.get(ctx.workspace_id.0, id).await?;
+    // **A loop iteration is not replayed** (user ruling, W9a Task 3 fix round
+    // 1): it is a part of its loop root's run, not a run of the flow, and
+    // `replay::spawn_due` never replays one either. Its loop root is.
+    if let (Some(root), Some(index)) = (
+        source.execution.parent_execution_id,
+        source.execution.loop_index,
+    ) {
+        return Err(Error::InvalidInput(format!(
+            "execution {id} is iteration {index} of a Loop in execution {root}, not a run of \
+             the flow, and cannot be replayed on its own; replay its loop root {root}"
+        )));
+    }
     // **The same gate `start_flow_execution` passes**, and fix round 1 is what
     // put it here: this handler used to check terminality and NOTHING else, so
     // a replay ran a flow that was trashed, disabled, or both — every door
