@@ -598,6 +598,29 @@ async fn the_edit_page_without_a_file_goes_to_the_grants_own_draft_not_marimos_f
 }
 
 #[tokio::test]
+async fn the_apps_listener_serves_nothing_but_tickets_and_pods() {
+    // D17: egret's API is not reachable through the apps host, whatever the cookie says.
+    let fx = Fixture::new().await;
+    let (cookie, _) = fx.cookie_for(&fx.editor, AppMode::Edit).await;
+    for target in [
+        "/",
+        "/healthz",
+        "/metrics",
+        "/api/auth/me",
+        "/api/apps/query",
+        "/api/apps/pod/apps/x/draft",
+        "/api/admin/workspaces",
+        "/e",
+        "/e/",
+        "/x/y/z",
+    ] {
+        let r = fx.get(target, Some(&cookie)).await;
+        assert_eq!(r.status, 404, "{target}");
+    }
+    assert!(fx.pod.all().is_empty());
+}
+
+#[tokio::test]
 async fn another_users_pod_reference_is_refused() {
     let fx = Fixture::new().await;
     let (cookie, _) = fx.cookie_for(&fx.editor, AppMode::Edit).await;

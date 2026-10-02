@@ -12,7 +12,9 @@ pub mod template;
 
 pub use gateway::{gateway_router, QueryRequest};
 pub use podapi::{pod_router, PodApiState};
-pub use proxy::{proxy_router, PodEndpoint, PodResolver, ProxyConfig, ProxyState};
+pub use proxy::{
+    pod_ref, proxy_router, PodEndpoint, PodResolver, ProxyConfig, ProxyState, UnavailablePods,
+};
 pub use routes::{apps_router, AppsApiState};
 
 /// OpenAPI fragment for the cookie-session app API (`/api/ws/{workspace}/apps…`).

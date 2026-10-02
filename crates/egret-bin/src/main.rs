@@ -2423,6 +2423,28 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         store: egret_apps::store::AppStore::new(db.clone()),
     });
 
+    // The apps host (spec §6.2, D17): the ticket route and the proxy, on a listener of their
+    // own. Off unless `apps.origin` is set. Until the edit-pod launcher is wired in, every pod
+    // is unavailable; the cookie, route and header checks are already live.
+    let apps_proxy = if config.apps.origin.is_empty() {
+        None
+    } else {
+        Some(egret_apps::proxy_router(egret_apps::ProxyState::new(
+            db.clone(),
+            pdp.clone(),
+            egret_apps::grant::GrantRepo::new(db.clone()),
+            egret_apps::session::AppSessionRepo::new(db.clone()),
+            std::sync::Arc::new(egret_apps::UnavailablePods),
+            egret_apps::ProxyConfig {
+                egret_origin: config.apps.egret_origin.clone(),
+                secure: config.apps.origin.starts_with("https://"),
+                session_idle: std::time::Duration::from_secs(config.apps.session_idle_secs),
+                session_absolute: std::time::Duration::from_secs(config.apps.session_absolute_secs),
+                cookie_ttl: std::time::Duration::from_secs(config.apps.cookie_ttl_secs),
+            },
+        )))
+    };
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
@@ -2470,6 +2492,25 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("binding {addr}"))?;
     tracing::info!(%addr, "egret listening");
+    if let Some(router) = apps_proxy {
+        let apps_addr = config.apps.listen.clone();
+        let apps_listener = tokio::net::TcpListener::bind(&apps_addr)
+            .await
+            .with_context(|| format!("binding apps host {apps_addr}"))?;
+        tracing::info!(addr = %apps_addr, origin = %config.apps.origin, "apps host listening");
+        tokio::spawn(async move {
+            if let Err(e) = egret_server::serve_with_drain(
+                apps_listener,
+                router,
+                egret_server::shutdown_signal(),
+                egret_server::DRAIN_DEADLINE,
+            )
+            .await
+            {
+                tracing::error!(error = %e, "apps host stopped");
+            }
+        });
+    }
     // SIGTERM is observed and in-flight requests are drained, bounded by
     // `DRAIN_DEADLINE`. Before this, a rollout dropped every in-flight query on
     // the floor — and silently, because `dataapi.access_log` is written after

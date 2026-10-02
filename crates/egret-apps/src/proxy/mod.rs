@@ -46,6 +46,34 @@ pub trait PodResolver: Send + Sync {
     async fn run_pod(&self, app: Uuid, version: Uuid) -> Result<PodEndpoint>;
 }
 
+/// The URL segment of an author's edit pod: stable per (user, workspace), opaque, and safe in
+/// a path and a pod name. Defined once, here, so the redirect after a ticket, the cookie's
+/// `Path`, the check on every request and the launcher's pod name cannot drift apart.
+pub fn pod_ref(user: UserId, ws: WorkspaceId) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(user.0.as_bytes());
+    h.update(ws.0.as_bytes());
+    hex::encode(&h.finalize()[..8])
+}
+
+/// The resolver while no launcher is wired in: the proxy and its checks are live, every pod
+/// is unavailable (502). `main` uses it until the edit-pod launcher replaces it.
+pub struct UnavailablePods;
+
+#[async_trait]
+impl PodResolver for UnavailablePods {
+    fn edit_ref(&self, user: UserId, ws: WorkspaceId) -> String {
+        pod_ref(user, ws)
+    }
+    async fn edit_pod(&self, _: UserId, _: WorkspaceId) -> Result<PodEndpoint> {
+        Err(anyhow::anyhow!("no app pod launcher is configured").into())
+    }
+    async fn run_pod(&self, _: Uuid, _: Uuid) -> Result<PodEndpoint> {
+        Err(egret_core::Error::NotFound("run pod".into()))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ProxyConfig {
     /// egret's own origin: the only one allowed to frame this host (`frame-ancestors`).
@@ -111,4 +139,25 @@ pub fn proxy_router(state: ProxyState) -> Router {
         .route("/_ticket", get(relay::redeem))
         .fallback(relay::proxy)
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pod_ref_is_stable_distinct_per_pair_and_path_safe() {
+        let (u1, u2) = (UserId(Uuid::new_v4()), UserId(Uuid::new_v4()));
+        let (w1, w2) = (WorkspaceId(Uuid::new_v4()), WorkspaceId(Uuid::new_v4()));
+        assert_eq!(pod_ref(u1, w1), pod_ref(u1, w1));
+        assert_ne!(pod_ref(u1, w1), pod_ref(u2, w1));
+        assert_ne!(pod_ref(u1, w1), pod_ref(u1, w2));
+        let r = pod_ref(u1, w1);
+        assert_eq!(r.len(), 16);
+        assert!(
+            r.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+            "{r}"
+        );
+    }
 }
