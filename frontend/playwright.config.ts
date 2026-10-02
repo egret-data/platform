@@ -19,6 +19,8 @@ export default defineConfig({
   reporter: [["list"]],
   use: {
     baseURL: process.env.EGRET_E2E_BASE_URL ?? "http://localhost:5173",
+    // The apps-on-kind run serves a self-signed certificate: `__Host-` cookies exist only over HTTPS.
+    ignoreHTTPSErrors: process.env.EGRET_E2E_INSECURE_TLS === "1",
     trace: "on-first-retry",
     screenshot: "only-on-failure",
   },

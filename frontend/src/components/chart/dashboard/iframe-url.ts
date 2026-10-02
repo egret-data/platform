@@ -82,8 +82,8 @@ export function frameSrcSources(): string[] {
 /** The full directive, as it must appear in `frontend/nginx-prod.conf`. A test pins the two
  *  together, so adding a host here and forgetting nginx fails the suite rather than silently
  *  leaving the browser layer behind the client one. */
-export function cspFrameSrcDirective(): string {
-  return `frame-src ${frameSrcSources().join(" ")};`;
+export function cspFrameSrcDirective(extraSources: string[] = []): string {
+  return `frame-src ${[...frameSrcSources(), ...extraSources].join(" ")};`;
 }
 
 /** Permissions-Policy features an embed may request through its `allow` attribute.

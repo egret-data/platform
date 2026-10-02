@@ -274,6 +274,50 @@ deploy-kind-oidc: images-build
     just _kind-refresh
     @echo "egret SPA: http://egret.localtest.me  (login admin@egret.local / Admin12345!)"
 
+# ── Data Apps on kind (P4e) ──────────────────────────────────────────────────────────────
+# A SEPARATE release, `egret-verify` in namespace `egret-verify`, on hosts `verify.localtest.me` and
+# `apps.verify.localtest.me`, OIDC off, TLS self-signed, with its own Postgres, engine and app-pod
+# namespaces and image tag `p4e`. Never a re-deploy of the live `egret` release: that one carries
+# four user-supplied values, runs migrations on restart, and serves plain http — and the `__Host-`
+# cookies the apps origin depends on exist only over HTTPS.
+#
+# Re-running this after a code change is safe and is what ROLLS the pods: the tag never changes, so
+# Kubernetes sees nothing to roll — hence the explicit `rollout restart`. Check pod AGE, not helm.
+apps_host := "verify.localtest.me"
+
+deploy-kind-apps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tls=$(mktemp -d); trap 'rm -rf "$tls"' EXIT
+    openssl req -x509 -newkey rsa:2048 -nodes -days 7 -keyout "$tls/tls.key" -out "$tls/tls.crt" \
+      -subj "/CN={{apps_host}}" -addext "subjectAltName=DNS:{{apps_host}},DNS:apps.{{apps_host}}"
+    docker build -f deploy/docker/backend.Dockerfile -t egret-backend:p4e .
+    docker build -f frontend/Dockerfile -t egret-frontend:p4e frontend
+    docker build -t egret-apps:p4e apps-image
+    kind load docker-image egret-backend:p4e egret-frontend:p4e egret-apps:p4e --name egret
+    helm upgrade --install egret-verify deploy/helm/egret -n egret-verify --create-namespace --wait --timeout 10m \
+      --set backend.image.tag=p4e --set frontend.image.tag=p4e --set frontend.nodePort=30081 \
+      --set ingress.enabled=true --set ingress.host={{apps_host}} --set ingress.tls.enabled=true \
+      --set-file ingress.tls.cert="$tls/tls.crt" --set-file ingress.tls.key="$tls/tls.key" \
+      --set apps.origin=https://apps.{{apps_host}} --set apps.egretOrigin=https://{{apps_host}} \
+      --set apps.pod.launcher=kubernetes --set apps.pod.namespace=egret-verify-apps --set apps.pod.image=egret-apps:p4e \
+      --set engineNamespace=egret-verify-engines --set createEngineNamespace=true
+    kubectl -n egret-verify rollout restart deploy/egret deploy/egret-frontend
+    kubectl -n egret-verify rollout status deploy/egret --timeout=300s
+    kubectl -n egret-verify rollout status deploy/egret-frontend --timeout=120s
+    echo "egret (apps): https://{{apps_host}}  — login admin@egret.local / Admin12345! (self-signed certificate)"
+
+# The browser half of spec §10 for edit mode, against the release above. The login endpoint allows 5
+# attempts per 5 minutes and the file logs in ONCE; re-run no more than a few times in that window.
+e2e-kind-apps:
+    cd frontend && EGRET_E2E_APPS=1 EGRET_E2E_BASE_URL=https://{{apps_host}} EGRET_E2E_INSECURE_TLS=1 \
+      npx playwright test apps-edit-kind
+
+# Remove the verification release and its three namespaces (the live `egret` release is untouched).
+undeploy-kind-apps:
+    helm uninstall egret-verify -n egret-verify
+    kubectl delete namespace egret-verify egret-verify-apps egret-verify-engines --ignore-not-found
+
 # Opt-in data-plane e2e against the in-cluster kind deploy (egret.localtest.me).
 # One-time prereq: just k8s-up && just ingress-install && just coredns-rewrite
 e2e-kind: deploy-kind-oidc

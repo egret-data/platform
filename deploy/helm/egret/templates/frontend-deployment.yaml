@@ -12,4 +12,9 @@ spec:
           image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"
           imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
           ports: [{ containerPort: 80 }]
+          {{- if .Values.apps.origin }}
+          env:
+            # Allowed in the SPA's CSP `frame-src` so the app editor's iframe is not blocked (nginx-prod.conf).
+            - { name: APPS_ORIGIN, value: "{{ .Values.apps.origin }}" }
+          {{- end }}
           readinessProbe: { httpGet: { path: /health, port: 80 }, initialDelaySeconds: 3, periodSeconds: 5 }

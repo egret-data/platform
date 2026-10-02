@@ -16,9 +16,12 @@ import { ALLOWED_IFRAME_HOSTS, cspFrameSrcDirective } from "../iframe-url";
 const NGINX = resolve(__dirname, "../../../../../nginx-prod.conf");
 
 describe("the CSP frame-src and the iframe allow-list", () => {
-  it("agree, host for host", () => {
+  it("agree, host for host — plus the one deployment-supplied source, the apps origin", () => {
     const conf = readFileSync(NGINX, "utf8");
-    const expected = cspFrameSrcDirective();
+    // The apps origin is the ONLY addition: the Data Apps editor is an iframe on a sibling origin
+    // (spec §6.1), and the browser refuses it unless `frame-src` names it. It is a placeholder the
+    // nginx image fills in from `APPS_ORIGIN` at start, so it is pinned here as that placeholder.
+    const expected = cspFrameSrcDirective(["${APPS_ORIGIN}"]);
     expect(
       conf.includes(expected),
       `nginx-prod.conf is missing or out of date. It must contain exactly:\n\n${expected}\n`,
@@ -37,5 +40,25 @@ describe("the CSP frame-src and the iframe allow-list", () => {
 
   it("does not grant 'self' — a same-origin embed is rejected by the card on purpose", () => {
     expect(cspFrameSrcDirective()).not.toContain("'self'");
+  });
+});
+
+
+describe("the apps origin in the frame-src", () => {
+  const dockerfile = readFileSync(resolve(__dirname, "../../../../../Dockerfile"), "utf8");
+
+  it("is filled in by the nginx image at start, from APPS_* variables only", () => {
+    // The config ships as a template, and substitution is restricted to `APPS_*` — otherwise
+    // envsubst would also rewrite nginx's own `$host`/`$uri` wherever an env var of that name exists.
+    expect(dockerfile).toMatch(/COPY nginx-prod\.conf \/etc\/nginx\/templates\/default\.conf\.template/);
+    expect(dockerfile).toMatch(/NGINX_ENVSUBST_FILTER=\^APPS_/);
+    // defined but empty by default: an undefined variable would be left as a literal `${APPS_ORIGIN}`
+    expect(dockerfile).toMatch(/APPS_ORIGIN=\s*$/m);
+  });
+
+  it("is the only `${...}` placeholder in the config, so nothing else can be substituted by accident", () => {
+    const conf = readFileSync(NGINX, "utf8");
+    const placeholders = [...conf.matchAll(/\$\{[A-Za-z_][A-Za-z0-9_]*\}/g)].map((m) => m[0]);
+    expect(new Set(placeholders)).toEqual(new Set(["${APPS_ORIGIN}"]));
   });
 });

@@ -13,7 +13,13 @@ RUN npm run build
 # ---- Stage 2: Serve with Nginx (root, port 80) ----
 FROM mirror.gcr.io/library/nginx:alpine
 
-COPY nginx-prod.conf /etc/nginx/conf.d/default.conf
+# A TEMPLATE, not conf.d/default.conf: the official image's entrypoint renders
+# /etc/nginx/templates/*.template into conf.d at start. Only variables matching the filter are
+# substituted, so nginx's own `$uri`, `$host`, … stay as they are. `APPS_ORIGIN` is the origin of
+# the Data Apps iframe, allowed in the CSP `frame-src`; defined-but-empty means "none".
+COPY nginx-prod.conf /etc/nginx/templates/default.conf.template
+ENV NGINX_ENVSUBST_FILTER=^APPS_ \
+    APPS_ORIGIN=
 COPY --from=builder /app/dist /usr/share/nginx/html
 
 EXPOSE 80
