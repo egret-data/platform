@@ -2385,6 +2385,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         audit: audit_sink.clone(),
     });
 
+    // Data Apps pod API (`/api/apps/pod/…`): what an app pod calls with its pod token.
+    let apps_pod = Some(egret_apps::PodApiState {
+        db: db.clone(),
+        pdp: pdp.clone(),
+        pods: egret_apps::podtoken::PodTokenRepo::new(db.clone()),
+        store: egret_apps::store::AppStore::new(db.clone()),
+    });
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
@@ -2425,6 +2433,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workflow_webhooks_enabled: config.workflow.webhooks_enabled,
         apps,
         apps_api,
+        apps_pod,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)
