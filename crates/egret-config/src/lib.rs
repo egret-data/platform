@@ -247,6 +247,13 @@ pub struct AppsConfig {
     /// Window length. A 429 holds that token for one full window (the limiter's
     /// lockout equals the window; see egret-bin `main.rs`).
     pub rate_window_secs: u64,
+    /// Where marimo is served, e.g. `https://apps.egret.example` — a sibling
+    /// subdomain of egret's own host, never another port on it (cookies are not
+    /// isolated by port). Empty means no iframe can be opened: the ticket endpoint
+    /// answers 503.
+    pub origin: String,
+    /// How long a one-time ticket may wait to be redeemed (spec §6.1: 30 s).
+    pub ticket_ttl_secs: u64,
 }
 
 impl Default for AppsConfig {
@@ -258,6 +265,8 @@ impl Default for AppsConfig {
             session_absolute_secs: 28_800,
             rate_max: 20,
             rate_window_secs: 2,
+            origin: String::new(),
+            ticket_ttl_secs: 30,
         }
     }
 }
@@ -1487,6 +1496,8 @@ mod tests {
                     session_absolute_secs: 28_800,
                     rate_max: 20,
                     rate_window_secs: 2,
+                    origin: String::new(),
+                    ticket_ttl_secs: 30,
                 }
             );
             Ok(())

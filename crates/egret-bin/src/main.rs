@@ -2410,6 +2410,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         authz: Authorizer::new(db.clone()),
         pdp: pdp.clone(),
         audit: audit_sink.clone(),
+        grants: egret_apps::grant::GrantRepo::new(db.clone()),
+        apps_origin: config.apps.origin.clone(),
+        ticket_ttl: std::time::Duration::from_secs(config.apps.ticket_ttl_secs),
     });
 
     // Data Apps pod API (`/api/apps/pod/…`): what an app pod calls with its pod token.

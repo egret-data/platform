@@ -15,6 +15,8 @@ egret-audit.workspace = true
 # `WorkspaceRepo::disabled_features` — the `apps` feature switch.
 egret-workspace.workspace = true
 axum.workspace = true
+# The ticket endpoint reads the login session cookie to bind the grant to it.
+axum-extra.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # `sql_sha256` in the audit detail: the SQL text itself is never logged.
