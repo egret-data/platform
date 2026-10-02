@@ -348,10 +348,13 @@ async fn admit(
     })
 }
 
-fn upstream_url(pod: &PodEndpoint, path_and_query: &str) -> Result<url::Url, Response> {
+fn upstream_url(pod: &PodEndpoint, path_and_query: &str) -> Option<url::Url> {
     let base = pod.base.as_str().trim_end_matches('/');
-    url::Url::parse(&format!("{base}{path_and_query}"))
-        .map_err(|_| plain(StatusCode::BAD_GATEWAY, "the app is unavailable"))
+    url::Url::parse(&format!("{base}{path_and_query}")).ok()
+}
+
+fn unavailable() -> Response {
+    plain(StatusCode::BAD_GATEWAY, "the app is unavailable")
 }
 
 async fn relay_http(
@@ -361,7 +364,7 @@ async fn relay_http(
     path_and_query: &str,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
-    let url = upstream_url(pod, path_and_query)?;
+    let url = upstream_url(pod, path_and_query).ok_or_else(unavailable)?;
     let method = req.method().clone();
     let body = reqwest::Body::wrap_stream(req.into_body().into_data_stream());
     let upstream = st
@@ -413,7 +416,7 @@ async fn relay_ws(
     headers: HeaderMap,
     admitted: &Admitted,
 ) -> Result<Response, Response> {
-    let mut url = upstream_url(pod, path_and_query)?;
+    let mut url = upstream_url(pod, path_and_query).ok_or_else(unavailable)?;
     let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
     url.set_scheme(scheme)
         .map_err(|()| plain(StatusCode::BAD_GATEWAY, "the app is unavailable"))?;

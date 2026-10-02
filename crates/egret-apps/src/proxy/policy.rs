@@ -85,12 +85,8 @@ fn matches(template: &str, path: &str) -> Option<usize> {
 }
 
 fn surface_allows(entry_surface: &str, wanted: Surface) -> bool {
-    match (entry_surface, wanted) {
-        ("both", _) => true,
-        ("run", _) => true,
-        ("edit", Surface::Edit) => true,
-        _ => false,
-    }
+    // `run` routes are needed by both surfaces (the editor runs apps); `edit` only by the editor.
+    matches!(entry_surface, "both" | "run") || (entry_surface == "edit" && wanted == Surface::Edit)
 }
 
 /// `method` is the HTTP method, or `WEBSOCKET` for an upgrade. `rel` is the percent-decoded,

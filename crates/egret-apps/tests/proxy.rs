@@ -538,8 +538,8 @@ async fn the_pod_gets_exactly_our_token_and_never_the_clients_header_cookie_or_c
         token.starts_with("ega_") && token != "ega_forged",
         "{token}"
     );
-    assert!(seen.headers.get("cookie").is_none(), "{seen:?}");
-    assert!(seen.headers.get("x-egret-user").is_none());
+    assert!(!seen.headers.contains_key("cookie"), "{seen:?}");
+    assert!(!seen.headers.contains_key("x-egret-user"));
     assert_eq!(
         seen.headers["authorization"],
         [format!("Bearer {MARIMO_TOKEN}")]
@@ -781,7 +781,7 @@ async fn a_static_file_costs_no_token_and_carries_none() {
         .get(&format!("/e/{eref}/assets/index.js"), Some(&cookie))
         .await;
     assert_eq!(r.status, 200);
-    assert!(fx.pod.last().headers.get("x-egret-app-token").is_none());
+    assert!(!fx.pod.last().headers.contains_key("x-egret-app-token"));
     let minted: i64 =
         sqlx::query_scalar("SELECT count(*) FROM analytics.app_sessions WHERE grant_id = $1")
             .bind(grant)
@@ -904,8 +904,8 @@ async fn a_websocket_relays_and_its_close_revokes_the_token_but_a_later_request_
         seen.headers["authorization"],
         [format!("Bearer {MARIMO_TOKEN}")]
     );
-    assert!(seen.headers.get("cookie").is_none());
-    assert!(seen.headers.get("origin").is_none());
+    assert!(!seen.headers.contains_key("cookie"));
+    assert!(!seen.headers.contains_key("origin"));
     assert!(fx.sessions.resolve(&token, IDLE).await.unwrap().is_some());
 
     // an HTTP request of the same grant carries the SAME token
