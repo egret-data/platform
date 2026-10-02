@@ -254,6 +254,15 @@ pub struct AppsConfig {
     pub origin: String,
     /// How long a one-time ticket may wait to be redeemed (spec §6.1: 30 s).
     pub ticket_ttl_secs: u64,
+    /// egret's own browser-facing origin, e.g. `https://egret.example`. The proxy tells the
+    /// browser that only this origin may frame the apps origin (`frame-ancestors`). Required
+    /// whenever `origin` is set.
+    pub egret_origin: String,
+    /// How long the apps-origin cookie a ticket becomes stays valid (8 h, as an app token).
+    pub cookie_ttl_secs: u64,
+    /// Where the apps host listens. It is a SEPARATE listener from egret's API: it serves
+    /// only the ticket route and the proxy, so a bug in one cannot expose the other.
+    pub listen: String,
 }
 
 impl Default for AppsConfig {
@@ -267,6 +276,9 @@ impl Default for AppsConfig {
             rate_window_secs: 2,
             origin: String::new(),
             ticket_ttl_secs: 30,
+            egret_origin: String::new(),
+            cookie_ttl_secs: 28_800,
+            listen: "0.0.0.0:8081".into(),
         }
     }
 }
@@ -1474,6 +1486,32 @@ impl Config {
         if self.apps.session_idle_secs > self.apps.session_absolute_secs {
             return Err("apps.session_idle_secs must be <= apps.session_absolute_secs".into());
         }
+        if !self.apps.origin.is_empty() {
+            let is_origin = |o: &str| {
+                (o.starts_with("https://") || o.starts_with("http://"))
+                    && !o
+                        .trim_start_matches("https://")
+                        .trim_start_matches("http://")
+                        .contains('/')
+            };
+            if !is_origin(&self.apps.origin) || !is_origin(&self.apps.egret_origin) {
+                return Err(
+                    "apps.origin and apps.egret_origin must both be origins (scheme://host[:port], \
+                     no path or trailing slash) when apps.origin is set"
+                        .into(),
+                );
+            }
+            if self.apps.origin == self.apps.egret_origin {
+                return Err(
+                    "apps.origin must differ from apps.egret_origin: author JavaScript on the \
+                     apps origin would otherwise run as egret itself"
+                        .into(),
+                );
+            }
+            if self.apps.ticket_ttl_secs == 0 || self.apps.cookie_ttl_secs == 0 {
+                return Err("apps.ticket_ttl_secs and apps.cookie_ttl_secs must be >= 1".into());
+            }
+        }
         Ok(())
     }
 }
@@ -1498,6 +1536,9 @@ mod tests {
                     rate_window_secs: 2,
                     origin: String::new(),
                     ticket_ttl_secs: 30,
+                    egret_origin: String::new(),
+                    cookie_ttl_secs: 28_800,
+                    listen: "0.0.0.0:8081".into(),
                 }
             );
             Ok(())
@@ -2175,6 +2216,29 @@ values = { allowed-images = [] }
         assert!(err.contains("apps.session_idle_secs"), "{err}");
         cfg.apps.session_idle_secs = cfg.apps.session_absolute_secs;
         assert!(cfg.validate().is_ok(), "equal windows are allowed");
+    }
+
+    #[test]
+    fn validate_requires_distinct_origins_without_paths_when_the_apps_origin_is_set() {
+        let mut cfg = Config::default();
+        assert!(
+            cfg.validate().is_ok(),
+            "unset origin: apps iframe is simply off"
+        );
+        cfg.apps.origin = "https://apps.egret.example".into();
+        assert!(cfg.validate().is_err(), "egret_origin missing");
+        cfg.apps.egret_origin = "https://egret.example".into();
+        assert!(cfg.validate().is_ok());
+        cfg.apps.egret_origin = "https://apps.egret.example".into();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("must differ"), "{err}");
+        cfg.apps.egret_origin = "https://egret.example/".into();
+        assert!(cfg.validate().is_err(), "trailing slash is a path");
+        cfg.apps.egret_origin = "egret.example".into();
+        assert!(cfg.validate().is_err(), "no scheme");
+        cfg.apps.egret_origin = "https://egret.example".into();
+        cfg.apps.cookie_ttl_secs = 0;
+        assert!(cfg.validate().is_err(), "a cookie that never lives");
     }
 
     #[test]

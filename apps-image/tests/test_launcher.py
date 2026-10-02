@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -300,6 +301,18 @@ def test_malformed_secrets_on_the_pipe_exit_64(env, monkeypatch, capsys, payload
         os.fstat(read_fd)  # closed even when malformed
 
 
+def _egret_apps_script() -> str:
+    """The console script installed beside the interpreter running this test.
+
+    Not `ROOT/.venv/bin/…`: that exists only where someone made that exact virtualenv. CI
+    installs the package into the interpreter `setup-python` provides.
+    """
+    beside = Path(sys.executable).with_name("egret-apps")
+    found = str(beside) if beside.exists() else shutil.which("egret-apps")
+    assert found, "egret-apps is not installed (pip install -e apps-image)"
+    return found
+
+
 def test_phase_two_ignores_modules_planted_in_the_cwd(tmp_path):
     """A real re-exec: egret_marimo/launcher.py and json.py in the cwd must not be imported."""
     planted = tmp_path / "cwd"
@@ -316,7 +329,7 @@ def test_phase_two_ignores_modules_planted_in_the_cwd(tmp_path):
         "EGRET_APPS_CONFIG": str(tmp_path / "no-config"),
     }
     r = subprocess.run(
-        [str(ROOT / ".venv" / "bin" / "egret-apps"), "edit"],
+        [_egret_apps_script(), "edit"],
         cwd=planted, env=env, capture_output=True, text=True, timeout=60,
     )
     assert "SHADOWED" not in r.stderr, r.stderr
