@@ -37,11 +37,11 @@ describe("useWorkspaceFeatures", () => {
       "datasets",
       "charts",
       "dashboards",
-      "notebooks",
+      "apps",
       "alerts",
+      "notebooks",
       "data_api",
       "workflows",
-      "apps",
     ]);
   });
 
@@ -61,7 +61,7 @@ describe("useDefaultExplorePath", () => {
 
   test("picks the first enabled module in nav order when sql_lab is off", async () => {
     const { result } = renderHook(() => useDefaultExplorePath(), {
-      wrapper: wrap(() => wsResponse(["charts", "notebooks"])),
+      wrapper: wrap(() => wsResponse(["charts", "apps"])),
     });
     await waitFor(() => expect(result.current).toBe("charts"));
   });

@@ -196,7 +196,7 @@ describe("Sidebar – workspace zones", () => {
         ),
       );
     renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () =>
-      wsResponse(["sql_lab", "datasets", "charts", "dashboards", "notebooks"]),
+      wsResponse(["sql_lab", "datasets", "charts", "dashboards", "apps"]),
     );
     await waitFor(() => expect(screen.queryByRole("link", { name: "Endpoints" })).not.toBeInTheDocument());
     expect(screen.queryByRole("link", { name: "Clients" })).not.toBeInTheDocument();
@@ -488,7 +488,7 @@ describe("Sidebar – workspace feature entitlements", () => {
       "Datasets",
       "Charts",
       "Dashboards",
-      "Notebooks",
+      "Apps",
       "Alerts & Reports",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
@@ -500,12 +500,12 @@ describe("Sidebar – workspace feature entitlements", () => {
     // the BACKEND feature catalog, so `/me/workspaces` never lists the key and
     // the item is filtered out of a workspace that should have it.
     renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () =>
-      wsResponse(["sql_lab", "datasets", "charts", "dashboards", "notebooks"]),
+      wsResponse(["sql_lab", "datasets", "charts", "dashboards", "apps"]),
     );
     await waitFor(() =>
       expect(screen.queryByRole("link", { name: "Alerts & Reports" })).not.toBeInTheDocument(),
     );
-    expect(screen.getByRole("link", { name: "Notebooks" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Apps" })).toBeInTheDocument();
   });
 
   test("shows Alerts & Reports when the workspace has the alerts entitlement", async () => {
@@ -522,7 +522,7 @@ describe("Sidebar – workspace feature entitlements", () => {
   test("hides a disabled item once the workspace's features load", async () => {
     renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () => wsResponse(["sql_lab", "datasets", "charts", "dashboards"]));
     await waitFor(() =>
-      expect(screen.queryByRole("link", { name: "Notebooks" })).not.toBeInTheDocument(),
+      expect(screen.queryByRole("link", { name: "Apps" })).not.toBeInTheDocument(),
     );
     for (const label of ["SQL Lab", "Datasets", "Charts", "Dashboards"]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
@@ -537,7 +537,7 @@ describe("Sidebar – workspace feature entitlements", () => {
       "Datasets",
       "Charts",
       "Dashboards",
-      "Notebooks",
+      "Apps",
       "Alerts & Reports",
     ]) {
       expect(screen.queryByRole("link", { name: label })).not.toBeInTheDocument();
@@ -550,7 +550,7 @@ describe("Sidebar – workspace feature entitlements", () => {
   test("applies even to a platform_admin — entitlements have no bypass", async () => {
     renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () => wsResponse(["sql_lab"]));
     await waitFor(() =>
-      expect(screen.queryByRole("link", { name: "Notebooks" })).not.toBeInTheDocument(),
+      expect(screen.queryByRole("link", { name: "Apps" })).not.toBeInTheDocument(),
     );
     expect(screen.getByRole("link", { name: "SQL Lab" })).toBeInTheDocument();
   });
