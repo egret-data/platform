@@ -3,6 +3,7 @@ pub mod gateway;
 pub mod grant;
 pub mod podapi;
 pub mod podtoken;
+pub mod proxy;
 pub mod readonly;
 pub mod routes;
 pub mod session;
