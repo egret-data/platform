@@ -14,7 +14,10 @@ use egret_core::ratelimit::{client_ip, RateLimiter};
 use egret_core::{Ack, Error};
 use serde::{Deserialize, Serialize};
 
-use crate::cookie::{clear_cookie, csrf_cookie, session_cookie, CSRF_COOKIE, SESSION_COOKIE};
+use crate::cookie::{
+    clear_cookie, csrf_cookie, read_session, secure_cookies, session_cookie, CSRF_COOKIE,
+    HOST_CSRF_COOKIE, HOST_SESSION_COOKIE, SESSION_COOKIE,
+};
 use crate::impersonation::{validate_impersonation_target, ImpersonationRepo, NewImpersonation};
 use crate::oidc_cookie::{build_state_cookie, ImpersonateIntent, OidcStateCookie};
 use crate::password::verify_password;
@@ -229,12 +232,16 @@ async fn logout(
     State(st): State<AuthState>,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, AuthError> {
-    if let Some(c) = jar.get(SESSION_COOKIE) {
+    if let Some(c) = read_session(&jar, secure_cookies()) {
         st.sessions.revoke(c.value()).await.map_err(AuthError)?;
     }
+    // Both spellings are cleared: a browser that logged in before `session.secure` was
+    // switched on still holds the plain pair.
     let jar = jar
         .add(clear_cookie(SESSION_COOKIE))
-        .add(clear_cookie(CSRF_COOKIE));
+        .add(clear_cookie(CSRF_COOKIE))
+        .add(clear_cookie(HOST_SESSION_COOKIE))
+        .add(clear_cookie(HOST_CSRF_COOKIE));
     Ok((jar, Json(serde_json::json!({ "ok": true }))))
 }
 
@@ -273,8 +280,7 @@ async fn me(Auth(principal): Auth) -> impl IntoResponse {
 /// Resolve THIS request's `sessions.id` from the session cookie. The overlay is
 /// keyed on the admin's own session row, so start/exit must operate on it.
 async fn session_id_from_jar(st: &AuthState, jar: &CookieJar) -> Result<uuid::Uuid, AuthError> {
-    let token = jar
-        .get(SESSION_COOKIE)
+    let token = read_session(jar, secure_cookies())
         .map(|c| c.value().to_string())
         .ok_or(AuthError(Error::Unauthorized))?;
     st.sessions

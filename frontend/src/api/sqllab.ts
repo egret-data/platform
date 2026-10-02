@@ -12,6 +12,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { csrfToken } from "./client";
 import { databasesList } from "./generated/databases/databases";
 import {
   getQueriesResultsCsvUrl,
@@ -195,8 +196,8 @@ export function useSearchObjects(ws: string, db: string | null, query: string) {
 export interface SqlSnippet { id: string; name: string; body: string; description: string; updated_at: string }
 export interface SnippetBody { name: string; body: string; description?: string }
 function csrfHeaders(): Record<string, string> {
-  const m = document.cookie.match(/(?:^|; )egret_csrf=([^;]+)/);
-  return m ? { "X-Egret-CSRF": decodeURIComponent(m[1]) } : {};
+  const token = csrfToken();
+  return token ? { "X-Egret-CSRF": token } : {};
 }
 async function snippetFetch(url: string, init?: RequestInit) {
   const r = await fetch(url, {

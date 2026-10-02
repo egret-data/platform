@@ -1472,6 +1472,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         cookie_key: oidc_cookie_key.clone(),
         session_secure: config.session.secure,
     };
+    // `Secure` cookies are named `__Host-egret_*` and ONLY those names are read, so a
+    // cookie tossed from a sibling host cannot stand in for them (spec §6.1).
+    egret_auth::cookie::set_secure_cookies(config.session.secure);
 
     // `secrets` (the SecretStore) is shared: the per-workspace storage layer and
     // the database block reuse the same instance for their secrets.
