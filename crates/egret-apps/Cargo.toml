@@ -17,6 +17,14 @@ egret-workspace.workspace = true
 axum.workspace = true
 # The ticket endpoint reads the login session cookie to bind the grant to it.
 axum-extra.workspace = true
+# The apps proxy (src/proxy): query strings, the pod HTTP/WebSocket client, and the streams between them.
+url.workspace = true
+http.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # `sql_sha256` in the audit detail: the SQL text itself is never logged.
@@ -39,6 +47,4 @@ sqlparser.workspace = true
 # needs an `EventBus`), not a mocked decision; `egret-auth` is a normal dependency.
 egret-events.workspace = true
 tower.workspace = true
-async-trait.workspace = true
 egret-test-db.workspace = true
-tokio.workspace = true
