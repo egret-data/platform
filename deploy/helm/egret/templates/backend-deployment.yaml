@@ -25,7 +25,11 @@ spec:
         - name: egret
           image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
           imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
-          ports: [{ containerPort: 8080 }]
+          ports:
+            - { containerPort: 8080 }
+            {{- if .Values.apps.origin }}
+            - { containerPort: 8081 }
+            {{- end }}
           envFrom:
             - configMapRef: { name: egret-env }
           env:
@@ -36,6 +40,25 @@ spec:
             - { name: EGRET_CATALOG__AUTH_TOKEN, valueFrom: { secretKeyRef: { name: egret-secrets, key: catalog-auth-token } } }
             - { name: EGRET_ADMIN_PASSWORD, valueFrom: { secretKeyRef: { name: egret-secrets, key: admin-password } } }
             - { name: EGRET_OIDC__CLIENT_SECRET, valueFrom: { secretKeyRef: { name: egret-secrets, key: oidc-client-secret } } }
+            {{- if .Values.apps.origin }}
+            - { name: EGRET_APPS__ORIGIN, value: "{{ .Values.apps.origin }}" }
+            - { name: EGRET_APPS__EGRET_ORIGIN, value: "{{ .Values.apps.egretOrigin }}" }
+            - { name: EGRET_APPS__LISTEN, value: "0.0.0.0:8081" }
+            {{- if eq .Values.apps.pod.launcher "kubernetes" }}
+            - { name: EGRET_APPS__POD__LAUNCHER, value: "kubernetes" }
+            - { name: EGRET_APPS__POD__NAMESPACE, value: "{{ .Values.apps.pod.namespace }}" }
+            - { name: EGRET_APPS__POD__IMAGE, value: "{{ .Values.apps.pod.image }}" }
+            - { name: EGRET_APPS__POD__IMAGE_PULL_POLICY, value: "{{ .Values.apps.pod.imagePullPolicy }}" }
+            - { name: EGRET_APPS__POD__CPU_REQUEST, value: "{{ .Values.apps.pod.resources.cpuRequest }}" }
+            - { name: EGRET_APPS__POD__MEM_REQUEST, value: "{{ .Values.apps.pod.resources.memRequest }}" }
+            - { name: EGRET_APPS__POD__CPU_LIMIT, value: "{{ .Values.apps.pod.resources.cpuLimit }}" }
+            - { name: EGRET_APPS__POD__MEM_LIMIT, value: "{{ .Values.apps.pod.resources.memLimit }}" }
+            - { name: EGRET_APPS__POD__READY_TIMEOUT_SECS, value: "{{ .Values.apps.pod.readyTimeoutSecs }}" }
+            - { name: EGRET_APPS__POD__IDLE_SECS, value: "{{ .Values.apps.pod.idleSecs }}" }
+            # Where a pod calls back: egret's in-cluster Service, API port (the pod API + the query gateway).
+            - { name: EGRET_APPS__POD__CALLBACK_URL, value: "http://egret.{{ .Release.Namespace }}.svc.cluster.local:8080" }
+            {{- end }}
+            {{- end }}
             {{- if eq .Values.kernel.launcher "kubernetes" }}
             - { name: EGRET_KERNEL__LAUNCHER, value: "kubernetes" }
             - { name: EGRET_KERNEL__NAMESPACE, value: "{{ .Values.kernel.namespace }}" }

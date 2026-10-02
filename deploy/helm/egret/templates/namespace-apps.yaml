@@ -1,0 +1,19 @@
+{{- /*
+The namespace the edit pods (marimo) run in, chart-managed like `namespace-kernels.yaml`: it
+holds only Pods this chart's backend creates. Pod Security `restricted` is ENFORCED, so the
+admission controller itself refuses a pod that is not hardened (the launcher builds every pod
+with runAsNonRoot, all capabilities dropped, seccomp RuntimeDefault, no privilege escalation and no
+service-account token). Rendered only when apps.pod.launcher is "kubernetes".
+*/ -}}
+{{- if eq .Values.apps.pod.launcher "kubernetes" }}
+{{- if eq .Values.apps.pod.namespace .Release.Namespace }}
+{{- fail "apps.pod.namespace must not be the release namespace: the chart would relabel egret's own namespace `restricted` and apply the app-pod NetworkPolicy to egret itself" }}
+{{- end }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.apps.pod.namespace }}
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+{{- end }}
