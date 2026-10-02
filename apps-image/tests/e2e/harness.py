@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import shutil
 import socket
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -12,7 +14,18 @@ import app_proxy
 
 ROOT = Path(__file__).resolve().parents[2]
 APPS = Path(__file__).resolve().parent / "apps"
-EGRET_APPS = ROOT / ".venv" / "bin" / "egret-apps"
+
+
+def _egret_apps() -> Path:
+    """The console script installed beside the interpreter running the tests (CI installs the
+    package into setup-python's interpreter; `ROOT/.venv` exists only where someone made it)."""
+    beside = Path(sys.executable).with_name("egret-apps")
+    found = beside if beside.exists() else shutil.which("egret-apps")
+    assert found, "egret-apps is not installed (pip install -e apps-image)"
+    return Path(found)
+
+
+EGRET_APPS = _egret_apps()
 MARIMO_TOKEN = "marimo-secret"
 POD_TOKEN = "pod-tok"
 START_TIMEOUT_S = 60
