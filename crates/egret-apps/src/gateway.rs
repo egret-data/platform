@@ -24,8 +24,10 @@
 use std::time::{Duration, Instant};
 
 use axum::{body::Bytes, extract::State, http::HeaderMap, routing::post, Json, Router};
-use egret_core::authz::{self, AuthTarget, ObjectRef, Resource, Subject};
+use egret_core::authz::{self, AuthTarget, ObjectRef, Pdp, Resource, Subject};
+use egret_core::ratelimit::Verdict;
 use egret_core::{Error, GroupId, Result, TabularResult, UserId, WorkspaceId};
+use egret_metastore::Db;
 use egret_query_api::{Limits, Param};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -80,9 +82,13 @@ async fn query(
     let started = Instant::now();
     // From here on every outcome is audited: the session names who and what.
     // `check` is true when the call is ALLOWED.
-    if !st.limiter.check(&sess.id.to_string()) {
+    if let Verdict::Denied { first } = st.limiter.verdict(&sess.id.to_string()) {
         let outcome = Err(Error::TooManyRequests);
-        audit(&st, &sess, None, &outcome, started.elapsed());
+        // One audit row per lockout: the call that tripped the limiter. The calls it
+        // then refuses are not events, or a runaway cell would fill the audit table.
+        if first {
+            audit(&st, &sess, None, &outcome, started.elapsed());
+        }
         return outcome.map(Json);
     }
     let req: QueryRequest = match serde_json::from_slice(&body) {
@@ -99,9 +105,9 @@ async fn query(
 }
 
 async fn run(st: &AppsState, sess: &AppSession, req: &QueryRequest) -> Result<TabularResult> {
-    ensure_user_active(st, sess.user_id).await?;
+    ensure_user_active(&st.db, sess.user_id).await?;
     let folder_id = app_folder(st, sess).await?;
-    ensure_feature_enabled(st, sess.workspace_id).await?;
+    ensure_feature_enabled(&st.db, sess.workspace_id).await?;
     authorize(st, sess, folder_id).await?;
     let (database_id, engine) = database_by_name(st, sess.workspace_id, &req.database).await?;
     let dialect = EngineDialect::from_engine(&engine)
@@ -138,7 +144,7 @@ async fn run(st: &AppsState, sess: &AppSession, req: &QueryRequest) -> Result<Ta
 }
 
 /// The auth scheme is case-insensitive (RFC 7235 §2.1); the token is not.
-fn bearer(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
     let value = headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
@@ -150,10 +156,10 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// A token outlives nothing about its user: disabling the user kills it at once.
-async fn ensure_user_active(st: &AppsState, user: UserId) -> Result<()> {
+pub(crate) async fn ensure_user_active(db: &Db, user: UserId) -> Result<()> {
     let status: Option<String> = sqlx::query_scalar("SELECT status FROM users WHERE id = $1")
         .bind(user.0)
-        .fetch_optional(&st.db.pool)
+        .fetch_optional(&db.pool)
         .await
         .map_err(anyhow::Error::from)?;
     if status.as_deref() == Some("active") {
@@ -163,8 +169,8 @@ async fn ensure_user_active(st: &AppsState, user: UserId) -> Result<()> {
     }
 }
 
-async fn ensure_feature_enabled(st: &AppsState, ws: WorkspaceId) -> Result<()> {
-    let disabled = egret_workspace::workspaces::WorkspaceRepo::new(st.db.clone())
+pub(crate) async fn ensure_feature_enabled(db: &Db, ws: WorkspaceId) -> Result<()> {
+    let disabled = egret_workspace::workspaces::WorkspaceRepo::new(db.clone())
         .disabled_features(ws)
         .await?;
     if disabled.contains("apps") {
@@ -211,34 +217,51 @@ impl AuthTarget for SessionTarget {
     }
 }
 
-async fn authorize(st: &AppsState, sess: &AppSession, folder_id: Option<Uuid>) -> Result<()> {
+/// The caller as the PDP sees them: the user and every group they belong to.
+pub(crate) async fn subject_for(db: &Db, user: UserId) -> Result<Subject> {
     let group_ids: Vec<Uuid> =
         sqlx::query_scalar("SELECT group_id FROM user_groups WHERE user_id = $1")
-            .bind(sess.user_id.0)
-            .fetch_all(&st.db.pool)
+            .bind(user.0)
+            .fetch_all(&db.pool)
             .await
             .map_err(anyhow::Error::from)?;
-    let subject = Subject {
-        user_id: sess.user_id,
+    Ok(Subject {
+        user_id: user,
         group_ids: group_ids.into_iter().map(GroupId).collect(),
-    };
-    let on_app = SessionTarget {
+    })
+}
+
+/// `perm` on one app, for a caller that holds a token rather than a
+/// `WorkspaceContext`. Shared by the query gateway and the pod API.
+pub(crate) async fn require_on_app(
+    pdp: &dyn Pdp,
+    subject: &Subject,
+    app: ObjectRef,
+    perm: &str,
+) -> Result<()> {
+    let target = SessionTarget {
         subject: subject.clone(),
-        resource: Resource::Object(ObjectRef {
-            kind: "app".into(),
-            id: sess.app_id,
-            folder_id,
-            workspace_id: sess.workspace_id,
-        }),
+        resource: Resource::Object(app),
+    };
+    authz::require(pdp, &target, perm).await
+}
+
+async fn authorize(st: &AppsState, sess: &AppSession, folder_id: Option<Uuid>) -> Result<()> {
+    let subject = subject_for(&st.db, sess.user_id).await?;
+    let app = ObjectRef {
+        kind: "app".into(),
+        id: sess.app_id,
+        folder_id,
+        workspace_id: sess.workspace_id,
     };
     let on_ws = SessionTarget {
-        subject,
+        subject: subject.clone(),
         resource: Resource::Workspace(sess.workspace_id),
     };
     match sess.mode {
-        AppMode::Run => authz::require(&*st.pdp, &on_app, APP_READ).await,
+        AppMode::Run => require_on_app(&*st.pdp, &subject, app, APP_READ).await,
         AppMode::Edit => {
-            authz::require(&*st.pdp, &on_app, APP_WRITE).await?;
+            require_on_app(&*st.pdp, &subject, app, APP_WRITE).await?;
             authz::require(&*st.pdp, &on_ws, QUERY_RUN).await
         }
     }
@@ -308,7 +331,7 @@ fn audit(
     };
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(sess.user_id.0),
-        impersonator: None,
+        impersonator: sess.impersonator.map(|u| u.0),
         workspace_id: Some(sess.workspace_id.0),
         action: "app:query".into(),
         resource_type: "app".into(),

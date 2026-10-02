@@ -1,5 +1,7 @@
 //! Data Apps: the query gateway and its session tokens (spec docs/en/specs/2026-09-30-marimo-data-apps-design.md).
 pub mod gateway;
+pub mod podapi;
+pub mod podtoken;
 pub mod readonly;
 pub mod routes;
 pub mod session;
@@ -7,6 +9,7 @@ pub mod store;
 pub mod template;
 
 pub use gateway::{gateway_router, QueryRequest};
+pub use podapi::{pod_router, PodApiState};
 pub use routes::{apps_router, AppsApiState};
 
 /// OpenAPI fragment for the cookie-session app API (`/api/ws/{workspace}/apps…`).

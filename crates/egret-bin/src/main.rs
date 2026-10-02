@@ -2372,6 +2372,26 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         cfg: config.apps.clone(),
     });
 
+    // Dead app tokens (revoked or expired more than a day ago) are deleted hourly. A
+    // fresh row is kept a day: it is what explains a 401 someone is still debugging.
+    {
+        let sessions = egret_apps::session::AppSessionRepo::new(db.clone());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                match sessions
+                    .sweep_expired(std::time::Duration::from_secs(24 * 3600))
+                    .await
+                {
+                    Ok(n) if n > 0 => tracing::info!(deleted = n, "app sessions swept"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "app session sweep failed"),
+                }
+            }
+        });
+    }
+
     // Data Apps management API (`/api/ws/{workspace}/apps…`): the same session
     // service, workspace repo, authorizer, PDP, audit sink and Db as the notebook
     // seam.
@@ -2383,6 +2403,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         authz: Authorizer::new(db.clone()),
         pdp: pdp.clone(),
         audit: audit_sink.clone(),
+    });
+
+    // Data Apps pod API (`/api/apps/pod/…`): what an app pod calls with its pod token.
+    let apps_pod = Some(egret_apps::PodApiState {
+        db: db.clone(),
+        pdp: pdp.clone(),
+        pods: egret_apps::podtoken::PodTokenRepo::new(db.clone()),
+        store: egret_apps::store::AppStore::new(db.clone()),
     });
 
     let app = build_router(AppState {
@@ -2425,6 +2453,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workflow_webhooks_enabled: config.workflow.webhooks_enabled,
         apps,
         apps_api,
+        apps_pod,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

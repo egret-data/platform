@@ -337,6 +337,8 @@ impl Fixture {
                     },
                     mode,
                     login_sid: user.login_sid,
+                    grant_id: None,
+                    impersonator: None,
                 },
                 IDLE,
                 ABS,
@@ -905,6 +907,67 @@ async fn rate_limited_call_is_audited() {
     assert_eq!(d["outcome"], "rate_limited");
     assert_eq!(d["database"], "");
     assert!(d["sql_sha256"].is_null(), "{d}");
+}
+
+/// P4a: a flood is one audit row, not one per rejected call. The limiter keeps a
+/// token locked for a window after the call that tripped it; every call inside that
+/// window is a 429 with no audit, so a runaway cell cannot fill the audit table.
+#[tokio::test]
+async fn a_flood_over_the_limit_is_audited_once() {
+    let mut f = Fixture::with_cfg(AppsConfig {
+        rate_max: 1,
+        rate_window_secs: 60,
+        ..AppsConfig::default()
+    })
+    .await;
+    let token = f.viewer_run().await;
+    assert_eq!(f.select1(&token).await.0, StatusCode::OK);
+    for _ in 0..50 {
+        assert_eq!(f.select1(&token).await.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+    let events = f.drain_audit();
+    let outcomes: Vec<&str> = events
+        .iter()
+        .map(|e| mutation(e)["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, ["ok", "rate_limited"], "{outcomes:?}");
+}
+
+/// P4a: a query made through an impersonated session names the real admin in the
+/// audit event; it is never recorded as the user's own act.
+#[tokio::test]
+async fn an_impersonated_session_audits_the_impersonator() {
+    let mut f = Fixture::new().await;
+    let admin = f.new_user().await;
+    let token = AppSessionRepo::new(f.db.clone())
+        .mint(
+            &NewAppSession {
+                user_id: UserId(f.viewer.id),
+                workspace_id: WorkspaceId(f.ws_a),
+                app_id: f.app,
+                version_id: Some(f.version),
+                mode: AppMode::Run,
+                login_sid: f.viewer.login_sid,
+                grant_id: None,
+                impersonator: Some(UserId(admin.id)),
+            },
+            IDLE,
+            ABS,
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.select1(&token).await.0, StatusCode::OK);
+    let events = f.drain_audit();
+    let AuditEvent::Mutation {
+        actor,
+        impersonator,
+        ..
+    } = &events[0]
+    else {
+        panic!("expected Mutation");
+    };
+    assert_eq!(*actor, Some(f.viewer.id));
+    assert_eq!(*impersonator, Some(admin.id));
 }
 
 /// Fix round 1: an unparseable body on a resolved session is 400, audited as

@@ -97,6 +97,9 @@ pub struct AppState {
     /// Data Apps management API (`/api/ws/{workspace}/apps…`): cookie session,
     /// behind CSRF; `None` in unit tests.
     pub apps_api: Option<egret_apps::AppsApiState>,
+    /// Data Apps pod API (`/api/apps/pod/…`): a pod token, no cookie, so no CSRF
+    /// layer; `None` in unit tests.
+    pub apps_pod: Option<egret_apps::PodApiState>,
 }
 
 impl AppState {
@@ -129,6 +132,7 @@ impl AppState {
             workflow_webhooks_enabled: false,
             apps: None,
             apps_api: None,
+            apps_pod: None,
         }
     }
 
@@ -189,6 +193,14 @@ impl AppState {
     /// the CSRF layer — the opposite of the gateway.
     pub fn with_apps_api(mut self, apps_api: egret_apps::AppsApiState) -> Self {
         self.apps_api = Some(apps_api);
+        self
+    }
+
+    /// Attach the Data Apps pod API to an otherwise-empty test state, so a test can
+    /// prove through the COMPOSED router that it is mounted and is NOT behind the CSRF
+    /// layer (its callers hold a pod token, not a cookie).
+    pub fn with_apps_pod(mut self, apps_pod: egret_apps::PodApiState) -> Self {
+        self.apps_pod = Some(apps_pod);
         self
     }
 }
@@ -401,6 +413,15 @@ pub fn build_router(state: AppState) -> Router {
             .nest("/api", egret_apps::gateway_router())
             .with_state(apps);
         router = router.merge(gateway_group);
+    }
+
+    if let Some(apps_pod) = state.apps_pod.clone() {
+        // Data Apps pod API: bearer pod token, called by marimo pods; no cookie, so no
+        // CSRF layer (spec §5.3). Authorization is re-checked inside every handler.
+        let pod_group = Router::new()
+            .nest("/api", egret_apps::pod_router())
+            .with_state(apps_pod);
+        router = router.merge(pod_group);
     }
 
     if let Some(apps_api) = state.apps_api.clone() {

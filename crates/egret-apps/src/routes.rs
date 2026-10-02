@@ -49,7 +49,7 @@ const APP_WRITE: &str = "app:write";
 /// the envelope). Explicit rather than axum's 2 MB default so the limit cannot
 /// move under this route; the handler's own 1 MiB check on the decoded source is
 /// what answers a JSON 413.
-const MAX_BODY_BYTES: usize = 3 * 1024 * 1024;
+pub(crate) const MAX_BODY_BYTES: usize = 3 * 1024 * 1024;
 
 const TRASHED: &str = "app is in the trash; restore it first";
 
@@ -340,9 +340,9 @@ impl IntoResponse for AppsHttpError {
     }
 }
 
-type AppsResult<T> = Result<T, ApiError<AppsHttpError>>;
+pub(crate) type AppsResult<T> = Result<T, ApiError<AppsHttpError>>;
 
-fn domain(e: AppsHttpError) -> ApiError<AppsHttpError> {
+pub(crate) fn domain(e: AppsHttpError) -> ApiError<AppsHttpError> {
     ApiError::Domain(e)
 }
 
@@ -413,12 +413,12 @@ fn emit(
     ));
 }
 
-fn etag(revision: i64) -> HeaderValue {
+pub(crate) fn etag(revision: i64) -> HeaderValue {
     HeaderValue::from_str(&format!("\"{revision}\"")).expect("digits and quotes are a valid header")
 }
 
 /// `If-Match`: a quoted or bare integer revision. Absent → 428; anything else → 400.
-fn if_match(headers: &HeaderMap) -> AppsResult<i64> {
+pub(crate) fn if_match(headers: &HeaderMap) -> AppsResult<i64> {
     let raw = headers
         .get(IF_MATCH)
         .ok_or_else(|| domain(AppsHttpError::PreconditionRequired))?;

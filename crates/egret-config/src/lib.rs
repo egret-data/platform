@@ -1462,6 +1462,9 @@ impl Config {
         if self.engine.preview_rows > self.engine.max_rows {
             return Err("engine.preview_rows must be <= engine.max_rows".into());
         }
+        if self.apps.session_idle_secs > self.apps.session_absolute_secs {
+            return Err("apps.session_idle_secs must be <= apps.session_absolute_secs".into());
+        }
         Ok(())
     }
 }
@@ -2149,6 +2152,18 @@ values = { allowed-images = [] }
             assert_eq!(cfg.rate_limit.login_max_attempts, 5);
             Ok(())
         });
+    }
+
+    #[test]
+    fn validate_rejects_an_app_idle_window_longer_than_the_absolute_one() {
+        // `app_sessions` has CHECK (idle_expires_at <= absolute_expires_at): the
+        // reverse would pass boot and then fail every mint with a 500.
+        let mut cfg = Config::default();
+        cfg.apps.session_idle_secs = cfg.apps.session_absolute_secs + 1;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("apps.session_idle_secs"), "{err}");
+        cfg.apps.session_idle_secs = cfg.apps.session_absolute_secs;
+        assert!(cfg.validate().is_ok(), "equal windows are allowed");
     }
 
     #[test]
