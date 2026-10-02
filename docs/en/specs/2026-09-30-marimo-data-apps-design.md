@@ -35,6 +35,20 @@ its edit mode is the authoring surface, its run mode is the published app.
 | D15 | **P5 start-up acceptance is relative to thread mode** (≤ 0.5 s median, ≤ 1 s for 3 concurrent, Linux, ≥ 5 runs); "< 2 s" is a separate, non-blocking experience goal (2026-10-01). | The ≈ 1.75 s page-load floor is outside the kernel launcher's reach (S0b). |
 | D16 | **The pool shutdown hang is covered by a P5 acceptance test**, not a separate spike (2026-10-01). | Applies to whichever launcher P5 picks; k8s restarts make this order routine. |
 
+### 1.1 Decisions proposed for P4 (2026-10-02) — **not yet agreed with the user**
+
+Made while writing the P4 plan (`docs/en/plans/2026-10-02-data-apps-p4-origin-proxy-edit.md`), because the spec left them open. D19 and D23 are questions for the user; the rest are the plan's defaults, to be reversed if the user disagrees.
+
+| # | Proposal | Reason |
+|---|---|---|
+| D17 | The apps host is served by a **separate listener** (`apps.listen`) that mounts only the ticket route and the proxy. | One router with Host-header dispatch lets one bug expose both surfaces; two ports make the separation structural. |
+| D18 | A **grant is a redeemed ticket**: one row in `analytics.app_grants`; the apps cookie holds the plaintext whose hash is `cookie_hash`. `login_sid` cascades from `sessions`. | Atomic single use, logout kills grants by construction, correct with several egret replicas. |
+| D19 | **Query tokens are minted per grant**, lazily, by the proxy; a cache miss mints a new one. A grant's tokens are revoked when its last WebSocket on that replica closes. **Open question:** the open-WebSocket count is per replica, so with several replicas idle expiry (30 min) is the backstop — acceptable, or a shared count in the database? | S0's per-cookie token broke on an iframe reload (the old WebSocket's close had revoked it). |
+| D20 | The egret listener refuses any request carrying `Sec-Fetch-Site: same-site`. **Unproven** until measured in P4e; beyond the spec's list. | S0 measured the viewer's Lax cookies riding requests from the apps origin; auditing `GET`s is necessary but not sufficient. |
+| D21 | Cookies are `__Host-egret_session` / `__Host-egret_csrf` when `auth.cookie_secure` is true, the current names otherwise; the frontend reads both. | `__Host-` needs `Secure`; Chromium refuses it over http (S0). |
+| D22 | Edit pods use a **new `AppPodLauncher` trait** in `egret-apps`; `egret-kernel`'s `KernelLauncher` is not generalised (this replaces §6.3's "generalised"). | P6 deletes the Jupyter half of `egret-kernel`. |
+| D23 | **Grid layout is blocked in edit mode** rather than stored with the draft. **Open question:** is losing the grid layout acceptable for v1? | Storing it needs a schema change and a marimo hook that does not exist. |
+
 ## 2. What the code says
 
 Read before designing; each of these shaped the design.
