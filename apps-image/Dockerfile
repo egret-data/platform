@@ -1,5 +1,11 @@
 FROM python:3.12-slim
 ARG MARIMO_VERSION=0.25.0
+# PID 1 must reap zombies and forward signals: marimo's kernels are children, and a pod that stops
+# has to take them with it within its grace period. tini does both; Python as PID 1 does neither.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && rm -rf /var/lib/apt/lists/* \
+ && test -x /usr/bin/tini
 # The package is built from a separate dir: a pyproject.toml in /work, a parent of /work
 # or $HOME makes the launcher refuse to start (it would shadow the locked marimo config).
 WORKDIR /opt/egret-apps/src
@@ -29,4 +35,4 @@ WORKDIR /work
 USER 1000
 EXPOSE 2718 2719
 # -I: phase 1 holds the secrets in its environment, so it must not import from the cwd either.
-ENTRYPOINT ["python", "-I", "-m", "egret_marimo.launcher"]
+ENTRYPOINT ["/usr/bin/tini", "--", "python", "-I", "-m", "egret_marimo.launcher"]

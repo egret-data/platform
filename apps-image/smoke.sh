@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 IMG="egret-apps:smoke"
-NAMES=(egret-apps-smoke-edit egret-apps-smoke-run egret-apps-smoke-shadow)
+NAMES=(egret-apps-smoke-edit egret-apps-smoke-run egret-apps-smoke-shadow egret-apps-smoke-hardened)
 FAKE_PID=""
 TMP=$(mktemp -d); JAR="$TMP/jar"; PAGE="$TMP/page.html"
 cleanup() {
@@ -63,7 +63,44 @@ docker run -d --name egret-apps-smoke-edit -p 127.0.0.1:18718:2718 "${COMMON[@]}
 wait_page "http://127.0.0.1:18718/e/$POD_POD/?access_token=$MARIMO_TOKEN" || fail "edit mode did not serve /e/$POD_POD/"
 grep -qi marimo "$PAGE" || fail "edit page is not marimo's"
 [ "$(docker exec egret-apps-smoke-edit id -u)" = 1000 ] || fail "edit container does not run as uid 1000"
-echo "edit OK"
+[ "$(docker exec egret-apps-smoke-edit cat /proc/1/comm)" = tini ] || fail "PID 1 is not tini"
+echo "edit OK (PID 1 is tini)"
+
+# Exactly the Pod's hardening (egret-bin apps_pod_k8s::build_pod): read-only root filesystem, every
+# capability dropped, no privilege escalation, and the only writable places are three volumes owned
+# by uid 1000. Nobody had run marimo like that: if it writes outside them, the pod would crash-loop
+# in production and no unit test would say so.
+docker run -d --name egret-apps-smoke-hardened -p 127.0.0.1:18720:2718 "${COMMON[@]}" \
+  --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --tmpfs /work:uid=1000,gid=1000,mode=0755,size=256m \
+  --tmpfs /home/egret:uid=1000,gid=1000,mode=0755,size=256m \
+  --tmpfs /tmp:uid=1000,gid=1000,mode=1777,size=256m \
+  -e "EGRET_BASE_URL=/e/$POD_POD" "$IMG" edit >/dev/null
+wait_page "http://127.0.0.1:18720/e/$POD_POD/?access_token=$MARIMO_TOKEN" || fail "edit mode does not run with a read-only root filesystem"
+grep -qi marimo "$PAGE" || fail "hardened edit page is not marimo's"
+echo "hardened edit OK (read-only root, no capabilities)"
+
+# A process of the same uid (this exec is what a cell is) must not be able to read the server's
+# environment or memory, where the pod token and the marimo token live.
+docker exec egret-apps-smoke-hardened python -I -c '
+import os, sys
+server = None
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        cmd = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+    except OSError:
+        continue
+    if b"egret_marimo.launcher" in cmd and b"--internal" in cmd:
+        server = pid
+assert server, "the marimo server process was not found"
+for name in ("environ", "mem"):
+    try:
+        open(f"/proc/{server}/{name}", "rb").close()
+    except PermissionError:
+        continue
+    sys.exit(f"/proc/{server}/{name} is readable by another process of the same uid")
+' || fail "the server's /proc files are readable by a same-uid process"
+echo "server is undumpable OK"
 
 docker run -d --name egret-apps-smoke-run -p 127.0.0.1:18719:2719 "${COMMON[@]}" \
   -e "EGRET_BASE_URL=/r/$VER" -e "EGRET_APP_ID=$APP" -e "EGRET_VERSION_ID=$VER" "$IMG" run >/dev/null

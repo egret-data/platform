@@ -263,6 +263,66 @@ pub struct AppsConfig {
     /// Where the apps host listens. It is a SEPARATE listener from egret's API: it serves
     /// only the ticket route and the proxy, so a bug in one cannot expose the other.
     pub listen: String,
+    /// How marimo pods are started. `launcher = "none"` (the default) starts none: the proxy and
+    /// its checks are live and every pod is unavailable.
+    #[serde(default)]
+    pub pod: AppPodConfig,
+}
+
+/// `[apps.pod]` — the edit-pod launcher (spec §6.3). Env: `EGRET_APPS__POD__<KEY>`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppPodConfig {
+    /// `"none"`, `"subprocess"` (local dev: one marimo process per author on this host) or
+    /// `"kubernetes"` (one hardened Pod per author per workspace).
+    pub launcher: String,
+    /// How long a request waits for a cold pod to answer.
+    pub ready_timeout_secs: u64,
+    /// An edit pod nobody has used for this long is stopped.
+    pub idle_secs: u64,
+    /// The base URL pods call back to (the pod API and the query gateway): egret's in-cluster
+    /// Service, e.g. `http://egret:8080`. Not the browser-facing origin.
+    pub callback_url: String,
+    // ── kubernetes ──
+    pub namespace: String,
+    pub image: String,
+    pub image_pull_policy: String,
+    pub cpu_request: String,
+    pub mem_request: String,
+    pub cpu_limit: String,
+    pub mem_limit: String,
+    /// An existing `kubernetes.io/dockerconfigjson` Secret for pulling `image`.
+    pub pull_secret: Option<String>,
+    // ── subprocess ──
+    /// The command that starts the launcher entrypoint, e.g. `["apps-image/.venv/bin/egret-apps"]`;
+    /// the mode (`edit`) is appended.
+    pub command: Vec<String>,
+    /// Parent directory of each pod's working directory and home.
+    pub work_dir: String,
+    /// The locked marimo configuration directory (`apps-image/config`), as the image's
+    /// `EGRET_APPS_CONFIG`. Honoured by the launcher only outside the image.
+    pub config_dir: String,
+}
+
+impl Default for AppPodConfig {
+    fn default() -> Self {
+        Self {
+            launcher: "none".into(),
+            ready_timeout_secs: 60,
+            idle_secs: 1_800,
+            callback_url: String::new(),
+            namespace: "egret-apps".into(),
+            image: "egret-apps:dev".into(),
+            image_pull_policy: "IfNotPresent".into(),
+            cpu_request: "250m".into(),
+            mem_request: "512Mi".into(),
+            cpu_limit: "1000m".into(),
+            mem_limit: "2Gi".into(),
+            pull_secret: None,
+            command: Vec::new(),
+            work_dir: "/tmp/egret-apps".into(),
+            config_dir: String::new(),
+        }
+    }
 }
 
 impl Default for AppsConfig {
@@ -279,6 +339,7 @@ impl Default for AppsConfig {
             egret_origin: String::new(),
             cookie_ttl_secs: 28_800,
             listen: "0.0.0.0:8081".into(),
+            pod: AppPodConfig::default(),
         }
     }
 }
@@ -1512,6 +1573,47 @@ impl Config {
                 return Err("apps.ticket_ttl_secs and apps.cookie_ttl_secs must be >= 1".into());
             }
         }
+        let pod = &self.apps.pod;
+        match pod.launcher.as_str() {
+            "none" => {}
+            "subprocess" | "kubernetes" => {
+                if self.apps.origin.is_empty() {
+                    return Err(format!(
+                        "apps.pod.launcher = \"{}\" needs apps.origin: pods are reached through the apps host",
+                        pod.launcher
+                    ));
+                }
+                if pod.callback_url.is_empty() {
+                    return Err(
+                        "apps.pod.callback_url is required: pods call egret back there".into(),
+                    );
+                }
+                if pod.ready_timeout_secs == 0 || pod.idle_secs < 60 {
+                    return Err(
+                        "apps.pod.ready_timeout_secs must be >= 1 and idle_secs >= 60".into(),
+                    );
+                }
+                if pod.launcher == "kubernetes"
+                    && (pod.image.is_empty() || pod.namespace.is_empty())
+                {
+                    return Err(
+                        "apps.pod.launcher = \"kubernetes\" needs image and namespace".into(),
+                    );
+                }
+                if pod.launcher == "subprocess"
+                    && (pod.command.is_empty() || pod.config_dir.is_empty())
+                {
+                    return Err(
+                        "apps.pod.launcher = \"subprocess\" needs command and config_dir".into(),
+                    );
+                }
+            }
+            other => {
+                return Err(format!(
+                    "apps.pod.launcher must be none, subprocess or kubernetes, not \"{other}\""
+                ))
+            }
+        }
         Ok(())
     }
 }
@@ -1539,6 +1641,7 @@ mod tests {
                     egret_origin: String::new(),
                     cookie_ttl_secs: 28_800,
                     listen: "0.0.0.0:8081".into(),
+                    pod: AppPodConfig::default(),
                 }
             );
             Ok(())
@@ -2239,6 +2342,36 @@ values = { allowed-images = [] }
         cfg.apps.egret_origin = "https://egret.example".into();
         cfg.apps.cookie_ttl_secs = 0;
         assert!(cfg.validate().is_err(), "a cookie that never lives");
+    }
+
+    #[test]
+    fn validate_checks_the_pod_launcher_choice_and_what_each_needs() {
+        let mut cfg = Config::default();
+        assert!(cfg.validate().is_ok(), "launcher none is the default");
+        cfg.apps.pod.launcher = "docker".into();
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .contains("none, subprocess or kubernetes"));
+
+        cfg.apps.pod.launcher = "kubernetes".into();
+        assert!(cfg.validate().unwrap_err().contains("needs apps.origin"));
+        cfg.apps.origin = "https://apps.egret.example".into();
+        cfg.apps.egret_origin = "https://egret.example".into();
+        assert!(cfg.validate().unwrap_err().contains("callback_url"));
+        cfg.apps.pod.callback_url = "http://egret:8080".into();
+        assert!(cfg.validate().is_ok());
+        cfg.apps.pod.idle_secs = 10;
+        assert!(cfg.validate().unwrap_err().contains("idle_secs"));
+        cfg.apps.pod.idle_secs = 1_800;
+        cfg.apps.pod.image = String::new();
+        assert!(cfg.validate().unwrap_err().contains("image"));
+
+        cfg.apps.pod.launcher = "subprocess".into();
+        assert!(cfg.validate().unwrap_err().contains("command"));
+        cfg.apps.pod.command = vec!["egret-apps".into()];
+        cfg.apps.pod.config_dir = "apps-image/config".into();
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

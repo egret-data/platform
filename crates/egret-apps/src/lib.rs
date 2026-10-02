@@ -1,6 +1,7 @@
 //! Data Apps: the query gateway and its session tokens (spec docs/en/specs/2026-09-30-marimo-data-apps-design.md).
 pub mod gateway;
 pub mod grant;
+pub mod launcher;
 pub mod podapi;
 pub mod podtoken;
 pub mod proxy;
@@ -8,9 +9,11 @@ pub mod readonly;
 pub mod routes;
 pub mod session;
 pub mod store;
+pub mod subprocess_pod;
 pub mod template;
 
 pub use gateway::{gateway_router, QueryRequest};
+pub use launcher::{spawn_reaper, AppPodLauncher, EditPodKey, FakeAppPodLauncher, LauncherPods};
 pub use podapi::{pod_router, PodApiState};
 pub use proxy::{
     pod_ref, proxy_router, PodEndpoint, PodResolver, ProxyConfig, ProxyState, UnavailablePods,

@@ -729,3 +729,25 @@ Gaps and honest limits:
 - **D20 is unproven until E4.5.** If a target browser does not send `Sec-Fetch-Site`, the GET audit and the `__Host-` rename are the only defences, exactly as the spec had it.
 - **Facts I did not verify while writing this plan** and that the tasks tell the implementer to read first: the exact signatures of `AppStore::{draft, save_draft, version}` and the `routes.rs` authorizer (A3); how a handler obtains the login session id (B2); `RateLimiter`'s API (A4.6); what the OIDC redirect sends in `Sec-Fetch-Site` (B4); the frontend Playwright location (E4); marimo's config key names (D3.3). Each is a read-then-adapt step, not a design question.
 - The unmerged-local-state caveat: this plan was written against local `origin/main` at `972b2bb8` plus the P3 docs branch, because `git fetch` timed out. P3's merged code (#614, #615) was read from `origin/feat/data-apps-p3-image`. Rebase onto the real main before starting A1.
+
+---
+
+## As built — P4d (2026-10-02)
+
+What differs from Part P4d above, and what was left.
+
+**Built as planned:** the `AppPodLauncher` trait in `egret-apps` (D22) with a fake and a resolver adapter; the subprocess launcher (tested with real processes); the Kubernetes launcher (Pod and Secret builders unit-tested; the tokens reach the container only through `secretKeyRef`; read-only root, `emptyDir`s, no service-account token, `restartPolicy: Never`, exit codes 64/65/69 mapped); the idle reaper; `apps.pod.*` configuration with boot validation; Helm namespace (Pod Security `restricted`), RBAC, NetworkPolicy, values and env; `tini` as PID 1.
+
+**Different from the plan:**
+
+- **Idle is stamped in the cluster, not in memory** (`egret.io/last-used`, at most once a minute per replica), so several egret replicas agree on which pods nobody wants. The plan said "reaper on idle, as today".
+- **`egret.databases()` is edit-only.** The plan did not say; listing a workspace's databases needs `database:manage` in egret's own API, so a viewer of a published app does not get it through an app they open. A run token gets 403. Connection details are never returned (name and engine only).
+- **Kernel uid separation became `PR_SET_DUMPABLE=0` on the server**, measured on real Linux (control: a same-uid child reads the server's `/proc/<pid>/environ` and `mem`; after: denied) and pinned by the smoke test. It protects the server from its kernels, **not one kernel from another**. That matters for run pods (several viewers, one uid) and is **P5's problem**; in an edit pod there is one author whose cells already run arbitrary Python.
+- **The config lock was measured before it was widened.** marimo 0.25.0 already ignores `server`, `ai`, `runtime.auto_instantiate` and `display.custom_css` from a notebook's PEP 723 header; what a header can still set (`dotenv`, `pythonpath`, `on_cell_change`, …) grants nothing a cell does not already have. Only `sharing.*` was added to the lock, derived from marimo's schema. `tests/test_config_lock.py` pins the measurement.
+- **The smoke test now runs marimo with the Pod's exact hardening** (read-only root filesystem, all capabilities dropped, three writable volumes). Nobody had; it works.
+
+**Not done:**
+
+- **Grid layout (D23)** — blocked on a decision that is still open; nothing was changed.
+- **A reload while the old WebSocket is still connected needing a second reload** — not reproduced or changed; the proxy's per-grant WebSocket count (D19) already keeps the new page's token alive, but the session-resume behaviour is marimo's (spec §5.3) and needs a browser (P4e).
+- **The Kubernetes launcher has not run against a cluster.** Its pure parts are tested; creating the Secret and Pod, owner-reference patching, the readiness wait and the exit-code handling are exercised for the first time in P4e on kind.

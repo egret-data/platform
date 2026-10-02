@@ -225,3 +225,21 @@ kernel:
     enabled: true
 # master/secret keys: generated-and-persisted by the chart (see secret.yaml); do
 # NOT put real secrets here.
+
+# Data Apps (marimo): the apps host, and the pods that run an author's edit session.
+apps:
+  # Where marimo is served to the browser: a SIBLING subdomain of ingress.host (`apps.<host>`),
+  # never another port on the same host (cookies are not isolated by port). Empty = the apps
+  # iframe is off and the apps listener is not started.
+  origin: ""
+  # egret's own browser-facing origin: the only one allowed to frame the apps origin.
+  egretOrigin: ""
+  pod:
+    launcher: none            # "kubernetes" starts one hardened Pod per author per workspace
+    namespace: egret-apps     # chart-managed; Pod Security `restricted` is enforced there
+    image: egret-apps:dev
+    imagePullPolicy: IfNotPresent
+    resources: { cpuRequest: 250m, memRequest: 512Mi, cpuLimit: 1000m, memLimit: 2Gi }
+    readyTimeoutSecs: 60
+    idleSecs: 1800            # an edit pod unused this long is stopped
+    networkPolicy: { enabled: true }

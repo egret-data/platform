@@ -113,3 +113,29 @@ async fn unknown_foreign_prefixed_and_revoked_tokens_do_not_resolve() {
     repo.revoke_for_pod(id).await.unwrap();
     assert!(repo.resolve(&token).await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn revoke_edit_for_kills_every_live_edit_token_of_that_user_in_that_workspace_only() {
+    let fx = Fixture::new().await;
+    let other = Fixture::new().await;
+    let repo = PodTokenRepo::new(fx.db.clone());
+    let a = repo.mint_edit(fx.user, fx.ws).await.unwrap();
+    let b = repo.mint_edit(fx.user, fx.ws).await.unwrap();
+    // the same user in another workspace, and another user in this one, are untouched
+    let elsewhere = repo.mint_edit(other.user, other.ws).await.unwrap();
+    let run = repo.mint_run(fx.ws, fx.app, fx.version).await.unwrap();
+
+    assert_eq!(repo.revoke_edit_for(fx.user, fx.ws).await.unwrap(), 2);
+    assert!(repo.resolve(&a).await.unwrap().is_none());
+    assert!(repo.resolve(&b).await.unwrap().is_none());
+    assert!(repo.resolve(&elsewhere).await.unwrap().is_some());
+    assert!(
+        repo.resolve(&run).await.unwrap().is_some(),
+        "a run token is not an edit token"
+    );
+    assert_eq!(
+        repo.revoke_edit_for(fx.user, fx.ws).await.unwrap(),
+        0,
+        "already revoked"
+    );
+}

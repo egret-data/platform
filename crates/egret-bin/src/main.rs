@@ -1,5 +1,6 @@
 //! `egret` binary entrypoint: parse the CLI, load config, dispatch the command.
 
+mod apps_pod_k8s;
 mod backfill;
 mod cli;
 mod kernel_launcher_k8s;
@@ -2424,17 +2425,72 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     });
 
     // The apps host (spec §6.2, D17): the ticket route and the proxy, on a listener of their
-    // own. Off unless `apps.origin` is set. Until the edit-pod launcher is wired in, every pod
-    // is unavailable; the cookie, route and header checks are already live.
+    // own. Off unless `apps.origin` is set. Which pods it can reach depends on
+    // `apps.pod.launcher`: with `none`, every pod is unavailable (the cookie, route and header
+    // checks are live all the same).
     let apps_proxy = if config.apps.origin.is_empty() {
         None
     } else {
+        let pod = &config.apps.pod;
+        let pod_tokens = egret_apps::podtoken::PodTokenRepo::new(db.clone());
+        let launcher: Option<std::sync::Arc<dyn egret_apps::AppPodLauncher>> =
+            match pod.launcher.as_str() {
+                "subprocess" => Some(std::sync::Arc::new(
+                    egret_apps::subprocess_pod::SubprocessPodLauncher::new(
+                        pod_tokens,
+                        egret_apps::subprocess_pod::SubprocessConfig {
+                            command: pod.command.clone(),
+                            work_dir: pod.work_dir.clone().into(),
+                            config_dir: pod.config_dir.clone().into(),
+                            callback_url: pod.callback_url.clone(),
+                        },
+                    ),
+                )),
+                "kubernetes" => {
+                    let client = kube::Client::try_default()
+                        .await
+                        .expect("apps.pod.launcher=kubernetes but no in-cluster kube config");
+                    Some(std::sync::Arc::new(
+                        crate::apps_pod_k8s::KubernetesAppPodLauncher::new(
+                            client,
+                            crate::apps_pod_k8s::K8sAppPodConfig {
+                                namespace: pod.namespace.clone(),
+                                image: pod.image.clone(),
+                                image_pull_policy: pod.image_pull_policy.clone(),
+                                cpu_request: pod.cpu_request.clone(),
+                                mem_request: pod.mem_request.clone(),
+                                cpu_limit: pod.cpu_limit.clone(),
+                                mem_limit: pod.mem_limit.clone(),
+                                pull_secret: pod.pull_secret.clone(),
+                                callback_url: pod.callback_url.clone(),
+                            },
+                            pod_tokens,
+                        ),
+                    ))
+                }
+                _ => None,
+            };
+        let resolver: std::sync::Arc<dyn egret_apps::PodResolver> = match launcher {
+            Some(launcher) => {
+                tracing::info!(mode = launcher.mode(), "app pod launcher");
+                egret_apps::spawn_reaper(
+                    launcher.clone(),
+                    std::time::Duration::from_secs(pod.idle_secs),
+                    std::time::Duration::from_secs(60),
+                );
+                std::sync::Arc::new(egret_apps::LauncherPods {
+                    launcher,
+                    ready_timeout: std::time::Duration::from_secs(pod.ready_timeout_secs),
+                })
+            }
+            None => std::sync::Arc::new(egret_apps::UnavailablePods),
+        };
         Some(egret_apps::proxy_router(egret_apps::ProxyState::new(
             db.clone(),
             pdp.clone(),
             egret_apps::grant::GrantRepo::new(db.clone()),
             egret_apps::session::AppSessionRepo::new(db.clone()),
-            std::sync::Arc::new(egret_apps::UnavailablePods),
+            resolver,
             egret_apps::ProxyConfig {
                 egret_origin: config.apps.egret_origin.clone(),
                 secure: config.apps.origin.starts_with("https://"),

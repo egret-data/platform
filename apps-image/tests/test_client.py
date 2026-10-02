@@ -5,7 +5,7 @@ import pytest
 from marimo._sql.engines.dbapi import DBAPIEngine
 
 from egret_marimo import client
-from egret_marimo.client import GatewayError, SessionExpired, connect, sql
+from egret_marimo.client import GatewayError, SessionExpired, connect, databases, sql
 
 
 @pytest.fixture(autouse=True)
@@ -110,4 +110,25 @@ def test_package_exports_the_public_api():
     from egret_marimo import client
 
     assert egret_marimo.Connection is client.Connection
-    assert set(egret_marimo.__all__) == {"Connection", "GatewayError", "SessionExpired", "connect", "sql"}
+    assert set(egret_marimo.__all__) == {
+        "Connection", "GatewayError", "SessionExpired", "connect", "databases", "sql",
+    }
+    assert egret_marimo.databases is client.databases
+
+
+def test_databases_lists_names_and_engines_for_the_authors_picker(egret):
+    egret.databases = [{"name": "trino_prod", "engine": "trino"}, {"name": "sr", "engine": "starrocks"}]
+    assert databases() == [("trino_prod", "trino"), ("sr", "starrocks")]
+
+
+def test_databases_for_a_viewer_is_a_403_gateway_error(egret):
+    egret.session_tokens["tok"] = {"user": "alice", "mode": "run"}
+    with pytest.raises(GatewayError) as e:
+        databases()
+    assert e.value.status == 403
+
+
+def test_databases_with_an_expired_session_says_so(monkeypatch):
+    monkeypatch.setenv("EGRET_TEST_TOKEN", "bad")
+    with pytest.raises(SessionExpired):
+        databases()

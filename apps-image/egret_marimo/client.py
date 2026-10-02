@@ -131,3 +131,23 @@ def sql(query: str, database: str, params=()) -> pl.DataFrame:
     data = _query(database, query, params)
     names = [c["name"] for c in data["columns"]]
     return pl.DataFrame(data["rows"], schema=names, orient="row")
+
+
+def databases() -> list[tuple[str, str]]:
+    """``(name, engine)`` of the databases an author can query, for pickers.
+
+    Edit mode only: a viewer's token gets a 403 (`GatewayError`), because listing a workspace's
+    databases is an admin act in egret, not something an app you merely open may do for you. An
+    app that needs the names when viewed carries them in its source.
+    """
+    try:
+        r = httpx.get(
+            f"{_base()}/api/apps/databases",
+            headers={"authorization": f"Bearer {_session_token()}"},
+            timeout=GATEWAY_TIMEOUT_S,
+        )
+    except httpx.TransportError as e:
+        raise transport_error(e) from e
+    if not r.is_success:
+        raise error_for(r)
+    return [(d["name"], d["engine"]) for d in r.json()["databases"]]

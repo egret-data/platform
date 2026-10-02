@@ -63,7 +63,24 @@ def install_run_mode_ipc_patch(venv_shim: Path) -> None:
 # Not locked: runtime.serve_cached_sessions_in_apps is header-settable but harmless
 # here: in run mode the session cache is read-only (CacheMode.READ, session.py), and
 # nothing writes `__marimo__/session/` into a run pod's fresh workdir.
-LOCKED_CONFIG = {"ai": {"enabled": False}, "experimental": {"rtc_v2": False}}
+# - sharing.*: every external code-sharing affordance (shareable WASM links, molab, HTML
+#   publishing). The pod's egress is closed, so none can complete, but the buttons would invite
+#   an author to try and a viewer to wonder; marimo hides them all when each flag is False. The
+#   keys come from marimo's own schema (as it does for MARIMO_RESTRICT_SHARING), so a sharing
+#   target added by an upgrade is locked without anyone remembering to.
+# What a header may still set (runtime.dotenv, pythonpath, on_cell_change, ...) grants the author
+# nothing a cell does not already have; see tests/test_config_lock.py for the measurement.
+def _sharing_off() -> dict[str, bool]:
+    from marimo._config.config import SharingConfig
+
+    return dict.fromkeys(SharingConfig.__annotations__, False)
+
+
+LOCKED_CONFIG = {
+    "ai": {"enabled": False},
+    "experimental": {"rtc_v2": False},
+    "sharing": _sharing_off(),
+}
 
 
 def install_config_lock() -> None:
