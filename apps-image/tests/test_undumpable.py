@@ -2,7 +2,8 @@
 would let a cell read `/proc/<server>/environ` and `/proc/<server>/mem`, where the pod token and the
 marimo token live after the launcher drops them from the environment).
 
-`prctl(PR_SET_DUMPABLE, 0)` makes those files root-owned for everyone else of the same uid. The
+`prctl(PR_SET_DUMPABLE, 0)` makes those files root-owned for everyone else of the same uid, whatever
+the host's Yama `ptrace_scope`: that is why `mem` is asserted DENIED only AFTER the call. The
 kernels are fresh `exec`s, so they are dumpable again: this protects the server from them, NOT
 one kernel from another. Kernels of different viewers sharing a run pod need separate uids or a
 blocked ptrace (P5); an edit pod has a single author, whose cells already run arbitrary Python.
@@ -24,9 +25,13 @@ def _probe(mode: str) -> dict[str, str]:
 
 
 @linux_only
-def test_without_the_protection_a_same_uid_child_reads_the_servers_environment_and_memory():
-    # The control: if this ever stops being true the next test proves nothing.
-    assert _probe("control") == {"environ": "READABLE", "mem": "READABLE"}
+def test_without_the_protection_a_same_uid_child_reads_the_servers_environment():
+    # The control. Only `environ` is asserted: opening `/proc/<pid>/mem` additionally needs ptrace
+    # attach rights, which Yama (`ptrace_scope` 1, the Ubuntu default) refuses to a child that is
+    # not an ancestor, so on such a host `mem` is DENIED even for an unprotected server. (The
+    # same child still reads `environ`, and a host with `ptrace_scope` 0 — Docker Desktop's VM —
+    # lets it open `mem` too.) If `environ` ever stops being readable, the next test proves nothing.
+    assert _probe("control")["environ"] == "READABLE"
 
 
 @linux_only
