@@ -251,9 +251,29 @@ def _read_secrets() -> dict[str, str]:
     return {name: secrets.get(name, "") for name in SECRETS}
 
 
+PR_SET_DUMPABLE = 4
+
+
+def make_undumpable() -> bool:
+    """Linux: stop other processes of this uid reading this one's `/proc/<pid>/environ` and `mem`.
+
+    Called as soon as the secrets are in memory. The kernels this server spawns run app code as the
+    same uid, so file permissions alone would let a cell read them; with the dumpable flag off those
+    files belong to root. Does nothing off Linux (returns False). Kernels are fresh `exec`s and are
+    dumpable again — see tests/test_undumpable.py for what this does and does not cover.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    import ctypes
+
+    return ctypes.CDLL(None, use_errno=True).prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) == 0
+
+
 def _internal(mode: str) -> int:
     try:
-        marimo_argv = build(mode, _read_secrets())
+        secrets = _read_secrets()
+        make_undumpable()
+        marimo_argv = build(mode, secrets)
     except LaunchError as e:
         print(f"egret-apps: {e}", file=sys.stderr)
         return e.code

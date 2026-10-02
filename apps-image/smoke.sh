@@ -80,6 +80,28 @@ wait_page "http://127.0.0.1:18720/e/$POD_POD/?access_token=$MARIMO_TOKEN" || fai
 grep -qi marimo "$PAGE" || fail "hardened edit page is not marimo's"
 echo "hardened edit OK (read-only root, no capabilities)"
 
+# A process of the same uid (this exec is what a cell is) must not be able to read the server's
+# environment or memory, where the pod token and the marimo token live.
+docker exec egret-apps-smoke-hardened python -I -c '
+import os, sys
+server = None
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        cmd = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+    except OSError:
+        continue
+    if b"egret_marimo.launcher" in cmd and b"--internal" in cmd:
+        server = pid
+assert server, "the marimo server process was not found"
+for name in ("environ", "mem"):
+    try:
+        open(f"/proc/{server}/{name}", "rb").close()
+    except PermissionError:
+        continue
+    sys.exit(f"/proc/{server}/{name} is readable by another process of the same uid")
+' || fail "the server's /proc files are readable by a same-uid process"
+echo "server is undumpable OK"
+
 docker run -d --name egret-apps-smoke-run -p 127.0.0.1:18719:2719 "${COMMON[@]}" \
   -e "EGRET_BASE_URL=/r/$VER" -e "EGRET_APP_ID=$APP" -e "EGRET_VERSION_ID=$VER" "$IMG" run >/dev/null
 wait_page "http://127.0.0.1:18719/r/$VER/?access_token=$MARIMO_TOKEN" || fail "run mode did not serve /r/$VER/"
