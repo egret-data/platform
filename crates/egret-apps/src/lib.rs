@@ -9,6 +9,7 @@ pub mod readonly;
 pub mod routes;
 pub mod session;
 pub mod store;
+pub mod subprocess_pod;
 pub mod template;
 
 pub use gateway::{gateway_router, QueryRequest};
