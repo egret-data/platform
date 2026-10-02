@@ -60,6 +60,9 @@ fn composed_app_with_apps_api() -> axum::Router {
         authz: Authorizer::new(db.clone()),
         pdp: Arc::new(DenyPdp),
         audit: egret_audit::AuditSink::new(1).0,
+        grants: egret_apps::grant::GrantRepo::new(db.clone()),
+        apps_origin: String::new(),
+        ticket_ttl: std::time::Duration::from_secs(30),
     };
     build_router(AppState::without_db().with_apps_api(state))
 }

@@ -34,6 +34,8 @@ import type {
   AppSaveDraft,
   AppSetFolder,
   AppSummary,
+  AppTicket,
+  AppTicketRequest,
   AppUpdate,
   AppVersion,
   AppVersionSummary,
@@ -1325,6 +1327,122 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getAppsRestoreMutationOptions(options), queryClient);
+    }
+    export type appsTicketResponse200 = {
+  data: AppTicket
+  status: 200
+}
+
+export type appsTicketResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type appsTicketResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type appsTicketResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type appsTicketResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type appsTicketResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type appsTicketResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type appsTicketResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type appsTicketResponseSuccess = (appsTicketResponse200) & {
+  headers: Headers;
+};
+export type appsTicketResponseError = (appsTicketResponse400 | appsTicketResponse401 | appsTicketResponse403 | appsTicketResponse404 | appsTicketResponse409 | appsTicketResponse500 | appsTicketResponse503) & {
+  headers: Headers;
+};
+
+export type appsTicketResponse = (appsTicketResponseSuccess | appsTicketResponseError)
+
+export const getAppsTicketUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/apps/${encodeURIComponent(id)}/ticket`
+}
+
+export const appsTicket = async (workspace: string,
+    id: string,
+    appTicketRequest: AppTicketRequest, options?: Parameters<typeof customInstance>[1]): Promise<appsTicketResponse> => {
+
+  return customInstance<appsTicketResponse>(getAppsTicketUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(appTicketRequest)
+  }
+);}
+
+
+
+
+
+export const getAppsTicketMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof appsTicket>>, TError,{workspace: string;id: string;data: AppTicketRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof appsTicket>>, TError,{workspace: string;id: string;data: AppTicketRequest}, TContext> => {
+
+const mutationKey = ['appsTicket'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof appsTicket>>, {workspace: string;id: string;data: AppTicketRequest}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  appsTicket(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AppsTicketMutationResult = NonNullable<Awaited<ReturnType<typeof appsTicket>>>
+    export type AppsTicketMutationBody = AppTicketRequest
+    export type AppsTicketMutationError = ErrorBody
+
+    export const useAppsTicket = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof appsTicket>>, TError,{workspace: string;id: string;data: AppTicketRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof appsTicket>>,
+        TError,
+        {workspace: string;id: string;data: AppTicketRequest},
+        TContext
+      > => {
+      return useMutation(getAppsTicketMutationOptions(options), queryClient);
     }
     export type appsTrashResponse204 = {
   data: void

@@ -1208,8 +1208,7 @@ async fn session_id_from_jar(
     st: &WorkspaceState,
     jar: &axum_extra::extract::cookie::CookieJar,
 ) -> Result<Uuid, AuthError> {
-    let token = jar
-        .get(egret_auth::cookie::SESSION_COOKIE)
+    let token = egret_auth::cookie::read_session(jar, egret_auth::cookie::secure_cookies())
         .map(|c| c.value().to_string())
         .ok_or(AuthError(Error::Unauthorized))?;
     st.sessions

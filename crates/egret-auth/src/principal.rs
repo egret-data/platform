@@ -6,7 +6,7 @@ use axum::response::{IntoResponse, Response};
 use axum_extra::extract::cookie::CookieJar;
 use egret_core::{Error, Principal};
 
-use crate::cookie::SESSION_COOKIE;
+use crate::cookie::{read_session, secure_cookies};
 use crate::session::SessionService;
 
 /// Wrapper so we can implement `FromRequestParts` for a foreign type (`Principal`).
@@ -21,8 +21,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let jar = CookieJar::from_headers(&parts.headers);
-        let token = jar
-            .get(SESSION_COOKIE)
+        let token = read_session(&jar, secure_cookies())
             .map(|c| c.value().to_string())
             .ok_or(AuthError(Error::Unauthorized))?;
         let svc = SessionService::from_ref(state);

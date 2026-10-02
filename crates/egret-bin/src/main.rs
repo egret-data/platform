@@ -1472,6 +1472,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         cookie_key: oidc_cookie_key.clone(),
         session_secure: config.session.secure,
     };
+    // `Secure` cookies are named `__Host-egret_*` and ONLY those names are read, so a
+    // cookie tossed from a sibling host cannot stand in for them (spec §6.1).
+    egret_auth::cookie::set_secure_cookies(config.session.secure);
 
     // `secrets` (the SecretStore) is shared: the per-workspace storage layer and
     // the database block reuse the same instance for their secrets.
@@ -2372,21 +2375,25 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         cfg: config.apps.clone(),
     });
 
-    // Dead app tokens (revoked or expired more than a day ago) are deleted hourly. A
+    // Dead app tokens and grants (revoked or expired more than a day ago) are deleted hourly. A
     // fresh row is kept a day: it is what explains a 401 someone is still debugging.
     {
         let sessions = egret_apps::session::AppSessionRepo::new(db.clone());
+        let grants = egret_apps::grant::GrantRepo::new(db.clone());
         tokio::spawn(async move {
+            let older_than = std::time::Duration::from_secs(24 * 3600);
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
             loop {
                 tick.tick().await;
-                match sessions
-                    .sweep_expired(std::time::Duration::from_secs(24 * 3600))
-                    .await
-                {
+                match sessions.sweep_expired(older_than).await {
                     Ok(n) if n > 0 => tracing::info!(deleted = n, "app sessions swept"),
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error = %e, "app session sweep failed"),
+                }
+                match grants.sweep(older_than).await {
+                    Ok(n) if n > 0 => tracing::info!(deleted = n, "app grants swept"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "app grant sweep failed"),
                 }
             }
         });
@@ -2403,6 +2410,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         authz: Authorizer::new(db.clone()),
         pdp: pdp.clone(),
         audit: audit_sink.clone(),
+        grants: egret_apps::grant::GrantRepo::new(db.clone()),
+        apps_origin: config.apps.origin.clone(),
+        ticket_ttl: std::time::Duration::from_secs(config.apps.ticket_ttl_secs),
     });
 
     // Data Apps pod API (`/api/apps/pod/…`): what an app pod calls with its pod token.

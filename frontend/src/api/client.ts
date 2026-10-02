@@ -33,13 +33,24 @@ export function readCookie(name: string): string | null {
   return m ? decodeURIComponent(m[1]) : null;
 }
 
+/**
+ * The CSRF token to echo in `X-Egret-CSRF`. A deployment with Secure cookies issues
+ * `__Host-egret_csrf` (the prefix stops a sibling host from tossing a cookie of that
+ * name); plain-http dev issues `egret_csrf`. The `__Host-` one wins when both exist, so
+ * a tossed plain-name cookie is never preferred — the server ignores it in a secure
+ * deployment anyway.
+ */
+export function csrfToken(): string | null {
+  return readCookie("__Host-egret_csrf") ?? readCookie("egret_csrf");
+}
+
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const method = (init.method ?? "GET").toUpperCase();
   const headers = new Headers(init.headers);
   if (MUTATING.has(method)) {
-    const csrf = readCookie("egret_csrf");
+    const csrf = csrfToken();
     if (csrf) headers.set("X-Egret-CSRF", csrf);
   }
   const res = await fetch(`/api${path}`, { ...init, headers, credentials: "include" });

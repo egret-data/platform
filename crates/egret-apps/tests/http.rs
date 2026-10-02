@@ -7,6 +7,8 @@
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
+use egret_apps::grant::GrantRepo;
+use egret_apps::session::AppMode;
 use egret_apps::store::{AppStore, MAX_SOURCE_BYTES};
 use egret_apps::{apps_router, AppsApiState};
 use egret_audit::AuditEvent;
@@ -24,6 +26,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 const TRASHED: &str = "app is in the trash; restore it first";
+const APPS_ORIGIN: &str = "https://apps.egret.test";
 
 /// `(method, path template with {id}, body, extra headers)`.
 type Route = (
@@ -71,6 +74,9 @@ async fn build_router(db: &Db) -> (axum::Router, Receiver<AuditEvent>) {
         authz: Authorizer::new(db.clone()),
         pdp,
         audit,
+        grants: GrantRepo::new(db.clone()),
+        apps_origin: APPS_ORIGIN.to_string(),
+        ticket_ttl: std::time::Duration::from_secs(30),
     };
     // Mounted as production mounts it: under `/api`, behind the CSRF layer.
     let router = axum::Router::new()
@@ -479,6 +485,12 @@ async fn an_app_of_another_workspace_is_404_on_every_route_like_a_random_id() {
             vec![("If-Match", "\"1\"")],
         ),
         ("POST", "/{id}/publish".to_string(), Some(json!({})), vec![]),
+        (
+            "POST",
+            "/{id}/ticket".to_string(),
+            Some(json!({ "mode": "edit" })),
+            vec![],
+        ),
         ("GET", "/{id}/versions".to_string(), None, vec![]),
         ("GET", format!("/{{id}}/versions/{b_ver}"), None, vec![]),
         (
@@ -1172,4 +1184,210 @@ async fn with_the_apps_feature_disabled_every_route_is_403() {
         );
         assert_eq!(r.body["code"], json!("feature_disabled"), "{method} {rest}");
     }
+}
+
+// ---------------------------------------------------------------- P4b: tickets
+
+impl Fixture {
+    async fn ticket(&self, id: &str, who: &User, body: Value) -> Resp {
+        self.call(
+            "POST",
+            &self.path(&format!("/{id}/ticket")),
+            who,
+            Some(body),
+        )
+        .await
+    }
+
+    async fn publish_app(&self, id: &str) -> Uuid {
+        let r = self
+            .call(
+                "POST",
+                &self.path(&format!("/{id}/publish")),
+                &self.editor,
+                Some(json!({})),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+        r.body["id"].as_str().unwrap().parse().unwrap()
+    }
+
+    /// The `t` of a ticket URL, which must point at the apps origin.
+    fn ticket_of(r: &Resp) -> String {
+        let url = r.body["url"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{}", r.body));
+        let rest = url
+            .strip_prefix(&format!("{APPS_ORIGIN}/_ticket?t="))
+            .unwrap_or_else(|| panic!("ticket URL off the apps origin: {url}"));
+        assert!(rest.starts_with("egt_"), "{url}");
+        rest.to_string()
+    }
+
+    async fn login_session_of(&self, who: &User) -> Uuid {
+        sessions(&self.db)
+            .session_id_for_token(&who.token)
+            .await
+            .unwrap()
+            .expect("live login session")
+    }
+}
+
+const COOKIE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+#[tokio::test]
+async fn an_author_gets_an_edit_ticket_bound_to_their_login_session_and_the_draft() {
+    let fx = Fixture::new().await;
+    let id = fx.create_app("a").await;
+    let r = fx.ticket(&id, &fx.editor, json!({ "mode": "edit" })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let ticket = Fixture::ticket_of(&r);
+
+    let (grant, _cookie) = GrantRepo::new(fx.db.clone())
+        .redeem(&ticket, COOKIE_TTL)
+        .await
+        .unwrap()
+        .expect("redeems");
+    assert_eq!(grant.mode, AppMode::Edit);
+    assert_eq!(grant.user_id, fx.editor.id);
+    assert_eq!(grant.app_id.to_string(), id);
+    assert_eq!(grant.workspace_id, fx.ws);
+    assert_eq!(grant.version_id, None, "edit runs the draft");
+    assert_eq!(grant.impersonator, None);
+    assert_eq!(grant.login_sid, fx.login_session_of(&fx.editor).await);
+}
+
+#[tokio::test]
+async fn a_viewer_may_open_but_never_edit() {
+    let fx = Fixture::new().await;
+    let id = fx.create_app("a").await;
+    let r = fx.ticket(&id, &fx.viewer, json!({ "mode": "edit" })).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+
+    // nothing is published yet: there is nothing to run
+    let r = fx.ticket(&id, &fx.viewer, json!({ "mode": "run" })).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+
+    let version = fx.publish_app(&id).await;
+    let r = fx.ticket(&id, &fx.viewer, json!({ "mode": "run" })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let (grant, _) = GrantRepo::new(fx.db.clone())
+        .redeem(&Fixture::ticket_of(&r), COOKIE_TTL)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(grant.mode, AppMode::Run);
+    assert_eq!(
+        grant.version_id,
+        Some(version),
+        "run pins the latest version"
+    );
+    assert_eq!(grant.user_id, fx.viewer.id);
+}
+
+#[tokio::test]
+async fn an_edit_ticket_needs_query_run_as_well_as_app_write() {
+    // An author writes arbitrary SQL, so edit mode needs the same permission SQL Lab does.
+    let fx = Fixture::new().await;
+    let id = fx.create_app("a").await;
+    let role_name = format!("app-writer-{}", Uuid::new_v4().simple());
+    let role: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (scope, name, description) VALUES ('workspace', $1, 't') RETURNING id",
+    )
+    .bind(&role_name)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    for perm in ["app:write", "app:read"] {
+        sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
+            .bind(role)
+            .bind(perm)
+            .execute(&fx.db.pool)
+            .await
+            .unwrap();
+    }
+    let mut fx = fx;
+    // A member whose only role holds `app:write` and `app:read` — and not `query:run`.
+    let writer = fx.user().await;
+    MemberRepo::new(fx.db.clone())
+        .add(fx.ws, "user", writer.id.0, &role_name, fx.owner)
+        .await
+        .unwrap();
+    fx.rebuild().await;
+    let r = fx.ticket(&id, &writer, json!({ "mode": "edit" })).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+}
+
+#[tokio::test]
+async fn a_run_ticket_for_a_version_of_another_app_is_not_found() {
+    let fx = Fixture::new().await;
+    let a = fx.create_app("a").await;
+    let b = fx.create_app("b").await;
+    let b_version = fx.publish_app(&b).await;
+    fx.publish_app(&a).await;
+    let r = fx
+        .ticket(
+            &a,
+            &fx.viewer,
+            json!({ "mode": "run", "version_id": b_version }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
+}
+
+#[tokio::test]
+async fn an_edit_ticket_that_names_a_version_is_invalid() {
+    let fx = Fixture::new().await;
+    let id = fx.create_app("a").await;
+    let v = fx.publish_app(&id).await;
+    let r = fx
+        .ticket(&id, &fx.editor, json!({ "mode": "edit", "version_id": v }))
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+}
+
+#[tokio::test]
+async fn a_trashed_app_gets_no_ticket() {
+    let fx = Fixture::new().await;
+    let id = fx.create_app("a").await;
+    fx.publish_app(&id).await;
+    let r = fx
+        .call("POST", &fx.path(&format!("/{id}/trash")), &fx.editor, None)
+        .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+    for mode in ["edit", "run"] {
+        let r = fx.ticket(&id, &fx.editor, json!({ "mode": mode })).await;
+        assert_eq!(r.status, StatusCode::CONFLICT, "{mode}: {}", r.body);
+    }
+}
+
+#[tokio::test]
+async fn with_no_apps_origin_configured_the_iframe_cannot_be_opened() {
+    let mut fx = Fixture::new().await;
+    let id = fx.create_app("a").await;
+    // A router whose state has no origin: the same wiring, `apps.origin` left empty.
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(fx.db.clone(), &egret_events::EventBus::new())
+            .await
+            .unwrap(),
+    );
+    let (audit, _rx) = egret_audit::AuditSink::new(8);
+    let st = AppsApiState {
+        store: AppStore::new(fx.db.clone()),
+        db: fx.db.clone(),
+        sessions: sessions(&fx.db),
+        workspaces: WorkspaceRepo::new(fx.db.clone()),
+        authz: Authorizer::new(fx.db.clone()),
+        pdp,
+        audit,
+        grants: GrantRepo::new(fx.db.clone()),
+        apps_origin: String::new(),
+        ticket_ttl: std::time::Duration::from_secs(30),
+    };
+    fx.router = axum::Router::new()
+        .nest("/api", apps_router())
+        .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+        .with_state(st);
+    let r = fx.ticket(&id, &fx.editor, json!({ "mode": "edit" })).await;
+    assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{}", r.body);
 }

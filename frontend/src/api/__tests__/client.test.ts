@@ -1,4 +1,4 @@
-import { apiFetch, ApiError, UnauthorizedError, readCookie } from "@/api/client";
+import { apiFetch, ApiError, UnauthorizedError, readCookie, csrfToken } from "@/api/client";
 import { queryClient } from "@/api/queryClient";
 import { afterEach, expect, test, vi } from "vitest";
 
@@ -10,6 +10,24 @@ test("attaches X-Egret-CSRF on mutating requests from the cookie", async () => {
   await apiFetch("/x", { method: "POST" });
   const headers = (spy.mock.calls[0][1] as RequestInit).headers as Headers;
   expect(headers.get("X-Egret-CSRF")).toBe("tok123");
+});
+
+test("prefers the __Host- CSRF cookie a secure deployment issues over the plain name", async () => {
+  // A cookie a sibling host tossed under the plain name must not win once the
+  // __Host- one exists.
+  // jsdom, like a browser, refuses to store a `__Host-` cookie on an http page, so the
+  // jar is stubbed rather than written.
+  vi.spyOn(document, "cookie", "get").mockReturnValue("egret_csrf=tossed; __Host-egret_csrf=real");
+  expect(csrfToken()).toBe("real");
+  const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+  await apiFetch("/x", { method: "POST" });
+  const headers = (spy.mock.calls[0][1] as RequestInit).headers as Headers;
+  expect(headers.get("X-Egret-CSRF")).toBe("real");
+});
+
+test("falls back to the plain CSRF cookie when there is no __Host- one", () => {
+  document.cookie = "egret_csrf=plain";
+  expect(csrfToken()).toBe("plain");
 });
 
 test("does not attach CSRF on GET", async () => {

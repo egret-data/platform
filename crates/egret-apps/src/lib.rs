@@ -1,5 +1,6 @@
 //! Data Apps: the query gateway and its session tokens (spec docs/en/specs/2026-09-30-marimo-data-apps-design.md).
 pub mod gateway;
+pub mod grant;
 pub mod podapi;
 pub mod podtoken;
 pub mod readonly;

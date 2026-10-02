@@ -6,7 +6,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum_extra::extract::cookie::CookieJar;
 
-use crate::cookie::{CSRF_COOKIE, CSRF_HEADER};
+use crate::cookie::{read_csrf, secure_cookies, CSRF_HEADER};
 
 /// Reject mutating requests whose `X-Egret-CSRF` header is missing or ≠ the CSRF cookie.
 /// Safe methods pass through. Pre-auth POSTs (login/oidc) are mounted on a router without
@@ -21,7 +21,7 @@ pub async fn csrf_layer(jar: CookieJar, request: Request, next: Next) -> Respons
         return next.run(request).await;
     }
 
-    let cookie_val = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
+    let cookie_val = read_csrf(&jar, secure_cookies()).map(|c| c.value().to_string());
     let header_val = request
         .headers()
         .get(CSRF_HEADER)

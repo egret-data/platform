@@ -581,7 +581,12 @@ pub fn build_router(state: AppState) -> Router {
         router = router.merge(egret_machine_idp::idp_router().with_state(idp));
     }
 
-    router.with_state(state)
+    // Outermost, so it runs before every route and every other layer: a request a
+    // sibling host (the apps origin) made with the viewer's cookies never reaches a
+    // handler. See `egret_auth::fetch_meta`.
+    router.with_state(state).layer(axum::middleware::from_fn(
+        egret_auth::fetch_meta::refuse_same_site,
+    ))
 }
 
 /// Liveness: the process is up. Always 200.

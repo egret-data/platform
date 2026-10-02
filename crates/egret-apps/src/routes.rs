@@ -20,8 +20,10 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
+use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, Utc};
 use egret_audit::{mutation_for, AuditSink};
+use egret_auth::cookie::{read_session, secure_cookies};
 use egret_auth::session::SessionService;
 use egret_core::authz::{require_object, ObjectRef, Pdp};
 use egret_core::http::{ApiError, ErrorBody};
@@ -33,9 +35,12 @@ use egret_workspace::workspaces::WorkspaceRepo;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::grant::{GrantRepo, NewGrant};
+use crate::session::AppMode;
 use crate::store::{
     AppRow, AppStore, PublishOutcome, SaveOutcome, VersionSummary, MAX_SOURCE_BYTES,
 };
@@ -43,6 +48,8 @@ use crate::template::new_app_source;
 
 const APP_READ: &str = "app:read";
 const APP_WRITE: &str = "app:write";
+/// Edit mode also needs arbitrary SQL, as SQL Lab does (spec §4.2).
+const QUERY_RUN: &str = "query:run";
 
 /// The draft PUT carries up to 1 MiB of source inside JSON; escaping can grow it,
 /// so the body may be larger than the source (1 MiB of `"` is 2 MiB of JSON before
@@ -63,6 +70,12 @@ pub struct AppsApiState {
     pub authz: Authorizer,
     pub pdp: Arc<dyn Pdp>,
     pub audit: AuditSink,
+    /// One-time tickets for the apps-origin iframe (spec §6.1).
+    pub grants: GrantRepo,
+    /// `apps.origin`, no trailing slash. Empty: the ticket endpoint answers 503.
+    pub apps_origin: String,
+    /// `apps.ticket_ttl_secs`.
+    pub ticket_ttl: Duration,
 }
 
 impl FromRef<AppsApiState> for SessionService {
@@ -97,6 +110,7 @@ pub fn apps_router() -> Router<AppsApiState> {
             get(draft_get).put(draft_put),
         )
         .route("/ws/{workspace}/apps/{id}/publish", post(publish))
+        .route("/ws/{workspace}/apps/{id}/ticket", post(ticket))
         .route("/ws/{workspace}/apps/{id}/versions", get(versions))
         .route(
             "/ws/{workspace}/apps/{id}/versions/{version_id}",
@@ -231,6 +245,31 @@ pub struct AppDraftSaved {
     pub revision: i64,
 }
 
+/// Open an app in an iframe on the apps origin.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AppTicketRequest {
+    pub mode: AppTicketMode,
+    /// Run mode only: the version to open. Omitted = the latest published version.
+    #[serde(default)]
+    pub version_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AppTicketMode {
+    /// Author the draft. Needs `app:write` on the app and `query:run` in the workspace.
+    Edit,
+    /// View a published version. Needs `app:read` on the app.
+    Run,
+}
+
+/// Where to point the iframe. The URL carries a one-time ticket that expires in
+/// seconds: open it at once, never cache or reload it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AppTicket {
+    pub url: String,
+}
+
 #[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct AppPublish {
     /// Publish only if the draft is still at this revision (else 409).
@@ -307,6 +346,10 @@ pub enum AppsHttpError {
     StaleRevision { current_revision: i64 },
     /// 409: a change to a trashed app.
     Trashed,
+    /// 409: a run ticket for an app that has never been published.
+    NoPublishedVersion,
+    /// 503: `apps.origin` is not configured, so there is nowhere to send an iframe.
+    OriginNotConfigured,
 }
 
 impl IntoResponse for AppsHttpError {
@@ -336,6 +379,14 @@ impl IntoResponse for AppsHttpError {
             )
                 .into_response(),
             Self::Trashed => body(StatusCode::CONFLICT, TRASHED),
+            Self::NoPublishedVersion => body(
+                StatusCode::CONFLICT,
+                "the app has no published version to run; publish it first",
+            ),
+            Self::OriginNotConfigured => body(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the apps origin is not configured on this deployment",
+            ),
         }
     }
 }
@@ -815,6 +866,108 @@ async fn draft_put(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/apps/{id}/ticket",
+    tag = "apps",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "App id")),
+    request_body = AppTicketRequest,
+    responses(
+        (status = 200, description = "A one-time URL for the apps-origin iframe", body = AppTicket),
+        (status = 400, description = "An edit ticket cannot name a version", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing app:read (run) or app:write + query:run (edit)", body = ErrorBody),
+        (status = 404, description = "No such app or version in this workspace", body = ErrorBody),
+        (status = 409, description = "The app is in the trash, or (run) has no published version", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+        (status = 503, description = "The apps origin is not configured", body = ErrorBody),
+    ),
+)]
+async fn ticket(
+    State(st): State<AppsApiState>,
+    WsContext(ctx): WsContext,
+    jar: CookieJar,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Json(b): Json<AppTicketRequest>,
+) -> AppsResult<Json<AppTicket>> {
+    if st.apps_origin.is_empty() {
+        return Err(domain(AppsHttpError::OriginNotConfigured));
+    }
+    let (obj, row) = app_object_ref(&st, &ctx, id).await?;
+    refuse_if_trashed(&row)?;
+    let (mode, version_id) = match b.mode {
+        AppTicketMode::Edit => {
+            if b.version_id.is_some() {
+                return Err(Error::InvalidInput(
+                    "an edit ticket opens the draft; it cannot name a version".into(),
+                )
+                .into());
+            }
+            require_object(&*st.pdp, &ctx, APP_WRITE, obj).await?;
+            egret_core::authz::require(&*st.pdp, &ctx, QUERY_RUN).await?;
+            (AppMode::Edit, None)
+        }
+        AppTicketMode::Run => {
+            require_object(&*st.pdp, &ctx, APP_READ, obj).await?;
+            let version = match b.version_id {
+                // `version()` is scoped to the app by its own query, so a version of
+                // another app is simply absent.
+                Some(v) => {
+                    st.store
+                        .version(id, v)
+                        .await?
+                        .ok_or_else(|| Error::NotFound("version".into()))?
+                        .summary
+                        .id
+                }
+                None => st
+                    .store
+                    .versions(id)
+                    .await?
+                    .first()
+                    .map(|v| v.id)
+                    .ok_or_else(|| domain(AppsHttpError::NoPublishedVersion))?,
+            };
+            (AppMode::Run, Some(version))
+        }
+    };
+    // The grant hangs off THIS login session, so logging out (or back-channel logout)
+    // removes it without anything having to remember to.
+    let login_sid = match read_session(&jar, secure_cookies()) {
+        Some(c) => st.sessions.session_id_for_token(c.value()).await?,
+        None => None,
+    }
+    .ok_or(Error::Unauthorized)?;
+    let issued = st
+        .grants
+        .issue_ticket(
+            &NewGrant {
+                user_id: ctx.principal.user_id,
+                workspace_id: ctx.workspace_id,
+                app_id: id,
+                version_id,
+                mode,
+                login_sid,
+                impersonator: ctx.principal.impersonator.as_ref().map(|i| i.user_id),
+            },
+            st.ticket_ttl,
+        )
+        .await?;
+    emit(
+        &st,
+        &ctx,
+        "app:open",
+        id,
+        json!({ "mode": mode.as_str(), "version_id": version_id }),
+    );
+    Ok(Json(AppTicket {
+        url: format!(
+            "{}/_ticket?t={issued}",
+            st.apps_origin.trim_end_matches('/')
+        ),
+    }))
+}
+
 /// The publish body is optional: an empty body or JSON `null` publishes whatever
 /// the draft is now. Parsed by hand rather than with `Option<Json<_>>` because the
 /// generated client sends `Content-Type: application/json` even when it has no
@@ -998,6 +1151,7 @@ async fn version_restore(
         draft_get,
         draft_put,
         publish,
+        ticket,
         versions,
         version_get,
         version_restore,
@@ -1012,6 +1166,9 @@ async fn version_restore(
         AppSaveDraft,
         AppDraftSaved,
         AppPublish,
+        AppTicketRequest,
+        AppTicketMode,
+        AppTicket,
         AppStaleRevision,
         AppConflict,
         AppVersionSummary,
