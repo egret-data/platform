@@ -132,4 +132,19 @@ impl PodTokenRepo {
         .map_err(|e| Error::from(anyhow::Error::from(e)))?;
         Ok(())
     }
+
+    /// Every live edit token of `user` in `ws`: what stopping that author's pod revokes, so a
+    /// pod that is gone cannot be impersonated by a copy of its token. Returns how many.
+    pub async fn revoke_edit_for(&self, user: UserId, ws: WorkspaceId) -> Result<u64> {
+        let r = sqlx::query(
+            "UPDATE analytics.app_pod_tokens SET revoked_at = now() \
+              WHERE kind = 'edit' AND user_id = $1 AND workspace_id = $2 AND revoked_at IS NULL",
+        )
+        .bind(user.0)
+        .bind(ws.0)
+        .execute(&self.db.pool)
+        .await
+        .map_err(|e| Error::from(anyhow::Error::from(e)))?;
+        Ok(r.rows_affected())
+    }
 }
