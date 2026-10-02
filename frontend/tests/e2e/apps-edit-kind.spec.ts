@@ -86,13 +86,15 @@ const STATE = "test-results/.apps-kind-admin.json";
 // Each test gets its OWN browser context built from the one saved login. Done as a fixture, not
 // `test.use({ storageState })`, because that is read before `beforeAll` has written the file.
 const test = base.extend({
-  context: async ({ browser }, use) => {
+  // The second argument is Playwright's `use`; it is named `provide` here because eslint's
+  // react-hooks rule takes any call to a function called `use` for a React hook.
+  context: async ({ browser }, provide) => {
     const context = await browser.newContext({ storageState: STATE, ignoreHTTPSErrors: true });
-    await use(context);
+    await provide(context);
     await context.close();
   },
-  page: async ({ context }, use) => {
-    await use(await context.newPage());
+  page: async ({ context }, provide) => {
+    await provide(await context.newPage());
   },
 });
 
