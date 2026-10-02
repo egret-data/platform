@@ -19,6 +19,8 @@ axum = { workspace = true, features = ["ws"] }
 axum-extra.workspace = true
 # The apps proxy (src/proxy): query strings, the pod HTTP/WebSocket client, and the streams between them.
 url.workspace = true
+time = "0.3"
+tracing.workspace = true
 http.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 tokio.workspace = true
