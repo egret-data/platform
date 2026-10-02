@@ -123,14 +123,32 @@ struct FakePods {
     base: url::Url,
 }
 
+/// A resolver whose pod is set after the fixture exists (the real-marimo test starts the pod
+/// only once it knows the pod reference and has a pod token).
+#[derive(Default)]
+struct SwitchPods(Mutex<Option<PodEndpoint>>);
+
+#[async_trait]
+impl PodResolver for SwitchPods {
+    fn edit_ref(&self, user: UserId, ws: WorkspaceId) -> String {
+        egret_apps::pod_ref(user, ws)
+    }
+    async fn edit_pod(&self, _: UserId, _: WorkspaceId) -> egret_core::Result<PodEndpoint> {
+        self.0
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| Error::NotFound("pod".into()))
+    }
+    async fn run_pod(&self, _: Uuid, _: Uuid) -> egret_core::Result<PodEndpoint> {
+        Err(Error::NotFound("pod".into()))
+    }
+}
+
 #[async_trait]
 impl PodResolver for FakePods {
     fn edit_ref(&self, user: UserId, ws: WorkspaceId) -> String {
-        format!(
-            "pod{}{}",
-            &user.0.simple().to_string()[..6],
-            &ws.0.simple().to_string()[..6]
-        )
+        egret_apps::pod_ref(user, ws)
     }
     async fn edit_pod(&self, _user: UserId, _ws: WorkspaceId) -> egret_core::Result<PodEndpoint> {
         Ok(PodEndpoint {
@@ -157,7 +175,6 @@ struct Fixture {
     db: Db,
     addr: SocketAddr,
     pod: PodLog,
-    pods: Arc<FakePods>,
     ws: WorkspaceId,
     app: Uuid,
     version: Uuid,
@@ -214,6 +231,11 @@ async fn grant_role(db: &Db, user: Uuid, role: &str, ws: Uuid) {
 
 impl Fixture {
     async fn new() -> Self {
+        let (pod_url, pod) = spawn_pod().await;
+        Self::with_resolver(Arc::new(FakePods { base: pod_url }), pod).await
+    }
+
+    async fn with_resolver(pods: Arc<dyn PodResolver>, pod: PodLog) -> Self {
         let url = egret_test_db::url().await.expect("test database");
         let db = Db::connect(&url, 10).await.expect("connect");
         let owner = insert_user(&db, "owner").await;
@@ -256,8 +278,6 @@ impl Fixture {
             login_sid: login_session(&db, viewer_id).await,
         };
 
-        let (pod_url, pod) = spawn_pod().await;
-        let pods = Arc::new(FakePods { base: pod_url });
         let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
             egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
                 .await
@@ -270,7 +290,7 @@ impl Fixture {
             pdp,
             grants.clone(),
             sessions.clone(),
-            pods.clone(),
+            pods,
             ProxyConfig {
                 egret_origin: EGRET_ORIGIN.into(),
                 secure: false,
@@ -288,7 +308,6 @@ impl Fixture {
             db,
             addr,
             pod,
-            pods,
             ws: WorkspaceId(ws),
             app,
             version,
@@ -300,7 +319,7 @@ impl Fixture {
     }
 
     fn edit_ref(&self, who: &Person) -> String {
-        self.pods.edit_ref(who.id, self.ws)
+        egret_apps::pod_ref(who.id, self.ws)
     }
 
     fn new_grant(&self, who: &Person, mode: AppMode) -> NewGrant {
@@ -730,6 +749,7 @@ async fn the_path_the_pod_receives_is_the_path_the_client_sent() {
         let r = fx.get(&target, Some(&cookie)).await;
         assert_eq!(r.status, 200, "{target}: {r:?}");
         assert_eq!(fx.pod.last().target, target, "forwarded unchanged");
+        assert_eq!(fx.pod.last().method, "GET");
     }
 }
 
@@ -967,5 +987,229 @@ async fn closing_one_of_two_websockets_leaves_the_token_alive_for_the_other() {
     assert!(revoked, "the last close must revoke");
 }
 
-#[allow(dead_code)]
-fn _unused(_: Error) {}
+// ---- the real thing
+
+/// marimo 0.25.0 itself, started by P3's launcher against the REAL pod API, behind the REAL
+/// proxy: does the allow-list leave the editor working? Every other test here uses a fake pod,
+/// which can only prove the proxy does what the proxy was written to do.
+///
+/// Not run by default (it needs the apps image's Python environment):
+///
+/// ```text
+/// EGRET_APPS_BIN=$PWD/apps-image/.venv/bin/egret-apps DATABASE_URL=… \
+///   cargo test -p egret-apps --test proxy -- --ignored real_marimo
+/// ```
+#[tokio::test]
+#[ignore = "needs marimo: set EGRET_APPS_BIN to apps-image/.venv/bin/egret-apps"]
+async fn real_marimo_behind_the_real_proxy_and_the_real_pod_api() {
+    let bin = std::env::var("EGRET_APPS_BIN").expect("EGRET_APPS_BIN");
+    let switch = Arc::new(SwitchPods::default());
+    let fx = Fixture::with_resolver(switch.clone(), PodLog::default()).await;
+
+    // the draft the pod will fetch through the real pod API
+    sqlx::query(
+        "INSERT INTO analytics.app_drafts (app_id, source, revision, updated_by) VALUES ($1, $2, 1, $3)",
+    )
+    .bind(fx.app)
+    .bind(
+        "import marimo\n\napp = marimo.App()\n\n\n@app.cell\ndef _():\n    x = 1\n    return\n\n\n\
+         if __name__ == \"__main__\":\n    app.run()\n",
+    )
+    .bind(fx.editor.id.0)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+
+    // the real pod API on its own port, and a pod token for the editor
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(fx.db.clone(), &egret_events::EventBus::new())
+            .await
+            .unwrap(),
+    );
+    let pods = egret_apps::podtoken::PodTokenRepo::new(fx.db.clone());
+    let api = axum::Router::new()
+        .nest("/api", egret_apps::pod_router())
+        .with_state(egret_apps::PodApiState {
+            db: fx.db.clone(),
+            pdp,
+            pods: pods.clone(),
+            store: egret_apps::store::AppStore::new(fx.db.clone()),
+        });
+    let api_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_addr = api_listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(api_listener, api).await.unwrap() });
+    let pod_token = pods.mint_edit(fx.editor.id, fx.ws).await.unwrap();
+
+    // start marimo
+    let eref = fx.edit_ref(&fx.editor);
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let tmp = std::env::temp_dir().join(format!("egret-real-marimo-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(tmp.join("home")).unwrap();
+    let config = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps-image/config");
+    let log = std::fs::File::create(tmp.join("pod.log")).unwrap();
+    let mut child = std::process::Command::new(&bin);
+    child
+        .arg("edit")
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", tmp.join("home"))
+        .env("EGRET_URL", format!("http://{api_addr}"))
+        .env("EGRET_POD_TOKEN", &pod_token)
+        .env("EGRET_MARIMO_TOKEN", MARIMO_TOKEN)
+        .env("EGRET_BASE_URL", format!("/e/{eref}"))
+        .env("APPS_WORKDIR", tmp.join("work"))
+        .env("EGRET_APPS_CONFIG", config.canonicalize().unwrap())
+        .env("EGRET_MARIMO_PORT", port.to_string())
+        // the launcher honours its test-only overrides only under pytest
+        .env("PYTEST_CURRENT_TEST", "egret-apps proxy test")
+        .stdout(log.try_clone().unwrap())
+        .stderr(log);
+    std::os::unix::process::CommandExt::process_group(&mut child, 0);
+    let mut child = child.spawn().expect("start egret-apps");
+    let pgid = child.id();
+    struct Kill(u32);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("kill")
+                .args(["-TERM", &format!("-{}", self.0)])
+                .status();
+        }
+    }
+    let _kill = Kill(pgid);
+
+    let http = reqwest::Client::new();
+    let health = format!("http://127.0.0.1:{port}/e/{eref}/health");
+    let mut up = false;
+    for _ in 0..240 {
+        if let Ok(Some(status)) = child.try_wait() {
+            panic!(
+                "egret-apps exited {status}:\n{}",
+                std::fs::read_to_string(tmp.join("pod.log")).unwrap_or_default()
+            );
+        }
+        if let Ok(r) = http.get(&health).bearer_auth(MARIMO_TOKEN).send().await {
+            if r.status().is_success() {
+                up = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(
+        up,
+        "marimo never came up:\n{}",
+        std::fs::read_to_string(tmp.join("pod.log")).unwrap_or_default()
+    );
+    *switch.0.lock().unwrap() = Some(PodEndpoint {
+        base: url::Url::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
+        marimo_token: MARIMO_TOKEN.into(),
+    });
+
+    // 1. the editor page, through the proxy, for the author's own draft
+    let (cookie, _) = fx.cookie_for(&fx.editor, AppMode::Edit).await;
+    let page = http
+        .get(format!("http://{}/e/{eref}/?file={}.py", fx.addr, fx.app))
+        .header("cookie", format!("{COOKIE}={cookie}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), 200);
+    let html = page.text().await.unwrap();
+    assert!(
+        html.to_lowercase().contains("marimo"),
+        "{}",
+        &html[..html.len().min(300)]
+    );
+
+    // 2. a static asset the page names
+    let asset = html
+        .split('"')
+        .find(|s| s.contains("/assets/") && s.ends_with(".js"))
+        .unwrap_or_else(|| panic!("no script in the page: {}", &html[..html.len().min(600)]))
+        .to_string();
+    // the page names assets relative to its own base URL (`./assets/…`)
+    let page_url = url::Url::parse(&format!("http://{}/e/{eref}/", fx.addr)).unwrap();
+    let asset_url = page_url.join(&asset).unwrap().to_string();
+    let r = http
+        .get(&asset_url)
+        .header("cookie", format!("{COOKIE}={cookie}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "{asset_url}");
+
+    // 3. what the allow-list blocks, against the real thing
+    for route in [
+        "/api/packages/list",
+        "/api/files/list_files",
+        "/api/secrets/keys",
+    ] {
+        let r = http
+            .get(format!("http://{}/e/{eref}{route}", fx.addr))
+            .header("cookie", format!("{COOKIE}={cookie}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "{route}");
+    }
+
+    // 4. the editor's WebSocket opens and marimo speaks on it
+    let mut ws = ws_connect(
+        &fx,
+        &format!("/e/{eref}/ws?file={}.py&session_id=s_proxytest", fx.app),
+        Some(&cookie),
+    )
+    .await
+    .expect("marimo WebSocket through the proxy");
+    let first = tokio::time::timeout(Duration::from_secs(60), ws.next())
+        .await
+        .expect("marimo sent nothing within 60 s")
+        .expect("socket closed")
+        .expect("socket error");
+    assert!(first.is_text() || first.is_binary(), "{first:?}");
+
+    // marimo's skew protection: the page carries a token the browser echoes on every POST
+    let server_token = html
+        .split("<marimo-server-token")
+        .nth(1)
+        .and_then(|t| t.split("data-token=\"").nth(1))
+        .and_then(|t| t.split('"').next())
+        .unwrap_or_else(|| {
+            panic!(
+                "no server token in the page: {}",
+                &html[..html.len().min(800)]
+            )
+        })
+        .to_string();
+
+    // 5. the kernel really started for the author's draft: instantiate it through the proxy,
+    // with the session header marimo uses to find the session
+    let r = http
+        .post(format!(
+            "http://{}/e/{eref}/api/kernel/instantiate",
+            fx.addr
+        ))
+        .header("cookie", format!("{COOKIE}={cookie}"))
+        .header("marimo-session-id", "s_proxytest")
+        .header("marimo-server-token", server_token)
+        .header("content-type", "application/json")
+        .body(r#"{"objectIds":[],"values":[],"auto_run":true}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap_or_default();
+    assert!(status.is_success(), "instantiate: {status} {body}");
+
+    // the pod's own log must not show either token
+    let log = std::fs::read_to_string(tmp.join("pod.log")).unwrap_or_default();
+    assert!(
+        !log.contains(MARIMO_TOKEN) && !log.contains(&pod_token),
+        "{log}"
+    );
+    ws.close(None).await.ok();
+    let _ = std::fs::remove_dir_all(&tmp);
+}
