@@ -77,9 +77,9 @@ async fn principal(st: &PodApiState, headers: &HeaderMap) -> Result<PodPrincipal
 }
 
 /// What an edit call has established before it touches the draft.
-struct EditTarget {
-    user: UserId,
-    trashed: bool,
+pub(crate) struct EditTarget {
+    pub(crate) user: UserId,
+    pub(crate) trashed: bool,
 }
 
 /// An edit token, whose user is active, in a workspace with `apps` on, naming an
@@ -92,17 +92,30 @@ async fn edit_target(
     let (PodKind::Edit, Some(user)) = (p.kind, p.user_id) else {
         return Err(Error::Forbidden);
     };
-    ensure_user_active(&st.db, user).await?;
-    ensure_feature_enabled(&st.db, p.workspace_id).await?;
-    let (folder_id, trashed) = app_in_workspace(&st.db, p.workspace_id, app_id).await?;
-    let subject = subject_for(&st.db, user).await?;
+    require_app_write(&st.db, &*st.pdp, user, p.workspace_id, app_id).await
+}
+
+/// `user` may write `app_id` of `ws` right now: active, `apps` on, the app is theirs to
+/// reach in that workspace, and the PDP says `app:write`. Asked afresh by every caller —
+/// the pod API on each draft call, the proxy on each request that names a notebook file.
+pub(crate) async fn require_app_write(
+    db: &Db,
+    pdp: &dyn Pdp,
+    user: UserId,
+    ws: WorkspaceId,
+    app_id: Uuid,
+) -> Result<EditTarget, Error> {
+    ensure_user_active(db, user).await?;
+    ensure_feature_enabled(db, ws).await?;
+    let (folder_id, trashed) = app_in_workspace(db, ws, app_id).await?;
+    let subject = subject_for(db, user).await?;
     let obj = ObjectRef {
         kind: "app".into(),
         id: app_id,
         folder_id,
-        workspace_id: p.workspace_id,
+        workspace_id: ws,
     };
-    require_on_app(&*st.pdp, &subject, obj, APP_WRITE).await?;
+    require_on_app(pdp, &subject, obj, APP_WRITE).await?;
     Ok(EditTarget { user, trashed })
 }
 

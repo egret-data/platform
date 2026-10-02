@@ -43,8 +43,9 @@ const WS_HANDSHAKE: [&str; 5] = [
 const CLIENT_ONLY: [&str; 3] = ["cookie", "authorization", "origin"];
 
 pub struct Inject<'a> {
-    /// The per-session query token (`ega_…`); sent as `X-Egret-App-Token`.
-    pub app_token: &'a str,
+    /// The per-session query token (`ega_…`); sent as `X-Egret-App-Token`. `None` for a
+    /// static file, which needs no identity and should not cost a token.
+    pub app_token: Option<&'a str>,
     /// The pod's marimo token (`--token-password`); sent as `Authorization: Bearer`.
     pub marimo_token: &'a str,
     /// The notebook file this request was authorized for, if it named one.
@@ -69,7 +70,7 @@ pub fn upstream_headers(client: &HeaderMap, inject: &Inject) -> HeaderMap {
     if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", inject.marimo_token)) {
         out.insert(header::AUTHORIZATION, v);
     }
-    if let Ok(v) = HeaderValue::from_str(inject.app_token) {
+    if let Some(Ok(v)) = inject.app_token.map(HeaderValue::from_str) {
         out.insert(HeaderName::from_static("x-egret-app-token"), v);
     }
     if let Some(Ok(v)) = inject.pinned_notebook.map(HeaderValue::from_str) {
@@ -147,7 +148,7 @@ mod tests {
 
     fn inject(pinned: Option<&'static str>) -> Inject<'static> {
         Inject {
-            app_token: "ega_real",
+            app_token: Some("ega_real"),
             marimo_token: "m-secret",
             pinned_notebook: pinned,
         }
@@ -175,6 +176,20 @@ mod tests {
         assert!(out.get("x-egret-user").is_none());
         assert!(out.get("x-egret-anything-else").is_none());
         assert_eq!(get(&out, "accept"), ["text/html"]);
+    }
+
+    #[test]
+    fn a_static_request_carries_no_token_at_all_and_still_no_forged_one() {
+        let client = headers(&[("x-egret-app-token", "ega_forged")]);
+        let out = upstream_headers(
+            &client,
+            &Inject {
+                app_token: None,
+                marimo_token: "m-secret",
+                pinned_notebook: None,
+            },
+        );
+        assert!(out.get("x-egret-app-token").is_none());
     }
 
     #[test]

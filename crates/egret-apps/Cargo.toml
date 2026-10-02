@@ -14,7 +14,7 @@ egret-query-api.workspace = true
 egret-audit.workspace = true
 # `WorkspaceRepo::disabled_features` — the `apps` feature switch.
 egret-workspace.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["ws"] }
 # The ticket endpoint reads the login session cookie to bind the grant to it.
 axum-extra.workspace = true
 # The apps proxy (src/proxy): query strings, the pod HTTP/WebSocket client, and the streams between them.
