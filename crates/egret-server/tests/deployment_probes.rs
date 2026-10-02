@@ -389,7 +389,10 @@ fn the_apps_ingress_keeps_websockets_alive_and_reaches_the_apps_listener() {
         read_timeout >= 3600,
         "an idle marimo WebSocket would be cut at {read_timeout}s"
     );
-    assert!(ingress.contains("proxy-buffering: \"off\""), "SSE needs buffering off");
+    assert!(
+        ingress.contains("proxy-buffering: \"off\""),
+        "SSE needs buffering off"
+    );
     assert!(
         ingress.contains("port: { number: 8081 }"),
         "the apps host must reach the apps listener, not the API port"
@@ -399,14 +402,19 @@ fn the_apps_ingress_keeps_websockets_alive_and_reaches_the_apps_listener() {
         "the API port must not be reachable through the apps host"
     );
     // the other two places that must agree on the port
-    assert!(deployment().contains("containerPort: 8081"), "the Deployment must expose 8081");
+    assert!(
+        deployment().contains("containerPort: 8081"),
+        "the Deployment must expose 8081"
+    );
     assert!(
         read("deploy/helm/egret/templates/backend-service.yaml").contains("targetPort: 8081"),
         "the Service must route 8081"
     );
     // and the default config of the listener is the same number
     assert!(
-        egret_config::AppsConfig::default().listen.ends_with(":8081"),
+        egret_config::AppsConfig::default()
+            .listen
+            .ends_with(":8081"),
         "the chart and the config default disagree on the apps port"
     );
 }
