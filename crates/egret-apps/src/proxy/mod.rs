@@ -3,3 +3,4 @@
 //! a network; [`relay`] is the part that moves bytes.
 
 pub mod pathguard;
+pub mod policy;
