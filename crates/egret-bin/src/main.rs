@@ -2372,21 +2372,25 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         cfg: config.apps.clone(),
     });
 
-    // Dead app tokens (revoked or expired more than a day ago) are deleted hourly. A
+    // Dead app tokens and grants (revoked or expired more than a day ago) are deleted hourly. A
     // fresh row is kept a day: it is what explains a 401 someone is still debugging.
     {
         let sessions = egret_apps::session::AppSessionRepo::new(db.clone());
+        let grants = egret_apps::grant::GrantRepo::new(db.clone());
         tokio::spawn(async move {
+            let older_than = std::time::Duration::from_secs(24 * 3600);
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
             loop {
                 tick.tick().await;
-                match sessions
-                    .sweep_expired(std::time::Duration::from_secs(24 * 3600))
-                    .await
-                {
+                match sessions.sweep_expired(older_than).await {
                     Ok(n) if n > 0 => tracing::info!(deleted = n, "app sessions swept"),
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error = %e, "app session sweep failed"),
+                }
+                match grants.sweep(older_than).await {
+                    Ok(n) if n > 0 => tracing::info!(deleted = n, "app grants swept"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "app grant sweep failed"),
                 }
             }
         });
