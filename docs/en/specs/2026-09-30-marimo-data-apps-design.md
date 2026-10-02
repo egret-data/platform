@@ -281,6 +281,35 @@ pod-scoped token that can read only that version, writes it to local disk, and n
 version gets a new pod; sessions opened before the publish keep running on the old version until they
 close, and the old pod stops when idle.
 
+### 5.3 Pod API contract (defined in P3, served by egret in P4)
+
+These are the only egret endpoints a marimo pod calls besides the query gateway (§4.2). Each one takes a
+**pod token** (`Authorization: Bearer <pod token>`) that egret mints when it launches the pod. P4 mints
+it and serves these routes; P3 builds the client and tests it against a fake egret.
+
+| Pod | Endpoint | Behaviour |
+|---|---|---|
+| edit (author × workspace) | `GET /api/apps/pod/apps/{app_id}/draft` | `{source, revision}`. egret re-checks `app:write` for the token's author on every call. |
+| edit | `PUT /api/apps/pod/apps/{app_id}/draft` with `If-Match: "<rev>"`, body `{source}` | 200 `{revision}` · 409 `{error, current_revision}` · 413 · 428, the same contract as the cookie API (§5) |
+| run (one version) | `GET /api/apps/pod/apps/{app_id}/versions/{version_id}` | `{source, version_no}`. The token is bound to exactly that version. |
+
+Pod-side rules, from S0:
+- **A base revision per editor session, not per app.** marimo builds a fresh `AppFileManager` on every
+  `NotebookWorkspace.load`, and each editor session keeps the manager from its own load. So every load
+  fetches the latest draft, and its `EgretStorage` holds the revision of what that session was given.
+  A session whose draft has moved on underneath it gets a 409 on its next save, and marimo shows a
+  toast. In edit mode marimo keeps one session per file, and a browser reload normally *resumes* the
+  orphaned session (TTL 120 s). So the pod marks a session conflicted on 409 and refuses to resume it,
+  and the reload creates a new session at the latest revision. A second tab shares the session (kiosk or
+  RTC) rather than forking it. This catches a stale editor and a second author. The earlier rule (one base revision per app for the pod's lifetime)
+  was dropped in P3: a shared revision could not tell sessions apart, so a stale session could save
+  over newer work once any other load had re-fetched.
+- **The pod refuses to start** if a `.marimo.toml` exists in its working directory, any parent of it, or
+  `$HOME`. marimo prefers those files over the locked-down `XDG_CONFIG_HOME` config.
+- **No default-engine API exists** in marimo 0.25.0. A new SQL cell uses the most recently defined
+  connection the user hasn't overridden, so the new-app template's `db = egret.connect(...)` cell (P2) is
+  what makes the egret engine the default (D13).
+
 ## 6. Runtime, proxy and the security boundary
 
 ### 6.1 marimo must not share egret's origin
@@ -526,7 +555,7 @@ never merged; automated Playwright, single run per case, macOS dev laptop under 
    marimo changes the command); pytest against
    a fake egret, including the
    `StorageInterface` contract test (with the reload-does-not-rebind case, §5.1) and the IPC contract
-   test (§6.3). Decides the SQL-cell default engine (§4.4).
+   test (§6.3). The pod API client follows §5.3. Plan: `docs/en/plans/2026-10-01-data-apps-p3-image-and-client.md`.
 4. **P4 — Apps origin, proxy, edit mode.** Ticket → cookie, proxy (route allow-list or the S0 block
    list, one raw path checked and forwarded, `X-Notebook-Id` stripped or pinned), `__Host-` cookie rename
    verified over HTTPS on kind, the egret-side audit that `GET` routes have no side effects and CSRF stays
@@ -535,6 +564,17 @@ never merged; automated Playwright, single run per case, macOS dev laptop under 
    an expired-but-undeleted egret login session must stop its app tokens; an `impersonator` column on
    `app_sessions` before any token is minted under impersonation; check `session_idle_secs <=
    session_absolute_secs` at boot; audit only the call that starts a rate-limit lockout, not every 429.
+   From the P3 final review: the pod endpoints of §5.3 and pod-token minting; the proxy also blocks
+   `/api/ai/*`, `/terminal`, `/api/kernel/copy` and `/api/kernel/rename` (the image refuses copy/rename
+   into a draft too, but the proxy is the boundary); tokens reach the pod via `secretKeyRef`; tini as
+   PID 1; the deployment acts on the launcher's exit codes (64 = bad env, do not restart; 65 = refused
+   config file, give a fresh `emptyDir`; 69 = version fetch failed, retry); the kernel runs as a separate
+   uid from the server (or `PR_SET_DUMPABLE=0` as a stopgap) so a cell cannot read the server's tokens;
+   only `ai` and `rtc_v2` are locked in config — the PEP 723 / venv / runtime keys are still open; a
+   reload while the old WebSocket is still connected needs a second reload; the `egret.databases()`
+   endpoint; re-run the marimo contract tests, e2e and route inventory on every marimo upgrade; the grid
+   layout (`layouts/*.grid.json`) is written only to the pod's disk, never to egret — store it with the
+   draft or block the grid layout in edit mode.
 5. **P5 — Run mode.** Per-version launcher, publish/versions/restore UI, the viewer page; the kernel
    launcher (warm pool or fork server), the per-pod session cap, memory limit and session-start UX set
    from measurements on kind (§6.3). **Start-up targets (D15):** acceptance = a new viewer on a warm pod

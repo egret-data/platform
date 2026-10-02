@@ -278,6 +278,35 @@ bằng token theo pod chỉ đọc được đúng phiên bản đó, ghi ra đ�
 bản mới có pod mới; session mở trước khi publish tiếp tục chạy trên phiên bản cũ cho tới khi đóng, và pod
 cũ dừng khi rảnh.
 
+### 5.3 Hợp đồng API phía pod (định nghĩa ở P3, egret phục vụ ở P4)
+
+Đây là các endpoint egret duy nhất mà pod marimo gọi, ngoài query gateway (§4.2). Mỗi endpoint nhận một
+**token pod** (`Authorization: Bearer <token pod>`) do egret tạo khi khởi chạy pod. P4 tạo token và
+phục vụ các route này; P3 xây client và test nó với một egret giả.
+
+| Pod | Endpoint | Hành vi |
+|---|---|---|
+| edit (tác giả × workspace) | `GET /api/apps/pod/apps/{app_id}/draft` | `{source, revision}`. egret kiểm lại `app:write` của tác giả trong token ở mỗi lần gọi. |
+| edit | `PUT /api/apps/pod/apps/{app_id}/draft` kèm `If-Match: "<rev>"`, body `{source}` | 200 `{revision}` · 409 `{error, current_revision}` · 413 · 428, cùng hợp đồng với API cookie (§5) |
+| run (một phiên bản) | `GET /api/apps/pod/apps/{app_id}/versions/{version_id}` | `{source, version_no}`. Token gắn với đúng phiên bản đó. |
+
+Quy tắc phía pod, rút ra từ S0:
+- **Revision gốc theo từng session editor, không theo app.** marimo tạo một `AppFileManager` mới ở mỗi
+  lần `NotebookWorkspace.load`, và mỗi session editor giữ manager từ lần nạp của chính nó. Vì vậy mỗi lần
+  nạp đều tải draft mới nhất, và `EgretStorage` của nó giữ revision của nội dung mà session đó nhận được.
+  Session nào có draft đã thay đổi bên dưới sẽ nhận 409 ở lần lưu kế tiếp, và marimo hiện toast. Ở chế độ
+  edit marimo giữ một session cho mỗi file, và tải lại trình duyệt thường *tiếp tục* session mồ côi (TTL
+  120 giây). Vì vậy pod đánh dấu session là xung đột khi gặp 409 và từ chối tiếp tục nó, và lần tải lại
+  tạo một session mới ở revision mới nhất. Tab thứ hai dùng chung session (kiosk hoặc RTC) chứ không tách
+  ra. Cách này bắt được editor cũ và tác giả thứ hai. Quy tắc cũ (một revision gốc cho mỗi app suốt vòng đời pod) đã bị bỏ ở P3: revision dùng chung
+  không phân biệt được các session, nên một session cũ có thể lưu đè bản mới hơn sau khi một lần nạp khác
+  đã tải lại.
+- **Pod từ chối khởi động** nếu có `.marimo.toml` trong thư mục làm việc, bất kỳ thư mục cha nào của nó,
+  hoặc `$HOME`. marimo ưu tiên các file đó hơn cấu hình đã khoá trong `XDG_CONFIG_HOME`.
+- **marimo 0.25.0 không có API đặt engine mặc định.** SQL cell mới dùng kết nối được định nghĩa gần nhất
+  mà người dùng chưa chọn khác, nên chính cell `db = egret.connect(...)` của mẫu app mới (P2) là thứ
+  khiến engine egret trở thành mặc định (D13).
+
 ## 6. Runtime, proxy và ranh giới bảo mật
 
 ### 6.1 marimo không được chung origin với egret
@@ -523,7 +552,7 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
    chạy của marimo (D14: shim của launcher trả lời, với test hợp đồng sẽ fail khi marimo đổi lệnh); pytest
    với một egret giả, kể
    cả test hợp đồng `StorageInterface` (có ca tải-lại-không-gắn-lại, §5.1) và test hợp đồng IPC (§6.3).
-   Quyết định engine mặc định của SQL cell (§4.4).
+   Client API phía pod theo §5.3. Plan: `docs/en/plans/2026-10-01-data-apps-p3-image-and-client.md`.
 4. **P4 — Origin apps, proxy, chế độ edit.** Ticket → cookie, proxy (allow-list route hoặc block list của
    S0, kiểm và chuyển tiếp một đường dẫn thô, xoá hoặc ghim `X-Notebook-Id`), đổi tên cookie sang `__Host-`
    và kiểm qua HTTPS trên kind, kiểm toán phía egret rằng route `GET` không có tác dụng phụ và CSRF vẫn dựa
@@ -532,6 +561,16 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
    đăng nhập egret đã hết hạn nhưng chưa xoá có phải chặn token app không; cột `impersonator` trên
    `app_sessions` trước khi mint token khi đang impersonate; kiểm `session_idle_secs <=
    session_absolute_secs` lúc khởi động; chỉ audit lời gọi bắt đầu khoá rate limit, không audit mọi 429.
+   Từ review cuối của P3: các endpoint phía pod ở §5.3 và việc mint token pod; proxy còn chặn
+   `/api/ai/*`, `/terminal`, `/api/kernel/copy` và `/api/kernel/rename` (image cũng từ chối copy/rename vào
+   draft, nhưng proxy mới là ranh giới); token tới pod qua `secretKeyRef`; tini làm PID 1; deployment xử
+   lý mã thoát của launcher (64 = env sai, không khởi động lại; 65 = có file config bị từ chối, cấp
+   `emptyDir` mới; 69 = lấy phiên bản thất bại, thử lại); kernel chạy dưới uid khác với server (hoặc
+   `PR_SET_DUMPABLE=0` tạm thời) để cell không đọc được token của server; config mới chỉ khoá `ai` và
+   `rtc_v2` — các khoá PEP 723 / venv / runtime vẫn mở; tải lại khi WebSocket cũ còn kết nối cần tải lại
+   lần hai; endpoint `egret.databases()`; chạy lại test hợp đồng marimo, e2e và kiểm kê route mỗi lần
+   nâng marimo; layout dạng grid (`layouts/*.grid.json`) chỉ ghi xuống đĩa của pod, không bao giờ về egret —
+   lưu cùng draft hoặc chặn layout grid ở chế độ edit.
 5. **P5 — Chế độ run.** Launcher theo phiên bản, UI publish/versions/khôi phục, trang xem app; launcher
    kernel (warm pool hoặc fork server), mức trần session mỗi pod, giới hạn bộ nhớ và UX lúc mở session
    đặt theo số đo trên kind (§6.3). **Mục tiêu khởi động (D15):** tiêu chí nghiệm thu = người xem mới trên
