@@ -157,12 +157,11 @@ async fn deleting_the_login_session_deletes_the_grant_and_its_app_sessions() {
         .await
         .unwrap();
 
-    let grants: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM analytics.app_grants WHERE id = $1")
-            .bind(grant)
-            .fetch_one(&fx.db.pool)
-            .await
-            .unwrap();
+    let grants: i64 = sqlx::query_scalar("SELECT count(*) FROM analytics.app_grants WHERE id = $1")
+        .bind(grant)
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap();
     let sessions: i64 =
         sqlx::query_scalar("SELECT count(*) FROM analytics.app_sessions WHERE id = $1")
             .bind(session)
@@ -195,7 +194,9 @@ async fn a_run_pod_token_needs_an_app_and_a_version_and_an_edit_one_a_user_and_n
         }
     };
     // valid shapes
-    insert("edit", Some(fx.user), None, None).await.expect("edit");
+    insert("edit", Some(fx.user), None, None)
+        .await
+        .expect("edit");
     insert("run", None, Some(fx.app), Some(fx.version))
         .await
         .expect("run");
@@ -246,12 +247,11 @@ async fn app_sessions_record_the_impersonator_and_null_it_when_that_user_is_dele
         .execute(&fx.db.pool)
         .await
         .unwrap();
-    let left: Option<Uuid> = sqlx::query_scalar(
-        "SELECT impersonator_user_id FROM analytics.app_sessions WHERE id = $1",
-    )
-    .bind(session)
-    .fetch_one(&fx.db.pool)
-    .await
-    .unwrap();
+    let left: Option<Uuid> =
+        sqlx::query_scalar("SELECT impersonator_user_id FROM analytics.app_sessions WHERE id = $1")
+            .bind(session)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
     assert_eq!(left, None);
 }
