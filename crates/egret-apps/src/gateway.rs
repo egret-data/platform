@@ -23,7 +23,13 @@
 
 use std::time::{Duration, Instant};
 
-use axum::{body::Bytes, extract::State, http::HeaderMap, routing::post, Json, Router};
+use axum::{
+    body::Bytes,
+    extract::State,
+    http::HeaderMap,
+    routing::{get, post},
+    Json, Router,
+};
 use egret_core::authz::{self, AuthTarget, ObjectRef, Pdp, Resource, Subject};
 use egret_core::ratelimit::Verdict;
 use egret_core::{Error, GroupId, Result, TabularResult, UserId, WorkspaceId};
@@ -62,7 +68,9 @@ pub struct QueryRequest {
 /// bearer token, with no frontend caller. Annotating it would make
 /// `npm run gen:api` generate a client nothing uses.
 pub fn gateway_router() -> Router<AppsState> {
-    Router::new().route("/apps/query", post(query))
+    Router::new()
+        .route("/apps/query", post(query))
+        .route("/apps/databases", get(databases))
 }
 
 async fn query(
@@ -102,6 +110,45 @@ async fn query(
     let outcome = run(&st, &sess, &req).await;
     audit(&st, &sess, Some(&req), &outcome, started.elapsed());
     outcome.map(Json)
+}
+
+/// `GET /api/apps/databases` — `egret.databases()`: the databases of the token's workspace, by name.
+///
+/// **Edit tokens only.** Enumerating a workspace's databases is an admin act in egret's own API
+/// (`database:manage`), so a viewer of a published app must not get it through an app they merely
+/// open; an author holds `query:run` and can run SQL against any of them anyway, so their names
+/// are no secret from the author. A run token is refused 403. Connection details (host, port,
+/// credentials) are never returned: name and engine only.
+async fn databases(
+    State(st): State<AppsState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>> {
+    let token = bearer(&headers).ok_or(Error::Unauthorized)?;
+    let idle = Duration::from_secs(st.cfg.session_idle_secs);
+    let sess = st
+        .sessions
+        .resolve(token, idle)
+        .await?
+        .ok_or(Error::Unauthorized)?;
+    ensure_user_active(&st.db, sess.user_id).await?;
+    let folder_id = app_folder(&st, &sess).await?;
+    ensure_feature_enabled(&st.db, sess.workspace_id).await?;
+    if sess.mode != AppMode::Edit {
+        return Err(Error::Forbidden);
+    }
+    authorize(&st, &sess, folder_id).await?;
+    let rows = sqlx::query(
+        "SELECT name, engine FROM query.databases WHERE workspace_id = $1 ORDER BY name",
+    )
+    .bind(sess.workspace_id.0)
+    .fetch_all(&st.db.pool)
+    .await
+    .map_err(anyhow::Error::from)?;
+    let databases: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| serde_json::json!({ "name": r.get::<String, _>("name"), "engine": r.get::<String, _>("engine") }))
+        .collect();
+    Ok(Json(serde_json::json!({ "databases": databases })))
 }
 
 async fn run(st: &AppsState, sess: &AppSession, req: &QueryRequest) -> Result<TabularResult> {

@@ -23,6 +23,7 @@ class State:
         self.pod_tokens: dict[str, dict] = {}
         self.session_tokens: dict[str, dict] = {}
         self.queries: list[dict] = []
+        self.databases: list[dict] = []
         self.events: list[dict] = []
 
 
@@ -106,11 +107,22 @@ async def query(request: Request) -> Response:
     )
 
 
+async def databases(request: Request) -> Response:
+    token = _bearer(request)
+    info = STATE.session_tokens.get(token)
+    if info is None:
+        return JSONResponse({"error": "session expired"}, status_code=401)
+    if info.get("mode") == "run":
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    return JSONResponse({"databases": STATE.databases})
+
+
 app = Starlette(
     routes=[
         Route("/api/apps/pod/apps/{app_id}/draft", draft, methods=["GET", "PUT"]),
         Route("/api/apps/pod/apps/{app_id}/versions/{version_id}", version, methods=["GET"]),
         Route("/api/apps/query", query, methods=["POST"]),
+        Route("/api/apps/databases", databases, methods=["GET"]),
     ]
 )
 

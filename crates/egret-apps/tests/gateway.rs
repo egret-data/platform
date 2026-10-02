@@ -377,6 +377,14 @@ impl Fixture {
         .await
     }
 
+    async fn databases(&self, token: Option<&str>) -> (StatusCode, Value) {
+        let mut req = Request::get("/api/apps/databases");
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        self.send_raw(req.body(Body::empty()).unwrap()).await
+    }
+
     async fn select1(&self, token: &str) -> (StatusCode, Value) {
         self.query(token, json!({"database": "trino_prod", "sql": "SELECT 1"}))
             .await
@@ -1135,4 +1143,68 @@ async fn group_membership_authorizes_and_clears_a_group_gated_app() {
     // The fixture viewer holds app:read directly but is not in the group.
     let outside = f.viewer_run().await;
     assert_eq!(f.select1(&outside).await.0, StatusCode::FORBIDDEN);
+}
+
+// ---------------------------------------------------------------- P4d: databases
+
+/// An author's picker: the databases of the token's workspace, by name, and nobody else's.
+#[tokio::test]
+async fn an_authors_token_lists_the_databases_of_its_own_workspace_only() {
+    let f = Fixture::new().await;
+    let token = f.mint(&f.editor, AppMode::Edit).await;
+    let (status, body) = f.databases(Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let names: Vec<&str> = body["databases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"trino_prod"), "{names:?}");
+    assert!(
+        !names.contains(&"b_only"),
+        "another workspace's database leaked: {names:?}"
+    );
+    let trino = body["databases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "trino_prod")
+        .unwrap();
+    assert_eq!(trino["engine"], "trino");
+    assert!(
+        trino.get("host").is_none() && trino.get("port").is_none(),
+        "connection details never leave egret: {trino}"
+    );
+}
+
+/// Enumerating a workspace's databases is an admin act in egret's own API; a viewer of a published
+/// app must not get it through the back door of an app they merely open.
+#[tokio::test]
+async fn a_viewers_run_token_cannot_enumerate_databases() {
+    let f = Fixture::new().await;
+    let token = f.viewer_run().await;
+    let (status, body) = f.databases(Some(&token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+}
+
+#[tokio::test]
+async fn databases_needs_a_live_token_and_the_authors_permissions_right_now() {
+    let f = Fixture::new().await;
+    assert_eq!(f.databases(None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        f.databases(Some("ega_nope")).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let token = f.mint(&f.editor, AppMode::Edit).await;
+    assert_eq!(f.databases(Some(&token)).await.0, StatusCode::OK);
+    // revoke the author's role, rebuild the PDP snapshot: the SAME token now fails
+    sqlx::query("DELETE FROM access_grants WHERE principal_id = $1")
+        .bind(f.editor.id)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let mut f = f;
+    f.rebuild().await;
+    assert_eq!(f.databases(Some(&token)).await.0, StatusCode::FORBIDDEN);
 }
