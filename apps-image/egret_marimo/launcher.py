@@ -269,10 +269,22 @@ def make_undumpable() -> bool:
     return ctypes.CDLL(None, use_errno=True).prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) == 0
 
 
+def keep_dumpable() -> bool:
+    """Test-only: leave the server readable, so a test can read ITS OWN view of the environment.
+
+    Honoured only under pytest, like the launcher's other overrides, so a production pod cannot
+    switch the protection off through its environment. The e2e tests read the server's environment
+    block with `ps eww` to prove the tokens are not in it, and `ps` can read nothing of an
+    undumpable process; the undumpable protection has its own test and a smoke check.
+    """
+    return bool(os.environ.get("EGRET_TEST_KEEP_DUMPABLE")) and _under_pytest()
+
+
 def _internal(mode: str) -> int:
     try:
         secrets = _read_secrets()
-        make_undumpable()
+        if not keep_dumpable():
+            make_undumpable()
         marimo_argv = build(mode, secrets)
     except LaunchError as e:
         print(f"egret-apps: {e}", file=sys.stderr)

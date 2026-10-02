@@ -58,6 +58,7 @@ def launch(tmp_path, egret):
             EGRET_VENV_SHIM=str(ROOT / "venv-shim"),
             EGRET_MARIMO_PORT=str(port),
             EGRET_TEST_INCLUDE_PID="1",  # the gateway records which kernel sent each query
+            EGRET_TEST_KEEP_DUMPABLE="1",  # `ps eww` must be able to read the server (see launcher.keep_dumpable)
             PYTEST_CURRENT_TEST="e2e",  # enables the test-only overrides and EGRET_TEST_INCLUDE_PID
         )
         env.update(extra)

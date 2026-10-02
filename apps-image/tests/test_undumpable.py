@@ -44,3 +44,16 @@ def test_make_undumpable_is_a_harmless_no_op_off_linux(monkeypatch):
 
     monkeypatch.setattr(sys, "platform", "darwin")
     assert launcher.make_undumpable() is False
+
+
+def test_the_keep_dumpable_override_is_honoured_only_under_pytest(monkeypatch):
+    from egret_marimo import launcher
+
+    monkeypatch.setenv("EGRET_TEST_KEEP_DUMPABLE", "1")
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "x")
+    assert launcher.keep_dumpable() is True
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    assert launcher.keep_dumpable() is False, "a production pod must not be able to disable the protection"
+    monkeypatch.delenv("EGRET_TEST_KEEP_DUMPABLE")
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "x")
+    assert launcher.keep_dumpable() is False
