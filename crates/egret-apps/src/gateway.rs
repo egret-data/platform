@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use axum::{body::Bytes, extract::State, http::HeaderMap, routing::post, Json, Router};
 use egret_core::authz::{self, AuthTarget, ObjectRef, Pdp, Resource, Subject};
+use egret_core::ratelimit::Verdict;
 use egret_core::{Error, GroupId, Result, TabularResult, UserId, WorkspaceId};
 use egret_metastore::Db;
 use egret_query_api::{Limits, Param};
@@ -81,9 +82,13 @@ async fn query(
     let started = Instant::now();
     // From here on every outcome is audited: the session names who and what.
     // `check` is true when the call is ALLOWED.
-    if !st.limiter.check(&sess.id.to_string()) {
+    if let Verdict::Denied { first } = st.limiter.verdict(&sess.id.to_string()) {
         let outcome = Err(Error::TooManyRequests);
-        audit(&st, &sess, None, &outcome, started.elapsed());
+        // One audit row per lockout: the call that tripped the limiter. The calls it
+        // then refuses are not events, or a runaway cell would fill the audit table.
+        if first {
+            audit(&st, &sess, None, &outcome, started.elapsed());
+        }
         return outcome.map(Json);
     }
     let req: QueryRequest = match serde_json::from_slice(&body) {
@@ -326,7 +331,7 @@ fn audit(
     };
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(sess.user_id.0),
-        impersonator: None,
+        impersonator: sess.impersonator.map(|u| u.0),
         workspace_id: Some(sess.workspace_id.0),
         action: "app:query".into(),
         resource_type: "app".into(),

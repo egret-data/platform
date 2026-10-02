@@ -84,6 +84,19 @@ struct State {
 ///
 /// Hashing bounds what one bucket **costs**; the sweep in [`Self::check_at`]
 /// bounds **how many** of them there are.
+/// What [`RateLimiter::verdict_at`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Allowed,
+    /// Over the limit. `first` is true for the one call that TRIPPED the limiter (it
+    /// started the lockout) and false for every call refused inside that lockout, so
+    /// a caller that records denials can record one per lockout rather than one per
+    /// refused call.
+    Denied {
+        first: bool,
+    },
+}
+
 #[derive(Clone)]
 pub struct RateLimiter {
     inner: Arc<Mutex<State>>,
@@ -131,6 +144,11 @@ impl RateLimiter {
     /// distinct keys seen since the last sweep plus everything still locked
     /// out — one window of lag on an already-bounded set, not open growth.
     pub fn check_at(&self, key: &str, now: Instant) -> bool {
+        self.verdict_at(key, now) == Verdict::Allowed
+    }
+
+    /// [`Self::check_at`], saying whether a denial was the first of its lockout.
+    pub fn verdict_at(&self, key: &str, now: Instant) -> Verdict {
         let mut st = self.inner.lock().unwrap();
         match st.next_sweep_at {
             Some(due) if now >= due => {
@@ -146,7 +164,7 @@ impl RateLimiter {
         let e = st.buckets.entry(Self::digest(key)).or_default();
         if let Some(until) = e.locked_until {
             if now < until {
-                return false;
+                return Verdict::Denied { first: false };
             }
             e.locked_until = None;
             e.attempts.clear();
@@ -154,14 +172,18 @@ impl RateLimiter {
         e.attempts.retain(|t| now.duration_since(*t) < self.window);
         if e.attempts.len() as u32 >= self.max {
             e.locked_until = Some(now + self.lockout);
-            return false;
+            return Verdict::Denied { first: true };
         }
         e.attempts.push(now);
-        true
+        Verdict::Allowed
     }
 
     pub fn check(&self, key: &str) -> bool {
         self.check_at(key, Instant::now())
+    }
+
+    pub fn verdict(&self, key: &str) -> Verdict {
+        self.verdict_at(key, Instant::now())
     }
 
     /// Total bytes the map spends on keys. Test-only probe for the bound
