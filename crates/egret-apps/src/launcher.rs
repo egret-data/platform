@@ -50,6 +50,53 @@ pub trait AppPodLauncher: Send + Sync {
     fn mode(&self) -> &'static str;
 }
 
+/// A shared launcher is a launcher: the proxy's resolver and the reaper hold the same one.
+#[async_trait]
+impl<T: AppPodLauncher + ?Sized> AppPodLauncher for std::sync::Arc<T> {
+    async fn ensure_edit(&self, key: EditPodKey, timeout: Duration) -> Result<PodEndpoint> {
+        (**self).ensure_edit(key, timeout).await
+    }
+    async fn stop_edit(&self, key: EditPodKey) -> Result<()> {
+        (**self).stop_edit(key).await
+    }
+    async fn idle_edit_pods(&self, idle: Duration) -> Result<Vec<EditPodKey>> {
+        (**self).idle_edit_pods(idle).await
+    }
+    fn mode(&self) -> &'static str {
+        (**self).mode()
+    }
+}
+
+/// Every `every`, stop the edit pods nobody has asked for in `idle`. Runs until the runtime
+/// ends. A failure to stop one pod is logged and the next tick tries again; it never ends the loop.
+pub fn spawn_reaper(
+    launcher: std::sync::Arc<dyn AppPodLauncher>,
+    idle: Duration,
+    every: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(every);
+        loop {
+            tick.tick().await;
+            let keys = match launcher.idle_edit_pods(idle).await {
+                Ok(k) => k,
+                Err(e) => {
+                    tracing::warn!(error = %e, "app pod reaper: listing idle pods failed");
+                    continue;
+                }
+            };
+            for key in keys {
+                match launcher.stop_edit(key).await {
+                    Ok(()) => tracing::info!(pod = %key.pod_ref(), "stopped an idle app pod"),
+                    Err(e) => {
+                        tracing::warn!(error = %e, pod = %key.pod_ref(), "app pod reaper: stop failed")
+                    }
+                }
+            }
+        }
+    })
+}
+
 /// Makes any launcher the proxy's [`PodResolver`]. Run pods arrive with P5.
 pub struct LauncherPods<L> {
     pub launcher: L,
@@ -190,6 +237,69 @@ mod tests {
             pods.run_pod(Uuid::new_v4(), Uuid::new_v4()).await,
             Err(Error::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn the_reaper_stops_idle_pods_and_survives_a_failing_one() {
+        use std::sync::Arc;
+        struct Flaky {
+            inner: FakeAppPodLauncher,
+            fail_first: Mutex<Option<EditPodKey>>,
+        }
+        #[async_trait]
+        impl AppPodLauncher for Flaky {
+            async fn ensure_edit(&self, k: EditPodKey, t: Duration) -> Result<PodEndpoint> {
+                self.inner.ensure_edit(k, t).await
+            }
+            async fn stop_edit(&self, k: EditPodKey) -> Result<()> {
+                if self.fail_first.lock().unwrap().take() == Some(k) {
+                    return Err(Error::from(anyhow::anyhow!("cluster hiccup")));
+                }
+                self.inner.stop_edit(k).await
+            }
+            async fn idle_edit_pods(&self, i: Duration) -> Result<Vec<EditPodKey>> {
+                self.inner.idle_edit_pods(i).await
+            }
+            fn mode(&self) -> &'static str {
+                "flaky"
+            }
+        }
+        let (a, b) = (key(), key());
+        let launcher = Arc::new(Flaky {
+            inner: fake(),
+            fail_first: Mutex::new(Some(a)),
+        });
+        launcher.inner.set_idle(vec![a, b]);
+        let handle = spawn_reaper(
+            launcher.clone(),
+            Duration::from_secs(1),
+            Duration::from_millis(20),
+        );
+        // `a` failed once and stays idle: report it again; `b` was stopped on the first tick.
+        for _ in 0..100 {
+            if launcher.inner.stopped() == [b] {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            launcher.inner.stopped(),
+            [b],
+            "one failure must not stop the others"
+        );
+        launcher.inner.set_idle(vec![a]);
+        for _ in 0..100 {
+            if launcher.inner.stopped().contains(&a) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            launcher.inner.stopped(),
+            [b, a],
+            "the loop is still alive and retried `a`"
+        );
+        handle.abort();
     }
 
     #[tokio::test]

@@ -13,7 +13,7 @@ pub mod subprocess_pod;
 pub mod template;
 
 pub use gateway::{gateway_router, QueryRequest};
-pub use launcher::{AppPodLauncher, EditPodKey, FakeAppPodLauncher, LauncherPods};
+pub use launcher::{spawn_reaper, AppPodLauncher, EditPodKey, FakeAppPodLauncher, LauncherPods};
 pub use podapi::{pod_router, PodApiState};
 pub use proxy::{
     pod_ref, proxy_router, PodEndpoint, PodResolver, ProxyConfig, ProxyState, UnavailablePods,
