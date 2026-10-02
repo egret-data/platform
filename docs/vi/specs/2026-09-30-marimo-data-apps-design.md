@@ -38,6 +38,20 @@ edit là nơi tác giả viết, chế độ run là app đã publish.
 | D15 | **Nghiệm thu thời gian khởi động của P5 tính tương đối so với chế độ thread** (≤ 0,5 giây trung vị, ≤ 1 giây cho 3 đồng thời, Linux, ≥ 5 lần chạy); "< 2 giây" là mục tiêu trải nghiệm riêng, không chặn (2026-10-01). | Mức sàn tải trang ≈ 1,75 giây nằm ngoài tầm của launcher kernel (S0b). |
 | D16 | **Việc pool bị treo khi tắt được phủ bằng một test nghiệm thu trong P5**, không làm spike riêng (2026-10-01). | Áp dụng cho launcher mà P5 chọn; trên k8s thứ tự tắt này xảy ra thường xuyên. |
 
+### 1.1 Các quyết định đề xuất cho P4 (2026-10-02) — **chưa thống nhất với người dùng**
+
+Phát sinh khi viết plan P4 (`docs/en/plans/2026-10-02-data-apps-p4-origin-proxy-edit.md`) vì spec chưa nói. D19 và D23 là câu hỏi cho người dùng; phần còn lại là mặc định của plan, đảo lại nếu người dùng không đồng ý.
+
+| # | Đề xuất | Lý do |
+|---|---|---|
+| D17 | Apps host chạy bằng **listener riêng** (`apps.listen`), chỉ gắn route ticket và proxy. | Một router phân theo Host header khiến một lỗi lộ cả hai bề mặt; hai cổng thì tách bạch về cấu trúc. |
+| D18 | **Grant là một ticket đã redeem**: một dòng trong `analytics.app_grants`; cookie của apps origin giữ plaintext có hash là `cookie_hash`. `login_sid` cascade từ `sessions`. | Dùng một lần nguyên tử, logout huỷ grant theo cấu trúc, đúng với nhiều replica egret. |
+| D19 | **Token truy vấn cấp theo grant**, do proxy cấp lười; thiếu cache thì cấp mới. Token của grant bị thu hồi khi WebSocket cuối cùng trên replica đó đóng. **Câu hỏi mở:** số WebSocket đang mở đếm theo từng replica, nên với nhiều replica chỉ còn hết hạn idle (30 phút) làm lưới đỡ — chấp nhận, hay đếm chung trong DB? | Token theo cookie của S0 hỏng khi reload iframe (WebSocket cũ đóng đã thu hồi nó). |
+| D20 | Listener của egret từ chối mọi request có `Sec-Fetch-Site: same-site`. **Chưa chứng minh** cho tới khi đo ở P4e; nằm ngoài danh sách của spec. | S0 đo thấy cookie Lax của người xem đi kèm request từ apps origin; kiểm `GET` là cần nhưng chưa đủ. |
+| D21 | Cookie là `__Host-egret_session` / `__Host-egret_csrf` khi `auth.cookie_secure` bật, giữ tên hiện tại nếu không; frontend đọc cả hai. | `__Host-` cần `Secure`; Chromium từ chối qua http (S0). |
+| D22 | Edit pod dùng **trait `AppPodLauncher` mới** trong `egret-apps`; không mở rộng `KernelLauncher` của `egret-kernel` (thay cho chữ "generalised" ở §6.3). | P6 xoá nửa Jupyter của `egret-kernel`. |
+| D23 | **Chặn grid layout ở chế độ edit** thay vì lưu cùng draft. **Câu hỏi mở:** mất grid layout ở v1 có chấp nhận được không? | Lưu nó cần đổi schema và một hook của marimo chưa tồn tại. |
+
 ## 2. Những gì code nói
 
 Đọc trước khi thiết kế; mỗi điều dưới đây đã định hình thiết kế.
