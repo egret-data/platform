@@ -440,6 +440,57 @@ async fn a_running_iteration_keeps_its_ended_roots_family() {
     assert!(w.gone(&a).await && w.gone(&b).await);
 }
 
+/// An index row whose URI is not under its execution's prefix (here: the
+/// row names another namespace than the execution's) is a row `delete_prefix`
+/// would not reach: the family is kept, counted as failed, and logged.
+#[tokio::test]
+async fn index_rows_outside_the_executions_prefix_keep_the_family() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let e = w.exec("SUCCESS", 400, None).await;
+    let own = w.file(e, "a.txt").await;
+    let run: Uuid = sqlx::query_scalar(
+        "INSERT INTO workflow.task_runs \
+           (execution_id, run_ix, task_ix, task_id, type_id, state, history) \
+         VALUES ($1, 99, 0, 'Write_It', 'io.kestra.plugin.core.storage.Write', 'SUCCESS', \
+                 '[\"SUCCESS\"]'::jsonb) RETURNING id",
+    )
+    .bind(e)
+    .fetch_one(&w.db.pool)
+    .await
+    .unwrap();
+    let elsewhere = format!(
+        "{}b.txt",
+        uri::task_prefix("w9a.elsewhere", FLOW, e, "Write_It", run).unwrap()
+    );
+    let mut conn = w.db.pool.acquire().await.unwrap();
+    index_task_files(
+        &mut conn,
+        w.ws,
+        run,
+        &[StoredFile {
+            uri: elsewhere.clone(),
+            size: 1,
+        }],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let report = w.pass().await;
+
+    assert!(report.failed >= 1, "{report:?}");
+    assert!(w.kept(&own).await, "{report:?}");
+    assert!(w.indexed(&elsewhere).await);
+    assert!(!w.pruned_at(e).await);
+    // Clean up, so later tests' passes do not count it.
+    sqlx::query("DELETE FROM workflow.execution_files WHERE execution_id = $1")
+        .bind(e)
+        .execute(&w.db.pool)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn a_failed_store_delete_keeps_the_rows_and_the_next_pass_retries() {
     let _g = SERIAL.lock().await;
