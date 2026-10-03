@@ -2135,9 +2135,11 @@ fn unconnected_pool() -> sqlx::PgPool {
 }
 
 /// **With `container_runner = none` (the default) the production registry is
-/// byte-for-byte what it was before W5a** -- `Handlers::with_core_tasks()`,
-/// no orphan sweep, no default runner for publish -- and with `docker` it is
-/// that plus exactly the four script types and their two aliases.
+/// what it was before W5a** -- `Handlers::with_core_tasks()`, no orphan
+/// sweep, no default runner for publish -- plus, since W9a Task 11, the two
+/// core storage tasks that need the pool (`handlers::storage::register`), on
+/// every deployment; and with `docker` it is that plus exactly the four
+/// script types and their two aliases.
 #[tokio::test]
 async fn with_container_runner_none_the_registry_is_unchanged() {
     use egret_workflow::scripts::RunnerKind;
@@ -2153,7 +2155,17 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         egret_workflow::runtime::handlers_for(&cfg, unconnected_pool(), no_secrets())
             .await
             .expect("`none` needs nothing");
-    assert_eq!(reg.type_ids(), Handlers::with_core_tasks().type_ids());
+    let mut want: Vec<String> = Handlers::with_core_tasks()
+        .type_ids()
+        .into_iter()
+        .map(String::from)
+        .collect();
+    want.extend([
+        egret_workflow::worker::handlers::storage::DELETE.to_string(),
+        egret_workflow::worker::handlers::storage::PURGE_CURRENT_EXECUTION_FILES.to_string(),
+    ]);
+    want.sort_unstable();
+    assert_eq!(reg.type_ids(), want);
     assert_eq!(default_runner, None, "publish has no runner to default to");
     assert!(reg.orphan_sweep().is_none(), "nothing to sweep");
 
@@ -2197,13 +2209,15 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         vec![
             "egret.container",
             "egret.script.python",
+            "io.kestra.plugin.core.storage.Delete",
+            "io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles",
             "io.kestra.plugin.scripts.python.Commands",
             "io.kestra.plugin.scripts.python.Script",
             "io.kestra.plugin.scripts.shell.Commands",
             "io.kestra.plugin.scripts.shell.Script",
         ]
     );
-    assert_eq!(reg.type_ids().len(), core + 6 + 9);
+    assert_eq!(reg.type_ids().len(), core + 2 + 6 + 9);
     assert_eq!(default_runner, Some(RunnerKind::Docker));
     assert!(
         reg.orphan_sweep().is_some(),

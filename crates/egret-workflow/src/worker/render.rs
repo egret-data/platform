@@ -423,8 +423,14 @@ impl Surface {
                     // "value 1", "value 2", "value 3"), so the key is the nth of
                     // the same object and has to be read back from the loop
                     // run's own `rendered`.
+                    //
+                    // Only an OBJECT is parsed (W9a Task 11): a `Loop` over a
+                    // file stores its whole values array here, up to
+                    // `max_read_bytes`, and every load of every iteration
+                    // would otherwise parse it to find no key.
                     "key": rendered
                         .as_deref()
+                        .filter(|r| r.trim_start().starts_with('{'))
                         .and_then(|r| serde_json::from_str::<Value>(r).ok())
                         .and_then(|v| match v {
                             Value::Object(m) => m
@@ -559,6 +565,49 @@ impl Surface {
         self.files
             .as_ref()
             .and_then(|f| f.0.infrastructure_failure())
+    }
+
+    /// W9a Task 11 (spec §9.3): the values of a `Loop` whose `values:`
+    /// rendered to `uri`, as the JSON array of strings `advance()` iterates --
+    /// or why not, which fails the loop run with that message.
+    ///
+    /// The file is resolved through this surface's snapshot -- the one
+    /// readability decision; `outputs.<task>.uri` is in it because every
+    /// terminated task's outputs are -- and read whole, capped by
+    /// `workflow.storage.max_read_bytes` (there is no loop-width limit in the
+    /// code to reuse). It is read as BYTES, because a plugin's STORE file is
+    /// binary Ion and not UTF-8, and parsed by `storage::ion`, the one Ion
+    /// reader, one top-level value per iteration value. A store OUTAGE is
+    /// recorded on the scope, so `settle` turns it into an `Err`.
+    ///
+    /// Kestra reads the file in batches of `concurrencyLimit` as iterations
+    /// end (`Loop.java:404`, `FlowableUtils.java:533-578`); egret reads it
+    /// once, before the loop starts, so a `null` record fails the loop before
+    /// its first iteration where Kestra fails it at the batch that reaches it
+    /// (`loop_over_ion.null_record`: one iteration ran).
+    pub(super) fn loop_values_from_file(&self, uri: &str) -> std::result::Result<String, String> {
+        if !uri.starts_with(crate::storage::uri::SCHEME_PREFIX) {
+            return Err(format!(
+                "{uri}: a Loop's `values:` reads a file only from egret's internal storage \
+                 (`kestra:///…`); `file://` is refused and `nsfile://` is a namespace file, \
+                 which egret does not have yet"
+            ));
+        }
+        let Some(files) = self.files.clone() else {
+            return Err(format!(
+                "{uri} cannot be read: this render has no file scope"
+            ));
+        };
+        let bytes =
+            crate::runners::env::on_a_render_thread(|| files.0.read_bytes(uri, LOOP_READS_WHOLE))??;
+        let (values, _) =
+            crate::storage::ion::values_to_json(std::io::Cursor::new(bytes), usize::MAX)
+                .map_err(|e| format!("{uri} is not an ION file a Loop can iterate: {e}"))?;
+        let strings = values
+            .into_iter()
+            .map(ion_value_to_string)
+            .collect::<std::result::Result<Vec<String>, String>>()?;
+        serde_json::to_string(&strings).map_err(|e| format!("{uri}: {e}"))
     }
 
     /// Attach the file scope every later [`Surface::context`] carries.
@@ -1072,6 +1121,7 @@ pub(super) fn render_expressions(
     plan: &Plan,
     state: &mut ExecutionState,
     now: Tick,
+    failures: &mut Vec<(RunIx, String)>,
 ) -> Pass {
     let pending: Vec<RunIx> = (0..state.runs.len())
         .filter(|&ix| {
@@ -1106,11 +1156,63 @@ pub(super) fn render_expressions(
         let expression = expression_of(plan, state.runs[ix].task).expect("filtered on Some above");
         let cx = surface.context(plan, state, Some(ix));
         match crate::render_str(&expression, &cx) {
+            // W9a Task 11 (spec §9.3): a `Loop` whose `values:` renders to a
+            // file URI iterates the FILE. Kestra's test is
+            // `URIFetcher.supports` -- the rendered text starts with one of
+            // its three schemes -- and its `Loop.initFromUri` reads the file
+            // before any iteration exists. Here the worker reads it, and
+            // `advance()` gets the JSON array it already knows how to iterate.
+            Ok(value)
+                if matches!(plan.tasks[state.runs[ix].task].kind, TaskKind::Loop { .. })
+                    && is_file_uri(&value) =>
+            {
+                match surface.loop_values_from_file(&value) {
+                    Ok(values) => state.runs[ix].rendered = Some(values),
+                    Err(why) => {
+                        fail(state, ix);
+                        failures.push((ix, why));
+                    }
+                }
+            }
             Ok(value) => state.runs[ix].rendered = Some(value),
             Err(_) => fail(state, ix),
         }
     }
     Pass::Rendered
+}
+
+/// Kestra's `URIFetcher.supports(String)`, verbatim: the text STARTS with
+/// `kestra://`, `file://` or `nsfile://` (`URIFetcher.java:19,65-67`) --
+/// nothing is trimmed, and anything else is a `values:` of the two JSON shapes.
+fn is_file_uri(rendered: &str) -> bool {
+    ["kestra://", "file://", "nsfile://"]
+        .iter()
+        .any(|scheme| rendered.starts_with(scheme))
+}
+
+/// What a `Loop`'s reading of its values file says when it is not whole:
+/// the end of `Snapshot::read_bytes`'s over-cap message.
+const LOOP_READS_WHOLE: &str = "a Loop reads its values file whole before its first iteration";
+
+/// One top-level Ion value as the string Kestra puts on `loopRun.value` --
+/// `FlowableUtils.ionValueToString` (`FlowableUtils.java:583-590`): a string
+/// as itself, a number's text, `null` an error with Kestra's own message, and
+/// anything else as JSON.
+///
+/// The value arrives through `storage::ion`'s JSON projection, so two Ion
+/// types read differently from Kestra's (`w9a-storage.json`
+/// `loop_over_ion.edge_file`, measured): a decimal is a JSON number
+/// (`12.50` is `"12.5"`, Kestra `"12.50"`) and a timestamp is its Ion text
+/// (`"2025-12-03T12:00:00Z"`, Kestra the JSON string
+/// `"\"2025-12-03T12:00:00.000000Z\""`). Pinned by
+/// `tests/storage_tasks.rs::a_loop_over_the_edge_file_reads_kestras_values_but_two`.
+fn ion_value_to_string(value: Value) -> std::result::Result<String, String> {
+    match value {
+        Value::Null => Err("Found a null value in the ION file".to_string()),
+        Value::String(s) => Ok(s),
+        Value::Number(n) => Ok(n.to_string()),
+        other => Ok(other.to_string()),
+    }
 }
 
 /// A render that will not resolve FAILS the run.

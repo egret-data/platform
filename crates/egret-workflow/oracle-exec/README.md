@@ -6234,7 +6234,9 @@ exactly as `loop-switch` does. Both are corrected in `baseline.txt`.
 
 ### The residual baseline, by construct and owner
 
-**109 entries** — it read `111` until W8 Task 7, two banks behind.
+**108 entries** — it read `111` until W8 Task 7, two banks behind, and `109`
+until W9a Task 11 banked `valids/loop-values-from-uri` (a `Loop` over the ION
+file a `core.storage.Write` wrote; the `Loop` row below fell 19 → 18 with it).
 `the_residual_baseline_is_attributed_to_a_construct_or_named` derives the rows
 from the baselined flows' own YAML on every run and fails if one moves; **the
 rows overlap and this is not a partition**, but the remainder is exhaustive and
@@ -6245,7 +6247,7 @@ found.
 
 | baselined entries declaring it | construct | owner |
 |---|---|---|
-| 19 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
+| 18 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
 | 16 | `finally:` | **unclaimed** |
 | 16 | `ExecutionUpdatableTask` (`Labels`, `SetVariables`, `UnsetVariables`, `Exit`) | **unclaimed** |
 | 5 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8 Task 5 banked seven of its twelve**; the five that remain are held by the FLOWABLE and not by the flag — see the paragraph below |

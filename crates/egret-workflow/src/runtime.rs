@@ -694,6 +694,14 @@ pub async fn handlers_for(
     cfg.validate_plugin_host()
         .map_err(egret_core::Error::InvalidInput)?;
     let mut handlers = Handlers::with_core_tasks();
+    // W9a Task 11: `Delete` and `PurgeCurrentExecutionFiles` need the pool,
+    // so they are registered here, for every deployment, with or without a
+    // container runner.
+    crate::worker::handlers::storage::register(
+        &mut handlers,
+        pool.clone(),
+        crate::storage::current(),
+    );
     let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) = match cfg
         .container_runner
     {

@@ -2053,6 +2053,29 @@ fn render_guarded_with(
     })
 }
 
+/// Run `f` on a thread of its own and wait for it, the way a render runs --
+/// for a caller that reads a file through a `FileScope` outside a template.
+///
+/// W9a Task 11: `worker::render` reads a `Loop`'s `values:` file in `settle`,
+/// on a tokio worker, and `Snapshot::read_bytes` refuses a runtime thread
+/// (`block_on` would panic there). This is the render's own arrangement --
+/// [`off_the_runtime`] around a scoped thread -- so the runtime keeps running
+/// while the read blocks. `Err` when the thread cannot start or panics.
+pub(crate) fn on_a_render_thread<T: Send>(f: impl FnOnce() -> T + Send) -> Result<T, String> {
+    off_the_runtime(|| {
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("egret-render".to_string())
+                .stack_size(RENDER_STACK_BYTES)
+                .spawn_scoped(scope, f)
+                .map_err(|e| format!("could not start a render thread: {e}"))?;
+            worker
+                .join()
+                .map_err(|_| "the render thread panicked".to_string())
+        })
+    })
+}
+
 /// Run `join`-on-a-render-thread `f` so the runtime keeps running under it.
 ///
 /// **W9a Task 4 fix round 1, C1.** A render can block its own thread on the

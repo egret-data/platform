@@ -1764,8 +1764,31 @@ pub(super) async fn settle(
         apply(state, &Command::SetExecutionState { state: terminal });
         marks.observe(&snapshot, state, seq);
     }
-    let (spawns, subflows) = drive(ctx, &surface, state, now, &mut marks, &mut seq)?;
+    // W9a Task 11: the runs a render failed WITH a message (a `Loop` whose
+    // values file cannot be iterated), written beside the state `persist`
+    // writes. Every other render failure still fails its run without one.
+    let mut failures: Vec<(RunIx, String)> = Vec::new();
+    let (spawns, subflows) = drive(
+        ctx,
+        &surface,
+        state,
+        now,
+        &mut marks,
+        &mut seq,
+        &mut failures,
+    )?;
     persist(conn, ctx, before, state, release, &marks, seq).await?;
+    for (run, message) in &failures {
+        sqlx::query(
+            "UPDATE workflow.task_runs SET message = $3 WHERE execution_id = $1 AND run_ix = $2",
+        )
+        .bind(ctx.id)
+        .bind(*run as i32)
+        .bind(message)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    }
     spawn::spawn_all(conn, ctx, state, &spawns).await?;
     // **After `persist`, exactly like the loop spawner, and for the same
     // reason**: the child's row names `(execution, run_ix)` and that run has to
@@ -2693,6 +2716,7 @@ fn drive(
     now: Tick,
     marks: &mut Marks,
     seq: &mut i64,
+    failures: &mut Vec<(RunIx, String)>,
 ) -> Result<(Vec<Requested>, Vec<subflow::Requested>)> {
     let plan = &ctx.plan;
     let mut spawns = Vec::new();
@@ -2720,7 +2744,7 @@ fn drive(
         }
 
         let snapshot = state.clone();
-        if render::render_expressions(surface, plan, state, now) == Pass::Rendered {
+        if render::render_expressions(surface, plan, state, now, failures) == Pass::Rendered {
             *seq += 1;
             marks.observe(&snapshot, state, *seq);
             continue;

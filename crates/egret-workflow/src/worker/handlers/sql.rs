@@ -288,28 +288,10 @@ impl Sql {
                     .to_string(),
             );
         };
-        if let Some(prefix) = task.render.files().and_then(|f| f.0.task_prefix()) {
-            return Ok((fs.clone(), prefix.to_string()));
-        }
-        let flow = (
-            crate::runners::render_str("{{ flow.namespace }}", &task.render),
-            crate::runners::render_str("{{ flow.id }}", &task.render),
-        );
-        let (Ok(namespace), Ok(flow_id)) = flow else {
-            return Err(
-                "this run has no storage prefix for the file `fetch: STORE` writes: it is not \
-                 a task run of a flow's execution"
-                    .to_string(),
-            );
-        };
-        let prefix = crate::storage::uri::task_prefix(
-            &namespace,
-            &flow_id,
-            task.execution_id,
-            &task.task_id,
-            task.run_id,
-        )?;
-        Ok((fs.clone(), prefix))
+        Ok((
+            fs.clone(),
+            super::task_storage_prefix(task, "`fetch: STORE`")?,
+        ))
     }
 
     /// What one port failure means, by VARIANT rather than by message.

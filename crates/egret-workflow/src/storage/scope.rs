@@ -170,13 +170,18 @@ impl RenderFiles for Snapshot {
     }
 
     fn read_utf8(&self, uri: &str) -> std::result::Result<String, String> {
+        let bytes = self.read_bytes(uri, "read() returns the whole file as a string")?;
+        decode_utf8(uri, bytes).map_err(|e| e.to_string())
+    }
+
+    fn read_bytes(&self, uri: &str, whole: &str) -> std::result::Result<Vec<u8>, String> {
         let file = self.resolve(uri)?;
         let object = self.store.object_uri(self.workspace, uri)?;
         let cap = self.store.caps.max_read_bytes;
         let over_cap = || {
             format!(
-                "{uri} is larger than workflow.storage.max_read_bytes ({cap} bytes): read() \
-                 returns the whole file as a string, so it reads only files up to that size"
+                "{uri} is larger than workflow.storage.max_read_bytes ({cap} bytes): {whole}, \
+                 so it reads only files up to that size"
             )
         };
         // The index knows the size: refuse without a download (fix round 1,
@@ -189,7 +194,7 @@ impl RenderFiles for Snapshot {
         // an error rather than a panic.
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(format!(
-                "{uri} cannot be read on this thread: read() must render on egret's render \
+                "{uri} cannot be read on this thread: a file is read on egret's render \
                  thread, not on a runtime worker"
             ));
         }
@@ -198,8 +203,8 @@ impl RenderFiles for Snapshot {
         // (it does on MemStore, which proves nothing about S3).
         if self.handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
             return Err(format!(
-                "{uri} cannot be read: read() needs the multi-thread runtime, and this render \
-                 runs on a current-thread one, whose only thread is waiting for it"
+                "{uri} cannot be read: reading a file needs the multi-thread runtime, and \
+                 this render runs on a current-thread one, whose only thread is waiting for it"
             ));
         }
         let bytes = self.handle.block_on(async {
@@ -239,7 +244,7 @@ impl RenderFiles for Snapshot {
         if bytes.len() as u64 > cap {
             return Err(over_cap());
         }
-        decode_utf8(uri, bytes).map_err(|e| e.to_string())
+        Ok(bytes)
     }
 
     fn infrastructure_failure(&self) -> Option<String> {
@@ -270,6 +275,9 @@ impl RenderFiles for Unconfigured {
         Err(FileUnavailable::Refused(unconfigured_message(uri)))
     }
     fn read_utf8(&self, uri: &str) -> std::result::Result<String, String> {
+        Err(unconfigured_message(uri))
+    }
+    fn read_bytes(&self, uri: &str, _whole: &str) -> std::result::Result<Vec<u8>, String> {
         Err(unconfigured_message(uri))
     }
     fn task_prefix(&self) -> Option<&str> {

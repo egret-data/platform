@@ -1771,9 +1771,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // **Which handlers run is `egret_workflow::runtime::handlers_for`'s
     // decision (W5a Task 5), made there so a test can reach it.** With
     // `workflow.container_runner = none` (the default) it is
-    // `Handlers::with_core_tasks()` exactly -- `core.log.Log`,
-    // `core.debug.Return`, `core.execution.Fail`, `core.flow.Sleep` -- as
-    // before W5a. With `docker` or `kubernetes` it adds Kestra's four script
+    // `Handlers::with_core_tasks()` -- `core.log.Log`, `core.debug.Return`,
+    // `core.execution.Fail`, `core.flow.Sleep` and, since W9a Task 11,
+    // `core.storage.Write`/`Size` over the store installed above -- plus
+    // `core.storage.Delete`/`PurgeCurrentExecutionFiles`, which need the
+    // pool. With `docker` or `kubernetes` it adds Kestra's four script
     // task types and W4's two aliases over ONE runner built here, gated at run
     // time by the workspace feature `workflow_containers` (off by default) and
     // the `plugin_configurations` image allowlist, and the reaper's tick
@@ -1788,11 +1790,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // does not fail the run: it propagates out of `run_one`, the run keeps its
     // lease, `reap` clears only `claimed_at` a `working_timeout` later, `claim`
     // re-selects it, and the cycle repeats for ever with one `warn` per cycle.
-    // `oracle-exec/README.md` item 19 carries this. **Seven of fifteen
+    // `oracle-exec/README.md` item 19 carries this. **Seven of nineteen
     // publishable types hang in production, whatever the runner** (`egret.sql`,
     // `egret.python`, `egret.dataapi.call`, `egret.dataset.refresh`,
-    // `egret.report.send`, `core.http`, `core.slack`); this comment said "nine
-    // of thirteen" before W5a folded `egret.container`/`egret.script.python`
+    // `egret.report.send`, `core.http`, `core.slack`; W9a Task 11's four core
+    // storage tasks are all registered, `Write` and `Size` in
+    // `with_core_tasks` and `Delete`/`PurgeCurrentExecutionFiles` by
+    // `handlers::storage::register` inside `handlers_for`); this comment said
+    // "seven of fifteen" until W9a Task 11, and "nine of thirteen" before W5a folded `egret.container`/`egret.script.python`
     // into aliases of four script types that a runner now serves. Publish
     // (`publish::check_script_tasks`) refuses EVERY script task when no
     // runner is configured -- with or without a `taskRunner:` -- and one whose

@@ -129,6 +129,15 @@ impl Handlers {
         r.add_publishable(Arc::new(handlers::ret::Return));
         r.add_publishable(Arc::new(handlers::fail::Fail));
         r.add_publishable(Arc::new(handlers::sleep::Sleep::new()));
+        // W9a Task 11: the two core storage tasks that need no connection.
+        // `Write` takes the process-wide store, read HERE -- this function is
+        // wiring (spec §4.6), and `egret-bin` installs the store before it
+        // builds the registry. `Delete` and `PurgeCurrentExecutionFiles` need
+        // the pool and are added by `handlers::storage::register`.
+        r.add_publishable(Arc::new(handlers::storage::Write::new(
+            crate::storage::current(),
+        )));
+        r.add_publishable(Arc::new(handlers::storage::Size));
         r
     }
 
@@ -283,8 +292,11 @@ mod tests {
     /// `io.kestra.plugin.core.log.Log`, not because this function mentions it.
     /// Delete that alias and this list loses an entry without anybody editing
     /// `with_core_tasks`.
+    ///
+    /// W9a Task 11 adds `core.storage.Write` and `Size`, the two storage tasks
+    /// that need no pool.
     #[test]
-    fn the_core_registry_holds_the_four_kestra_type_ids_and_the_one_alias() {
+    fn the_core_registry_holds_the_six_kestra_type_ids_and_the_one_alias() {
         assert_eq!(
             Handlers::with_core_tasks().type_ids(),
             vec![
@@ -293,6 +305,8 @@ mod tests {
                 "io.kestra.plugin.core.execution.Fail",
                 "io.kestra.plugin.core.flow.Sleep",
                 "io.kestra.plugin.core.log.Log",
+                "io.kestra.plugin.core.storage.Size",
+                "io.kestra.plugin.core.storage.Write",
             ]
         );
     }

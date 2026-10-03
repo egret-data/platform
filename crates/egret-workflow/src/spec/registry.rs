@@ -68,10 +68,11 @@ pub struct TaskTypeSpec {
 /// [`add_publishable`](crate::worker::Handlers::add_publishable): the same
 /// mechanism facing this way would refuse to start any deployment that declines
 /// to wire `egret.sql`, `core.http` or the container tasks — which is every
-/// deployment, since `with_core_tasks` is four handlers and this table is
-/// fifteen rows (5 `egret.*`, 2 short `core.*`, 8 Kestra FQCNs -- W5a replaced
+/// deployment, since `with_core_tasks` is six handlers and this table is
+/// nineteen rows (5 `egret.*`, 2 short `core.*`, 12 Kestra FQCNs -- W5a replaced
 /// the `egret.container`/`egret.script.python` rows with four script-task
-/// FQCNs that carry them as aliases). The
+/// FQCNs that carry them as aliases, and W9a Task 11 added the four core
+/// storage tasks, two of them in `with_core_tasks`). The
 /// asymmetry is deliberate, `main.rs` documents the shipping set, and what a
 /// flow using an unwired type gets is the loop above rather than a refusal.
 pub const TASK_TYPES: &[TaskTypeSpec] = &[
@@ -188,6 +189,32 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
     },
     TaskTypeSpec {
         r#type: "io.kestra.plugin.core.flow.Sleep",
+        aliases: &[],
+        references: &[],
+    },
+    // ── W9a Task 11: the core storage tasks (`worker::handlers::storage`) ──
+    //
+    // FQCN only, no short alias, for the reason given above for the three
+    // that have none. `Write` and `Size` are in `with_core_tasks`; `Delete`
+    // and `PurgeCurrentExecutionFiles` need a pool and are registered by
+    // `handlers::storage::register`, which `runtime::handlers_for` calls.
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::WRITE,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::SIZE,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::DELETE,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::PURGE_CURRENT_EXECUTION_FILES,
         aliases: &[],
         references: &[],
     },

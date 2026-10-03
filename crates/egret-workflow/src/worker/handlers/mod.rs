@@ -48,8 +48,38 @@ pub mod ret;
 pub mod script;
 pub mod sleep;
 pub mod sql;
+pub mod storage;
 
 use crate::logs::{LogLevel, LogLine};
+
+/// The run's own `…/tasks/{task}/{taskRunId}/` prefix, under which a handler
+/// that writes a file in egret puts it: the render scope's (the worker's
+/// claim computed it), or else built from `flow.namespace` and `flow.id` the
+/// way `script.rs`'s `collect_to` does. `writes` names the writer in the
+/// message of a run that has none (W9a Tasks 10 and 11: `egret.sql`'s STORE,
+/// `core.storage.Write`). `Err` is the author's: a failed task.
+pub(crate) fn task_storage_prefix(task: &super::TaskInput, writes: &str) -> Result<String, String> {
+    if let Some(prefix) = task.render.files().and_then(|f| f.0.task_prefix()) {
+        return Ok(prefix.to_string());
+    }
+    let flow = (
+        crate::runners::render_str("{{ flow.namespace }}", &task.render),
+        crate::runners::render_str("{{ flow.id }}", &task.render),
+    );
+    let (Ok(namespace), Ok(flow_id)) = flow else {
+        return Err(format!(
+            "this run has no storage prefix for the file {writes} writes: it is not a task \
+             run of a flow's execution"
+        ));
+    };
+    crate::storage::uri::task_prefix(
+        &namespace,
+        &flow_id,
+        task.execution_id,
+        &task.task_id,
+        task.run_id,
+    )
+}
 
 /// Where a task's log lines go.
 ///

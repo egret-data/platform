@@ -40,13 +40,12 @@
 //! terminal state is supplied by the caller rather than decided here, and every
 //! iteration after the first batch is neither spawned nor compared.
 //!
-//! # One shape of `values:` is a named gap, not a limitation of the harness
+//! # The third shape of `values:`, an ION file, is read by the WORKER
 //!
-//! Kestra documents three, and [`iteration_values`] implements two. An **ION
-//! file URI** is resolved by a different code path entirely, before
-//! `resolveValues` is reached, and egret has no path for it — see
-//! [`iteration_values`] for the two corpus entries that costs and for what
-//! closing it would require.
+//! Kestra documents three shapes and [`iteration_values`] implements two. The
+//! third, an ION file URI, was a named gap here until W9a Task 11
+//! (2026-10-03); it is closed in `worker::render`, before `advance()` is asked,
+//! so this module still performs no I/O -- see [`iteration_values`].
 
 use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx, TaskKind};
@@ -166,41 +165,41 @@ fn first_batch(concurrency_limit: u32, size: usize) -> usize {
 /// - **Anything else** — an error. Kestra's own message is "Unknown value type:
 ///   NUMBER" for a scalar, and unparseable text throws before that.
 ///
-/// # A NAMED GAP: Kestra has a THIRD `values:` shape and this does not
+/// # The THIRD shape, an ION file URI, is resolved before this is called
 ///
-/// **An ION file URI is not implemented, and it is a hole in `advance()` rather
-/// than in the harness.** `Loop.java:210-214` documents three shapes, and the
-/// third is "an ION file URI, each line will be deserialized as an ION object
-/// then coalesced to a string". It is not reached through `resolveValues` at
-/// all: `FlowableUtils.resolveLoopValuesUri` (`FlowableUtils.java:519`) renders
-/// `values` first, asks `URIFetcher.supports` whether the result is a URI, and
-/// if it is, `Loop.initFromUri` (`Loop.java:404`) reads the file and counts its
-/// lines **before** this function's arm would ever run.
+/// `Loop.java:210-214` documents three shapes; the third is "an ION file URI,
+/// each line will be deserialized as an ION object then coalesced to a
+/// string". Kestra does not reach `resolveValues` for it:
+/// `FlowableUtils.resolveLoopValuesUri` (`FlowableUtils.java:519`) renders
+/// `values`, asks `URIFetcher.supports`, and `Loop.initFromUri`
+/// (`Loop.java:404`) reads the file.
 ///
-/// So a rendered `kestra:///….ion` arrives here as a plain string, is not JSON,
-/// and takes the error arm. Two comparable entries are that shape —
-/// **`valids/loop-outputs-auto` and `valids/loop-values-from-uri`**, both
-/// writing `values: "{{ outputs.write.uri }}"` — and they would fail here even
-/// with a perfect render context. Task 6's first account attributed them wholly
-/// to the oracle's narrow `outputs`-less context, and that was half the reason.
+/// **Until W9a Task 11 this was a NAMED GAP here**: a rendered `kestra:///….ion`
+/// arrived as a plain string, was not JSON, and took the error arm, which
+/// failed `valids/loop-outputs-auto` and `valids/loop-values-from-uri` (both
+/// `values: "{{ outputs.write.uri }}"`) inside the executor whatever the
+/// render context held.
 ///
-/// **The test that asserted both causes no longer exists and has no
-/// successor**, which is why this correction names the gap instead of a name:
-/// `the_caller_can_render_every_expression_except_the_ones_named` was deleted
-/// with W3a's four-tier harness at W3b Task 5, along with the render tier it
-/// pinned. Rendering lives in `worker::render` and is tested there; nothing
-/// asserts these two entries' second cause today, and both remain baselined.
-/// (Corrected by W6 Task 3, the first package to open this directory.)
+/// **Since W9a Task 11 (2026-10-03) the worker reads the file** --
+/// `worker::render::render_expressions` and `Surface::loop_values_from_file`,
+/// in `settle`, BEFORE `advance()` is asked: the URI is resolved through the
+/// render snapshot (the one readability decision), the file is read whole as
+/// bytes, capped by `workflow.storage.max_read_bytes` (no loop-width limit
+/// exists to reuse), parsed one top-level Ion value at a time by
+/// `storage::ion` (text or binary Ion), each value coalesced as Kestra's
+/// `FlowableUtils.ionValueToString`, and the JSON ARRAY of those strings is
+/// what lands in [`TaskRun::rendered`](crate::executor::TaskRun::rendered) --
+/// the caller's answer, as for an `If`. This function and [`open`] are
+/// unchanged and pure: they take that array down the array arm.
 ///
-/// **What closing it would take**, so that whoever does it is not designing from
-/// scratch: `advance()` performs no I/O, so it cannot fetch the file. The caller
-/// would have to resolve `values` all the way to a JSON array — fetching the ION
-/// file and coalescing its lines — and put *that* in
-/// [`TaskRun::rendered`](crate::executor::TaskRun::rendered), which is already
-/// what `rendered` means for an `If`: the caller's answer, not the author's
-/// source. That is a decision about the W3b contract and it has not been taken.
-/// Neither of the two entries could bank on it alone, because this oracle has
-/// neither the `outputs` context nor the storage the file lives in.
+/// Two consequences of going down the array arm, both registered by W9a Task
+/// 11: Kestra's URI path has no `distinct()` and egret's array arm has, so a
+/// file holding the same record twice iterates it once on egret; and the file
+/// is read whole before the first iteration, so a `null` record fails the loop
+/// before any iteration where Kestra fails it at the batch that reaches it.
+/// `valids/loop-values-from-uri` banks; `valids/loop-outputs-auto` iterates as
+/// Kestra does and is still baselined on the `Loop`'s own `outputs:`, which
+/// egret does not produce.
 ///
 /// # `distinct()` is on the array arm and NOT on the object arm
 ///

@@ -3862,6 +3862,9 @@ mod tests {
                 self.lookup(uri).map_err(|e| e.message().to_string())?;
                 Ok(self.text[uri].clone())
             }
+            fn read_bytes(&self, uri: &str, _whole: &str) -> Result<Vec<u8>, String> {
+                self.read_utf8(uri).map(String::into_bytes)
+            }
             fn task_prefix(&self) -> Option<&str> {
                 None
             }

@@ -401,11 +401,20 @@ def refresh_kinds():
 
 # The four handlers this package writes.  `core.flow.Sleep` is here because it
 # is a `RunnableTask` (Sleep.java:47), not because of its package.
+#
+# **And, since W9a Task 11, the four core storage tasks** (`worker::handlers::
+# storage`), which the ratchet's own registry (`driver::registry`) runs. The
+# name is kept for the reason given for `W3A_FLOWABLES` below; what it means
+# is "the handlers the oracle's driver runs".
 W3B_HANDLERS = {
     "io.kestra.plugin.core.log.Log",
     "io.kestra.plugin.core.debug.Return",
     "io.kestra.plugin.core.execution.Fail",
     "io.kestra.plugin.core.flow.Sleep",
+    "io.kestra.plugin.core.storage.Write",
+    "io.kestra.plugin.core.storage.Size",
+    "io.kestra.plugin.core.storage.Delete",
+    "io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles",
 }
 
 # The flowables `advance()` already drives and decides for (W3a Tasks 3-6).
@@ -871,9 +880,10 @@ def check_inputs(flows, kinds, golden, baseline):
     # and `valids/pause-timeout-allow-failure`; 109 since W8 Task 6 banked the
     # two `sla:` entries whose `EXECUTION_ASSERTION` cancels the execution,
     # `valids/flow-concurrency-sla-assert-cancel` and
-    # `valids/sla-execution-condition`.
-    if len(baseline) != 109:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 109; the split "
+    # `valids/sla-execution-condition`; 108 since W9a Task 11 banked
+    # `valids/loop-values-from-uri` (a `Loop` over an ION file).
+    if len(baseline) != 108:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 108; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1507,8 +1517,8 @@ def self_test():
          "not 266",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 109",
-         "not 109",
+    case("baseline.txt is no longer 108",
+         "not 108",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

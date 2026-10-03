@@ -586,7 +586,6 @@ valids/loop-outputs-auto
 valids/loop-outputs-failed-render
 valids/loop-outputs-store
 valids/loop-until-restart
-valids/loop-values-from-uri
 valids/loopuntil-failed-flowable
 valids/npe-labels-update-task
 valids/output-values

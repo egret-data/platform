@@ -44,6 +44,12 @@ pub trait RenderFiles: Send + Sync {
     fn lookup(&self, uri: &str) -> Result<FileMeta, FileUnavailable>;
     /// UTF-8 contents, capped at the store's max_read_bytes. Blocks on the runtime handle.
     fn read_utf8(&self, uri: &str) -> Result<String, String>;
+    /// The bytes, capped at the store's max_read_bytes, for a reader that
+    /// needs the whole file and does not decode it as text -- W9a Task 11's
+    /// `Loop` over an ION file, whose file is often BINARY Ion (spec §9.3).
+    /// `whole` finishes the over-cap message's "…: {whole}, so it reads only
+    /// files up to that size". Blocks on the runtime handle, as `read_utf8`.
+    fn read_bytes(&self, uri: &str, whole: &str) -> Result<Vec<u8>, String>;
     /// This run's baseUri (`…/tasks/{task}/{taskRunId}/`), None outside a task run.
     fn task_prefix(&self) -> Option<&str>;
     /// The first store OUTAGE a read met, naming the URI (spec §11): not the
