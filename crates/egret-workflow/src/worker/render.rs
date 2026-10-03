@@ -604,7 +604,10 @@ impl Surface {
         let bytes =
             crate::runners::env::on_a_render_thread(|| files.0.read_bytes(uri, LOOP_READS_WHOLE))??;
         use crate::storage::ion::{loop_values, Stop};
-        let values = match loop_values(std::io::Cursor::new(bytes), usize::MAX) {
+        // The reader's bounds (`ion::for_each_value`) under the same cap the
+        // file was read whole with.
+        let cap = files.0.max_read_bytes().unwrap_or(bytes.len() as u64);
+        let values = match loop_values(std::io::Cursor::new(bytes), usize::MAX, cap) {
             (values, Stop::End | Stop::Full) => values,
             (_, Stop::Failed(e) | Stop::TooDeep(e) | Stop::TooLarge(e) | Stop::Crashed(e)) => {
                 return Err(format!("{uri} is not an ION file a Loop can iterate: {e}"))

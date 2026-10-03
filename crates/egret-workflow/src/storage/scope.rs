@@ -257,6 +257,10 @@ impl RenderFiles for Snapshot {
     fn task_prefix(&self) -> Option<&str> {
         self.task_prefix.as_deref()
     }
+
+    fn max_read_bytes(&self) -> Option<u64> {
+        Some(self.store.caps.max_read_bytes)
+    }
 }
 
 /// What the four functions answer when this process has no `[storage]`.

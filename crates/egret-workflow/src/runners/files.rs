@@ -59,6 +59,11 @@ pub trait RenderFiles: Send + Sync {
     fn infrastructure_failure(&self) -> Option<String> {
         None
     }
+    /// `workflow.storage.max_read_bytes` of the store this scope reads, the
+    /// Ion reader's cap for a `Loop` over a file; `None` with no store.
+    fn max_read_bytes(&self) -> Option<u64> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

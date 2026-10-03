@@ -366,7 +366,7 @@ pub(crate) async fn preview_execution_file(
         .rsplit_once('.')
         .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("ion"));
     let preview = if is_ion {
-        preview_ion(budget, max_rows, &state, &file.uri).await
+        preview_ion(budget, max_rows, fs.caps.max_read_bytes, &state, &file.uri).await
     } else {
         preview_lines(budget, max_rows, &state).await
     };
@@ -393,6 +393,7 @@ fn not_previewable() -> FilePreviewDto {
 async fn preview_ion(
     budget: Budget,
     max_rows: usize,
+    cap: u64,
     state: &BudgetState,
     uri: &str,
 ) -> FilePreviewDto {
@@ -400,7 +401,8 @@ async fn preview_ion(
     // thread, and this blocking task waits for it while the bridge pulls the
     // store's stream as the reader needs bytes.
     let bridge = tokio_util::io::SyncIoBridge::new(budget);
-    let read = tokio::task::spawn_blocking(move || ion::read_values(bridge, max_rows)).await;
+    let read =
+        tokio::task::spawn_blocking(move || ion::read_values_capped(bridge, max_rows, cap)).await;
     let (rows, stop) = match read {
         Ok(read) => read,
         Err(e) => {
