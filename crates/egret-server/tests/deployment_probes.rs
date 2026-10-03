@@ -361,3 +361,77 @@ fn every_single_instance_store_is_recreated_rather_than_rolled() {
         );
     }
 }
+
+// ── the apps host ───────────────────────────────────────────────────────────
+
+/// The apps host has its own Ingress object because the `egret` one pins a 60 s read timeout (see
+/// that file for why) which would cut every idle marimo WebSocket at a minute. This pins the
+/// relation: the timeouts here must out-last the apps proxy's idle token window's shortest sensible
+/// wait, buffering must be off for server-sent events, and the backend must be the APPS listener
+/// (8081), never the API port. The apps listener's port is in the backend Deployment and the
+/// Service; all three have to say 8081 or the host serves nothing.
+#[test]
+fn the_apps_ingress_keeps_websockets_alive_and_reaches_the_apps_listener() {
+    let ingress = read("deploy/helm/egret/templates/ingress-apps.yaml");
+    // an annotation value must be a quoted string, which `scalar_int` does not unquote
+    let read_timeout: u64 = ingress
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("nginx.ingress.kubernetes.io/proxy-read-timeout:")
+        })
+        .expect("no proxy-read-timeout annotation")
+        .trim()
+        .trim_matches('"')
+        .parse()
+        .expect("proxy-read-timeout is a number of seconds");
+    assert!(
+        read_timeout >= 3600,
+        "an idle marimo WebSocket would be cut at {read_timeout}s"
+    );
+    assert!(
+        ingress.contains("proxy-buffering: \"off\""),
+        "SSE needs buffering off"
+    );
+    assert!(
+        ingress.contains("port: { number: 8081 }"),
+        "the apps host must reach the apps listener, not the API port"
+    );
+    assert!(
+        !ingress.contains("number: 8080"),
+        "the API port must not be reachable through the apps host"
+    );
+    // the other two places that must agree on the port
+    assert!(
+        deployment().contains("containerPort: 8081"),
+        "the Deployment must expose 8081"
+    );
+    assert!(
+        read("deploy/helm/egret/templates/backend-service.yaml").contains("targetPort: 8081"),
+        "the Service must route 8081"
+    );
+    // and the default config of the listener is the same number
+    assert!(
+        egret_config::AppsConfig::default()
+            .listen
+            .ends_with(":8081"),
+        "the chart and the config default disagree on the apps port"
+    );
+}
+
+/// TLS ends at the ingress, so the backend sees plain http. If it were not told its cookies are
+/// `Secure`, the `__Host-` names would not be issued and the cookie-tossing defence would be off
+/// exactly where the apps origin exists.
+#[test]
+fn the_backend_is_told_its_cookies_are_secure_when_tls_is_on() {
+    let d = deployment();
+    let at = d
+        .find("EGRET_SESSION__SECURE")
+        .expect("the chart never sets EGRET_SESSION__SECURE");
+    let before = &d[..at];
+    let guard = before.rfind("{{- if").expect("an `if` guards it");
+    assert!(
+        before[guard..].contains(".Values.ingress.tls.enabled"),
+        "EGRET_SESSION__SECURE must be conditional on ingress.tls.enabled"
+    );
+}

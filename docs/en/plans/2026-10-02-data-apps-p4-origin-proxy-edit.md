@@ -751,3 +751,19 @@ What differs from Part P4d above, and what was left.
 - **Grid layout (D23)** — blocked on a decision that is still open; nothing was changed.
 - **A reload while the old WebSocket is still connected needing a second reload** — not reproduced or changed; the proxy's per-grant WebSocket count (D19) already keeps the new page's token alive, but the session-resume behaviour is marimo's (spec §5.3) and needs a browser (P4e).
 - **The Kubernetes launcher has not run against a cluster.** Its pure parts are tested; creating the Secret and Pod, owner-reference patching, the readiness wait and the exit-code handling are exercised for the first time in P4e on kind.
+
+---
+
+## As built — P4e (2026-10-03)
+
+The measurements are in [`2026-10-03-data-apps-p4e-live-result.md`](2026-10-03-data-apps-p4e-live-result.md). What differs from Part P4e above:
+
+- **A separate release, not the live one.** The plan said to put `auth.cookie_secure` on "the kind values". The live `egret` release carries four user-supplied values, runs migrations on restart and serves plain http, so the verification runs as `egret-verify` in its own namespaces on hosts `verify.localtest.me` / `apps.verify.localtest.me` (`just deploy-kind-apps`, `e2e-kind-apps`, `undeploy-kind-apps`). OIDC is off there; Keycloak was not needed.
+- **The apps Ingress is its own object** (long WebSocket timeouts, buffering off, 8 MiB body) and the chart sets `EGRET_SESSION__SECURE` when TLS is on — the key is `session.secure`, not `auth.cookie_secure`.
+- **A defect only the browser could find:** the SPA's CSP `frame-src` did not allow the apps origin, so the editor was a blank box. Fixed with an nginx template filled in from `APPS_ORIGIN` at start (not in the plan; the two tests that pin that CSP now pin the placeholder).
+- **The Apps list is minimal:** name, status (Draft only / Published vN), updated, Edit, and a New-app dialog. Trash, folders, bookmarks, bulk select and the share dialog of the notebook list were **not** ported; the backend has them (P2), the UI follows with run mode. **Open** is shown disabled.
+- **No theme query parameter.** The plan and spec §7 say theme is passed to marimo that way; marimo 0.25.0 has no such parameter that I found, so nothing was added. The iframe follows marimo's own theme setting.
+- **Edit is offered to everyone who can see the list.** The list response carries no capability flags, so a viewer clicks Edit and gets "You can't edit this app" from the ticket endpoint's 403; the backend, not the button, is the gate.
+- **Explore menu:** "Notebooks" became "Apps" in `EXPLORE_MODULES`; `ALL_FEATURE_KEYS` keeps `notebooks` because the notebook routes still exist until P6 and would otherwise flash Forbidden while features load.
+
+**Not done:** Firefox/Safari, a `SELECT` against a real engine, impersonation end to end, the run surface (P5), grid layout (D23, still undecided).

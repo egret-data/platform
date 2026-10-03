@@ -1,0 +1,42 @@
+{{- /*
+The apps host (spec §6.1): marimo is served from a SIBLING subdomain of egret's own host, a
+separate origin, because the author's JavaScript runs in the viewer's browser and must not share
+egret's origin, cookies or storage. It reaches the backend's apps listener (port 8081), which serves
+only the ticket route and the marimo proxy — never egret's API.
+
+Its own Ingress object, not another rule on `egret`: that object pins `proxy-read-timeout: 60` (see
+ingress.yaml for why), which would cut every idle marimo WebSocket at a minute. Here the timeouts
+are an hour, buffering is off (marimo streams kernel output over server-sent events), and the body
+limit is raised for a notebook save.
+*/ -}}
+{{- if and .Values.ingress.enabled .Values.apps.origin }}
+{{- $host := .Values.apps.origin | trimPrefix "https://" | trimPrefix "http://" }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: egret-apps
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+{{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ $host }}
+      secretName: {{ .Values.ingress.tls.secretName | default "egret-ingress-tls" }}
+{{- end }}
+  rules:
+    - host: {{ $host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: egret
+                port: { number: 8081 }
+{{- end }}

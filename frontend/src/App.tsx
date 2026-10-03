@@ -46,6 +46,8 @@ import Alerts from "@/routes/explore/Alerts";
 import ScheduleDetail from "@/routes/explore/ScheduleDetail";
 import Notifications from "@/routes/explore/settings/Notifications";
 import DashboardView from "@/routes/explore/DashboardView";
+import Apps from "@/routes/explore/Apps";
+import AppEditPage from "@/routes/explore/AppEditPage";
 import Notebooks from "@/routes/explore/Notebooks";
 import NotebookPage from "@/routes/explore/NotebookPage";
 import NotebookSettings from "@/routes/explore/NotebookSettings";
@@ -146,6 +148,8 @@ function ExploreRoutes() {
           <Route path="charts/:id" element={<RequireFeature feature="charts"><ChartExplore /></RequireFeature>} />
           <Route path="dashboards" element={<RequireFeature feature="dashboards"><Dashboards /></RequireFeature>} />
           <Route path="dashboards/:id" element={<RequireFeature feature="dashboards"><DashboardView /></RequireFeature>} />
+          <Route path="apps" element={<RequireFeature feature="apps"><Apps /></RequireFeature>} />
+          <Route path="apps/:id/edit" element={<RequireFeature feature="apps"><AppEditPage /></RequireFeature>} />
           <Route path="notebooks" element={<RequireFeature feature="notebooks"><Notebooks /></RequireFeature>} />
           <Route path="notebooks/:id" element={<RequireFeature feature="notebooks"><NotebookPage /></RequireFeature>} />
           <Route path="notebook-settings" element={<RequireFeature feature="notebooks"><NotebookSettings /></RequireFeature>} />

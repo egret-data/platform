@@ -40,6 +40,12 @@ spec:
             - { name: EGRET_CATALOG__AUTH_TOKEN, valueFrom: { secretKeyRef: { name: egret-secrets, key: catalog-auth-token } } }
             - { name: EGRET_ADMIN_PASSWORD, valueFrom: { secretKeyRef: { name: egret-secrets, key: admin-password } } }
             - { name: EGRET_OIDC__CLIENT_SECRET, valueFrom: { secretKeyRef: { name: egret-secrets, key: oidc-client-secret } } }
+            {{- if .Values.ingress.tls.enabled }}
+            # TLS ends at the ingress, so the backend itself sees plain http; its cookies must still be
+            # `Secure` (and `__Host-` prefixed: egret_auth::cookie), or a sibling host's JavaScript could
+            # toss a cookie of the same name.
+            - { name: EGRET_SESSION__SECURE, value: "true" }
+            {{- end }}
             {{- if .Values.apps.origin }}
             - { name: EGRET_APPS__ORIGIN, value: "{{ .Values.apps.origin }}" }
             - { name: EGRET_APPS__EGRET_ORIGIN, value: "{{ .Values.apps.egretOrigin }}" }

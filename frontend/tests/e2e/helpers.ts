@@ -56,7 +56,11 @@ export async function loginLocalAdmin(page: Page): Promise<void> {
 /** CSRF double-submit header from the session cookie, for control-plane mutations. */
 export async function csrf(context: BrowserContext): Promise<Record<string, string>> {
   const cookies = await context.cookies();
-  const token = cookies.find((c) => c.name === "egret_csrf")?.value ?? "";
+  // A deployment with Secure cookies issues `__Host-egret_csrf` (and ignores the plain name).
+  const token =
+    cookies.find((c) => c.name === "__Host-egret_csrf")?.value ??
+    cookies.find((c) => c.name === "egret_csrf")?.value ??
+    "";
   return { "X-Egret-CSRF": token, "Content-Type": "application/json" };
 }
 
