@@ -243,3 +243,8 @@ apps:
     readyTimeoutSecs: 60
     idleSecs: 1800            # an edit pod unused this long is stopped
     networkPolicy: { enabled: true }
+    # Run pods (D24: one per viewer per published version, never shared).
+    run:
+      idleSecs: 300           # shorter than idleSecs above: an abandoned tab costs less than an author's work
+      sessionCap: 8           # that one viewer's own open tabs, not concurrent strangers (D24)
+      kernelMode: thread      # "thread" (default, safe because D24 makes one pod one viewer) or "forced_ipc"

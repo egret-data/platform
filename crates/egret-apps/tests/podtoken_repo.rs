@@ -139,3 +139,46 @@ async fn revoke_edit_for_kills_every_live_edit_token_of_that_user_in_that_worksp
         "already revoked"
     );
 }
+
+#[tokio::test]
+async fn revoke_run_for_kills_every_live_token_of_that_version_only() {
+    let fx = Fixture::new().await;
+    let other_version: Uuid = sqlx::query_scalar(
+        "INSERT INTO analytics.app_versions (app_id, version_no, source) \
+         VALUES ($1, 2, 'import marimo') RETURNING id",
+    )
+    .bind(fx.app)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    let repo = PodTokenRepo::new(fx.db.clone());
+    let a = repo.mint_run(fx.ws, fx.app, fx.version).await.unwrap();
+    let b = repo.mint_run(fx.ws, fx.app, fx.version).await.unwrap();
+    // another version of the same app, and an edit token in the same workspace, are untouched
+    let other = repo.mint_run(fx.ws, fx.app, other_version).await.unwrap();
+    let edit = repo.mint_edit(fx.user, fx.ws).await.unwrap();
+
+    assert_eq!(
+        repo.revoke_run_for(fx.ws, fx.app, fx.version)
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(repo.resolve(&a).await.unwrap().is_none());
+    assert!(repo.resolve(&b).await.unwrap().is_none());
+    assert!(
+        repo.resolve(&other).await.unwrap().is_some(),
+        "a different version's token is not this version's token"
+    );
+    assert!(
+        repo.resolve(&edit).await.unwrap().is_some(),
+        "an edit token is not a run token"
+    );
+    assert_eq!(
+        repo.revoke_run_for(fx.ws, fx.app, fx.version)
+            .await
+            .unwrap(),
+        0,
+        "already revoked"
+    );
+}

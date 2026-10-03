@@ -435,3 +435,25 @@ fn the_backend_is_told_its_cookies_are_secure_when_tls_is_on() {
         "EGRET_SESSION__SECURE must be conditional on ingress.tls.enabled"
     );
 }
+
+/// Run pods (D24) get their own idle/cap/kernel-mode env, next to the edit settings, only when
+/// `apps.pod.launcher` is kubernetes — the same guard the edit settings already live under.
+#[test]
+fn run_pod_settings_reach_the_backend_env_under_the_kubernetes_launcher_guard() {
+    let d = deployment();
+    for name in [
+        "EGRET_APPS__POD__RUN_IDLE_SECS",
+        "EGRET_APPS__POD__RUN_SESSION_CAP",
+        "EGRET_APPS__POD__RUN_KERNEL_MODE",
+    ] {
+        let at = d
+            .find(name)
+            .unwrap_or_else(|| panic!("the chart never sets {name}"));
+        let before = &d[..at];
+        let guard = before.rfind("{{- if").expect("an `if` guards it");
+        assert!(
+            before[guard..].contains(r#".Values.apps.pod.launcher "kubernetes""#),
+            "{name} must be conditional on apps.pod.launcher == kubernetes"
+        );
+    }
+}

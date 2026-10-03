@@ -69,6 +69,7 @@ impl Fixture {
                 work_dir: self.dir.join("pods"),
                 config_dir: self.dir.join("config"),
                 callback_url: "http://egret.test:8080".into(),
+                run_kernel_mode: "thread".into(),
             },
         )
     }

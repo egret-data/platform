@@ -103,30 +103,52 @@ impl<T: AppPodLauncher + ?Sized> AppPodLauncher for std::sync::Arc<T> {
     }
 }
 
-/// Every `every`, stop the edit pods nobody has asked for in `idle`. Runs until the runtime
-/// ends. A failure to stop one pod is logged and the next tick tries again; it never ends the loop.
-pub fn spawn_reaper(
+/// Every `every`, stop the edit pods idle `edit_idle` and the run pods idle `run_idle` (the two
+/// differ — D24's run_idle_secs defaults far shorter than an author's edit_idle). Runs until the
+/// runtime ends. A failure to stop one pod, of either kind, is logged and the next tick tries
+/// again; one kind's failure never skips the other's tick.
+pub fn spawn_pod_reaper(
     launcher: std::sync::Arc<dyn AppPodLauncher>,
-    idle: Duration,
+    edit_idle: Duration,
+    run_idle: Duration,
     every: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(every);
         loop {
             tick.tick().await;
-            let keys = match launcher.idle_edit_pods(idle).await {
-                Ok(k) => k,
-                Err(e) => {
-                    tracing::warn!(error = %e, "app pod reaper: listing idle pods failed");
-                    continue;
-                }
-            };
-            for key in keys {
-                match launcher.stop_edit(key).await {
-                    Ok(()) => tracing::info!(pod = %key.pod_ref(), "stopped an idle app pod"),
-                    Err(e) => {
-                        tracing::warn!(error = %e, pod = %key.pod_ref(), "app pod reaper: stop failed")
+            match launcher.idle_edit_pods(edit_idle).await {
+                Ok(keys) => {
+                    for key in keys {
+                        match launcher.stop_edit(key).await {
+                            Ok(()) => {
+                                tracing::info!(pod = %key.pod_ref(), "stopped an idle app pod")
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, pod = %key.pod_ref(), "app pod reaper: stop failed")
+                            }
+                        }
                     }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "app pod reaper: listing idle edit pods failed")
+                }
+            }
+            match launcher.idle_run_pods(run_idle).await {
+                Ok(keys) => {
+                    for key in keys {
+                        match launcher.stop_run(key).await {
+                            Ok(()) => {
+                                tracing::info!(pod = %key.pod_ref(), "stopped an idle app run pod")
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, pod = %key.pod_ref(), "app run pod reaper: stop failed")
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "app pod reaper: listing idle run pods failed")
                 }
             }
         }
@@ -439,19 +461,23 @@ mod tests {
             }
         }
         let (a, b) = (key(), key());
+        let r = run_key();
         let launcher = Arc::new(Flaky {
             inner: fake(),
             fail_first: Mutex::new(Some(a)),
         });
         launcher.inner.set_idle(vec![a, b]);
-        let handle = spawn_reaper(
+        launcher.inner.set_idle_run(vec![r]);
+        let handle = spawn_pod_reaper(
             launcher.clone(),
+            Duration::from_secs(1),
             Duration::from_secs(1),
             Duration::from_millis(20),
         );
         // `a` failed once and stays idle: report it again; `b` was stopped on the first tick.
+        // `r` is a run pod, reaped on the same tick but tracked on its own list entirely.
         for _ in 0..100 {
-            if launcher.inner.stopped() == [b] {
+            if launcher.inner.stopped() == [b] && launcher.inner.stopped_run() == [r] {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -460,6 +486,11 @@ mod tests {
             launcher.inner.stopped(),
             [b],
             "one failure must not stop the others"
+        );
+        assert_eq!(
+            launcher.inner.stopped_run(),
+            [r],
+            "the run pod is reaped on its own tick, independent of the edit failure"
         );
         launcher.inner.set_idle(vec![a]);
         for _ in 0..100 {
