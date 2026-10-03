@@ -5884,3 +5884,204 @@ async fn explain_reads_the_profile_through_the_download_routes_own_assembler() {
         "body: {body}"
     );
 }
+
+/// **SP4d debt Task 5, at the route: a tag-addressed MASK is refused when the
+/// tag is already attached to a whole TABLE.**
+///
+/// Measured live on Trino 470 (SP4d-2b's live gate): that pair makes the engine
+/// type-check the one mask against EVERY column of the scanned table, so
+/// `SELECT item`, `SELECT id` and even `count(*)` fail — the table is
+/// unreadable, not masked. The row filter was measured and ruled out as the
+/// cause in the same run.
+///
+/// **This binary is where the 400 lives**, not
+/// `egret-policy/tests/unreadable_table_mask_db.rs`: that one pins the rule's
+/// SHAPE against the database, and a route handler's guard is not covered by it
+/// — nothing there can tell a refusal that is a 400 naming the remedy from one
+/// that is an uncaught error, and nothing there can tell a refusal that rolled
+/// the row back from one that stored it.
+///
+/// Three assertions, and the third is the one a shape-only test cannot make:
+/// the refusal is a 400, the message carries BOTH remedies, and the rule is NOT
+/// in `perm.rules` afterwards.
+///
+/// The fixture's tag is ALREADY attached to `sales.orders.email` at column
+/// level, and this adds a TABLE-level attachment on a different table — so the
+/// test also shows that an existing, harmless column attachment does not
+/// excuse the table one.
+#[tokio::test]
+async fn a_tag_mask_rule_is_refused_when_its_tag_is_attached_to_a_whole_table() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    attach_fixture_tag_to_whole_table(&f, "orders_t5a").await;
+
+    let name = unique("t5-tag-mask");
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/rules",
+                &token,
+                Some(json!({
+                    "name": name,
+                    "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+                    "selector": { "type": "tag", "key": f.tag_key },
+                    "exempt": { "include": [], "exclude": [] }
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("sales.orders_t5a"),
+        "the refusal must name the table that would become unreadable: {msg}"
+    );
+    assert!(
+        msg.contains("to the columns that need masking instead of to the table"),
+        "the refusal must name the attach-to-column remedy: {msg}"
+    );
+    assert!(
+        msg.contains("by catalog/schema/table/column path instead of by tag"),
+        "the refusal must name the resource-addressed remedy: {msg}"
+    );
+    assert_eq!(
+        rules_named(&f, &name).await,
+        0,
+        "the refused rule must not have been stored"
+    );
+}
+
+/// **The remedy has to keep working, and `preview` has to say so first.**
+///
+/// The refusal above names two remedies; this drives the second one through the
+/// route that applies it. A tag-addressed mask is created while nothing is
+/// attached at table level (legal), the tag is then attached to a whole table
+/// behind the route's back — which is the state the guard exists to prevent and
+/// which `psql` can still reach, so it is also the honest fixture for "a
+/// deployment that already holds the pair" — and the PATCH that makes the rule
+/// resource-addressed is then asserted to SUCCEED.
+///
+/// Without this control the obvious over-refusal (gate the guard on "the rule
+/// is a tag rule", old or new) would be green: it would refuse the very edit
+/// the error message asks the steward to make, and the steward would have no
+/// way out of the state at all.
+///
+/// `preview` is asserted on the same body first, because it funnels through the
+/// same `write_rule` and is what the dialog calls before enabling Save — a
+/// remedy that previewed as a 400 and then saved fine would be unreachable from
+/// the UI.
+///
+/// Takes [`exclusive`]: creating and patching a TAG-selected rule recompiles
+/// every compiler-targeted profile in the database, other tests' included.
+#[tokio::test]
+async fn the_resource_addressed_remedy_is_accepted_while_the_tag_is_on_a_whole_table() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+
+    // 1. A tag-addressed mask, authored while nothing is attached at table level.
+    let name = unique("t5-remedy");
+    let tag_rule = json!({
+        "name": name,
+        "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+        "selector": { "type": "tag", "key": f.tag_key },
+        "exempt": { "include": [], "exclude": [] }
+    });
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/rules", &token, Some(tag_rule.clone())))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let rule_id = body["id"].as_str().expect("id").to_string();
+
+    // 2. The other half arrives from outside the three guarded routes.
+    attach_fixture_tag_to_whole_table(&f, "orders_t5b").await;
+
+    // 3. The dialog previews the remedy...
+    let path_rule = json!({
+        "name": name,
+        "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+        "selector": { "type": "path", "catalog_id": f.catalog_id,
+                      "schema": "sales", "table": "orders", "column": "email" },
+        "exempt": { "include": [], "exclude": [] }
+    });
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                &token,
+                Some(json!({ "id": rule_id, "rule": path_rule })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the preview of the remedy must not be refused; body: {body}"
+    );
+
+    // 4. ...and saves it.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/rules/{rule_id}"),
+                &token,
+                Some(path_rule),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the remedy the refusal names must be applicable; body: {body}"
+    );
+
+    // And the rule really is resource-addressed now — the assertion that makes
+    // the 200 above mean something.
+    let selector: String =
+        sqlx::query_scalar("SELECT selector_kind::text FROM perm.rules WHERE id = $1::uuid")
+            .bind(&rule_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("read back selector");
+    assert_eq!(selector, "path");
+}
+
+/// Attach the fixture's tag to the WHOLE table `sales.{table}` in the fixture's
+/// own warehouse — migration 0081's `column_name = ''` sentinel, which 0166
+/// deliberately keeps legal.
+///
+/// Raw SQL on purpose: this is the half `egret_bi::CatalogTagRepo::assign_catalog`
+/// now refuses from the other direction, and a fixture that went through that
+/// route could not set up the state the rule-side guard is being tested on.
+async fn attach_fixture_tag_to_whole_table(f: &Fixture, table: &str) {
+    let warehouse_id: Uuid =
+        sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+            .bind(f.catalog_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("fixture warehouse");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments \
+             (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         SELECT id, $1, 'sales', $2, '' FROM tags WHERE key = $3",
+    )
+    .bind(warehouse_id)
+    .bind(table)
+    .bind(&f.tag_key)
+    .execute(&f.db.pool)
+    .await
+    .expect("table-level attachment");
+}

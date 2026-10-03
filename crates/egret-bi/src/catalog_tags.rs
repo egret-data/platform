@@ -74,6 +74,13 @@ impl CatalogTagRepo {
     /// "internal error"). The two predicates are written to the same shape on
     /// purpose: "two guards that must agree, written to different shapes" is a
     /// defect this programme has produced four times.
+    ///
+    /// **And refuses the one pair that makes a table unreadable** — SP4d debt
+    /// Task 5. A TABLE-level attachment (`column = ""`) of a tag that a
+    /// tag-addressed MASK already names is refused here, which is the same rule,
+    /// in the same function, that `egret_perm_compile::routes::write_rule` and
+    /// `egret_policy::admin::create_policy` apply from the other direction; see
+    /// `egret_policy::unreadable_table_mask`.
     pub async fn assign_catalog(
         &self,
         tag_id: Uuid,
@@ -92,6 +99,40 @@ impl CatalogTagRepo {
             .begin()
             .await
             .map_err(crate::error::BiError::from)?;
+        // **The OTHER half of SP4d debt Task 5's one rule**, and the half the
+        // obvious implementation misses: a table-level attachment is refused
+        // when a tag-addressed MASK already names this tag, exactly as a
+        // tag-addressed mask is refused when the attachment already exists.
+        // Either half can be created second; `egret_policy::unreadable_table_mask`
+        // is the single function both directions call, and its module doc carries
+        // the live Trino 470 measurement, the full write-path enumeration and why
+        // there is no migration for this pair.
+        //
+        // ⚠ `column.is_empty()` is the gate, and it is NOT a refusal of the
+        // sentinel: `column_name = ''` is migration 0081's table-level attachment
+        // and 0166 keeps it legal on purpose. What is refused is the PAIR, and
+        // only when this write is the table-level half of it — a column-level
+        // assignment of a masked tag is the ordinary, working configuration and
+        // is untouched.
+        if column.is_empty() {
+            if let Some(pair) = egret_policy::unreadable_table_mask_for(
+                &mut tx,
+                // `Transaction` derefs to the connection the guard reads on, so
+                // the check runs on THIS transaction's snapshot — the row this
+                // write is about to insert is not in it yet, which is why the
+                // guard can refuse before writing anything.
+                egret_policy::TagWrite::TableAttachment {
+                    tag_id,
+                    schema,
+                    table,
+                },
+            )
+            .await
+            .map_err(crate::error::BiError::from)?
+            {
+                return Err(crate::error::BiError::BadRequest(pair.refusal()).into());
+            }
+        }
         sqlx::query(
             "INSERT INTO catalog_tag_assignments \
                  (tag_id, warehouse_id, schema_name, table_name, column_name, assigned_by) \
@@ -469,7 +510,7 @@ async fn list_resource_tags(
     request_body = ResourceTagBody,
     responses(
         (status = 200, description = "Tag assigned to the catalog resource (idempotent)", body = egret_core::Ack),
-        (status = 400, description = "The coordinate cannot be stored: an empty schema or table, or `*`/`?` in any level — see migration 0166", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The coordinate cannot be stored (an empty schema or table, or `*`/`?` in any level — see migration 0166), or the tag is being attached to a whole TABLE while a tag-addressed mask names it, which would make that table unreadable rather than masked", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),

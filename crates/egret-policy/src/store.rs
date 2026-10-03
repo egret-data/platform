@@ -426,6 +426,35 @@ impl PolicyStore {
         refuse_if_generated(&mut conn, service_id).await
     }
 
+    /// SP4d debt Task 5 — the POLICY EDITOR's entry into the one rule in
+    /// [`crate::unreadable_table_mask`]: a hand-authored tag MASKING policy
+    /// (`POST /api/control-plane/policies`, `kind: "tag-masking"`) is the
+    /// second surface that can author the mask half, and on this development
+    /// host it is the surface that produced **all four** live instances of the
+    /// pair (see that module's doc for the measurement).
+    ///
+    /// Pooled and read-only, for the same reason
+    /// [`Self::refuse_if_generated_pooled`] is: the editor's create path has no
+    /// transaction open at the point the check belongs, and the check must
+    /// refuse BEFORE `create_policy` commits, so that a refusal leaves nothing
+    /// stored and is a plain 400 rather than a compensating delete.
+    pub(crate) async fn unreadable_table_mask_for_tag_mask(
+        &self,
+        tag_name: &str,
+        policy_name: &str,
+    ) -> Result<Option<crate::unreadable_table_mask::UnreadableTableMask>, PolicyStoreError> {
+        let mut conn = self.db.pool.acquire().await?;
+        Ok(crate::unreadable_table_mask::unreadable_table_mask_for(
+            &mut conn,
+            crate::unreadable_table_mask::TagWrite::Mask {
+                tag: crate::unreadable_table_mask::TagRef::Name(tag_name),
+                origin: crate::unreadable_table_mask::MaskOrigin::Policy,
+                name: policy_name,
+            },
+        )
+        .await?)
+    }
+
     /// Idempotent upsert of a service-def by name (used to seed Trino).
     pub async fn upsert_service_def(
         &self,

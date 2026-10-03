@@ -1312,3 +1312,146 @@ async fn scoped_permission_policies_read_and_create() {
     );
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
+
+/// **SP4d debt Task 5: the POLICY EDITOR is the second surface that can author
+/// the mask half, and on this host it is the one that actually did.**
+///
+/// A tag masking policy (`POST /policies`, `kind: "tag-masking"`) plus a
+/// TABLE-level attachment of that tag makes the engine type-check the one mask
+/// against every column of the scanned table, so the table becomes unreadable
+/// rather than masked — measured live on Trino 470 during SP4d-2b's live gate.
+/// Of the 44 databases on this development host the 4 live instances of that
+/// pair are ALL editor policies and none is a `perm.rules` row
+/// (`egret_policy::unreadable_table_mask`'s module doc carries the
+/// measurement), which is why guarding only `POST /perm/rules` would have left
+/// the reachable half open.
+///
+/// Four assertions, and the last two are what a DB-level test cannot make: the
+/// refusal is a 400, it carries both remedies, nothing was stored under the tag
+/// service, and the same policy authored as a tag ROW FILTER — which carries no
+/// column type check — is still accepted through the same route.
+#[tokio::test]
+async fn a_tag_masking_policy_is_refused_when_its_tag_is_on_a_whole_table() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t5pol", true).await;
+    egret_policy::seed_trino(&f.store)
+        .await
+        .expect("seed trino");
+    egret_policy::seed_tag(&f.store).await.expect("seed tag");
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tag_svc_name = format!("t5tag-{suffix}");
+    let tag_svc = f
+        .store
+        .create_service(&tag_svc_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("create tag service");
+    let trino_name = format!("t5trino-{suffix}");
+    let trino_svc = f
+        .store
+        .create_service(
+            &trino_name,
+            "trino",
+            &serde_json::json!({ "tagService": tag_svc_name }),
+        )
+        .await
+        .expect("create trino profile");
+
+    // A classification tag, attached to the WHOLE table. The tag's `name` is
+    // what a tag policy addresses (D6); its `key` is deliberately a different
+    // string so a key/name confusion in the guard cannot read as a pass.
+    let tag_key = format!("t5-k-{suffix}");
+    let tag_name = format!("T5-N-{suffix}");
+    let tag_id: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+            .bind(&tag_key)
+            .bind(&tag_name)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("tag");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments \
+             (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1, $2, 'sales', 'orders', '')",
+    )
+    .bind(tag_id)
+    .bind(Uuid::new_v4())
+    .execute(&f.db.pool)
+    .await
+    .expect("table-level attachment");
+
+    let policy_name = format!("t5-mask-{suffix}");
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies",
+                &token,
+                Some(serde_json::json!({
+                    "kind": "tag-masking", "name": policy_name,
+                    "service": trino_name, "tag": tag_name, "isEnabled": true,
+                    "items": [{"groups": ["analysts"], "maskType": "MASK_HASH"}]
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a tag masking policy over a table-level tag must be refused; body={body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("sales.orders") && msg.contains(&policy_name),
+        "the refusal must name the table and the policy; got {msg}"
+    );
+    assert!(
+        msg.contains("to the columns that need masking instead of to the table")
+            && msg.contains("by catalog/schema/table/column path instead of by tag"),
+        "the refusal must carry BOTH remedies; got {msg}"
+    );
+    assert_eq!(
+        f.store
+            .enabled_policies_for_service(tag_svc.id)
+            .await
+            .expect("enabled policies")
+            .len(),
+        0,
+        "a refused policy must not have been stored under the tag service"
+    );
+
+    // ⚠ The accept-control, and it is the one that keeps this guard from being
+    // "no tag policy may name a table-level tag": a tag ROW FILTER is
+    // table-granular on both engines by construction, so a table-level
+    // attachment is its natural match. Refusing it would withdraw a working
+    // control.
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies",
+                &token,
+                Some(serde_json::json!({
+                    "kind": "tag-rowfilter", "name": format!("t5-filter-{suffix}"),
+                    "service": trino_name, "tag": tag_name, "isEnabled": true,
+                    "items": [{"groups": ["analysts"], "filterExpr": "1=1"}]
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a tag ROW FILTER over the same table-level tag must still be accepted; body={body}"
+    );
+
+    f.store.delete_service(trino_svc.id).await.expect("cleanup");
+    f.store.delete_service(tag_svc.id).await.expect("cleanup");
+}

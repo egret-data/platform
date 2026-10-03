@@ -1040,6 +1040,25 @@ async fn resolve_tag_service_and_body(
     Ok((tag_svc, pol))
 }
 
+/// The tags a MASKING tag policy addresses, or empty if this body is not one
+/// — SP4d debt Task 5.
+///
+/// **Reads the SERIALIZED body, not the editor form**, so the guard keys on
+/// exactly what `tagify` wrote and what the engine would download, rather than
+/// on a second reading of the request. `tagify` writes one value today
+/// (`"A tag policy targets exactly one tag"`); this iterates the array anyway,
+/// because a guard that silently inspected only element 0 would fail OPEN the
+/// day that comment stops being true.
+fn tag_mask_addresses(body: &Value) -> Vec<&str> {
+    if body.get("policyType").and_then(Value::as_i64) != Some(1) {
+        return Vec::new();
+    }
+    body.pointer("/resources/tag/values")
+        .and_then(Value::as_array)
+        .map(|vs| vs.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
+}
+
 /// Read the required `service` name from an editor policy body, or 400.
 fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
     v.get("service")
@@ -1064,7 +1083,7 @@ fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
     request_body = Object,
     responses(
         (status = 200, description = "Policy created", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input or missing policy name", body = ErrorBody),
+        (status = 400, description = "Invalid editor input, missing policy name, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
@@ -1089,6 +1108,25 @@ async fn create_policy(
             return Err(PolicyHttpError::BadRequest(
                 "policy name is required".into(),
             ));
+        }
+        // **The editor's half of SP4d debt Task 5's one rule.** A tag MASKING
+        // policy whose tag is attached to a whole TABLE makes that table
+        // unreadable rather than masked — measured live on Trino 470 — and this
+        // route is the second surface that can author that half, alongside
+        // `POST /api/control-plane/perm/rules`. `egret_bi`'s resource-tag write
+        // calls the SAME function from the attachment side; read
+        // `crate::unreadable_table_mask` for the measurement, the full
+        // write-path enumeration (including why `PUT /policies/{id}` and
+        // `PUT /policies/{id}/enabled` cannot reach this shape) and why there is
+        // no migration.
+        for tag in tag_mask_addresses(&pol.body) {
+            if let Some(pair) = st
+                .store
+                .unreadable_table_mask_for_tag_mask(tag, &pol.name)
+                .await?
+            {
+                return Err(PolicyHttpError::BadRequest(pair.refusal()));
+            }
         }
         let id = st.store.create_policy(svc.id, &pol.name, &pol.body).await?;
         if !pol.is_enabled {

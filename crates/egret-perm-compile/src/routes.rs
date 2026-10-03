@@ -64,7 +64,8 @@ use egret_policy::{
     catalog_is_assigned_to_workspace_via, catalog_names_for_ids_via, catalogs_for_service_via,
     clearance_gates_for_tags_via, get_service_by_id_via, resolved_tags_for_resource_via,
     services_for_catalog_via, tag_assignment_coordinates_via, tag_keys_by_ids_via,
-    tag_names_for_keys_via, PolicyStore, ServiceRow,
+    tag_names_for_keys_via, unreadable_table_mask_for, MaskOrigin, PolicyStore, ServiceRow, TagRef,
+    TagWrite,
 };
 use egret_policy_api::ServicePolicies;
 use egret_ranger_eval::eval::{
@@ -1082,6 +1083,38 @@ async fn write_rule(
     };
     // Same reason as the grant path: an empty affected set validates nothing.
     validate_rule_shape(&r)?;
+    // **The one shape that makes a table UNREADABLE instead of masked** — SP4d
+    // debt Task 5. A tag-addressed MASK plus a table-level attachment of that
+    // same tag makes the engine type-check the mask against every column of the
+    // scanned table, so `count(*)` fails too; measured live on Trino 470 during
+    // SP4d-2b's live gate. The rule, the measurement, every write path that can
+    // reach the pair and why there is no migration for it all live in
+    // `egret_policy::unreadable_table_mask` — ONE function, whose other arm
+    // `egret_bi::CatalogTagRepo::assign_catalog` calls, because either half can
+    // be created second and a guard keyed to one creation order is the defect
+    // this programme has produced four times.
+    //
+    // Gated on the shape of the row being WRITTEN, not on the pair: a tag ROW
+    // FILTER, a path-addressed mask, and a PATCH that turns a tag mask INTO
+    // either of those are all untouched — the last one matters, because it is
+    // one of the two remedies the refusal names and it has to keep working.
+    // `validate_rule_shape` cannot host this: it is service- AND
+    // database-independent by construction, and this predicate reads two tables.
+    if let (RuleKind::Mask { .. }, Selector::Tag { key }) = (&r.kind, &r.selector) {
+        if let Some(pair) = unreadable_table_mask_for(
+            &mut **tx,
+            TagWrite::Mask {
+                tag: TagRef::Key(key),
+                origin: MaskOrigin::Rule,
+                name: &r.name,
+            },
+        )
+        .await
+        .map_err(PermHttpError::db)?
+        {
+            return Err(PermHttpError::BadRequest(pair.refusal()));
+        }
+    }
 
     let new_services = affected_services_for_rule(tx, &r).await?;
     let services = merge_service_ids(&old_services, &new_services);
@@ -1361,7 +1394,7 @@ async fn list_rules(
     request_body = NewRule,
     responses(
         (status = 201, description = "Rule created AND the profiles it affects recompiled, in one transaction"),
-        (status = 400, description = "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), or cannot be compiled for a profile it affects", body = ErrorBody),
+        (status = 400, description = "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or cannot be compiled for a profile it affects", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1404,7 +1437,7 @@ async fn create_rule(
                    at all.",
     responses(
         (status = 200, description = "Rule updated AND every affected profile recompiled, in one transaction", body = CompileResponse),
-        (status = 400, description = "The patched rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), or cannot be compiled for a profile it affects", body = ErrorBody),
+        (status = 400, description = "The patched rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or cannot be compiled for a profile it affects", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such rule", body = ErrorBody),

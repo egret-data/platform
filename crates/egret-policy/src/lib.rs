@@ -9,6 +9,7 @@ mod port_impl;
 pub mod ranger;
 pub mod service_def;
 pub mod store;
+pub mod unreadable_table_mask;
 pub use admin::{
     policy_admin_router, EngineBinding, EngineBindingReader, EngineReadError, PolicyAdminState,
     PolicyHttpError,
@@ -19,6 +20,10 @@ pub use service_def::{
     seed_starrocks, seed_tag, seed_trino, starrocks_service_def, tag_service_def,
     trino_service_def, STARROCKS_DEF_NAME, TAG_DEF_NAME, TRINO_DEF_NAME,
 };
+pub use unreadable_table_mask::{
+    unreadable_table_mask_for, MaskOrigin, TagRef, TagWrite, UnreadableTableMask,
+};
+
 pub use store::{
     catalog_is_assigned_to_workspace_via, catalog_names_for_ids_via, catalogs_for_service_via,
     clearance_gates_for_tags_via, compiler_targeted_services_via, get_service_by_id_via,

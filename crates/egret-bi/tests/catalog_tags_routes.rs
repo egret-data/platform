@@ -310,3 +310,175 @@ async fn resource_tag_assign_list_unassign_and_gating() {
         "after unassign, GET drops the column tag but keeps the table tag; got {listed}"
     );
 }
+
+/// **SP4d debt Task 5, at the route, in the direction the obvious
+/// implementation misses: the ATTACHMENT is created second.**
+///
+/// A guard that only refused "a tag-addressed MASK whose tag is already on a
+/// whole table" leaves the hole wide open — the steward authors the mask first
+/// (legal at that moment) and attaches the tag to the table afterwards, and in
+/// this programme "two guards that must agree, written to different shapes" has
+/// produced a defect four times. So this is the `PUT …/resource-tags` half, and
+/// it is run against BOTH surfaces that can author the mask: a `perm.rules` row
+/// and a hand-authored tag masking policy. The second is not the hypothetical
+/// one — of the 44 databases on this development host, all 4 live instances of
+/// the pair come from the policy editor and none from `perm.rules`
+/// (`egret_policy::unreadable_table_mask`'s module doc carries the
+/// measurement).
+///
+/// Four assertions per surface, and the last two are the ones a DB-level test
+/// cannot make: the refusal is a 400, the body carries both remedies verbatim
+/// (`CatalogTagEditor` renders `assign.error.message` straight into the page),
+/// nothing was stored, and a COLUMN-level assignment of the very same tag still
+/// succeeds — the remedy the message names, through the same route.
+#[tokio::test]
+async fn a_table_level_assignment_is_refused_when_a_tag_mask_names_the_tag() {
+    let Some(url) = egret_test_db::url().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let admin = seed_user(&db, true).await;
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let sessions = st.sessions.clone();
+    let token = session_for(&sessions, admin).await;
+    let app = egret_bi::resource_tags_router().with_state(st);
+    let wh = Uuid::new_v4();
+    let uri = format!("/control-plane/warehouses/{wh}/resource-tags");
+
+    let put = |column: Option<&str>, tag_id: Uuid, table: &str| {
+        let mut body = serde_json::json!({ "schema": "sales", "table": table, "tag_id": tag_id });
+        if let Some(c) = column {
+            body["column"] = serde_json::json!(c);
+        }
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header("Cookie", format!("egret_session={token}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    let tags = TagRepo::new(db.clone());
+    for surface in ["rule", "policy"] {
+        // A tag of its own per surface. Its `name` differs from its `key` on
+        // purpose: `perm.rules.tag_key` references the KEY and a tag policy
+        // addresses the NAME, so a fixture where they coincide cannot tell a
+        // key/name confusion in the guard from a correct answer.
+        let suffix = Uuid::new_v4().simple().to_string();
+        let tag = tags
+            .create(
+                &format!("t5-k-{surface}-{suffix}"),
+                &format!("T5-N-{surface}-{suffix}"),
+                "",
+                "",
+                Some(admin),
+            )
+            .await
+            .expect("create tag");
+
+        // The MASK half, written the way that surface writes it.
+        let mask_name = format!("t5-{surface}-{suffix}");
+        match surface {
+            "rule" => {
+                sqlx::query(
+                    "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, tag_key) \
+                     VALUES ($1, 'mask', 'MASK_HASH', 'tag', $2)",
+                )
+                .bind(&mask_name)
+                .bind(&tag.key)
+                .execute(&db.pool)
+                .await
+                .expect("tag mask rule");
+            }
+            _ => {
+                // `policy.authz_services.type` FK-references `authz_service_defs`,
+                // so the tag def has to exist before a tag service can.
+                egret_policy::seed_tag(&egret_policy::PolicyStore::new(db.clone()))
+                    .await
+                    .expect("seed tag service-def");
+                let svc: i64 = sqlx::query_scalar(
+                    "INSERT INTO policy.authz_services (name, type, config_jsonb) \
+                     VALUES ($1, 'tag', '{}'::jsonb) RETURNING id",
+                )
+                .bind(format!("t5-tagsvc-{suffix}"))
+                .fetch_one(&db.pool)
+                .await
+                .expect("tag service");
+                sqlx::query(
+                    "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb) \
+                     VALUES ($1, $2, jsonb_build_object( \
+                         'policyType', 1, 'serviceType', 'tag', \
+                         'resources', jsonb_build_object('tag', \
+                             jsonb_build_object('values', jsonb_build_array($3::text)))))",
+                )
+                .bind(svc)
+                .bind(&mask_name)
+                .bind(&tag.name)
+                .execute(&db.pool)
+                .await
+                .expect("tag masking policy");
+            }
+        }
+
+        // The TABLE-level half, through the route → 400.
+        let resp = app
+            .clone()
+            .oneshot(put(None, tag.id, "orders"))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = body_string(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "the {surface} surface's mask must make a table-level assignment a 400; got {body}"
+        );
+        assert!(
+            body.contains("sales.orders"),
+            "the refusal must name the table that would become unreadable; got {body}"
+        );
+        assert!(
+            body.contains(&mask_name),
+            "the refusal must name the {surface} the steward has to edit; got {body}"
+        );
+        assert!(
+            body.contains("to the columns that need masking instead of to the table")
+                && body.contains("by catalog/schema/table/column path instead of by tag"),
+            "the refusal must carry BOTH remedies; got {body}"
+        );
+
+        // Nothing was stored — the assertion a status-only test cannot make.
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM catalog_tag_assignments WHERE tag_id = $1 AND column_name = ''",
+        )
+        .bind(tag.id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count");
+        assert_eq!(stored, 0, "a refused assignment must not be stored");
+
+        // And the remedy works through the same route: attach the tag to the
+        // COLUMN instead. ⚠ If this ever goes red the guard has started
+        // refusing the sentinel's legitimate sibling — the configuration every
+        // live attachment on this host actually uses.
+        let resp = app
+            .clone()
+            .oneshot(put(Some("email"), tag.id, "orders"))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = body_string(resp).await;
+        assert!(
+            status.is_success(),
+            "the column-level remedy must be accepted; got {status}: {body}"
+        );
+    }
+}
