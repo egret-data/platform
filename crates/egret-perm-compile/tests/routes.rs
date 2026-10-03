@@ -125,12 +125,15 @@ struct Fixture {
     catalog_id: Uuid,
     /// A `tags.key` nothing else in the database uses, already on
     /// `sales.orders.email` in this fixture's warehouse.
+    ///
+    /// Its `tags.name` is a DIFFERENT string on purpose — the wire reports the
+    /// name (what the engine matches tag policies on) and the rule selectors take
+    /// the key, so a fixture where they coincide cannot tell a key/name confusion
+    /// from a correct answer. The name is **not** carried here: the one test that
+    /// needs it reads it back out of `tags` by this key
+    /// (`the_read_surface_names_the_catalog_and_the_tag_for_a_policy_read_only_caller`),
+    /// which is what lets it assert the two differ rather than assume it.
     tag_key: String,
-    /// The same tag's `tags.name`, which is a DIFFERENT string on purpose: the
-    /// wire reports the name (what the engine matches tag policies on) and the
-    /// rule selectors take the key, so a fixture where they coincide cannot tell
-    /// a key/name confusion from a correct answer.
-    tag_name: String,
 }
 
 impl Fixture {
@@ -281,6 +284,7 @@ async fn setup() -> Option<Fixture> {
     .expect("attach catalog");
 
     let tag_key = unique("pii");
+    // A DIFFERENT string from the key, on purpose — see `Fixture::tag_key`.
     let tag_name = unique("PII");
     let tag_id: Uuid =
         sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
@@ -321,7 +325,6 @@ async fn setup() -> Option<Fixture> {
         service_id: service.id,
         catalog_id,
         tag_key,
-        tag_name,
     })
 }
 
@@ -2903,38 +2906,134 @@ async fn a_group_only_grant_is_refused_by_the_artifact_the_engine_downloads() {
 /// `Allowed` with "None." was one no query could read at all.
 ///
 /// The field is now the evaluator's own set, read back out of it. This test
-/// therefore asserts the NAME (not the key), and that a column-level assignment
-/// reports `attached_at_column: true` — the half of the answer that tells a
-/// steward which row to change.
+/// therefore asserts the NAME (not the key), and that `attached_at_column` tracks
+/// the coordinate each assignment actually used — the half of the answer that
+/// tells a steward which row to change.
+///
+/// # ⚠ SP4d debt Task 7 rebuilt the FIXTURE, because the assertion it replaced
+/// could not have passed and asserting `[]` instead would have been worse
+///
+/// This test was ADDED by #611, the same squashed commit (`f5e2e84d`) in which the
+/// H3 fix moved the set off the response and onto each profile, so it read
+/// `body["tags"]` — `Null` — and had never run: it is DB-gated and the shared test
+/// template was broken across branches. **So the F4/F5 property had no passing
+/// automated assertion on `main` at all**; the three e2e tests that do pass read
+/// decisions and decline reasons, and none of them reads `profiles[].tags`.
+///
+/// Re-pointing it at `profiles[0].tags` and expecting `[]` would have made it green
+/// while exercising NOTHING. The old fixture is `setup()`'s single StarRocks
+/// profile with no bound tag service, so `tag_policies_in_download` is `0` and
+/// [`super`]'s `tags_for_profile` returns empty **by construction** — a population
+/// in which neither name-not-key nor `attached_at_column` can be observed, which is
+/// the exact shape this branch has been caught by repeatedly. The fixture below can
+/// fail on each of the three things the field exists for:
+///
+/// 1. **The NAME, not the key.** Two tags, each with a key that differs from its
+///    name by construction, and the keys are asserted ABSENT from the whole
+///    response — so the happy path is not the only thing pinning the choice.
+/// 2. **`attached_at_column`, in BOTH directions, from one request.** The column
+///    row is `SELF` for this target and the table row is `ANCESTOR`, so a flag
+///    written once — either way — pairs one tag with the wrong answer.
+/// 3. **H1: non-empty for the profile that resolves it, empty for the one that does
+///    not.** Migration 0165's `CHECK` makes a StarRocks profile carrying a
+///    `tagService` unrepresentable, so "one profile resolves these tags and one
+///    cannot" is the ONLY shape this pair can take — and it is exactly the state
+///    whose single response-level list made the page claim, under both profiles,
+///    that these tags decide this request.
+///
+/// It also pins H3 from the other side: there is no response-level `tags` key left
+/// to read, so a tag list can only ever appear beside a verdict.
 #[tokio::test]
 async fn explain_reports_the_tag_set_the_evaluator_was_handed() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
-    let mut body = explain_body(f.catalog_id, "analyst");
-    body["target"]["column"] = json!("email");
+    let (trino_id, _starrocks_id, catalog_id) = two_profile_catalog(&f, "explain-tagset").await;
+    // Two assignments at DIFFERENT coordinates on the same table. The resolver's
+    // order is `ORDER BY is_self DESC, t.name`, so the column row comes first
+    // whatever the two names sort as — the array below is a literal for that
+    // reason, and because a set comparison would also pass with the two
+    // `attached_at_column` flags swapped.
+    let on_column = assign_tag(&f, catalog_id, "sales", "orders", "email").await;
+    let on_table = assign_tag(&f, catalog_id, "sales", "orders", "").await;
+    // One tag policy, on the TRINO profile only — so this profile's download
+    // carries a tag block and the StarRocks one carries none.
+    bind_tag_service_with_one_policy(&f, trino_id, &on_column.name).await;
 
+    let mut ask = explain_body(catalog_id, "analyst");
+    ask["target"]["column"] = json!("email");
     let (status, body) = into_json(
         f.app()
-            .oneshot(req("POST", "/perm/explain", &token, Some(body)))
+            .oneshot(req("POST", "/perm/explain", &token, Some(ask)))
             .await
             .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    // ⚠ **The key-absence check leads deliberately**, so that each of the three
+    // regressions this test exists for trips a DIFFERENT assertion: a list built
+    // from `tags.key` dies here, a mis-derived `attached_at_column` dies on the
+    // literal below, and a set handed to every profile dies on the StarRocks
+    // block. Asserted against the whole serialised response rather than against
+    // the one field, because "reports the name here" is not the same claim as "the
+    // key is not on the wire" — it could also come back in an attribution or a
+    // policy name.
+    let rendered = body.to_string();
+    for key in [&on_column.key, &on_table.key] {
+        assert!(
+            !rendered.contains(key.as_str()),
+            "`tags.key` {key} must appear NOWHERE in the response — it is what \
+             this list used to be built from, and live it differs from the name \
+             the engine matches on; body: {body}"
+        );
+    }
+    let trino = profile_for(&body, "trino");
+    assert_eq!(
+        trino["tags"],
+        json!([
+            { "name": on_column.name, "attached_at_column": true },
+            { "name": on_table.name, "attached_at_column": false },
+        ]),
+        "the profile whose download carries a tag block must report the \
+         evaluator's own set, by NAME, with `attached_at_column` tracking each \
+         assignment's own coordinate: `sales.orders.email` is SELF of this target \
+         and `sales.orders` is its ANCESTOR; body: {body}"
+    );
+    // The list sits beside verdicts, or it is a claim about nothing (H3).
+    assert_eq!(
+        access_for(trino, "select")["decision"]["kind"],
+        "denied",
+        "`analyst` holds no grant on this catalog, so there is a real verdict for \
+         the tag list to sit beside; body: {body}"
+    );
+    assert_eq!(
+        trino["tag_policies_in_download"], 1,
+        "and the narrowing predicate's value has to be the one that let the list \
+         through, or the assertion above is green for the wrong reason; body: \
+         {body}"
+    );
+
+    // H1. Same catalog, same resolution, same request — and a profile that could
+    // not have used it reports an empty list plus the reason it is empty.
+    let starrocks = profile_for(&body, "starrocks");
+    assert_eq!(
+        starrocks["tags"],
+        json!([]),
+        "no tag policy of any kind is in this profile's download, so no tag can \
+         reach any verdict here and saying these tags decide this request would \
+         be false; body: {body}"
+    );
+    assert_eq!(
+        starrocks["tag_policies_in_download"], 0,
+        "and the page needs the reason the list is empty while the column IS \
+         tagged; body: {body}"
+    );
+    // H3. There is nowhere to put a tag list except beside a verdict.
     assert_eq!(
         body["tags"],
-        json!([{ "name": f.tag_name, "attached_at_column": true }]),
-        "sales.orders.email carries this fixture's tag, reported by NAME and as a \
-         column-level attachment; the KEY is {} and must not appear; body: {body}",
-        f.tag_key
-    );
-    // And the tag did not become an evaluator input: this profile's download
-    // carries no `tagPolicies` block, so the verdict is a decision rather than
-    // the refusal a block that could decide would produce.
-    assert_eq!(
-        access_for(profile_for(&body, "starrocks"), "select")["decision"]["kind"],
-        "denied",
-        "body: {body}"
+        Value::Null,
+        "the response-level `tags` field is gone, and this test read it for a \
+         whole release; body: {body}"
     );
 }
 
@@ -5397,8 +5496,8 @@ async fn a_resolved_tag_lets_the_tag_policy_itself_decide() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
     let (trino_id, _starrocks_id, catalog_id) = two_profile_catalog(&f, "explain-tagdecides").await;
-    let tag_name = assign_tag(&f, catalog_id, "sales", "orders", "").await;
-    bind_tag_service_with_one_policy(&f, trino_id, &tag_name).await;
+    let tag = assign_tag(&f, catalog_id, "sales", "orders", "").await;
+    bind_tag_service_with_one_policy(&f, trino_id, &tag.name).await;
 
     let (status, body) = into_json(
         f.app()
@@ -5424,28 +5523,47 @@ async fn a_resolved_tag_lets_the_tag_policy_itself_decide() {
     );
 }
 
+/// Both halves of one fixture tag row, and they are DIFFERENT strings by
+/// construction (`t7key_…` vs `t7tag_…`).
+///
+/// # ⚠ The `key` is carried so a test can assert it is ABSENT
+///
+/// `tags.name` is what the tag WIRE carries as the tag's `type`, and therefore
+/// what a tag policy's `resources.tag.values` must name and what `explain`'s tag
+/// list must report. `tags.key` is what that list used to report, and live the two
+/// differ — the fail-open D3 names, and the F4/F5 defect the browser measured.
+///
+/// An assertion that only names the expected NAME cannot distinguish "reports the
+/// name" from "reports the key of a row whose two columns happen to agree", so
+/// name-not-key would be pinned by the happy path alone. Holding both strings lets
+/// the test say the key appears NOWHERE in the response, which is a statement with
+/// content only because `unique()` guarantees they differ.
+struct AssignedTag {
+    key: String,
+    name: String,
+}
+
 /// One `tags` row plus one `catalog_tag_assignments` row on this catalog's
-/// warehouse, returning `tags.name` — which is what the tag WIRE carries as the
-/// tag's `type` and therefore what a tag policy's `resources.tag.values` must
-/// name. Never `tags.key`: live the two differ, and that is the fail-open D3
-/// names.
+/// warehouse, returning both of the row's identifiers — see [`AssignedTag`] for
+/// why the key comes back too.
 async fn assign_tag(
     f: &Fixture,
     catalog_id: Uuid,
     schema: &str,
     table: &str,
     column: &str,
-) -> String {
+) -> AssignedTag {
     let warehouse_id: Uuid =
         sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
             .bind(catalog_id)
             .fetch_one(&f.db.pool)
             .await
             .expect("catalog warehouse");
+    let key = unique("t7key");
     let name = unique("t7tag");
     let tag_id: Uuid =
         sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
-            .bind(unique("t7key"))
+            .bind(&key)
             .bind(&name)
             .fetch_one(&f.db.pool)
             .await
@@ -5462,7 +5580,7 @@ async fn assign_tag(
     .execute(&f.db.pool)
     .await
     .expect("tag assignment");
-    name
+    AssignedTag { key, name }
 }
 
 /// [`assign_tag`] without the `expect`, for the one test whose subject is the
