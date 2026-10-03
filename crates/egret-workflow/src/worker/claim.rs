@@ -1778,16 +1778,13 @@ pub(super) async fn settle(
         &mut failures,
     )?;
     persist(conn, ctx, before, state, release, &marks, seq).await?;
-    for (run, message) in &failures {
-        sqlx::query(
-            "UPDATE workflow.task_runs SET message = $3 WHERE execution_id = $1 AND run_ix = $2",
-        )
-        .bind(ctx.id)
-        .bind(*run as i32)
-        .bind(message)
-        .execute(&mut *conn)
-        .await
-        .map_err(db_err)?;
+    if !failures.is_empty() {
+        // Built and boxed in a SYNC callee: `settle` re-enters itself through
+        // a `Subflow` chain, and a statement future built inline (even one
+        // boxed here) grows every level's poll frame in a debug build -- the
+        // worker suite's `a_chain_of_subflows_deeper_than_the_bound…`
+        // overflowed with either.
+        write_render_failures(conn, ctx.id, failures).await?;
     }
     spawn::spawn_all(conn, ctx, state, &spawns).await?;
     // **After `persist`, exactly like the loop spawner, and for the same
@@ -2707,6 +2704,30 @@ fn sla_terminal(surface: &Surface, ctx: &ExecutionCtx, state: &ExecutionState) -
         p.render(&cx).map_err(|e| e.to_string())
     })?;
     crate::sla::state_for(violation.behavior)
+}
+
+/// W9a Task 11: the message of each run a render failed with one, beside the
+/// state `persist` wrote. See `settle`.
+fn write_render_failures(
+    conn: &mut PgConnection,
+    execution: Uuid,
+    failures: Vec<(RunIx, String)>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    Box::pin(async move {
+        for (run, message) in failures {
+            sqlx::query(
+                "UPDATE workflow.task_runs SET message = $3 \
+                  WHERE execution_id = $1 AND run_ix = $2",
+            )
+            .bind(execution)
+            .bind(run as i32)
+            .bind(message)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        }
+        Ok(())
+    })
 }
 
 fn drive(

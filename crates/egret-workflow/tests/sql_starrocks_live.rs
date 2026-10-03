@@ -342,6 +342,12 @@ fn input(f: &Live, spec: serde_json::Value, cx: serde_json::Value) -> TaskInput 
 /// rather than when this thread happens to find nothing to do. That is also the
 /// difference between asserting about the run you started and asserting about
 /// whichever run went first.
+/// The three tests that tick take turns (W9a Task 11): a claim is global, so
+/// one test's `tick` with a registry whose `egret.sql` has no store claimed
+/// the STORE test's run and failed it with "needs internal storage" -- seen
+/// once in the W9a Task 11 gate, 0 of 3 alone.
+static TICKING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn drive(f: &Live, reg: &Handlers, ex: Uuid) -> String {
     for _ in 0..64 {
         let state: String =
@@ -639,6 +645,7 @@ async fn a_connection_from_another_workspace_is_refused() {
 /// `egret.sql` from having the same gap.
 #[tokio::test]
 async fn the_output_reaches_postgres_through_the_real_worker() {
+    let _turn = TICKING.lock().await;
     let f = fixture!();
     let source = format!(
         "id: sql-live\nnamespace: egret.test\ninputs:\n  - id: r\n    type: STRING\n\
@@ -686,6 +693,7 @@ async fn the_output_reaches_postgres_through_the_real_worker() {
 /// The control is the test above, which is the same flow with a `flow_id`.
 #[tokio::test]
 async fn an_execution_with_no_flow_has_no_owner_and_the_task_fails() {
+    let _turn = TICKING.lock().await;
     let f = fixture!();
     let source = format!(
         "id: sql-noowner\nnamespace: egret.test\ntasks:\n  - id: q\n    type: {TYPE_ID}\n    \
@@ -761,6 +769,7 @@ fn the_fetch_spellings_are_the_ones_a_flow_writes() {
 /// on the runtime handle.
 #[tokio::test(flavor = "multi_thread")]
 async fn store_of_50_000_rows_is_indexed_and_read_returns_its_first_line() {
+    let _turn = TICKING.lock().await;
     let f = fixture!();
     let fs = egret_workflow::storage::install_mem_for_tests();
     const ROWS: i64 = 50_000;
