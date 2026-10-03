@@ -230,6 +230,9 @@ fn first_batch(concurrency_limit: u32, size: usize) -> usize {
 /// at 128 and returns `Err` past it, which lands on the `FAILED` arm of
 /// [`open`] rather than on the stack.
 pub fn iteration_values(rendered: &str) -> Result<Vec<String>, String> {
+    if values_name_a_file(rendered) {
+        return values_read_from_a_file(rendered);
+    }
     let parsed: serde_json::Value =
         serde_json::from_str(rendered).map_err(|e| format!("values is not JSON: {e}"))?;
     match parsed {
@@ -280,4 +283,51 @@ pub fn iteration_values(rendered: &str) -> Result<Vec<String>, String> {
             }
         )),
     }
+}
+
+/// Kestra's `URIFetcher.supports(String)`, verbatim: a `Loop`'s rendered
+/// `values:` names a FILE when it STARTS with `kestra://`, `file://` or
+/// `nsfile://` (`URIFetcher.java:19,65-67`) -- nothing is trimmed, and
+/// anything else is one of the two JSON shapes.
+///
+/// The worker routes on it (`worker::render::render_expressions` reads the
+/// file), and [`iteration_values`] on it again to know that `rendered` is
+/// [`rendered_from_file`]'s form: a rendered text that names a file never
+/// reaches `rendered` as itself, so the two cannot be confused.
+pub fn values_name_a_file(rendered: &str) -> bool {
+    ["kestra://", "file://", "nsfile://"]
+        .iter()
+        .any(|scheme| rendered.starts_with(scheme))
+}
+
+/// What the worker stores in a `Loop` run's `rendered` once it has read the
+/// file `uri` names: the URI, a newline, and the JSON array of the file's
+/// values -- each already Kestra's `ionValueToString` of one record.
+///
+/// It starts with the URI, so [`values_name_a_file`] tells it apart from
+/// every inline `values:` (W9a Task 11, the user's ruling of 2026-10-03:
+/// the URI path is iterated as read, without the array arm's `distinct()`).
+/// The JSON is compact, so it holds no raw newline and the LAST newline is
+/// the separator, whatever the URI holds.
+pub fn rendered_from_file(uri: &str, values: &[String]) -> String {
+    let array = serde_json::to_string(values).expect("a list of strings serialises");
+    format!("{uri}\n{array}")
+}
+
+/// [`iteration_values`] of [`rendered_from_file`]'s form.
+fn values_read_from_a_file(rendered: &str) -> Result<Vec<String>, String> {
+    let Some((uri, array)) = rendered.rsplit_once('\n') else {
+        return Err(format!(
+            "values names the file {rendered}, which the worker has not read"
+        ));
+    };
+    let values: Vec<String> = serde_json::from_str(array)
+        .map_err(|e| format!("the values read from {uri} are not a list of strings: {e}"))?;
+    let mut out: Vec<String> = Vec::with_capacity(values.len());
+    for value in values {
+        if !out.contains(&value) {
+            out.push(value);
+        }
+    }
+    Ok(out)
 }

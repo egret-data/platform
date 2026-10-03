@@ -597,14 +597,18 @@ impl Surface {
         };
         let bytes =
             crate::runners::env::on_a_render_thread(|| files.0.read_bytes(uri, LOOP_READS_WHOLE))??;
-        let (values, _) =
-            crate::storage::ion::values_to_json(std::io::Cursor::new(bytes), usize::MAX)
-                .map_err(|e| format!("{uri} is not an ION file a Loop can iterate: {e}"))?;
+        use crate::storage::ion::{loop_values, Stop};
+        let values = match loop_values(std::io::Cursor::new(bytes), usize::MAX) {
+            (values, Stop::End | Stop::Full) => values,
+            (_, Stop::Failed(e) | Stop::TooDeep(e) | Stop::Crashed(e)) => {
+                return Err(format!("{uri} is not an ION file a Loop can iterate: {e}"))
+            }
+        };
         let strings = values
             .into_iter()
-            .map(ion_value_to_string)
+            .map(|v| v.ok_or_else(|| "Found a null value in the ION file".to_string()))
             .collect::<std::result::Result<Vec<String>, String>>()?;
-        serde_json::to_string(&strings).map_err(|e| format!("{uri}: {e}"))
+        Ok(crate::executor::rendered_from_file(uri, &strings))
     }
 
     /// Attach the file scope every later [`Surface::context`] carries.
@@ -1161,7 +1165,7 @@ pub(super) fn render_expressions(
             // `advance()` gets the JSON array it already knows how to iterate.
             Ok(value)
                 if matches!(plan.tasks[state.runs[ix].task].kind, TaskKind::Loop { .. })
-                    && is_file_uri(&value) =>
+                    && crate::executor::values_name_a_file(&value) =>
             {
                 match surface.loop_values_from_file(&value) {
                     Ok(values) => state.runs[ix].rendered = Some(values),
@@ -1178,39 +1182,9 @@ pub(super) fn render_expressions(
     Pass::Rendered
 }
 
-/// Kestra's `URIFetcher.supports(String)`, verbatim: the text STARTS with
-/// `kestra://`, `file://` or `nsfile://` (`URIFetcher.java:19,65-67`) --
-/// nothing is trimmed, and anything else is a `values:` of the two JSON shapes.
-fn is_file_uri(rendered: &str) -> bool {
-    ["kestra://", "file://", "nsfile://"]
-        .iter()
-        .any(|scheme| rendered.starts_with(scheme))
-}
-
 /// What a `Loop`'s reading of its values file says when it is not whole:
 /// the end of `Snapshot::read_bytes`'s over-cap message.
 const LOOP_READS_WHOLE: &str = "a Loop reads its values file whole before its first iteration";
-
-/// One top-level Ion value as the string Kestra puts on `loopRun.value` --
-/// `FlowableUtils.ionValueToString` (`FlowableUtils.java:583-590`): a string
-/// as itself, a number's text, `null` an error with Kestra's own message, and
-/// anything else as JSON.
-///
-/// The value arrives through `storage::ion`'s JSON projection, so two Ion
-/// types read differently from Kestra's (`w9a-storage.json`
-/// `loop_over_ion.edge_file`, measured): a decimal is a JSON number
-/// (`12.50` is `"12.5"`, Kestra `"12.50"`) and a timestamp is its Ion text
-/// (`"2025-12-03T12:00:00Z"`, Kestra the JSON string
-/// `"\"2025-12-03T12:00:00.000000Z\""`). Pinned by
-/// `tests/storage_tasks.rs::a_loop_over_the_edge_file_reads_kestras_values_but_two`.
-fn ion_value_to_string(value: Value) -> std::result::Result<String, String> {
-    match value {
-        Value::Null => Err("Found a null value in the ION file".to_string()),
-        Value::String(s) => Ok(s),
-        Value::Number(n) => Ok(n.to_string()),
-        other => Ok(other.to_string()),
-    }
-}
 
 /// A render that will not resolve FAILS the run.
 ///

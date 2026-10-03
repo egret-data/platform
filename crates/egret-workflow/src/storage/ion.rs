@@ -83,10 +83,33 @@ pub fn values_to_json(
 ///   purpose) never yields that value cut short: the Ion reader asks for more
 ///   bytes before it ends a token, and gets the error.
 pub(crate) fn read_values<R: Read + Send + 'static>(bytes: R, max: usize) -> (Vec<Value>, Stop) {
+    read_projected(bytes, max, to_json)
+}
+
+/// Each top-level value of `bytes` as the string a Kestra `Loop` over that
+/// file iterates (`FlowableUtils.ionValueToString`), `None` for a `null`
+/// record, through the same reader as [`read_values`] -- see
+/// [`loop_value`] for the projection and why it is not the preview's.
+pub(crate) fn loop_values<R: Read + Send + 'static>(
+    bytes: R,
+    max: usize,
+) -> (Vec<Option<String>>, Stop) {
+    read_projected(bytes, max, loop_value)
+}
+
+/// [`read_values`]'s reader with the projection of each top-level value as a
+/// parameter: the ONE place the Ion reader runs (depth scan, its own thread,
+/// linear-time fills). The preview projects with [`to_json`], a `Loop` over a
+/// file with [`loop_value`].
+fn read_projected<R, T>(bytes: R, max: usize, project: fn(&ion_rs::Element) -> T) -> (Vec<T>, Stop)
+where
+    R: Read + Send + 'static,
+    T: Send + 'static,
+{
     let spawned = std::thread::Builder::new()
         .name("egret-ion-reader".into())
         .stack_size(READER_STACK_BYTES)
-        .spawn(move || read_guarded(bytes, max));
+        .spawn(move || read_guarded(bytes, max, project));
     match spawned {
         Err(e) => (
             Vec::new(),
@@ -110,7 +133,11 @@ pub(crate) fn read_values<R: Read + Send + 'static>(bytes: R, max: usize) -> (Ve
 /// in a debug build.
 const READER_STACK_BYTES: usize = 16 << 20;
 
-fn read_guarded<R: Read>(bytes: R, max: usize) -> (Vec<Value>, Stop) {
+fn read_guarded<R: Read, T>(
+    bytes: R,
+    max: usize,
+    project: fn(&ion_rs::Element) -> T,
+) -> (Vec<T>, Stop) {
     let trip: Arc<Mutex<Option<Trip>>> = Arc::default();
     let guarded = FillWhole {
         inner: DepthGuard {
@@ -144,7 +171,7 @@ fn read_guarded<R: Read>(bytes: R, max: usize) -> (Vec<Value>, Stop) {
                     None => (rows, Stop::Failed(e.to_string())),
                 }
             }
-            Some(Ok(element)) => rows.push(to_json(&element)),
+            Some(Ok(element)) => rows.push(project(&element)),
         }
     }
 }
@@ -735,6 +762,16 @@ fn to_json(element: &ion_rs::Element) -> Value {
             }
             Value::Object(map)
         }
+    }
+}
+
+/// One top-level value as a Kestra `Loop` over its file iterates it.
+fn loop_value(element: &ion_rs::Element) -> Option<String> {
+    match to_json(element) {
+        Value::Null => None,
+        Value::String(s) => Some(s),
+        Value::Number(n) => Some(n.to_string()),
+        other => Some(other.to_string()),
     }
 }
 

@@ -64,7 +64,7 @@ pub use state::{
 /// should be from it, and W3b will need it to schedule the batches after the
 /// first. See [`flowable::loop_::iteration_values`] for the rule and for the one
 /// place it is knowingly wider than Kestra.
-pub use flowable::loop_::iteration_values;
+pub use flowable::loop_::{iteration_values, rendered_from_file, values_name_a_file};
 
 /// Kestra's `TruthUtils.isTruthy`, over an already-rendered string.
 ///
