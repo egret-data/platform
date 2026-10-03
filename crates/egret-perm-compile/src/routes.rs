@@ -1102,7 +1102,7 @@ async fn write_rule(
     // database-independent by construction, and this predicate reads two tables.
     if let (RuleKind::Mask { .. }, Selector::Tag { key }) = (&r.kind, &r.selector) {
         if let Some(pair) = unreadable_table_mask_for(
-            &mut **tx,
+            tx,
             TagWrite::Mask {
                 tag: TagRef::Key(key),
                 origin: MaskOrigin::Rule,
