@@ -102,6 +102,7 @@ impl Fixture {
                 work_dir: self.dir.join("pods"),
                 config_dir: self.dir.join("config"),
                 callback_url: "http://egret.test:8080".into(),
+                run_kernel_mode: "thread".into(),
             },
         )
     }
@@ -161,6 +162,7 @@ async fn a_run_pod_starts_with_its_version_and_app_id_and_the_r_prefixed_base_ur
     assert_eq!(get("EGRET_BASE_URL"), format!("/r/{}", key.pod_ref()));
     assert_eq!(get("EGRET_APP_ID"), fx.app.to_string());
     assert_eq!(get("EGRET_VERSION_ID"), key.version_id.to_string());
+    assert_eq!(get("EGRET_RUN_KERNEL_MODE"), "thread");
     // the pod token identifies the version, not the viewer (D24: not per-viewer)
     let principal = fx
         .pods

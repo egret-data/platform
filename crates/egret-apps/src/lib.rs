@@ -14,7 +14,7 @@ pub mod template;
 
 pub use gateway::{gateway_router, QueryRequest};
 pub use launcher::{
-    spawn_reaper, AppPodLauncher, EditPodKey, FakeAppPodLauncher, LauncherPods, RunPodKey,
+    spawn_pod_reaper, AppPodLauncher, EditPodKey, FakeAppPodLauncher, LauncherPods, RunPodKey,
 };
 pub use podapi::{pod_router, PodApiState};
 pub use proxy::pod_ref::{edit_pod_ref, run_pod_ref};

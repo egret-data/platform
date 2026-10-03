@@ -34,6 +34,9 @@ pub struct SubprocessConfig {
     pub config_dir: PathBuf,
     /// The base URL pods call back to (egret's pod API and query gateway).
     pub callback_url: String,
+    /// `apps.pod.run_kernel_mode` (D24): `"thread"` or `"forced_ipc"`. Run pods only — edit
+    /// pods always use marimo's normal single-session kernel.
+    pub run_kernel_mode: String,
 }
 
 struct Running {
@@ -231,6 +234,7 @@ impl SubprocessPodLauncher {
         let extra = [
             ("EGRET_APP_ID", app_id.to_string()),
             ("EGRET_VERSION_ID", key.version_id.to_string()),
+            ("EGRET_RUN_KERNEL_MODE", self.cfg.run_kernel_mode.clone()),
         ];
         match self
             .spawn_and_wait(&key.pod_ref(), "run", &pod_token, &extra, timeout)

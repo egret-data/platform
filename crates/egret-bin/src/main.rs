@@ -2443,6 +2443,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                             work_dir: pod.work_dir.clone().into(),
                             config_dir: pod.config_dir.clone().into(),
                             callback_url: pod.callback_url.clone(),
+                            run_kernel_mode: pod.run_kernel_mode.clone(),
                         },
                     ),
                 )),
@@ -2463,6 +2464,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                                 mem_limit: pod.mem_limit.clone(),
                                 pull_secret: pod.pull_secret.clone(),
                                 callback_url: pod.callback_url.clone(),
+                                run_kernel_mode: pod.run_kernel_mode.clone(),
                             },
                             pod_tokens,
                         ),
@@ -2473,9 +2475,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         let resolver: std::sync::Arc<dyn egret_apps::PodResolver> = match launcher {
             Some(launcher) => {
                 tracing::info!(mode = launcher.mode(), "app pod launcher");
-                egret_apps::spawn_reaper(
+                egret_apps::spawn_pod_reaper(
                     launcher.clone(),
                     std::time::Duration::from_secs(pod.idle_secs),
+                    std::time::Duration::from_secs(pod.run_idle_secs),
                     std::time::Duration::from_secs(60),
                 );
                 std::sync::Arc::new(egret_apps::LauncherPods {

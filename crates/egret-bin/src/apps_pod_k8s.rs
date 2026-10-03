@@ -63,6 +63,8 @@ pub struct K8sAppPodConfig {
     pub pull_secret: Option<String>,
     /// egret's in-cluster URL, as the pod reaches it (`EGRET_URL`).
     pub callback_url: String,
+    /// `apps.pod.run_kernel_mode` (D24): `"thread"` or `"forced_ipc"`. Run pods only.
+    pub run_kernel_mode: String,
 }
 
 /// `app-edit-<pod ref>`: DNS-safe and derived from the same ref the proxy's URLs use.
@@ -335,6 +337,7 @@ pub fn build_run_pod(key: &RunPodKey, app_id: Uuid, cfg: &K8sAppPodConfig) -> Po
     let extra_env = vec![
         plain("EGRET_APP_ID", &app_id.to_string()),
         plain("EGRET_VERSION_ID", &key.version_id.to_string()),
+        plain("EGRET_RUN_KERNEL_MODE", &cfg.run_kernel_mode),
     ];
     let container = marimo_container(
         &name,
@@ -949,6 +952,7 @@ mod tests {
             mem_limit: "2Gi".into(),
             pull_secret: None,
             callback_url: "http://egret:8080".into(),
+            run_kernel_mode: "thread".into(),
         }
     }
 
@@ -1191,6 +1195,7 @@ mod tests {
         assert_eq!(plain["APPS_WORKDIR"], "/work");
         assert_eq!(plain["EGRET_APP_ID"], app_id.to_string());
         assert_eq!(plain["EGRET_VERSION_ID"], k.version_id.to_string());
+        assert_eq!(plain["EGRET_RUN_KERNEL_MODE"], "thread");
         for name in ["EGRET_POD_TOKEN", "EGRET_MARIMO_TOKEN"] {
             let var = env.iter().find(|e| e.name == name).unwrap();
             assert!(var.value.is_none(), "{name} must not be a literal");
