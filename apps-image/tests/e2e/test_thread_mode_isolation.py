@@ -9,8 +9,9 @@ measurement that justifies defaulting run pods to marimo's own thread-mode kerne
 two sessions of one viewer must still each see their own request's `x-egret-app-token`, which
 is the one thing thread mode could plausibly get wrong (if it read a stale/wrong request).
 
-Promoted into the e2e suite by Task 5c-2 once `run_kernel_mode=thread` is the real toggle
-(Task 5c-1); until then this runs against whatever `launcher.py` currently does for run mode.
+Promoted into the e2e suite by Task 5c-2, now that `run_kernel_mode=thread` (Task 5c-1) is the
+real, default behaviour of `egret_marimo.launcher` — this exercises production code, not a
+manual patch-removal.
 """
 
 from __future__ import annotations
@@ -21,16 +22,7 @@ import pytest
 
 from harness import APPS, viewer_page, wait_until
 
-pytestmark = [
-    pytest.mark.e2e,
-    pytest.mark.skip(
-        reason="D24 Task 5c-1 has not landed yet: egret_marimo.launcher still forces the IPC patch "
-        "unconditionally in run mode, so this test (which asserts thread mode IS the default) would "
-        "fail against today's actual behaviour. It PASSED as a manual spike with the patch call "
-        "commented out by hand — see docs/en/plans/2026-10-03-data-apps-p5-startup-result.md. "
-        "Task 5c-2 removes this skip once the real run_kernel_mode=thread default exists."
-    ),
-]
+pytestmark = [pytest.mark.e2e]
 
 APP = "44444444-4444-4444-8444-444444444444"
 VERSION = "v-1"

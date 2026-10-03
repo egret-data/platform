@@ -29,7 +29,7 @@ def env(tmp_path, monkeypatch):
     workdir = tmp_path / "work"
     for name in (
         "XDG_CONFIG_HOME", "MARIMO_SKIP_UPDATE_CHECK", "EGRET_REAL_PYTHON", "EGRET_MARIMO_VERSION",
-        "EGRET_MARIMO_PORT", "EGRET_APP_ID", "EGRET_VERSION_ID",
+        "EGRET_MARIMO_PORT", "EGRET_APP_ID", "EGRET_VERSION_ID", "EGRET_RUN_KERNEL_MODE",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HOME", str(home))
@@ -168,7 +168,10 @@ def test_edit_argv_installs_storage_patch_only(env):
     assert Path.cwd() == Path(workdir)
 
 
-def test_run_fetches_the_version_once_and_installs_ipc_patch_only(env, egret, monkeypatch):
+def test_run_fetches_the_version_once_and_does_not_install_ipc_patch_by_default(env, egret, monkeypatch):
+    """D24: a run pod serves exactly one viewer, so the default kernel mode is thread, not the
+    forced-IPC patch (kept only behind EGRET_RUN_KERNEL_MODE=forced_ipc for a possible future
+    shared-pod revival)."""
     monkeypatch.setenv("EGRET_URL", egret.base_url)
     monkeypatch.setenv("EGRET_BASE_URL", f"/r/{VERSION}")
     monkeypatch.setenv("EGRET_APP_ID", APP)
@@ -190,8 +193,50 @@ def test_run_fetches_the_version_once_and_installs_ipc_patch_only(env, egret, mo
         "-q", "run", str(app_file), "--host", "0.0.0.0", "--port", "2719", "--headless",
         "--base-url", f"/r/{VERSION}", "--token-password", "marimo-secret",
     ]]
-    assert env["calls"]["ipc"] == [(SHIM,)]
+    assert env["calls"]["ipc"] == []
     assert env["calls"]["storage"] == []
+
+
+def test_run_kernel_mode_thread_explicit_also_skips_the_ipc_patch(env, egret, monkeypatch):
+    monkeypatch.setenv("EGRET_URL", egret.base_url)
+    monkeypatch.setenv("EGRET_APP_ID", APP)
+    monkeypatch.setenv("EGRET_VERSION_ID", VERSION)
+    monkeypatch.setenv("EGRET_RUN_KERNEL_MODE", "thread")
+    egret.pod_tokens["pod-tok"] = {}
+    egret.versions[(APP, VERSION)] = {"source": "", "version_no": 1}
+    assert launcher.main(["run"]) == 0
+    assert env["calls"]["ipc"] == []
+
+
+def test_run_kernel_mode_forced_ipc_installs_the_patch(env, egret, monkeypatch):
+    monkeypatch.setenv("EGRET_URL", egret.base_url)
+    monkeypatch.setenv("EGRET_APP_ID", APP)
+    monkeypatch.setenv("EGRET_VERSION_ID", VERSION)
+    monkeypatch.setenv("EGRET_RUN_KERNEL_MODE", "forced_ipc")
+    egret.pod_tokens["pod-tok"] = {}
+    egret.versions[(APP, VERSION)] = {"source": "", "version_no": 1}
+    assert launcher.main(["run"]) == 0
+    assert env["calls"]["ipc"] == [(SHIM,)]
+
+
+def test_run_kernel_mode_unknown_value_exits_64(env, egret, monkeypatch, capsys):
+    monkeypatch.setenv("EGRET_URL", egret.base_url)
+    monkeypatch.setenv("EGRET_APP_ID", APP)
+    monkeypatch.setenv("EGRET_VERSION_ID", VERSION)
+    monkeypatch.setenv("EGRET_RUN_KERNEL_MODE", "bogus")
+    egret.pod_tokens["pod-tok"] = {}
+    egret.versions[(APP, VERSION)] = {"source": "", "version_no": 1}
+    assert launcher.main(["run"]) == 64
+    assert "EGRET_RUN_KERNEL_MODE" in capsys.readouterr().err
+    assert env["calls"]["ipc"] == [] and env["calls"]["marimo"] == []
+
+
+def test_edit_mode_ignores_run_kernel_mode(env, monkeypatch):
+    """EGRET_RUN_KERNEL_MODE is a run-only setting; an edit pod never installs the IPC patch
+    regardless of its value."""
+    monkeypatch.setenv("EGRET_RUN_KERNEL_MODE", "forced_ipc")
+    assert launcher.main(["edit"]) == 0
+    assert env["calls"]["ipc"] == []
 
 
 def test_run_exits_69_when_egret_cannot_serve_the_version(env, egret, monkeypatch, capsys):

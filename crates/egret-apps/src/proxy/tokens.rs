@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use egret_core::Result;
+use egret_core::{Result, UserId};
 use uuid::Uuid;
 
 use crate::grant::Grant;
@@ -35,6 +35,10 @@ struct Entry {
 #[derive(Default)]
 pub(crate) struct TokenBook {
     map: Mutex<HashMap<Uuid, Entry>>,
+    /// D24/`apps.pod.run_session_cap`: open WebSockets of ONE viewer's run pod, keyed by
+    /// `(viewer, version)` rather than grant id — a page reload can mint a fresh grant, but it is
+    /// still the same pod and the same cap. Not a multi-tenant limit: D24 makes one pod one person.
+    run_sessions: Mutex<HashMap<(UserId, Uuid), u32>>,
 }
 
 impl TokenBook {
@@ -124,6 +128,29 @@ impl TokenBook {
             true
         } else {
             false
+        }
+    }
+
+    /// Claims one of that `(viewer, version)` pod's `cap` session slots. `false` means the pod is
+    /// already at capacity and the caller must refuse the upgrade before it ever dials upstream.
+    pub(crate) fn run_ws_try_open(&self, user: UserId, version: Uuid, cap: u32) -> bool {
+        let mut m = self.run_sessions.lock().unwrap();
+        let n = m.entry((user, version)).or_insert(0);
+        if *n >= cap {
+            return false;
+        }
+        *n += 1;
+        true
+    }
+
+    /// Releases a slot claimed by `run_ws_try_open`.
+    pub(crate) fn run_ws_closed(&self, user: UserId, version: Uuid) {
+        let mut m = self.run_sessions.lock().unwrap();
+        if let Some(n) = m.get_mut(&(user, version)) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                m.remove(&(user, version));
+            }
         }
     }
 }
