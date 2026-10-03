@@ -148,6 +148,22 @@ impl PodTokenRepo {
         Ok(r.rows_affected())
     }
 
+    /// A version's app and workspace, for a launcher that has only a `version_id` (D24's
+    /// `RunPodKey` is `(user, version)` — the pod's app and workspace are looked up, not carried).
+    /// `None` for an unknown version.
+    pub async fn version_owner(&self, version_id: Uuid) -> Result<Option<(Uuid, WorkspaceId)>> {
+        let row = sqlx::query(
+            "SELECT a.id AS app_id, a.workspace_id AS workspace_id \
+               FROM analytics.app_versions v JOIN analytics.apps a ON a.id = v.app_id \
+              WHERE v.id = $1",
+        )
+        .bind(version_id)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(|e| Error::from(anyhow::Error::from(e)))?;
+        Ok(row.map(|r| (r.get("app_id"), WorkspaceId(r.get("workspace_id")))))
+    }
+
     /// Every live run token of this one `(app, version)`: what stopping that version's run pod
     /// revokes. A run token proves "may read this version", not "is this viewer" — revoking it
     /// is about not leaving a live token for a pod that is gone, not about per-viewer isolation.
