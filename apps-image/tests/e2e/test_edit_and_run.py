@@ -34,13 +34,27 @@ def _wait_text(page, pattern: re.Pattern, timeout: float = 60) -> re.Match:
     return wait_until(lambda: pattern.search(_text(page)), timeout, f"{pattern.pattern!r} on the page", 0.25)
 
 
-def test_run_mode_one_kernel_process_and_token_per_viewer(egret, launch, proxy, browser, tmp_path):
-    """D7 + §4.1: each viewer's session has its own kernel process and queries with its own token."""
+def test_run_mode_forced_ipc_gives_one_kernel_process_and_token_per_viewer(egret, launch, proxy, browser, tmp_path):
+    """D7 + §4.1, under `forced_ipc`: each viewer's session has its own kernel process and queries
+    with its own token.
+
+    Before D24, this was run mode's only behaviour — many viewers shared one pod, isolated by this
+    patch. D24 (see `docs/en/plans/2026-10-03-data-apps-p5-run-mode.md`) instead gives each viewer
+    their own pod by default (thread mode is safe there — see test_thread_mode_isolation.py — because
+    a pod never holds two different people's sessions). `forced_ipc` is kept for a possible future
+    shared-pod revival, so this test pins that it still does what it always did when asked for; it is
+    no longer the default and this scenario (two different people in one pod) no longer arises in
+    production.
+    """
     _seed_viewers(egret)
     egret.versions[(APP, VERSION)] = {"source": (APPS / "viewer.py").read_text(), "version_no": 1}
     shim, shim_log = recording_shim(tmp_path)
     t0 = time.monotonic()
-    server = launch("run", f"/r/{VERSION}", EGRET_APP_ID=APP, EGRET_VERSION_ID=VERSION, EGRET_VENV_SHIM=str(shim))
+    server = launch(
+        "run", f"/r/{VERSION}",
+        EGRET_APP_ID=APP, EGRET_VERSION_ID=VERSION, EGRET_VENV_SHIM=str(shim),
+        EGRET_RUN_KERNEL_MODE="forced_ipc",
+    )
     t_ready = time.monotonic() - t0
     base = proxy(server.port, TOKENS)
 
