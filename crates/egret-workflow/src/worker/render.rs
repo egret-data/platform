@@ -586,13 +586,10 @@ impl Surface {
     /// its first iteration where Kestra fails it at the batch that reaches it
     /// (`loop_over_ion.null_record`: one iteration ran).
     pub(super) fn loop_values_from_file(&self, uri: &str) -> std::result::Result<String, String> {
-        if !uri.starts_with(crate::storage::uri::SCHEME_PREFIX) {
-            return Err(format!(
-                "{uri}: a Loop's `values:` reads a file only from egret's internal storage \
-                 (`kestra:///…`); `file://` is refused and `nsfile://` is a namespace file, \
-                 which egret does not have yet"
-            ));
-        }
+        // A `file://` or `nsfile://` URI is refused by the snapshot -- the one
+        // readability decision -- as a URI that does not parse, naming it;
+        // there is no second check here (mutation j of W9a Task 11 measured
+        // one as dead weight).
         let Some(files) = self.files.clone() else {
             return Err(format!(
                 "{uri} cannot be read: this render has no file scope"

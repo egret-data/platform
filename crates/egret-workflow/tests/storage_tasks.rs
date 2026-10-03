@@ -1039,7 +1039,8 @@ async fn an_outage_reading_the_values_file_rolls_back_and_the_loop_waits() {
 
 /// A `values:` that renders to a `file://` or `nsfile://` URI -- Kestra's
 /// other two `URIFetcher` schemes -- fails the loop naming why, instead of
-/// being taken for JSON.
+/// being taken for JSON: the snapshot (the one readability decision) refuses
+/// a URI that does not parse as `kestra:///…`, by name.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_or_nsfile_values_uri_fails_the_loop_by_name() {
     let _turn = SERIAL.lock().await;
