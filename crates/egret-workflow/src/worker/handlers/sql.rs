@@ -82,6 +82,7 @@
 //! | `NONE` (default) | `{}` |
 //! | `FETCH_ONE` | `{"size": 1, "row": {…}}`, or `{"size": 0}` when the statement returned no rows |
 //! | `FETCH` | `{"size": n, "rows": [{…}, …]}` |
+//! | `STORE` | `{"size": n, "uri": "kestra:///…/tasks/{task}/{taskRunId}/result.ion"}` |
 //!
 //! `size` is defined as **the number of rows this task put into its own
 //! output** — 0 or 1 for `FETCH_ONE`, `rows.len()` for `FETCH` — rather than as
@@ -89,6 +90,30 @@
 //! two cannot disagree. A row is an object keyed by column name; a result with
 //! two columns of the same name fails the task rather than silently dropping
 //! one, because a JSON object cannot hold both and the loss would be invisible.
+//!
+//! # `fetch: STORE` (W9a Task 10, spec §9.2)
+//!
+//! The rows go to internal storage instead of the output: Ion text written by
+//! `runners::ionfmt` ([`crate::runners::write_ion_row`]), one struct per line,
+//! streamed through a `tokio::io::duplex` into `put_stream` at the run's own
+//! task prefix, and handed to the commit through `Outcome::files`, which
+//! indexes it in the outcome's transaction (§4.3). The outputs are Kestra's
+//! `AbstractJdbcQuery` STORE shape, `{uri, size}` with `size` the ROW count
+//! (`w9a-storage.json` `store_outputs`). Kestra names the file randomly
+//! (`{n}.ion`, measured: two runs, two names); egret's is the fixed
+//! [`STORE_FILE`], `result.ion`, so a re-claim overwrites its own object
+//! (§4.3). Kestra's file is binary Ion from `FileSerde`; this one is Ion text,
+//! and the test `store_ion_matches_the_artifact_for_every_type_egret_can_carry`
+//! records per SQL type where the DECODED values agree and where they do not.
+//!
+//! **What STORE does not do: reduce memory.** `QueryExecPort` returns a whole
+//! `TabularResult`, and neither connector hands a row on before the end
+//! (`w9a-storage.json` `connector_streaming`: Trino pages through `nextUri`
+//! and StarRocks iterates rows, but both collect every row into a `Vec`, and
+//! `port_impl::run_bounded` awaits the whole result). So STORE is capped by
+//! [`MAX_FETCH_ROWS`] and fails at the cap exactly as `FETCH` does; what it
+//! changes is where the rows go -- a file instead of `task_runs.outputs` --
+//! not how many egret holds. `egret.sql` is in no production registry (§1).
 //!
 //! `NONE` is the default because an output is **persisted**: `task_runs.outputs`
 //! is a JSONB column and every later render context in the execution carries it.
@@ -103,6 +128,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::super::{Outcome, TaskHandler, TaskInput};
+use crate::storage::{FileStore, StoredFile};
 
 /// The `type:` a flow writes. egret's own short spelling, and the one
 /// `crate::spec::registry::TASK_TYPES` already publishes under.
@@ -116,6 +142,9 @@ pub const TYPE_ID: &str = "egret.sql";
 /// subsequent render pays for. A result that hits the cap **fails the task**
 /// rather than being truncated — see [`Sql::run`].
 pub const MAX_FETCH_ROWS: usize = 10_000;
+
+/// The name of the file `fetch: STORE` writes under the run's task prefix.
+pub const STORE_FILE: &str = "result.ion";
 
 /// The wall-clock budget one statement gets when the author asked for none.
 ///
@@ -139,10 +168,9 @@ pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 /// What the task does with the rows.
 ///
-/// The three names are Kestra's JDBC `fetchType` spellings, so an author coming
-/// from there is not surprised, under egret's own shorter key. `STORE` is
-/// deliberately absent: it writes a result set to internal storage, which W9
-/// owns and this crate has no way to reach.
+/// The four names are Kestra's JDBC `fetchType` spellings, so an author coming
+/// from there is not surprised, under egret's own shorter key. `STORE` writes
+/// the result set to internal storage (W9a Task 10; see this module's doc).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 pub enum Fetch {
     /// Run it; produce `{}`.
@@ -155,6 +183,9 @@ pub enum Fetch {
     /// Produce every row under `rows`.
     #[serde(rename = "FETCH")]
     All,
+    /// Write every row to internal storage as Ion; produce `{uri, size}`.
+    #[serde(rename = "STORE")]
+    Store,
 }
 
 /// `egret.sql`'s own properties.
@@ -186,6 +217,9 @@ pub struct Sql {
     port: Arc<dyn QueryExecPort>,
     max_rows: usize,
     timeout: std::time::Duration,
+    /// Internal storage, which `fetch: STORE` writes to; `None` when egret
+    /// has no `[storage]`, and `STORE` then fails naming it.
+    files: Option<Arc<FileStore>>,
 }
 
 impl std::fmt::Debug for Sql {
@@ -196,6 +230,7 @@ impl std::fmt::Debug for Sql {
         f.debug_struct("Sql")
             .field("max_rows", &self.max_rows)
             .field("timeout", &self.timeout)
+            .field("files", &self.files.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -207,6 +242,7 @@ impl Sql {
             port,
             max_rows: MAX_FETCH_ROWS,
             timeout: DEFAULT_TIMEOUT,
+            files: None,
         }
     }
 
@@ -221,7 +257,54 @@ impl Sql {
             port,
             max_rows,
             timeout,
+            files: None,
         }
+    }
+
+    /// The same handler, writing `fetch: STORE` files to `files`.
+    pub fn with_files(mut self, files: Option<Arc<FileStore>>) -> Self {
+        self.files = files;
+        self
+    }
+
+    /// Where `fetch: STORE` writes, or the task's failure: the store, and the
+    /// run's own task prefix -- the render scope's (the writing execution's,
+    /// an iteration's inside a `Loop`, spec §3), else built from `flow` the
+    /// way `script.rs`'s `collect_to` builds it. A namespace, flow or task id
+    /// no URI can carry is the author's error, never `Internal`.
+    fn store_target(
+        &self,
+        task: &TaskInput,
+    ) -> std::result::Result<(Arc<FileStore>, String), String> {
+        let Some(fs) = &self.files else {
+            return Err(
+                "`fetch: STORE` needs internal storage, and egret has none configured \
+                 (the `[storage]` section of its configuration)"
+                    .to_string(),
+            );
+        };
+        if let Some(prefix) = task.render.files().and_then(|f| f.0.task_prefix()) {
+            return Ok((fs.clone(), prefix.to_string()));
+        }
+        let flow = (
+            crate::runners::render_str("{{ flow.namespace }}", &task.render),
+            crate::runners::render_str("{{ flow.id }}", &task.render),
+        );
+        let (Ok(namespace), Ok(flow_id)) = flow else {
+            return Err(
+                "this run has no storage prefix for the file `fetch: STORE` writes: it is not \
+                 a task run of a flow's execution"
+                    .to_string(),
+            );
+        };
+        let prefix = crate::storage::uri::task_prefix(
+            &namespace,
+            &flow_id,
+            task.execution_id,
+            &task.task_id,
+            task.run_id,
+        )?;
+        Ok((fs.clone(), prefix))
     }
 
     /// What one port failure means, by VARIANT rather than by message.
@@ -313,7 +396,29 @@ impl TaskHandler for Sql {
             )));
         };
 
-        let (sql, bound) = match crate::runners::env::render_bound(&spec.sql, &task.render) {
+        // `fetch: STORE` needs somewhere to put the rows, and that is decided
+        // BEFORE the statement runs: a statement whose rows have nowhere to
+        // go would cost the engine for nothing.
+        let store_to = match spec.fetch {
+            Fetch::Store => match self.store_target(task) {
+                Ok(target) => Some(target),
+                Err(why) => return Ok(failed(format!("{TYPE_ID}: {why}"))),
+            },
+            Fetch::None | Fetch::One | Fetch::All => None,
+        };
+
+        let rendered = crate::runners::env::render_bound(&spec.sql, &task.render);
+        // W9a Task 4: a `read()` in `sql:` that met a store OUTAGE failed the
+        // render, and that failure is not the author's (spec §11): `Err`,
+        // before the statement runs.
+        if let Some(outage) = task
+            .render
+            .files()
+            .and_then(|f| f.0.infrastructure_failure())
+        {
+            return Err(Error::Internal(anyhow::anyhow!("{TYPE_ID}: {outage}")));
+        }
+        let (sql, bound) = match rendered {
             Ok(pair) => pair,
             Err(e) => return Ok(failed(format!("{TYPE_ID}: `sql` did not render: {e}"))),
         };
@@ -352,9 +457,13 @@ impl TaskHandler for Sql {
             Err(e) => return self.mapped(e, budget),
         };
 
-        match outputs_for(spec.fetch, &result, self.max_rows) {
-            Ok(outputs) => Ok(Outcome::succeeded_with(outputs)),
-            Err(message) => Ok(failed(format!("{TYPE_ID}: {message}"))),
+        let outputs = match outputs_for(spec.fetch, &result, self.max_rows) {
+            Ok(outputs) => outputs,
+            Err(message) => return Ok(failed(format!("{TYPE_ID}: {message}"))),
+        };
+        match store_to {
+            None => Ok(Outcome::succeeded_with(outputs)),
+            Some((fs, prefix)) => store(&fs, task.workspace_id, &prefix, &result, outputs).await,
         }
     }
 
@@ -545,24 +654,171 @@ fn outputs_for(
             })),
         },
         Fetch::All => {
-            // Checked for `FETCH` alone, and that is precise rather than lazy:
-            // `NONE` discards the rows and `FETCH_ONE` takes the first, so
-            // neither can be made wrong by a cap the other side of it. Only
-            // `FETCH` claims to have produced "the rows", and a claim that is
-            // silently a prefix is the over-acceptance shape the spec's fidelity
-            // rules forbid.
-            if result.truncated {
-                return Err(format!(
-                    "the statement returned more than the {max_rows} rows `fetch: FETCH` \
-                     will put in an output, and a prefix is not an answer. Narrow the \
-                     statement, or use `fetch: NONE` if the rows are not needed"
-                ));
-            }
+            // Checked for `FETCH` and `STORE` alone, and that is precise rather
+            // than lazy: `NONE` discards the rows and `FETCH_ONE` takes the
+            // first, so neither can be made wrong by a cap the other side of
+            // it. Only `FETCH` and `STORE` claim to have produced "the rows",
+            // and a claim that is silently a prefix is the over-acceptance
+            // shape the spec's fidelity rules forbid.
+            complete("FETCH", result, max_rows)?;
             let rows: Vec<serde_json::Value> =
                 result.rows.iter().map(|r| row_object(&names, r)).collect();
             Ok(serde_json::json!({ "size": rows.len(), "rows": rows }))
         }
+        // The rows go to a file, not here: `size` is decided now (the ROW
+        // count, `w9a-storage.json` `store_outputs.size_counts`) and `uri` is
+        // added by [`store`] once the file is written.
+        Fetch::Store => {
+            complete("STORE", result, max_rows)?;
+            Ok(serde_json::json!({ "size": result.rows.len() }))
+        }
     }
+}
+
+/// The cap, for the two fetches that claim every row: a truncated result is
+/// the task's failure, never a prefix.
+fn complete(
+    fetch: &str,
+    result: &TabularResult,
+    max_rows: usize,
+) -> std::result::Result<(), String> {
+    if result.truncated {
+        return Err(format!(
+            "the statement returned more than the {max_rows} rows `fetch: {fetch}` \
+             will put in an output, and a prefix is not an answer. Narrow the \
+             statement, or use `fetch: NONE` if the rows are not needed"
+        ));
+    }
+    Ok(())
+}
+
+/// How many bytes of rows go through the pipe between the writer and the
+/// upload at once.
+const STORE_PIPE_BYTES: usize = 64 * 1024;
+
+/// One row and its newline: the one spelling both of [`store`]'s passes use.
+fn store_line(line: &mut String, columns: &[String], row: &[serde_json::Value]) {
+    line.clear();
+    crate::runners::write_ion_row(line, columns, row);
+    line.push('\n');
+}
+
+/// `fetch: STORE`'s file: every row as Ion text, one per line, streamed into
+/// the store at `{prefix}`[`STORE_FILE`]; `outputs` gains its `uri`, and the
+/// outcome carries the file so the commit indexes it (spec §4.3).
+///
+/// Two passes over the rows the port already holds, both through
+/// [`store_line`]: the first only counts bytes, so the caps are judged before
+/// a byte is uploaded and the upload is told its exact size; the second
+/// writes into a `tokio::io::duplex` that `put_stream` reads from, so the
+/// file is never assembled whole beside the rows.
+///
+/// * The author's: a name no URI can carry, a crossed cap -- a failed task.
+/// * egret's: the store failing, or holding other than what was written --
+///   `Err` (spec §11), so the lease lapses and the run is re-claimed with no
+///   attempt spent; the re-claim writes the same object again.
+async fn store(
+    fs: &FileStore,
+    workspace: Uuid,
+    prefix: &str,
+    result: &TabularResult,
+    mut outputs: serde_json::Value,
+) -> Result<Outcome> {
+    use tokio::io::AsyncWriteExt;
+    let fail = |why: String| -> Result<Outcome> { Ok(failed(format!("{TYPE_ID}: {why}"))) };
+    let file = match crate::storage::uri::verbatim_file_uri(prefix, STORE_FILE) {
+        Ok(file) => file,
+        Err(why) => return fail(why),
+    };
+    let object = match fs.object_uri(workspace, &file) {
+        Ok(object) => object,
+        Err(why) => return fail(why),
+    };
+    let columns: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
+
+    let mut line = String::new();
+    let mut size: u64 = 0;
+    for row in &result.rows {
+        store_line(&mut line, &columns, row);
+        size += line.len() as u64;
+    }
+    let caps = fs.caps;
+    if size > caps.max_file_bytes {
+        return fail(format!(
+            "the file `fetch: STORE` writes, {file}, is {size} bytes, over the {} one file \
+             may be (workflow.storage.max_file_bytes)",
+            caps.max_file_bytes
+        ));
+    }
+    if size > caps.max_task_bytes {
+        return fail(format!(
+            "the file `fetch: STORE` writes, {file}, is {size} bytes, over the {} one task \
+             run may store (workflow.storage.max_task_bytes)",
+            caps.max_task_bytes
+        ));
+    }
+
+    let (mut tx, rx) = tokio::io::duplex(STORE_PIPE_BYTES);
+    let rows = &result.rows;
+    let columns = &columns;
+    let write = async move {
+        let mut line = String::new();
+        for row in rows {
+            store_line(&mut line, columns, row);
+            tx.write_all(line.as_bytes()).await?;
+        }
+        tx.shutdown().await
+    };
+    // `rx` is MOVED into the upload, so an upload that gives up drops it and
+    // the writer's next write fails instead of waiting for a reader for ever.
+    let put = async {
+        let mut rx = rx;
+        fs.store.put_stream(&object, &mut rx, Some(size)).await
+    };
+    let (written, put) = tokio::join!(write, put);
+    let outage = |what: String| -> Result<Outcome> {
+        Err(Error::Internal(anyhow::anyhow!("{TYPE_ID}: {what}")))
+    };
+    let uploaded = match put {
+        Ok(n) => n,
+        Err(e) => {
+            return outage(format!(
+                "{file} could not be stored: internal storage is unavailable: {e}"
+            ))
+        }
+    };
+    if let Err(e) = written {
+        return outage(format!(
+            "{file} could not be written to internal storage: {e}"
+        ));
+    }
+    // `head` for the real size (spec §4.2), as `collect_one` does: what the
+    // index row will hold.
+    match fs.store.head(&object).await {
+        Ok(Some(held)) if held == size && uploaded == size => {}
+        Ok(Some(held)) => {
+            return outage(format!(
+                "{file} holds {held} bytes in internal storage after {size} were written \
+                 ({uploaded} uploaded)"
+            ))
+        }
+        Ok(None) => {
+            return outage(format!(
+                "{file} was written ({uploaded} bytes) but internal storage does not have it"
+            ))
+        }
+        Err(e) => {
+            return outage(format!(
+                "{file} could not be checked: internal storage is unavailable: {e}"
+            ))
+        }
+    }
+
+    outputs["uri"] = serde_json::Value::String(file.clone());
+    Ok(Outcome {
+        files: vec![StoredFile { uri: file, size }],
+        ..Outcome::succeeded_with(outputs)
+    })
 }
 
 /// The column names, refusing a duplicate.
@@ -1213,5 +1469,608 @@ mod tests {
             "the handler's own reason must survive the trip through the \
              registry rather than being flattened: {reason}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // `fetch: STORE` (W9a Task 10, spec §9.2)
+    // -----------------------------------------------------------------
+
+    use crate::storage::{self, uri, Caps, StoredFile};
+    use egret_storage::{ObjectStore, StorageError};
+
+    const NS: &str = "w9a.t10";
+    const FLOW: &str = "pg_store";
+
+    /// A `FileStore` over a `MemStore` the test keeps a handle on, so it can
+    /// read back what the handler wrote and see what it did not.
+    fn mem_files(caps: Caps) -> (Arc<FileStore>, egret_storage::MemStore) {
+        let mem = egret_storage::MemStore::new();
+        let fs = Arc::new(FileStore {
+            store: Arc::new(mem.clone()),
+            bucket: "egret-test".to_string(),
+            prefix: "workflow/".to_string(),
+            caps,
+            retention_days: 30,
+        });
+        (fs, mem)
+    }
+
+    /// A STORE input as the worker hands it over: ids of its own, and the
+    /// render scope carrying the run's `task_prefix` (what `claim` builds).
+    struct Stored {
+        task: TaskInput,
+        prefix: String,
+    }
+
+    fn store_input(fs: &Arc<FileStore>, sql: &str) -> Stored {
+        let ws = Uuid::new_v4();
+        let ex = Uuid::new_v4();
+        let run = Uuid::new_v4();
+        let prefix = uri::task_prefix(NS, FLOW, ex, "q", run).unwrap();
+        let scope = storage::scope::Snapshot::from_parts(
+            std::collections::BTreeMap::new(),
+            fs.clone(),
+            ws,
+            Some(prefix.clone()),
+        )
+        .into_scope();
+        let mut task = input(
+            serde_json::json!({"database": db_id().to_string(), "sql": sql, "fetch": "STORE"}),
+            RenderContext::new().with_files(scope),
+        );
+        task.workspace_id = ws;
+        task.execution_id = ex;
+        task.run_id = run;
+        Stored { task, prefix }
+    }
+
+    async fn object(fs: &FileStore, ws: Uuid, uri: &str) -> Vec<u8> {
+        fs.store
+            .get(&fs.object_uri(ws, uri).unwrap())
+            .await
+            .expect("the file is in the store")
+    }
+
+    fn decoded(bytes: Vec<u8>) -> Vec<serde_json::Value> {
+        let (rows, more) =
+            storage::ion::values_to_json(std::io::Cursor::new(bytes), 100_000).expect("Ion");
+        assert!(!more);
+        rows
+    }
+
+    /// **The output shape is Kestra's** (`w9a-storage.json` `store_outputs`:
+    /// keys `size` and `uri`, `size` the ROW count), the file is under the
+    /// run's own prefix with the fixed name, every row is in it as one Ion
+    /// struct per line, and **the file is handed to the commit through
+    /// `Outcome.files`** with its BYTE size -- which is what indexes it.
+    /// Zero rows still writes and indexes a 0-byte file (measured: "0 rows ->
+    /// size 0 (a 0-byte file is still written and returned)").
+    #[tokio::test]
+    async fn store_writes_every_row_as_ion_and_outputs_uri_and_row_count() {
+        let (fs, _mem) = mem_files(Caps::default());
+        let spy = Spy::answering(result(
+            &["region", "units", "note"],
+            vec![
+                vec![
+                    serde_json::json!("EU"),
+                    serde_json::json!(40),
+                    serde_json::json!("a\nb"),
+                ],
+                vec![
+                    serde_json::json!("US"),
+                    serde_json::json!(7),
+                    serde_json::Value::Null,
+                ],
+                vec![
+                    serde_json::json!("EU"),
+                    serde_json::json!(51),
+                    serde_json::json!("say \"hi\""),
+                ],
+            ],
+        ));
+        let st = store_input(&fs, "SELECT region, units, note FROM t");
+        let out = Sql::new(spy.clone())
+            .with_files(Some(fs.clone()))
+            .run(&st.task)
+            .await
+            .expect("a stored result is not a worker failure");
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+
+        let want_uri = format!("{}{STORE_FILE}", st.prefix);
+        assert_eq!(
+            STORE_FILE, "result.ion",
+            "w9a-storage.json store_outputs.egret.name"
+        );
+        assert_eq!(
+            out.outputs,
+            Some(serde_json::json!({"uri": want_uri, "size": 3})),
+            "Kestra's STORE outputs: {{uri, size}} with size the row count"
+        );
+
+        let bytes = object(&fs, st.task.workspace_id, &want_uri).await;
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert_eq!(
+            text.lines().count(),
+            3,
+            "one row per line, and a newline inside a value is escaped: {text:?}"
+        );
+        assert_eq!(
+            decoded(bytes.clone()),
+            vec![
+                serde_json::json!({"region": "EU", "units": 40, "note": "a\nb"}),
+                // The reader drops a null field, as Kestra's preview does.
+                serde_json::json!({"region": "US", "units": 7}),
+                serde_json::json!({"region": "EU", "units": 51, "note": "say \"hi\""}),
+            ]
+        );
+        assert!(
+            text.contains("note:null"),
+            "the null is written, not omitted (ofIon writes ALWAYS): {text}"
+        );
+        assert_eq!(
+            out.files,
+            vec![StoredFile {
+                uri: want_uri.clone(),
+                size: bytes.len() as u64,
+            }],
+            "the file reaches the outcome-commit transaction through Outcome.files, \
+             with its size in BYTES (the index row), not in rows"
+        );
+        crate::storage::collect::check_outputs_collected(
+            out.outputs.as_ref().unwrap(),
+            &st.prefix,
+            &out.files,
+        )
+        .expect("§5: every URI under the run's prefix in the outputs is collected");
+
+        // Zero rows: still a file, still indexed, size 0.
+        let empty = Spy::answering(result(&["n"], vec![]));
+        let st = store_input(&fs, "SELECT n FROM t WHERE false");
+        let out = Sql::new(empty)
+            .with_files(Some(fs.clone()))
+            .run(&st.task)
+            .await
+            .unwrap();
+        let want_uri = format!("{}{STORE_FILE}", st.prefix);
+        assert_eq!(
+            out.outputs,
+            Some(serde_json::json!({"uri": want_uri, "size": 0}))
+        );
+        assert!(object(&fs, st.task.workspace_id, &want_uri)
+            .await
+            .is_empty());
+        assert_eq!(
+            out.files,
+            vec![StoredFile {
+                uri: want_uri,
+                size: 0
+            }]
+        );
+    }
+
+    /// How a value of each SQL type decodes, against the artifact's own file.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Ion {
+        /// Decodes to the same JSON and is spelled the same Ion text as the
+        /// artifact's (`ion_text`, Kestra's file decoded by its own ion-java).
+        Same,
+        /// Decodes to the same JSON through `storage::ion`, but the Ion TYPE
+        /// differs (a string where Kestra wrote a timestamp or a blob); the
+        /// reader's JSON projection cannot see it, the text can.
+        SameJsonOtherType,
+        /// Decodes to different JSON: a divergence, recorded, not faked.
+        Diverges,
+    }
+
+    /// **Every type in `ion_rows`, compared as DECODED values** (spec §1,
+    /// §9.2): Kestra's file is binary Ion from `FileSerde`, egret's is Ion
+    /// text from `ionfmt`, so bytes never match. Both go through the one Ion
+    /// reader, `storage::ion::values_to_json`.
+    ///
+    /// The value egret writes is the JSON its `TabularResult` CARRIES for that
+    /// type, which is each connector's, read from its code:
+    /// * Trino (`connector/trino.rs:390-393`) passes the REST response's JSON
+    ///   through: a boolean, a decimal as a string, a timestamp as
+    ///   `yyyy-MM-dd HH:mm:ss.ffffff`, a varbinary as base64.
+    /// * StarRocks (`connector/starrocks.rs`, `bytes_to_json`) types only ints
+    ///   and floats; DECIMAL, dates and times are strings, a BOOLEAN is a
+    ///   TINYINT (`1`), a non-UTF-8 VARBINARY is hex. No timestamptz type.
+    #[test]
+    fn store_ion_matches_the_artifact_for_every_type_egret_can_carry() {
+        use base64::Engine as _;
+        use serde_json::json;
+        use Ion::*;
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../oracle-exec/w9a-storage.json")).unwrap();
+        let rows = fixture["egret_expected"]["ion_rows"].as_array().unwrap();
+
+        // (sql_type, Trino carries, StarRocks carries (None: no such type))
+        let carried: Vec<(
+            &str,
+            (serde_json::Value, Ion),
+            Option<(serde_json::Value, Ion)>,
+        )> = vec![
+            ("int", (json!(42), Same), Some((json!(42), Same))),
+            (
+                "bigint",
+                (json!(9007199254740993_i64), Same),
+                Some((json!(9007199254740993_i64), Same)),
+            ),
+            (
+                "decimal",
+                (json!("12.340"), Diverges),
+                Some((json!("12.340"), Diverges)),
+            ),
+            ("float", (json!(1.5), Same), Some((json!(1.5), Same))),
+            ("bool", (json!(true), Same), Some((json!(1), Diverges))),
+            (
+                "text_with_quote",
+                (json!("say \"hi\""), Same),
+                Some((json!("say \"hi\""), Same)),
+            ),
+            (
+                "timestamp",
+                (json!("2026-01-02 03:04:05.123456"), Diverges),
+                Some((json!("2026-01-02 03:04:05.123456"), Diverges)),
+            ),
+            (
+                "timestamptz",
+                (json!("2026-01-01 20:04:05.000 UTC"), Diverges),
+                None,
+            ),
+            (
+                "date",
+                (json!("2026-01-02"), SameJsonOtherType),
+                Some((json!("2026-01-02"), SameJsonOtherType)),
+            ),
+            ("null", (json!(null), Same), Some((json!(null), Same))),
+            (
+                "bytea",
+                (json!("3q2+7w=="), SameJsonOtherType),
+                Some((json!("deadbeef"), Diverges)),
+            ),
+        ];
+        assert_eq!(
+            carried.len(),
+            rows.len(),
+            "every ion_rows entry is classified, none skipped"
+        );
+
+        let mut seen = std::collections::BTreeMap::new();
+        for row in rows {
+            let ty = row["sql_type"].as_str().unwrap();
+            let (_, trino, starrocks) = carried
+                .iter()
+                .find(|(t, _, _)| *t == ty)
+                .unwrap_or_else(|| panic!("{ty} is not classified"));
+            let kestra_bytes = base64::engine::general_purpose::STANDARD
+                .decode(row["bytes_b64"].as_str().unwrap())
+                .unwrap();
+            let kestra = decoded(kestra_bytes);
+            let kestra_text = row["ion_text"].as_str().unwrap();
+            for (engine, (value, want)) in
+                [("trino", Some(trino)), ("starrocks", starrocks.as_ref())]
+                    .into_iter()
+                    .filter_map(|(e, c)| c.map(|c| (e, c)))
+            {
+                let mut ours = String::new();
+                crate::runners::write_ion_row(&mut ours, &["v".to_string()], &[value.clone()]);
+                let got = decoded(ours.clone().into_bytes());
+                let class = match (got == kestra, ours == kestra_text) {
+                    (true, true) => Same,
+                    (true, false) => SameJsonOtherType,
+                    (false, _) => Diverges,
+                };
+                assert_eq!(
+                    class, *want,
+                    "{ty} on {engine}: egret wrote {ours} -> {got:?}; Kestra {kestra_text} -> {kestra:?}"
+                );
+                seen.insert((ty, engine), class);
+            }
+        }
+        // The divergences, named so a change in either direction is seen.
+        let diverging: Vec<_> = seen
+            .iter()
+            .filter(|(_, c)| **c != Same)
+            .map(|(k, _)| *k)
+            .collect();
+        assert_eq!(
+            diverging,
+            vec![
+                ("bool", "starrocks"),
+                ("bytea", "starrocks"),
+                ("bytea", "trino"),
+                ("date", "starrocks"),
+                ("date", "trino"),
+                ("decimal", "starrocks"),
+                ("decimal", "trino"),
+                ("timestamp", "starrocks"),
+                ("timestamp", "trino"),
+                ("timestamptz", "trino"),
+            ]
+        );
+    }
+
+    /// **At the cap STORE fails, as `FETCH` does, and writes nothing.** A
+    /// stored prefix would be a file that claims to be the result. The same
+    /// result with the flag clear stores, so this cannot pass against a
+    /// handler that refuses everything.
+    #[tokio::test]
+    async fn store_over_the_row_cap_fails_like_fetch_does() {
+        let (fs, mem) = mem_files(Caps::default());
+        let mut r = result(&["n"], vec![vec![serde_json::json!(1)]]);
+        r.truncated = true;
+        let st = store_input(&fs, "SELECT n FROM t");
+        let out = Sql::with_limits(Spy::answering(r.clone()), 10, DEFAULT_TIMEOUT)
+            .with_files(Some(fs.clone()))
+            .run(&st.task)
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Failed);
+        let msg = out.message.unwrap();
+        assert_eq!(
+            msg,
+            "egret.sql: the statement returned more than the 10 rows `fetch: STORE` \
+             will put in an output, and a prefix is not an answer. Narrow the \
+             statement, or use `fetch: NONE` if the rows are not needed"
+        );
+        let fetch = outputs_for(Fetch::All, &r, 10).unwrap_err();
+        assert_eq!(
+            msg.replace("`fetch: STORE`", "`fetch: FETCH`"),
+            format!("egret.sql: {fetch}"),
+            "the same message shape as FETCH's"
+        );
+        assert!(
+            mem.keys().is_empty(),
+            "nothing is written: {:?}",
+            mem.keys()
+        );
+        assert!(out.files.is_empty());
+
+        r.truncated = false;
+        let out = Sql::with_limits(Spy::answering(r), 10, DEFAULT_TIMEOUT)
+            .with_files(Some(fs))
+            .run(&st.task)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.state,
+            RunState::Success,
+            "the control: {:?}",
+            out.message
+        );
+    }
+
+    /// **No internal storage: the task fails naming `[storage]`, and the
+    /// statement never runs** -- a statement whose rows have nowhere to go
+    /// would cost the engine for nothing. The control stores.
+    #[tokio::test]
+    async fn store_without_a_store_fails_naming_storage_before_the_statement_runs() {
+        let (fs, _mem) = mem_files(Caps::default());
+        let spy = Spy::answering(result(&["n"], vec![vec![serde_json::json!(1)]]));
+        let st = store_input(&fs, "SELECT 1 AS n");
+        let out = Sql::new(spy.clone()).run(&st.task).await.unwrap();
+        assert_eq!(out.state, RunState::Failed);
+        let msg = out.message.unwrap_or_default();
+        assert!(msg.contains("[storage]"), "{msg}");
+        assert_eq!(spy.calls(), 0, "the statement must not run");
+
+        let out = Sql::new(spy.clone())
+            .with_files(Some(fs))
+            .run(&st.task)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.state,
+            RunState::Success,
+            "the control: {:?}",
+            out.message
+        );
+        assert_eq!(spy.calls(), 1);
+    }
+
+    /// No prefix to write under (not a task run of a flow's execution: no
+    /// scope, no `flow`) is the task's failure, before the statement runs.
+    /// With `flow` in the context the prefix is built from it instead.
+    #[tokio::test]
+    async fn store_with_no_task_prefix_fails_the_task_and_runs_nothing() {
+        let (fs, _mem) = mem_files(Caps::default());
+        let spy = Spy::new();
+        let spec = serde_json::json!({"database": db_id().to_string(), "sql": "SELECT 1", "fetch": "STORE"});
+        let out = Sql::new(spy.clone())
+            .with_files(Some(fs.clone()))
+            .run(&input(spec.clone(), RenderContext::new()))
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Failed);
+        assert!(
+            out.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("no storage prefix"),
+            "{:?}",
+            out.message
+        );
+        assert_eq!(spy.calls(), 0);
+
+        let mut cx = RenderContext::new();
+        cx.insert("flow", serde_json::json!({"namespace": NS, "id": FLOW}));
+        let mut task = input(spec, cx);
+        task.execution_id = Uuid::new_v4();
+        task.run_id = Uuid::new_v4();
+        let out = Sql::new(spy.clone())
+            .with_files(Some(fs))
+            .run(&task)
+            .await
+            .unwrap();
+        let prefix = uri::task_prefix(NS, FLOW, task.execution_id, "q", task.run_id).unwrap();
+        assert_eq!(
+            out.outputs.as_ref().unwrap()["uri"],
+            serde_json::json!(format!("{prefix}{STORE_FILE}")),
+            "{:?}",
+            out.message
+        );
+    }
+
+    /// `workflow.storage.max_file_bytes` is the author's cap: a failed task
+    /// naming it, nothing written. Judged before a byte is uploaded.
+    #[tokio::test]
+    async fn store_over_the_file_cap_fails_naming_it_and_writes_nothing() {
+        let (fs, mem) = mem_files(Caps {
+            max_file_bytes: 10,
+            ..Caps::default()
+        });
+        let spy = Spy::answering(result(
+            &["n"],
+            vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
+        ));
+        let st = store_input(&fs, "SELECT n FROM t");
+        let out = Sql::new(spy)
+            .with_files(Some(fs))
+            .run(&st.task)
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Failed);
+        let msg = out.message.unwrap_or_default();
+        assert!(
+            msg.contains("workflow.storage.max_file_bytes") && msg.contains("12"),
+            "{msg}"
+        );
+        assert!(mem.keys().is_empty());
+    }
+
+    /// A store that fails while the file is written.
+    struct Down;
+
+    #[async_trait::async_trait]
+    impl ObjectStore for Down {
+        async fn put(&self, uri: &str, _: Vec<u8>) -> std::result::Result<(), StorageError> {
+            Err(StorageError::S3(format!("{uri}: connection refused")))
+        }
+        async fn get(&self, uri: &str) -> std::result::Result<Vec<u8>, StorageError> {
+            Err(StorageError::S3(format!("{uri}: connection refused")))
+        }
+        async fn delete(&self, _: &str) -> std::result::Result<(), StorageError> {
+            Ok(())
+        }
+        async fn copy(&self, _: &str, _: &str) -> std::result::Result<(), StorageError> {
+            Ok(())
+        }
+        async fn list(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> std::result::Result<egret_storage::Listing, StorageError> {
+            unreachable!()
+        }
+        async fn put_stream(
+            &self,
+            uri: &str,
+            body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+            _: Option<u64>,
+        ) -> std::result::Result<u64, StorageError> {
+            // Read a little, then fail mid-upload, as a dropped connection does.
+            let mut buf = [0u8; 4];
+            let _ = tokio::io::AsyncReadExt::read(body, &mut buf).await;
+            Err(StorageError::S3(format!(
+                "{uri}: dispatch failure: connection refused"
+            )))
+        }
+        async fn get_stream(
+            &self,
+            uri: &str,
+        ) -> std::result::Result<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>, StorageError>
+        {
+            Err(StorageError::S3(format!(
+                "{uri}: dispatch failure: connection refused"
+            )))
+        }
+    }
+
+    fn down() -> Arc<FileStore> {
+        Arc::new(FileStore {
+            store: Arc::new(Down),
+            bucket: "egret-test".to_string(),
+            prefix: "workflow/".to_string(),
+            caps: Caps::default(),
+            retention_days: 30,
+        })
+    }
+
+    /// **A store outage while writing is egret's, not the author's** (spec
+    /// §11): `Err`, so the lease lapses and the run is re-claimed with no
+    /// attempt spent -- never a failed task. The rows are many so the writer
+    /// is still writing when the upload fails (it must not hang).
+    #[tokio::test]
+    async fn a_store_outage_while_writing_is_a_worker_failure_naming_the_uri() {
+        let fs = down();
+        let rows = (0..50_000).map(|i| vec![serde_json::json!(i)]).collect();
+        let st = store_input(&fs, "SELECT n FROM t");
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            Sql::with_limits(
+                Spy::answering(result(&["n"], rows)),
+                100_000,
+                DEFAULT_TIMEOUT,
+            )
+            .with_files(Some(fs))
+            .run(&st.task),
+        )
+        .await
+        .expect("the writer must not hang when the upload fails")
+        .expect_err("an outage is not the author's error");
+        assert!(matches!(err, Error::Internal(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("{}{STORE_FILE}", st.prefix)) && msg.contains("unavailable"),
+            "{msg}"
+        );
+    }
+
+    /// **A store outage met while `sql:` rendered** (a `read()` in it) is
+    /// egret's too (Task 4: a render with a file scope checks
+    /// `infrastructure_failure`): `Err`, and the statement does not run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_store_outage_in_the_sql_render_is_a_worker_failure_and_runs_nothing() {
+        let fs = down();
+        let ws = Uuid::new_v4();
+        let ex = Uuid::new_v4();
+        let file = uri::execution_file_uri(NS, FLOW, ex, "x.txt").unwrap();
+        let mut files = std::collections::BTreeMap::new();
+        files.insert(
+            file.clone(),
+            Ok(storage::IndexedFile {
+                uri: file.clone(),
+                execution_id: ex,
+                task_run_id: None,
+                size: 3,
+            }),
+        );
+        let scope = storage::scope::Snapshot::from_parts(files, fs, ws, None).into_scope();
+        let spy = Spy::new();
+        let mut task = input(
+            serde_json::json!({
+                "database": db_id().to_string(),
+                "sql": format!("SELECT {{{{ read('{file}') }}}}"),
+            }),
+            RenderContext::new().with_files(scope),
+        );
+        task.workspace_id = ws;
+        let err = Sql::new(spy.clone())
+            .run(&task)
+            .await
+            .expect_err("an outage in the render is not the author's error");
+        assert!(matches!(err, Error::Internal(_)), "{err:?}");
+        assert!(err.to_string().contains(&file), "{err}");
+        assert_eq!(spy.calls(), 0);
+    }
+
+    #[test]
+    fn the_fetch_spellings_include_store() {
+        assert_eq!(
+            serde_json::from_value::<Fetch>(serde_json::json!("STORE")).unwrap(),
+            Fetch::Store
+        );
+        assert!(serde_json::from_value::<Fetch>(serde_json::json!("store")).is_err());
     }
 }

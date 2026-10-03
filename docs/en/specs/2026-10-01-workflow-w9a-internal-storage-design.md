@@ -253,5 +253,5 @@ Namespace files, `nsfile://` and `fileURI` (W9b); the KV store (W9c); `PurgeStor
 - An output file's name follows Kestra's scheme; its hash differs from Kestra's (§3).
 - Files are pruned 30 days after the execution ends by default — for a `Loop` iteration, after its loop root ends (§10); Kestra keeps them.
 - `outputFiles` changed from contents to URIs (§6.2).
-- `egret.sql` STORE holds the whole result in memory, capped at 10 000 rows, because the port returns a whole `TabularResult`; and `egret.sql` is not wired into any production registry (§9.2).
+- `egret.sql` STORE holds the whole result in memory, capped at 10 000 rows, because the port returns a whole `TabularResult`: both connectors read the wire incrementally (Trino `nextUri` pages, StarRocks a row iterator) but collect every row into a `Vec` before returning, and `run_bounded` awaits the whole result (`w9a-storage.json` `connector_streaming`). STORE changes where the rows go, not how many egret holds. `egret.sql` is not wired into any production registry (§9.2).
 - Every deployment that runs workflow containers needs a reachable S3 or MinIO bucket.

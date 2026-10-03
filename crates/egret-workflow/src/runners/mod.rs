@@ -66,4 +66,5 @@ pub(crate) use functions::base62;
 /// The refusal every render but a `kestra.*` task's gives `secret()`, also
 /// the message of `spec::validate`'s publish-time refusal (W5b fix round 1).
 pub(crate) use functions::SECRET_REFUSAL;
+pub(crate) use ionfmt::write_ion_row;
 pub use rewrite::{rewrite, RewriteError};
