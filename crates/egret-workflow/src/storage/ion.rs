@@ -28,6 +28,7 @@
 //! timestamps and `java.time`-annotated strings -- see `loop_value`.
 
 use std::io::Read;
+use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -57,7 +58,7 @@ pub const MAX_DEPTH: usize = 100;
 /// `Err` names why the input is not Ion; the values before the fault are lost
 /// (see [`read_values`] for a caller that keeps them).
 pub fn values_to_json(
-    bytes: impl Read + Send + 'static,
+    bytes: impl Read + Send,
     max: usize,
 ) -> Result<(Vec<Value>, bool /*truncated*/), String> {
     match read_values(bytes, max) {
@@ -87,7 +88,7 @@ pub fn values_to_json(
 /// - A reader that fails mid-value (the preview's byte budget does, on
 ///   purpose) never yields that value cut short: the Ion reader asks for more
 ///   bytes before it ends a token, and gets the error.
-pub(crate) fn read_values<R: Read + Send + 'static>(bytes: R, max: usize) -> (Vec<Value>, Stop) {
+pub(crate) fn read_values<R: Read + Send>(bytes: R, max: usize) -> (Vec<Value>, Stop) {
     read_projected(bytes, max, to_json)
 }
 
@@ -96,7 +97,7 @@ pub(crate) fn read_values<R: Read + Send + 'static>(bytes: R, max: usize) -> (Ve
 /// one (a `null` record, a `java.time` text that does not parse), through
 /// the same reader as [`read_values`] -- see
 /// [`loop_value`] for the projection and why it is not the preview's.
-pub(crate) fn loop_values<R: Read + Send + 'static>(
+pub(crate) fn loop_values<R: Read + Send>(
     bytes: R,
     max: usize,
 ) -> (Vec<Result<String, String>>, Stop) {
@@ -104,46 +105,78 @@ pub(crate) fn loop_values<R: Read + Send + 'static>(
 }
 
 /// [`read_values`]'s reader with the projection of each top-level value as a
-/// parameter: the ONE place the Ion reader runs (depth scan, its own thread,
-/// linear-time fills). The preview projects with [`to_json`], a `Loop` over a
-/// file with [`loop_value`].
+/// parameter: the preview projects with [`to_json`], a `Loop` over a file
+/// with [`loop_value`]. It is [`for_each_value`] collecting up to `max`
+/// values: the ONE place the Ion reader runs (depth scan, its own thread,
+/// linear-time fills).
 fn read_projected<R, T>(bytes: R, max: usize, project: fn(&ion_rs::Element) -> T) -> (Vec<T>, Stop)
 where
-    R: Read + Send + 'static,
-    T: Send + 'static,
+    R: Read + Send,
+    T: Send,
 {
-    let spawned = std::thread::Builder::new()
-        .name("egret-ion-reader".into())
-        .stack_size(READER_STACK_BYTES)
-        .spawn(move || read_guarded(bytes, max, project));
-    match spawned {
-        Err(e) => (
-            Vec::new(),
-            Stop::Crashed(format!("the Ion reader's thread did not start: {e}")),
-        ),
-        Ok(handle) => handle.join().unwrap_or_else(|panic| {
-            let why = panic
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "no message".into());
-            (
-                Vec::new(),
-                Stop::Crashed(format!("the Ion reader panicked: {why}")),
-            )
-        }),
+    let mut rows = Vec::new();
+    let stop = for_each_value(bytes, |element| {
+        if rows.len() == max {
+            return ControlFlow::Break(());
+        }
+        rows.push(project(element));
+        ControlFlow::Continue(())
+    });
+    match stop {
+        // As before the sink: a reader that crashed hands back nothing.
+        Stop::Crashed(why) => (Vec::new(), Stop::Crashed(why)),
+        // Anything read after `max` values -- another value, an error, a
+        // refusal -- is `Full`: the caller asked for no more.
+        Stop::Failed(_) | Stop::TooDeep(_) if rows.len() == max => (rows, Stop::Full),
+        stop => (rows, stop),
     }
+}
+
+/// Every top-level value of `bytes`, handed to `sink` in file order as the
+/// reader yields it -- **the one way into the Ion reader**: the preview and
+/// a `Loop` over a file come through it by [`read_projected`], and W9a Task
+/// 12's item tasks (`FilterItems`, `DeduplicateItems`, `Split` of a binary
+/// Ion file) stream a file of any size through it, one value at a time,
+/// holding none of the values it has passed on.
+///
+/// `sink` runs on the reader's own thread (see [`read_values`] for why it
+/// has one), which is a scoped thread, so it may borrow from the caller.
+/// It answers `Break` to stop reading: the answer is then [`Stop::Full`].
+/// Otherwise the answer is how the input ended: [`Stop::End`], or why it is
+/// not Ion past the values already handed over.
+pub(crate) fn for_each_value<R, F>(bytes: R, sink: F) -> Stop
+where
+    R: Read + Send,
+    F: FnMut(&ion_rs::Element) -> ControlFlow<()> + Send,
+{
+    std::thread::scope(|scope| {
+        let spawned = std::thread::Builder::new()
+            .name("egret-ion-reader".into())
+            .stack_size(READER_STACK_BYTES)
+            .spawn_scoped(scope, move || read_guarded(bytes, sink));
+        match spawned {
+            Err(e) => Stop::Crashed(format!("the Ion reader's thread did not start: {e}")),
+            // Joined here, so a panic is this answer and not the scope's.
+            Ok(handle) => handle.join().unwrap_or_else(|panic| {
+                let why = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "no message".into());
+                Stop::Crashed(format!("the Ion reader panicked: {why}"))
+            }),
+        }
+    })
 }
 
 /// The stack of the reader's thread: `MAX_DEPTH` levels need well under 1 MiB
 /// in a debug build.
 const READER_STACK_BYTES: usize = 16 << 20;
 
-fn read_guarded<R: Read, T>(
+fn read_guarded<R: Read>(
     bytes: R,
-    max: usize,
-    project: fn(&ion_rs::Element) -> T,
-) -> (Vec<T>, Stop) {
+    mut sink: impl FnMut(&ion_rs::Element) -> ControlFlow<()>,
+) -> Stop {
     let trip: Arc<Mutex<Option<Trip>>> = Arc::default();
     let guarded = FillWhole {
         inner: DepthGuard {
@@ -161,23 +194,25 @@ fn read_guarded<R: Read, T>(
         Ok(it) => it,
         Err(e) => {
             return match tripped() {
-                Some(t) => (Vec::new(), t.into_stop()),
-                None => (Vec::new(), Stop::Failed(e.to_string())),
+                Some(t) => t.into_stop(),
+                None => Stop::Failed(e.to_string()),
             }
         }
     };
-    let mut rows = Vec::new();
     loop {
         match values.next() {
-            None => return (rows, Stop::End),
-            Some(_) if rows.len() == max => return (rows, Stop::Full),
+            None => return Stop::End,
             Some(Err(e)) => {
                 return match tripped() {
-                    Some(t) => (rows, t.into_stop()),
-                    None => (rows, Stop::Failed(e.to_string())),
+                    Some(t) => t.into_stop(),
+                    None => Stop::Failed(e.to_string()),
                 }
             }
-            Some(Ok(element)) => rows.push(project(&element)),
+            Some(Ok(element)) => {
+                if sink(&element).is_break() {
+                    return Stop::Full;
+                }
+            }
         }
     }
 }
@@ -769,6 +804,51 @@ fn to_json(element: &ion_rs::Element) -> Value {
             Value::Object(map)
         }
     }
+}
+
+/// Binary Ion 1.0's version marker, the first four bytes of every binary Ion
+/// file: what Kestra's `IonStreamUtils.isIonBinary` reads to choose `Split`'s
+/// Ion strategy over its text one (`StorageService.split`).
+pub(crate) const BINARY_VERSION_MARKER: [u8; 4] = [0xE0, 0x01, 0x00, 0xEA];
+
+/// One record of an item file as the variables Kestra's `FilterItems` and
+/// `DeduplicateItems` render their expression with (W9a Task 12): the
+/// record's fields, each a top-level name. Kestra reads the record into a
+/// `Map` (`MAPPER.readValue(textIon, Map.class)`, `FilterItems.java`
+/// `PebbleExpressionPredicate.extract`) and merges it OVER the run's
+/// variables (`DefaultRunContext.render(String, Map)`,
+/// `mergeWithNullableValues`), so a field `outputs` hides the task outputs,
+/// and a `null` field is bound, as `null`, not dropped.
+///
+/// Each field's value is [`to_json`]'s, the preview's projection (an int, a
+/// string, a bool as themselves; a decimal as a double; a timestamp as its
+/// Ion text). Only ints and strings were measured (`w9a-storage.json`
+/// `core_storage`'s `dedup` and `filter*` runs); what Kestra's mapper makes
+/// of the other types inside a Pebble render was not. A field named twice
+/// keeps its first place and its last value, as a `LinkedHashMap` does.
+///
+/// `Err` for a record that is not a struct: Kestra's `convertValue(…,
+/// Map.class)` throws for it, failing the task whatever
+/// `errorOrNullBehavior` says.
+pub(crate) fn record_binding(
+    element: &ion_rs::Element,
+) -> Result<serde_json::Map<String, Value>, String> {
+    let ion_rs::Value::Struct(st) = element.value() else {
+        return Err(format!(
+            "it is an Ion {}, not a struct, so it has no fields to bind",
+            element.ion_type()
+        ));
+    };
+    let mut map = serde_json::Map::new();
+    for (name, value) in st.fields() {
+        let json = if value.is_null() {
+            Value::Null
+        } else {
+            to_json(value)
+        };
+        map.insert(name.text().unwrap_or("").to_string(), json);
+    }
+    Ok(map)
 }
 
 /// Kestra's message for a `null` record of a `Loop`'s values file

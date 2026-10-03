@@ -403,7 +403,8 @@ def refresh_kinds():
 # is a `RunnableTask` (Sleep.java:47), not because of its package.
 #
 # **And, since W9a Task 11, the four core storage tasks** (`worker::handlers::
-# storage`), which the ratchet's own registry (`driver::registry`) runs. The
+# storage`), which the ratchet's own registry (`driver::registry`) runs, and
+# since W9a Task 12 the five whole-file ones. The
 # name is kept for the reason given for `W3A_FLOWABLES` below; what it means
 # is "the handlers the oracle's driver runs".
 W3B_HANDLERS = {
@@ -415,6 +416,11 @@ W3B_HANDLERS = {
     "io.kestra.plugin.core.storage.Size",
     "io.kestra.plugin.core.storage.Delete",
     "io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles",
+    "io.kestra.plugin.core.storage.Concat",
+    "io.kestra.plugin.core.storage.Split",
+    "io.kestra.plugin.core.storage.Reverse",
+    "io.kestra.plugin.core.storage.DeduplicateItems",
+    "io.kestra.plugin.core.storage.FilterItems",
 }
 
 # The flowables `advance()` already drives and decides for (W3a Tasks 3-6).

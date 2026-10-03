@@ -127,8 +127,8 @@ pub const STEP_BOUND: usize = 4 * 765;
 const BATCH: usize = 1;
 
 /// The registry the ratchet judges: the four handlers W3b ships, with `Sleep`
-/// capped — see the module doc, item 3 — and, since W9a Task 11, the four core
-/// storage tasks over the test `MemStore` (`storage::install_mem_for_tests`,
+/// capped — see the module doc, item 3 — and, since W9a Tasks 11 and 12, the
+/// nine core storage tasks over the test `MemStore` (`storage::install_mem_for_tests`,
 /// installed here, so the render snapshot of every `settle` in this process
 /// reads the same store the handlers write). `pool` is the database `run`
 /// drives: `Delete` and `PurgeCurrentExecutionFiles` delete index rows in it.
@@ -143,6 +143,19 @@ pub fn registry(pool: &PgPool) -> Handlers {
     r.add(std::sync::Arc::new(
         egret_workflow::worker::handlers::storage::Size,
     ));
+    // W9a Task 12: the five whole-file storage tasks, over the same store.
+    {
+        use egret_workflow::worker::handlers::storage as st;
+        r.add(std::sync::Arc::new(st::Concat::new(Some(files.clone()))));
+        r.add(std::sync::Arc::new(st::Split::new(Some(files.clone()))));
+        r.add(std::sync::Arc::new(st::Reverse::new(Some(files.clone()))));
+        r.add(std::sync::Arc::new(st::DeduplicateItems::new(Some(
+            files.clone(),
+        ))));
+        r.add(std::sync::Arc::new(st::FilterItems::new(Some(
+            files.clone(),
+        ))));
+    }
     egret_workflow::worker::handlers::storage::register(&mut r, pool.clone(), Some(files));
     r.add(std::sync::Arc::new(
         egret_workflow::worker::handlers::log::Log::new(),
@@ -753,7 +766,7 @@ const LIVE: usize = 247;
 /// sweeping for "16" is looking for. **The figure is gone entirely now** —
 /// there is no numeral in this sentence to go stale.)
 ///
-/// `registry::known_type` is an allow-list of nineteen rows — **five**
+/// `registry::known_type` is an allow-list of twenty-four rows — **five**
 /// `egret.*` types (this sentence said "eight" from W6 until W10 Task 6 fix
 /// round 2, and "seven" until W5a Task 2 turned `egret.container` and
 /// `egret.script.python` into aliases; counted, not quoted, at `TASK_TYPES`),
@@ -765,7 +778,10 @@ const LIVE: usize = 247;
 /// FQCNs with the two `egret.*` aliases. The corpus writes none of the script
 /// types, so that addition moves no count in this file. **Since W9a Task 11**
 /// it also holds the four `io.kestra.plugin.core.storage.*` FQCNs that task
-/// implements, which DO move two (see [`LIVE`]).
+/// implements, which DO move two (see [`LIVE`]), and **since W9a Task 12**
+/// the five whole-file ones (`Concat`, `Split`, `Reverse`,
+/// `DeduplicateItems`, `FilterItems`), which the corpus writes in no flow, so
+/// they move no count here.
 ///
 /// **The FQCN rows are what make most of [`LIVE`].** (This sentence said
 /// "makes `LIVE` 248" and "false for 227 of the 248" after `LIVE` had moved

@@ -135,8 +135,16 @@ impl Handlers {
         // passes the one `egret-bin` installed, a test its own or `None`.
         // `Delete` and `PurgeCurrentExecutionFiles` need the pool and are
         // added by `handlers::storage::register`.
-        r.add_publishable(Arc::new(handlers::storage::Write::new(files)));
+        r.add_publishable(Arc::new(handlers::storage::Write::new(files.clone())));
         r.add_publishable(Arc::new(handlers::storage::Size));
+        // W9a Task 12: the five whole-file storage tasks, over the same store.
+        r.add_publishable(Arc::new(handlers::storage::Concat::new(files.clone())));
+        r.add_publishable(Arc::new(handlers::storage::Split::new(files.clone())));
+        r.add_publishable(Arc::new(handlers::storage::Reverse::new(files.clone())));
+        r.add_publishable(Arc::new(handlers::storage::DeduplicateItems::new(
+            files.clone(),
+        )));
+        r.add_publishable(Arc::new(handlers::storage::FilterItems::new(files)));
         r
     }
 
@@ -293,9 +301,9 @@ mod tests {
     /// `with_core_tasks`.
     ///
     /// W9a Task 11 adds `core.storage.Write` and `Size`, the two storage tasks
-    /// that need no pool.
+    /// that need no pool, and Task 12 the five whole-file storage tasks.
     #[test]
-    fn the_core_registry_holds_the_six_kestra_type_ids_and_the_one_alias() {
+    fn the_core_registry_holds_the_eleven_kestra_type_ids_and_the_one_alias() {
         assert_eq!(
             Handlers::with_core_tasks(None).type_ids(),
             vec![
@@ -304,7 +312,12 @@ mod tests {
                 "io.kestra.plugin.core.execution.Fail",
                 "io.kestra.plugin.core.flow.Sleep",
                 "io.kestra.plugin.core.log.Log",
+                "io.kestra.plugin.core.storage.Concat",
+                "io.kestra.plugin.core.storage.DeduplicateItems",
+                "io.kestra.plugin.core.storage.FilterItems",
+                "io.kestra.plugin.core.storage.Reverse",
                 "io.kestra.plugin.core.storage.Size",
+                "io.kestra.plugin.core.storage.Split",
                 "io.kestra.plugin.core.storage.Write",
             ]
         );

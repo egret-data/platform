@@ -68,11 +68,12 @@ pub struct TaskTypeSpec {
 /// [`add_publishable`](crate::worker::Handlers::add_publishable): the same
 /// mechanism facing this way would refuse to start any deployment that declines
 /// to wire `egret.sql`, `core.http` or the container tasks — which is every
-/// deployment, since `with_core_tasks` is six handlers and this table is
-/// nineteen rows (5 `egret.*`, 2 short `core.*`, 12 Kestra FQCNs -- W5a replaced
+/// deployment, since `with_core_tasks` is eleven handlers and this table is
+/// twenty-four rows (5 `egret.*`, 2 short `core.*`, 17 Kestra FQCNs -- W5a replaced
 /// the `egret.container`/`egret.script.python` rows with four script-task
-/// FQCNs that carry them as aliases, and W9a Task 11 added the four core
-/// storage tasks, two of them in `with_core_tasks`). The
+/// FQCNs that carry them as aliases, W9a Task 11 added the four core
+/// storage tasks, two of them in `with_core_tasks`, and Task 12 the five
+/// whole-file ones, all in it). The
 /// asymmetry is deliberate, `main.rs` documents the shipping set, and what a
 /// flow using an unwired type gets is the loop above rather than a refusal.
 pub const TASK_TYPES: &[TaskTypeSpec] = &[
@@ -215,6 +216,33 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
     },
     TaskTypeSpec {
         r#type: crate::worker::handlers::storage::PURGE_CURRENT_EXECUTION_FILES,
+        aliases: &[],
+        references: &[],
+    },
+    // ── W9a Task 12: the whole-file core storage tasks, all five in
+    // `with_core_tasks` (they need the store and no pool). ──
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::CONCAT,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::SPLIT,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::REVERSE,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::DEDUPLICATE_ITEMS,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::FILTER_ITEMS,
         aliases: &[],
         references: &[],
     },

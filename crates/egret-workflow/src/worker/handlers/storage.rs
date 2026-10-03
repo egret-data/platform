@@ -1,6 +1,8 @@
 //! `io.kestra.plugin.core.storage.{Write, Size, Delete, PurgeCurrentExecutionFiles}`
-//! -- the core storage tasks W9a Task 11 ports (spec §9.3). Task 12 adds the
-//! other five.
+//! -- the core storage tasks W9a Task 11 ports (spec §9.3) -- and the five
+//! whole-file tasks Task 12 ports, `{Concat, Split, Reverse,
+//! DeduplicateItems, FilterItems}`, in [`items`] (their streams in
+//! `stream`).
 //!
 //! # The shapes are Kestra's, measured
 //!
@@ -15,6 +17,11 @@
 //! | `Size` (`Size.java`) | `uri` (required) | `size`, bytes |
 //! | `Delete` (`Delete.java`) | `uri` (required), `errorOnMissing` (default `false`) | `uri`, `deleted` |
 //! | `PurgeCurrentExecutionFiles` | none | `uris` |
+//! | `Concat` (`Concat.java`) | `extension` (default `.tmp`), `files` (required), `separator` | `uri` |
+//! | `Split` (`Split.java`, `StorageService.split`) | `bytes`, `from` (required), `partitions`, `regexPattern`, `rows`, `separator` (default `\n`) | `uris` |
+//! | `Reverse` (`Reverse.java`) | `charset` (default `UTF-8`), `from` (required), `separator` (default `\n`) | `uri` |
+//! | `DeduplicateItems` | `expr` (required), `from` (required) | `droppedItemsTotal`, `numKeys`, `processedItemsTotal`, `uri` |
+//! | `FilterItems` | `errorOrNullBehavior` (default `FAIL`), `filterCondition` (required), `filterType` (default `INCLUDE`), `from` (required) | `droppedItemsTotal`, `processedItemsTotal`, `uri` |
 //!
 //! # Where egret differs, on purpose
 //!
@@ -82,6 +89,24 @@ pub const DELETE: &str = "io.kestra.plugin.core.storage.Delete";
 /// `io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles`.
 pub const PURGE_CURRENT_EXECUTION_FILES: &str =
     "io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles";
+/// `io.kestra.plugin.core.storage.Concat`.
+pub const CONCAT: &str = "io.kestra.plugin.core.storage.Concat";
+/// `io.kestra.plugin.core.storage.Split`.
+pub const SPLIT: &str = "io.kestra.plugin.core.storage.Split";
+/// `io.kestra.plugin.core.storage.Reverse`.
+pub const REVERSE: &str = "io.kestra.plugin.core.storage.Reverse";
+/// `io.kestra.plugin.core.storage.DeduplicateItems`.
+pub const DEDUPLICATE_ITEMS: &str = "io.kestra.plugin.core.storage.DeduplicateItems";
+/// `io.kestra.plugin.core.storage.FilterItems`.
+pub const FILTER_ITEMS: &str = "io.kestra.plugin.core.storage.FilterItems";
+
+mod items;
+mod stream;
+
+pub use items::{
+    Concat, DeduplicateItems, FilterItems, Reverse, Split, KEYED_UPLOADS_PER_PASS, MAX_SPLIT_FILES,
+    SPLIT_FILE_STEM,
+};
 
 /// The fixed stem of `Write`'s file name (see the module doc).
 pub const WRITE_FILE_STEM: &str = "content";
@@ -106,8 +131,8 @@ pub struct Declared {
     pub outputs: &'static [(&'static str, &'static str)],
 }
 
-/// The four classes, as `w9a-storage.json`'s `core_storage` records them.
-pub const DECLARED: [Declared; 4] = [
+/// The nine classes, as `w9a-storage.json`'s `core_storage` records them.
+pub const DECLARED: [Declared; 9] = [
     Declared {
         type_id: WRITE,
         properties: &[
@@ -153,6 +178,136 @@ pub const DECLARED: [Declared; 4] = [
         type_id: PURGE_CURRENT_EXECUTION_FILES,
         properties: &[],
         outputs: &[("uris", "array")],
+    },
+    Declared {
+        type_id: CONCAT,
+        properties: &[
+            Prop {
+                name: "extension",
+                required: false,
+                default: Some(DEFAULT_EXTENSION),
+            },
+            Prop {
+                name: "files",
+                required: true,
+                default: None,
+            },
+            Prop {
+                name: "separator",
+                required: false,
+                default: None,
+            },
+        ],
+        outputs: &[("uri", "string")],
+    },
+    Declared {
+        type_id: SPLIT,
+        properties: &[
+            Prop {
+                name: "bytes",
+                required: false,
+                default: None,
+            },
+            Prop {
+                name: "from",
+                required: true,
+                default: None,
+            },
+            Prop {
+                name: "partitions",
+                required: false,
+                default: None,
+            },
+            Prop {
+                name: "regexPattern",
+                required: false,
+                default: None,
+            },
+            Prop {
+                name: "rows",
+                required: false,
+                default: None,
+            },
+            // The schema writes the default newline escaped: a backslash, an `n`.
+            Prop {
+                name: "separator",
+                required: false,
+                default: Some("\\n"),
+            },
+        ],
+        outputs: &[("uris", "array")],
+    },
+    Declared {
+        type_id: REVERSE,
+        properties: &[
+            Prop {
+                name: "charset",
+                required: false,
+                default: Some("UTF-8"),
+            },
+            Prop {
+                name: "from",
+                required: true,
+                default: None,
+            },
+            Prop {
+                name: "separator",
+                required: false,
+                default: Some("\\n"),
+            },
+        ],
+        outputs: &[("uri", "string")],
+    },
+    Declared {
+        type_id: DEDUPLICATE_ITEMS,
+        properties: &[
+            Prop {
+                name: "expr",
+                required: true,
+                default: None,
+            },
+            Prop {
+                name: "from",
+                required: true,
+                default: None,
+            },
+        ],
+        outputs: &[
+            ("droppedItemsTotal", "integer"),
+            ("numKeys", "integer"),
+            ("processedItemsTotal", "integer"),
+            ("uri", "string"),
+        ],
+    },
+    Declared {
+        type_id: FILTER_ITEMS,
+        properties: &[
+            Prop {
+                name: "errorOrNullBehavior",
+                required: false,
+                default: Some("FAIL"),
+            },
+            Prop {
+                name: "filterCondition",
+                required: true,
+                default: None,
+            },
+            Prop {
+                name: "filterType",
+                required: false,
+                default: Some("INCLUDE"),
+            },
+            Prop {
+                name: "from",
+                required: true,
+                default: None,
+            },
+        ],
+        outputs: &[
+            ("droppedItemsTotal", "integer"),
+            ("processedItemsTotal", "integer"),
+            ("uri", "string"),
+        ],
     },
 ];
 

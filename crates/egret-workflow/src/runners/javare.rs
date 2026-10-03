@@ -112,7 +112,7 @@ const LINE_TERMINATORS: &[char] = ['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}']
 /// A compiled Java pattern, plus what the translation had to remember about
 /// it.
 #[derive(Debug)]
-pub(super) struct JavaRegex {
+pub(crate) struct JavaRegex {
     regex: Regex,
     /// The pattern used `$` outside `MULTILINE`, or `\Z`. See the module doc.
     end_of_input_anchor: bool,
@@ -128,7 +128,7 @@ pub(super) struct JavaRegex {
 
 /// Why a Java pattern could not be used.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum JavaRegexError {
+pub(crate) enum JavaRegexError {
     /// Java rejects the pattern too. The text is the closest egret gets to
     /// `PatternSyntaxException.getDescription()`.
     Syntax(String),
@@ -196,14 +196,14 @@ impl JavaRegex {
         Ok(self.regex.is_match(haystack))
     }
 
-    pub(super) fn group_count(&self) -> usize {
+    pub(crate) fn group_count(&self) -> usize {
         // `captures_len` counts group 0.
         self.regex.captures_len() - 1
     }
 
     /// `Matcher.find()` then `Matcher.group(n)`: `None` for no match, and
     /// `Some(None)` for a group that did not participate in the match.
-    pub(super) fn find_group(
+    pub(crate) fn find_group(
         &self,
         haystack: &str,
         group: usize,
@@ -494,7 +494,7 @@ fn expand_replacement(
 pub(super) const MAX_CLASS_DEPTH: usize = 10_000;
 
 /// Compiles a Java pattern.
-pub(super) fn compile(pattern: &str) -> Result<JavaRegex, JavaRegexError> {
+pub(crate) fn compile(pattern: &str) -> Result<JavaRegex, JavaRegexError> {
     let mut translator = Translator::new(pattern);
     let translated = translator.translate()?;
     // `(?d)` (UNIX_LINES) makes `\n` Java's ONLY line terminator, so the

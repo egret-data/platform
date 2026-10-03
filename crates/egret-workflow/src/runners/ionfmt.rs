@@ -164,6 +164,103 @@ pub(crate) fn write_ion_row(out: &mut String, columns: &[String], row: &[serde_j
     out.push('}');
 }
 
+/// One value an Ion READER yielded (`storage::ion`), written back as Ion
+/// text, compact, with no newline -- what W9a Task 12's item tasks
+/// (`FilterItems`, `DeduplicateItems`, `Split` of a binary Ion file) write
+/// for each record they keep (spec §2, §9.3).
+///
+/// **Kestra writes those files as BINARY Ion** (`FileSerde.write`,
+/// `w9a-storage.json` finding `store_binary_ion`); this writes text, so the
+/// bytes never match and the VALUES do: every Ion type is written as itself
+/// (a decimal keeps its scale, a timestamp its precision and offset, a blob
+/// its bytes, a symbol stays a symbol, a typed null its type), with the
+/// value's annotations in front of it, the layout this module's other
+/// writers use (`{k:"a",v:1}`). Kestra's round trip through `FileSerde`
+/// turns a symbol into a string and a timestamp into a `java.time` value
+/// before writing; this keeps the value the file held (not measured beyond
+/// the fixture's strings and ints). A struct field whose value is `null` is
+/// written, as `ofIon`'s inclusion is `ALWAYS` (this module's doc).
+///
+/// The depth is the reader's: `storage::ion` never yields a value nested
+/// deeper than its `MAX_DEPTH`, so this recursion is bounded by it.
+pub(crate) fn write_ion_element(out: &mut String, element: &ion_rs::Element) {
+    use base64::Engine as _;
+    use ion_rs::Value as V;
+    for annotation in element.annotations().iter() {
+        write_symbol(out, annotation.text().unwrap_or(""));
+        out.push_str("::");
+    }
+    match element.value() {
+        V::Null(ion_rs::IonType::Null) => out.push_str("null"),
+        V::Null(t) => {
+            out.push_str("null.");
+            out.push_str(&t.to_string());
+        }
+        V::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        V::Int(i) => out.push_str(&i.to_string()),
+        V::Float(f) => write_ion_float(out, *f),
+        // `ion-rs`'s Display of a decimal and of a timestamp is Ion text
+        // (`12.340`, `1d3`, `12.`; `2026-01-02T03:04:05.123Z`).
+        V::Decimal(d) => out.push_str(&d.to_string()),
+        V::Timestamp(t) => out.push_str(&t.to_string()),
+        V::Symbol(sym) => match sym.text() {
+            Some(text) => write_symbol(out, text),
+            // A symbol with unknown text: Ion's symbol zero.
+            None => out.push_str("$0"),
+        },
+        V::String(text) => write_ion_string(out, text.text()),
+        V::Clob(bytes) => {
+            out.push_str("{{\"");
+            for &b in bytes.as_ref() {
+                match b {
+                    b'"' => out.push_str("\\\""),
+                    b'\\' => out.push_str("\\\\"),
+                    0x20..=0x7e => out.push(b as char),
+                    _ => out.push_str(&format!("\\x{b:02x}")),
+                }
+            }
+            out.push_str("\"}}");
+        }
+        V::Blob(bytes) => {
+            out.push_str("{{");
+            out.push_str(&base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()));
+            out.push_str("}}");
+        }
+        V::List(seq) => {
+            out.push('[');
+            for (i, item) in seq.elements().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_ion_element(out, item);
+            }
+            out.push(']');
+        }
+        V::SExp(seq) => {
+            out.push('(');
+            for (i, item) in seq.elements().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                write_ion_element(out, item);
+            }
+            out.push(')');
+        }
+        V::Struct(st) => {
+            out.push('{');
+            for (i, (name, value)) in st.fields().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_symbol(out, name.text().unwrap_or(""));
+                out.push(':');
+                write_ion_element(out, value);
+            }
+            out.push('}');
+        }
+    }
+}
+
 /// One JSON value as Ion text, for [`write_ion_row`]. Recursion is bounded by
 /// the JSON's own depth, which `serde_json` caps when it parses.
 fn write_ion_json(out: &mut String, value: &serde_json::Value) {

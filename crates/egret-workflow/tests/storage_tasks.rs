@@ -1,6 +1,7 @@
 //! W9a Task 11: `core.storage.{Write, Size, Delete, PurgeCurrentExecutionFiles}`
-//! and `Loop` over an ION file, through the real worker (spec §9.3), against
-//! `oracle-exec/w9a-storage.json`. Requires DATABASE_URL.
+//! and `Loop` over an ION file, and W9a Task 12: `core.storage.{Concat, Split,
+//! Reverse, DeduplicateItems, FilterItems}`, through the real worker (spec
+//! §9.3), against `oracle-exec/w9a-storage.json`. Requires DATABASE_URL.
 //!
 //! `multi_thread` and [`SERIAL`] for `tests/storage_render.rs`'s reasons: a
 //! `Loop`'s values file is read on a render thread that blocks on the
@@ -234,6 +235,11 @@ const WRITE: &str = "io.kestra.plugin.core.storage.Write";
 const SIZE: &str = "io.kestra.plugin.core.storage.Size";
 const DELETE: &str = "io.kestra.plugin.core.storage.Delete";
 const PURGE: &str = "io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles";
+const CONCAT: &str = "io.kestra.plugin.core.storage.Concat";
+const SPLIT: &str = "io.kestra.plugin.core.storage.Split";
+const REVERSE: &str = "io.kestra.plugin.core.storage.Reverse";
+const DEDUP: &str = "io.kestra.plugin.core.storage.DeduplicateItems";
+const FILTER: &str = "io.kestra.plugin.core.storage.FilterItems";
 
 /// The handlers' declared properties and outputs are the fixture's, per class
 /// (name, `required`, `default`; output name and JSON type).
@@ -265,7 +271,7 @@ fn each_class_declares_kestras_properties_and_outputs() {
             .collect();
         assert_eq!(ours, theirs, "{}: outputs", d.type_id);
     }
-    assert_eq!(DECLARED.len(), 4);
+    assert_eq!(DECLARED.len(), 9);
 }
 
 /// `Write`, `Size` and `Delete`, each task taken verbatim from the fixture's
@@ -378,6 +384,196 @@ async fn write_size_and_delete_reproduce_kestras_runs() {
         *ROWS_AT_DELETE.lock().unwrap(),
         vec![(other.clone(), 0)],
         "the store deleted the object once, after the index row was gone"
+    );
+}
+
+/// Kestra's bytes of `file` in `run`'s `files_written`.
+fn kestra_bytes(run: &Value, file: &str) -> Vec<u8> {
+    base64::engine::general_purpose::STANDARD
+        .decode(run["files_written"][file]["bytes_b64"].as_str().unwrap())
+        .unwrap()
+}
+
+/// Every Ion value of `bytes`, text or binary, as JSON: the comparison for
+/// a file Kestra writes as BINARY Ion and egret as text.
+fn ion_values(bytes: &[u8]) -> Vec<Value> {
+    egret_workflow::storage::ion::values_to_json(std::io::Cursor::new(bytes.to_vec()), 100_000)
+        .unwrap()
+        .0
+}
+
+/// **W9a Task 12.** `Concat`, `Split`, `Reverse`, `DeduplicateItems` and
+/// `FilterItems`, each run taken verbatim from the fixture and in one flow
+/// after its three `Write`s: every state and output is Kestra's (URIs
+/// renamed), the text files are Kestra's bytes, and the two item files --
+/// BINARY Ion in Kestra, text in egret -- hold Kestra's values. Each file is
+/// indexed with its size, and the URI is the run's prefix and egret's fixed
+/// name.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_whole_file_tasks_reproduce_kestras_runs() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let order = [
+        (WRITE, "w_lines"),
+        (WRITE, "w_other"),
+        (WRITE, "w_ion"),
+        (CONCAT, "concat"),
+        (CONCAT, "concat_sep"),
+        (SPLIT, "split_rows"),
+        (SPLIT, "split_parts"),
+        (SPLIT, "split_bytes"),
+        (REVERSE, "reverse"),
+        (DEDUP, "dedup"),
+        (FILTER, "filter"),
+        (FILTER, "filter_exclude"),
+    ];
+    let tasks = order
+        .iter()
+        .map(|(c, t)| run_task(c, t)["task"].clone())
+        .collect();
+    let ex = start_execution(
+        &db.pool,
+        ws,
+        None,
+        &flow_of("core-storage", tasks),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    drain(&db.pool).await;
+
+    let mut map = Vec::new();
+    for t in ["w_lines", "w_other", "w_ion"] {
+        let theirs = run_task(WRITE, t)["outputs"]["uri"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        map.push((theirs, uri_of(&db.pool, ex, t).await));
+    }
+    let run_id = |t: &'static str| {
+        let pool = db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+            )
+            .bind(ex)
+            .bind(t)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    for (class, t) in &order[3..] {
+        let want = run_task(class, t);
+        let (state, outputs, message) = result_in(&db.pool, ex, t).await;
+        assert_eq!(state, want["state"].as_str().unwrap(), "{t}: {message:?}");
+        let outputs = outputs.unwrap();
+        let prefix = uri::task_prefix(NS, "core-storage", ex, t, run_id(t).await).unwrap();
+        // Kestra's files, in order, and egret's.
+        let (theirs, ours): (Vec<String>, Vec<String>) = if *class == SPLIT {
+            let list = |v: &Value| -> Vec<String> {
+                v["uris"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|u| u.as_str().unwrap().to_string())
+                    .collect()
+            };
+            (list(&want["outputs"]), list(&outputs))
+        } else {
+            (
+                vec![want["outputs"]["uri"].as_str().unwrap().to_string()],
+                vec![outputs["uri"].as_str().unwrap().to_string()],
+            )
+        };
+        assert_eq!(theirs.len(), ours.len(), "{t}: {ours:?}");
+        let mut renames = map.clone();
+        for (i, (k, e)) in theirs.iter().zip(&ours).enumerate() {
+            let ext = &k[k.rfind('.').unwrap()..];
+            let name = if *class == SPLIT {
+                format!("part-{i:05}{ext}")
+            } else {
+                format!("content{ext}")
+            };
+            assert_eq!(
+                e,
+                &format!("{prefix}{name}"),
+                "{t}: prefix, fixed name, Kestra's extension"
+            );
+            let bytes = object_of(&fs, ws, e)
+                .await
+                .unwrap_or_else(|| panic!("{t}: {e}"));
+            let kestra = kestra_bytes(&want, k);
+            if [DEDUP, FILTER].contains(class) {
+                assert_eq!(
+                    &kestra[..4],
+                    [0xE0, 0x01, 0x00, 0xEA],
+                    "{t}: Kestra's is binary"
+                );
+                assert_eq!(
+                    ion_values(&bytes),
+                    ion_values(&kestra),
+                    "{t}: Kestra's values"
+                );
+            } else {
+                assert_eq!(bytes, kestra, "{t}: Kestra's bytes");
+            }
+            assert_eq!(rows_named(&db.pool, e).await, 1, "{t}: indexed");
+            let size: i64 =
+                sqlx::query_scalar("SELECT size FROM workflow.execution_files WHERE uri = $1")
+                    .bind(e)
+                    .fetch_one(&db.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(size as usize, bytes.len(), "{t}: the index holds the size");
+            renames.push((k.clone(), e.clone()));
+        }
+        assert_eq!(
+            outputs,
+            renamed(&want["outputs"], &renames),
+            "{t}: Kestra's outputs"
+        );
+    }
+}
+
+/// A `filterCondition` reads through the RUN's own snapshot: `fileSize` of a
+/// file the run may read answers inside the per-item render, with the
+/// item's fields beside it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_filter_condition_reads_the_runs_files_beside_the_items_fields() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, _ws, _fs)) = setup().await else {
+        return;
+    };
+    let w_ion = run_task(WRITE, "w_ion")["task"].clone();
+    let w_lines = run_task(WRITE, "w_lines")["task"].clone();
+    let filter = json!({
+        "id": "f",
+        "type": FILTER,
+        "from": "{{ outputs.w_ion.uri }}",
+        "filterCondition": "{{ fileSize(outputs.w_lines.uri) == 15 and v > 2 }}",
+    });
+    let ex = start_execution(
+        &db.pool,
+        _ws,
+        None,
+        &flow_of("filter-reads", vec![w_lines, w_ion, filter]),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    drain(&db.pool).await;
+    let (state, outputs, message) = result_in(&db.pool, ex, "f").await;
+    assert_eq!(state, "SUCCESS", "{message:?}");
+    let outputs = outputs.unwrap();
+    assert_eq!(
+        (
+            &outputs["processedItemsTotal"],
+            &outputs["droppedItemsTotal"]
+        ),
+        (&json!(4), &json!(2))
     );
 }
 
