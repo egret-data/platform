@@ -123,6 +123,8 @@ Cơ chế chuyển của W5a trở thành streamed: `get_stream` nuôi một str
 
 **Re-attach (W5a):** việc thu chạy như thường trên pod được nhận lại; không gì được index trước commit, nên không gì bị nhân đôi.
 
+**Quyền thư mục (W9a Task 9, đo trực tiếp).** `docker cp` để mọi entry được staging thuộc root, còn image plugin host chạy với `USER 65532`. Vì vậy thư mục output `.egret/out` — cho `outputDirectory: true` của task script cũng như cho plugin — được tạo **ai cũng ghi được (`0777`)**, một thay đổi hành vi với task script so với Task 6 (`0755`). Mỗi lần chạy plugin còn có `.egret/tmp` (`0777`, không bao giờ được thu): scratch của host (`LocalWorkingDir` của Kestra) và các file đang ghi (file `.part`, chuyển nguyên tử vào `.egret/out` khi xong, nên một JVM bị kill không để lại file dở dang nào bị thu). Cả hai nằm dưới thư mục làm việc, nên trên Kubernetes vẫn bị chặn bởi `emptyDir.sizeLimit` của nó. Mọi thư mục khác giữ `0755`. URI của plugin được so theo đường dẫn thô: egret không bao giờ percent-decode URI.
+
 ## 6. Task script
 
 ### 6.1 URI trong `inputFiles`

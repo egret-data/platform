@@ -146,7 +146,8 @@ pub struct Bridge {
     pub collect_to: Option<CollectTo>,
     /// `task.json`'s `maxTaskBytes`: `workflow.storage.max_task_bytes`.
     pub max_task_bytes: u64,
-    /// `task.json`'s `context`: `namespace`, `flowId`, `executionId` (the
+    /// `task.json`'s `context`, sent for every task run of a flow WITH or
+    /// without internal storage (fix round 1, I1): `namespace`, `flowId`, `executionId` (the
     /// run's own execution, an iteration's id inside a `Loop`), `taskId`,
     /// `taskRunId` -- what Kestra's `StorageContext.forTask` is built from,
     /// whose context URI equals `baseUri` (`plugin-host`'s
@@ -319,10 +320,16 @@ pub fn outcome_of(
                 crate::storage::collect::check_outputs_collected(&outputs, prefix, &files).err()
             });
             match unbacked {
-                Some(why) => Outcome {
-                    outputs: Some(outputs),
-                    ..failed(why)
-                },
+                Some(why) => {
+                    let why = match encoded_twin(&outputs, &files) {
+                        Some(hint) => format!("{why}. {hint}"),
+                        None => why,
+                    };
+                    Outcome {
+                        outputs: Some(outputs),
+                        ..failed(why)
+                    }
+                }
                 None => Outcome {
                     files,
                     ..Outcome::succeeded_with(outputs)
@@ -396,13 +403,25 @@ impl Kestra {
                 },
             );
         }
-        let Some(files) = &self.rt.files else {
-            return Ok(bridge);
-        };
         let flow = (
             render_str("{{ flow.namespace }}", &task.render),
             render_str("{{ flow.id }}", &task.render),
         );
+        // Fix round 1, I1: `context` does not depend on internal storage. It
+        // goes with every task run of a flow, so a host with no `baseUri`
+        // reaches EgretStorage's own refusal, naming `[storage]`, on a write.
+        if let (Ok(namespace), Ok(flow_id)) = &flow {
+            bridge.context = Some(serde_json::json!({
+                "namespace": namespace,
+                "flowId": flow_id,
+                "executionId": task.execution_id.hyphenated().to_string(),
+                "taskId": task.task_id,
+                "taskRunId": task.run_id.hyphenated().to_string(),
+            }));
+        }
+        let Some(files) = &self.rt.files else {
+            return Ok(bridge);
+        };
         let (Ok(namespace), Ok(flow_id)) = flow else {
             return Err(
                 "this run has no storage prefix for the files a plugin writes: it is not a task \
@@ -426,15 +445,53 @@ impl Kestra {
             naming: Naming::UnderPrefixVerbatim,
         });
         bridge.max_task_bytes = files.caps.max_task_bytes;
-        bridge.context = Some(serde_json::json!({
-            "namespace": namespace,
-            "flowId": flow_id,
-            "executionId": task.execution_id.hyphenated().to_string(),
-            "taskId": task.task_id,
-            "taskRunId": task.run_id.hyphenated().to_string(),
-        }));
         Ok(bridge)
     }
+}
+
+/// Fix round 1, M4: when an output names a URI that was never collected but
+/// a collected file's URI is the same after percent-decoding, say so: the
+/// host returned an encoded spelling of a file egret stored under its raw
+/// name (or the reverse), which no author can see from the URIs alone.
+fn encoded_twin(outputs: &Value, files: &[crate::storage::StoredFile]) -> Option<String> {
+    let mut named = std::collections::BTreeSet::new();
+    crate::storage::scope::walk(outputs, &mut named);
+    named.iter().find_map(|uri| {
+        if files.iter().any(|f| &f.uri == uri) {
+            return None;
+        }
+        let want = percent_decoded(uri);
+        files
+            .iter()
+            .find(|f| percent_decoded(&f.uri) == want)
+            .map(|f| {
+                format!(
+                    "The host returned {uri}, which is percent-encoded differently from the file \
+                     egret stored, {}: egret keeps a URI exactly as written and never decodes it",
+                    f.uri
+                )
+            })
+    })
+}
+
+/// `%XX` decoded byte-wise (invalid escapes kept), for [`encoded_twin`] only.
+fn percent_decoded(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok();
+            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
 }
 
 /// Every string leaf of `value` that is WHOLE a `kestra:///` URI, with its
@@ -1654,6 +1711,127 @@ mod tests {
             .await
             .expect("no worker error");
         assert_eq!(out.state, RunState::Failed, "{:?}", out.message);
+    }
+
+    /// **Fix round 1, I1: `context` goes with every task run of a flow,
+    /// with or without internal storage**, so the host reaches
+    /// `EgretStorage`'s own refusal naming `[storage]` on a write (Java:
+    /// `without_internal_storage_a_plugin_write_fails_naming_storage`) rather
+    /// than a false "egret sends it with every task".
+    #[tokio::test]
+    async fn without_internal_storage_task_json_still_carries_the_context() {
+        let files = mem_files();
+        let spy = Spy::ok(ok(serde_json::json!({"size": 1})));
+        let t = stored_task(
+            &files,
+            QUERY,
+            spec(),
+            Ok(indexed(&upstream("a.ion"), 7)),
+            Ok(indexed(&upstream("b.ion"), 9)),
+        );
+        let out = stored(QUERY, spy.clone(), None)
+            .run(&t)
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        let cmds = spy.only();
+        let doc = task_json(&cmds);
+        assert_eq!(doc["context"]["executionId"], EXEC.hyphenated().to_string());
+        assert_eq!(doc["context"]["flowId"], "pg-storage");
+        assert!(
+            doc.get("baseUri").is_none(),
+            "no storage, no baseUri: {doc}"
+        );
+        assert!(doc.get("maxTaskBytes").is_none(), "{doc}");
+        assert!(!cmds.output_directory);
+        assert_eq!(cmds.collect_to, None);
+    }
+
+    /// **Fix round 1: every plugin run gets `.egret/tmp`**, a world-writable
+    /// directory under the working directory for the host's scratch and its
+    /// `.part` files -- with or without storage -- and a script run does not.
+    #[tokio::test]
+    async fn a_plugin_run_gets_its_scratch_directory_and_a_script_run_does_not() {
+        use crate::storage::transfer::TarSource;
+        let spy = Spy::ok(ok(serde_json::json!({})));
+        handler(spy.clone()).run(&task()).await.expect("ran");
+        let cmds = spy.only();
+        let tar = cmds.tar_sources().expect("sources");
+        assert!(
+            matches!(
+                tar.get(crate::worker::commands::SCRATCH_DIR_REL),
+                Some(TarSource::Directory)
+            ),
+            "{:?}",
+            tar.keys().collect::<Vec<_>>()
+        );
+        assert!(!tar.contains_key(crate::worker::commands::OUTPUT_DIR_REL));
+        let script = TaskCommands {
+            input_files: BTreeMap::from([("a".to_string(), "x".to_string())]),
+            host_protocol: false,
+            ..cmds.clone()
+        };
+        assert!(!script
+            .tar_sources()
+            .expect("sources")
+            .contains_key(crate::worker::commands::SCRATCH_DIR_REL));
+        // An input file inside it is refused, by name.
+        let clash = TaskCommands {
+            input_files: BTreeMap::from([(".egret/tmp/x".to_string(), "x".to_string())]),
+            ..cmds
+        };
+        let e = clash.tar_sources().expect_err("a clash");
+        assert!(e.to_string().contains(".egret/tmp/x"), "{e}");
+    }
+
+    /// **Fix round 1, M4: a URI the host returned percent-encoded differently
+    /// from the file egret stored fails naming both**, so the author can see
+    /// why "never collected" when the names look alike.
+    #[tokio::test]
+    async fn an_encoded_twin_of_a_collected_file_is_named_in_the_failure() {
+        let files = mem_files();
+        let stored_uri = format!("{}a b.ion", prefix());
+        let returned = format!("{}a%20b.ion", prefix());
+        let spy = Spy::ok(CommandsResult {
+            exit_code: 0,
+            vars: serde_json::json!({"uri": returned})
+                .as_object()
+                .cloned()
+                .unwrap(),
+            output_files: BTreeMap::from([(
+                "a b.ion".to_string(),
+                crate::storage::StoredFile {
+                    uri: stored_uri.clone(),
+                    size: 3,
+                },
+            )]),
+            ..CommandsResult::default()
+        });
+        let t = stored_task(
+            &files,
+            QUERY,
+            spec(),
+            Ok(indexed(&upstream("a.ion"), 7)),
+            Ok(indexed(&upstream("b.ion"), 9)),
+        );
+        let out = stored(QUERY, spy, Some(files))
+            .run(&t)
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Failed);
+        let m = message(&out);
+        assert!(m.contains("never collected"), "{m}");
+        assert!(m.contains("percent-encoded"), "{m}");
+        assert!(m.contains(&stored_uri), "{m}");
+        // The control: a URI with no collected twin gets no hint.
+        assert!(encoded_twin(
+            &serde_json::json!({"uri": format!("{}other.ion", prefix())}),
+            &[crate::storage::StoredFile {
+                uri: stored_uri,
+                size: 3
+            }]
+        )
+        .is_none());
     }
 
     /// **`base-uri-cases.json`, read by `plugin-host`'s

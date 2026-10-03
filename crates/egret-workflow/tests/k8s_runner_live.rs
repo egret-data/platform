@@ -1964,6 +1964,321 @@ macro_rules! case {
     };
 }
 
+// ---------------------------------------------------------------------------
+// W9a Task 9 fix round 1: the plugin storage bridge in a pod
+// ---------------------------------------------------------------------------
+
+/// The plugin host image (W5b), loaded into the cluster like the helper.
+const PLUGIN_HOST_IMAGE: &str = "egret-plugin-host:dev";
+const PG_IMAGE: &str =
+    "postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
+
+fn docker_out(args: &[&str]) -> (bool, String) {
+    let o = std::process::Command::new("docker")
+        .args(args)
+        .output()
+        .expect("docker on PATH");
+    let mut text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    if !o.status.success() {
+        text.push_str(&String::from_utf8_lossy(&o.stderr));
+    }
+    (o.status.success(), text)
+}
+
+/// A throwaway Postgres on the kind clusters' Docker network, removed on drop.
+struct KindPg {
+    name: String,
+    ip: String,
+}
+
+impl Drop for KindPg {
+    fn drop(&mut self) {
+        let _ = docker_out(&["rm", "--force", &self.name]);
+    }
+}
+
+impl KindPg {
+    async fn start() -> Self {
+        let name = format!("egret-w9a-t9-k8s-pg-{}", Uuid::new_v4().simple());
+        let (ok, out) = docker_out(&[
+            "run",
+            "-d",
+            "--network",
+            "kind",
+            "--name",
+            &name,
+            "-e",
+            "POSTGRES_USER=w9a",
+            "-e",
+            "POSTGRES_DB=w9a",
+            "-e",
+            "POSTGRES_PASSWORD=w9a-k8s",
+            PG_IMAGE,
+        ]);
+        assert!(ok, "docker run postgres: {out}");
+        let (ok, ip) = docker_out(&[
+            "inspect",
+            "-f",
+            "{{.NetworkSettings.Networks.kind.IPAddress}}",
+            &name,
+        ]);
+        assert!(ok && !ip.is_empty(), "the container's kind IP: {ip}");
+        let pg = KindPg { name, ip };
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let mut ready = 0;
+        while ready < 2 {
+            if pg.psql_try("SELECT 1").0 {
+                ready += 1;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            } else {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Postgres did not come up"
+                );
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+        pg
+    }
+
+    fn psql_try(&self, sql: &str) -> (bool, String) {
+        docker_out(&[
+            "exec", &self.name, "psql", "-U", "w9a", "-d", "w9a", "-tAc", sql,
+        ])
+    }
+
+    fn psql(&self, sql: &str) -> String {
+        let (ok, out) = self.psql_try(sql);
+        assert!(ok, "psql {sql}: {out}");
+        out
+    }
+
+    fn url(&self) -> String {
+        format!("jdbc:postgresql://{}:5432/w9a", self.ip)
+    }
+}
+
+struct NoSecrets;
+
+#[async_trait::async_trait]
+impl egret_workflow::runners::secrets::SecretSource for NoSecrets {
+    async fn get(
+        &self,
+        _: Uuid,
+        name: &str,
+    ) -> Result<BTreeMap<String, String>, egret_workflow::runners::secrets::SecretError> {
+        Err(egret_workflow::runners::secrets::SecretError::NotFound { name: name.into() })
+    }
+}
+
+/// The production registry's plugin handlers over the cluster's runner, with
+/// the suite's internal storage.
+async fn plugin_handlers() -> egret_workflow::worker::Handlers {
+    let mut h = egret_workflow::worker::Handlers::new();
+    egret_workflow::worker::handlers::kestra::register(
+        &mut h,
+        Arc::new(egret_workflow::worker::handlers::kestra::KestraRuntime {
+            runner: Arc::new(runner().await),
+            runner_kind: RunnerKind::Kubernetes,
+            features: Arc::new(egret_workflow::worker::handlers::script::FixedFeatureState(
+                true,
+            )),
+            plugin_configurations: Default::default(),
+            host: egret_config::PluginHostConfig {
+                image: Some(PLUGIN_HOST_IMAGE.into()),
+                ..Default::default()
+            },
+            secrets: Arc::new(NoSecrets),
+            files: Some(suite_files()),
+        }),
+    );
+    h
+}
+
+/// A plugin task run of `type_id`, in flow `w9a.t9.k8s`/`live`, whose snapshot
+/// resolves `readable`.
+fn plugin_task(
+    ws: Uuid,
+    execution: Uuid,
+    type_id: &str,
+    spec: serde_json::Value,
+    readable: Vec<egret_workflow::storage::IndexedFile>,
+) -> TaskInput {
+    let run = Uuid::new_v4();
+    let (mut t, _) = task_for(ws, execution, run);
+    t.type_id = type_id.to_string();
+    t.task_id = "load".into();
+    t.spec = spec;
+    let prefix =
+        egret_workflow::storage::uri::task_prefix("w9a.t9.k8s", "live", execution, "load", run)
+            .unwrap();
+    let snapshot = egret_workflow::storage::scope::Snapshot::from_parts(
+        readable
+            .into_iter()
+            .map(|f| (f.uri.clone(), Ok(f)))
+            .collect(),
+        suite_files(),
+        ws,
+        Some(prefix),
+    );
+    let mut cx = egret_workflow::runners::RenderContext::new().with_files(snapshot.into_scope());
+    cx.insert(
+        "flow",
+        serde_json::json!({"namespace": "w9a.t9.k8s", "id": "live"}),
+    );
+    t.render = cx;
+    t
+}
+
+/// **In a pod, as `run_as_user` (1000), not the image's `USER 65532`**: the
+/// plugin host's `.egret/tmp` and `.egret/out` -- extracted by `files-in`'s
+/// `tar -x` as a non-root user -- are directories that user can write.
+async fn the_plugin_host_scratch_and_output_dirs_are_writable_as_run_as_user() {
+    let (t, rec) = task();
+    let mut cmds = shell(&[
+        "id -u",
+        "stat -c '%a %u %n' .egret/tmp .egret/out",
+        "touch .egret/tmp/probe && echo tmp-writable",
+        "touch .egret/out/probe && echo out-writable",
+    ]);
+    cmds.host_protocol = true;
+    cmds.output_directory = true;
+    let cmds = egret_workflow::worker::commands::TaskCommands {
+        collect_to: Some(egret_workflow::worker::commands::CollectTo {
+            workspace: t.workspace_id,
+            task_prefix: egret_workflow::storage::uri::task_prefix(
+                "w9a.t9.k8s",
+                "live",
+                t.execution_id,
+                &t.task_id,
+                t.run_id,
+            )
+            .unwrap(),
+            naming: egret_workflow::worker::commands::Naming::UnderPrefixVerbatim,
+        }),
+        ..cmds
+    };
+    let r = runner().await;
+    let out = r
+        .run(&t, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("ran");
+    let texts = rec.texts();
+    println!("    PROBE: exit {} {texts:?}", out.exit_code);
+    assert_eq!(out.exit_code, 0, "{texts:?}");
+    assert!(
+        texts.contains(&"1000".to_string()),
+        "run as run_as_user: {texts:?}"
+    );
+    assert!(texts.contains(&"tmp-writable".to_string()), "{texts:?}");
+    assert!(texts.contains(&"out-writable".to_string()), "{texts:?}");
+    assert!(
+        out.output_files.contains_key("probe"),
+        "the probe was collected"
+    );
+    r.release(&t, &k8s_spec()).await.expect("released");
+}
+
+/// **The plugin storage chain in a pod**: `postgresql.Query fetchType:
+/// STORE` writes through the host's `EgretStorage` (scratch in
+/// `.egret/tmp`, the file in `.egret/out`), the runner collects it; then
+/// `postgresql.Batch` reads that URI, staged into the pod, into a table.
+async fn a_plugin_stores_and_reads_storage_in_a_pod() {
+    let pg = KindPg::start().await;
+    pg.psql(
+        "CREATE TABLE src (i int, t text); INSERT INTO src VALUES (20, 'p'), (21, 'q'), (22, 'r'); \
+         CREATE TABLE dst (i int, t text)",
+    );
+    let h = plugin_handlers().await;
+    let (ws, exec) = (Uuid::new_v4(), Uuid::new_v4());
+    let conn = serde_json::json!({"url": pg.url(), "username": "w9a", "password": "w9a-k8s"});
+    let with = |extra: serde_json::Value| {
+        let mut m = conn.as_object().unwrap().clone();
+        m.extend(extra.as_object().unwrap().clone());
+        serde_json::Value::Object(m)
+    };
+
+    let query = "kestra.io.kestra.plugin.jdbc.postgresql.Query";
+    let store = plugin_task(
+        ws,
+        exec,
+        query,
+        with(serde_json::json!({"sql": "SELECT i, t FROM src ORDER BY i", "fetchType": "STORE"})),
+        vec![],
+    );
+    let out = h
+        .get(query)
+        .expect("served")
+        .run(&store)
+        .await
+        .expect("no worker error");
+    println!(
+        "    STORE: {:?} {:?} {:?} files {:?}",
+        out.state, out.outputs, out.message, out.files
+    );
+    assert_eq!(
+        out.state,
+        egret_workflow::executor::RunState::Success,
+        "{:?}",
+        out.message
+    );
+    let uri = out.outputs.as_ref().unwrap()["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(out.files.len(), 1);
+    assert_eq!(
+        out.files[0].uri, uri,
+        "the URI the plugin returned is the file collected"
+    );
+    h.get(query)
+        .unwrap()
+        .release(&store)
+        .await
+        .expect("released");
+
+    let batch = "kestra.io.kestra.plugin.jdbc.postgresql.Batch";
+    let load = plugin_task(
+        ws,
+        exec,
+        batch,
+        with(serde_json::json!({"from": uri, "sql": "INSERT INTO dst (i, t) VALUES (?, ?)"})),
+        vec![egret_workflow::storage::IndexedFile {
+            uri: uri.clone(),
+            execution_id: exec,
+            task_run_id: Some(store.run_id),
+            size: out.files[0].size,
+        }],
+    );
+    let out = h
+        .get(batch)
+        .expect("served")
+        .run(&load)
+        .await
+        .expect("no worker error");
+    println!(
+        "    BATCH: {:?} {:?} {:?}",
+        out.state, out.outputs, out.message
+    );
+    assert_eq!(
+        out.state,
+        egret_workflow::executor::RunState::Success,
+        "{:?}",
+        out.message
+    );
+    assert_eq!(out.outputs.as_ref().unwrap()["rowCount"], 3);
+    h.get(batch)
+        .unwrap()
+        .release(&load)
+        .await
+        .expect("released");
+    assert_eq!(
+        pg.psql("SELECT string_agg(i || ':' || t, ',' ORDER BY i) FROM dst")
+            .trim(),
+        "20:p,21:q,22:r"
+    );
+}
+
 fn cases() -> Vec<(&'static str, Case)> {
     vec![
         case!(a_shell_command_runs_in_a_pod_and_the_pod_is_deleted),
@@ -1986,6 +2301,8 @@ fn cases() -> Vec<(&'static str, Case)> {
         case!(an_exec_the_role_refuses_fails_the_task_naming_the_missing_verb),
         case!(an_unpullable_helper_image_fails_the_task_naming_the_setting),
         case!(a_task_that_fills_its_disk_is_evicted_and_fails_saying_so),
+        case!(the_plugin_host_scratch_and_output_dirs_are_writable_as_run_as_user),
+        case!(a_plugin_stores_and_reads_storage_in_a_pod),
     ]
 }
 

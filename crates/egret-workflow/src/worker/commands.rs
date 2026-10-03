@@ -328,6 +328,15 @@ pub const OUTPUT_DIR: &str = "/egret/working-dir/.egret/out";
 /// [`OUTPUT_DIR`] relative to [`WORKING_DIR`].
 pub const OUTPUT_DIR_REL: &str = ".egret/out";
 
+/// The plugin host's scratch, relative to [`WORKING_DIR`] (W9a Task 9 fix
+/// round 1): Kestra's `LocalWorkingDir` and `EgretStorage`'s `.part` files.
+/// Created world-writable for every `host_protocol` run -- `docker cp`
+/// leaves the working directory itself root-owned and the host image runs as
+/// `USER 65532` -- and kept under the working directory so it stays bounded
+/// by the working directory's `emptyDir.sizeLimit` on Kubernetes. Never
+/// collected: only [`OUTPUT_DIR_REL`] is.
+pub const SCRATCH_DIR_REL: &str = ".egret/tmp";
+
 /// The env var naming [`OUTPUT_DIR`]: Kestra's `OUTPUT_DIR`, measured.
 pub const ENV_OUTPUT_DIR: &str = "OUTPUT_DIR";
 
@@ -383,7 +392,10 @@ impl TaskCommands {
 
     /// Whether anything goes into the working directory before the command.
     pub fn has_inputs(&self) -> bool {
-        !self.input_files.is_empty() || !self.stored_inputs.is_empty() || self.output_directory
+        !self.input_files.is_empty()
+            || !self.stored_inputs.is_empty()
+            || self.output_directory
+            || self.host_protocol
     }
 
     /// Every input file, by name, as the archive writes it. A name in both
@@ -413,6 +425,18 @@ impl TaskCommands {
                 )));
             }
             out.insert(OUTPUT_DIR_REL.to_string(), TarSource::Directory);
+        }
+        if self.host_protocol {
+            if let Some(clash) = out
+                .keys()
+                .find(|k| *k == SCRATCH_DIR_REL || k.starts_with(&format!("{SCRATCH_DIR_REL}/")))
+            {
+                return Err(Error::InvalidInput(format!(
+                    "the input file {clash:?} is inside {SCRATCH_DIR_REL}, the plugin host's \
+                     scratch directory, which egret creates empty"
+                )));
+            }
+            out.insert(SCRATCH_DIR_REL.to_string(), TarSource::Directory);
         }
         Ok(out)
     }

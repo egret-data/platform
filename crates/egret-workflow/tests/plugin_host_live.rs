@@ -1004,8 +1004,60 @@ async fn plugins_read_and_write_storage_through_egret() {
     assert_no_secret_stored(&pool, PG_PASSWORD).await;
     drop(pg);
 
-    // ---- StarRocks (skippable), a THROWAWAY container ------------------------
     let mut skipped = 0;
+    // ---- Trino (skippable): `trino.Query fetchType: STORE` ---------------------
+    match start_engine(TRINO_IMAGE, 8080, &["--memory", "3g"]).await {
+        Err(why) => {
+            println!("SKIPPED: Trino STORE: {why}");
+            skipped += 1;
+        }
+        Ok(trino) => {
+            let deadline = Instant::now() + Duration::from_secs(180);
+            let mut ready = false;
+            while Instant::now() < deadline {
+                let (ok, out) =
+                    docker(&["exec", &trino.name, "trino", "--execute", "SELECT 1"]).await;
+                if ok && out.contains('1') {
+                    ready = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            if !ready {
+                println!("SKIPPED: Trino STORE: Trino did not answer within 180 s");
+                skipped += 1;
+            } else {
+                let src = format!(
+                    "id: trino_storage\nnamespace: w9a.plugins\ntasks:\n  - id: q\n    \
+                     type: kestra.io.kestra.plugin.jdbc.trino.Query\n    \
+                     url: jdbc:trino://host.docker.internal:{}/tpch/tiny\n    \
+                     username: w9a\n    \
+                     sql: \"SELECT nationkey, name FROM nation ORDER BY nationkey\"\n    \
+                     fetchType: STORE\n",
+                    trino.port
+                );
+                let exec = fx.run(&src, 15, Duration::from_secs(180)).await;
+                let (state, outputs, message) = fx.task_run(exec, "q").await;
+                println!("TRINO STORE: {state} {outputs:?} {message:?}");
+                assert_eq!(state, "SUCCESS", "{message:?}");
+                let outputs = outputs.expect("outputs");
+                assert_eq!(outputs["size"], 25, "tpch tiny has 25 nations");
+                let uri = outputs["uri"].as_str().expect("a uri");
+                let indexed: Option<i64> = sqlx::query_scalar(
+                    "SELECT size FROM workflow.execution_files WHERE workspace_id = $1 AND uri = $2",
+                )
+                .bind(fx.ws)
+                .bind(uri)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+                println!("INDEXED trino: {uri} ({indexed:?} bytes)");
+                assert!(indexed.is_some_and(|n| n > 0), "{uri} is indexed");
+            }
+        }
+    }
+
+    // ---- StarRocks (skippable), a THROWAWAY container ------------------------
     let sr_image_ok = docker(&["image", "inspect", STARROCKS_IMAGE]).await.0;
     if std::env::var("EGRET_TEST_STARROCKS_URL").is_err() {
         println!("SKIPPED: StarRocks mysql.Batch: EGRET_TEST_STARROCKS_URL is not set");
@@ -1064,7 +1116,7 @@ async fn plugins_read_and_write_storage_through_egret() {
         );
         drop(sr);
     }
-    println!("STARROCKS SKIPPED: {skipped} of 1");
+    println!("ENGINES SKIPPED: {skipped} of 2 (Trino STORE, StarRocks mysql.Batch)");
 
     let removed = forget(&files).await;
     let left = files

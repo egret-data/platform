@@ -121,6 +121,8 @@ W5a's transfer becomes streamed: `get_stream` feeds a streaming tar writer into 
 
 **Re-attach (W5a):** collection runs as usual on the adopted pod; nothing is indexed before the commit, so nothing is duplicated.
 
+**Directory modes (W9a Task 9, measured live).** `docker cp` leaves every staged entry root-owned, and the plugin host image runs as `USER 65532`. So the output directory `.egret/out` — for script tasks' `outputDirectory: true` as well as for plugins — is created **world-writable (`0777`)**, a behaviour change for script tasks since Task 6 (`0755`). Every plugin run also gets `.egret/tmp` (`0777`, never collected): the host's scratch (Kestra's `LocalWorkingDir`) and its writes in progress (`.part` files, moved atomically into `.egret/out` when complete, so a killed JVM leaves no partial file to collect). Both live under the working directory, so on Kubernetes they stay bounded by its `emptyDir.sizeLimit`. Every other directory stays `0755`. A plugin URI is matched on its raw path: egret never percent-decodes one.
+
 ## 6. Script tasks
 
 ### 6.1 `inputFiles` URIs
