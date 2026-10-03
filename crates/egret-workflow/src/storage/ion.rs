@@ -754,10 +754,10 @@ fn float(f: f64) -> Value {
 mod tests {
     use super::*;
 
-    /// 8 MiB in one value. Measured in fix round 1 (`ion-rs` at opt-level 3 in
-    /// dev, the workspace's `[profile.dev.package.ion-rs]`): about 7 s; the
-    /// quadratic reader had not finished after 31 minutes.
-    const TIME_BOUND_SECS: u64 = 20;
+    /// A hang guard only, per read in the linear-time test: 8 MiB took
+    /// about 7 s linear and had not finished after 31 minutes quadratic; 4 MiB
+    /// quadratic took 79 s. The test's verdict is its ratio.
+    const HANG_GUARD_SECS: u64 = 300;
     use base64::Engine as _;
     use serde_json::json;
 
@@ -1129,22 +1129,41 @@ mod tests {
     /// Fix round 1, I2: one big value fed 16 KiB at a time was re-parsed after
     /// every fill (quadratic: 4 MiB took 79 s in the review). Each fill now
     /// fills the reader's whole buffer, which doubles.
+    ///
+    /// W9a Task 10 fix round 1, I3: judged by a RATIO, not a wall clock (the
+    /// 20 s bound passed in 8 s alone and failed in 22.7 s at load ~30). The
+    /// same run reads 1 MiB and 4 MiB, each the best of two: linear is about
+    /// 4x, quadratic about 16x; the bound is 8x. 1 and 4 rather than 2 and 8
+    /// so the quadratic mutant can be SHOWN failing it -- at 8 MiB it had not
+    /// finished after 31 minutes. The absolute ceiling is only a hang guard.
     #[test]
     fn a_big_value_from_a_chunked_reader_reads_in_linear_time() {
-        let mut list = String::from("[");
-        while list.len() < 8 << 20 {
-            list.push_str("1,");
-        }
-        list.push(']');
-        let started = std::time::Instant::now();
-        let (rows, stop) = read_values(Chunky(cursor(list), 16 << 10), 1);
-        let took = started.elapsed();
-        println!("8 MiB in one value, 16 KiB a read: {took:?}");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
-        assert_eq!(rows[0].as_array().unwrap().len(), 4 << 20);
+        let read = |bytes: usize| {
+            let mut list = String::from("[");
+            while list.len() < bytes {
+                list.push_str("1,");
+            }
+            list.push(']');
+            let started = std::time::Instant::now();
+            let (rows, stop) = read_values(Chunky(cursor(list), 16 << 10), 1);
+            let took = started.elapsed();
+            assert!(matches!(stop, Stop::End), "{stop:?}");
+            assert_eq!(rows[0].as_array().unwrap().len(), bytes / 2);
+            assert!(
+                took < std::time::Duration::from_secs(HANG_GUARD_SECS),
+                "{bytes} bytes took {took:?}"
+            );
+            took
+        };
+        let best = |bytes: usize| read(bytes).min(read(bytes));
+        let small = best(1 << 20);
+        let large = best(4 << 20);
+        let ratio = large.as_secs_f64() / small.as_secs_f64();
+        println!("1 MiB {small:?}, 4 MiB {large:?}: x{ratio:.1}");
         assert!(
-            took < std::time::Duration::from_secs(TIME_BOUND_SECS),
-            "8 MiB took {took:?}"
+            ratio < 8.0,
+            "4x the bytes took x{ratio:.1} the time (linear ~4, quadratic ~16): \
+             1 MiB {small:?}, 4 MiB {large:?}"
         );
     }
 

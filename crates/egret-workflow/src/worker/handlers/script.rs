@@ -240,7 +240,7 @@ impl Script {
         type_id: &str,
         task: &TaskInput,
         p: &ScriptTask,
-    ) -> std::result::Result<TaskCommands, Outcome> {
+    ) -> std::result::Result<TaskCommands, String> {
         let mut cx = task.render.clone();
         cx.insert(WORKING_DIR_VAR, serde_json::json!(WORKING_DIR));
         // Kestra's `{{ outputDir }}`, bound with the directory enabled
@@ -250,9 +250,7 @@ impl Script {
         }
 
         let one = |what: &str, s: &str| {
-            render_str(s, &cx).map_err(|e| {
-                Outcome::failed_with(format!("{type_id}: `{what}` did not render: {e}"))
-            })
+            render_str(s, &cx).map_err(|e| format!("{type_id}: `{what}` did not render: {e}"))
         };
         let image = one("containerImage", p.image())?;
         let interpreter = match &p.interpreter {
@@ -275,10 +273,10 @@ impl Script {
                 let body = one("script", script)?;
                 if input_files.contains_key(SCRIPT_FILE) || stored_inputs.contains_key(SCRIPT_FILE)
                 {
-                    return Err(Outcome::failed_with(format!(
+                    return Err(format!(
                         "{type_id}: `inputFiles` declares {SCRIPT_FILE:?}, which is where egret \
                          writes this task's `script`; name the file something else"
-                    )));
+                    ));
                 }
                 input_files.insert(SCRIPT_FILE.to_string(), body);
                 vec![format!("python {SCRIPT_FILE}")]
@@ -289,9 +287,7 @@ impl Script {
         // task's failure, decided before the gate and before any runner.
         for rel in input_files.keys().chain(stored_inputs.keys()) {
             if let Some(problem) = relative_problem(rel) {
-                return Err(Outcome::failed_with(format!(
-                    "{type_id}: `inputFiles`: {problem}"
-                )));
+                return Err(format!("{type_id}: `inputFiles`: {problem}"));
             }
         }
 
@@ -340,8 +336,8 @@ impl Script {
         &self,
         type_id: &str,
         task: &TaskInput,
-    ) -> std::result::Result<CollectTo, Outcome> {
-        let fail = |why: String| Outcome::failed_with(format!("{type_id}: {why}"));
+    ) -> std::result::Result<CollectTo, String> {
+        let fail = |why: String| format!("{type_id}: {why}");
         if self.rt.files.is_none() {
             return Err(fail(no_storage_for_outputs()));
         }
@@ -389,7 +385,7 @@ impl Script {
         type_id: &str,
         task: &TaskInput,
         rendered: BTreeMap<String, String>,
-    ) -> std::result::Result<StagedInputs, Outcome> {
+    ) -> std::result::Result<StagedInputs, String> {
         let mut contents = BTreeMap::new();
         let mut stored = BTreeMap::new();
         for (name, value) in rendered {
@@ -397,9 +393,7 @@ impl Script {
                 contents.insert(name, value);
                 continue;
             }
-            let fail = |why: &str| {
-                Outcome::failed_with(format!("{type_id}: `inputFiles` {name:?}: {why}"))
-            };
+            let fail = |why: &str| format!("{type_id}: `inputFiles` {name:?}: {why}");
             let Some(scope) = task.render.files() else {
                 return Err(fail(&format!(
                     "{value} cannot be read: this render has no file scope"
@@ -481,12 +475,12 @@ impl TaskHandler for Script {
         // 2. render.
         let mut cmds = match self.render(type_id, task, &parsed) {
             Ok(c) => c,
-            Err(o) => return Ok(o),
+            Err(why) => return Ok(Outcome::failed_with(why)),
         };
         if cmds.has_outputs() {
             cmds.collect_to = match self.collect_to(type_id, task) {
                 Ok(to) => Some(to),
-                Err(o) => return Ok(o),
+                Err(why) => return Ok(Outcome::failed_with(why)),
             };
         }
 

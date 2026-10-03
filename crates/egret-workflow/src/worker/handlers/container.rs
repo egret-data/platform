@@ -191,19 +191,19 @@ pub(super) fn mapped(type_id: &str, e: Error) -> Result<Outcome> {
 }
 
 /// Render every string in a list, or say which one did not.
+///
+/// `Err` is the failed task's whole message; the caller makes the
+/// `Outcome` (an `Outcome` as the error made every `Result` here as large as
+/// it, clippy `result_large_err`).
 pub(super) fn render_all(
     type_id: &str,
     what: &str,
     items: &[String],
     cx: &crate::runners::RenderContext,
-) -> std::result::Result<Vec<String>, Outcome> {
+) -> std::result::Result<Vec<String>, String> {
     items
         .iter()
-        .map(|s| {
-            render_str(s, cx).map_err(|e| {
-                Outcome::failed_with(format!("{type_id}: `{what}` did not render: {e}"))
-            })
-        })
+        .map(|s| render_str(s, cx).map_err(|e| format!("{type_id}: `{what}` did not render: {e}")))
         .collect()
 }
 
@@ -218,13 +218,13 @@ pub(super) fn render_values(
     what: &str,
     items: &BTreeMap<String, String>,
     cx: &crate::runners::RenderContext,
-) -> std::result::Result<BTreeMap<String, String>, Outcome> {
+) -> std::result::Result<BTreeMap<String, String>, String> {
     items
         .iter()
         .map(|(k, v)| {
-            render_str(v, cx).map(|v| (k.clone(), v)).map_err(|e| {
-                Outcome::failed_with(format!("{type_id}: `{what}` did not render: {e}"))
-            })
+            render_str(v, cx)
+                .map(|v| (k.clone(), v))
+                .map_err(|e| format!("{type_id}: `{what}` did not render: {e}"))
         })
         .collect()
 }

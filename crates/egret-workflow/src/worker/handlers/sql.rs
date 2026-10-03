@@ -272,6 +272,11 @@ impl Sql {
     /// an iteration's inside a `Loop`, spec §3), else built from `flow` the
     /// way `script.rs`'s `collect_to` builds it. A namespace, flow or task id
     /// no URI can carry is the author's error, never `Internal`.
+    ///
+    /// The `flow` fallback is for tests that call the handler directly: under
+    /// the worker, `claim` gives every run a scope whose `task_prefix` is set
+    /// whenever `uri::task_prefix` succeeds, so in production the fallback
+    /// only re-derives that function's `Err` as the author's message.
     fn store_target(
         &self,
         task: &TaskInput,
@@ -1938,6 +1943,155 @@ mod tests {
             "{msg}"
         );
         assert!(mem.keys().is_empty());
+    }
+
+    /// Fix round 1, I1: `workflow.storage.max_task_bytes` is judged too, and
+    /// on its own -- the file cap here is the default 1 GiB, so only the task
+    /// cap can refuse these 12 bytes.
+    #[tokio::test]
+    async fn store_over_the_task_cap_fails_naming_it_and_writes_nothing() {
+        let (fs, mem) = mem_files(Caps {
+            max_task_bytes: 10,
+            ..Caps::default()
+        });
+        assert!(fs.caps.max_file_bytes > 12, "only the task cap is crossed");
+        let spy = Spy::answering(result(
+            &["n"],
+            vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
+        ));
+        let st = store_input(&fs, "SELECT n FROM t");
+        let out = Sql::new(spy)
+            .with_files(Some(fs))
+            .run(&st.task)
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Failed);
+        let msg = out.message.unwrap_or_default();
+        assert!(
+            msg.contains("workflow.storage.max_task_bytes") && msg.contains("12"),
+            "{msg}"
+        );
+        assert!(mem.keys().is_empty(), "{:?}", mem.keys());
+        assert!(out.files.is_empty());
+    }
+
+    /// Two columns of one name fail a STORE as they fail a FETCH, naming the
+    /// column, and nothing is written. (An Ion struct could hold both; egret
+    /// keeps one rule for both fetches that produce rows.)
+    #[tokio::test]
+    async fn store_refuses_a_duplicate_column_name_and_writes_nothing() {
+        let (fs, mem) = mem_files(Caps::default());
+        let r = result(
+            &["id", "id"],
+            vec![vec![serde_json::json!(1), serde_json::json!(2)]],
+        );
+        let msg = outputs_for(Fetch::Store, &r, 10).expect_err("refused");
+        assert!(msg.contains("\"id\""), "{msg}");
+        let st = store_input(&fs, "SELECT a.id, b.id FROM a, b");
+        let out = Sql::new(Spy::answering(r))
+            .with_files(Some(fs))
+            .run(&st.task)
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Failed);
+        assert!(
+            out.message.as_deref().unwrap_or("").contains("\"id\""),
+            "{:?}",
+            out.message
+        );
+        assert!(mem.keys().is_empty());
+    }
+
+    /// What `head` answers after the upload.
+    #[derive(Clone, Copy, Debug)]
+    enum Head {
+        /// A size other than what was written.
+        Other,
+        /// `Ok(None)`: the store does not have the object.
+        Absent,
+        /// The store cannot be reached.
+        Down,
+    }
+
+    /// A `MemStore` whose uploads succeed and whose `head` lies as told.
+    struct Lying(egret_storage::MemStore, Head);
+
+    #[async_trait::async_trait]
+    impl ObjectStore for Lying {
+        async fn put(&self, uri: &str, b: Vec<u8>) -> std::result::Result<(), StorageError> {
+            self.0.put(uri, b).await
+        }
+        async fn get(&self, uri: &str) -> std::result::Result<Vec<u8>, StorageError> {
+            self.0.get(uri).await
+        }
+        async fn delete(&self, uri: &str) -> std::result::Result<(), StorageError> {
+            self.0.delete(uri).await
+        }
+        async fn copy(&self, a: &str, b: &str) -> std::result::Result<(), StorageError> {
+            self.0.copy(a, b).await
+        }
+        async fn list(
+            &self,
+            p: &str,
+            d: Option<&str>,
+        ) -> std::result::Result<egret_storage::Listing, StorageError> {
+            self.0.list(p, d).await
+        }
+        async fn put_stream(
+            &self,
+            uri: &str,
+            body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+            hint: Option<u64>,
+        ) -> std::result::Result<u64, StorageError> {
+            self.0.put_stream(uri, body, hint).await
+        }
+        async fn head(&self, uri: &str) -> std::result::Result<Option<u64>, StorageError> {
+            match self.1 {
+                Head::Other => Ok(self.0.head(uri).await?.map(|n| n + 1)),
+                Head::Absent => Ok(None),
+                Head::Down => Err(StorageError::S3(format!("{uri}: connection refused"))),
+            }
+        }
+    }
+
+    /// **The check after the upload** (spec §4.2, as `collect_one`): a size
+    /// other than what was written, an object the store does not have, and a
+    /// `head` that cannot reach the store are each egret's failure -- `Err`
+    /// naming the URI, never a stored file or a failed task. The control is
+    /// the same rows through an honest `MemStore` (the first test).
+    #[tokio::test]
+    async fn the_check_after_the_upload_is_a_worker_failure_when_the_store_disagrees() {
+        for (mode, says) in [
+            (Head::Other, "bytes in internal storage after"),
+            (Head::Absent, "internal storage does not have it"),
+            (
+                Head::Down,
+                "could not be checked: internal storage is unavailable",
+            ),
+        ] {
+            let fs = Arc::new(FileStore {
+                store: Arc::new(Lying(egret_storage::MemStore::new(), mode)),
+                bucket: "egret-test".to_string(),
+                prefix: "workflow/".to_string(),
+                caps: Caps::default(),
+                retention_days: 30,
+            });
+            let st = store_input(&fs, "SELECT n FROM t");
+            let err = Sql::new(Spy::answering(result(
+                &["n"],
+                vec![vec![serde_json::json!(1)]],
+            )))
+            .with_files(Some(fs))
+            .run(&st.task)
+            .await
+            .expect_err("the store disagreeing is not the author's error");
+            assert!(matches!(err, Error::Internal(_)), "{mode:?}: {err:?}");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("{}{STORE_FILE}", st.prefix)) && msg.contains(says),
+                "{mode:?}: {msg}"
+            );
+        }
     }
 
     /// A store that fails while the file is written.
