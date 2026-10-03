@@ -392,10 +392,10 @@ impl TaskCommands {
 
     /// Whether anything goes into the working directory before the command.
     pub fn has_inputs(&self) -> bool {
-        !self.input_files.is_empty()
-            || !self.stored_inputs.is_empty()
-            || self.output_directory
-            || self.host_protocol
+        // A plugin run always has `task.json`, so its scratch directory
+        // ([`SCRATCH_DIR_REL`]) rides in that archive; `host_protocol` alone
+        // does not make one (a W5a pod with no inputs keeps no `files-in`).
+        !self.input_files.is_empty() || !self.stored_inputs.is_empty() || self.output_directory
     }
 
     /// Every input file, by name, as the archive writes it. A name in both
