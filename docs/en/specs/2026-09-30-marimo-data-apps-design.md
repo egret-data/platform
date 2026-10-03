@@ -32,7 +32,8 @@ its edit mode is the authoring surface, its run mode is the published app.
 | D12 | **The apps origin is a sibling subdomain** (`apps.<egret host>`), same-site with egret (2026-10-01). | P4 must ship `__Host-` cookies (verified over HTTPS), side-effect-free GETs, header-based CSRF, no CORS for the apps origin (§6.1). |
 | D13 | **SQL cells: ship DuckDB, egret engine is the default** (2026-10-01). | DuckDB for SQL over fetched DataFrames, in-pod only; a new SQL cell targets the gateway (§4.4). |
 | D14 | **marimo's per-launch `has_marimo_installed` check is answered by the launcher shim** (2026-10-01). | A hack against private marimo behaviour: pinned marimo, a contract test in the image's CI that fails when the command changes; no upstream change pursued for now (§6.3). |
-| D15 | **P5 start-up acceptance is relative to thread mode** (≤ 0.5 s median, ≤ 1 s for 3 concurrent, Linux, ≥ 5 runs); "< 2 s" is a separate, non-blocking experience goal (2026-10-01). | The ≈ 1.75 s page-load floor is outside the kernel launcher's reach (S0b). |
+| D15 | **P5 start-up acceptance is relative to thread mode** (≤ 0.5 s median, ≤ 1 s for 3 concurrent, Linux, ≥ 5 runs); "< 2 s" is a separate, non-blocking experience goal (2026-10-01). **Superseded by D24 (2026-10-03):** this compared a pre-started kernel pool against thread mode inside one shared pod; D24 removed the shared pod, so there is no pool to compare against. | The ≈ 1.75 s page-load floor is outside the kernel launcher's reach (S0b). See [`2026-10-03-data-apps-p5-startup-result.md`](../plans/2026-10-03-data-apps-p5-startup-result.md) for what P5 measures instead (a cold run pod's own start-up cost, not yet trustworthy — measured under severe unrelated load). |
+
 | D16 | **The pool shutdown hang is covered by a P5 acceptance test**, not a separate spike (2026-10-01). | Applies to whichever launcher P5 picks; k8s restarts make this order routine. |
 
 ### 1.1 Decisions proposed for P4 (2026-10-02) — **not yet agreed with the user**
@@ -48,6 +49,13 @@ Made while writing the P4 plan (`docs/en/plans/2026-10-02-data-apps-p4-origin-pr
 | D21 | Cookies are `__Host-egret_session` / `__Host-egret_csrf` when `auth.cookie_secure` is true, the current names otherwise; the frontend reads both. | `__Host-` needs `Secure`; Chromium refuses it over http (S0). |
 | D22 | Edit pods use a **new `AppPodLauncher` trait** in `egret-apps`; `egret-kernel`'s `KernelLauncher` is not generalised (this replaces §6.3's "generalised"). | P6 deletes the Jupyter half of `egret-kernel`. |
 | D23 | **Grid layout is blocked in edit mode** rather than stored with the draft. **Open question:** is losing the grid layout acceptable for v1? | Storing it needs a schema change and a marimo hook that does not exist. |
+
+
+### 1.2 D24 — run mode is one pod per (viewer, published version), not per version (2026-10-03)
+
+| # | Decision | Consequence |
+|---|---|---|
+| D24 | marimo's IPC kernel channels (`marimo/_ipc/connection.py`) bind unauthenticated ZeroMQ sockets to `tcp://127.0.0.1:<random port>`. The design this spec had for run mode — many viewers' kernels, isolated by the P3 forced-IPC patch, sharing one pod per published **version** — would let a published app's own code, running as one viewer's kernel, reach another viewer's control channel inside that shared pod (reading their `x-egret-app-token`, or forging output into their session): a cross-viewer leak, worse than D3's "the author is untrusted with respect to the viewer." **Decided with the user: one run pod per (app version, viewer)** — the fallback D7 already named for when the forced-IPC patch breaks, adopted as the default instead of a shared pod. | §5.2, §6.3 and D7 are superseded where they describe one pod per version; a run pod now serves exactly one `(version_id, user_id)` pair. The P3 forced-IPC patch (`apps-image/egret_marimo/patches.py::install_run_mode_ipc_patch`) is kept but **off by default** (`apps.pod.run_kernel_mode = "thread"`): with one viewer per pod, that viewer's own browser tabs sharing marimo's default thread-mode kernel is no longer a cross-person problem (measured in [`2026-10-03-data-apps-p5-startup-result.md`](../plans/2026-10-03-data-apps-p5-startup-result.md) — two tabs, same viewer, thread mode, tokens never crossed). Cost accepted: one pod per concurrent viewer rather than many viewers sharing one. D15's numeric targets no longer apply (see that row). Plan: [`2026-10-03-data-apps-p5-run-mode.md`](../plans/2026-10-03-data-apps-p5-run-mode.md). |
 
 ## 2. What the code says
 
