@@ -1336,7 +1336,9 @@ async fn a_cron_runs_to_success_with_nothing_driving_it(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let flow = seed_cron_flow(&pool, "e2e").await;
     common::make_due(&Db { pool: pool.clone() }, flow, "s", 1).await;
-    let handlers = Arc::new(egret_workflow::worker::Handlers::with_core_tasks());
+    let handlers = Arc::new(egret_workflow::worker::Handlers::with_core_tasks(
+        egret_workflow::storage::current(),
+    ));
     let cfg = |scheduler_enabled| RuntimeConfig {
         scheduler_enabled,
         trigger_interval: Duration::from_millis(50),
@@ -1623,7 +1625,9 @@ async fn a_flow_trigger_runs_to_success_with_nothing_driving_it(pool: sqlx::PgPo
     let producer_src = w13_source("producer");
     let producer = common::seed_flow(&db, ws, user, &producer_src, "draft").await;
     let listener = common::seed_flow(&db, ws, user, &w13_listener("listener"), "draft").await;
-    let handlers = Arc::new(egret_workflow::worker::Handlers::with_core_tasks());
+    let handlers = Arc::new(egret_workflow::worker::Handlers::with_core_tasks(
+        egret_workflow::storage::current(),
+    ));
     let cfg = |scheduler_enabled| RuntimeConfig {
         scheduler_enabled,
         trigger_interval: Duration::from_millis(50),
@@ -2135,7 +2139,7 @@ fn unconnected_pool() -> sqlx::PgPool {
 }
 
 /// **With `container_runner = none` (the default) the production registry is
-/// what it was before W5a** -- `Handlers::with_core_tasks()`, no orphan
+/// what it was before W5a** -- `Handlers::with_core_tasks(egret_workflow::storage::current())`, no orphan
 /// sweep, no default runner for publish -- plus, since W9a Task 11, the two
 /// core storage tasks that need the pool (`handlers::storage::register`), on
 /// every deployment; and with `docker` it is that plus exactly the four
@@ -2155,7 +2159,7 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         egret_workflow::runtime::handlers_for(&cfg, unconnected_pool(), no_secrets())
             .await
             .expect("`none` needs nothing");
-    let mut want: Vec<String> = Handlers::with_core_tasks()
+    let mut want: Vec<String> = Handlers::with_core_tasks(egret_workflow::storage::current())
         .type_ids()
         .into_iter()
         .map(String::from)
@@ -2185,11 +2189,17 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         egret_workflow::runtime::handlers_for(&cfg, unconnected_pool(), no_secrets())
             .await
             .expect("the Docker runner is built without a daemon");
-    let core = Handlers::with_core_tasks().type_ids().len();
+    let core = Handlers::with_core_tasks(egret_workflow::storage::current())
+        .type_ids()
+        .len();
     let added: Vec<&str> = reg
         .type_ids()
         .into_iter()
-        .filter(|id| Handlers::with_core_tasks().get(id).is_none())
+        .filter(|id| {
+            Handlers::with_core_tasks(egret_workflow::storage::current())
+                .get(id)
+                .is_none()
+        })
         .filter(|id| !id.starts_with(egret_workflow::plugins::PREFIX))
         .collect();
     // W5b: plus one `kestra.<FQCN>` per catalog class, over the same runner.
@@ -2284,7 +2294,8 @@ impl egret_workflow::worker::commands::OrphanSweep for CountingSweep {
 async fn the_reaper_tick_sweeps_the_configured_runners_orphans(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let sweep = Arc::new(CountingSweep::default());
-    let reg = egret_workflow::worker::Handlers::with_core_tasks().with_orphan_sweep(sweep.clone());
+    let reg = egret_workflow::worker::Handlers::with_core_tasks(egret_workflow::storage::current())
+        .with_orphan_sweep(sweep.clone());
     let cancel = CancellationToken::new();
     let cfg = RuntimeConfig {
         tick_interval: Duration::from_secs(3600),

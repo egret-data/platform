@@ -327,6 +327,12 @@ fn input(f: &Live, spec: serde_json::Value, cx: serde_json::Value) -> TaskInput 
     }
 }
 
+/// The three tests that tick take turns (W9a Task 11): a claim is global, so
+/// one test's `tick` with a registry whose `egret.sql` has no store claimed
+/// the STORE test's run and failed it with "needs internal storage" -- seen
+/// once in the W9a Task 11 gate, 0 of 3 alone.
+static TICKING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Tick until **this** execution is terminal, and return its state.
 ///
 /// Deliberately not "tick until `tick` returns 0". The claim is *global* by
@@ -337,17 +343,11 @@ fn input(f: &Live, spec: serde_json::Value, cx: serde_json::Value) -> TaskInput 
 /// `tick(..) == 0` and one of them read back `"RUNNING"` because its budget had
 /// been spent finishing the other's execution.
 ///
-/// Ticking on behalf of another test is harmless — both register the same
-/// handler — so the fix is to stop when the execution under test has finished
+/// Ticking on behalf of another test is harmless while both register the same
+/// handlers (where they do not, [`TICKING`] makes them take turns), so the fix is to stop when the execution under test has finished
 /// rather than when this thread happens to find nothing to do. That is also the
 /// difference between asserting about the run you started and asserting about
 /// whichever run went first.
-/// The three tests that tick take turns (W9a Task 11): a claim is global, so
-/// one test's `tick` with a registry whose `egret.sql` has no store claimed
-/// the STORE test's run and failed it with "needs internal storage" -- seen
-/// once in the W9a Task 11 gate, 0 of 3 alone.
-static TICKING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 async fn drive(f: &Live, reg: &Handlers, ex: Uuid) -> String {
     for _ in 0..64 {
         let state: String =
@@ -793,7 +793,7 @@ async fn store_of_50_000_rows_is_indexed_and_read_returns_its_first_line() {
     .await
     .expect("start the execution");
 
-    let mut reg = Handlers::with_core_tasks();
+    let mut reg = Handlers::with_core_tasks(egret_workflow::storage::current());
     reg.add(Arc::new(
         Sql::with_limits(f.port.clone(), 60_000, std::time::Duration::from_secs(120))
             .with_files(Some(fs.clone())),

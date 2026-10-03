@@ -1324,7 +1324,7 @@ pub(super) fn write_json(out: &mut String, value: &MjValue, omit_nulls: bool) {
 /// `\b \t \n \f \r` have named escapes — which is why no existing golden
 /// moved when this was fixed and why only W2 Task 6's `toJson` sweep found
 /// it. Verified: the mismatch count is unchanged either side of this fix.
-fn write_json_string(out: &mut String, s: &str) {
+pub(crate) fn write_json_string(out: &mut String, s: &str) {
     match serde_json::to_string(s) {
         Ok(quoted) => out.push_str(&uppercase_unicode_escapes(&quoted)),
         // `to_string` on a `&str` cannot fail; this arm keeps the writer

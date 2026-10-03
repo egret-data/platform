@@ -1151,7 +1151,7 @@ async fn end_to_end_a_flow_logs_through_the_real_runtime(pool: sqlx::PgPool) {
     };
     let rt = spawn_with_logs(
         pool.clone(),
-        Handlers::with_core_tasks(),
+        Handlers::with_core_tasks(egret_workflow::storage::current()),
         cfg,
         cancel.clone(),
     );
@@ -1266,7 +1266,7 @@ async fn a_line_written_after_cancel_by_an_in_flight_run_is_stored(pool: sqlx::P
 
     let started = Arc::new(tokio::sync::Notify::new());
     let go = Arc::new(tokio::sync::Notify::new());
-    let mut handlers = Handlers::with_core_tasks();
+    let mut handlers = Handlers::with_core_tasks(egret_workflow::storage::current());
     handlers.register(
         "io.kestra.plugin.core.log.Log",
         Arc::new(GatedLog {

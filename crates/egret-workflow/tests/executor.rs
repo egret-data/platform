@@ -6986,7 +6986,8 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     // The runnable one, and the budget it asks for. `Handlers` is the registry
     // the shipping worker dispatches on, so "a type this worker can run" is
     // read from it rather than asserted as a list.
-    let registry = egret_workflow::worker::Handlers::with_core_tasks();
+    let registry =
+        egret_workflow::worker::Handlers::with_core_tasks(egret_workflow::storage::current());
     let runnable: Vec<(String, String, std::time::Duration)> = declaring
         .iter()
         .flat_map(|(id, tasks)| tasks.iter().map(move |t| (id.clone(), t)))

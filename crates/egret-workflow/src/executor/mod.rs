@@ -64,7 +64,9 @@ pub use state::{
 /// should be from it, and W3b will need it to schedule the batches after the
 /// first. See [`flowable::loop_::iteration_values`] for the rule and for the one
 /// place it is knowingly wider than Kestra.
-pub use flowable::loop_::{iteration_values, rendered_from_file, values_name_a_file};
+pub use flowable::loop_::{
+    iteration_values, rendered_from_file, resolve_loop_values, values_name_a_file, LoopValues,
+};
 
 /// Kestra's `TruthUtils.isTruthy`, over an already-rendered string.
 ///
@@ -2344,28 +2346,65 @@ mod tests {
         }
     }
 
-    /// **A file's values are iterated as read: no `distinct()`** (W9a Task
-    /// 11, the user's ruling of 2026-10-03). Kestra's URI path,
-    /// `FlowableUtils.readLoopValuesFromUri` and
-    /// `readAndCountLoopValuesFromUri`, adds every record's
-    /// `ionValueToString` to its list and has no `distinct()`; only
-    /// `resolveValues`' two array arms have one (`javap -c` of the artifact's
-    /// jar, `w9a-storage.json` `egret_expected_basis.loop_value_to_string`).
-    /// The inline array is the control: the same four values, deduplicated.
+    /// **A file's values are COUNTED in `rendered`, not listed, and every
+    /// record counts** (W9a Task 11: the user's ruling of 2026-10-03 -- no
+    /// `distinct()` on Kestra's URI path, `readLoopValuesFromUri`, `javap -c`
+    /// of the artifact's jar -- and fix round 1: the records live in
+    /// `workflow.loop_file_values`, read by index when spawned). The inline
+    /// array is the control: the same four values, deduplicated.
+    ///
+    /// `open` spawns `min(limit, count)` iterations of a file loop, each with
+    /// an empty value the spawner fills by index, and a file of no record
+    /// succeeds without running, as an empty inline array does.
     #[test]
-    fn a_files_values_are_iterated_as_read_and_an_inline_arrays_deduplicated() {
-        let values = ["1", "1", "{\"a\":1}", "1"].map(String::from);
-        let from_file = rendered_from_file("kestra:///n/f/executions/x/tasks/w/r/a.ion", &values);
-        assert_eq!(iteration_values(&from_file).unwrap(), values.to_vec());
-
-        let inline = serde_json::to_string(&values).unwrap();
+    fn a_files_values_are_counted_not_listed_and_an_inline_arrays_deduplicated() {
+        let uri = "kestra:///n/f/executions/x/tasks/w/r/a.ion";
+        let from_file = rendered_from_file(uri, 4);
+        assert_eq!(from_file, format!("{uri}\n4"));
         assert_eq!(
-            iteration_values(&inline).unwrap(),
-            vec!["1".to_string(), "{\"a\":1}".to_string()]
+            resolve_loop_values(&from_file).unwrap(),
+            LoopValues::FromFile { count: 4 }
         );
 
-        // A URI the worker has not read is not a list of values.
-        assert!(iteration_values("kestra:///n/f/executions/x/tasks/w/r/a.ion").is_err());
+        let inline = serde_json::to_string(&["1", "1", "{\"a\":1}", "1"]).unwrap();
+        assert_eq!(
+            resolve_loop_values(&inline).unwrap(),
+            LoopValues::Listed(vec!["1".to_string(), "{\"a\":1}".to_string()])
+        );
+
+        // A URI the worker has not read is not a list of values, and a file's
+        // values are never listed.
+        assert!(resolve_loop_values(uri).is_err());
+        assert!(iteration_values(&from_file).is_err());
+
+        // `open`: `valids/loop-parallel-less` has `concurrencyLimit: 2`.
+        let plan = plan_of("valids/loop-parallel-less");
+        let (state, _) = spawn_round(&plan, "loop");
+        let ix = (0..state.runs.len())
+            .find(|&ix| plan.tasks[state.runs[ix].task].id == "loop")
+            .unwrap();
+        for (count, spawns, terminal) in
+            [(4, 2, None), (1, 1, None), (0, 0, Some(RunState::Success))]
+        {
+            let mut state = state.clone();
+            state.runs[ix].rendered = Some(rendered_from_file(uri, count));
+            let cmds = advance(&plan, &state, T0);
+            let spawned: Vec<&str> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    Command::SpawnExecution { value, .. } => Some(value.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(spawned, vec![""; spawns], "count {count}: {cmds:?}");
+            if let Some(t) = terminal {
+                assert!(
+                    cmds.iter()
+                        .any(|c| matches!(c, Command::SetRunState { state, .. } if *state == t)),
+                    "count {count}: {cmds:?}"
+                );
+            }
+        }
     }
 
     /// **Kestra's `resolveValues`, row by row** — including the two rules a

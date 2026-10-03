@@ -730,7 +730,8 @@ async fn a_version_carrying_plugin_defaults_runs_and_the_defaults_apply_nothing(
     )
     .await
     .expect("an execution of a source carrying pluginDefaults starts");
-    let handlers = egret_workflow::worker::Handlers::with_core_tasks();
+    let handlers =
+        egret_workflow::worker::Handlers::with_core_tasks(egret_workflow::storage::current());
     for _ in 0..16 {
         if egret_workflow::worker::tick(&pool, 8, &handlers)
             .await

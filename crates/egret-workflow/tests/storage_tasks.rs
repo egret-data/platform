@@ -145,7 +145,7 @@ async fn setup() -> Option<(Db, Uuid, Arc<FileStore>)> {
 /// The shipping registry for `container_runner = none`: `with_core_tasks`
 /// plus `storage::register`, as `runtime::handlers_for` builds it.
 fn registry(pool: &sqlx::PgPool) -> Handlers {
-    let mut r = Handlers::with_core_tasks();
+    let mut r = Handlers::with_core_tasks(egret_workflow::storage::current());
     egret_workflow::worker::handlers::storage::register(&mut r, pool.clone(), storage::current());
     r
 }
@@ -592,11 +592,65 @@ async fn purge_lists_what_it_deleted_as_kestra_does() {
     );
 }
 
-/// `PurgeCurrentExecutionFiles` deletes the LOOP FAMILY's files -- the root's
-/// and every iteration's, each under its own execution -- and not one file of
-/// its trigger execution; every object after its row.
+/// The root's FILE input, indexed at start as the start route indexes an
+/// upload: its URI, with the object put first.
+async fn root_input(fs: &FileStore, ws: Uuid, flow: &str, root: Uuid) -> StoredFile {
+    let file = uri::input_uri(NS, flow, root, "f", "in.txt").unwrap();
+    fs.store
+        .put(&fs.object_uri(ws, &file).unwrap(), b"input".to_vec())
+        .await
+        .unwrap();
+    StoredFile { uri: file, size: 5 }
+}
+
+/// Start `source` with the id `id`, the FILE input `input` and, optionally,
+/// a trigger execution.
+async fn start_with(
+    db: &Db,
+    ws: Uuid,
+    source: &str,
+    id: Uuid,
+    input: Option<StoredFile>,
+    trigger: Option<Uuid>,
+) -> Uuid {
+    let mut conn = db.pool.acquire().await.unwrap();
+    start_execution_in(
+        &mut conn,
+        NewExecution {
+            workspace_id: ws,
+            flow_id: None,
+            source,
+            inputs: json!({}),
+            trigger: None,
+            scheduled_date: None,
+            trigger_execution_id: trigger,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
+            born_failed: false,
+            replayed_from_execution_id: None,
+            id: Some(id),
+            input_files: input.into_iter().collect(),
+        },
+    )
+    .await
+    .unwrap()
+}
+
+/// The `uri` output of `task` in `execution`.
+async fn uri_of(pool: &sqlx::PgPool, execution: Uuid, task: &str) -> String {
+    result_in(pool, execution, task).await.1.unwrap()["uri"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// **`PurgeCurrentExecutionFiles` from the ROOT deletes only the root's own
+/// files** -- its FILE input and what its tasks wrote -- and not one file of
+/// its iterations or of its trigger execution (the controller's ruling of
+/// 2026-10-03: "current execution" is the running one; spec §9.3). Every
+/// object after its row.
 #[tokio::test(flavor = "multi_thread")]
-async fn purge_deletes_the_loop_familys_files_and_none_of_its_triggers() {
+async fn purge_from_the_root_deletes_only_the_roots_own_files() {
     let _turn = SERIAL.lock().await;
     let Some((db, ws, fs)) = setup().await else {
         return;
@@ -608,10 +662,7 @@ async fn purge_deletes_the_loop_familys_files_and_none_of_its_triggers() {
         .await
         .unwrap();
     drain(&db.pool).await;
-    let kept = result_in(&db.pool, s, "w").await.1.unwrap()["uri"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let kept = uri_of(&db.pool, s, "w").await;
 
     let main = format!(
         "id: purging\nnamespace: {NS}\ntasks:\n\
@@ -620,28 +671,9 @@ async fn purge_deletes_the_loop_familys_files_and_none_of_its_triggers() {
          \x20     - id: w_it\n        type: {WRITE}\n        content: \"{{{{ item.value }}}}\"\n\
          \x20 - id: purge\n    type: {PURGE}\n"
     );
-    let mut conn = db.pool.acquire().await.unwrap();
-    let root = start_execution_in(
-        &mut conn,
-        NewExecution {
-            workspace_id: ws,
-            flow_id: None,
-            source: &main,
-            inputs: json!({}),
-            trigger: None,
-            scheduled_date: None,
-            trigger_execution_id: Some(s),
-            execution_depth: 0,
-            flow_trigger_event_id: None,
-            born_failed: false,
-            replayed_from_execution_id: None,
-            id: None,
-            input_files: Vec::new(),
-        },
-    )
-    .await
-    .unwrap();
-    drop(conn);
+    let id = Uuid::new_v4();
+    let input = root_input(&fs, ws, "purging", id).await;
+    let root = start_with(&db, ws, &main, id, Some(input.clone()), Some(s)).await;
     drain(&db.pool).await;
 
     let iterations: Vec<Uuid> = sqlx::query_scalar(
@@ -652,17 +684,12 @@ async fn purge_deletes_the_loop_familys_files_and_none_of_its_triggers() {
     .await
     .unwrap();
     assert_eq!(iterations.len(), 2);
-    let mut written = vec![result_in(&db.pool, root, "w_root").await.1.unwrap()["uri"]
-        .as_str()
-        .unwrap()
-        .to_string()];
+    let own = [input.uri.clone(), uri_of(&db.pool, root, "w_root").await];
+    let mut theirs = vec![kept.clone()];
     for it in &iterations {
-        let f = result_in(&db.pool, *it, "w_it").await.1.unwrap()["uri"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let f = uri_of(&db.pool, *it, "w_it").await;
         assert_eq!(uri::parse(&f).unwrap().execution, *it, "its own id");
-        written.push(f);
+        theirs.push(f);
     }
 
     let (state, outputs, message) = result_in(&db.pool, root, "purge").await;
@@ -673,31 +700,195 @@ async fn purge_deletes_the_loop_familys_files_and_none_of_its_triggers() {
         .iter()
         .map(|u| u.as_str().unwrap().to_string())
         .collect();
-    for f in &written {
+    for f in &own {
         assert!(listed.contains(f), "{f} listed");
         assert_eq!(rows_named(&db.pool, f).await, 0, "{f}: row");
         assert_eq!(object_of(&fs, ws, f).await, None, "{f}: object");
     }
-    for ex in std::iter::once(root).chain(iterations.iter().copied()) {
-        let dir = written
-            .iter()
-            .find(|f| uri::parse(f).unwrap().execution == ex)
-            .map(|f| f[..f.find("/tasks/").unwrap()].to_string())
-            .unwrap();
-        assert!(listed.contains(&dir), "{dir}: each execution under its own");
+    for f in &theirs {
+        assert!(!listed.contains(f), "{f} not listed");
+        assert_eq!(rows_named(&db.pool, f).await, 1, "{f}: its row stays");
+        assert!(
+            object_of(&fs, ws, f).await.is_some(),
+            "{f}: its object stays"
+        );
     }
-    assert!(!listed.contains(&kept));
-    assert_eq!(
-        rows_named(&db.pool, &kept).await,
-        1,
-        "the trigger's row stays"
+    assert!(
+        listed
+            .iter()
+            .all(|u| uri::parse(u).map_or(true, |p| p.execution == root)),
+        "only the root's own prefix is listed: {listed:?}"
     );
-    assert_eq!(object_of(&fs, ws, &kept).await, Some(b"kept".to_vec()));
     let mut seen = ROWS_AT_DELETE.lock().unwrap().clone();
     seen.sort();
-    let mut want: Vec<(String, i64)> = written.iter().map(|f| (f.clone(), 0)).collect();
+    let mut want: Vec<(String, i64)> = own.iter().map(|f| (f.clone(), 0)).collect();
     want.sort();
     assert_eq!(seen, want, "each object deleted once, after its row");
+}
+
+/// **`PurgeCurrentExecutionFiles` inside an iteration deletes only that
+/// ITERATION's files** (the controller's ruling of 2026-10-03; a file written
+/// inside an iteration carries the iteration's id, spec §3): the root's FILE
+/// input and its task's file stay, and so does a sibling's file. Each
+/// iteration writes, purges, then writes again, so iteration 1's purge runs
+/// while iteration 0's second file exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn purge_inside_an_iteration_leaves_the_root_and_its_siblings_files() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let main = format!(
+        "id: purge-it\nnamespace: {NS}\ntasks:\n\
+         \x20 - id: w_root\n    type: {WRITE}\n    content: root\n\
+         \x20 - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\", \"b\"]'\n    tasks:\n\
+         \x20     - id: w_before\n        type: {WRITE}\n        content: \"{{{{ item.value }}}}\"\n\
+         \x20     - id: purge\n        type: {PURGE}\n\
+         \x20     - id: w_after\n        type: {WRITE}\n        content: after\n"
+    );
+    let id = Uuid::new_v4();
+    let input = root_input(&fs, ws, "purge-it", id).await;
+    let root = start_with(&db, ws, &main, id, Some(input.clone()), None).await;
+    drain(&db.pool).await;
+
+    let iterations: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 ORDER BY loop_index",
+    )
+    .bind(root)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(iterations.len(), 2);
+    let root_file = uri_of(&db.pool, root, "w_root").await;
+    let mut kept = vec![input.uri.clone(), root_file];
+    let mut purged = Vec::new();
+    for it in &iterations {
+        purged.push(uri_of(&db.pool, *it, "w_before").await);
+        kept.push(uri_of(&db.pool, *it, "w_after").await);
+        let (state, outputs, message) = result_in(&db.pool, *it, "purge").await;
+        assert_eq!(state, "SUCCESS", "{message:?}");
+        let listed = outputs.unwrap()["uris"].clone();
+        assert!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|u| uri::parse(u.as_str().unwrap()).map_or(true, |p| p.execution == *it)),
+            "iteration {it} lists only its own: {listed}"
+        );
+    }
+    // Iteration 1's purge ran after iteration 0's `w_after` existed.
+    for f in &kept {
+        assert_eq!(rows_named(&db.pool, f).await, 1, "{f}: its row stays");
+        assert!(
+            object_of(&fs, ws, f).await.is_some(),
+            "{f}: its object stays"
+        );
+    }
+    for f in &purged {
+        assert_eq!(rows_named(&db.pool, f).await, 0, "{f}: row");
+        assert_eq!(object_of(&fs, ws, f).await, None, "{f}: object");
+    }
+}
+
+/// **`Delete`'s statement is scoped to the loop family by itself**, not only
+/// by the check before it: an index row whose URI names this execution but
+/// whose `execution_id` is ANOTHER execution's (a row no writer makes, put
+/// here directly) passes the URI check and is still not deleted -- the
+/// statement's `execution_id = ANY(family)` is what keeps it.
+#[tokio::test(flavor = "multi_thread")]
+async fn deletes_statement_cannot_reach_a_row_of_another_execution() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let other = start_execution(
+        &db.pool,
+        ws,
+        None,
+        &format!("id: other\nnamespace: {NS}\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: x\n"),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    let id = Uuid::new_v4();
+    let file = format!(
+        "{}odd.txt",
+        uri::task_prefix(NS, "scoped", id, "t", Uuid::new_v4()).unwrap()
+    );
+    let source = format!(
+        "id: scoped\nnamespace: {NS}\ntasks:\n\
+         \x20 - id: del\n    type: {DELETE}\n    uri: \"{file}\"\n"
+    );
+    let root = start_with(&db, ws, &source, id, None, None).await;
+    sqlx::query(
+        "INSERT INTO workflow.execution_files (workspace_id, execution_id, uri, size) \
+         VALUES ($1, $2, $3, 3)",
+    )
+    .bind(ws)
+    .bind(other)
+    .bind(&file)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    fs.store
+        .put(&fs.object_uri(ws, &file).unwrap(), b"odd".to_vec())
+        .await
+        .unwrap();
+    drain(&db.pool).await;
+
+    let (state, outputs, message) = result_in(&db.pool, root, "del").await;
+    assert_eq!(
+        (state.as_str(), outputs),
+        ("SUCCESS", Some(json!({"uri": file, "deleted": false}))),
+        "{message:?}"
+    );
+    assert_eq!(
+        rows_named(&db.pool, &file).await,
+        1,
+        "the other's row stays"
+    );
+    assert_eq!(object_of(&fs, ws, &file).await, Some(b"odd".to_vec()));
+}
+
+/// **A `Loop` over a file keeps the file's values out of its task run**
+/// (fix round 1, I1): the run's `rendered` -- what every load of the
+/// execution reads and the task-run API returns -- is the URI and the
+/// count, `"{uri}\n{count}"`, and the values themselves are read by index
+/// from `workflow.loop_file_values` when an iteration is spawned.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loop_over_a_file_keeps_its_values_out_of_the_task_run() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, _fs)) = setup().await else {
+        return;
+    };
+    let root = start_execution(
+        &db.pool,
+        ws,
+        None,
+        &loop_over_content("compact", "\"needle-0\"\n\"needle-1\"\n\"needle-0\""),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    drain(&db.pool).await;
+    let file = uri_of(&db.pool, root, "write").await;
+    let (state, _, message) = result_in(&db.pool, root, "loop").await;
+    assert_eq!(state, "SUCCESS", "{message:?}");
+    let rendered: Option<String> = sqlx::query_scalar(
+        "SELECT rendered FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'loop'",
+    )
+    .bind(root)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(rendered, Some(format!("{file}\n3")));
+    let values: Vec<String> = iterations_of(&db.pool, root)
+        .await
+        .into_iter()
+        .map(|(_, _, v)| v)
+        .collect();
+    assert_eq!(values, ["needle-0", "needle-1", "needle-0"]);
 }
 
 fn loop_over_ion() -> &'static Value {

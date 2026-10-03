@@ -284,7 +284,7 @@ impl Fx {
     /// (no `kestra` entry allows the whole catalog; no `allowed-images`
     /// anywhere, which would refuse every script image).
     fn handlers(&self, kill_grace_s: u64) -> Handlers {
-        let mut h = Handlers::with_core_tasks();
+        let mut h = Handlers::with_core_tasks(egret_workflow::storage::current());
         register(
             &mut h,
             Arc::new(KestraRuntime {

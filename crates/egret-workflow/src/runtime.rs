@@ -693,7 +693,7 @@ pub async fn handlers_for(
     // W5b: the plugin host's image (required with a runner) and heap.
     cfg.validate_plugin_host()
         .map_err(egret_core::Error::InvalidInput)?;
-    let mut handlers = Handlers::with_core_tasks();
+    let mut handlers = Handlers::with_core_tasks(crate::storage::current());
     // W9a Task 11: `Delete` and `PurgeCurrentExecutionFiles` need the pool,
     // so they are registered here, for every deployment, with or without a
     // container runner.

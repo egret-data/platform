@@ -767,11 +767,14 @@ const LIVE: usize = 247;
 /// it also holds the four `io.kestra.plugin.core.storage.*` FQCNs that task
 /// implements, which DO move two (see [`LIVE`]).
 ///
-/// **That last clause is what makes [`LIVE`] 248.** This paragraph used to end
+/// **The FQCN rows are what make most of [`LIVE`].** (This sentence said
+/// "makes `LIVE` 248" and "false for 227 of the 248" after `LIVE` had moved
+/// to 247, 245 and 247 again; W9a Task 11 fix round 1 took the figures out,
+/// for the reason the parenthesis above gives.) This paragraph used to end
 /// *"the flows that DO reach a version are exactly the corpus flows whose every
 /// task is control flow, a `core.subflow` or a `core.pause` … so none meets the
 /// allow-list at all"*, which was true when only 21 flows published and is
-/// **false for 227 of the 248 now**: the overwhelming majority of live corpus
+/// **false for every live flow but those now**: the overwhelming majority of live corpus
 /// flows are live precisely *because* their leaves meet the allow-list. The old
 /// sentence survives here only as the description of the **21**, which is the
 /// population it was written for.

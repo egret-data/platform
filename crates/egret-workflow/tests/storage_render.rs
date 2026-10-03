@@ -130,7 +130,7 @@ async fn setup() -> Option<(Db, Uuid, Arc<FileStore>)> {
 
 /// Tick until nothing is claimable.
 async fn drain(pool: &sqlx::PgPool) {
-    let reg = Handlers::with_core_tasks();
+    let reg = Handlers::with_core_tasks(egret_workflow::storage::current());
     for _ in 0..64 {
         if egret_workflow::worker::tick(pool, 16, &reg)
             .await
@@ -686,7 +686,12 @@ async fn an_outage_while_a_handler_renders_is_a_worker_error_and_spends_no_attem
     let before = attempts(&db.pool, ex, "r").await;
 
     OUTAGE.store(true, Ordering::SeqCst);
-    let ticked = egret_workflow::worker::tick(&db.pool, 16, &Handlers::with_core_tasks()).await;
+    let ticked = egret_workflow::worker::tick(
+        &db.pool,
+        16,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     OUTAGE.store(false, Ordering::SeqCst);
     let err = ticked.expect_err("an outage is the worker's error, not the task's");
     assert!(err.to_string().contains("o.txt"), "{err}");
@@ -954,7 +959,7 @@ async fn a_later_task_stages_an_earlier_tasks_output_uri_end_to_end() {
     let Some((db, ws, fs)) = setup().await else {
         return;
     };
-    let mut reg = Handlers::with_core_tasks();
+    let mut reg = Handlers::with_core_tasks(egret_workflow::storage::current());
     script::register(
         &mut reg,
         Arc::new(ScriptRuntime {
@@ -1118,7 +1123,7 @@ fn collecting_registry(
 ) -> Handlers {
     use egret_config::{PluginConfiguration, PluginConfigurationValues, PluginConfigurations};
     use egret_workflow::worker::handlers::script::{self, FixedFeatureState, ScriptRuntime};
-    let mut reg = Handlers::with_core_tasks();
+    let mut reg = Handlers::with_core_tasks(egret_workflow::storage::current());
     script::register(
         &mut reg,
         Arc::new(ScriptRuntime {

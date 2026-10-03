@@ -257,7 +257,7 @@ impl Fx {
 
     /// Tick until nothing is claimable.
     async fn drain(&self) {
-        let reg = Handlers::with_core_tasks();
+        let reg = Handlers::with_core_tasks(egret_workflow::storage::current());
         for _ in 0..64 {
             if egret_workflow::worker::tick(&self.db.pool, 16, &reg)
                 .await

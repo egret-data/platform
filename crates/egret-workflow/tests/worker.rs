@@ -888,7 +888,11 @@ async fn the_real_registry_runs_all_four_handlers_end_to_end(pool: sqlx::PgPool)
         .await
         .expect("start execution");
 
-    let finished = drain(&pool, &Handlers::with_core_tasks()).await;
+    let finished = drain(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(finished, 4, "one tick's work per task, four tasks");
 
     for id in ["l", "r", "f", "s"] {
@@ -918,7 +922,14 @@ async fn a_truthy_fail_fails_the_execution_through_the_real_handler(pool: sqlx::
         .await
         .expect("start execution");
 
-    assert_eq!(drain(&pool, &Handlers::with_core_tasks()).await, 1);
+    assert_eq!(
+        drain(
+            &pool,
+            &Handlers::with_core_tasks(egret_workflow::storage::current())
+        )
+        .await,
+        1
+    );
     assert_eq!(run_state(&pool, ex, "f").await.as_deref(), Some("FAILED"));
     assert_eq!(
         run_state(&pool, ex, "after").await,
@@ -967,7 +978,11 @@ async fn the_render_surface_reaches_inputs_and_outputs_and_still_refuses_labels(
         .await
         .expect("start execution");
 
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         (
             run_state(&pool, ex, "a").await,
@@ -1003,7 +1018,11 @@ async fn the_render_surface_reaches_inputs_and_outputs_and_still_refuses_labels(
     let r = start_execution(&pool, ws, None, refused, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         run_state(&pool, r, "l").await.as_deref(),
         Some("FAILED"),
@@ -1037,7 +1056,11 @@ async fn a_task_that_produced_no_output_renders_as_an_empty_map_not_an_absent_ke
     let e1 = start_execution(&pool, ws, None, ok, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         (
             run_state(&pool, e1, "b").await,
@@ -1057,7 +1080,11 @@ async fn a_task_that_produced_no_output_renders_as_an_empty_map_not_an_absent_ke
     let e2 = start_execution(&pool, ws, None, bad, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         run_state(&pool, e2, "b").await.as_deref(),
         Some("FAILED"),
@@ -1083,9 +1110,13 @@ async fn a_type_with_no_handler_aborts_the_tick(pool: sqlx::PgPool) {
         .await
         .expect("start execution");
 
-    let err = egret_workflow::worker::tick(&pool, 8, &Handlers::with_core_tasks())
-        .await
-        .expect_err("an unhandled type must not report a finished run");
+    let err = egret_workflow::worker::tick(
+        &pool,
+        8,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await
+    .expect_err("an unhandled type must not report a finished run");
     assert!(
         err.to_string()
             .contains("io.kestra.plugin.core.output.OutputValues"),
@@ -1243,7 +1274,11 @@ async fn a_sub_execution_inherits_the_posted_inputs_of_its_parent(pool: sqlx::Pg
     let parent = start_execution(&pool, ws, None, source, serde_json::json!({"failed": true}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let subs = sqlx::query_scalar::<_, serde_json::Value>(
         "SELECT inputs FROM workflow.executions WHERE parent_execution_id = $1",
@@ -1332,7 +1367,11 @@ async fn a_loop_over_two_values_spawns_two_sub_executions_ordered_by_index(pool:
     );
 
     // And each sub-execution really runs the loop's body, in its own right.
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     let done = sub_executions(&pool, ex, 0).await;
     assert_eq!(
         done.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(),
@@ -1372,7 +1411,11 @@ async fn the_default_concurrency_limit_runs_one_iteration_at_a_time(pool: sqlx::
          default of 0 (unlimited) would have spawned all three here"
     );
 
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         sub_executions(&pool, ex, 0).await,
         vec![
@@ -1438,7 +1481,11 @@ async fn a_failing_iteration_ends_a_transmit_failed_loop_at_once(pool: sqlx::PgP
         .await
         .expect("start execution");
 
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         sub_executions(&pool, ex, 0).await,
         vec![SubExecution {
@@ -1482,7 +1529,11 @@ async fn transmit_failed_false_runs_every_iteration_and_the_loop_succeeds(pool: 
         .await
         .expect("start execution");
 
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         sub_executions(&pool, ex, 0).await,
         vec![
@@ -1534,7 +1585,11 @@ async fn a_nested_loop_spawns_from_inside_a_sub_execution(pool: sqlx::PgPool) {
         .await
         .expect("start execution");
 
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let outer = sub_executions(&pool, ex, 0).await;
     assert_eq!(
@@ -1603,7 +1658,11 @@ async fn no_run_for_a_loop_body_task_is_ever_created_in_the_parent(pool: sqlx::P
     let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let parent_runs: Vec<String> = sqlx::query_scalar(
         "SELECT task_id FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix",
@@ -1672,7 +1731,11 @@ async fn a_transmit_failed_loop_with_several_iterations_in_flight_terminates_onc
         "unlimited: all three iterations are in flight before any of them fails"
     );
 
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     let history: serde_json::Value = sqlx::query_scalar(
         "SELECT history FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'loop'",
     )
@@ -3315,7 +3378,11 @@ tasks:
     let ex = start_execution(&pool, ws, None, parent, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let sub: Uuid = sqlx::query_scalar(
         "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 \
@@ -3368,7 +3435,11 @@ tasks:
         .await
         .expect("link the child as a replay: a parent, and no loop columns");
 
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         (
             run_state(&pool, child, "reads").await,
@@ -3534,7 +3605,11 @@ async fn a_subflow_child_is_linked_by_the_trigger_columns_and_never_by_parent_ex
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     // **The load-bearing assertion, and it is first on purpose.** It is asked
     // WITHOUT going through the trigger columns -- the child is found by the
@@ -3657,7 +3732,11 @@ async fn a_subflow_target_that_does_not_resolve_fails_the_run_and_creates_no_chi
     let parent = start_execution(&pool, ws, None, &source, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     assert_eq!(
         children_by_trigger(&pool, parent).await.len(),
@@ -3732,7 +3811,11 @@ async fn a_subflow_target_in_another_workspace_does_not_resolve(pool: sqlx::PgPo
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     assert_eq!(
         (
@@ -3788,7 +3871,11 @@ async fn a_subflow_target_disabled_by_its_own_yaml_does_not_run(pool: sqlx::PgPo
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     assert_eq!(
         (
@@ -3820,7 +3907,11 @@ async fn a_subflow_target_disabled_by_its_own_yaml_does_not_run(pool: sqlx::PgPo
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         (
             children_by_trigger(&pool, ok).await.len(),
@@ -3859,7 +3950,11 @@ async fn a_subflow_target_disabled_by_the_state_column_does_not_run(pool: sqlx::
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     assert_eq!(
         (
@@ -3904,7 +3999,11 @@ async fn a_trashed_subflow_target_does_not_run(pool: sqlx::PgPool) {
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     assert_eq!(
         (
@@ -3955,7 +4054,11 @@ async fn a_subflow_that_does_not_wait_records_the_childs_state_at_spawn_and_stil
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let kids = children_by_trigger(&pool, parent).await;
     assert_eq!(kids.len(), 1, "the child is still created and driven");
@@ -4014,7 +4117,11 @@ async fn a_subflow_that_does_not_wait_records_the_childs_state_at_spawn_and_stil
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let fast_kids = children_by_trigger(&pool, fast).await;
     assert_eq!(
@@ -4085,7 +4192,11 @@ async fn transmit_failed_decides_what_a_failing_child_does_to_its_parent(pool: s
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     assert_eq!(
         (
@@ -4157,7 +4268,11 @@ async fn a_subflow_inside_an_errors_list_is_reached_and_spawned(pool: sqlx::PgPo
     let parent = start_execution(&pool, ws, None, source, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     assert_eq!(
         (
@@ -4207,7 +4322,11 @@ async fn a_cycle_of_subflows_stops_instead_of_crashing(pool: sqlx::PgPool) {
     let root = start_execution(&pool, ws, None, a, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     // **Ordered by the CHAIN, not by `created_at`.** The first draft of this
     // ordered by `(created_at, id)` and passed alone and failed in the full
@@ -4306,7 +4425,11 @@ async fn a_cycle_whose_every_hop_crosses_a_loop_boundary_stops_too(pool: sqlx::P
     let root = start_execution(&pool, ws, None, a, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     // **The chain by NAME and in order, not a bare count**, because the count
     // alone would not say the walk crossed the loop links at all. It is read
@@ -4432,7 +4555,11 @@ async fn a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overfl
     let root = start_execution(&pool, ws, None, root_src, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let all: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
         .fetch_one(&pool)
@@ -4562,7 +4689,11 @@ async fn a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter(pool:
     let root = start_execution(&pool, ws, None, root_src, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     // By NAME and in order, not by count: a count alone cannot say the chain
     // stopped at the right link, and `asc-3` appearing here is exactly what the
@@ -4715,7 +4846,11 @@ async fn a_loop_ascent_and_a_wait_false_subflow_are_frames_too(pool: sqlx::PgPoo
     let root = start_execution(&pool, ws, None, root_src, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let refused: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT r.state, r.message FROM workflow.task_runs r WHERE r.message IS NOT NULL",
@@ -5725,7 +5860,7 @@ tasks:
 ";
     file_flow(&db, ws, user, child_source).await;
 
-    let reg = Handlers::with_core_tasks();
+    let reg = Handlers::with_core_tasks(egret_workflow::storage::current());
     let parent = start_execution(
         &pool,
         ws,
@@ -6109,7 +6244,7 @@ async fn a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item(pool: 
     egret_test_db::assert_database_url_is_exported();
     let db = Db { pool: pool.clone() };
     let (ws, user) = common::seed_workspace(&db).await;
-    let reg = Handlers::with_core_tasks();
+    let reg = Handlers::with_core_tasks(egret_workflow::storage::current());
 
     // An `If`'s condition is the observation point: `advance()` stores the
     // render in `task_runs.rendered`, so no handler stands between the surface
@@ -7637,7 +7772,11 @@ async fn execution_render_context_renders_the_sources_inputs_and_outputs(pool: s
     let ex = start_execution(&pool, ws, None, source, serde_json::json!({"x": "posted"}))
         .await
         .expect("start the source");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         execution_history(&pool, ex).await,
         serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
@@ -7828,7 +7967,11 @@ async fn a_subflow_child_is_one_deeper_and_refused_past_depth_100(pool: sqlx::Pg
         set_depth(&pool, root, depth).await;
         roots.push(root);
     }
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let depths: Vec<Vec<i32>> = {
         let mut out = Vec::new();
@@ -7892,7 +8035,11 @@ async fn a_loop_iteration_keeps_its_parents_depth(pool: sqlx::PgPool) {
         .await
         .expect("start");
     set_depth(&pool, root, 7).await;
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let iterations: Vec<i32> = sqlx::query_scalar(
         "SELECT execution_depth FROM workflow.executions \
@@ -8283,7 +8430,8 @@ async fn an_unconditional_fail_logs_one_line_and_a_conditional_fail_two(pool: sq
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
     let sink = std::sync::Arc::new(Lines::default());
-    let reg = Handlers::with_core_tasks().with_log_sink(sink.clone(), LogLimits::default());
+    let reg = Handlers::with_core_tasks(egret_workflow::storage::current())
+        .with_log_sink(sink.clone(), LogLimits::default());
 
     let cases = w11_expected("script_runner_diagnostics")["failed_attempt_line"]["fail_task"]
         .as_array()

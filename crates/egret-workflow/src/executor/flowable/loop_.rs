@@ -92,7 +92,7 @@ pub(crate) fn open(
     let Some(rendered) = state.runs[run].rendered.as_deref() else {
         return Step::Waiting;
     };
-    let Ok(values) = iteration_values(rendered) else {
+    let Ok(values) = resolve_loop_values(rendered) else {
         return Step::Commands(vec![Command::SetRunState {
             run,
             state: RunState::Failed,
@@ -106,17 +106,19 @@ pub(crate) fn open(
     }
 
     let limit = first_batch(concurrency_limit, values.len());
+    let spawn = |value| Command::SpawnExecution {
+        task,
+        value,
+        parent_run: run,
+    };
     let mut cmds = start(plan, run, task, now);
-    cmds.extend(
-        values
-            .into_iter()
-            .take(limit)
-            .map(|value| Command::SpawnExecution {
-                task,
-                value,
-                parent_run: run,
-            }),
-    );
+    match values {
+        LoopValues::Listed(values) => cmds.extend(values.into_iter().take(limit).map(spawn)),
+        // A file's values are not in the state (see [`rendered_from_file`]):
+        // each spawn carries an EMPTY value, and the worker's spawner reads
+        // the iteration's value by its index (`worker::spawn`).
+        LoopValues::FromFile { .. } => cmds.extend((0..limit).map(|_| spawn(String::new()))),
+    }
     Step::Commands(cmds)
 }
 
@@ -191,8 +193,12 @@ fn first_batch(concurrency_limit: u32, size: usize) -> usize {
 /// decimals, doubles and `java.time` forms), and what lands in
 /// [`TaskRun::rendered`](crate::executor::TaskRun::rendered) -- the caller's
 /// answer, as for an `If` -- is [`rendered_from_file`]'s form: the URI and
-/// the JSON array of those strings. This function and [`open`] stay pure:
-/// they recognise that form ([`values_name_a_file`]) and iterate it AS READ.
+/// how many records the file holds. The records themselves go to
+/// `workflow.loop_file_values` (fix round 1: `rendered` is read by every load
+/// of the execution, and a values file is up to 10 MiB). This function
+/// refuses that form; [`resolve_loop_values`] counts it, and [`open`] stays
+/// pure: it spawns the first batch with empty values, which the worker's
+/// spawner fills by index, every record an iteration.
 ///
 /// **No `distinct()` for a file** (the user's ruling of 2026-10-03; until
 /// then the array went down the array arm and a record the file held twice
@@ -236,7 +242,10 @@ fn first_batch(concurrency_limit: u32, size: usize) -> usize {
 /// [`open`] rather than on the stack.
 pub fn iteration_values(rendered: &str) -> Result<Vec<String>, String> {
     if values_name_a_file(rendered) {
-        return values_read_from_a_file(rendered);
+        return Err(format!(
+            "values were read from a file ({}); they are read by index, not listed",
+            rendered.lines().next().unwrap_or(rendered)
+        ));
     }
     let parsed: serde_json::Value =
         serde_json::from_str(rendered).map_err(|e| format!("values is not JSON: {e}"))?;
@@ -296,7 +305,7 @@ pub fn iteration_values(rendered: &str) -> Result<Vec<String>, String> {
 /// anything else is one of the two JSON shapes.
 ///
 /// The worker routes on it (`worker::render::render_expressions` reads the
-/// file), and [`iteration_values`] on it again to know that `rendered` is
+/// file), and [`resolve_loop_values`] on it again to know that `rendered` is
 /// [`rendered_from_file`]'s form: a rendered text that names a file never
 /// reaches `rendered` as itself, so the two cannot be confused.
 pub fn values_name_a_file(rendered: &str) -> bool {
@@ -305,30 +314,63 @@ pub fn values_name_a_file(rendered: &str) -> bool {
         .any(|scheme| rendered.starts_with(scheme))
 }
 
-/// What the worker stores in a `Loop` run's `rendered` once it has read the
-/// file `uri` names: the URI, a newline, and the JSON array of the file's
-/// values -- each already Kestra's `ionValueToString` of one record.
-///
-/// It starts with the URI, so [`values_name_a_file`] tells it apart from
-/// every inline `values:` (W9a Task 11, the user's ruling of 2026-10-03:
-/// the URI path is iterated as read, without the array arm's `distinct()`).
-/// The JSON is compact, so it holds no raw newline and the LAST newline is
-/// the separator, whatever the URI holds.
-pub fn rendered_from_file(uri: &str, values: &[String]) -> String {
-    let array = serde_json::to_string(values).expect("a list of strings serialises");
-    format!("{uri}\n{array}")
+/// A `Loop` run's values, as its `rendered` holds them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopValues {
+    /// An inline `values:`: [`iteration_values`]'s list.
+    Listed(Vec<String>),
+    /// A file's (W9a Task 11, fix round 1): `count` records, NOT in the
+    /// state. The worker wrote them to `workflow.loop_file_values`, one row
+    /// per record in file order, when it rendered the run, and reads an
+    /// iteration's value from there by its index when it spawns it.
+    FromFile { count: usize },
 }
 
-/// [`iteration_values`] of [`rendered_from_file`]'s form.
-fn values_read_from_a_file(rendered: &str) -> Result<Vec<String>, String> {
-    let Some((uri, array)) = rendered.rsplit_once('\n') else {
+impl LoopValues {
+    /// How many iterations the loop has.
+    pub fn len(&self) -> usize {
+        match self {
+            LoopValues::Listed(values) => values.len(),
+            LoopValues::FromFile { count } => *count,
+        }
+    }
+
+    /// Whether the loop has no iteration.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// A `Loop` run's `rendered`, resolved: [`iteration_values`] for an inline
+/// `values:`, the count for [`rendered_from_file`]'s form.
+pub fn resolve_loop_values(rendered: &str) -> Result<LoopValues, String> {
+    if !values_name_a_file(rendered) {
+        return iteration_values(rendered).map(LoopValues::Listed);
+    }
+    let Some((uri, count)) = rendered.rsplit_once('\n') else {
         return Err(format!(
             "values names the file {rendered}, which the worker has not read"
         ));
     };
-    // As read: Kestra's URI path has no `distinct()` (see
-    // [`rendered_from_file`]), so a record the file holds twice is two
-    // iterations.
-    serde_json::from_str(array)
-        .map_err(|e| format!("the values read from {uri} are not a list of strings: {e}"))
+    count
+        .parse()
+        .map(|count| LoopValues::FromFile { count })
+        .map_err(|e| format!("the count of the values read from {uri} is not a number: {e}"))
+}
+
+/// What the worker stores in a `Loop` run's `rendered` once it has read the
+/// file `uri` names: the URI, a newline, and how many records it holds --
+/// **not the records** (W9a Task 11, fix round 1). `rendered` is read by
+/// every load of the execution and returned by the task-run API, and a
+/// values file is up to `workflow.storage.max_read_bytes`; the records go to
+/// `workflow.loop_file_values` (migration 0169) in the same transaction, and
+/// stay there unchanged for the run's life.
+///
+/// It starts with the URI, so [`values_name_a_file`] tells it apart from
+/// every inline `values:`; the count holds no newline, so the LAST newline
+/// is the separator, whatever the URI holds. Every record is an iteration,
+/// duplicates included: Kestra's URI path has no `distinct()` (the user's
+/// ruling of 2026-10-03).
+pub fn rendered_from_file(uri: &str, count: usize) -> String {
+    format!("{uri}\n{count}")
 }

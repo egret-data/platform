@@ -1019,6 +1019,12 @@ pub struct TaskRunDto {
     /// The parent run's `run_ix` — a gantt's nesting, `NULL` at the top level.
     pub parent_ix: Option<i32>,
     pub value: Option<String>,
+    /// The run's rendered expression (an `If`'s condition, a `Switch`'s
+    /// value, a `Loop`'s `values:`, ...), `NULL` until it is rendered. For a
+    /// `Loop` whose `values:` named a file it is `"<kestra:/// URI>\n<count>"`
+    /// -- the file and how many records it holds -- and **never the records**
+    /// (W9a Task 11 fix round 1): they are the file's, read through the
+    /// execution file API, and stay out of every task-run response.
     pub rendered: Option<String>,
     pub rendered_run_if: Option<String>,
     pub state: String,

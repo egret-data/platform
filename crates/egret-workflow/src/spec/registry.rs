@@ -154,7 +154,7 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         aliases: &[],
         references: &[],
     },
-    // ── The four tasks `worker::Handlers::with_core_tasks()` implements ────
+    // ── The four tasks `worker::Handlers::with_core_tasks` implements ────
     //
     // **FQCN canonical, short form as an alias, per programme spec section 8
     // rule 4.** Until W10 Task 6 fix round 1 this table held `core.log` and

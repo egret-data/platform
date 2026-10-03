@@ -424,10 +424,10 @@ impl Surface {
                     // the same object and has to be read back from the loop
                     // run's own `rendered`.
                     //
-                    // Only an OBJECT is parsed (W9a Task 11): a `Loop` over a
-                    // file stores its whole values array here, up to
-                    // `max_read_bytes`, and every load of every iteration
-                    // would otherwise parse it to find no key.
+                    // Only an OBJECT is parsed (W9a Task 11): nothing else
+                    // has a key. A `Loop` over a file keeps only its URI and
+                    // count here (fix round 1), its values being in
+                    // `workflow.loop_file_values`.
                     "key": rendered
                         .as_deref()
                         .filter(|r| r.trim_start().starts_with('{'))
@@ -568,9 +568,10 @@ impl Surface {
     }
 
     /// W9a Task 11 (spec §9.3): the values of a `Loop` whose `values:`
-    /// rendered to `uri`, in `executor::rendered_from_file`'s form, which
-    /// `advance()` iterates as read (no `distinct()`, as Kestra's URI path) --
-    /// or why not, which fails the loop run with that message.
+    /// rendered to `uri`, one per record in file order (no `distinct()`, as
+    /// Kestra's URI path) -- or why not, which fails the loop run with that
+    /// message. The caller stores `executor::rendered_from_file`'s count and
+    /// hands the values to `settle`.
     ///
     /// The file is resolved through this surface's snapshot -- the one
     /// readability decision; `outputs.<task>.uri` is in it because every
@@ -587,7 +588,10 @@ impl Surface {
     /// once, before the loop starts, so a `null` record fails the loop before
     /// its first iteration where Kestra fails it at the batch that reaches it
     /// (`loop_over_ion.null_record`: one iteration ran).
-    pub(super) fn loop_values_from_file(&self, uri: &str) -> std::result::Result<String, String> {
+    pub(super) fn loop_values_from_file(
+        &self,
+        uri: &str,
+    ) -> std::result::Result<Vec<String>, String> {
         // A `file://` or `nsfile://` URI is refused by the snapshot -- the one
         // readability decision -- as a URI that does not parse, naming it;
         // there is no second check here (mutation j of W9a Task 11 measured
@@ -609,10 +613,9 @@ impl Surface {
         // The first record that cannot be a value -- a `null`
         // (`ion::LOOP_NULL_RECORD`, Kestra's message), a `java.time` text that
         // does not parse -- fails the loop, as Kestra's read of it throws.
-        let strings = values
+        values
             .into_iter()
-            .collect::<std::result::Result<Vec<String>, String>>()?;
-        Ok(crate::executor::rendered_from_file(uri, &strings))
+            .collect::<std::result::Result<Vec<String>, String>>()
     }
 
     /// Attach the file scope every later [`Surface::context`] carries.
@@ -1099,6 +1102,20 @@ pub(super) fn render_run_if(surface: &Surface, plan: &Plan, state: &mut Executio
     Pass::Rendered
 }
 
+/// What a render pass produced beside the state, for `settle` to write in
+/// the same transaction after `persist` (W9a Task 11).
+#[derive(Debug, Default)]
+pub(super) struct RenderSide {
+    /// Each run a render failed WITH a message: a `Loop` whose values file
+    /// cannot be iterated. Every other render failure fails its run without
+    /// one.
+    pub(super) failures: Vec<(RunIx, String)>,
+    /// Each `Loop` run whose values were read from a file, with those values
+    /// in file order: written to `workflow.loop_file_values`, not to the
+    /// run's `rendered` (fix round 1; see `executor::rendered_from_file`).
+    pub(super) file_values: Vec<(RunIx, Vec<String>)>,
+}
+
 /// **Tier B — an `If`'s condition, a `Switch`'s value, a `Loop`'s `values:`, a
 /// `Pause`'s `pauseDuration:` and — W8 Task 4 — a `LoopUntil`'s `condition:`.**
 ///
@@ -1126,7 +1143,7 @@ pub(super) fn render_expressions(
     plan: &Plan,
     state: &mut ExecutionState,
     now: Tick,
-    failures: &mut Vec<(RunIx, String)>,
+    side: &mut RenderSide,
 ) -> Pass {
     let pending: Vec<RunIx> = (0..state.runs.len())
         .filter(|&ix| {
@@ -1165,17 +1182,23 @@ pub(super) fn render_expressions(
             // file URI iterates the FILE. Kestra's test is
             // `URIFetcher.supports` -- the rendered text starts with one of
             // its three schemes -- and its `Loop.initFromUri` reads the file
-            // before any iteration exists. Here the worker reads it, and
-            // `advance()` gets the JSON array it already knows how to iterate.
+            // before any iteration exists. Here the worker reads it: the run's
+            // `rendered` gets the URI and the count, `advance()` spawns from
+            // the count, and the values go to `settle` (`RenderSide`), which
+            // writes them where the spawner reads them by index.
             Ok(value)
                 if matches!(plan.tasks[state.runs[ix].task].kind, TaskKind::Loop { .. })
                     && crate::executor::values_name_a_file(&value) =>
             {
                 match surface.loop_values_from_file(&value) {
-                    Ok(values) => state.runs[ix].rendered = Some(values),
+                    Ok(values) => {
+                        state.runs[ix].rendered =
+                            Some(crate::executor::rendered_from_file(&value, values.len()));
+                        side.file_values.push((ix, values));
+                    }
                     Err(why) => {
                         fail(state, ix);
-                        failures.push((ix, why));
+                        side.failures.push((ix, why));
                     }
                 }
             }

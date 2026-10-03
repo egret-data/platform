@@ -1164,7 +1164,8 @@ fn worker_registry(
     images: &[&str],
 ) -> egret_workflow::worker::Handlers {
     use egret_workflow::worker::handlers::script::{register, PgFeatureState, ScriptRuntime};
-    let mut reg = egret_workflow::worker::Handlers::with_core_tasks();
+    let mut reg =
+        egret_workflow::worker::Handlers::with_core_tasks(egret_workflow::storage::current());
     register(
         &mut reg,
         std::sync::Arc::new(ScriptRuntime {
@@ -1463,7 +1464,8 @@ fn daemon_registry(
     daemon: std::sync::Arc<FakeDaemon>,
 ) -> egret_workflow::worker::Handlers {
     use egret_workflow::worker::handlers::script::{register, PgFeatureState, ScriptRuntime};
-    let mut reg = egret_workflow::worker::Handlers::with_core_tasks();
+    let mut reg =
+        egret_workflow::worker::Handlers::with_core_tasks(egret_workflow::storage::current());
     register(
         &mut reg,
         std::sync::Arc::new(ScriptRuntime {

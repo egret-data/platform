@@ -1764,27 +1764,19 @@ pub(super) async fn settle(
         apply(state, &Command::SetExecutionState { state: terminal });
         marks.observe(&snapshot, state, seq);
     }
-    // W9a Task 11: the runs a render failed WITH a message (a `Loop` whose
-    // values file cannot be iterated), written beside the state `persist`
-    // writes. Every other render failure still fails its run without one.
-    let mut failures: Vec<(RunIx, String)> = Vec::new();
-    let (spawns, subflows) = drive(
-        ctx,
-        &surface,
-        state,
-        now,
-        &mut marks,
-        &mut seq,
-        &mut failures,
-    )?;
+    // W9a Task 11: what a render produced beside the state -- the runs it
+    // failed WITH a message, and a file `Loop`'s values -- written after the
+    // state `persist` writes and BEFORE `spawn_all`, which reads the values.
+    let mut side = render::RenderSide::default();
+    let (spawns, subflows) = drive(ctx, &surface, state, now, &mut marks, &mut seq, &mut side)?;
     persist(conn, ctx, before, state, release, &marks, seq).await?;
-    if !failures.is_empty() {
+    if !side.failures.is_empty() || !side.file_values.is_empty() {
         // Built and boxed in a SYNC callee: `settle` re-enters itself through
         // a `Subflow` chain, and a statement future built inline (even one
         // boxed here) grows every level's poll frame in a debug build -- the
         // worker suite's `a_chain_of_subflows_deeper_than_the_bound…`
         // overflowed with either.
-        write_render_failures(conn, ctx.id, failures).await?;
+        write_render_side(conn, ctx.id, side).await?;
     }
     spawn::spawn_all(conn, ctx, state, &spawns).await?;
     // **After `persist`, exactly like the loop spawner, and for the same
@@ -2706,15 +2698,18 @@ fn sla_terminal(surface: &Surface, ctx: &ExecutionCtx, state: &ExecutionState) -
     crate::sla::state_for(violation.behavior)
 }
 
-/// W9a Task 11: the message of each run a render failed with one, beside the
-/// state `persist` wrote. See `settle`.
-fn write_render_failures(
+/// W9a Task 11: what a render produced beside the state (see `settle`): the
+/// message of each run a render failed with one, and each file `Loop`'s
+/// values, one row per record in file order (migration 0169) -- replacing
+/// any rows a previous rendering of the same run left, so a run's values
+/// are the ones its current `rendered` counts.
+fn write_render_side(
     conn: &mut PgConnection,
     execution: Uuid,
-    failures: Vec<(RunIx, String)>,
+    side: render::RenderSide,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
     Box::pin(async move {
-        for (run, message) in failures {
+        for (run, message) in side.failures {
             sqlx::query(
                 "UPDATE workflow.task_runs SET message = $3 \
                   WHERE execution_id = $1 AND run_ix = $2",
@@ -2722,6 +2717,27 @@ fn write_render_failures(
             .bind(execution)
             .bind(run as i32)
             .bind(message)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        }
+        for (run, values) in side.file_values {
+            sqlx::query(
+                "DELETE FROM workflow.loop_file_values WHERE execution_id = $1 AND run_ix = $2",
+            )
+            .bind(execution)
+            .bind(run as i32)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+            sqlx::query(
+                "INSERT INTO workflow.loop_file_values (execution_id, run_ix, idx, value) \
+                 SELECT $1, $2, v.ord::int - 1, v.value \
+                   FROM unnest($3::text[]) WITH ORDINALITY AS v(value, ord)",
+            )
+            .bind(execution)
+            .bind(run as i32)
+            .bind(&values)
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;
@@ -2737,7 +2753,7 @@ fn drive(
     now: Tick,
     marks: &mut Marks,
     seq: &mut i64,
-    failures: &mut Vec<(RunIx, String)>,
+    side: &mut render::RenderSide,
 ) -> Result<(Vec<Requested>, Vec<subflow::Requested>)> {
     let plan = &ctx.plan;
     let mut spawns = Vec::new();
@@ -2765,7 +2781,7 @@ fn drive(
         }
 
         let snapshot = state.clone();
-        if render::render_expressions(surface, plan, state, now, failures) == Pass::Rendered {
+        if render::render_expressions(surface, plan, state, now, side) == Pass::Rendered {
             *seq += 1;
             marks.observe(&snapshot, state, *seq);
             continue;

@@ -164,12 +164,13 @@ comments are cut before scanning -- one corpus comment writes
 
        17  read another task's result (`outputs.` or `tasksWithState()`)
 
-  This is what W3c's `runIf:` fix banks nothing against and what
-  `loop-outputs-auto` cannot resolve its `values:` for: W3a's harness
+  This is what W3c's `runIf:` fix banks nothing against: W3a's harness
   render context reaches `inputs` and `vars` and stops. The real driver
   has outputs, so these entries become live -- and spec SS4.4 is right that
   every one of them must be attributed to the render surface rather than
-  to durability.
+  to durability. (`loop-outputs-auto` was named here until W9a Task 11:
+  its `values:` resolves now, and what blocks it is the Loop's STORE
+  `outputs:`, which W9a leaves out -- section 3's construct list.)
 
 
 4. WHAT EACH HANDLER MUST PRODUCE, FROM KESTRA'S OWN CLASS
@@ -317,13 +318,13 @@ Two rules, and they are deliberately different:
     186  reproduced today, and by nothing the driver removes
       0  reproduced today ONLY because the feed supplies a terminal
          for a task type W3b has no handler for
-     28  not reproduced today, and nothing found here blocks it
-     80  not reproduced today, and blocked -- by cause below
+     27  not reproduced today, and nothing found here blocks it
+     81  not reproduced today, and blocked -- by cause below
   -----
     294  TOTAL, the comparable entries
 
-  CEILING, feed removed  = 186 + 28 = **214**
-  CEILING, feed retained = 186 + 0 + 28 = 214
+  CEILING, feed removed  = 186 + 27 = **213**
+  CEILING, feed retained = 186 + 0 + 27 = 213
 
   Today the ratchet matches 186. The two ceilings are the same
   quantity under the two answers Task 5 may give to `does the driver
@@ -331,14 +332,14 @@ Two rules, and they are deliberately different:
   NOT the same set with a different name, and the composition is printed
   above so a reader cannot take one for the other.
 
-  **214 is the bound this package should be held to**, because removing
+  **213 is the bound this package should be held to**, because removing
   the feed is the stated intent of Task 5 step 4. If Task 5 keeps the
   feed for unhandled types it must say so, and then the bound is
-  214 -- reported as a decision, not as progress.
+  213 -- reported as a decision, not as progress.
 
   The 0 at risk, with the type whose terminal is fed:
 
-  The 28 nothing here blocks:
+  The 27 nothing here blocks:
     invalids/loop-switch-failed
     valids/all-flowable
     valids/dag
@@ -350,7 +351,6 @@ Two rules, and they are deliberately different:
     valids/loop-object
     valids/loop-object-in-list
     valids/loop-outputs
-    valids/loop-outputs-auto
     valids/loop-outputs-failed-render
     valids/loop-outputs-store
     valids/parallel-disabled-tasks
@@ -387,6 +387,7 @@ Two rules, and they are deliberately different:
         2  clock      checkFrequency.maxDuration; the golden's iteration count carries the artifact's delay-poller latency
         2  construct  io.kestra.plugin.core.execution.UnsetVariables
         2  handler    io.kestra.plugin.core.execution.Assert
+        1  construct  Loop outputs: over a file (STORE mode, executions/{iteration}/{n}.ion)
         1  construct  Pause behavior:
         1  construct  Pause errors:
         1  construct  Pause onPause:
@@ -394,12 +395,12 @@ Two rules, and they are deliberately different:
         1  handler    io.kestra.plugin.core.kv.Set
         1  render     a relational operator against a quoted operand; Pebble throws and minijinja answers
     -----
-       80  DISTINCT entries blocked (the rows above overlap)
+       81  DISTINCT entries blocked (the rows above overlap)
 
   The four causes the plan names, and where each landed:
 
        30  a missing handler
-       58  a construct no W3b task owns
+       59  a construct no W3b task owns
         0  a state RunState cannot hold
         5  an over-acceptance -- W1's validation
 
@@ -463,7 +464,7 @@ Two rules, and they are deliberately different:
     valids/retry-failed-flow-duration        maxDuration with no elapsed time
     valids/retry-success                     WARNING, which RunState cannot hold
 
-    working expectation = 214 - 6 = 208
+    working expectation = 213 - 6 = 207
 
   Two of them deserve a sentence each:
 

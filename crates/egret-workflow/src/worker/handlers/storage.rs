@@ -25,12 +25,17 @@
 //!   `egret.sql`'s fixed `result.ion` does. The extension is used verbatim, as
 //!   Kestra's `createTempFile` suffix is; one holding `/` is refused (Kestra's
 //!   `Files.createTempFile` throws for it too).
-//! - **`Delete` and `PurgeCurrentExecutionFiles` act on the running
-//!   execution's LOOP FAMILY only** -- its loop root and every iteration under
-//!   it (spec §4.4 items 1-2, §9.3). A trigger's or a replay source's file is
-//!   readable and is never deletable: `Delete` of one fails the task naming
-//!   it (`w9a-storage.json` `core_storage.other_execution`, chosen; Kestra OSS
-//!   deleted another execution's file).
+//! - **`Delete` acts on the running execution's LOOP FAMILY only** -- its
+//!   loop root and every iteration under it (spec §4.4 items 1-2, §9.3): the
+//!   author names the URI. A trigger's or a replay source's file is readable
+//!   and is never deletable: `Delete` of one fails the task naming it
+//!   (`w9a-storage.json` `core_storage.other_execution`, chosen; Kestra OSS
+//!   deleted another execution's file). Its statement is scoped to the family
+//!   too, and a test kills that clause alone.
+//! - **`PurgeCurrentExecutionFiles` acts on the running execution's OWN
+//!   files only** -- inside a `Loop` iteration, the iteration's, never the
+//!   root's or a sibling's (the controller's ruling of 2026-10-03; what
+//!   Kestra does inside an iteration was not measured).
 //! - **The index row goes first, then the object** (spec §9.3). A file exists
 //!   for a flow only while its row does (§4.2), so once the row is gone the
 //!   file is deleted for every reader, and a store that then fails to delete
@@ -40,9 +45,9 @@
 //!   outcome commits: a worker fenced after that has still deleted the file,
 //!   and its re-claim answers `deleted: false`, as a second `Delete` would.
 //! - **`PurgeCurrentExecutionFiles` deletes the objects of the rows it
-//!   deleted, one by one**, not each execution's whole prefix: a sibling
-//!   iteration may be uploading a file whose row its own commit will insert,
-//!   and deleting that object would leave the row dangling. Its `uris` lists
+//!   deleted, one by one**, not the execution's whole prefix: a task of the
+//!   same execution may be uploading a file whose row its own commit will
+//!   insert, and deleting that object would leave the row dangling. Its `uris` lists
 //!   what it deleted the way Kestra's `deleteByPrefix` does -- every file, then
 //!   each directory above it up to the execution's, in post-order, measured
 //!   (`core_storage.PurgeCurrentExecutionFiles.runs`). Kestra's directory
@@ -521,8 +526,9 @@ async fn delete_object(fs: &FileStore, task: &TaskInput, file: &str) {
 // PurgeCurrentExecutionFiles
 // ---------------------------------------------------------------------------
 
-/// `core.storage.PurgeCurrentExecutionFiles`: every file of this execution's
-/// loop family, index rows first (see the module doc).
+/// `core.storage.PurgeCurrentExecutionFiles`: every file of the running
+/// execution itself -- an iteration's own inside a `Loop`, never its root's
+/// or a sibling's -- index rows first (see the module doc).
 #[derive(Debug, Clone)]
 pub struct PurgeCurrentExecutionFiles {
     pool: PgPool,
@@ -552,15 +558,18 @@ impl TaskHandler for PurgeCurrentExecutionFiles {
             .acquire()
             .await
             .map_err(|e| db_err(PURGE_CURRENT_EXECUTION_FILES, e))?;
-        let family =
-            crate::storage::loop_family(&mut conn, task.workspace_id, task.execution_id).await?;
+        // The RUNNING execution's own files only -- inside a `Loop` iteration
+        // that is the iteration, whose files carry its own id (spec §3) --
+        // never the loop root's or a sibling's (the controller's ruling of
+        // 2026-10-03; spec §9.3). Kestra's "current execution"; what its
+        // `deleteByPrefix` does inside an iteration was not measured.
         let gone: Vec<String> = sqlx::query_scalar(
             "DELETE FROM workflow.execution_files \
-              WHERE workspace_id = $1 AND execution_id = ANY($2) \
+              WHERE workspace_id = $1 AND execution_id = $2 \
               RETURNING uri",
         )
         .bind(task.workspace_id)
-        .bind(&family)
+        .bind(task.execution_id)
         .fetch_all(&mut *conn)
         .await
         .map_err(|e| db_err(PURGE_CURRENT_EXECUTION_FILES, e))?;

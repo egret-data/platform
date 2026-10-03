@@ -827,18 +827,30 @@ fn loop_value(element: &ion_rs::Element) -> Result<String, String> {
 /// ([`java_time`]), at every depth.
 ///
 /// Written as TEXT, not built as a [`Value`]: `serde_json`'s number keeps
-/// `12.50` but lowercases `1E+3`, which Kestra writes upper-case. A struct
+/// `12.50` but lowercases `1E+3`, which Kestra writes upper-case; a string
+/// is escaped as Jackson escapes it (`\u001F`, upper case,
+/// `runners::env::write_json_string`). A struct
 /// field named twice keeps its first place and its last value, as a
 /// `LinkedHashMap` (and [`to_json`]'s map) does; a field whose value is any
 /// `null` is dropped. The depth is bounded as [`to_json`]'s is: the reader
 /// never yields a value deeper than [`MAX_DEPTH`].
 fn loop_json(element: &ion_rs::Element) -> Result<String, String> {
     use ion_rs::Value as V;
-    let quoted = |s: &str| Value::String(s.to_string()).to_string();
+    // Jackson's escapes: `serde_json`'s, with `\uXXXX` in upper case.
+    let quoted = |s: &str| {
+        let mut out = String::new();
+        crate::runners::env::write_json_string(&mut out, s);
+        out
+    };
     if let Some(typed) = java_time_annotated(element) {
         return Ok(quoted(&typed?));
     }
     Ok(match element.value() {
+        V::String(s) => quoted(s.text()),
+        V::Symbol(s) => match s.text() {
+            Some(t) => quoted(t),
+            None => "null".to_string(),
+        },
         V::Decimal(d) => java_big_decimal(d),
         V::Float(f) if f.is_finite() => {
             let mut out = String::new();
@@ -1618,6 +1630,23 @@ mod tests {
         assert_eq!(
             refused, 2,
             "the null.int row and the unparseable LocalDateTime"
+        );
+    }
+
+    /// A control character in a string the `Loop`'s JSON writes is escaped
+    /// as Jackson escapes it -- the four hex digits UPPER case (`\u001F`),
+    /// which `serde_json` writes lower case (fix round 1; the rule
+    /// `runners::env::write_json_string` already holds for `toJson`) -- in a
+    /// value, in a field name and in a list.
+    #[test]
+    fn a_loops_json_escapes_control_characters_as_jackson_does() {
+        let (values, _) = loop_values(cursor(r#"{'k\x0b':"a\x1fb"} ["c\x0ed"]"#), 10);
+        assert_eq!(
+            values,
+            vec![
+                Ok(r#"{"k\u000B":"a\u001Fb"}"#.to_string()),
+                Ok(r#"["c\u000Ed"]"#.to_string()),
+            ]
         );
     }
 
