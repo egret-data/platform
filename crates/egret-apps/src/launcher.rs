@@ -157,8 +157,20 @@ impl<L: AppPodLauncher> PodResolver for LauncherPods<L> {
             .await
     }
 
-    async fn run_pod(&self, _app: Uuid, _version: Uuid) -> Result<PodEndpoint> {
-        Err(Error::NotFound("run pod".into()))
+    fn run_ref(&self, user: UserId, version: Uuid) -> String {
+        run_pod_ref(user, version)
+    }
+
+    async fn run_pod(&self, user: UserId, _app: Uuid, version: Uuid) -> Result<PodEndpoint> {
+        self.launcher
+            .ensure_run(
+                RunPodKey {
+                    user_id: user,
+                    version_id: version,
+                },
+                self.ready_timeout,
+            )
+            .await
     }
 }
 
@@ -363,10 +375,32 @@ mod tests {
         let ep = pods.edit_pod(k.user_id, k.workspace_id).await.unwrap();
         assert_eq!(ep.base.as_str(), "http://10.0.0.1:2718/");
         assert_eq!(pods.launcher.started(), [k]);
-        assert!(matches!(
-            pods.run_pod(Uuid::new_v4(), Uuid::new_v4()).await,
-            Err(Error::NotFound(_))
-        ));
+    }
+
+    #[tokio::test]
+    async fn the_resolver_also_starts_the_viewers_own_run_pod_by_version() {
+        let (u, v) = (UserId(Uuid::new_v4()), Uuid::new_v4());
+        let pods = LauncherPods {
+            launcher: fake(),
+            ready_timeout: Duration::from_secs(3),
+        };
+        assert_eq!(
+            pods.run_ref(u, v),
+            RunPodKey {
+                user_id: u,
+                version_id: v
+            }
+            .pod_ref()
+        );
+        let ep = pods.run_pod(u, Uuid::new_v4(), v).await.unwrap();
+        assert_eq!(ep.base.as_str(), "http://10.0.0.1:2718/");
+        assert_eq!(
+            pods.launcher.started_run(),
+            [RunPodKey {
+                user_id: u,
+                version_id: v
+            }]
+        );
     }
 
     #[tokio::test]

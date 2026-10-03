@@ -140,7 +140,10 @@ impl PodResolver for SwitchPods {
             .clone()
             .ok_or_else(|| Error::NotFound("pod".into()))
     }
-    async fn run_pod(&self, _: Uuid, _: Uuid) -> egret_core::Result<PodEndpoint> {
+    fn run_ref(&self, user: UserId, version: Uuid) -> String {
+        egret_apps::run_pod_ref(user, version)
+    }
+    async fn run_pod(&self, _: UserId, _: Uuid, _: Uuid) -> egret_core::Result<PodEndpoint> {
         Err(Error::NotFound("pod".into()))
     }
 }
@@ -156,7 +159,18 @@ impl PodResolver for FakePods {
             marimo_token: MARIMO_TOKEN.into(),
         })
     }
-    async fn run_pod(&self, _app: Uuid, _version: Uuid) -> egret_core::Result<PodEndpoint> {
+    fn run_ref(&self, user: UserId, version: Uuid) -> String {
+        // A REAL per-(viewer, version) reference, same function production uses (D24): this is
+        // what lets `two_viewers_of_the_same_version_get_two_different_run_pod_references`
+        // actually distinguish them, even though every run pod in this fake is the same upstream.
+        egret_apps::run_pod_ref(user, version)
+    }
+    async fn run_pod(
+        &self,
+        _user: UserId,
+        _app: Uuid,
+        _version: Uuid,
+    ) -> egret_core::Result<PodEndpoint> {
         Ok(PodEndpoint {
             base: self.base.clone(),
             marimo_token: MARIMO_TOKEN.into(),

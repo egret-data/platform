@@ -24,7 +24,7 @@ use egret_core::{Result, UserId, WorkspaceId};
 use egret_metastore::Db;
 use uuid::Uuid;
 
-use pod_ref::edit_pod_ref;
+use pod_ref::{edit_pod_ref, run_pod_ref};
 
 use crate::grant::GrantRepo;
 use crate::session::AppSessionRepo;
@@ -45,8 +45,13 @@ pub trait PodResolver: Send + Sync {
     fn edit_ref(&self, user: UserId, ws: WorkspaceId) -> String;
     /// The author's own edit pod, started if need be.
     async fn edit_pod(&self, user: UserId, ws: WorkspaceId) -> Result<PodEndpoint>;
-    /// The pod serving one published version. `NotFound` until P5 launches run pods.
-    async fn run_pod(&self, app: Uuid, version: Uuid) -> Result<PodEndpoint>;
+    /// The URL segment of a viewer's own run pod for one version (D24: never shared with
+    /// another viewer). Pure and stable, the same way `edit_ref` is.
+    fn run_ref(&self, user: UserId, version: Uuid) -> String;
+    /// That viewer's own pod, serving that version, started if need be. `app` is carried for
+    /// symmetry with the pod API's `(app, version)` pair and because callers already have it in
+    /// scope; the launcher only needs `version` to key the pod (D24).
+    async fn run_pod(&self, user: UserId, app: Uuid, version: Uuid) -> Result<PodEndpoint>;
 }
 
 /// The resolver while no launcher is wired in: the proxy and its checks are live, every pod
@@ -61,7 +66,10 @@ impl PodResolver for UnavailablePods {
     async fn edit_pod(&self, _: UserId, _: WorkspaceId) -> Result<PodEndpoint> {
         Err(anyhow::anyhow!("no app pod launcher is configured").into())
     }
-    async fn run_pod(&self, _: Uuid, _: Uuid) -> Result<PodEndpoint> {
+    fn run_ref(&self, user: UserId, version: Uuid) -> String {
+        run_pod_ref(user, version)
+    }
+    async fn run_pod(&self, _: UserId, _: Uuid, _: Uuid) -> Result<PodEndpoint> {
         Err(egret_core::Error::NotFound("run pod".into()))
     }
 }
