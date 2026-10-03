@@ -61,6 +61,10 @@ spec:
             - { name: EGRET_APPS__POD__MEM_LIMIT, value: "{{ .Values.apps.pod.resources.memLimit }}" }
             - { name: EGRET_APPS__POD__READY_TIMEOUT_SECS, value: "{{ .Values.apps.pod.readyTimeoutSecs }}" }
             - { name: EGRET_APPS__POD__IDLE_SECS, value: "{{ .Values.apps.pod.idleSecs }}" }
+            # Run pods (D24: one per viewer per published version), separate from the edit settings above.
+            - { name: EGRET_APPS__POD__RUN_IDLE_SECS, value: "{{ .Values.apps.pod.run.idleSecs }}" }
+            - { name: EGRET_APPS__POD__RUN_SESSION_CAP, value: "{{ .Values.apps.pod.run.sessionCap }}" }
+            - { name: EGRET_APPS__POD__RUN_KERNEL_MODE, value: "{{ .Values.apps.pod.run.kernelMode }}" }
             # Where a pod calls back: egret's in-cluster Service, API port (the pod API + the query gateway).
             - { name: EGRET_APPS__POD__CALLBACK_URL, value: "http://egret.{{ .Release.Namespace }}.svc.cluster.local:8080" }
             {{- end }}
