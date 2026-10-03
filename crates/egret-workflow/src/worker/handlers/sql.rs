@@ -1685,11 +1685,8 @@ mod tests {
         let rows = fixture["egret_expected"]["ion_rows"].as_array().unwrap();
 
         // (sql_type, Trino carries, StarRocks carries (None: no such type))
-        let carried: Vec<(
-            &str,
-            (serde_json::Value, Ion),
-            Option<(serde_json::Value, Ion)>,
-        )> = vec![
+        type Carried = (serde_json::Value, Ion);
+        let carried: Vec<(&str, Carried, Option<Carried>)> = vec![
             ("int", (json!(42), Same), Some((json!(42), Same))),
             (
                 "bigint",
@@ -1754,7 +1751,11 @@ mod tests {
                     .filter_map(|(e, c)| c.map(|c| (e, c)))
             {
                 let mut ours = String::new();
-                crate::runners::write_ion_row(&mut ours, &["v".to_string()], &[value.clone()]);
+                crate::runners::write_ion_row(
+                    &mut ours,
+                    &["v".to_string()],
+                    std::slice::from_ref(value),
+                );
                 let got = decoded(ours.clone().into_bytes());
                 let class = match (got == kestra, ours == kestra_text) {
                     (true, true) => Same,
