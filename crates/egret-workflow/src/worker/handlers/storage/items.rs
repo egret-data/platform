@@ -2578,12 +2578,17 @@ mod tests {
         let fs = store_with(
             Arc::new(MemStore::new()),
             Caps {
-                max_read_bytes: 64,
+                max_read_bytes: 64 << 10,
                 ..Caps::default()
             },
         );
         let mut index = Files::new();
-        let body = format!("{{v:1}}\n{{s:\"{}\"}}\n", "x".repeat(100));
+        // Each item under the cap but one: a value of twice it.
+        let body = format!(
+            "{}{{s:\"{}\"}}\n",
+            "{v:1}\n".repeat(20_000),
+            "x".repeat(128 << 10)
+        );
         let from = stored(&fs, &mut index, "in.ion", body.as_bytes()).await;
         for (type_id, spec) in [
             (
@@ -2595,7 +2600,7 @@ mod tests {
             let t = task_over(type_id, spec, &fs, index.clone());
             let out = handler_for(type_id, &fs).run(&t).await.unwrap();
             assert!(
-                message(&out).contains("max_read_bytes (64 bytes)"),
+                message(&out).contains("max_read_bytes (65536 bytes)"),
                 "{type_id}: {out:?}"
             );
         }

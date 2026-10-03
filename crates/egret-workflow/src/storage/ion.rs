@@ -29,6 +29,7 @@
 
 use std::io::Read;
 use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -154,12 +155,32 @@ where
 /// Otherwise the answer is how the input ended: [`Stop::End`], or why it is
 /// not Ion past the values already handed over.
 ///
-/// **One value is held whole** -- the Ion reader builds each top-level value
-/// before `sink` sees it, in a buffer it doubles -- so a value longer than
-/// `max_value_bytes` is refused ([`Stop::TooLarge`], naming the cap) by the
-/// same scan that refuses nesting: the byte that would cross it is never
-/// handed over, and the reader never holds more than about twice the cap.
-/// The item tasks pass `workflow.storage.max_read_bytes`.
+/// **What `max_value_bytes` bounds** (W9a Task 12 fix rounds 1-2). The Ion
+/// reader builds each top-level value whole before `sink` sees it, in a
+/// buffer that starts at 4 KiB and doubles whenever what it must hold does
+/// not fit. So the guard counts EVERY byte it hands the reader, and resets
+/// the count only when the reader yields a top-level value to `sink`; the
+/// byte that takes the count past `max_value_bytes` is never handed over
+/// ([`Stop::TooLarge`], naming `workflow.storage.max_read_bytes`, which the
+/// item tasks pass). The reset follows what the reader DID, not a model of
+/// Ion's grammar, so nothing the reader builds as one value -- an
+/// annotation chain, adjacent long strings -- is counted in parts.
+///
+/// - **Bounded:** the bytes between two yields are at most the cap, and the
+///   reader's buffer holds at most those plus the read-ahead counted before
+///   the last yield (itself at most the cap): under twice the cap of data,
+///   in a buffer of under four times the cap. A run of local symbol tables
+///   with no value between them is consumed without a yield, so it is
+///   counted whole and refused past the cap.
+/// - **Not bounded by this:** local symbol tables INTERLEAVED with values
+///   (`$ion_symbol_table::{imports:$ion_symbol_table, …} 1 …`, append
+///   mode): each yield resets the count, and the reader's symbol table
+///   grows with every append, up to the size of the file.
+/// - **Over-counting, never under-counting:** a value is counted with the
+///   read-ahead the reader's last fill took past it -- at most one buffer.
+///   A file is never refused when each value plus the reader's buffer fits
+///   in the cap; since the buffer only doubles to fit a value, a file whose
+///   largest value is under about a third of the cap always reads.
 pub(crate) fn for_each_value<R, F>(bytes: R, max_value_bytes: u64, sink: F) -> Stop
 where
     R: Read + Send,
@@ -195,12 +216,13 @@ fn read_guarded<R: Read>(
     mut sink: impl FnMut(&ion_rs::Element) -> ControlFlow<()>,
 ) -> Stop {
     let trip: Arc<Mutex<Option<Trip>>> = Arc::default();
+    let since_yield = Arc::new(AtomicU64::new(0));
     let guarded = FillWhole {
         inner: DepthGuard {
             inner: bytes,
             scan: Scan::Undecided,
             max_value_bytes,
-            value_bytes: 0,
+            since_yield: since_yield.clone(),
             trip: None,
             shared: trip.clone(),
         },
@@ -228,6 +250,9 @@ fn read_guarded<R: Read>(
                 }
             }
             Some(Ok(element)) => {
+                // The ONLY reset of the count: ion-rs has built a top-level
+                // value and handed it over (see `for_each_value`).
+                since_yield.store(0, Ordering::SeqCst);
                 if sink(&element).is_break() {
                     return Stop::Full;
                 }
@@ -303,10 +328,11 @@ impl<R: Read> Read for FillWhole<R> {
 struct DepthGuard<R> {
     inner: R,
     scan: Scan,
-    /// The longest top-level value handed on.
+    /// The most bytes handed on between two values the reader yields.
     max_value_bytes: u64,
-    /// The bytes of the current top-level value handed on so far.
-    value_bytes: u64,
+    /// The bytes handed on since the reader last yielded a top-level value
+    /// (reset by `read_guarded`, never here).
+    since_yield: Arc<AtomicU64>,
     trip: Option<Trip>,
     shared: Arc<Mutex<Option<Trip>>>,
 }
@@ -318,7 +344,7 @@ impl<R: Read> Read for DepthGuard<R> {
         }
         let n = self.inner.read(buf)?;
         for (i, b) in buf[..n].iter().enumerate() {
-            let fed = self.scan.feed(*b).and_then(|place| self.count(place));
+            let fed = self.scan.feed(*b).and_then(|()| self.count());
             if let Err(t) = fed {
                 if let Ok(mut g) = self.shared.lock() {
                     *g = Some(t.clone());
@@ -337,43 +363,19 @@ impl<R: Read> Read for DepthGuard<R> {
 }
 
 impl<R> DepthGuard<R> {
-    /// Count a byte the scan placed against the current top-level value:
-    /// the byte that takes the value past `max_value_bytes` trips.
-    fn count(&mut self, place: Place) -> Result<(), Trip> {
-        self.value_bytes = match place {
-            Place::Between => 0,
-            Place::Starts => 1,
-            Place::Inside | Place::Ends => self.value_bytes.saturating_add(1),
-        };
-        if self.value_bytes > self.max_value_bytes {
+    /// Count one byte handed on: the byte that takes the bytes since the
+    /// reader's last yield past `max_value_bytes` trips.
+    fn count(&mut self) -> Result<(), Trip> {
+        let since = self.since_yield.fetch_add(1, Ordering::SeqCst) + 1;
+        if since > self.max_value_bytes {
             return Err(Trip::TooLarge(format!(
                 "a top-level value is longer than workflow.storage.max_read_bytes ({} bytes): \
                  a value is held whole to be read, so values are read only up to that size",
                 self.max_value_bytes
             )));
         }
-        if place == Place::Ends {
-            self.value_bytes = 0;
-        }
         Ok(())
     }
-}
-
-/// Where a scanned byte stands against the file's top-level values -- what
-/// [`DepthGuard`] counts against `max_value_bytes`. **Never early**: a byte
-/// the scan cannot place is `Inside`, so two values may be counted as one
-/// (a refusal that is too strict, never one that is missed).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Place {
-    /// Part of the current value (or of what precedes one, a comment).
-    Inside,
-    /// The last byte of a value: the count starts again after it.
-    Ends,
-    /// Between values (whitespace, a binary version marker): not counted.
-    Between,
-    /// The first byte of a value that follows one the scan could not end
-    /// before it (a text long string, which the next one may continue).
-    Starts,
 }
 
 /// The depth scan, text or binary as the first byte says (binary Ion starts
@@ -385,7 +387,7 @@ enum Scan {
 }
 
 impl Scan {
-    fn feed(&mut self, b: u8) -> Result<Place, Trip> {
+    fn feed(&mut self, b: u8) -> Result<(), Trip> {
         if let Scan::Undecided = self {
             *self = if b == 0xE0 {
                 Scan::Binary(BinaryScan::default())
@@ -439,9 +441,6 @@ struct TextScan {
     state: Text,
     /// The last byte scanned in `Normal` was an operator character.
     after_operator: bool,
-    /// A top-level long string closed and no other value has started: the
-    /// next long string continues it (adjacent long strings are ONE value).
-    long_open: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -537,48 +536,7 @@ impl TextScan {
         })
     }
 
-    fn feed(&mut self, b: u8) -> Result<Place, Trip> {
-        let (prev, prev_depth) = (self.state, self.depth);
-        self.step(b)?;
-        Ok(self.place(prev, prev_depth, b))
-    }
-
-    /// Where `b` -- just scanned from `prev` at `prev_depth` -- stands
-    /// against the top-level values (see [`Place`]). A value ends at the
-    /// byte that closes it at the top level (`]`, `)`, `}`, a quote) or at
-    /// the whitespace after it; a long string is not ended by whitespace,
-    /// since another may continue it, but by the next value's first byte.
-    fn place(&mut self, prev: Text, prev_depth: usize, b: u8) -> Place {
-        let top = self.depth == 0 && matches!(self.state, Text::Normal);
-        if top && b == b'\'' && matches!(prev, Text::Long(2)) {
-            self.long_open = true;
-            return Place::Inside;
-        }
-        if self.long_open
-            && prev_depth == 0
-            && matches!(prev, Text::Normal)
-            && !b.is_ascii_whitespace()
-            && b != b'\''
-            && b != b'/'
-        {
-            self.long_open = false;
-            return Place::Starts;
-        }
-        if !top {
-            return Place::Inside;
-        }
-        match b {
-            _ if b.is_ascii_whitespace() && self.long_open => Place::Inside,
-            _ if b.is_ascii_whitespace() => Place::Between,
-            b']' | b')' | b'}' | b'"' | b'\'' => {
-                self.long_open = false;
-                Place::Ends
-            }
-            _ => Place::Inside,
-        }
-    }
-
-    fn step(&mut self, b: u8) -> Result<(), Trip> {
+    fn feed(&mut self, b: u8) -> Result<(), Trip> {
         self.state = match self.state {
             Text::Normal => self.normal(b)?,
             Text::Slash => match b {
@@ -685,8 +643,6 @@ struct BinaryScan {
     pos: u64,
     state: Binary,
     stack: Vec<Frame>,
-    /// Bytes of a top-level version marker still to come (not a value).
-    marker: u8,
 }
 
 struct Frame {
@@ -777,7 +733,6 @@ impl BinaryScan {
     fn type_descriptor(&mut self, b: u8) -> Result<Binary, Trip> {
         if self.stack.is_empty() && b == 0xE0 {
             // A version marker: E0 01 00 EA.
-            self.marker = 4;
             return Ok(Binary::Skip(3));
         }
         let (t, l) = (b >> 4, u64::from(b & 0x0F));
@@ -813,20 +768,7 @@ impl BinaryScan {
         })
     }
 
-    /// Scan `b` and place it: a value ends at the byte after which the
-    /// scan is back at the top level with no container open.
-    fn feed(&mut self, b: u8) -> Result<Place, Trip> {
-        self.step(b)?;
-        if self.marker > 0 {
-            self.marker -= 1;
-            return Ok(Place::Between);
-        }
-        let closed = matches!(self.state, Binary::Item)
-            && self.stack.first().is_none_or(|f| f.end <= self.pos);
-        Ok(if closed { Place::Ends } else { Place::Inside })
-    }
-
-    fn step(&mut self, b: u8) -> Result<(), Trip> {
+    fn feed(&mut self, b: u8) -> Result<(), Trip> {
         let pos = self.pos;
         self.pos += 1;
         if let Binary::Item = self.state {
@@ -1846,64 +1788,126 @@ mod tests {
         }
     }
 
-    /// The cap is per top-level VALUE, not per file: many small values far
-    /// past it read, however they are separated (or not); a value of exactly
-    /// the cap reads and one byte more is refused, text and binary.
-    #[test]
-    fn the_cap_counts_one_top_level_value_at_a_time() {
-        for (what, body) in [
-            ("lines", "{a:1}\n".repeat(100)),
-            ("adjacent structs", "{}".repeat(100)),
-            ("adjacent lists", "[1][2]".repeat(50)),
-            ("adjacent strings", "\"ab\"".repeat(50)),
-            ("symbols", "'s' ".repeat(50)),
-            ("scalars", "12345 ".repeat(50)),
-        ] {
-            let (rows, stop) = capped(cursor(body.clone()), 8);
-            assert!(matches!(stop, Stop::End), "{what}: {stop:?}");
-            assert!(rows.len() >= 50, "{what}: {}", rows.len());
-        }
-        let mut binary = BINARY_VERSION_MARKER.to_vec();
-        for _ in 0..100 {
-            binary.extend([0xD3, 0x84, 0x21, 0x01]); // {name: 1} (`name` is $4)
-        }
-        let (rows, stop) = capped(cursor(binary), 8);
-        assert!(matches!(stop, Stop::End), "binary: {stop:?}");
-        assert_eq!(rows.len(), 100);
-
-        // At the cap, and one over: an unquoted scalar, a string, a struct.
-        for (at, over) in [
-            ("12345", "123456"),
-            ("\"abc\"", "\"abcd\""),
-            ("{a:1}", "{a:12}"),
-        ] {
-            let (rows, stop) = capped(cursor(format!("{at} {at}\n")), at.len() as u64);
-            assert!(matches!(stop, Stop::End), "{at}: {stop:?}");
-            assert_eq!(rows.len(), 2, "{at}");
-            let (_, stop) = capped(cursor(format!("{at} {over}")), at.len() as u64);
-            assert!(matches!(stop, Stop::TooLarge(_)), "{over}: {stop:?}");
-        }
-        let mut at = BINARY_VERSION_MARKER.to_vec();
-        at.extend([0x83, b'a', b'b', b'c']);
-        let (_, stop) = capped(cursor(at.clone()), 4);
-        assert!(matches!(stop, Stop::End), "binary at the cap: {stop:?}");
-        let (_, stop) = capped(cursor(at), 3);
-        assert!(matches!(stop, Stop::TooLarge(_)), "binary over: {stop:?}");
+    /// A binary Ion header of type `t` (the high nibble) and `len` bytes,
+    /// in the long form: `tE` and a VarUInt length.
+    fn binary_header(t: u8, len: usize) -> Vec<u8> {
+        let mut out = binary_string_header(len as u64);
+        out[0] = (t << 4) | 0x0E;
+        out
     }
 
-    /// Adjacent long strings are ONE value in Ion text, so the count runs
-    /// across them (each part is under the cap, the value is not).
+    /// A binary local symbol table appending one symbol of `len` bytes:
+    /// `$ion_symbol_table::{imports: $ion_symbol_table, symbols: ["ss…"]}`.
+    fn binary_append_lst(len: usize) -> Vec<u8> {
+        let mut symbol = binary_header(8, len);
+        symbol.extend(std::iter::repeat_n(b's', len));
+        let mut list = binary_header(11, symbol.len());
+        list.extend(symbol);
+        // imports ($6): the symbol $3; symbols ($7): the list.
+        let mut fields = vec![0x86, 0x71, 0x03, 0x87];
+        fields.extend(list);
+        let mut st = binary_header(13, fields.len());
+        st.extend(fields);
+        // One annotation, $3 (`$ion_symbol_table`).
+        let mut wrapped = vec![0x81, 0x83];
+        wrapped.extend(st);
+        let mut out = binary_header(14, wrapped.len());
+        out.extend(wrapped);
+        out
+    }
+
+    /// The text of the same append: one symbol of `len` bytes.
+    fn text_append_lst(len: usize) -> String {
+        format!(
+            "$ion_symbol_table::{{imports:$ion_symbol_table,symbols:[\"{}\"]}}\n",
+            "s".repeat(len)
+        )
+    }
+
+    const KIB: usize = 1 << 10;
+
+    /// Fix round 2: the count resets only when the reader YIELDS a value,
+    /// so ONE value built from parts each under the cap is counted whole --
+    /// a chain of quoted annotations, each 12 KiB under a 16 KiB cap, is one
+    /// value (the premise: uncapped, it reads as one `1`; `ion-rs` itself
+    /// refuses an annotation sequence over 65 KB), refused; so are adjacent
+    /// long strings.
     #[test]
-    fn concatenated_long_strings_count_as_one_value() {
-        let body = "\'\'\'abcd\'\'\' \n \'\'\'efgh\'\'\'";
-        let (rows, stop) = capped(cursor(body), u64::MAX);
+    fn an_annotation_chain_is_one_value_and_counted_whole() {
+        let part = format!("'{}'::", "a".repeat(12 * KIB));
+        let chain = format!("{}1\n", part.repeat(4));
+        let (rows, stop) = capped(cursor(chain.clone()), u64::MAX);
         assert!(matches!(stop, Stop::End), "{stop:?}");
-        assert_eq!(rows, vec![json!("abcdefgh")], "the premise: one value");
-        let (_, stop) = capped(cursor(body), 12);
+        assert_eq!(rows, vec![json!(1)], "the premise: one value");
+        let (rows, stop) = capped(cursor(chain), 16 * KIB as u64);
+        assert!(rows.is_empty(), "the chain was read: {stop:?}");
+        let Stop::TooLarge(why) = stop else {
+            panic!("{stop:?}")
+        };
+        assert!(why.contains("max_read_bytes (16384 bytes)"), "{why}");
+        let long = format!("'''{}''' ", "b".repeat(40 * KIB)).repeat(3);
+        let (rows, stop) = capped(cursor(long.clone()), u64::MAX);
+        assert_eq!(rows.len(), 1, "the premise: {stop:?}");
+        let (_, stop) = capped(cursor(long), 64 * KIB as u64);
         assert!(matches!(stop, Stop::TooLarge(_)), "{stop:?}");
-        let (rows, stop) = capped(cursor(body), body.len() as u64);
-        assert!(matches!(stop, Stop::End), "{stop:?}");
-        assert_eq!(rows.len(), 1);
+    }
+
+    /// Fix round 2: local symbol tables are consumed without a yield, so a
+    /// run of appends -- each 40 KiB, under a 64 KiB cap -- is counted whole
+    /// and refused, text and binary (the premise: uncapped, the file is the
+    /// one value after them).
+    #[test]
+    fn a_run_of_symbol_table_appends_is_counted_whole() {
+        let text = format!("{}1\n", text_append_lst(40 * KIB).repeat(4));
+        let mut binary = BINARY_VERSION_MARKER.to_vec();
+        for _ in 0..4 {
+            binary.extend(binary_append_lst(40 * KIB));
+        }
+        binary.extend([0x21, 0x01]);
+        let mut read = Vec::new();
+        for (what, bytes) in [("text", text.into_bytes()), ("binary", binary)] {
+            let (rows, stop) = capped(cursor(bytes.clone()), u64::MAX);
+            assert!(matches!(stop, Stop::End), "{what}: {stop:?}");
+            assert_eq!(rows, vec![json!(1)], "{what}: the premise");
+            let (rows, stop) = capped(cursor(bytes), 64 * KIB as u64);
+            if !rows.is_empty() || !matches!(stop, Stop::TooLarge(_)) {
+                read.push(format!("{what}: {rows:?} {stop:?}"));
+            }
+        }
+        assert!(read.is_empty(), "read past the cap: {read:?}");
+    }
+
+    /// The control: the cap bounds what is read between two values, not the
+    /// file. Under a 64 KiB cap, 1 MiB of small values reads (text and
+    /// binary), and so does 1 MiB of 16 KiB values -- each value plus the
+    /// reader's buffer (doubled to 32 KiB to fit it) is under the cap, the
+    /// over-count margin. One value of twice the cap is refused.
+    #[test]
+    fn values_under_the_cap_read_however_large_the_file() {
+        const CAP: u64 = 64 * KIB as u64;
+        let small = "{a:1}\n".repeat(200_000);
+        let mut binary = BINARY_VERSION_MARKER.to_vec();
+        for _ in 0..250_000 {
+            binary.extend([0xD3, 0x84, 0x21, 0x01]); // {name: 1} (`name` is $4)
+        }
+        let sixteen = format!("\"{}\"\n", "c".repeat(16 * KIB)).repeat(64);
+        for (what, bytes, n) in [
+            ("small text", small.into_bytes(), 200_000),
+            ("small binary", binary, 250_000),
+            ("16 KiB strings", sixteen.into_bytes(), 64),
+        ] {
+            let mut count = 0usize;
+            let stop = for_each_value(cursor(bytes), CAP, |_| {
+                count += 1;
+                ControlFlow::Continue(())
+            });
+            assert!(matches!(stop, Stop::End), "{what}: {stop:?}");
+            assert_eq!(count, n, "{what}");
+        }
+        let big = format!("1 \"{}\" 2", "d".repeat(2 * CAP as usize));
+        let (rows, stop) = capped(cursor(big), CAP);
+        assert_eq!(rows, vec![json!(1)]);
+        assert!(matches!(stop, Stop::TooLarge(_)), "{stop:?}");
     }
 
     /// A reader that hands out at most `chunk` bytes a call, as the store does.

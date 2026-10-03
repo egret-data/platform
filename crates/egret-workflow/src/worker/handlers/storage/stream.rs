@@ -473,9 +473,9 @@ impl Drop for Upload<'_> {
         // An `Err` in the body: `put_stream` fails, and stores nothing. Each
         // wait is bounded by `abort_wait`: a stalled store -- a full queue it
         // never reads, a `put_stream` that never ends -- must not hold this
-        // thread for ever. Past it the upload task is cancelled; the store
-        // then keeps no object, or an unfinished multipart upload of an
-        // unindexed key (an orphan, spec §10).
+        // thread for ever. Past it the upload task is cancelled, and a
+        // cancelled `put_stream` aborts its own multipart upload as it drops
+        // (`egret_storage::s3`'s `AbortOnDrop`), so the store keeps no object.
         let wait = self.run.abort_wait;
         let join = self.join.take();
         self.run.handle.block_on(async move {
