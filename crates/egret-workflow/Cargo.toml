@@ -193,11 +193,17 @@ unicode-normalization = "0.1"
 # the file API's preview: Kestra's STORE files are BINARY Ion with a version
 # marker per row and no lines, and `ionfmt::read_ion` refuses the timestamps
 # and blobs they hold. Nothing above changes: egret still writes Ion itself.
-# W9a Task 12 fix round 3: `experimental-reader-writer` makes `Reader`,
-# `LazyValue` and `SymbolTable` public, so `storage::ion` reads each value
-# lazily -- counting its elements before an `Element` is built -- and sees
-# the symbol table grow. Pinned `=1.0.1`, the feature's API cannot move.
-ion-rs = { version = "=1.0.1", features = ["experimental-reader-writer"] }
+# W9a Task 12 fix rounds 3-4: `experimental-reader-writer` makes `SymbolTable`
+# public, and `experimental-tooling-apis` makes `SystemReader` and
+# `SystemStreamItem` public, so `storage::ion` sees EVERY item the reader
+# consumes -- a version marker, a local symbol table, a value -- and charges
+# the symbol table after each one, not only after a value (the elements of a
+# value are counted by the depth scan before the reader sees them, so no
+# lazy walk is needed). Pinned `=1.0.1`, the features' API cannot move.
+ion-rs = { version = "=1.0.1", features = [
+    "experimental-reader-writer",
+    "experimental-tooling-apis",
+] }
 jaq-core = "3.1"
 jaq-std = "3.0"
 jaq-json = "2.0"

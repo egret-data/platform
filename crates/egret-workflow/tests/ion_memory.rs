@@ -133,6 +133,118 @@ fn a_huge_flat_list_is_refused_before_it_is_built() {
     }
 }
 
+/// A binary Ion header of type `t` (the high nibble) and `len` bytes, in
+/// the long form: `tE` and a VarUInt length.
+fn binary_header(t: u8, len: usize) -> Vec<u8> {
+    let mut groups = Vec::new();
+    let mut n = len;
+    while n > 0 || groups.is_empty() {
+        groups.push((n & 0x7F) as u8);
+        n >>= 7;
+    }
+    groups.reverse();
+    *groups.last_mut().unwrap() |= 0x80;
+    let mut out = vec![(t << 4) | 0x0E];
+    out.extend(groups);
+    out
+}
+
+/// A binary append-mode local symbol table of `k` symbols with no text
+/// (`null`, one byte each -- the cheapest symbol there is):
+/// `$ion_symbol_table::{imports: $ion_symbol_table, symbols: [null, …]}`.
+fn binary_null_symbol_table(k: usize) -> Vec<u8> {
+    let mut list = binary_header(11, k);
+    list.extend(std::iter::repeat_n(0x0Fu8, k));
+    // imports ($6): the symbol $3; symbols ($7): the list.
+    let mut fields = vec![0x86, 0x71, 0x03, 0x87];
+    fields.extend(list);
+    let mut st = binary_header(13, fields.len());
+    st.extend(fields);
+    // One annotation, $3 (`$ion_symbol_table`).
+    let mut wrapped = vec![0x81, 0x83];
+    wrapped.extend(st);
+    let mut out = binary_header(14, wrapped.len());
+    out.extend(wrapped);
+    out
+}
+
+const IVM: [u8; 4] = [0xE0, 0x01, 0x00, 0xEA];
+
+/// **(A) fix round 4: back-to-back symbol tables.** The value count starts
+/// again at each binary top level, so 63 append-mode tables of 163 000
+/// `null` symbols each pass the per-value budget (163 840 at the 10 MiB
+/// default), and the file (10 270 140 bytes) is under the byte cap. Charged
+/// only at the next user value's yield, the reader had grown its table by
+/// all 63 first: the reviewer measured a 494 MB peak. Charged after EVERY
+/// item the reader consumes, the second table is refused with a peak of
+/// about one table -- measured here against ONE such table, which reads.
+#[test]
+fn back_to_back_symbol_tables_are_refused_with_a_peak_of_one_table() {
+    let cap = 10 * MIB as u64;
+    let table = binary_null_symbol_table(163_000);
+    let mut one = IVM.to_vec();
+    one.extend(&table);
+    one.extend([0x21, 0x01]);
+    let (rows, stop, one_peak) = read_measured(one, cap);
+    eprintln!("one symbol table: {rows} values, peak {one_peak} bytes, {stop:?}");
+    assert!(
+        matches!(stop, Stop::End),
+        "the premise, one table: {stop:?}"
+    );
+    assert_eq!(rows, 1);
+
+    let mut many = IVM.to_vec();
+    for _ in 0..63 {
+        many.extend(&table);
+    }
+    many.extend([0x21, 0x01]);
+    assert_eq!(many.len(), 10_270_140, "the reviewer's file");
+    let size = many.len();
+    let (rows, stop, peak) = read_measured(many, cap);
+    eprintln!("63 symbol tables: {size} bytes, {rows} values, peak {peak} bytes, {stop:?}");
+    let Stop::TooLarge(why) = stop else {
+        panic!("not refused: {rows} values, peak {peak}, {stop:?}")
+    };
+    assert!(why.contains("symbol"), "{why}");
+    assert!(why.contains("max_read_bytes (10485760 bytes)"), "{why}");
+    assert_eq!(rows, 0);
+    assert!(
+        peak <= 3 * one_peak,
+        "held {peak} bytes for 63 tables where one table holds {one_peak}"
+    );
+}
+
+/// **(B) fix round 4: element amplification in an s-expression.** Inside an
+/// s-expression `ion-rs` splits a run of word characters at every
+/// `$<digits>` symbol ID (`($1$2$3)` is three values), where the text scan
+/// counted a run once: `(` + `$1` × 5 000 000 + `)` is 10 000 002 bytes,
+/// under the 10 MiB cap, counted as about three values against a budget of
+/// 163 840 -- and the reviewer measured `ion-rs` building 5 000 000 children
+/// at a 1.92 GB peak (3.88 GB here, counted, in a debug build). Inside an
+/// s-expression every word byte now counts, so it is refused while scanned
+/// at the 163 841st: what the reader holds is the children it matched up
+/// to there (its child cache, about 206 bytes each: 33.8 MB measured, under
+/// the documented bound of about 8 × the cap).
+#[test]
+fn a_sexp_of_adjacent_symbol_ids_is_refused_before_it_is_split() {
+    let n = 5_000_000;
+    let mut text = String::with_capacity(2 * n + 2);
+    text.push('(');
+    for _ in 0..n {
+        text.push_str("$1");
+    }
+    text.push(')');
+    assert_eq!(text.len(), 10_000_002, "the reviewer's file");
+    let (rows, stop, peak) = read_measured(text.into_bytes(), 10 * MIB as u64);
+    eprintln!("sexp of symbol ids: {rows} values, peak {peak} bytes, {stop:?}");
+    let Stop::TooLarge(why) = stop else {
+        panic!("not refused: {rows} values, peak {peak}, {stop:?}")
+    };
+    assert!(why.contains("more than 163840 values"), "{why}");
+    assert_eq!(rows, 0);
+    assert!(peak < 8 * 10 * MIB, "held {peak} bytes for a 10 MiB cap");
+}
+
 /// The control: files egret and Kestra write read whole under the default
 /// 10 MiB cap -- Kestra's `FileSerde` binary (a version marker and a symbol
 /// table per row; the fixture's `DeduplicateItems` output, repeated to

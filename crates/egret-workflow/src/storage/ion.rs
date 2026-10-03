@@ -88,6 +88,10 @@ pub fn values_to_json(
 ///   in after every fill of its buffer, and grows the buffer only when a fill
 ///   filled it; [`FillWhole`] fills every request, so a value of `n` bytes is
 ///   parsed about `log2(n / 4 KiB)` times instead of once per store chunk.
+/// - **Every item is seen.** It reads with `ion-rs`'s `SystemReader`, so a
+///   version marker and a local symbol table are items here too (consumed,
+///   never yielded), and the symbol table is charged after each of them --
+///   see [`for_each_value`].
 /// - Reads one value past `max` only to learn whether more follow; any
 ///   outcome of that read (another value, an error, a refusal) is `Full`.
 /// - A reader that fails mid-value (the preview's byte budget does, on
@@ -165,8 +169,10 @@ where
 /// not Ion past the values already handed over.
 ///
 /// **What `max_value_bytes` (the cap, `workflow.storage.max_read_bytes`)
-/// bounds** (W9a Task 12 fix rounds 1-3). Each refusal is [`Stop::TooLarge`]
-/// naming the cap; preview, `Loop` and the item tasks all pass it.
+/// bounds** (W9a Task 12 fix rounds 1-4; `tests/ion_memory.rs` measures
+/// each bound with a counting allocator -- peak live heap, not RSS). Each
+/// refusal is [`Stop::TooLarge`] naming the cap; preview, `Loop` and the
+/// item tasks all pass it.
 ///
 /// - **Bytes.** Every byte handed to the reader counts, and the count
 ///   resets only when the reader yields a top-level value; the byte that
@@ -176,22 +182,37 @@ where
 ///   so a file whose largest value is under about a third of the cap always
 ///   reads.
 /// - **Values.** The depth scan also counts the values a top-level value can
-///   hold -- exactly in binary, over-counted in text (every byte that can
-///   start one: a timestamp counts several) -- and a top-level value of more
-///   than `cap / ELEMENT_BYTES` is refused while it is scanned, before the
-///   reader holds it: the text reader caches every child it matches and an
-///   `Element` is 128 bytes, so a value at the budget costs about 8 × the
-///   cap (see [`ELEMENT_BYTES`]). The count starts again at the top level
-///   between values (binary: every container closed; text: a top-level
-///   separator or closing bracket) and at each yield.
-/// - **Symbols.** After each value, what the reader's symbol table ADDED
-///   since the last one is charged, its text plus [`SYMBOL_OVERHEAD`] a
-///   symbol, against the cap ([`SymbolCharge`]); a table that shrank (a
-///   version marker, a non-append table) is counted again from nothing.
-///   One symbol table between two values is bounded by the value budget
-///   (each symbol is a value); appends between values, which each yield
-///   used to forget, by this charge. Kestra's `FileSerde` (a marker and a
-///   table per row) and `ionfmt` text (no table) are never charged past a
+///   hold -- exactly in binary, over-counted in text: every byte that can
+///   start one (a timestamp counts several), and inside an s-expression
+///   EVERY identifier byte, since `ion-rs` splits a run there at each
+///   `$<digits>` symbol ID where a list or struct refuses the adjacency
+///   (the split rule is never mirrored: mirroring could under-count) -- and
+///   a top-level value of more than `cap / ELEMENT_BYTES` is refused while
+///   it is scanned, before the reader holds it. **Measured at the budget:**
+///   33.8 MB under the 10 MiB cap for an s-expression of five million `$1`
+///   (3.9 GB unbounded), 16.9 MB under a 4 MiB cap for a text list of a
+///   million zeros (481 MB unbounded) -- the text reader's child cache,
+///   about 206-270 bytes a child, plus the `Element`s, under the bound of
+///   about 8 × the cap (see [`ELEMENT_BYTES`]). The count starts again at
+///   the top level between values (binary: every container closed; text: a
+///   top-level separator or closing bracket) and at each yield. The price
+///   in text: one top-level value holding more than `cap / 64` values, or
+///   an s-expression of more than `cap / 64` identifier bytes (about 160
+///   KB at the default), is refused.
+/// - **Symbols.** After EVERY item the reader consumes -- a version marker,
+///   a symbol table, a value -- what its symbol table ADDED since the last
+///   item is charged, its text plus [`SYMBOL_OVERHEAD`] a symbol, plus the
+///   symbols of a table just read and not yet applied, against the cap
+///   ([`SymbolCharge`]); a table that shrank (a version marker, a non-append
+///   table) is counted again from nothing. So the table the reader holds
+///   before a refusal is at most the cap plus one table, and one table is
+///   at most `cap / 64` symbols by the value budget. **Measured:** 63
+///   back-to-back tables of 163 000 symbols under the 10 MiB cap (each
+///   under the value budget, the file under the byte cap) are refused at the
+///   second at a 38 MB peak, where one such table reads holding 23 MB;
+///   charged after values only (round 3) the same file peaked at 426 MB
+///   (the reviewer's 494 MB in release). Kestra's `FileSerde` (a marker and
+///   a table per row) and `ionfmt` text (no table) are never charged past a
 ///   row's symbols.
 /// - **Not bounded by these:** one value's string or blob is held whole, up
 ///   to the byte cap; an annotation sequence reaches the count reset at a
@@ -254,32 +275,57 @@ fn read_guarded<R: Read>(
         Some(t) => t.into_stop(),
         None => Stop::Failed(e.to_string()),
     };
-    let mut reader = match ion_rs::Reader::new(ion_rs::AnyEncoding, input) {
-        Ok(reader) => reader,
-        Err(e) => return failed(e),
-    };
+    // The SYSTEM reader (fix round 4): every top-level item it consumes is
+    // seen here -- a version marker, a local symbol table, a value -- where
+    // `Reader::next` is this same loop skipping all but the values
+    // (`ion-rs` 1.0.1 `lazy/reader.rs:101`, `expanded/mod.rs:598`).
+    let mut reader = ion_rs::SystemReader::new(ion_rs::AnyEncoding, input);
     let mut symbols = SymbolCharge::default();
     loop {
-        let value = match reader.next() {
-            Ok(None) => return Stop::End,
-            Ok(Some(value)) => value,
+        use ion_rs::SystemStreamItem as Item;
+        let element = match reader.next_item() {
             Err(e) => return failed(e),
+            Ok(Item::EndOfStream(_)) => return Stop::End,
+            // The value as `Reader::next` would have yielded it, built the
+            // same way: its table was charged as pending after the item
+            // that defined it (below), so this build is of a value whose
+            // symbols were already found to fit.
+            Ok(Item::Value(value)) => match ion_rs::Element::try_from(value) {
+                Ok(element) => Some(element),
+                Err(e) => return failed(e),
+            },
+            // A version marker, a symbol table, or (Ion 1.1) an encoding
+            // directive: consumed by the reader, never yielded.
+            Ok(_) => None,
         };
-        // The ONLY reset of the byte count: ion-rs has read a whole
-        // top-level value (see `for_each_value`).
-        since_yield.store(0, Ordering::SeqCst);
-        values_since.store(0, Ordering::SeqCst);
-        // What the reader's symbol table now holds, charged by what it
-        // added since the last value -- whatever made it add them.
-        if let Err(why) = symbols.charge(value.symbol_table(), max_value_bytes) {
+        if element.is_some() {
+            // The ONLY reset of the byte count: ion-rs has read a whole
+            // top-level VALUE (see `for_each_value`); a symbol table between
+            // two values is counted with the value after it.
+            since_yield.store(0, Ordering::SeqCst);
+            values_since.store(0, Ordering::SeqCst);
+        }
+        // After EVERY item: what the reader's symbol table holds, by what
+        // it added since the last item, plus what the item just read left
+        // PENDING (a symbol table is applied only as the next item is read,
+        // `expanded/mod.rs:between_top_level_expressions`) -- so a run of
+        // tables is refused at the one that would not fit, before the
+        // reader reads on.
+        let pending = reader.pending_context_changes();
+        if let Err(why) = symbols.charge(
+            reader.symbol_table(),
+            pending
+                .local_symbols()
+                .iter()
+                .chain(pending.imported_symbols()),
+            max_value_bytes,
+        ) {
             return Stop::TooLarge(why);
         }
-        let element = match ion_rs::Element::try_from(value) {
-            Ok(element) => element,
-            Err(e) => return failed(e),
-        };
-        if sink(&element).is_break() {
-            return Stop::Full;
+        if let Some(element) = element {
+            if sink(&element).is_break() {
+                return Stop::Full;
+            }
         }
     }
 }
@@ -300,13 +346,21 @@ pub(crate) const ELEMENT_BYTES: u64 = 64;
 /// its `Symbol`, its `Arc`, its place in the table's `Vec` and map.
 pub(crate) const SYMBOL_OVERHEAD: u64 = 64;
 
-/// What the reader's symbol table costs, charged after each top-level value
-/// by what the table ADDED since the last one (its text plus
-/// [`SYMBOL_OVERHEAD`] each) -- and counted again from nothing when the
-/// table shrank (a version marker, a symbol table that does not append),
-/// since the old one is gone. Charges past the cap refuse the read: an
-/// append-mode symbol table between every value grows the table for ever,
-/// and each yield resets the byte count.
+/// What the reader's symbol table costs, charged after EVERY item the
+/// reader consumes (fix round 4; round 3 charged after each value only) by
+/// what the table ADDED since the last item (its text plus
+/// [`SYMBOL_OVERHEAD`] each) -- counted again from nothing when the table
+/// shrank (a version marker, a symbol table that does not append), since
+/// the old one is gone -- plus what the item left PENDING: `ion-rs` applies
+/// a symbol table to its context only as it reads the next item, so right
+/// after the table's own item its symbols are `pending_context_changes()`,
+/// and charging them there refuses a table that will not fit before the
+/// reader grows by it and reads on. The table the reader holds before a
+/// refusal is therefore at most the cap plus one table, and one table is
+/// bounded by the value budget ([`ELEMENT_BYTES`]: at most `cap / 64`
+/// symbols). Charged after values only, back-to-back tables were seen only
+/// at the next value's yield (the reviewer measured 63 tables held at once,
+/// 494 MB, under a 10 MiB cap).
 #[derive(Default)]
 struct SymbolCharge {
     len: usize,
@@ -314,23 +368,34 @@ struct SymbolCharge {
 }
 
 impl SymbolCharge {
-    fn charge(&mut self, table: &ion_rs::SymbolTable, cap: u64) -> Result<(), String> {
+    /// `pending`: the symbols the reader has read but not yet applied (its
+    /// `pending_context_changes()`, a type `ion-rs` does not export).
+    fn charge<'s>(
+        &mut self,
+        table: &ion_rs::SymbolTable,
+        pending: impl Iterator<Item = &'s ion_rs::Symbol>,
+        cap: u64,
+    ) -> Result<(), String> {
+        let cost =
+            |symbol: &ion_rs::Symbol| symbol.text().map_or(0, str::len) as u64 + SYMBOL_OVERHEAD;
         let symbols = table.symbols();
         if symbols.len() < self.len {
             self.len = 0;
             self.held = 0;
         }
         for symbol in &symbols[self.len..] {
-            let text = symbol.text().map_or(0, str::len) as u64;
-            self.held = self.held.saturating_add(text + SYMBOL_OVERHEAD);
+            self.held = self.held.saturating_add(cost(symbol));
         }
         self.len = symbols.len();
-        if self.held > cap {
+        let (pending_symbols, pending_cost) = pending.fold((0usize, 0u64), |(n, sum), symbol| {
+            (n + 1, sum.saturating_add(cost(symbol)))
+        });
+        if self.held.saturating_add(pending_cost) > cap {
             return Err(format!(
                 "the file's symbol tables define more symbols than workflow.storage.max_read_bytes \
                  ({cap} bytes) holds ({} symbols, {SYMBOL_OVERHEAD} bytes each over their text): \
                  egret reads only files whose symbols fit in that size",
-                self.len
+                self.len + pending_symbols
             ));
         }
         Ok(())
@@ -560,6 +625,9 @@ struct TextScan {
     count: Count,
     /// The last byte scanned in `Normal` was an identifier character.
     in_word: bool,
+    /// Bit `i` set: the container open at level `i + 1` is an s-expression
+    /// (`MAX_DEPTH` levels fit; the bits above `depth` are stale).
+    sexps: u128,
 }
 
 /// What a scan reports for the ELEMENT budget (W9a Task 12 fix round 3):
@@ -631,12 +699,24 @@ fn is_operator(b: u8) -> bool {
 }
 
 impl TextScan {
-    fn open(&mut self) -> Result<(), Trip> {
+    /// One level deeper, opened by `b` (`(` is an s-expression).
+    fn open(&mut self, b: u8) -> Result<(), Trip> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
             return Err(too_deep());
         }
+        let bit = 1u128 << (self.depth - 1);
+        if b == b'(' {
+            self.sexps |= bit;
+        } else {
+            self.sexps &= !bit;
+        }
         Ok(())
+    }
+
+    /// The innermost open container is an s-expression.
+    fn in_sexp(&self) -> bool {
+        self.depth > 0 && (self.sexps >> (self.depth - 1)) & 1 == 1
     }
 
     fn normal(&mut self, b: u8) -> Result<Text, Trip> {
@@ -647,11 +727,18 @@ impl TextScan {
         // bracket, a quote) once -- outside strings, symbols, lobs and
         // comments. A value is at least one such byte, so this is never
         // under what the reader builds; a timestamp or a decimal counts as
-        // several.
+        // several. Inside an s-expression EVERY identifier byte counts (fix
+        // round 4): there `ion-rs` 1.0.1 splits a run at each `$<digits>`
+        // symbol ID (`($1$2$3)` is three values; `($1a$1a)` is `($ion
+        // a$1a)`), where a list or a struct refuses the adjacency -- and the
+        // split rule is never mirrored, since mirroring it could count UNDER
+        // what the reader builds. The price: an s-expression of more than
+        // `cap / 64` identifier bytes (about 160 KB at the default) in one
+        // top-level value is refused; Kestra writes no s-expressions.
         let word = b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
         if b.is_ascii_whitespace() || b == b',' {
             self.count.top |= self.depth == 0;
-        } else if !(word && self.in_word) {
+        } else if !(word && self.in_word && !self.in_sexp()) {
             self.count.values += 1;
         }
         self.in_word = word;
@@ -660,11 +747,11 @@ impl TextScan {
             b'\'' => Text::Quote1,
             b'/' if !after_operator => Text::Slash,
             b'{' => {
-                self.open()?;
+                self.open(b)?;
                 Text::Brace
             }
             b'[' | b'(' => {
-                self.open()?;
+                self.open(b)?;
                 Text::Normal
             }
             b']' | b')' | b'}' => {
@@ -723,7 +810,7 @@ impl TextScan {
             Text::LineComment => match b {
                 b'\n' | b'\r' => Text::Normal,
                 b'[' | b'(' | b'{' => {
-                    self.open()?;
+                    self.open(b)?;
                     Text::LineComment
                 }
                 _ => Text::LineComment,
@@ -731,7 +818,7 @@ impl TextScan {
             Text::BlockComment(star) => match b {
                 b'/' if star => Text::Normal,
                 b'[' | b'(' | b'{' => {
-                    self.open()?;
+                    self.open(b)?;
                     Text::BlockComment(false)
                 }
                 _ => Text::BlockComment(b == b'*'),
@@ -2066,8 +2153,8 @@ mod tests {
     // ---- W9a Task 12 fix round 3: symbol tables and element counts --------
 
     /// A binary symbol table appending `k` symbols with no text (`null`, one
-    /// byte each -- the cheapest symbol there is), then the int `i`.
-    fn binary_null_symbols_then(k: usize, i: u8) -> Vec<u8> {
+    /// byte each -- the cheapest symbol there is).
+    fn binary_null_symbol_table(k: usize) -> Vec<u8> {
         let mut list = binary_header(11, k);
         list.extend(std::iter::repeat_n(0x0Fu8, k));
         let mut fields = vec![0x86, 0x71, 0x03, 0x87];
@@ -2078,6 +2165,12 @@ mod tests {
         wrapped.extend(st);
         let mut out = binary_header(14, wrapped.len());
         out.extend(wrapped);
+        out
+    }
+
+    /// [`binary_null_symbol_table`], then the int `i`.
+    fn binary_null_symbols_then(k: usize, i: u8) -> Vec<u8> {
+        let mut out = binary_null_symbol_table(k);
         out.extend([0x21, i]);
         out
     }
@@ -2182,6 +2275,98 @@ mod tests {
         let annotated = format!("{}0", "x::".repeat(budget));
         let (_, stop) = capped(cursor(annotated), cap);
         assert!(matches!(stop, Stop::TooLarge(_)), "{stop:?}");
+    }
+
+    // ---- W9a Task 12 fix round 4: every item charged; sexp word bytes ----
+
+    /// **(A)** Symbol tables BACK TO BACK, each under the value budget, are
+    /// charged as the reader consumes each one -- not at the next user
+    /// value, by which time the table held them all. 20 append-mode tables
+    /// of 16 000 `null` symbols (16 KiB each, 320 KiB in all) under a 1 MiB
+    /// cap: one table then a value reads (the premise); the run is refused
+    /// naming the symbols, and the reader pulled under 128 KiB of the 320
+    /// (before: all of it, the charge waiting for the value at the end).
+    #[test]
+    fn back_to_back_symbol_tables_are_charged_before_the_next_value() {
+        const CAP: u64 = 1 << 20;
+        let table = binary_null_symbol_table(16_000);
+        let mut one = BINARY_VERSION_MARKER.to_vec();
+        one.extend(&table);
+        one.extend([0x21, 0x01]);
+        let (rows, stop) = capped(cursor(one), CAP);
+        assert!(matches!(stop, Stop::End), "the premise: {stop:?}");
+        assert_eq!(rows, vec![json!(1)]);
+        let mut many = BINARY_VERSION_MARKER.to_vec();
+        for _ in 0..20 {
+            many.extend(&table);
+        }
+        many.extend([0x21, 0x01]);
+        let total = many.len() as u64;
+        let input = Generated::new(&many, 0, 0, b"");
+        let pulled = input.pulled.clone();
+        let (rows, stop) = capped(input, CAP);
+        assert!(rows.is_empty(), "{rows:?}");
+        let Stop::TooLarge(why) = stop else {
+            panic!("{stop:?}")
+        };
+        assert!(why.contains("symbol"), "{why}");
+        assert!(why.contains("max_read_bytes (1048576 bytes)"), "{why}");
+        let pulled = pulled.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            pulled < 128 * KIB as u64,
+            "pulled {pulled} of {total} bytes: the tables were charged only at the value"
+        );
+    }
+
+    /// **(B)** Inside an s-expression `ion-rs` splits a run of word
+    /// characters at every `$<digits>` symbol ID (the premise: `($1$2$3)` is
+    /// three symbols), so there EVERY word byte counts as a value -- a run
+    /// of 600 `$1` (1 200 bytes, under a 64 KiB cap) is refused by the
+    /// budget of 1 024, not built. Elsewhere a run counts once: the same run
+    /// in a list is `ion-rs`'s own error (lists refuse adjacency), and an
+    /// s-expression of ordinary tokens -- ints, symbols, timestamps, a struct
+    /// and a list -- under the budget reads.
+    #[test]
+    fn a_sexp_counts_every_word_byte_as_a_value() {
+        let cap = 64 * KIB as u64;
+        let (rows, stop) = capped(cursor("($1$2$3)"), u64::MAX);
+        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert_eq!(
+            rows,
+            vec![json!(["$ion", "$ion_1_0", "$ion_symbol_table"])],
+            "the premise: ion-rs splits the run"
+        );
+        let run = "$1".repeat(600);
+        let (rows, stop) = capped(cursor(format!("({run})")), cap);
+        assert!(rows.is_empty(), "{rows:?}");
+        let Stop::TooLarge(why) = stop else {
+            panic!("{stop:?}")
+        };
+        assert!(why.contains("more than 1024 values"), "{why}");
+        let (rows, stop) = capped(cursor(format!("[{run}]")), cap);
+        assert!(rows.is_empty(), "{rows:?}");
+        assert!(
+            matches!(stop, Stop::Failed(_)),
+            "a list refuses adjacency: {stop:?}"
+        );
+        // The threshold: an s-expression's word bytes are its values (its
+        // tokens were). 1 000 of them, in 250 symbols, read under the budget
+        // of 1 024 (the `(` counts too); 1 032 are refused.
+        let words = |n: usize| format!("({})", vec!["abcd"; n / 4].join(" "));
+        let (rows, stop) = capped(cursor(words(1_000)), cap);
+        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert_eq!(rows.len(), 1);
+        let (_, stop) = capped(cursor(words(1_032)), cap);
+        assert!(matches!(stop, Stop::TooLarge(_)), "{stop:?}");
+        let ordinary =
+            "(1 22 333 abc d_e 2025-12-03T12:00:00.123Z {a:1,b:[x,y]} [1,2] \"s\" 'q')\n";
+        let (rows, stop) = capped(cursor(ordinary.repeat(1_000)), cap);
+        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert_eq!(rows.len(), 1_000);
+        assert_eq!(
+            rows[0],
+            json!([1, 22, 333, "abc", "d_e", "2025-12-03T12:00:00.123Z", {"a": 1, "b": ["x", "y"]}, [1, 2], "s", "q"])
+        );
     }
 
     /// A reader that hands out at most `chunk` bytes a call, as the store does.
