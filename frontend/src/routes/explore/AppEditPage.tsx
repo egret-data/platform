@@ -7,6 +7,7 @@ import { requestAppTicket, useApp, usePublishApp } from "@/api/apps";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { describeFailure } from "@/lib/apps/failures";
 
 /**
  * The editor for one app: egret's header over an iframe that shows marimo from the APPS origin.
@@ -26,30 +27,6 @@ type Load =
   | { state: "ticketing" }
   | { state: "ready"; url: string }
   | { state: "failed"; title: string; message: string };
-
-function describeFailure(err: unknown): { title: string; message: string } {
-  const status = (err as { status?: number })?.status;
-  const detail = (err as Error)?.message;
-  switch (status) {
-    case 403:
-      return {
-        title: "You can't edit this app",
-        message:
-          "Editing needs permission to write this app and to run queries in this workspace. Ask a workspace admin.",
-      };
-    case 404:
-      return { title: "App not found", message: "It may have been deleted, or it belongs to another workspace." };
-    case 409:
-      return { title: "This app can't be opened right now", message: detail || "It is in the trash." };
-    case 503:
-      return {
-        title: "Apps are not set up on this deployment",
-        message: "The apps origin is not configured. An operator needs to set apps.origin.",
-      };
-    default:
-      return { title: "Couldn't open the editor", message: detail || "Something went wrong asking for the editor." };
-  }
-}
 
 export default function AppEditPage() {
   const { workspace, id } = useParams();
