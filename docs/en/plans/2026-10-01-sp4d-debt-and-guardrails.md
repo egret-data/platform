@@ -423,6 +423,56 @@ programme.
 
 ---
 
+### Task 15: a tag RENAME can create the unreadable-table pair, bypassing both guards
+
+**Files:** `crates/egret-bi/src/tags.rs:160` (the `UPDATE tags SET name = …` path)
+
+**Found by me while adjudicating Task 5, from the direction its own concern 5 did not check.** Task 5
+examined rename moving a tag **out** from under its guard and concluded correctly that the pair is then
+genuinely gone — the engine matches on the name too. It listed `TagRepo::rename` as "not in the class".
+The other direction is the gap:
+
+1. An editor mask policy addresses tag **name** `"SENSITIVE"` (no such tag exists, or it is column-attached).
+2. Tag `"PII"` is attached at **table** level.
+3. Rename `"PII"` → `"SENSITIVE"`.
+4. The pair now exists — **authored by neither write path**, so neither of Task 5's guards ran.
+
+Measured: `crates/egret-bi/src/tags.rs:160` is a production `UPDATE tags SET name = COALESCE($2, name)`
+and **no caller of `unreadable_table_mask_for_*` sits on it** (the guard's only callers are in
+`egret-policy/src/store.rs`, on the mask and attachment paths).
+
+- [ ] **Step 1: Confirm it end to end before fixing it.** Build the three-step sequence above against the
+real routes and show the pair exists afterwards. If the editor policy's tag lookup makes it unreachable,
+that is the finding and this task is a doc change.
+- [ ] **Step 2: The rename is a third authoring surface**, so it takes the same guard the other two take —
+not a copy of the predicate. Task 5 deliberately put the decision beside the SQL after its own mutation M4
+caught a copy; keep that.
+- [ ] **Step 3: Test the rename in both directions** — renaming *into* a masked name refuses; renaming
+*out of* one is still allowed, since that is how a steward escapes the pair.
+- [ ] **Step 4: Commit.**
+
+---
+
+### Task 16: a tag-masking policy can be created and deleted but never edited
+
+**Files:** `crates/egret-policy/src/admin/mod.rs` (`update_policy`'s missing tag branch)
+
+**Found by Task 5, pre-existing and outside its scope.** `PUT /policies/{id}` has **no `is_tag_kind`
+branch**, so `editor_to_ranger_json` returns `"unknown policy kind: tag-masking"`. `create_policy` has the
+branch; `update_policy` does not.
+
+Convenient for Task 5 — one fewer surface to guard — and bad for the product: an editor-authored tag mask
+can be **created and deleted but never edited**. So the remedy for an editor-origin unreadable-table pair
+is **delete and recreate**, which Task 5's refusal message does not say, because saying it would document
+a defect rather than a workflow.
+
+- [ ] **Step 1: Add the branch**, mirroring `create_policy`'s, and route it through **every guard the
+create path takes** — including Task 5's. An edit is an authoring surface.
+- [ ] **Step 2: Then revisit Task 5's refusal message**, which currently names two remedies; with editing
+possible, "edit the policy to address it by path" becomes a third and better one.
+
+---
+
 ## Pre-merge steps
 
 1. **Run migration 0166's own listing query** (`migrations/0166_…sql:124`) against any cluster that
