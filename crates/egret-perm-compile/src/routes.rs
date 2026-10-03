@@ -2482,8 +2482,14 @@ fn attachment_for(
     })
 }
 
-/// The evaluator's own tag set, as the steward reads it —
-/// [`ExplainResponse::tags`].
+/// The evaluator's own tag set, as the steward reads it — the list each
+/// [`ExplainProfile::tags`] is narrowed from.
+///
+/// ⚠ This link read `[ExplainResponse::tags]` until SP4d debt Task 7. That field was
+/// removed by the H3 fix **in the same squashed commit that wrote this doc**, and
+/// `rustdoc` resolves an unknown path in a private item's doc silently, so nothing
+/// mechanical saw it — the same commit, and the same blind spot, as the two
+/// assertions that task repaired.
 ///
 /// **Task 8's F4/F5 fix, and the direction matters.** This maps the set the
 /// evaluator was handed; it does not re-query, re-derive or re-order anything. So
@@ -3198,7 +3204,7 @@ mod tag_resolution_tests {
         );
     }
 
-    /// **Task 8's F4/F5.** `ExplainResponse::tags` is the evaluator's own set now,
+    /// **Task 8's F4/F5.** [`ExplainProfile::tags`] is the evaluator's own set now,
     /// and the field a steward acts on is `attached_at_column`: `true` says
     /// "change this column's assignment", `false` says "change the TABLE's". The
     /// browser measured the old field reporting "None." next to a deny driven by a

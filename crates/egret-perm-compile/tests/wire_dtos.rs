@@ -569,19 +569,38 @@ fn cause_tag_priority_arbitration_keeps_names_and_priorities_in_step() {
     );
 }
 
-/// The whole-branch review's CRITICAL rides the arbitration wire shape as a
-/// DELIBERATE ALIAS, and this pins the mapping so it cannot drift silently.
+/// The whole-branch review's CRITICAL has its OWN named variant, and the two
+/// policies are NAMED rather than positional.
 ///
-/// The tag policy comes FIRST and the resource policy SECOND, in all three
-/// parallel lists. That order is what makes the page's sentence readable at all,
-/// and a swap would pair each name with the other's priority — the exact defect
-/// the three-list shape exists to avoid.
+/// # ⚠ This assertion changed DIRECTION, and the reason is recorded here
 ///
-/// ⚠ The wire tag is `tag_priority_arbitration_not_modelled`, so the page's
-/// sentence calls the resource policy a tag policy. See the ⚠ hand-off note on
-/// the `From` arm in `explain_wire.rs`.
+/// It read the opposite until SP4d debt Task 7: it pinned this cause as riding
+/// [`WireUndecidableCause::TagPriorityArbitrationNotModelled`]'s three positional
+/// lists under that variant's own `kind`. That alias was real, deliberate and
+/// documented — it let the Critical land without racing `openapi.json`, the
+/// generated client and the exhaustive TSX switch — and the final SP4d round then
+/// SPLIT it, for the one-word reason the `From` arm in `explain_wire.rs` states:
+/// the arbitration sentence opens "Several **tag** policies …", and here one of
+/// the two is a RESOURCE policy, so the alias put a wrong NOUN in front of a
+/// steward. The test was added by #611, the same squashed commit that performed
+/// the split, and it is DB-free — nothing hid it but CI being out of quota with
+/// `just check` as the only gate.
+///
+/// **The code is the current side, confirmed from the contract and not from a
+/// comment:** `WireUndecidableCause::AccessPriorityCompositeNotModelled` exists
+/// with six named fields, `openapi.json` carries the
+/// `access_priority_composite_not_modelled` discriminator, the generated client's
+/// `wireUndecidableCause.ts` has that arm, and `ExplainAccess.tsx` switches on it
+/// with a sentence of its own. Rewriting the assertion to match the code would be
+/// papering over a defect if any of those four disagreed; all four agree.
+///
+/// What survives unchanged is the property the old assertion was for: which policy
+/// is the TAG one must be readable off the wire. A `Vec` cannot say that, so the
+/// pairing is now pinned by the field names instead of by position — and that is
+/// asserted on the JSON, not only on the enum, because it is a property of the
+/// serialisation.
 #[test]
-fn cause_access_priority_composite_rides_the_arbitration_wire_shape() {
+fn cause_access_priority_composite_is_its_own_named_variant() {
     let cause = UndecidableCause::AccessPriorityCompositeNotModelled {
         tag_policy_id: Some(901),
         tag_policy_name: "clearance-allow".to_string(),
@@ -593,11 +612,17 @@ fn cause_access_priority_composite_rides_the_arbitration_wire_shape() {
     assert_eq!(
         serde_json::to_value(WireUndecidableCause::from(&cause)).unwrap(),
         serde_json::json!({
-            "kind": "tag_priority_arbitration_not_modelled",
-            "policy_ids": [901, 1],
-            "policy_names": ["clearance-allow", "override-grant"],
-            "priorities": [0, 1],
-        })
+            "kind": "access_priority_composite_not_modelled",
+            "tag_policy_id": 901,
+            "tag_policy_name": "clearance-allow",
+            "tag_priority": 0,
+            "resource_policy_id": 1,
+            "resource_policy_name": "override-grant",
+            "resource_priority": 1,
+        }),
+        "the composite must NOT serialise as `tag_priority_arbitration_not_modelled` \
+         any more: that `kind` is the one whose page sentence calls both policies tag \
+         policies, and one of these two is a resource policy"
     );
 }
 
