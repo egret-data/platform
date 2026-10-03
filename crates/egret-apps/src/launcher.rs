@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use egret_core::{Error, Result, UserId, WorkspaceId};
+use egret_core::{Result, UserId, WorkspaceId};
 use uuid::Uuid;
 
 use crate::proxy::pod_ref::{edit_pod_ref, run_pod_ref};
@@ -281,6 +281,7 @@ impl AppPodLauncher for FakeAppPodLauncher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egret_core::Error;
 
     fn key() -> EditPodKey {
         EditPodKey {
