@@ -83,6 +83,9 @@ pub struct ProxyConfig {
     pub session_idle: Duration,
     pub session_absolute: Duration,
     pub cookie_ttl: Duration,
+    /// D24: a run pod's own viewer, open WebSockets at once, before a new one gets 503. Not a
+    /// multi-tenant cap — bounds one person's reconnect loop, not concurrent strangers.
+    pub run_session_cap: u32,
 }
 
 pub(crate) struct Inner {

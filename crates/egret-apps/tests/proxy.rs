@@ -243,13 +243,22 @@ async fn grant_role(db: &Db, user: Uuid, role: &str, ws: Uuid) {
     .unwrap();
 }
 
+/// No test needs the cap itself; this is just large enough that nothing in the suite trips it.
+const NO_PRACTICAL_CAP: u32 = 1000;
+
 impl Fixture {
     async fn new() -> Self {
         let (pod_url, pod) = spawn_pod().await;
-        Self::with_resolver(Arc::new(FakePods { base: pod_url }), pod).await
+        Self::with_resolver(Arc::new(FakePods { base: pod_url }), pod, NO_PRACTICAL_CAP).await
     }
 
-    async fn with_resolver(pods: Arc<dyn PodResolver>, pod: PodLog) -> Self {
+    /// A fixture whose run surface enforces `cap` concurrent WebSockets per (viewer, version).
+    async fn with_run_cap(cap: u32) -> Self {
+        let (pod_url, pod) = spawn_pod().await;
+        Self::with_resolver(Arc::new(FakePods { base: pod_url }), pod, cap).await
+    }
+
+    async fn with_resolver(pods: Arc<dyn PodResolver>, pod: PodLog, run_session_cap: u32) -> Self {
         let url = egret_test_db::url().await.expect("test database");
         let db = Db::connect(&url, 10).await.expect("connect");
         let owner = insert_user(&db, "owner").await;
@@ -311,6 +320,7 @@ impl Fixture {
                 session_idle: IDLE,
                 session_absolute: Duration::from_secs(8 * 3600),
                 cookie_ttl: Duration::from_secs(3600),
+                run_session_cap,
             },
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1050,6 +1060,56 @@ async fn closing_one_of_two_websockets_leaves_the_token_alive_for_the_other() {
     assert!(revoked, "the last close must revoke");
 }
 
+/// D24's `run_session_cap`: a run pod's own viewer is capped at N concurrent sessions, keyed by
+/// (viewer, version) rather than by grant — a page reload mints a fresh grant for the same person
+/// and the same pod, and the cap must still hold across that.
+#[tokio::test]
+async fn a_run_pods_own_viewer_is_capped_at_n_concurrent_sessions() {
+    let fx = Fixture::with_run_cap(2).await;
+    let rref = egret_apps::run_pod_ref(fx.viewer.id, fx.version);
+    let path = format!("/r/{rref}/ws");
+
+    let (c1, _) = fx.cookie_for(&fx.viewer, AppMode::Run).await;
+    let mut a = ws_connect(&fx, &path, Some(&c1))
+        .await
+        .expect("1st session");
+    // a second grant for the SAME viewer and version (e.g. the app reopened in another tab)
+    let (c2, _) = fx.cookie_for(&fx.viewer, AppMode::Run).await;
+    let b = ws_connect(&fx, &path, Some(&c2))
+        .await
+        .expect("2nd session, a different grant, the same pod");
+
+    match ws_connect(&fx, &path, Some(&c2)).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+            assert_eq!(
+                resp.status().as_u16(),
+                503,
+                "the pod, not the grant, is at capacity"
+            );
+        }
+        other => panic!("expected a 503 refusal, got {other:?}"),
+    }
+    assert_eq!(
+        fx.pod.all().len(),
+        2,
+        "the refused 3rd session must never reach the pod"
+    );
+
+    // closing one frees a slot for the next
+    a.close(None).await.unwrap();
+    drop(a);
+    let mut opened = false;
+    for _ in 0..50 {
+        if ws_connect(&fx, &path, Some(&c2)).await.is_ok() {
+            opened = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(opened, "closing a session must free a slot for the next");
+    let _ = b;
+}
+
 // ---- the real thing
 
 /// marimo 0.25.0 itself, started by P3's launcher against the REAL pod API, behind the REAL
@@ -1067,7 +1127,7 @@ async fn closing_one_of_two_websockets_leaves_the_token_alive_for_the_other() {
 async fn real_marimo_behind_the_real_proxy_and_the_real_pod_api() {
     let bin = std::env::var("EGRET_APPS_BIN").expect("EGRET_APPS_BIN");
     let switch = Arc::new(SwitchPods::default());
-    let fx = Fixture::with_resolver(switch.clone(), PodLog::default()).await;
+    let fx = Fixture::with_resolver(switch.clone(), PodLog::default(), NO_PRACTICAL_CAP).await;
 
     // the draft the pod will fetch through the real pod API
     sqlx::query(

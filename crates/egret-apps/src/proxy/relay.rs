@@ -24,7 +24,7 @@ use axum::http::header::{CACHE_CONTROL, LOCATION, REFERRER_POLICY, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use egret_core::Error;
+use egret_core::{Error, UserId};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as TgMessage;
@@ -397,14 +397,19 @@ async fn relay_http(
 }
 
 /// Decrements the grant's WebSocket count when the relay ends — or when the upgrade never
-/// happens and the closure holding this is dropped — and revokes its tokens at zero.
+/// happens and the closure holding this is dropped — and revokes its tokens at zero. For a run
+/// surface it also releases that pod's session-cap slot (D24's `run_session_cap`).
 struct WsGuard {
     st: ProxyState,
     grant: Uuid,
+    run_cap_key: Option<(UserId, Uuid)>,
 }
 
 impl Drop for WsGuard {
     fn drop(&mut self) {
+        if let Some((user, version)) = self.run_cap_key {
+            self.st.inner.tokens.run_ws_closed(user, version);
+        }
         if self.st.inner.tokens.ws_closed(self.grant) {
             let sessions = self.st.inner.sessions.clone();
             let grant = self.grant;
@@ -417,6 +422,22 @@ impl Drop for WsGuard {
     }
 }
 
+/// Holds a run-pod session-cap slot claimed by `run_ws_try_open` until either `key` is taken
+/// (ownership moves to a `WsGuard` once the upgrade succeeds) or this is dropped on an early
+/// return, releasing it — so a dial failure between the claim and the upgrade never leaks a slot.
+struct RunCapClaim<'a> {
+    st: &'a ProxyState,
+    key: Option<(UserId, Uuid)>,
+}
+
+impl Drop for RunCapClaim<'_> {
+    fn drop(&mut self) {
+        if let Some((user, version)) = self.key.take() {
+            self.st.inner.tokens.run_ws_closed(user, version);
+        }
+    }
+}
+
 async fn relay_ws(
     st: &ProxyState,
     upgrade: WebSocketUpgrade,
@@ -425,6 +446,22 @@ async fn relay_ws(
     headers: HeaderMap,
     admitted: &Admitted,
 ) -> Result<Response, Response> {
+    // D24's run_session_cap: one pod, one viewer — bounds a reconnect loop, checked before the
+    // upstream dial so a pod at capacity never even sees the attempt. `claim` releases the slot
+    // on any early return between here and the successful upgrade below.
+    let mut claim = RunCapClaim { st, key: None };
+    if admitted.surface == Surface::Run {
+        let version = admitted.grant.version_id.ok_or_else(unavailable)?;
+        let key = (admitted.grant.user_id, version);
+        if !st
+            .inner
+            .tokens
+            .run_ws_try_open(key.0, key.1, st.inner.cfg.run_session_cap)
+        {
+            return Err(plain(StatusCode::SERVICE_UNAVAILABLE, "app busy"));
+        }
+        claim.key = Some(key);
+    }
     let mut url = upstream_url(pod, path_and_query).ok_or_else(unavailable)?;
     let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
     url.set_scheme(scheme)
@@ -446,6 +483,7 @@ async fn relay_ws(
     let guard = WsGuard {
         st: st.clone(),
         grant: admitted.grant.id,
+        run_cap_key: claim.key.take(),
     };
     Ok(upgrade.on_upgrade(move |socket| async move {
         pump(socket, upstream).await;

@@ -2500,6 +2500,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 session_idle: std::time::Duration::from_secs(config.apps.session_idle_secs),
                 session_absolute: std::time::Duration::from_secs(config.apps.session_absolute_secs),
                 cookie_ttl: std::time::Duration::from_secs(config.apps.cookie_ttl_secs),
+                run_session_cap: pod.run_session_cap,
             },
         )))
     };
