@@ -223,13 +223,24 @@ pub enum TagWrite<'a> {
         /// The mask's own name, for the message.
         name: &'a str,
     },
-    /// A tag is being attached to a whole TABLE — migration 0081's
-    /// `column_name = ''`. **The sentinel itself is legal and stays legal**
-    /// (0166 keeps it so on purpose); what is refused is the PAIR.
-    TableAttachment {
+    /// A tag is being attached to a catalog resource.
+    ///
+    /// **The caller passes its `column` verbatim and makes no judgement about
+    /// it**, because only a TABLE-level attachment (migration 0081's
+    /// `column_name = ''`) is half of this pair and that decision belongs
+    /// beside the SQL that spells the same thing `= ''`. A guard whose caller
+    /// decided "this one is table-level" and whose query decided it again is
+    /// two guards that must agree, written to different shapes — the defect
+    /// this programme has produced four times. **The sentinel itself is legal
+    /// and stays legal** (0166 keeps it so on purpose); what is refused is the
+    /// PAIR.
+    Attachment {
         tag_id: Uuid,
         schema: &'a str,
         table: &'a str,
+        /// `""` ⇒ the whole table. Anything else is a column attachment, which
+        /// is the ordinary working configuration and never refused.
+        column: &'a str,
     },
 }
 
@@ -291,11 +302,17 @@ pub async fn unreadable_table_mask_for(
                 table,
             }))
         }
-        TagWrite::TableAttachment {
+        TagWrite::Attachment {
             tag_id,
             schema,
             table,
+            column,
         } => {
+            // Only the TABLE-level attachment is half of the pair. This is the
+            // one place that decision is made — see `TagWrite::Attachment`.
+            if !column.is_empty() {
+                return Ok(None);
+            }
             // THE MASK HALF, both surfaces, in one statement. The `ORDER BY 1`
             // puts a `perm.rules` row ahead of an editor policy, which matters
             // for the message rather than for the verdict: a rule's own compiled

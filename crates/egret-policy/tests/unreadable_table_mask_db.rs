@@ -272,10 +272,11 @@ async fn a_table_level_attachment_is_refused_when_a_tag_mask_rule_already_names_
     let mut conn = db.pool.acquire().await.expect("acquire");
     let pair = unreadable_table_mask_for(
         &mut conn,
-        TagWrite::TableAttachment {
+        TagWrite::Attachment {
             tag_id: t.id,
             schema: "sales",
             table: "orders",
+            column: "",
         },
     )
     .await
@@ -341,10 +342,11 @@ async fn a_table_level_attachment_is_refused_when_an_editor_tag_mask_policy_name
     let mut conn = db.pool.acquire().await.expect("acquire");
     let pair = unreadable_table_mask_for(
         &mut conn,
-        TagWrite::TableAttachment {
+        TagWrite::Attachment {
             tag_id: t.id,
             schema: "sales",
             table: "orders",
+            column: "",
         },
     )
     .await
@@ -385,6 +387,28 @@ async fn a_column_level_attachment_of_a_masked_tag_is_accepted() {
         .is_none(),
         "a mask over a tag attached only to COLUMNS is the working configuration"
     );
+    // And from the ATTACHMENT direction, which is the arm that decides what
+    // "table-level" means. Both arms, because the sentinel is the only thing
+    // separating the refused shape from this one, and an earlier draft spelled
+    // that decision in the CALLER as well as in this function — two guards that
+    // must agree, written to different shapes. A mutation that drops the
+    // `column.is_empty()` early return now dies HERE and nowhere else.
+    assert!(
+        unreadable_table_mask_for(
+            &mut conn,
+            TagWrite::Attachment {
+                tag_id: t.id,
+                schema: "sales",
+                table: "orders",
+                column: "email",
+            },
+        )
+        .await
+        .expect("query")
+        .is_none(),
+        "attaching a masked tag to a COLUMN is the remedy the refusal names; it \
+         must never be refused"
+    );
 }
 
 /// **A tag-addressed ROW FILTER is table-granular on both engines by
@@ -400,10 +424,11 @@ async fn a_tag_row_filter_with_a_table_level_attachment_is_accepted() {
     assert!(
         unreadable_table_mask_for(
             &mut conn,
-            TagWrite::TableAttachment {
+            TagWrite::Attachment {
                 tag_id: t.id,
                 schema: "sales",
                 table: "orders",
+                column: "",
             },
         )
         .await
@@ -427,10 +452,11 @@ async fn a_path_addressed_mask_with_a_table_level_attachment_is_accepted() {
     assert!(
         unreadable_table_mask_for(
             &mut conn,
-            TagWrite::TableAttachment {
+            TagWrite::Attachment {
                 tag_id: t.id,
                 schema: "sales",
                 table: "orders",
+                column: "",
             },
         )
         .await
@@ -460,10 +486,11 @@ async fn a_tag_access_or_row_filter_policy_with_a_table_level_attachment_is_acce
         assert!(
             unreadable_table_mask_for(
                 &mut conn,
-                TagWrite::TableAttachment {
+                TagWrite::Attachment {
                     tag_id: t.id,
                     schema: "sales",
                     table: "orders",
+                    column: "",
                 },
             )
             .await
@@ -494,10 +521,11 @@ async fn a_masking_policy_on_a_resource_profile_is_accepted() {
     assert!(
         unreadable_table_mask_for(
             &mut conn,
-            TagWrite::TableAttachment {
+            TagWrite::Attachment {
                 tag_id: t.id,
                 schema: "sales",
                 table: "orders",
+                column: "",
             },
         )
         .await

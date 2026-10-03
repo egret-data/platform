@@ -108,30 +108,31 @@ impl CatalogTagRepo {
         // the live Trino 470 measurement, the full write-path enumeration and why
         // there is no migration for this pair.
         //
-        // ⚠ `column.is_empty()` is the gate, and it is NOT a refusal of the
-        // sentinel: `column_name = ''` is migration 0081's table-level attachment
-        // and 0166 keeps it legal on purpose. What is refused is the PAIR, and
-        // only when this write is the table-level half of it — a column-level
+        // ⚠ `column` is passed VERBATIM and this call site makes no judgement
+        // about it. Only a TABLE-level attachment (`column_name = ''`,
+        // migration 0081's sentinel, which 0166 keeps legal on purpose) is half
+        // of the pair, and that decision lives beside the SQL that spells the
+        // same thing `= ''` — a gate here plus a predicate there would be two
+        // guards that must agree, written to different shapes. A column-level
         // assignment of a masked tag is the ordinary, working configuration and
-        // is untouched.
-        if column.is_empty() {
-            if let Some(pair) = egret_policy::unreadable_table_mask_for(
-                &mut tx,
-                // `Transaction` derefs to the connection the guard reads on, so
-                // the check runs on THIS transaction's snapshot — the row this
-                // write is about to insert is not in it yet, which is why the
-                // guard can refuse before writing anything.
-                egret_policy::TagWrite::TableAttachment {
-                    tag_id,
-                    schema,
-                    table,
-                },
-            )
-            .await
-            .map_err(crate::error::BiError::from)?
-            {
-                return Err(crate::error::BiError::BadRequest(pair.refusal()).into());
-            }
+        // the guard returns `None` for it.
+        if let Some(pair) = egret_policy::unreadable_table_mask_for(
+            // `Transaction` derefs to the connection the guard reads on, so the
+            // check runs on THIS transaction's snapshot — the row this write is
+            // about to insert is not in it yet, which is why the guard can
+            // refuse before writing anything.
+            &mut tx,
+            egret_policy::TagWrite::Attachment {
+                tag_id,
+                schema,
+                table,
+                column,
+            },
+        )
+        .await
+        .map_err(crate::error::BiError::from)?
+        {
+            return Err(crate::error::BiError::BadRequest(pair.refusal()).into());
         }
         sqlx::query(
             "INSERT INTO catalog_tag_assignments \
