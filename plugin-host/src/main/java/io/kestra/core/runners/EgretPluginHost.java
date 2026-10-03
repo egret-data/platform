@@ -83,9 +83,14 @@ public final class EgretPluginHost {
     private static final TypeReference<Map<String, Object>> MAP = new TypeReference<>() {};
 
     /**
-     * Task classes egret ports natively ({@code spec::registry::TASK_TYPES}, canonical types and
-     * aliases that are FQCNs). They never enter the catalog, so a native type never runs in the JVM.
-     * Task 3's test checks this list against the Rust table.
+     * Task classes egret ports natively that {@link #describe} must never put in the catalog, so a
+     * native type never runs in the JVM. It is a guard, not a mirror of
+     * {@code spec::registry::TASK_TYPES}: {@code describe} scans only the plugin jars it is given
+     * (the three JDBC plugins), so a native class no scanned jar holds needs no entry -- the
+     * {@code io.kestra.plugin.core.storage} classes, for one, measured with {@code describe} on
+     * 2026-10-03 (W9a Task 11). A native type whose class a scanned jar does ship must be added
+     * here. No test checks this list against the Rust table; an earlier version of this comment
+     * said one did, and none exists.
      */
     static final Set<String> NATIVE_TYPES = Set.of(
         "io.kestra.plugin.scripts.shell.Commands",
