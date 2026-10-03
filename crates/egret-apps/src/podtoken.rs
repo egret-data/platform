@@ -147,4 +147,23 @@ impl PodTokenRepo {
         .map_err(|e| Error::from(anyhow::Error::from(e)))?;
         Ok(r.rows_affected())
     }
+
+    /// Every live run token of this one `(app, version)`: what stopping that version's run pod
+    /// revokes. A run token proves "may read this version", not "is this viewer" — revoking it
+    /// is about not leaving a live token for a pod that is gone, not about per-viewer isolation.
+    /// Returns how many.
+    pub async fn revoke_run_for(&self, ws: WorkspaceId, app: Uuid, version: Uuid) -> Result<u64> {
+        let r = sqlx::query(
+            "UPDATE analytics.app_pod_tokens SET revoked_at = now() \
+              WHERE kind = 'run' AND workspace_id = $1 AND app_id = $2 AND version_id = $3 \
+                AND revoked_at IS NULL",
+        )
+        .bind(ws.0)
+        .bind(app)
+        .bind(version)
+        .execute(&self.db.pool)
+        .await
+        .map_err(|e| Error::from(anyhow::Error::from(e)))?;
+        Ok(r.rows_affected())
+    }
 }
