@@ -121,7 +121,24 @@ impl Requested {
 /// emitted something other than a prefix of the remaining values or the stored
 /// `rendered` has changed under a running loop, and both are corruption rather
 /// than a case to tolerate.
-pub(super) async fn spawn_all(
+///
+/// # A sync fn returning a boxed future
+///
+/// `settle` awaits this, and `settle` re-enters itself through a `Subflow`
+/// chain: awaited inline, this future's size is part of every level's poll
+/// frame, and W9a Task 11 fix round 1's file-values arm grew it past what the
+/// worker suite's `a_chain_of_subflows_deeper_than_the_bound…` fits in its
+/// stack (measured: it overflowed). Boxed here, `settle` holds a pointer.
+pub(super) fn spawn_all<'a>(
+    conn: &'a mut PgConnection,
+    ctx: &'a claim::ExecutionCtx,
+    state: &'a ExecutionState,
+    requested: &'a [Requested],
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Uuid>>> + Send + 'a>> {
+    Box::pin(spawn_all_now(conn, ctx, state, requested))
+}
+
+async fn spawn_all_now(
     conn: &mut PgConnection,
     ctx: &claim::ExecutionCtx,
     state: &ExecutionState,
