@@ -13,11 +13,12 @@ pub mod subprocess_pod;
 pub mod template;
 
 pub use gateway::{gateway_router, QueryRequest};
-pub use launcher::{spawn_reaper, AppPodLauncher, EditPodKey, FakeAppPodLauncher, LauncherPods};
-pub use podapi::{pod_router, PodApiState};
-pub use proxy::{
-    pod_ref, proxy_router, PodEndpoint, PodResolver, ProxyConfig, ProxyState, UnavailablePods,
+pub use launcher::{
+    spawn_reaper, AppPodLauncher, EditPodKey, FakeAppPodLauncher, LauncherPods, RunPodKey,
 };
+pub use podapi::{pod_router, PodApiState};
+pub use proxy::pod_ref::{edit_pod_ref, run_pod_ref};
+pub use proxy::{proxy_router, PodEndpoint, PodResolver, ProxyConfig, ProxyState, UnavailablePods};
 pub use routes::{apps_router, AppsApiState};
 
 /// OpenAPI fragment for the cookie-session app API (`/api/ws/{workspace}/apps…`).

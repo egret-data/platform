@@ -131,7 +131,7 @@ struct SwitchPods(Mutex<Option<PodEndpoint>>);
 #[async_trait]
 impl PodResolver for SwitchPods {
     fn edit_ref(&self, user: UserId, ws: WorkspaceId) -> String {
-        egret_apps::pod_ref(user, ws)
+        egret_apps::edit_pod_ref(user, ws)
     }
     async fn edit_pod(&self, _: UserId, _: WorkspaceId) -> egret_core::Result<PodEndpoint> {
         self.0
@@ -148,7 +148,7 @@ impl PodResolver for SwitchPods {
 #[async_trait]
 impl PodResolver for FakePods {
     fn edit_ref(&self, user: UserId, ws: WorkspaceId) -> String {
-        egret_apps::pod_ref(user, ws)
+        egret_apps::edit_pod_ref(user, ws)
     }
     async fn edit_pod(&self, _user: UserId, _ws: WorkspaceId) -> egret_core::Result<PodEndpoint> {
         Ok(PodEndpoint {
@@ -319,7 +319,7 @@ impl Fixture {
     }
 
     fn edit_ref(&self, who: &Person) -> String {
-        egret_apps::pod_ref(who.id, self.ws)
+        egret_apps::edit_pod_ref(who.id, self.ws)
     }
 
     fn new_grant(&self, who: &Person, mode: AppMode) -> NewGrant {
