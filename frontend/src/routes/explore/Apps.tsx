@@ -150,18 +150,27 @@ export default function Apps() {
                   <RelativeTime iso={app.updated_at} />
                 </td>
                 <td className="whitespace-nowrap py-1 text-right">
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      {/* aria-disabled, not `disabled`: a disabled button swallows the hover that shows why. */}
-                      <span>
-                        <Button size="sm" variant="ghost" aria-disabled="true" tabIndex={-1} className="pointer-events-none opacity-50">
-                          <Play className="h-4 w-4" />
-                          Open
-                        </Button>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom">Opening a published app arrives in the next release.</TooltipContent>
-                  </Tooltip>
+                  {app.latest_version_no == null ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        {/* aria-disabled, not `disabled`: a disabled button swallows the hover that shows why. */}
+                        <span>
+                          <Button size="sm" variant="ghost" aria-disabled="true" tabIndex={-1} className="pointer-events-none opacity-50">
+                            <Play className="h-4 w-4" />
+                            Open
+                          </Button>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">Publish a draft before it can be opened.</TooltipContent>
+                    </Tooltip>
+                  ) : (
+                    <Button size="sm" variant="ghost" asChild>
+                      <Link to={`/explore/${ws}/apps/${app.id}`}>
+                        <Play className="h-4 w-4" />
+                        Open
+                      </Link>
+                    </Button>
+                  )}
                   <Button size="sm" variant="outline" asChild>
                     <Link to={`/explore/${ws}/apps/${app.id}/edit`}>
                       <PencilLine className="h-4 w-4" />

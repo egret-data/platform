@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Loader2, RefreshCw, Rocket } from "lucide-react";
+import { ArrowLeft, History, Loader2, RefreshCw, Rocket } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import { requestAppTicket, useApp, usePublishApp } from "@/api/apps";
+import VersionsDialog from "@/components/apps/VersionsDialog";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -38,6 +39,7 @@ export default function AppEditPage() {
   const [attempt, setAttempt] = useState(0);
   const [load, setLoad] = useState<Load>({ state: "ticketing" });
   const [frameLoaded, setFrameLoaded] = useState(false);
+  const [versionsOpen, setVersionsOpen] = useState(false);
   // One ticket per (app, attempt). React runs this effect twice in development (mount, cleanup,
   // mount), and a ticket is spent by its first use, so the second run must not ask again — but it
   // also must not be the one that throws the first run's answer away. So the answer is accepted
@@ -93,6 +95,10 @@ export default function AppEditPage() {
           <span className="hidden text-xs text-muted-foreground md:inline">
             Save in the editor (Ctrl/⌘+S) before publishing.
           </span>
+          <Button size="sm" variant="outline" onClick={() => setVersionsOpen(true)}>
+            <History className="h-4 w-4" />
+            Versions
+          </Button>
           <Button size="sm" variant="outline" onClick={() => setAttempt((n) => n + 1)}>
             <RefreshCw className="h-4 w-4" />
             Reload editor
@@ -139,6 +145,7 @@ export default function AppEditPage() {
           </div>
         )}
       </div>
+      <VersionsDialog ws={ws} appId={appId} open={versionsOpen} onOpenChange={setVersionsOpen} />
     </div>
   );
 }

@@ -59,13 +59,24 @@ describe("Apps list", () => {
     expect(screen.getByText("Published v3")).toBeTruthy();
   });
 
-  it("links an app to its editor and offers Open only as a disabled promise", () => {
-    useAppsMock.mockReturnValue({ data: [app({ id: "a9", name: "Live app", latest_version_no: 1 })], isLoading: false });
+  it("links an app to its editor; a draft-only app's Open stays a disabled promise", () => {
+    useAppsMock.mockReturnValue({ data: [app({ id: "a9", name: "Draft app" })], isLoading: false });
     renderApps();
-    expect(screen.getByRole("link", { name: "Live app" }).getAttribute("href")).toBe("/explore/acme/apps/a9/edit");
+    expect(screen.getByRole("link", { name: "Draft app" }).getAttribute("href")).toBe("/explore/acme/apps/a9/edit");
     expect(screen.getByRole("link", { name: /Edit/ }).getAttribute("href")).toBe("/explore/acme/apps/a9/edit");
     const open = screen.getByRole("button", { name: /Open/ });
     expect(open.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("a published app's Open is a real link to the viewer page", () => {
+    useAppsMock.mockReturnValue({
+      data: [app({ id: "a9", name: "Live app", latest_version_no: 2 })],
+      isLoading: false,
+    });
+    renderApps();
+    const open = screen.getByRole("link", { name: /Open/ });
+    expect(open.getAttribute("href")).toBe("/explore/acme/apps/a9");
+    expect(open.getAttribute("aria-disabled")).toBeNull();
   });
 
   it("explains an empty workspace", () => {

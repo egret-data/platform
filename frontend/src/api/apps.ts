@@ -10,10 +10,13 @@ import {
   appsCreate,
   appsPublish,
   appsTicket,
+  appsVersionRestore,
   getAppsGetOneQueryKey,
   getAppsListQueryKey,
+  getAppsVersionsQueryKey,
   useAppsGetOne,
   useAppsList,
+  useAppsVersions,
 } from "./generated/apps/apps";
 import type { AppDetail, AppSummary, AppTicketMode, AppVersionSummary } from "./generated/model";
 
@@ -51,6 +54,27 @@ export function usePublishApp(ws: string, id: string) {
       (await appsPublish(ws, id, expectedRevision == null ? null : { expected_revision: expectedRevision }))
         .data as AppVersionSummary,
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: getAppsGetOneQueryKey(ws, id) });
+      qc.invalidateQueries({ queryKey: getAppsListQueryKey(ws) });
+    },
+  });
+}
+
+/** An app's published versions, newest first (the backend orders them; see `AppStore::versions`). */
+export function useAppVersions(ws: string, id: string) {
+  return useAppsVersions<AppVersionSummary[], ApiError>(ws, id, {
+    query: { select: (r) => r.data as AppVersionSummary[] },
+  });
+}
+
+/** Restoring a past version publishes a NEW version from its source — history stays linear, no
+ * pointer moves. Invalidates both the version list and the app (its `latest_version_no` changes). */
+export function useRestoreVersion(ws: string, id: string) {
+  const qc = useQueryClient();
+  return useMutation<AppVersionSummary, ApiError, { versionId: string }>({
+    mutationFn: async ({ versionId }) => (await appsVersionRestore(ws, id, versionId)).data as AppVersionSummary,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: getAppsVersionsQueryKey(ws, id) });
       qc.invalidateQueries({ queryKey: getAppsGetOneQueryKey(ws, id) });
       qc.invalidateQueries({ queryKey: getAppsListQueryKey(ws) });
     },
