@@ -53,6 +53,7 @@ IMAGE_ROOT = Path("/opt/egret-apps")
 DEFAULT_CONFIG = IMAGE_ROOT / "config"
 DEFAULT_VENV_SHIM = IMAGE_ROOT / "venv-shim"
 PORTS = {"edit": "2718", "run": "2719"}
+RUN_KERNEL_MODES = {"thread", "forced_ipc"}
 INTERNAL = "--internal"
 SECRETS_FD = "EGRET_SECRETS_FD"
 SECRETS = ("EGRET_POD_TOKEN", "EGRET_MARIMO_TOKEN")
@@ -116,6 +117,8 @@ def _check_env(mode: str, secrets: dict[str, str]) -> dict[str, str]:
     if mode == "run" and not _VERSION_ID.fullmatch(env["EGRET_VERSION_ID"]):
         # It is put into the pod-API URL path as is.
         raise LaunchError(EX_USAGE, f"EGRET_VERSION_ID is not a version id: {env['EGRET_VERSION_ID']!r}")
+    if mode == "run":
+        _run_kernel_mode()  # validates; raises before anything is fetched or started
     return env
 
 
@@ -124,6 +127,16 @@ def _image_path(var: str, default: Path) -> Path:
     if not _under_pytest() and not path.resolve().is_relative_to(IMAGE_ROOT):
         raise LaunchError(EX_DATAERR, f"{var}={path} is outside {IMAGE_ROOT} (test-only override)")
     return path
+
+
+def _run_kernel_mode() -> str:
+    """D24: a run pod serves exactly one viewer, so the default kernel mode is marimo's own
+    thread mode. "forced_ipc" (the P3 patch) is kept for a possible future shared-pod revival —
+    not a supported production path today."""
+    mode = os.environ.get("EGRET_RUN_KERNEL_MODE") or "thread"
+    if mode not in RUN_KERNEL_MODES:
+        raise LaunchError(EX_USAGE, f"EGRET_RUN_KERNEL_MODE must be one of {sorted(RUN_KERNEL_MODES)}, got {mode!r}")
+    return mode
 
 
 def _port(mode: str) -> str:
@@ -179,7 +192,8 @@ def build(mode: str, secrets: dict[str, str]) -> list[str]:
             raise LaunchError(EX_UNAVAILABLE, f"cannot fetch version {env['EGRET_VERSION_ID']}: {e}") from e
         app_file = workdir / f"{app_id}.py"
         app_file.write_text(source, encoding="utf-8")
-        install_run_mode_ipc_patch(shim)
+        if _run_kernel_mode() == "forced_ipc":
+            install_run_mode_ipc_patch(shim)
         target = str(app_file)
 
     # -q first (a marimo GROUP option): without it marimo prints its startup URL, which
