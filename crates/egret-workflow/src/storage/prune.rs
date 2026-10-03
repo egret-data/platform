@@ -1,0 +1,648 @@
+//! W9a: the retention pruner of execution files, and the orphan sweep (spec §10).
+//!
+//! Modelled on W11's log pruner ([`crate::logs`]' `prune`): one global
+//! setting, `workflow.storage_retention_days` (default 30; **`0` keeps files
+//! for ever**, so no pruner is started), an hourly pass with
+//! `MissedTickBehavior::Skip`, and a per-pass budget. It runs on a task of its
+//! own, so it never takes a worker's place.
+//!
+//! # What a pass prunes
+//!
+//! **A loop family, as one, on its loop root's end** (spec §10, the user's
+//! ruling of 2026-10-01): a file written inside a `Loop` iteration carries the
+//! iteration's own id (§3), so an iteration that ended while its root still
+//! runs keeps its files and a task after the loop can still read them. A
+//! candidate is a **loop root** (a row with no `loop_index`) whose family
+//! still has index rows, whose state is terminal (`RunState::is_terminal`, the
+//! one list, as `ExecutionRepo::log_status`) and whose `updated_at` is more
+//! than `retention_days` old. A family one of whose iterations has not ended
+//! is skipped: **an execution that has not ended is never pruned**.
+//!
+//! Per family, in this order:
+//!
+//! 1. every member's **own** prefix is computed ([`own_prefix`]) and every index
+//!    row of the family is checked to lie under its member's prefix -- so the
+//!    prefix deletes below are proven to reach every indexed object;
+//! 2. `delete_prefix` for each member. **A failure stops here**: the rows stay,
+//!    the family is still a candidate, and the next pass retries it (a store
+//!    outage is logged, never a crash, and ends this pass's pruning);
+//! 3. ONE statement deletes the family's index rows and its
+//!    `workflow.loop_file_values` rows (a whole copy of a file's records, kept
+//!    for a `Loop` over a file, Task 11) and sets `files_pruned_at` on every
+//!    member -- which is what makes a later read of one of its URIs
+//!    [`Unreadable::Pruned`](super::Unreadable::Pruned) rather than `Missing`;
+//! 4. its prefixes are swept for orphans, as below.
+//!
+//! Objects first, then rows: the opposite order would leave objects nothing
+//! points to whenever the store delete failed. (`Delete` and
+//! `PurgeCurrentExecutionFiles` delete the row first for the opposite reason:
+//! a running flow must stop seeing a file it deleted at once, and the object
+//! they may leave behind is exactly what this sweep takes.)
+//!
+//! # Orphans
+//!
+//! Objects that were uploaded and never indexed (a refused start, a task run
+//! whose outcome never committed, a `Delete` whose object delete failed): for
+//! each family pruned in this pass, and each FAILED or KILLED loop root that
+//! ended more than [`StoragePruneConfig::orphan_age`] ago and was not swept
+//! yet (`files_swept_at IS NULL`), every member's prefix is **listed**, and
+//! each object with no index row and a `last_modified` older than
+//! `orphan_age` is deleted **by its key**. A key is deleted only when it reads
+//! back as a URI of that member ([`uri::parse`], round trip); an object whose
+//! age the store does not say is kept. A swept family gets `files_swept_at`.
+//!
+//! # Never another execution's or workspace's keys
+//!
+//! [`FileStore::execution_prefix`] is not round-trip checked: for a namespace
+//! the URI builders refuse (`a..b`, or one holding `executions.<uuid>`) it
+//! names a key range that is not that execution's -- possibly another
+//! execution's subtree. [`own_prefix`] refuses such a prefix: it is used only
+//! when `uri::parse` reads a URI under it back as exactly that execution, and
+//! `parse` takes the FIRST `executions/<uuid>` of a path, so every key under
+//! an accepted prefix belongs to that execution and no other. An execution
+//! with no own prefix cannot have written a file (its builders refuse), and
+//! step 1 proves it has no row.
+//!
+//! Replicas pruning together are harmless: a second `delete_prefix`, a second
+//! `DELETE` of the same rows and a second `UPDATE` are no-ops.
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::time::Duration;
+
+use egret_core::{Error, Result};
+use sqlx::{PgConnection, PgPool};
+use tokio::task::JoinHandle;
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+use super::{loop_family, uri, FileStore};
+use crate::executor::RunState;
+
+/// The pruner's settings. [`StoragePruneConfig::new`] fills in the spec's cadence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoragePruneConfig {
+    /// A loop family whose root ended more than this many days ago loses its
+    /// files. `0` keeps them for ever: [`spawn_storage_pruner`] starts nothing.
+    pub retention_days: u32,
+    /// Between passes.
+    pub every: Duration,
+    /// Loop roots per candidate query.
+    pub batch: i64,
+    /// A pass starts no new family once it has run this long (it always does
+    /// at least one).
+    pub pass_budget: Duration,
+    /// An unindexed object older than this is an orphan; a FAILED/KILLED
+    /// family is swept once its root ended more than this long ago.
+    pub orphan_age: Duration,
+}
+
+impl StoragePruneConfig {
+    /// `retention_days`, pruned every hour, 100 loop roots per query, a 30 s
+    /// pass budget, and orphans older than 24 hours.
+    pub fn new(retention_days: u32) -> Self {
+        Self {
+            retention_days,
+            every: Duration::from_secs(3600),
+            batch: 100,
+            pass_budget: Duration::from_secs(30),
+            orphan_age: Duration::from_secs(24 * 3600),
+        }
+    }
+}
+
+/// What one pass did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    /// Executions (loop roots and iterations) whose files were pruned.
+    pub executions: u64,
+    /// Orphan objects deleted.
+    pub orphans: u64,
+    /// Families left for the next pass: a store failure, or index rows that
+    /// do not lie under their execution's prefix.
+    pub failed: u64,
+}
+
+/// Start the pruner, or return `None` when `cfg.retention_days` is `0` (keep
+/// for ever). Stops on `cancel`, between passes.
+pub fn spawn_storage_pruner(
+    pool: PgPool,
+    fs: Arc<FileStore>,
+    cfg: StoragePruneConfig,
+    cancel: CancellationToken,
+) -> Option<JoinHandle<()>> {
+    if cfg.retention_days == 0 {
+        tracing::info!(
+            "workflow storage retention is 0: execution files are kept for ever, no pruner"
+        );
+        return None;
+    }
+    tracing::info!(
+        retention_days = cfg.retention_days,
+        every_secs = cfg.every.as_secs(),
+        "workflow storage pruner started"
+    );
+    Some(tokio::spawn(async move {
+        let mut tick = tokio::time::interval(cfg.every);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tick.tick() => match prune_pass(&pool, &fs, &cfg).await {
+                    Ok(r) if r != PruneReport::default() => tracing::info!(
+                        executions = r.executions,
+                        orphans = r.orphans,
+                        failed = r.failed,
+                        "workflow storage pruned"
+                    ),
+                    Ok(_) => {}
+                    // The next pass tries again.
+                    Err(e) => tracing::warn!(error = %e, "workflow storage prune pass failed"),
+                },
+            }
+        }
+        tracing::info!("workflow storage pruner stopped");
+    }))
+}
+
+/// One pass: prune, then sweep, until there is nothing left, the budget is
+/// spent or the store fails. `Err` is the database's; a store failure is
+/// logged and counted in [`PruneReport::failed`].
+pub async fn prune_pass(
+    pool: &PgPool,
+    fs: &FileStore,
+    cfg: &StoragePruneConfig,
+) -> Result<PruneReport> {
+    let start = Instant::now();
+    let mut report = PruneReport::default();
+    let mut units = 0u64;
+    let over = |units: u64| units > 0 && start.elapsed() >= cfg.pass_budget;
+    let mut conn = pool.acquire().await.map_err(db_err)?;
+
+    // ── Prune ──────────────────────────────────────────────────────────────
+    let mut skip: Vec<Uuid> = Vec::new();
+    'prune: loop {
+        let roots = prune_candidates(&mut conn, cfg, &skip).await?;
+        let short = (roots.len() as i64) < cfg.batch;
+        for (workspace, root) in roots {
+            if over(units) {
+                return Ok(report);
+            }
+            units += 1;
+            // Never twice in one pass, whatever happened to it.
+            skip.push(root);
+            match prune_family(&mut conn, fs, cfg, workspace, root).await? {
+                Pruned::Done {
+                    executions,
+                    orphans,
+                } => {
+                    report.executions += executions;
+                    report.orphans += orphans;
+                }
+                Pruned::Kept => {}
+                Pruned::Anomaly => report.failed += 1,
+                Pruned::StoreDown => {
+                    report.failed += 1;
+                    break 'prune;
+                }
+            }
+        }
+        if short {
+            break;
+        }
+    }
+
+    // ── Sweep FAILED/KILLED families ───────────────────────────────────────
+    let mut skip: Vec<Uuid> = Vec::new();
+    loop {
+        let roots = sweep_candidates(&mut conn, cfg, &skip).await?;
+        let short = (roots.len() as i64) < cfg.batch;
+        for (workspace, root) in roots {
+            if over(units) {
+                return Ok(report);
+            }
+            units += 1;
+            let family = members(&mut conn, workspace, root).await?;
+            let mut deleted = 0;
+            let mut down = false;
+            for m in &family {
+                match sweep_member(&mut conn, fs, cfg, workspace, m).await? {
+                    Ok(n) => deleted += n,
+                    Err(()) => {
+                        down = true;
+                        break;
+                    }
+                }
+            }
+            report.orphans += deleted;
+            if down {
+                report.failed += 1;
+                return Ok(report);
+            }
+            let ids: Vec<Uuid> = family.iter().map(|m| m.id).collect();
+            sqlx::query(
+                "UPDATE workflow.executions SET files_swept_at = now() \
+                  WHERE workspace_id = $1 AND id = ANY($2)",
+            )
+            .bind(workspace)
+            .bind(&ids)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+            skip.push(root);
+        }
+        if short {
+            break;
+        }
+    }
+    Ok(report)
+}
+
+fn db_err(e: sqlx::Error) -> Error {
+    Error::Internal(anyhow::Error::new(e))
+}
+
+fn terminal() -> Vec<&'static str> {
+    RunState::ALL
+        .iter()
+        .filter(|s| s.is_terminal())
+        .map(|s| s.wire())
+        .collect()
+}
+
+/// Loop roots that ended more than `retention_days` ago and whose family
+/// still has index rows, oldest first. The walk starts from the files (the
+/// table holds only what is not pruned yet) and climbs `parent_execution_id`
+/// while the row is a loop iteration, as `index::loop_root` does.
+async fn prune_candidates(
+    conn: &mut PgConnection,
+    cfg: &StoragePruneConfig,
+    skip: &[Uuid],
+) -> Result<Vec<(Uuid, Uuid)>> {
+    // Saturated: above about 2.4 million days `make_interval` leaves the
+    // timestamp range and the query fails (logged, retried); `0` is "for ever".
+    let days = i32::try_from(cfg.retention_days).unwrap_or(i32::MAX);
+    sqlx::query_as(
+        "WITH RECURSIVE up(id, parent, loop_index, ws) AS ( \
+           SELECT e.id, e.parent_execution_id, e.loop_index, e.workspace_id \
+             FROM workflow.executions e \
+            WHERE e.id IN (SELECT DISTINCT execution_id FROM workflow.execution_files) \
+           UNION \
+           SELECT e.id, e.parent_execution_id, e.loop_index, e.workspace_id \
+             FROM workflow.executions e JOIN up ON e.id = up.parent AND e.workspace_id = up.ws \
+            WHERE up.loop_index IS NOT NULL \
+         ) \
+         SELECT r.workspace_id, r.id FROM workflow.executions r \
+          WHERE r.id IN (SELECT id FROM up WHERE loop_index IS NULL) \
+            AND r.state = ANY($1) \
+            AND r.updated_at < now() - make_interval(days => $2) \
+            AND NOT (r.id = ANY($3)) \
+          ORDER BY r.updated_at, r.id \
+          LIMIT $4",
+    )
+    .bind(terminal())
+    .bind(days)
+    .bind(skip)
+    .bind(cfg.batch)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)
+}
+
+/// FAILED or KILLED loop roots that ended more than `orphan_age` ago, neither
+/// swept nor pruned yet, oldest first.
+async fn sweep_candidates(
+    conn: &mut PgConnection,
+    cfg: &StoragePruneConfig,
+    skip: &[Uuid],
+) -> Result<Vec<(Uuid, Uuid)>> {
+    let swept: Vec<&str> = [RunState::Failed, RunState::Killed]
+        .iter()
+        .map(|s| s.wire())
+        .collect();
+    sqlx::query_as(
+        "SELECT workspace_id, id FROM workflow.executions \
+          WHERE loop_index IS NULL AND state = ANY($1) \
+            AND updated_at < now() - make_interval(secs => $2) \
+            AND files_swept_at IS NULL AND files_pruned_at IS NULL \
+            AND NOT (id = ANY($3)) \
+          ORDER BY updated_at, id \
+          LIMIT $4",
+    )
+    .bind(swept)
+    .bind(cfg.orphan_age.as_secs_f64())
+    .bind(skip)
+    .bind(cfg.batch)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)
+}
+
+/// A member of a loop family, with what its prefix is made of.
+struct Member {
+    id: Uuid,
+    namespace: String,
+    flow: String,
+    iteration: bool,
+    state: String,
+}
+
+/// `root` and every iteration under it ([`loop_family`]), with their rows.
+async fn members(conn: &mut PgConnection, workspace: Uuid, root: Uuid) -> Result<Vec<Member>> {
+    let family = loop_family(conn, workspace, root).await?;
+    let rows: Vec<(Uuid, String, String, bool, String)> = sqlx::query_as(
+        "SELECT id, namespace, flow_key, loop_index IS NOT NULL, state \
+           FROM workflow.executions WHERE workspace_id = $1 AND id = ANY($2)",
+    )
+    .bind(workspace)
+    .bind(&family)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, namespace, flow, iteration, state)| Member {
+            id,
+            namespace,
+            flow,
+            iteration,
+            state,
+        })
+        .collect())
+}
+
+/// An execution's own prefix: the store's (`s3://…/`, for `delete_prefix`)
+/// and the URIs' (`kestra:///…/executions/{id}/`), or `None` when
+/// [`FileStore::execution_prefix`] would name a key range that is not
+/// provably this execution's alone. See the module doc.
+pub(crate) fn own_prefix(
+    fs: &FileStore,
+    workspace: Uuid,
+    namespace: &str,
+    flow: &str,
+    execution: Uuid,
+) -> Option<(String, String)> {
+    let ns_path = uri::namespace_as_path(namespace);
+    let flow_slug = uri::slugify_str(flow);
+    let uri_prefix = format!(
+        "{}{ns_path}/{flow_slug}/executions/{}/",
+        uri::SCHEME_PREFIX,
+        execution.hyphenated()
+    );
+    let parsed = uri::parse(&format!("{uri_prefix}x")).ok()?;
+    let own = parsed.execution == execution
+        && parsed.ns_path == ns_path
+        && parsed.flow_slug == flow_slug
+        && parsed.tail == uri::Tail::Execution { file: "x".into() };
+    let store_prefix = fs.execution_prefix(workspace, namespace, flow, execution);
+    // The two spell the same path: the store's is `{prefix}{ws}/` + the URI's.
+    let same = store_prefix.ends_with(&uri_prefix[uri::SCHEME_PREFIX.len()..]);
+    (own && same).then_some((store_prefix, uri_prefix))
+}
+
+enum Pruned {
+    Done {
+        executions: u64,
+        orphans: u64,
+    },
+    /// An iteration has not ended: kept, not retried in this pass.
+    Kept,
+    /// Index rows outside their execution's prefix: kept, logged.
+    Anomaly,
+    /// The store failed: kept, retried next pass.
+    StoreDown,
+}
+
+async fn prune_family(
+    conn: &mut PgConnection,
+    fs: &FileStore,
+    cfg: &StoragePruneConfig,
+    workspace: Uuid,
+    root: Uuid,
+) -> Result<Pruned> {
+    let family = members(conn, workspace, root).await?;
+    let terminal = terminal();
+    // The root's own end is the candidate query's; an iteration may still run
+    // (a root ended before every iteration did) and keeps the whole family.
+    if family
+        .iter()
+        .any(|m| m.iteration && !terminal.contains(&m.state.as_str()))
+    {
+        return Ok(Pruned::Kept);
+    }
+    let prefixes: Vec<Option<(String, String)>> = family
+        .iter()
+        .map(|m| own_prefix(fs, workspace, &m.namespace, &m.flow, m.id))
+        .collect();
+    let ids: Vec<Uuid> = family.iter().map(|m| m.id).collect();
+    let uri_prefixes: Vec<Option<String>> = prefixes
+        .iter()
+        .map(|p| p.as_ref().map(|(_, u)| u.clone()))
+        .collect();
+    // Step 1: every index row lies under its member's own prefix, so the
+    // deletes below reach every indexed object.
+    let stray: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.execution_files f \
+           JOIN UNNEST($2::uuid[], $3::text[]) AS p(id, pre) ON f.execution_id = p.id \
+          WHERE f.workspace_id = $1 \
+            AND (p.pre IS NULL OR left(f.uri, length(p.pre)) <> p.pre)",
+    )
+    .bind(workspace)
+    .bind(&ids)
+    .bind(&uri_prefixes)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    if stray > 0 {
+        tracing::error!(
+            %workspace,
+            %root,
+            stray,
+            "workflow storage: index rows of this loop family lie outside their execution's \
+             prefix; its files are kept"
+        );
+        return Ok(Pruned::Anomaly);
+    }
+    // Step 2: the objects.
+    for (store_prefix, _) in prefixes.iter().flatten() {
+        if let Err(e) = fs.store.delete_prefix(store_prefix).await {
+            tracing::warn!(
+                %workspace,
+                %root,
+                error = %e,
+                "workflow storage: an execution's files could not be deleted; \
+                 its index rows are kept and the next pass retries"
+            );
+            return Ok(Pruned::StoreDown);
+        }
+    }
+    // Step 3: the rows, in one statement.
+    sqlx::query(
+        "WITH files AS ( \
+           DELETE FROM workflow.execution_files WHERE workspace_id = $1 AND execution_id = ANY($2) \
+         ), loop_values AS ( \
+           DELETE FROM workflow.loop_file_values WHERE execution_id = ANY($2) \
+         ) \
+         UPDATE workflow.executions SET files_pruned_at = now() \
+          WHERE workspace_id = $1 AND id = ANY($2)",
+    )
+    .bind(workspace)
+    .bind(&ids)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    // Step 4: what an upload in flight may have left.
+    let mut orphans = 0;
+    for m in &family {
+        match sweep_member(conn, fs, cfg, workspace, m).await? {
+            Ok(n) => orphans += n,
+            // The rows are gone and the family pruned; what is left there
+            // has no row and is taken when this prefix is listed again --
+            // which, for a SUCCESS family, is never. Logged by sweep_member.
+            Err(()) => break,
+        }
+    }
+    Ok(Pruned::Done {
+        executions: family.len() as u64,
+        orphans,
+    })
+}
+
+/// List one member's own prefix and delete, by key, each object of that
+/// member with no index row and older than `orphan_age`. `Ok(Err(()))` is
+/// a store failure (logged).
+async fn sweep_member(
+    conn: &mut PgConnection,
+    fs: &FileStore,
+    cfg: &StoragePruneConfig,
+    workspace: Uuid,
+    m: &Member,
+) -> Result<std::result::Result<u64, ()>> {
+    let Some((store_prefix, _)) = own_prefix(fs, workspace, &m.namespace, &m.flow, m.id) else {
+        return Ok(Ok(0));
+    };
+    let bucket_root = format!("s3://{}/", fs.bucket);
+    let Some(key_prefix) = store_prefix.strip_prefix(&bucket_root) else {
+        return Ok(Ok(0));
+    };
+    let listing = match fs.store.list(key_prefix, None).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(%workspace, execution = %m.id, error = %e,
+                "workflow storage: an execution's prefix could not be listed for orphans");
+            return Ok(Err(()));
+        }
+    };
+    let workspace_root = format!("{}{}/", fs.prefix, workspace.hyphenated());
+    let cutoff = chrono::Utc::now()
+        - chrono::Duration::from_std(cfg.orphan_age).unwrap_or(chrono::Duration::MAX);
+    // (key, uri) of every old object that reads back as this member's file.
+    let mut old: Vec<(String, String)> = Vec::new();
+    for o in &listing.objects {
+        if !o.key.starts_with(key_prefix) {
+            continue;
+        }
+        let Some(path) = o.key.strip_prefix(&workspace_root) else {
+            continue;
+        };
+        let u = format!("{}{path}", uri::SCHEME_PREFIX);
+        let ours = uri::parse(&u).is_ok_and(|p| p.execution == m.id && p.to_uri() == u);
+        let aged = o
+            .last_modified
+            .as_deref()
+            .and_then(parse_last_modified)
+            .is_some_and(|t| t < cutoff);
+        if ours && aged {
+            old.push((o.key.clone(), u));
+        }
+    }
+    if old.is_empty() {
+        return Ok(Ok(0));
+    }
+    let uris: Vec<&str> = old.iter().map(|(_, u)| u.as_str()).collect();
+    let indexed: BTreeSet<String> = sqlx::query_scalar(
+        "SELECT uri FROM workflow.execution_files WHERE workspace_id = $1 AND uri = ANY($2)",
+    )
+    .bind(workspace)
+    .bind(&uris)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?
+    .into_iter()
+    .collect();
+    let mut deleted = 0;
+    for (key, u) in &old {
+        if indexed.contains(u) {
+            continue;
+        }
+        if let Err(e) = fs.store.delete(&format!("{bucket_root}{key}")).await {
+            tracing::warn!(%workspace, execution = %m.id, uri = %u, error = %e,
+                "workflow storage: an orphan could not be deleted");
+            return Ok(Err(()));
+        }
+        deleted += 1;
+    }
+    Ok(Ok(deleted))
+}
+
+/// `ObjectMeta::last_modified`: RFC 3339 (S3's `DateTime` display), or the
+/// epoch seconds it falls back to. Anything else is `None`, and the object is
+/// kept: an age the store does not say is not old.
+fn parse_last_modified(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(t.with_timezone(&chrono::Utc));
+    }
+    let secs: f64 = s.parse().ok()?;
+    chrono::DateTime::from_timestamp(secs.trunc() as i64, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fs() -> FileStore {
+        FileStore {
+            store: Arc::new(egret_storage::MemStore::new()),
+            bucket: "b".into(),
+            prefix: "workflow/".into(),
+            caps: super::super::Caps::default(),
+            retention_days: 30,
+        }
+    }
+
+    #[test]
+    fn an_own_prefix_is_the_execution_prefix_and_names_only_that_execution() {
+        let (ws, e) = (Uuid::new_v4(), Uuid::new_v4());
+        let (store, uris) = own_prefix(&fs(), ws, "a.b", "My_Flow", e).expect("own");
+        assert_eq!(store, fs().execution_prefix(ws, "a.b", "My_Flow", e));
+        assert_eq!(uris, format!("kestra:///a/b/my-flow/executions/{e}/"));
+    }
+
+    /// The namespaces the URI builders refuse: `execution_prefix` would name
+    /// another execution's subtree (`a.f.executions.<other>`) or a path that
+    /// does not parse (`a..b`, `a.`).
+    #[test]
+    fn a_prefix_that_is_not_provably_the_executions_own_is_refused() {
+        let (ws, e, other) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        for ns in [
+            format!("a.f.executions.{other}"),
+            "a..b".to_string(),
+            "a.".to_string(),
+        ] {
+            assert_eq!(own_prefix(&fs(), ws, &ns, "tasks", e), None, "{ns}");
+        }
+    }
+
+    #[test]
+    fn last_modified_reads_rfc3339_and_epoch_seconds_and_nothing_else() {
+        let t = parse_last_modified("2026-10-03T10:00:00Z").unwrap();
+        assert_eq!(t.to_rfc3339(), "2026-10-03T10:00:00+00:00");
+        assert!(parse_last_modified("2026-10-03T10:00:00.123+02:00").is_some());
+        assert_eq!(
+            parse_last_modified("1700000000.5").unwrap().timestamp(),
+            1_700_000_000
+        );
+        assert_eq!(parse_last_modified("yesterday"), None);
+    }
+}

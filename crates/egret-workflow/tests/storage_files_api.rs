@@ -510,6 +510,48 @@ async fn another_executions_file_is_404_with_no_redirect() {
     }
 }
 
+/// W9a Task 13: a file of the family whose storage the pruner deleted is a
+/// 404 that says so, naming the retention window; a missing file of an
+/// execution that was not pruned keeps the one message (the control). The
+/// prune is simulated (row deleted, `files_pruned_at` set): the real pass is
+/// global and would race this binary's other tests; it is
+/// `storage_prune.rs`'s.
+#[tokio::test]
+async fn a_pruned_file_is_404_saying_it_was_deleted_at_retention() {
+    let Some(fx) = fx().await else { return };
+    let a = fx.exec(Link::default()).await;
+    let gone = fx.file(a, "gone.txt", b"x").await;
+    assert_eq!(fx.statuses(a, &gone).await, [200, 200, 200]);
+    sqlx::query("DELETE FROM workflow.execution_files WHERE workspace_id = $1 AND uri = $2")
+        .bind(fx.ws)
+        .bind(&gone)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+    // The control, before the execution is marked pruned: the one message.
+    let body = common::json(fx.get(a, "file/metas", &gone).await).await;
+    assert_eq!(
+        body["error"],
+        format!("not found: {gone}: no such file of execution {a}"),
+        "{body}"
+    );
+    sqlx::query("UPDATE workflow.executions SET files_pruned_at = now() WHERE id = $1")
+        .bind(a)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(fx.statuses(a, &gone).await, [404, 404, 404]);
+    let body = common::json(fx.get(a, "file/metas", &gone).await).await;
+    assert_eq!(
+        body["error"],
+        format!(
+            "not found: {gone} was deleted: files are kept {} days after their execution ends",
+            fx.fs.retention_days
+        ),
+        "{body}"
+    );
+}
+
 #[tokio::test]
 async fn another_workspaces_execution_is_404() {
     let Some(fx) = fx().await else { return };

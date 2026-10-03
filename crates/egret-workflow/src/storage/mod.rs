@@ -33,6 +33,7 @@ pub mod collect;
 pub mod index;
 pub mod inputs;
 pub mod ion;
+pub mod prune;
 pub mod routes;
 pub mod scope;
 pub mod transfer;
@@ -187,6 +188,12 @@ pub enum Unreadable {
     /// Its execution is readable and no such file was ever committed.
     #[error("{uri} does not exist")]
     Missing { uri: String },
+    /// Its execution is readable, it has no index row, and the pruner deleted
+    /// that execution's files (`executions.files_pruned_at`, spec §10). Not
+    /// [`Unreadable::Missing`]: `fileExists` answers `false` for a file that
+    /// never existed, and fails on this one, naming the retention window.
+    #[error("{uri} was deleted: files are kept {retention_days} days after their execution ends")]
+    Pruned { uri: String, retention_days: u32 },
 }
 
 /// A readable file whose bytes are not UTF-8, refused by `read()` (spec §7.2;

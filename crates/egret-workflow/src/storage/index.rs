@@ -165,7 +165,13 @@ pub async fn readable_executions(
 /// `{exec}` is not in `readable` -- decided from the URI alone, before and
 /// without any query, so the answer cannot depend on whether the file exists;
 /// otherwise one `SELECT` over the readable URIs, scoped by `workspace`, and a
-/// URI with no row is `Missing`. The map holds one entry per distinct URI.
+/// URI with no row is `Missing` -- or `Pruned` when its `{exec}` (readable)
+/// has `files_pruned_at` set (spec §10; a second `SELECT`, only when a URI has
+/// no row). The map holds one entry per distinct URI.
+///
+/// `Pruned`'s `retention_days` is the installed store's
+/// (`workflow.storage_retention_days`): the number in the message only, the
+/// decision is the row's. With no store installed it is the default, 30.
 pub async fn resolve_readable_many(
     conn: &mut PgConnection,
     workspace: Uuid,
@@ -220,8 +226,56 @@ pub async fn resolve_readable_many(
             }),
         );
     }
+    // A readable URI with no row: was its execution's storage pruned?
+    let missing: BTreeMap<&str, Uuid> = out
+        .iter()
+        .filter(|(_, v)| matches!(v, Err(Unreadable::Missing { .. })))
+        .filter_map(|(u, _)| Some((u.as_str(), uri::parse(u).ok()?.execution)))
+        .collect();
+    if missing.is_empty() {
+        return Ok(out);
+    }
+    let executions: Vec<Uuid> = missing
+        .values()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let pruned: BTreeSet<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions \
+          WHERE workspace_id = $1 AND id = ANY($2) AND files_pruned_at IS NOT NULL",
+    )
+    .bind(workspace)
+    .bind(&executions)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?
+    .into_iter()
+    .collect();
+    if pruned.is_empty() {
+        return Ok(out);
+    }
+    let retention_days = super::current().map_or(DEFAULT_RETENTION_DAYS, |f| f.retention_days);
+    let gone: Vec<String> = missing
+        .into_iter()
+        .filter(|(_, e)| pruned.contains(e))
+        .map(|(u, _)| u.to_string())
+        .collect();
+    for uri in gone {
+        out.insert(
+            uri.clone(),
+            Err(Unreadable::Pruned {
+                uri,
+                retention_days,
+            }),
+        );
+    }
     Ok(out)
 }
+
+/// `workflow.storage_retention_days`'s default, named by
+/// [`Unreadable::Pruned`] when no store is installed in this process.
+const DEFAULT_RETENTION_DAYS: u32 = 30;
 
 /// `readable_executions` + `resolve_readable_many`, one element.
 pub async fn resolve_readable(

@@ -1540,6 +1540,14 @@ mod tests {
                 Err(crate::storage::Unreadable::Missing { uri: a.clone() }),
                 "does not exist",
             ),
+            // W9a Task 13: a pruned file fails the task with its message.
+            (
+                Err(crate::storage::Unreadable::Pruned {
+                    uri: a.clone(),
+                    retention_days: 30,
+                }),
+                "was deleted: files are kept 30 days",
+            ),
         ] {
             let spy = Spy::ok(ok(serde_json::json!({})));
             let t = stored_task(

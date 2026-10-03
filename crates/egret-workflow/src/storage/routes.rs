@@ -21,7 +21,10 @@
 //! served here: a viewer asks those executions by their own id. Anything
 //! `resolve_readable_many` does not answer `Ok` is one 404 with one message,
 //! whatever the reason (malformed, another execution, missing): no redirect,
-//! and nothing that tells whether a file exists outside the family.
+//! and nothing that tells whether a file exists outside the family. The one
+//! exception is a file of the family whose storage was pruned (W9a Task 13):
+//! its 404 says so, naming the retention window -- the family is the viewer's
+//! to read, so that tells nothing about anything outside it.
 //!
 //! # Streaming
 //!
@@ -128,6 +131,10 @@ async fn family_file(
         resolve_readable_many(&mut conn, workspace, &family, std::slice::from_ref(&path)).await?;
     match answers.remove(&path) {
         Some(Ok(file)) => Ok(file),
+        // Its execution is in the family: saying it was pruned leaks nothing.
+        Some(Err(pruned @ super::Unreadable::Pruned { .. })) => {
+            Err(Error::NotFound(pruned.to_string()))
+        }
         _ => Err(Error::NotFound(format!(
             "{path}: no such file of execution {id}"
         ))),

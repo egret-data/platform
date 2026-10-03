@@ -1277,6 +1277,11 @@ mod tests {
         let cases = [
             crate::storage::Unreadable::NotReadable { uri: uri.clone() },
             crate::storage::Unreadable::Missing { uri: uri.clone() },
+            // W9a Task 13: a pruned file is refused at staging too.
+            crate::storage::Unreadable::Pruned {
+                uri: uri.clone(),
+                retention_days: 30,
+            },
         ];
         for why in cases {
             let spy = Spy::ok(CommandsResult::default());

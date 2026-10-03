@@ -300,16 +300,23 @@ pub struct RuntimeHandle {
     claim_loop: Option<tokio::task::JoinHandle<()>>,
     log_writer: Option<tokio::task::JoinHandle<()>>,
     pruner: Option<tokio::task::JoinHandle<()>>,
+    /// W9a: the execution-file pruner ([`crate::storage::prune`]).
+    storage_pruner: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl RuntimeHandle {
     /// Wait for the claim loop, then the log writer (which the claim loop's
-    /// end releases, see [`spawn_with_logs`]), then the pruner. Unbounded if a
+    /// end releases, see [`spawn_with_logs`]), then the pruners. Unbounded if a
     /// tick is in flight; the caller bounds it.
     pub async fn join(self) {
-        for h in [self.claim_loop, self.log_writer, self.pruner]
-            .into_iter()
-            .flatten()
+        for h in [
+            self.claim_loop,
+            self.log_writer,
+            self.pruner,
+            self.storage_pruner,
+        ]
+        .into_iter()
+        .flatten()
         {
             let _ = h.await;
         }
@@ -328,6 +335,11 @@ impl RuntimeHandle {
 ///
 /// With `cfg.enabled` false this is [`spawn`]: no writer and no pruner,
 /// because the worker is the only producer of lines (spec §4.3).
+///
+/// W9a: with the worker on and a store installed ([`crate::storage::current`]),
+/// it also starts the execution-file pruner
+/// ([`crate::storage::prune::spawn_storage_pruner`]) with the store's
+/// `retention_days`; `0` starts none. It stops on `cancel`.
 ///
 /// # Shutdown order, and what enforces it
 ///
@@ -360,9 +372,19 @@ pub fn spawn_with_logs(
     );
     let reg: Arc<dyn Registry> = Arc::new(handlers.with_log_sink(Arc::new(sink), cfg.log_limits));
 
+    // W9a (spec §10): the execution-file pruner, on its own task beside the
+    // log pruner, when this process has a store. Its retention is the
+    // store's own (`FileStore::retention_days`, `workflow.storage_retention_days`)
+    // -- the number `Unreadable::Pruned` names -- so the two cannot differ.
+    let storage_pruner = crate::storage::current().and_then(|fs| {
+        let cfg = crate::storage::prune::StoragePruneConfig::new(fs.retention_days);
+        crate::storage::prune::spawn_storage_pruner(pool.clone(), fs, cfg, cancel.clone())
+    });
+
     let mut handle = spawn_inner(pool, reg, cfg, cancel, Some(writer_stop));
     handle.log_writer = Some(writer);
     handle.pruner = pruner;
+    handle.storage_pruner = storage_pruner;
     handle
 }
 

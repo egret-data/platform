@@ -390,3 +390,9 @@ harness = false
 [[test]]
 name = "storage_files_api_s3_live"
 harness = false
+
+# W9a Task 13: the pruner and the orphan sweep on MinIO, under a throwaway
+# prefix and a fence refusing any delete outside it; IGNORED without the gate.
+[[test]]
+name = "storage_prune_s3_live"
+harness = false
