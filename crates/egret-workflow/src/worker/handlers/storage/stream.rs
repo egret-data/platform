@@ -79,7 +79,14 @@ pub(super) struct Run {
     cancel: Arc<AtomicBool>,
     /// Bytes given to this run's uploads so far, against `max_task_bytes`.
     stored: AtomicU64,
+    /// How long an aborted [`Upload`] waits for the store ([`ABORT_WAIT`]).
+    abort_wait: std::time::Duration,
 }
+
+/// How long dropping an unfinished [`Upload`] waits for the store to take
+/// the abort and end its `put_stream`; past it the upload task is cancelled
+/// and the thread moves on, so a stalled store cannot hang it.
+pub(super) const ABORT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl Run {
     pub(super) fn new(fs: Arc<FileStore>, workspace: Uuid, prefix: String) -> Self {
@@ -90,7 +97,15 @@ impl Run {
             prefix,
             cancel: Arc::default(),
             stored: AtomicU64::new(0),
+            abort_wait: ABORT_WAIT,
         }
+    }
+
+    /// The same run, waiting `wait` for an aborted upload (tests).
+    #[cfg(test)]
+    pub(super) fn with_abort_wait(mut self, wait: std::time::Duration) -> Self {
+        self.abort_wait = wait;
+        self
     }
 
     /// `Err(Cancelled)` once the run's future is gone.
@@ -250,6 +265,7 @@ impl Faults {
             Stop::Failed(why) | Stop::TooDeep(why) => Err(Halt::Author(format!(
                 "{file} is not an Ion file egret can read: {why}"
             ))),
+            Stop::TooLarge(why) => Err(Halt::Author(format!("{file}: {why}"))),
             Stop::Crashed(why) => Err(Halt::Worker(format!("{file}: {why}"))),
         }
     }
@@ -454,12 +470,24 @@ impl Drop for Upload<'_> {
         let Some(tx) = self.tx.take() else {
             return;
         };
-        // An `Err` in the body: `put_stream` fails, and stores nothing.
-        let _ = tx.blocking_send(Err(io::Error::other("aborted by egret")));
-        drop(tx);
-        if let Some(join) = self.join.take() {
-            let _ = self.run.handle.block_on(join);
-        }
+        // An `Err` in the body: `put_stream` fails, and stores nothing. Each
+        // wait is bounded by `abort_wait`: a stalled store -- a full queue it
+        // never reads, a `put_stream` that never ends -- must not hold this
+        // thread for ever. Past it the upload task is cancelled; the store
+        // then keeps no object, or an unfinished multipart upload of an
+        // unindexed key (an orphan, spec §10).
+        let wait = self.run.abort_wait;
+        let join = self.join.take();
+        self.run.handle.block_on(async move {
+            let aborted = Err(io::Error::other("aborted by egret"));
+            let _ = tokio::time::timeout(wait, tx.send(aborted)).await;
+            drop(tx);
+            if let Some(mut join) = join {
+                if tokio::time::timeout(wait, &mut join).await.is_err() {
+                    join.abort();
+                }
+            }
+        });
     }
 }
 

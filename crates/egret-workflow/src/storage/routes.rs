@@ -426,7 +426,7 @@ async fn preview_ion(
             truncated: true,
         },
         ion::Stop::Failed(_) => not_previewable(),
-        ion::Stop::TooDeep(why) => {
+        ion::Stop::TooDeep(why) | ion::Stop::TooLarge(why) => {
             tracing::warn!(uri = %uri, "{why}");
             not_previewable()
         }

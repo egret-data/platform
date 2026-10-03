@@ -791,16 +791,20 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// does is make the run finish, or make anything *notice* that it has not.
 ///
 /// **3. A publishable type with no handler is claimed and never completed.**
-/// `Handlers::with_core_tasks` registers **4** handlers (`log`, `ret`, `fail`,
-/// `sleep`); `spec::registry::TASK_TYPES` holds **14** rows. With
-/// `workflow.container_runner` set, `runtime::handlers_for` adds the **4**
+/// `Handlers::with_core_tasks` registers **11** handlers (`log`, `ret`, `fail`,
+/// `sleep` and seven core storage tasks) and `runtime::handlers_for` **2**
+/// more (`storage::Delete`, `PurgeCurrentExecutionFiles`);
+/// `spec::registry::TASK_TYPES` holds **23** rows. With
+/// `workflow.container_runner` set, `handlers_for` adds the **4**
 /// script rows (W5a); with `none` it does not, and `publish` refuses those four
-/// instead. Either way **6 of 14 publishable types** (`egret.sql`,
+/// instead. Either way **6 of 23 publishable types** (`egret.sql`,
 /// `egret.dataapi.call`, `egret.dataset.refresh`,
 /// `egret.report.send`, `core.http`, `core.slack`) produce a run that
 /// `claim` leases, finds no handler for, and leaves `RUNNING` -- as does a
 /// script task reached without publish (a draft run) under `none`. *(This
-/// read "13 rows ... 9 of 13" until W5a Task 6: W5a folded
+/// read "4 handlers ... 15 rows ... 7 of 15" until W9a Task 12 fix round 1,
+/// whose W9a Tasks 11-12 added nine core storage rows and handlers; and
+/// "13 rows ... 9 of 13" until W5a Task 6: W5a folded
 /// `egret.container`/`egret.script.python` into aliases and added the four
 /// script FQCNs; it read "15 rows ... 7 of 15" until Data Apps P6 removed
 /// `egret.python`, the notebook-kernel task.)* [`reap`] then

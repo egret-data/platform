@@ -606,7 +606,7 @@ impl Surface {
         use crate::storage::ion::{loop_values, Stop};
         let values = match loop_values(std::io::Cursor::new(bytes), usize::MAX) {
             (values, Stop::End | Stop::Full) => values,
-            (_, Stop::Failed(e) | Stop::TooDeep(e) | Stop::Crashed(e)) => {
+            (_, Stop::Failed(e) | Stop::TooDeep(e) | Stop::TooLarge(e) | Stop::Crashed(e)) => {
                 return Err(format!("{uri} is not an ION file a Loop can iterate: {e}"))
             }
         };

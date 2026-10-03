@@ -7958,7 +7958,8 @@ and the attempt stays open, and `claim`'s own predicate
 counts the cycles — `attempts.push` is in one file and neither site is on this
 path — so one `warn` per cycle is the entire signal, and **9 of 13 publishable
 types** are in this condition on the shipped registry. *(W5a Task 6,
-2026-09-28: **7 of 15** now; see item 19 (a).)*
+2026-09-28: **7 of 15** now; see item 19 (a). W9a Tasks 11-12 added nine
+core storage rows, all with handlers: **7 of 24** since.)*
 
 **The second cause was not recorded anywhere in this statement**: a handler that
 **outruns** `working_timeout`. `Sleep::new()` is uncapped and is one of the four

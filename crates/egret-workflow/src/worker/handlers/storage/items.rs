@@ -62,12 +62,15 @@
 //! - **Nothing holds a whole file** (global constraints): every task streams
 //!   its input and its outputs (`stream`), except `Reverse`, which reads its
 //!   input whole and so only up to `workflow.storage.max_read_bytes` (Kestra
-//!   copies it to disk). `DeduplicateItems` reads its input TWICE -- the keys,
-//!   then the items it keeps -- and holds only the keys, up to
-//!   `max_read_bytes` of them, where Kestra holds every item. `Split` by
-//!   `partitions` or `regexPattern` writes at most
+//!   copies it to disk). One Ion item is held whole, so an item longer than
+//!   `max_read_bytes` is refused (`ion::for_each_value`). `DeduplicateItems`
+//!   reads its input TWICE -- the keys, then the items it keeps -- and holds
+//!   only each distinct key and its last item's index, each charged its
+//!   bytes and [`KEY_OVERHEAD`] against `max_read_bytes`, where Kestra holds
+//!   every item. `Split` by `partitions` or `regexPattern` writes at most
 //!   [`KEYED_UPLOADS_PER_PASS`] files at a time and reads its input once per
-//!   that many files, and writes at most [`MAX_SPLIT_FILES`] files in all.
+//!   that many files, at most `max_task_bytes` in all, and writes at most
+//!   [`MAX_SPLIT_FILES`] files in all.
 //! - **`Reverse` reads only UTF-8** (`charset` another name is refused);
 //!   Kestra decodes any Java charset.
 
@@ -611,7 +614,7 @@ fn each_ion_value(
 ) -> Step<()> {
     let mut halted = None;
     let mut text = String::new();
-    let stop = ion::for_each_value(input, |element| {
+    let stop = ion::for_each_value(input, run.fs.caps.max_read_bytes, |element| {
         let step = run.live().and_then(|()| {
             text.clear();
             crate::runners::write_ion_element(&mut text, element);
@@ -642,9 +645,9 @@ fn part_name(n: usize, extension: &str) -> String {
     format!("{SPLIT_FILE_STEM}{n:05}{extension}")
 }
 
-fn too_many_files() -> Halt {
+fn too_many_files(max_files: usize) -> Halt {
     Halt::Author(format!(
-        "it would write more than {MAX_SPLIT_FILES} files, egret's limit for one Split"
+        "it would write more than {max_files} files, egret's limit for one Split"
     ))
 }
 
@@ -672,7 +675,7 @@ fn split_sequential(
                 done.push(upload.finish()?);
             }
             if done.len() == MAX_SPLIT_FILES {
-                return Err(too_many_files());
+                return Err(too_many_files(MAX_SPLIT_FILES));
             }
             current = Some((run.create(&part_name(done.len(), extension))?, 0));
         }
@@ -696,6 +699,14 @@ fn split_sequential(
 /// the input writes the next keys and skips the rest. A key no record
 /// reaches has no file (Kestra drops its empty partitions). Files are listed
 /// in key order: the partition's index, or the order of first appearance.
+///
+/// **The passes are bounded** (W9a Task 12 fix round 1): before each pass,
+/// the bytes read so far and this pass's must fit in `max_task_bytes`
+/// ([`over_read_budget`], the same check `partitions` meets up front), and a
+/// pass is read only while one is needed -- a partition no record reaches
+/// (`partitions` over fewer records) or a key not yet met (`regexPattern`)
+/// -- so eight keys cost one pass, not two. The keys already written are
+/// held as [`KeyDigest`]s, not as the keys: a key can be a row long.
 fn split_keyed(
     run: &Run,
     file: &str,
@@ -703,14 +714,18 @@ fn split_keyed(
     separator: &str,
     extension: &str,
     cut: &Cut,
+    max_files: usize,
 ) -> Step<Vec<StoredFile>> {
-    // (key, its file) in the order the files are listed.
     let mut done: Vec<StoredFile> = Vec::new();
-    let mut seen: HashSet<Option<String>> = HashSet::new();
+    let mut seen: HashSet<KeyDigest> = HashSet::new();
     let mut pass = 0usize;
     loop {
+        if let Some(why) = over_read_budget(pass + 1, file, size, run.fs.caps.max_task_bytes) {
+            return Err(Halt::Author(why));
+        }
         let mut active: Vec<(Option<String>, Option<Upload<'_>>)> = Vec::new();
         let mut index = 0usize;
+        let mut unmet = false;
         let first = done.len();
         each_record(run, file, size, separator, &mut |record| {
             let key = match cut {
@@ -733,13 +748,19 @@ fn split_keyed(
             let slot = match active.iter().position(|(k, _)| *k == key) {
                 Some(slot) => slot,
                 None => {
-                    if seen.contains(&key) || active.len() == KEYED_UPLOADS_PER_PASS {
+                    let digest = KeyDigest::of(key.as_deref());
+                    if seen.contains(&digest) {
                         return Ok(true);
                     }
-                    if first + active.len() == MAX_SPLIT_FILES {
-                        return Err(too_many_files());
+                    if active.len() == KEYED_UPLOADS_PER_PASS {
+                        // A key for a later pass.
+                        unmet = true;
+                        return Ok(true);
                     }
-                    seen.insert(key.clone());
+                    if first + active.len() == max_files {
+                        return Err(too_many_files(max_files));
+                    }
+                    seen.insert(digest);
                     active.push((key, None));
                     active.len() - 1
                 }
@@ -762,22 +783,61 @@ fn split_keyed(
                 .write(record.bytes)?;
             Ok(true)
         })?;
-        let wrote = active.len();
         for (_, upload) in active {
             if let Some(upload) = upload {
                 done.push(upload.finish()?);
             }
         }
         pass += 1;
+        let next = pass * KEYED_UPLOADS_PER_PASS;
         let more = match cut {
-            Cut::Partitions(n) => pass * KEYED_UPLOADS_PER_PASS < *n,
-            // A pass that met no new key has met them all.
-            _ => wrote == KEYED_UPLOADS_PER_PASS,
+            // A later pass's partitions exist, and a record reaches one.
+            Cut::Partitions(n) => next < *n && next < index,
+            _ => unmet,
         };
         if !more {
             return Ok(done);
         }
     }
+}
+
+/// A key a keyed `Split` has written, held as the first 128 bits of its
+/// SHA-256 (a `None` key -- a group that did not take part -- apart from
+/// every string): 16 bytes whatever the key's length.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct KeyDigest([u8; 16]);
+
+impl KeyDigest {
+    fn of(key: Option<&str>) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        match key {
+            None => hasher.update([0u8]),
+            Some(key) => {
+                hasher.update([1u8]);
+                hasher.update(key.as_bytes());
+            }
+        }
+        let mut out = [0u8; 16];
+        out.copy_from_slice(&hasher.finalize()[..16]);
+        Self(out)
+    }
+}
+
+/// Why `passes` reads of `file` (`size` bytes each) are refused: more than
+/// `budget` bytes in all -- `workflow.storage.max_task_bytes`, the cap on
+/// what one task run stores, which a keyed `Split` meets for what it reads
+/// too. `None` when they fit. The one check, up front for `partitions` and
+/// before every pass.
+fn over_read_budget(passes: usize, file: &str, size: u64, budget: u64) -> Option<String> {
+    let read = (passes as u64).saturating_mul(size);
+    (read > budget).then(|| {
+        format!(
+            "it would read {file} {passes} passes of {size} bytes ({KEYED_UPLOADS_PER_PASS} \
+             files a pass), {read} bytes, over the {budget} bytes one task run may read and \
+             store (workflow.storage.max_task_bytes)"
+        )
+    })
 }
 
 #[async_trait::async_trait]
@@ -836,6 +896,12 @@ impl TaskHandler for Split {
             Ok(size) => size,
             Err(why) => return fail(why),
         };
+        if let Cut::Partitions(n) = &cut {
+            let passes = n.div_ceil(KEYED_UPLOADS_PER_PASS);
+            if let Some(why) = over_read_budget(passes, &from, size, fs.caps.max_task_bytes) {
+                return fail(why);
+            }
+        }
         let run = Run::new(fs, task.workspace_id, prefix);
         let step = run_blocking(run, move |run| {
             let files = match &cut {
@@ -845,9 +911,15 @@ impl TaskHandler for Split {
                 Cut::Rows(limit) => {
                     split_sequential(run, &from, size, &separator, &extension, *limit, false)?
                 }
-                Cut::Partitions(_) | Cut::Regex(_) => {
-                    split_keyed(run, &from, size, &separator, &extension, &cut)?
-                }
+                Cut::Partitions(_) | Cut::Regex(_) => split_keyed(
+                    run,
+                    &from,
+                    size,
+                    &separator,
+                    &extension,
+                    &cut,
+                    MAX_SPLIT_FILES,
+                )?,
             };
             let uris: Vec<&str> = files.iter().map(|f| f.uri.as_str()).collect();
             Ok(Outcome {
@@ -888,6 +960,12 @@ fn render_item(
     };
     let mut cx = base.clone();
     for (name, value) in fields {
+        // No template can name a field with a space, and the render's own
+        // globals (`egret file scope`, `egret context scope`) have such
+        // names: bound, the field would hide them.
+        if name.contains(' ') {
+            continue;
+        }
         cx.insert(name, value);
     }
     let rendered = crate::runners::env::render_once_with(expression, &cx, &|_| {});
@@ -925,7 +1003,7 @@ fn each_item_of(
 ) -> Step<()> {
     let mut halted = None;
     let mut index = 0usize;
-    let stop = ion::for_each_value(input, |element| {
+    let stop = ion::for_each_value(input, run.fs.caps.max_read_bytes, |element| {
         let step = run.live().and_then(|()| each(index, element));
         index += 1;
         match step {
@@ -975,21 +1053,12 @@ impl DeduplicateItems {
     }
 }
 
-/// Which of `keys` (one per item, in file order) are kept: each key's LAST
-/// item (`DeduplicateItems.java`'s index map, measured: `b`, `a` (v=3),
-/// `c`). Also the number of distinct keys.
-pub(super) fn last_of_each_key(keys: &[String]) -> (Vec<bool>, usize) {
-    let mut last: HashMap<&str, usize> = HashMap::new();
-    for (i, key) in keys.iter().enumerate() {
-        last.insert(key.as_str(), i);
-    }
-    let keep = keys
-        .iter()
-        .enumerate()
-        .map(|(i, key)| last.get(key.as_str()) == Some(&i))
-        .collect();
-    (keep, last.len())
-}
+/// What [`DeduplicateItems`] charges one distinct key against
+/// `workflow.storage.max_read_bytes` beyond the key's own bytes: its
+/// `String`, its last item's index, the hash map's entry and control byte at
+/// its load factor, and its place in the kept list -- about 50 bytes on a
+/// 64-bit target, rounded up. An item whose key was met before costs nothing.
+pub(super) const KEY_OVERHEAD: u64 = 64;
 
 #[async_trait::async_trait]
 impl TaskHandler for DeduplicateItems {
@@ -1021,10 +1090,13 @@ impl TaskHandler for DeduplicateItems {
         let expr = spec.expr;
         let run = Run::new(fs, task.workspace_id, prefix);
         let step = run_blocking(run, move |run| {
-            // Pass 1: each item's key, and only the keys are held.
+            // Pass 1: each distinct key and its LAST item's index
+            // (`DeduplicateItems.java`'s index map, measured: `b`, `a` (v=3),
+            // `c`); what is held is charged, key by key, against the cap.
             let cap = run.fs.caps.max_read_bytes;
-            let mut keys: Vec<String> = Vec::new();
+            let mut last: HashMap<String, u64> = HashMap::new();
             let mut held = 0u64;
+            let mut items = 0u64;
             each_item(run, &from, size, &mut |i, item| {
                 let key = render_item(&expr, &base, item)
                     .map_err(|halt| match halt {
@@ -1039,36 +1111,55 @@ impl TaskHandler for DeduplicateItems {
                             item_text(item)
                         ))
                     })?;
-                held += key.len() as u64;
+                items += 1;
+                if let Some(at) = last.get_mut(&key) {
+                    *at = i as u64;
+                    return Ok(());
+                }
+                held += key.len() as u64 + KEY_OVERHEAD;
                 if held > cap {
                     return Err(Halt::Author(format!(
                         "the keys of {from} are larger than workflow.storage.max_read_bytes \
-                         ({cap} bytes): DeduplicateItems holds every item's key, so it reads \
-                         only files whose keys fit in that size"
+                         ({cap} bytes): DeduplicateItems holds every distinct key (its bytes \
+                         and {KEY_OVERHEAD} more), so it reads only files whose keys fit in \
+                         that size"
                     )));
                 }
-                keys.push(key);
+                last.insert(key, i as u64);
                 Ok(())
             })?;
-            let (keep, num_keys) = last_of_each_key(&keys);
-            drop(keys);
+            let num_keys = last.len();
+            let mut keep: Vec<u64> = last.into_values().collect();
+            keep.sort_unstable();
             // Pass 2: the kept items, as they stream past again.
+            let changed = || {
+                Halt::Worker(format!(
+                    "{from} held a different number of items on its second read than the \
+                     {items} of its first"
+                ))
+            };
             let mut out = run.create(&items_name())?;
             let mut processed = 0u64;
             let mut dropped = 0u64;
+            let mut next = keep.iter().peekable();
             each_item(run, &from, size, &mut |i, item| {
-                match keep.get(i) {
-                    Some(true) => write_item(&mut out, item)?,
-                    Some(false) => dropped += 1,
-                    None => {
-                        return Err(Halt::Worker(format!(
-                            "{from} held more items on its second read than on its first"
-                        )))
-                    }
+                // An item past the first read's count matches no kept index
+                // and is counted, so the check after the pass refuses more
+                // items as it refuses fewer (one check: an in-pass one was
+                // measured as dead weight, fix round 1's mutation I3e).
+                let i = i as u64;
+                if next.peek() == Some(&&i) {
+                    next.next();
+                    write_item(&mut out, item)?;
+                } else {
+                    dropped += 1;
                 }
                 processed += 1;
                 Ok(())
             })?;
+            if processed != items {
+                return Err(changed());
+            }
             let file = out.finish()?;
             Ok(Outcome {
                 outputs: Some(serde_json::json!({
@@ -1127,9 +1218,14 @@ impl Keep {
     }
 }
 
-/// `TruthUtils.isTruthy` of the rendered text, trimmed.
+/// `TruthUtils.isTruthy` of the rendered text, trimmed as Java's
+/// `String.trim` trims: every char at or under U+0020, and nothing else
+/// (not a no-break space, which Rust's `trim` would take).
 pub(super) fn truthy(rendered: &str) -> bool {
-    !matches!(rendered.trim(), "false" | "0" | "-0" | "")
+    !matches!(
+        rendered.trim_matches(|c: char| c <= '\u{20}'),
+        "false" | "0" | "-0" | ""
+    )
 }
 
 /// `FilterItems.run`'s decision for one item: `Ok(Some(action))` for the
@@ -2254,6 +2350,465 @@ mod tests {
         );
         let t = task_over(CONCAT, json!({"files": [foreign]}), &fs, index);
         assert!(message(&Concat::new(Some(fs)).run(&t).await.unwrap()).contains("may not read"));
+    }
+
+    // ---- W9a Task 12 fix round 1 ------------------------------------------------
+
+    /// `MemStore` with two faults on demand: `get_stream` of a key holding
+    /// `breaks` yields `after` bytes and then fails as a dropped connection
+    /// does; `get_stream` of a key holding `flips` serves `second` from its
+    /// second read on; `put_stream` of a key holding `stalls` never ends.
+    struct Tricky {
+        inner: MemStore,
+        after: usize,
+        second: Vec<u8>,
+        flips_read: AtomicU64,
+    }
+
+    impl Tricky {
+        fn new(after: usize, second: &[u8]) -> Self {
+            Self {
+                inner: MemStore::new(),
+                after,
+                second: second.to_vec(),
+                flips_read: AtomicU64::new(0),
+            }
+        }
+    }
+
+    /// Hands over `left` bytes of `inner`, then fails.
+    struct BreaksAfter {
+        inner: Box<dyn tokio::io::AsyncBufRead + Send + Unpin>,
+        left: usize,
+    }
+
+    impl AsyncRead for BreaksAfter {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.left == 0 {
+                return std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "connection reset by peer",
+                )));
+            }
+            let take = self.left.min(buf.remaining());
+            let mut limited = ReadBuf::new(buf.initialize_unfilled_to(take));
+            let poll = std::pin::Pin::new(&mut self.inner).poll_read(cx, &mut limited);
+            let n = limited.filled().len();
+            buf.advance(n);
+            self.left -= n;
+            poll
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for Tricky {
+        async fn put(&self, uri: &str, bytes: Vec<u8>) -> std::result::Result<(), StorageError> {
+            self.inner.put(uri, bytes).await
+        }
+        async fn get(&self, uri: &str) -> std::result::Result<Vec<u8>, StorageError> {
+            self.inner.get(uri).await
+        }
+        async fn delete(&self, uri: &str) -> std::result::Result<(), StorageError> {
+            self.inner.delete(uri).await
+        }
+        async fn copy(&self, a: &str, b: &str) -> std::result::Result<(), StorageError> {
+            self.inner.copy(a, b).await
+        }
+        async fn list(
+            &self,
+            p: &str,
+            d: Option<&str>,
+        ) -> std::result::Result<egret_storage::Listing, StorageError> {
+            self.inner.list(p, d).await
+        }
+        async fn get_stream(
+            &self,
+            uri: &str,
+        ) -> std::result::Result<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>, StorageError>
+        {
+            if uri.contains("flips") && self.flips_read.fetch_add(1, Ordering::SeqCst) > 0 {
+                return Ok(Box::new(std::io::Cursor::new(self.second.clone())));
+            }
+            let inner = self.inner.get_stream(uri).await?;
+            if uri.contains("breaks") {
+                return Ok(Box::new(tokio::io::BufReader::new(BreaksAfter {
+                    inner,
+                    left: self.after,
+                })));
+            }
+            Ok(inner)
+        }
+        async fn put_stream(
+            &self,
+            uri: &str,
+            body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+            hint: Option<u64>,
+        ) -> std::result::Result<u64, StorageError> {
+            if uri.contains("stalls") {
+                std::future::pending::<()>().await;
+            }
+            self.inner.put_stream(uri, body, hint).await
+        }
+        async fn head(&self, uri: &str) -> std::result::Result<Option<u64>, StorageError> {
+            self.inner.head(uri).await
+        }
+    }
+
+    fn handler_for(type_id: &str, fs: &Arc<FileStore>) -> Box<dyn TaskHandler> {
+        match type_id {
+            SPLIT => Box::new(Split::new(Some(fs.clone()))),
+            REVERSE => Box::new(Reverse::new(Some(fs.clone()))),
+            CONCAT => Box::new(Concat::new(Some(fs.clone()))),
+            FILTER_ITEMS => Box::new(FilterItems::new(Some(fs.clone()))),
+            _ => Box::new(DeduplicateItems::new(Some(fs.clone()))),
+        }
+    }
+
+    /// I3 (d): a store that fails IN THE MIDDLE of a read -- after the
+    /// object opened and some bytes arrived -- is an outage, the worker's
+    /// (spec §11), for every one of the five; the control reads the same
+    /// object whole.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_that_fails_mid_stream_is_a_worker_failure() {
+        let fs = store_with(Arc::new(Tricky::new(7, b"")), Caps::default());
+        let mut index = Files::new();
+        let breaks = stored(&fs, &mut index, "breaks.ion", ITEMS.as_bytes()).await;
+        let whole = stored(&fs, &mut index, "whole.ion", ITEMS.as_bytes()).await;
+        for from in [&breaks, &whole] {
+            for (type_id, spec) in [
+                (SPLIT, json!({"from": from, "rows": 1})),
+                (REVERSE, json!({"from": from})),
+                (CONCAT, json!({"files": [from]})),
+                (
+                    FILTER_ITEMS,
+                    json!({"from": from, "filterCondition": "{{ true }}"}),
+                ),
+                (DEDUPLICATE_ITEMS, json!({"from": from, "expr": "{{ k }}"})),
+            ] {
+                let t = task_over(type_id, spec, &fs, index.clone());
+                let out = handler_for(type_id, &fs).run(&t).await;
+                if from == &whole {
+                    assert_eq!(out.unwrap().state, RunState::Success, "{type_id}: control");
+                    continue;
+                }
+                let err = out.expect_err("a store fault mid-read is Err, not a failed task");
+                assert!(
+                    err.to_string().contains("internal storage is unavailable"),
+                    "{type_id}: {err}"
+                );
+            }
+        }
+    }
+
+    /// I3 (e): an object that holds a different NUMBER of items on
+    /// DeduplicateItems' second read than on its first (same size, other
+    /// bytes) is not written as if it were the same file -- more items, or
+    /// fewer, is a worker failure naming it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deduplicate_refuses_an_object_that_changed_between_its_reads() {
+        for (first, second) in [
+            (&b"{k:1} {k:2} "[..], &b"{k:1}{k:2}{}"[..]),
+            (&b"{k:1}{k:2}{}"[..], &b"{k:1} {k:2} "[..]),
+        ] {
+            let fs = store_with(Arc::new(Tricky::new(0, second)), Caps::default());
+            let mut index = Files::new();
+            let from = stored(&fs, &mut index, "flips.ion", first).await;
+            let t = task_over(
+                DEDUPLICATE_ITEMS,
+                json!({"from": from, "expr": "{{ 1 }}"}),
+                &fs,
+                index,
+            );
+            let err = DeduplicateItems::new(Some(fs.clone()))
+                .run(&t)
+                .await
+                .expect_err("a changed object is Err");
+            assert!(err.to_string().contains("second read"), "{err}");
+        }
+    }
+
+    /// I2: DeduplicateItems' cap bounds what it HOLDS -- every distinct key
+    /// costs its bytes and a fixed overhead -- so a hundred one-byte keys do
+    /// not pass a 1000-byte cap they would pass counting key bytes alone
+    /// (about 190); ten do. The refusal names the cap.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deduplicate_charges_each_key_what_it_holds() {
+        let caps = Caps {
+            max_read_bytes: 1000,
+            ..Caps::default()
+        };
+        for (keys, refused) in [(100, true), (10, false)] {
+            let fs = store_with(Arc::new(MemStore::new()), caps);
+            let mut index = Files::new();
+            let body: String = (0..keys).map(|i| format!("{{k:{i}}}\n")).collect();
+            let from = stored(&fs, &mut index, "in.ion", body.as_bytes()).await;
+            let t = task_over(
+                DEDUPLICATE_ITEMS,
+                json!({"from": from, "expr": "{{ k }}"}),
+                &fs,
+                index,
+            );
+            let out = DeduplicateItems::new(Some(fs.clone()))
+                .run(&t)
+                .await
+                .unwrap();
+            if refused {
+                assert!(
+                    message(&out).contains("max_read_bytes (1000 bytes)"),
+                    "{out:?}"
+                );
+            } else {
+                assert_eq!(
+                    out.outputs.as_ref().unwrap()["numKeys"],
+                    json!(keys),
+                    "{out:?}"
+                );
+            }
+        }
+    }
+
+    /// I1: an item over `max_read_bytes` -- one value is held whole -- fails
+    /// the task naming the cap; the items before it are not a success.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_item_over_the_read_cap_fails_naming_it() {
+        let fs = store_with(
+            Arc::new(MemStore::new()),
+            Caps {
+                max_read_bytes: 64,
+                ..Caps::default()
+            },
+        );
+        let mut index = Files::new();
+        let body = format!("{{v:1}}\n{{s:\"{}\"}}\n", "x".repeat(100));
+        let from = stored(&fs, &mut index, "in.ion", body.as_bytes()).await;
+        for (type_id, spec) in [
+            (
+                FILTER_ITEMS,
+                json!({"from": from, "filterCondition": "{{ true }}"}),
+            ),
+            (DEDUPLICATE_ITEMS, json!({"from": from, "expr": "{{ 1 }}"})),
+        ] {
+            let t = task_over(type_id, spec, &fs, index.clone());
+            let out = handler_for(type_id, &fs).run(&t).await.unwrap();
+            assert!(
+                message(&out).contains("max_read_bytes (64 bytes)"),
+                "{type_id}: {out:?}"
+            );
+        }
+    }
+
+    /// I3 (c): `partitions` under 1 or over [`MAX_SPLIT_FILES`] is refused
+    /// before a byte is read, naming the bound; at the bound it is accepted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn partitions_out_of_range_are_refused() {
+        for (n, says) in [
+            (0i64, "at least 1".to_string()),
+            (-1, "at least 1".to_string()),
+            (
+                MAX_SPLIT_FILES as i64 + 1,
+                format!("at most {MAX_SPLIT_FILES} files"),
+            ),
+        ] {
+            let (_, out) = split(json!({"partitions": n}), b"a\nb\n", "in.txt").await;
+            assert!(message(&out).contains(&says), "{n}: {out:?}");
+        }
+        let (_, out) = split(json!({"partitions": MAX_SPLIT_FILES}), b"a\nb\n", "in.txt").await;
+        assert_eq!(out.state, RunState::Success, "{out:?}");
+    }
+
+    /// I3 (b): a keyed Split that meets more keys than it may write files is
+    /// refused naming the limit (`split_keyed`'s own check; production
+    /// passes [`MAX_SPLIT_FILES`]), and one at the limit is written.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_keyed_split_past_its_file_limit_is_refused() {
+        let fs = mem();
+        let mut index = Files::new();
+        let from = stored(&fs, &mut index, "in.txt", b"a:1\nb:2\nc:3\n").await;
+        for (max, ok) in [(2usize, false), (3, true)] {
+            let run = Run::new(fs.clone(), Uuid::nil(), prefix());
+            let cut = Cut::Regex(crate::runners::compile_java_regex("^(\\w+):").unwrap());
+            let from = from.clone();
+            let got = run_blocking(run, move |run| {
+                split_keyed(run, &from, 12, "\n", ".txt", &cut, max)
+            })
+            .await;
+            match (ok, got) {
+                (true, Ok(files)) => assert_eq!(files.len(), 3),
+                (false, Err(Halt::Author(m))) => {
+                    assert!(m.contains("more than 2 files"), "{m}")
+                }
+                (_, other) => panic!("max {max}: {other:?}"),
+            }
+        }
+    }
+
+    /// I4: a Split by `partitions` that would read its input more than
+    /// `max_task_bytes` in all -- `ceil(partitions / 8)` passes -- is refused
+    /// UP FRONT, before a byte is read, naming the cap; at the cap it runs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_partitions_split_over_the_read_budget_is_refused_up_front() {
+        let body: String = (0..20).map(|i| format!("{i:02}\n")).collect(); // 60 bytes
+        for (budget, refused) in [(119u64, true), (120, false)] {
+            let meter = Arc::new(Meter::new());
+            let fs = store_with(
+                meter.clone(),
+                Caps {
+                    max_task_bytes: budget,
+                    ..Caps::default()
+                },
+            );
+            let mut index = Files::new();
+            let from = stored(&fs, &mut index, "in.txt", body.as_bytes()).await;
+            meter.read.store(0, Ordering::SeqCst);
+            let t = task_over(SPLIT, json!({"from": from, "partitions": 16}), &fs, index);
+            let out = Split::new(Some(fs.clone())).run(&t).await.unwrap();
+            if refused {
+                assert_eq!(meter.read.load(Ordering::SeqCst), 0, "read before refusing");
+                assert!(
+                    message(&out).contains("workflow.storage.max_task_bytes"),
+                    "{out:?}"
+                );
+                assert!(message(&out).contains("2 passes"), "{out:?}");
+            } else {
+                assert_eq!(out.files.len(), 16, "{out:?}");
+            }
+        }
+    }
+
+    /// I4: a Split by `regexPattern` counts its passes against the same
+    /// budget as they run: nine keys need two passes, refused under twice
+    /// the input and written at it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_regex_split_over_the_read_budget_is_refused_as_it_runs() {
+        let body: String = (0..9).map(|i| format!("k{i}:x\n")).collect(); // 45 bytes
+        for (budget, refused) in [(89u64, true), (90, false)] {
+            let fs = store_with(
+                Arc::new(MemStore::new()),
+                Caps {
+                    max_task_bytes: budget,
+                    ..Caps::default()
+                },
+            );
+            let mut index = Files::new();
+            let from = stored(&fs, &mut index, "in.txt", body.as_bytes()).await;
+            let t = task_over(
+                SPLIT,
+                json!({"from": from, "regexPattern": "^(\\w+):"}),
+                &fs,
+                index,
+            );
+            let out = Split::new(Some(fs.clone())).run(&t).await.unwrap();
+            if refused {
+                assert!(
+                    message(&out).contains("workflow.storage.max_task_bytes"),
+                    "{out:?}"
+                );
+            } else {
+                assert_eq!(out.files.len(), 9, "{out:?}");
+            }
+        }
+    }
+
+    /// I4 + M4: no pass is read for nothing -- `partitions: 16` over three
+    /// rows, and a `regexPattern` with exactly eight keys, each read their
+    /// input ONCE.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_keyed_split_reads_no_pass_it_does_not_need() {
+        let eight: String = (0..8).map(|i| format!("k{i}:x\n")).collect();
+        for (cut, body, files) in [
+            (json!({"partitions": 16}), "a\nb\nc\n".to_string(), 3),
+            (json!({"regexPattern": "^(\\w+):"}), eight, 8),
+        ] {
+            let meter = Arc::new(Meter::new());
+            let fs = store_with(meter.clone(), Caps::default());
+            let mut index = Files::new();
+            let from = stored(&fs, &mut index, "in.txt", body.as_bytes()).await;
+            meter.read.store(0, Ordering::SeqCst);
+            let mut spec = cut.clone();
+            spec["from"] = json!(from);
+            let t = task_over(SPLIT, spec, &fs, index);
+            let out = Split::new(Some(fs.clone())).run(&t).await.unwrap();
+            assert_eq!(out.files.len(), files, "{cut}: {out:?}");
+            assert_eq!(
+                meter.read.load(Ordering::SeqCst),
+                body.len() as u64,
+                "{cut}: one pass"
+            );
+        }
+    }
+
+    /// M5: `TruthUtils` trims as Java's `String.trim` does -- every char at
+    /// or under U+0020 and nothing else -- so a no-break space is kept (and
+    /// the text is truthy) while a control character is trimmed.
+    #[test]
+    fn truthy_trims_as_java_does() {
+        assert!(truthy("\u{a0}0"), "U+00A0 is not trimmed by Java");
+        assert!(truthy("\u{3000}false"), "U+3000 is not trimmed by Java");
+        assert!(!truthy("\u{1}0\u{1f}"), "controls are trimmed by Java");
+        assert!(!truthy("\t false \n"));
+    }
+
+    /// M6: an item field named like a global the render binds for itself
+    /// (`egret file scope`, which no template can name: it holds a space)
+    /// does not hide it -- `fileExists` still reads the run's scope. The
+    /// control is the same item without that field.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_item_field_cannot_hide_the_renders_own_globals() {
+        let fs = mem();
+        let mut index = Files::new();
+        let up = stored(&fs, &mut index, "up.txt", b"x").await;
+        for body in [
+            "{'egret file scope':1,'egret context scope':2,v:1}",
+            "{v:1}",
+        ] {
+            let from = stored(&fs, &mut index, "in.ion", body.as_bytes()).await;
+            let t = task_over(
+                FILTER_ITEMS,
+                json!({"from": from, "filterCondition": format!("{{{{ fileExists('{up}') }}}}")}),
+                &fs,
+                index.clone(),
+            );
+            let out = FilterItems::new(Some(fs.clone())).run(&t).await.unwrap();
+            assert_eq!(out.state, RunState::Success, "{body}: {out:?}");
+            assert_eq!(
+                out.outputs.as_ref().unwrap()["droppedItemsTotal"],
+                json!(0),
+                "{body}"
+            );
+        }
+    }
+
+    /// M7: dropping an unfinished upload whose store has stalled -- its
+    /// `put_stream` never ends -- returns after the abort wait instead of
+    /// holding the thread for ever.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_aborted_upload_does_not_wait_for_a_stalled_store() {
+        let fs = store_with(Arc::new(Tricky::new(0, b"")), Caps::default());
+        let run = Run::new(fs, Uuid::nil(), prefix())
+            .with_abort_wait(std::time::Duration::from_millis(200));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = tokio::runtime::Handle::current();
+        // A plain thread, so a hang fails this test instead of hanging it.
+        std::thread::spawn(move || {
+            let _guard = handle.enter();
+            let done = handle.block_on(run_blocking(run, |run| {
+                let mut upload = run.create("stalls.txt")?;
+                upload.write(b"some bytes")?;
+                drop(upload);
+                Ok(())
+            }));
+            let _ = tx.send(done);
+        });
+        let done = tokio::task::spawn_blocking(move || {
+            rx.recv_timeout(std::time::Duration::from_secs(20))
+        })
+        .await
+        .unwrap();
+        assert_eq!(done, Ok(Ok(())), "the drop returned");
     }
 
     #[test]
