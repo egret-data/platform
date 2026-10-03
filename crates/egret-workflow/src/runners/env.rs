@@ -1395,7 +1395,7 @@ fn uppercase_unicode_escapes(quoted: &str) -> String {
 /// break the tie differently down there. No corpus entry reaches it and no
 /// plausible flow does; recorded so the claim above is not read as
 /// unconditional.
-pub(super) fn write_java_double(out: &mut String, x: f64) {
+pub(crate) fn write_java_double(out: &mut String, x: f64) {
     if x.is_nan() {
         out.push_str("NaN");
         return;

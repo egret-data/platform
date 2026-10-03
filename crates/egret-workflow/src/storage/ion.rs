@@ -1,4 +1,5 @@
-//! The Ion READER of the execution file API's preview (W9a spec §8).
+//! The Ion READER of the execution file API's preview (W9a spec §8), and of
+//! a `Loop` over a file (§9.3).
 //!
 //! `ion-rs` 1.0.1 over bytes, **one top-level value at a time, text or
 //! binary**: Kestra's STORE and item-task files are binary Ion 1.0 with a
@@ -21,6 +22,10 @@
 //! | blob, clob | base64 of the bytes, as a `byte[]` is | (chosen; `runners::ionfmt`'s table) |
 //! | annotations | dropped: `LocalDateTime::"…"` is the string | (chosen) |
 //! | top-level `null` | `null` | |
+//!
+//! A `Loop` over a file does NOT use this table: Kestra iterates what
+//! `FileSerde.read` made of each value, which differs for decimals, floats,
+//! timestamps and `java.time`-annotated strings -- see `loop_value`.
 
 use std::io::Read;
 use std::sync::{Arc, Mutex};
@@ -87,13 +92,14 @@ pub(crate) fn read_values<R: Read + Send + 'static>(bytes: R, max: usize) -> (Ve
 }
 
 /// Each top-level value of `bytes` as the string a Kestra `Loop` over that
-/// file iterates (`FlowableUtils.ionValueToString`), `None` for a `null`
-/// record, through the same reader as [`read_values`] -- see
+/// file iterates (`FlowableUtils.ionValueToString`), or why it cannot be
+/// one (a `null` record, a `java.time` text that does not parse), through
+/// the same reader as [`read_values`] -- see
 /// [`loop_value`] for the projection and why it is not the preview's.
 pub(crate) fn loop_values<R: Read + Send + 'static>(
     bytes: R,
     max: usize,
-) -> (Vec<Option<String>>, Stop) {
+) -> (Vec<Result<String, String>>, Stop) {
     read_projected(bytes, max, loop_value)
 }
 
@@ -765,14 +771,372 @@ fn to_json(element: &ion_rs::Element) -> Value {
     }
 }
 
-/// One top-level value as a Kestra `Loop` over its file iterates it.
-fn loop_value(element: &ion_rs::Element) -> Option<String> {
-    match to_json(element) {
-        Value::Null => None,
-        Value::String(s) => Some(s),
-        Value::Number(n) => Some(n.to_string()),
-        other => Some(other.to_string()),
+/// Kestra's message for a `null` record of a `Loop`'s values file
+/// (`FlowableUtils.ionValueToString`).
+pub const LOOP_NULL_RECORD: &str = "Found a null value in the ION file";
+
+/// One top-level value as a Kestra `Loop` over its file iterates it:
+/// `FlowableUtils.ionValueToString` of what `FileSerde.read` made of it --
+/// a `String` as itself, a `Number`'s `toString()`, `null` refused
+/// ([`LOOP_NULL_RECORD`]), anything else Kestra's JSON of it
+/// (`egret_expected.loop_value_to_string`: Kestra's own method, run on the
+/// artifact's jar in its container's zone).
+///
+/// **Not the preview's projection** ([`to_json`]): Kestra's preview shows a
+/// decimal as a double and a timestamp as its Ion text, while `FileSerde`
+/// makes a decimal a `BigDecimal`, a float a `Double` and a timestamp a
+/// `java.time` value. So, here only:
+///
+/// - a decimal is [`java_big_decimal`] (`12.50` keeps its scale, `1d3` is
+///   `1E+3`), a float Java's `Double.toString` (`1.0E20`);
+/// - a timestamp is [`kestra_timestamp`], and a string annotated with a
+///   `java.time` class name (what a JDBC plugin's STORE writes,
+///   `LocalDateTime::"…"`) is [`java_time`] -- JSON-quoted at the top level,
+///   because neither is a `String`; one that does not parse is an `Err`, as
+///   `FileSerde.read` throws;
+/// - a blob or clob at the top level is JSON-quoted base64 (a `byte[]`).
+///
+/// Still divergent, named by `LOOP_VALUE_DIVERGENT` in the tests: a date
+/// before the Gregorian cutover, and a value with any other annotation,
+/// which Kestra cannot serialise (it fails) and egret reads without it.
+fn loop_value(element: &ion_rs::Element) -> Result<String, String> {
+    use ion_rs::Value as V;
+    if let Some(typed) = java_time_annotated(element) {
+        return Ok(Value::String(typed?).to_string());
     }
+    match element.value() {
+        V::Null(_) => Err(LOOP_NULL_RECORD.to_string()),
+        V::String(s) => Ok(s.text().to_string()),
+        V::Symbol(s) => Ok(s.text().unwrap_or("").to_string()),
+        V::Int(i) => Ok(i.to_string()),
+        V::Decimal(d) => Ok(java_big_decimal(d)),
+        V::Float(f) => {
+            let mut out = String::new();
+            crate::runners::env::write_java_double(&mut out, *f);
+            Ok(out)
+        }
+        _ => loop_json(element),
+    }
+}
+
+/// The JSON Kestra's mapper writes for a value `FileSerde` read: [`to_json`]
+/// but for a decimal (a `BigDecimal`'s `toString()` as the number token, so
+/// `{d:12.50}` is `{"d":12.50}` and `[1d3]` is `[1E+3]`), a finite float
+/// (Java's `Double.toString`; NaN and the infinities stay strings), a
+/// timestamp ([`kestra_timestamp`]) and a `java.time`-annotated string
+/// ([`java_time`]), at every depth.
+///
+/// Written as TEXT, not built as a [`Value`]: `serde_json`'s number keeps
+/// `12.50` but lowercases `1E+3`, which Kestra writes upper-case. A struct
+/// field named twice keeps its first place and its last value, as a
+/// `LinkedHashMap` (and [`to_json`]'s map) does; a field whose value is any
+/// `null` is dropped. The depth is bounded as [`to_json`]'s is: the reader
+/// never yields a value deeper than [`MAX_DEPTH`].
+fn loop_json(element: &ion_rs::Element) -> Result<String, String> {
+    use ion_rs::Value as V;
+    let quoted = |s: &str| Value::String(s.to_string()).to_string();
+    if let Some(typed) = java_time_annotated(element) {
+        return Ok(quoted(&typed?));
+    }
+    Ok(match element.value() {
+        V::Decimal(d) => java_big_decimal(d),
+        V::Float(f) if f.is_finite() => {
+            let mut out = String::new();
+            crate::runners::env::write_java_double(&mut out, *f);
+            out
+        }
+        V::Timestamp(t) => quoted(&kestra_timestamp(t)),
+        V::List(seq) | V::SExp(seq) => {
+            let items = seq
+                .elements()
+                .map(loop_json)
+                .collect::<Result<Vec<String>, String>>()?;
+            format!("[{}]", items.join(","))
+        }
+        V::Struct(st) => {
+            let mut fields: Vec<(String, String)> = Vec::new();
+            let mut at: std::collections::HashMap<String, usize> = Default::default();
+            for (name, value) in st.fields() {
+                if value.is_null() {
+                    continue;
+                }
+                let name = name.text().unwrap_or("").to_string();
+                let json = loop_json(value)?;
+                match at.get(&name) {
+                    Some(&i) => fields[i].1 = json,
+                    None => {
+                        at.insert(name.clone(), fields.len());
+                        fields.push((name, json));
+                    }
+                }
+            }
+            let body: Vec<String> = fields
+                .iter()
+                .map(|(name, json)| format!("{}:{json}", quoted(name)))
+                .collect();
+            format!("{{{}}}", body.join(","))
+        }
+        _ => to_json(element).to_string(),
+    })
+}
+
+/// `java.math.BigDecimal.toString()` of the Ion decimal `d`, as `FileSerde`
+/// reads it (a `BigDecimal` has no negative zero, so `-0.0` is `0.0`): the
+/// plain digits when the scale is not negative and the adjusted exponent is
+/// at least -6, else one digit, the rest after a point, and `E` with a signed
+/// exponent (`1d3` is `1E+3`, `0.0000001` is `1E-7`, `12345678d2` is
+/// `1.2345678E+9`).
+fn java_big_decimal(d: &ion_rs::Decimal) -> String {
+    let coefficient = d.coefficient();
+    let digits = coefficient.magnitude().to_string();
+    let sign = if coefficient.is_negative() && !d.is_zero() {
+        "-"
+    } else {
+        ""
+    };
+    let scale = -d.exponent();
+    let len = digits.len() as i64;
+    let adjusted = -scale + (len - 1);
+    if scale == 0 {
+        return format!("{sign}{digits}");
+    }
+    if scale > 0 && adjusted >= -6 {
+        let point = len - scale;
+        return if point > 0 {
+            let (int, frac) = digits.split_at(point as usize);
+            format!("{sign}{int}.{frac}")
+        } else {
+            format!("{sign}0.{}{digits}", "0".repeat((-point) as usize))
+        };
+    }
+    let (first, rest) = digits.split_at(1);
+    let mantissa = if rest.is_empty() {
+        first.to_string()
+    } else {
+        format!("{first}.{rest}")
+    };
+    match adjusted {
+        0 => format!("{sign}{mantissa}"),
+        e if e > 0 => format!("{sign}{mantissa}E+{e}"),
+        e => format!("{sign}{mantissa}E{e}"),
+    }
+}
+
+/// An Ion timestamp as Kestra's mapper writes what `FileSerde` read
+/// (`io.kestra.core.serializers.ion.IonParser.getEmbeddedObject`, `javap -c`
+/// of the artifact's jar; `egret_expected.loop_value_to_string`):
+///
+/// - the instant is `Timestamp.calendarValue().toInstant()`, so MILLISECOND
+///   precision, the rest truncated (`.1239` is `.123`);
+/// - with no offset (`-00:00`, or a date) or offset zero, an instant at
+///   midnight UTC is a `LocalDate`: `2025-12-03`;
+/// - otherwise the instant in UTC with six fraction digits:
+///   `2025-12-03T12:00:00.123000Z` -- a non-zero offset makes a
+///   `ZonedDateTime`, which the artifact's mapper writes in the JVM's zone,
+///   and the artifact's container runs in `Etc/UTC` (measured).
+fn kestra_timestamp(t: &ion_rs::Timestamp) -> String {
+    let utc = t.to_utc();
+    let millis = t.milliseconds();
+    let (y, mo, d) = (utc.year(), utc.month(), utc.day());
+    let (h, mi, s) = (utc.hour(), utc.minute(), utc.second());
+    if matches!(t.offset(), None | Some(0)) && h == 0 && mi == 0 && s == 0 && millis == 0 {
+        format!("{y:04}-{mo:02}-{d:02}")
+    } else {
+        format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{millis:03}000Z")
+    }
+}
+
+/// The `java.time` class names Kestra's `IonParser.getEmbeddedObject` parses
+/// an annotated string as (`javap -c` of the artifact's jar).
+const JAVA_TIME_TYPES: [&str; 7] = [
+    "Instant",
+    "OffsetDateTime",
+    "ZonedDateTime",
+    "LocalDateTime",
+    "LocalDate",
+    "OffsetTime",
+    "LocalTime",
+];
+
+/// `Some` when `element` is annotated with one of [`JAVA_TIME_TYPES`] (the
+/// first annotation, as Jackson's type id): Kestra's JSON of the value
+/// parsed as that class, or why it does not parse.
+fn java_time_annotated(element: &ion_rs::Element) -> Option<Result<String, String>> {
+    let class = element.annotations().first()?;
+    if !JAVA_TIME_TYPES.contains(&class) {
+        return None;
+    }
+    let text = match element.value() {
+        ion_rs::Value::String(s) => s.text(),
+        _ => {
+            return Some(Err(format!(
+                "a {class}-annotated Ion value is not a string"
+            )))
+        }
+    };
+    Some(
+        java_time(class, text)
+            .ok_or_else(|| format!("Text '{text}' could not be parsed as a {class}")),
+    )
+}
+
+/// `text` parsed as the `java.time` class `class` (Java's ISO `parse`) and
+/// written as Kestra's mapper writes it, the artifact's JVM zone being UTC
+/// (`egret_expected.loop_value_to_string`, measured):
+///
+/// - `Instant`, `ZonedDateTime`: the instant in UTC, six fraction digits
+///   (truncated), `Z` -- Kestra's own serialisers;
+/// - `OffsetDateTime`: the instant in UTC, the fewest fraction digits, `Z`;
+/// - `LocalDateTime`, `LocalTime`: as given, seconds always, the fewest
+///   fraction digits (`.100` is `.1`);
+/// - `LocalDate` as given; `OffsetTime` as given, its offset kept.
+///
+/// A `ZonedDateTime`'s `[region]` is skipped: its offset fixes the instant.
+fn java_time(class: &str, text: &str) -> Option<String> {
+    use chrono::{NaiveDateTime, Timelike as _};
+    let micros6 = |dt: NaiveDateTime| {
+        format!(
+            "{}.{:06}Z",
+            dt.format("%Y-%m-%dT%H:%M:%S"),
+            dt.nanosecond() / 1_000
+        )
+    };
+    match class {
+        "LocalDate" => {
+            let (date, rest) = iso_date(text)?;
+            rest.is_empty().then(|| date.format("%Y-%m-%d").to_string())
+        }
+        "LocalTime" => {
+            let (time, rest) = iso_time(text)?;
+            rest.is_empty().then(|| fewest(time))
+        }
+        "OffsetTime" => {
+            let (time, rest) = iso_time(text)?;
+            let (offset, rest) = iso_offset(rest)?;
+            rest.is_empty()
+                .then(|| format!("{}{}", fewest(time), offset_text(offset)))
+        }
+        "LocalDateTime" => {
+            let (dt, rest) = iso_date_time(text)?;
+            rest.is_empty()
+                .then(|| format!("{}T{}", dt.date().format("%Y-%m-%d"), fewest(dt.time())))
+        }
+        "OffsetDateTime" | "ZonedDateTime" | "Instant" => {
+            let (dt, rest) = iso_date_time(text)?;
+            let (offset, rest) = iso_offset(rest)?;
+            let rest = match rest.strip_prefix('[') {
+                // A region after the offset: `ZonedDateTime` only, and whole.
+                Some(region) if class == "ZonedDateTime" => {
+                    region.strip_suffix(']').filter(|r| !r.is_empty())?;
+                    0
+                }
+                _ => rest.len(),
+            };
+            if rest != 0 {
+                return None;
+            }
+            let utc = dt - chrono::Duration::seconds(i64::from(offset));
+            Some(if class == "OffsetDateTime" {
+                format!("{}T{}Z", utc.date().format("%Y-%m-%d"), fewest(utc.time()))
+            } else {
+                micros6(utc)
+            })
+        }
+        _ => None,
+    }
+}
+
+/// `HH:mm:ss` and the fewest fraction digits (none for a whole second), as
+/// Java's `ISO_LOCAL_TIME` formats.
+fn fewest(time: chrono::NaiveTime) -> String {
+    use chrono::Timelike as _;
+    let whole = time.format("%H:%M:%S").to_string();
+    match time.nanosecond() {
+        0 => whole,
+        n => format!("{whole}.{}", format!("{n:09}").trim_end_matches('0')),
+    }
+}
+
+/// `Z` for a zero offset, else `+HH:MM` (with `:SS` when it has seconds), as
+/// Java's `ISO_OFFSET_TIME` formats.
+fn offset_text(seconds: i32) -> String {
+    if seconds == 0 {
+        return "Z".into();
+    }
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let a = seconds.unsigned_abs();
+    let (h, m, s) = (a / 3600, a / 60 % 60, a % 60);
+    if s == 0 {
+        format!("{sign}{h:02}:{m:02}")
+    } else {
+        format!("{sign}{h:02}:{m:02}:{s:02}")
+    }
+}
+
+/// `uuuu-MM-dd` (four-digit year) and what follows it.
+fn iso_date(text: &str) -> Option<(chrono::NaiveDate, &str)> {
+    fn digits(s: &str) -> Option<u32> {
+        s.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| s.parse().ok())?
+    }
+    let (y, rest) = (text.get(..4)?, text.get(4..)?);
+    let (m, rest) = (rest.strip_prefix('-')?.get(..2)?, rest.get(3..)?);
+    let (d, rest) = (rest.strip_prefix('-')?.get(..2)?, rest.get(3..)?);
+    Some((
+        chrono::NaiveDate::from_ymd_opt(digits(y)? as i32, digits(m)?, digits(d)?)?,
+        rest,
+    ))
+}
+
+/// `HH:mm[:ss[.f…]]` (one to nine fraction digits) and what follows it.
+fn iso_time(text: &str) -> Option<(chrono::NaiveTime, &str)> {
+    let two = |s: &str| -> Option<u32> {
+        (s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse().ok())?
+    };
+    let h = two(text.get(..2)?)?;
+    let rest = text.get(2..)?.strip_prefix(':')?;
+    let m = two(rest.get(..2)?)?;
+    let mut rest = rest.get(2..)?;
+    let (mut s, mut nanos) = (0, 0);
+    if let Some(after) = rest.strip_prefix(':') {
+        s = two(after.get(..2)?)?;
+        rest = after.get(2..)?;
+        if let Some(frac) = rest.strip_prefix('.') {
+            let n = frac.bytes().take_while(u8::is_ascii_digit).count();
+            if !(1..=9).contains(&n) {
+                return None;
+            }
+            nanos = format!("{:0<9}", &frac[..n]).parse().ok()?;
+            rest = &frac[n..];
+        }
+    }
+    Some((chrono::NaiveTime::from_hms_nano_opt(h, m, s, nanos)?, rest))
+}
+
+/// `uuuu-MM-ddTHH:mm[:ss[.f…]]` and what follows it.
+fn iso_date_time(text: &str) -> Option<(chrono::NaiveDateTime, &str)> {
+    let (date, rest) = iso_date(text)?;
+    let (time, rest) = iso_time(rest.strip_prefix('T')?)?;
+    Some((date.and_time(time), rest))
+}
+
+/// `Z` or `±HH:MM[:SS]`, in seconds, and what follows it.
+fn iso_offset(text: &str) -> Option<(i32, &str)> {
+    if let Some(rest) = text.strip_prefix('Z') {
+        return Some((0, rest));
+    }
+    let sign = match text.as_bytes().first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let (time, rest) = iso_time(&text[1..])?;
+    if time.nanosecond() != 0 || time.hour() > 18 {
+        return None;
+    }
+    use chrono::Timelike as _;
+    Some((sign * time.num_seconds_from_midnight() as i32, rest))
 }
 
 fn float(f: f64) -> Value {
@@ -1202,6 +1566,68 @@ mod tests {
             "4x the bytes took x{ratio:.1} the time (linear ~4, quadratic ~16): \
              1 MiB {small:?}, 4 MiB {large:?}"
         );
+    }
+
+    /// Rows of `egret_expected.loop_value_to_string` egret knowingly does NOT
+    /// reproduce, each with why: before the Gregorian cutover Kestra's
+    /// `Calendar` reads the Julian calendar (`0000-12-30`), and an annotation
+    /// that is not a `java.time` class makes Kestra's mapper fail where egret
+    /// reads the value without it.
+    const LOOP_VALUE_DIVERGENT: &[&str] = &["0001-01-01T00:00:00Z", r#"foo::"x""#];
+
+    /// **A `Loop` over a file reads each value as Kestra's
+    /// `FlowableUtils.ionValueToString` does** (the user's ruling of
+    /// 2026-10-03 on W9a Task 11's concern 2): every row of
+    /// `egret_expected.loop_value_to_string` (Kestra's own method, run on the
+    /// artifact's jar in its container's zone) but the named divergent ones,
+    /// which must still differ so the list cannot go stale. A `null` row is
+    /// Kestra's message; a row `FileSerde.read` refused (`read_error`) is an
+    /// `Err` here too.
+    #[test]
+    fn a_loop_reads_each_value_as_kestras_ion_value_to_string() {
+        let o = oracle();
+        let rows = o["egret_expected"]["loop_value_to_string"]
+            .as_array()
+            .unwrap();
+        assert!(rows.len() >= 94, "{} rows", rows.len());
+        let (mut matched, mut refused) = (0, 0);
+        for row in rows {
+            let ion = row["ion"].as_str().unwrap();
+            let (values, stop) = loop_values(cursor(ion), 10);
+            assert!(matches!(stop, Stop::End), "{ion}: {stop:?}");
+            assert_eq!(values.len(), 1, "{ion}");
+            let ours = values.into_iter().next().unwrap();
+            if LOOP_VALUE_DIVERGENT.contains(&ion) {
+                assert!(
+                    row["value"].as_str() != ours.as_deref().ok(),
+                    "{ion} is listed as divergent but matches"
+                );
+            } else if row.get("read_error").is_some() {
+                assert!(ours.is_err(), "{ion}: {ours:?}");
+                refused += 1;
+            } else if let Some(error) = row["error"].as_str() {
+                assert_eq!(error, LOOP_NULL_RECORD, "{ion}");
+                assert_eq!(ours, Err(LOOP_NULL_RECORD.to_string()), "{ion}");
+                refused += 1;
+            } else {
+                assert_eq!(ours.as_deref(), Ok(row["value"].as_str().unwrap()), "{ion}");
+                matched += 1;
+            }
+        }
+        assert_eq!(matched + refused, rows.len() - LOOP_VALUE_DIVERGENT.len());
+        assert_eq!(
+            refused, 2,
+            "the null.int row and the unparseable LocalDateTime"
+        );
+    }
+
+    /// The preview's projection is NOT the `Loop`'s: Kestra's preview shows a
+    /// decimal as a double and a timestamp as its Ion text (the table at the
+    /// top of this module, measured), and those rows stay green above.
+    #[test]
+    fn the_preview_keeps_its_own_decimal_and_timestamp() {
+        let (rows, _) = values_to_json(cursor("12.50 2025-12-03T12:00:00Z"), 10).unwrap();
+        assert_eq!(rows, vec![json!(12.5), json!("2025-12-03T12:00:00Z")]);
     }
 
     #[test]

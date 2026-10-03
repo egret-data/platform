@@ -2344,6 +2344,30 @@ mod tests {
         }
     }
 
+    /// **A file's values are iterated as read: no `distinct()`** (W9a Task
+    /// 11, the user's ruling of 2026-10-03). Kestra's URI path,
+    /// `FlowableUtils.readLoopValuesFromUri` and
+    /// `readAndCountLoopValuesFromUri`, adds every record's
+    /// `ionValueToString` to its list and has no `distinct()`; only
+    /// `resolveValues`' two array arms have one (`javap -c` of the artifact's
+    /// jar, `w9a-storage.json` `egret_expected_basis.loop_value_to_string`).
+    /// The inline array is the control: the same four values, deduplicated.
+    #[test]
+    fn a_files_values_are_iterated_as_read_and_an_inline_arrays_deduplicated() {
+        let values = ["1", "1", "{\"a\":1}", "1"].map(String::from);
+        let from_file = rendered_from_file("kestra:///n/f/executions/x/tasks/w/r/a.ion", &values);
+        assert_eq!(iteration_values(&from_file).unwrap(), values.to_vec());
+
+        let inline = serde_json::to_string(&values).unwrap();
+        assert_eq!(
+            iteration_values(&inline).unwrap(),
+            vec!["1".to_string(), "{\"a\":1}".to_string()]
+        );
+
+        // A URI the worker has not read is not a list of values.
+        assert!(iteration_values("kestra:///n/f/executions/x/tasks/w/r/a.ion").is_err());
+    }
+
     /// **Kestra's `resolveValues`, row by row** — including the two rules a
     /// reader would not write.
     ///

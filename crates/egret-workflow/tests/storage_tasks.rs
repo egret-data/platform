@@ -774,14 +774,14 @@ fn loop_over_content(flow: &str, content: &str) -> String {
     )
 }
 
-/// `loop_over_ion.edge_file`: a number, a nested struct, a list holding a
-/// null, a string and a boolean are Kestra's values. Two are NOT, and are
-/// pinned here as the divergence `storage::ion`'s JSON projection costs
-/// (`worker::render::ion_value_to_string`'s doc): a decimal (`12.50` is
-/// `12.5`) and a timestamp (its Ion text, where Kestra JSON-quotes an
-/// instant with microseconds).
+/// `loop_over_ion.edge_file`, measured: a number, a nested struct, a list
+/// holding a null, a string, a decimal (`12.50` keeps its scale), a
+/// timestamp (JSON-quoted, as an instant with microseconds) and a boolean are
+/// Kestra's values, all seven (the user's ruling of 2026-10-03 on W9a Task
+/// 11's concern 2; until then the decimal and the timestamp were pinned as
+/// divergences).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_loop_over_the_edge_file_reads_kestras_values_but_two() {
+async fn a_loop_over_the_edge_file_reads_kestras_values() {
     let _turn = SERIAL.lock().await;
     let Some((db, ws, _fs)) = setup().await else {
         return;
@@ -804,7 +804,7 @@ async fn a_loop_over_the_edge_file_reads_kestras_values_but_two() {
         .into_iter()
         .map(|(_, _, v)| v)
         .collect();
-    let mut kestra: Vec<String> = edge["items"]
+    let kestra: Vec<String> = edge["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -812,9 +812,49 @@ async fn a_loop_over_the_edge_file_reads_kestras_values_but_two() {
         .collect();
     assert_eq!(kestra[4], "12.50");
     assert_eq!(kestra[5], "\"2025-12-03T12:00:00.000000Z\"");
-    kestra[4] = "12.5".into();
-    kestra[5] = "2025-12-03T12:00:00Z".into();
     assert_eq!(ours, kestra);
+}
+
+/// **A record the file holds twice iterates twice** (the user's ruling of
+/// 2026-10-03 on W9a Task 11's concern 2): Kestra's URI path has no
+/// `distinct()` (`FlowableUtils.readLoopValuesFromUri`, `javap -c` of the
+/// artifact's jar), so every record is an iteration, in file order, with its
+/// own index. An inline `values:` array still deduplicates
+/// (`executor::tests::a_files_values_are_iterated_as_read_and_an_inline_arrays_deduplicated`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_record_the_file_holds_twice_iterates_twice() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, _fs)) = setup().await else {
+        return;
+    };
+    let root = start_execution(
+        &db.pool,
+        ws,
+        None,
+        &loop_over_content("twice", "1\n1\n{a:1}\n1\n{a:1}"),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    drain(&db.pool).await;
+    let (state, _, message) = result_in(&db.pool, root, "loop").await;
+    assert_eq!(state, "SUCCESS", "{message:?}");
+    let its = iterations_of(&db.pool, root).await;
+    let want = ["1", "1", "{\"a\":1}", "1", "{\"a\":1}"];
+    assert_eq!(
+        its.iter()
+            .map(|(_, i, v)| (*i, v.as_str()))
+            .collect::<Vec<_>>(),
+        want.iter()
+            .enumerate()
+            .map(|(i, v)| (i as i32, *v))
+            .collect::<Vec<_>>()
+    );
+    for (id, _, value) in &its {
+        let (state, outputs, message) = result_in(&db.pool, *id, "item").await;
+        assert_eq!(state, "SUCCESS", "{message:?}");
+        assert_eq!(outputs.unwrap()["value"], json!(value));
+    }
 }
 
 /// `loop_over_ion.null_record`: a `null` record fails the loop with Kestra's
@@ -853,7 +893,8 @@ async fn a_values_file_over_max_read_bytes_fails_the_loop_naming_the_cap() {
     let Some((db, ws, _fs)) = setup().await else {
         return;
     };
-    let content = "1\n".repeat(READ_CAP as usize / 2 + 1);
+    // One string record of READ_CAP + 1 bytes.
+    let content = format!("\"{}\"", "a".repeat(READ_CAP as usize - 1));
     let root = start_execution(
         &db.pool,
         ws,
@@ -878,8 +919,12 @@ async fn a_values_file_over_max_read_bytes_fails_the_loop_naming_the_cap() {
     );
     assert!(iterations_of(&db.pool, root).await.is_empty());
 
-    // The control: the same file one record shorter is at the cap and loops.
-    let at_cap = "1\n".repeat(READ_CAP as usize / 2);
+    // The control: the same record one byte shorter is at the cap and loops.
+    // (One record, not 2048 × `1`: a file's values are not deduplicated
+    // since the user's ruling of 2026-10-03, and the repeat is
+    // `a_record_the_file_holds_twice_iterates_twice`'s.)
+    let at_cap = format!("\"{}\"", "a".repeat(READ_CAP as usize - 2));
+    assert_eq!(at_cap.len() as u64, READ_CAP);
     let root = start_execution(
         &db.pool,
         ws,
@@ -892,8 +937,9 @@ async fn a_values_file_over_max_read_bytes_fails_the_loop_naming_the_cap() {
     drain(&db.pool).await;
     let (state, _, message) = result_in(&db.pool, root, "loop").await;
     assert_eq!(state, "SUCCESS", "{message:?}");
-    // `Loop`'s array arm is `distinct()`: one value, `"1"`.
-    assert_eq!(iterations_of(&db.pool, root).await.len(), 1);
+    let its = iterations_of(&db.pool, root).await;
+    assert_eq!(its.len(), 1);
+    assert_eq!(its[0].2, "a".repeat(READ_CAP as usize - 2));
 }
 
 /// A BINARY Ion file -- what a JDBC plugin's STORE writes, each row with its

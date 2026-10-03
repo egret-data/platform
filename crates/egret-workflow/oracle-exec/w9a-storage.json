@@ -2633,7 +2633,478 @@
    },
    "note": "both connectors READ incrementally (Trino nextUri pages; StarRocks a mysql_async row iterator), but neither hands a row on before the end: each collects every row (up to Limits::max_rows) into a Vec and returns one TabularResult. Nothing streams through QueryExecPort.",
    "basis": "code (egret, HEAD 5e43eb58)"
-  }
+  },
+  "loop_value_to_string": [
+   {
+    "ion": "42",
+    "java_class": "java.lang.Integer",
+    "value": "42"
+   },
+   {
+    "ion": "{a:1,b:{c:[1,2]}}",
+    "java_class": "java.util.LinkedHashMap",
+    "value": "{\"a\":1,\"b\":{\"c\":[1,2]}}"
+   },
+   {
+    "ion": "[1,\"two\",null]",
+    "java_class": "java.util.ArrayList",
+    "value": "[1,\"two\",null]"
+   },
+   {
+    "ion": "\"plain string\"",
+    "java_class": "java.lang.String",
+    "value": "plain string"
+   },
+   {
+    "ion": "12.50",
+    "java_class": "java.math.BigDecimal",
+    "value": "12.50"
+   },
+   {
+    "ion": "2025-12-03T12:00:00Z",
+    "java_class": "java.time.Instant",
+    "value": "\"2025-12-03T12:00:00.000000Z\""
+   },
+   {
+    "ion": "true",
+    "java_class": "java.lang.Boolean",
+    "value": "true"
+   },
+   {
+    "ion": "{d:12.50}",
+    "java_class": "java.util.LinkedHashMap",
+    "value": "{\"d\":12.50}"
+   },
+   {
+    "ion": "[12.50, 1d3, 0.0]",
+    "java_class": "java.util.ArrayList",
+    "value": "[12.50,1E+3,0.0]"
+   },
+   {
+    "ion": "1d3",
+    "java_class": "java.math.BigDecimal",
+    "value": "1E+3"
+   },
+   {
+    "ion": "1.0d-2",
+    "java_class": "java.math.BigDecimal",
+    "value": "0.010"
+   },
+   {
+    "ion": "-0.0",
+    "java_class": "java.math.BigDecimal",
+    "value": "0.0"
+   },
+   {
+    "ion": "0.",
+    "java_class": "java.math.BigDecimal",
+    "value": "0"
+   },
+   {
+    "ion": "1.23d10",
+    "java_class": "java.math.BigDecimal",
+    "value": "1.23E+10"
+   },
+   {
+    "ion": "123456789012345678901234567890.123",
+    "java_class": "java.math.BigDecimal",
+    "value": "123456789012345678901234567890.123"
+   },
+   {
+    "ion": "0.0000001",
+    "java_class": "java.math.BigDecimal",
+    "value": "1E-7"
+   },
+   {
+    "ion": "2025-12-03T12:00:00+07:00",
+    "java_class": "java.time.ZonedDateTime",
+    "value": "\"2025-12-03T05:00:00.000000Z\""
+   },
+   {
+    "ion": "2025-12-03T12:00:00.123456789Z",
+    "java_class": "java.time.Instant",
+    "value": "\"2025-12-03T12:00:00.123000Z\""
+   },
+   {
+    "ion": "2025-12-03T12:00:00.1Z",
+    "java_class": "java.time.Instant",
+    "value": "\"2025-12-03T12:00:00.100000Z\""
+   },
+   {
+    "ion": "2025-12-03T12:00Z",
+    "java_class": "java.time.Instant",
+    "value": "\"2025-12-03T12:00:00.000000Z\""
+   },
+   {
+    "ion": "2025-12-03",
+    "java_class": "java.time.LocalDate",
+    "value": "\"2025-12-03\""
+   },
+   {
+    "ion": "2025-12T",
+    "java_class": "java.time.LocalDate",
+    "value": "\"2025-12-01\""
+   },
+   {
+    "ion": "2025T",
+    "java_class": "java.time.LocalDate",
+    "value": "\"2025-01-01\""
+   },
+   {
+    "ion": "2025-12-03T12:00:00-00:00",
+    "java_class": "java.time.Instant",
+    "value": "\"2025-12-03T12:00:00.000000Z\""
+   },
+   {
+    "ion": "2025-12-03T12:00:00.123-05:30",
+    "java_class": "java.time.ZonedDateTime",
+    "value": "\"2025-12-03T17:30:00.123000Z\""
+   },
+   {
+    "ion": "{t:2025-12-03T12:00:00Z}",
+    "java_class": "java.util.LinkedHashMap",
+    "value": "{\"t\":\"2025-12-03T12:00:00.000000Z\"}"
+   },
+   {
+    "ion": "[2025-12-03T12:00:00+07:00]",
+    "java_class": "java.util.ArrayList",
+    "value": "[\"2025-12-03T05:00:00.000000Z\"]"
+   },
+   {
+    "ion": "1.5e0",
+    "java_class": "java.lang.Double",
+    "value": "1.5"
+   },
+   {
+    "ion": "2e0",
+    "java_class": "java.lang.Double",
+    "value": "2.0"
+   },
+   {
+    "ion": "nan",
+    "java_class": "java.lang.Double",
+    "value": "NaN"
+   },
+   {
+    "ion": "+inf",
+    "java_class": "java.lang.Double",
+    "value": "Infinity"
+   },
+   {
+    "ion": "9007199254740993",
+    "java_class": "java.lang.Long",
+    "value": "9007199254740993"
+   },
+   {
+    "ion": "123456789012345678901234567890",
+    "java_class": "java.math.BigInteger",
+    "value": "123456789012345678901234567890"
+   },
+   {
+    "ion": "{{3q2+7w==}}",
+    "java_class": "[B",
+    "value": "\"3q2+7w==\""
+   },
+   {
+    "ion": "{{\"clob text\"}}",
+    "java_class": "[B",
+    "value": "\"Y2xvYiB0ZXh0\""
+   },
+   {
+    "ion": "sym",
+    "java_class": "java.lang.String",
+    "value": "sym"
+   },
+   {
+    "ion": "'quoted sym'",
+    "java_class": "java.lang.String",
+    "value": "quoted sym"
+   },
+   {
+    "ion": "(a b 1)",
+    "java_class": "java.util.ArrayList",
+    "value": "[\"a\",\"b\",1]"
+   },
+   {
+    "ion": "LocalDateTime::\"2026-01-02T03:04:05.123456\"",
+    "java_class": "java.time.LocalDateTime",
+    "value": "\"2026-01-02T03:04:05.123456\""
+   },
+   {
+    "ion": "{a:null,b:1}",
+    "java_class": "java.util.LinkedHashMap",
+    "value": "{\"b\":1}"
+   },
+   {
+    "ion": "false",
+    "java_class": "java.lang.Boolean",
+    "value": "false"
+   },
+   {
+    "ion": "\"12.50\"",
+    "java_class": "java.lang.String",
+    "value": "12.50"
+   },
+   {
+    "ion": "null.int",
+    "java_class": "null",
+    "error": "Found a null value in the ION file"
+   },
+   {
+    "ion": "2025-12-03T12:00:00.1239Z",
+    "java_class": "java.time.Instant",
+    "value": "\"2025-12-03T12:00:00.123000Z\""
+   },
+   {
+    "ion": "2025-12-03T12:00:00.9999Z",
+    "java_class": "java.time.Instant",
+    "value": "\"2025-12-03T12:00:00.999000Z\""
+   },
+   {
+    "ion": "1969-12-31T23:59:59.9999Z",
+    "java_class": "java.time.Instant",
+    "value": "\"1969-12-31T23:59:59.999000Z\""
+   },
+   {
+    "ion": "0001-01-01T00:00:00Z",
+    "java_class": "java.time.LocalDate",
+    "value": "\"0000-12-30\""
+   },
+   {
+    "ion": "2025-12-03T12:00+07:00",
+    "java_class": "java.time.ZonedDateTime",
+    "value": "\"2025-12-03T05:00:00.000000Z\""
+   },
+   {
+    "ion": "2025-12-03T12:00:00.000Z",
+    "java_class": "java.time.Instant",
+    "value": "\"2025-12-03T12:00:00.000000Z\""
+   },
+   {
+    "ion": "2025-12-03T12:00:00.000001Z",
+    "java_class": "java.time.Instant",
+    "value": "\"2025-12-03T12:00:00.000000Z\""
+   },
+   {
+    "ion": "{d:2025T,e:2025-12-03}",
+    "java_class": "java.util.LinkedHashMap",
+    "value": "{\"d\":\"2025-01-01\",\"e\":\"2025-12-03\"}"
+   },
+   {
+    "ion": "1.0d-7",
+    "java_class": "java.math.BigDecimal",
+    "value": "1.0E-7"
+   },
+   {
+    "ion": "100d-2",
+    "java_class": "java.math.BigDecimal",
+    "value": "1.00"
+   },
+   {
+    "ion": "-12.50",
+    "java_class": "java.math.BigDecimal",
+    "value": "-12.50"
+   },
+   {
+    "ion": "0d5",
+    "java_class": "java.math.BigDecimal",
+    "value": "0E+5"
+   },
+   {
+    "ion": "0.000",
+    "java_class": "java.math.BigDecimal",
+    "value": "0.000"
+   },
+   {
+    "ion": "1234.5d-8",
+    "java_class": "java.math.BigDecimal",
+    "value": "0.000012345"
+   },
+   {
+    "ion": "-0.0001",
+    "java_class": "java.math.BigDecimal",
+    "value": "-0.0001"
+   },
+   {
+    "ion": "0.000001",
+    "java_class": "java.math.BigDecimal",
+    "value": "0.000001"
+   },
+   {
+    "ion": "0.0000001",
+    "java_class": "java.math.BigDecimal",
+    "value": "1E-7"
+   },
+   {
+    "ion": "12345678d2",
+    "java_class": "java.math.BigDecimal",
+    "value": "1.2345678E+9"
+   },
+   {
+    "ion": "1e20",
+    "java_class": "java.lang.Double",
+    "value": "1.0E20"
+   },
+   {
+    "ion": "1e-5",
+    "java_class": "java.lang.Double",
+    "value": "1.0E-5"
+   },
+   {
+    "ion": "[1e20, nan, -inf, 1.5e0]",
+    "java_class": "java.util.ArrayList",
+    "value": "[1.0E20,\"NaN\",\"-Infinity\",1.5]"
+   },
+   {
+    "ion": "1234567.0e0",
+    "java_class": "java.lang.Double",
+    "value": "1234567.0"
+   },
+   {
+    "ion": "0.001e0",
+    "java_class": "java.lang.Double",
+    "value": "0.001"
+   },
+   {
+    "ion": "2025-12-03T00:00:00Z",
+    "java_class": "java.time.LocalDate",
+    "value": "\"2025-12-03\""
+   },
+   {
+    "ion": "2025-12-03T07:00:00+07:00",
+    "java_class": "java.time.ZonedDateTime",
+    "value": "\"2025-12-03T00:00:00.000000Z\""
+   },
+   {
+    "ion": "2025-12-03T00:00:00.0001Z",
+    "java_class": "java.time.LocalDate",
+    "value": "\"2025-12-03\""
+   },
+   {
+    "ion": "2025-12-03T00:00:00+00:00",
+    "java_class": "java.time.LocalDate",
+    "value": "\"2025-12-03\""
+   },
+   {
+    "ion": "2025-12-03T00:00:00-00:00",
+    "java_class": "java.time.LocalDate",
+    "value": "\"2025-12-03\""
+   },
+   {
+    "ion": "2025-12-03T00:00Z",
+    "java_class": "java.time.LocalDate",
+    "value": "\"2025-12-03\""
+   },
+   {
+    "ion": "LocalDateTime::\"2026-01-02T03:04:05\"",
+    "java_class": "java.time.LocalDateTime",
+    "value": "\"2026-01-02T03:04:05\""
+   },
+   {
+    "ion": "LocalDateTime::\"2026-01-02T03:04:05.100\"",
+    "java_class": "java.time.LocalDateTime",
+    "value": "\"2026-01-02T03:04:05.1\""
+   },
+   {
+    "ion": "LocalDateTime::\"2026-01-02T03:04\"",
+    "java_class": "java.time.LocalDateTime",
+    "value": "\"2026-01-02T03:04:00\""
+   },
+   {
+    "ion": "LocalDateTime::\"2026-01-02T03:04:05.123456789\"",
+    "java_class": "java.time.LocalDateTime",
+    "value": "\"2026-01-02T03:04:05.123456789\""
+   },
+   {
+    "ion": "LocalDateTime::\"2026-01-02T00:00:00\"",
+    "java_class": "java.time.LocalDateTime",
+    "value": "\"2026-01-02T00:00:00\""
+   },
+   {
+    "ion": "ZonedDateTime::\"2026-01-01T20:04:05Z[Etc/UTC]\"",
+    "java_class": "java.time.ZonedDateTime",
+    "value": "\"2026-01-01T20:04:05.000000Z\""
+   },
+   {
+    "ion": "ZonedDateTime::\"2026-01-01T20:04:05+07:00[Asia/Ho_Chi_Minh]\"",
+    "java_class": "java.time.ZonedDateTime",
+    "value": "\"2026-01-01T13:04:05.000000Z\""
+   },
+   {
+    "ion": "ZonedDateTime::\"2026-01-01T20:04:05.123456789Z[Etc/UTC]\"",
+    "java_class": "java.time.ZonedDateTime",
+    "value": "\"2026-01-01T20:04:05.123456Z\""
+   },
+   {
+    "ion": "ZonedDateTime::\"2026-01-01T20:04:05+07:00\"",
+    "java_class": "java.time.ZonedDateTime",
+    "value": "\"2026-01-01T13:04:05.000000Z\""
+   },
+   {
+    "ion": "ZonedDateTime::\"2026-01-02T00:00:00Z\"",
+    "java_class": "java.time.ZonedDateTime",
+    "value": "\"2026-01-02T00:00:00.000000Z\""
+   },
+   {
+    "ion": "Instant::\"2026-01-01T20:04:05.123456789Z\"",
+    "java_class": "java.time.Instant",
+    "value": "\"2026-01-01T20:04:05.123456Z\""
+   },
+   {
+    "ion": "Instant::\"2026-01-01T00:00:00Z\"",
+    "java_class": "java.time.Instant",
+    "value": "\"2026-01-01T00:00:00.000000Z\""
+   },
+   {
+    "ion": "OffsetDateTime::\"2026-01-01T20:04:05+07:00\"",
+    "java_class": "java.time.OffsetDateTime",
+    "value": "\"2026-01-01T13:04:05Z\""
+   },
+   {
+    "ion": "OffsetDateTime::\"2026-01-01T20:04:05.5Z\"",
+    "java_class": "java.time.OffsetDateTime",
+    "value": "\"2026-01-01T20:04:05.5Z\""
+   },
+   {
+    "ion": "LocalDate::\"2026-01-02\"",
+    "java_class": "java.time.LocalDate",
+    "value": "\"2026-01-02\""
+   },
+   {
+    "ion": "LocalTime::\"03:04:05.123\"",
+    "java_class": "java.time.LocalTime",
+    "value": "\"03:04:05.123\""
+   },
+   {
+    "ion": "LocalTime::\"03:04\"",
+    "java_class": "java.time.LocalTime",
+    "value": "\"03:04:00\""
+   },
+   {
+    "ion": "OffsetTime::\"03:04:05+07:00\"",
+    "java_class": "java.time.OffsetTime",
+    "value": "\"03:04:05+07:00\""
+   },
+   {
+    "ion": "{v:LocalDateTime::\"2026-01-02T03:04:05.123456\"}",
+    "java_class": "java.util.LinkedHashMap",
+    "value": "{\"v\":\"2026-01-02T03:04:05.123456\"}"
+   },
+   {
+    "ion": "{v:ZonedDateTime::\"2026-01-01T20:04:05Z[Etc/UTC]\"}",
+    "java_class": "java.util.LinkedHashMap",
+    "value": "{\"v\":\"2026-01-01T20:04:05.000000Z\"}"
+   },
+   {
+    "ion": "LocalDateTime::\"not a date\"",
+    "read_error": "java.time.format.DateTimeParseException: Text 'not a date' could not be parsed at index 0"
+   },
+   {
+    "ion": "foo::\"x\"",
+    "java_class": "com.amazon.ion.impl.lite.IonStringLite",
+    "error": "com.fasterxml.jackson.databind.exc.InvalidDefinitionException: Direct self-reference leading to cycle (through reference chain: com.amazon.ion.impl.lite.IonStringLite[\"symbolTable\"]->com.amazon.ion.im [truncated]"
+   }
+  ]
  },
  "egret_expected_basis": {
   "slugify": "the first 22 rows: io.kestra.core.utils.Slugify.of run in jshell on the artifact's own jar (/app/kestra copied out of the pinned image); the last 7: measured, the slug Kestra put into URIs for those flow/task ids",
@@ -2729,7 +3200,8 @@
     "why": "user ruling 2026-10-01 (spec §7.2): the measured probe assembles its URI at render (a literal URI prefix `~ execution.id ~` `~ taskrun.id ~` the file name); egret resolves only URIs present whole in the flow source or a render-context value before the render, so this exact template is an error naming the URI ('was not looked up … assembled while rendering'). Given the WHOLE URI (a literal or a context value) egret answers Kestra's false (Unreadable::Missing): storage_render::an_assembled_uri_not_in_the_snapshot_is_an_error_saying_why"
    }
   ],
-  "rule": "a cell carrying \"basis\": \"chosen\" holds EGRET's answer (the spec's), with Kestra's measured answer under \"kestra\"; error tokens are plan Task 3's Unreadable variants (NotReadable, Malformed, Missing) plus NotUtf8 for spec §7.2's non-UTF-8 read error, plus NotLookedUp for a URI assembled at render (the 2026-10-01 snapshot ruling). Every other cell is Kestra's measured answer, which egret matches"
+  "rule": "a cell carrying \"basis\": \"chosen\" holds EGRET's answer (the spec's), with Kestra's measured answer under \"kestra\"; error tokens are plan Task 3's Unreadable variants (NotReadable, Malformed, Missing) plus NotUtf8 for spec §7.2's non-UTF-8 read error, plus NotLookedUp for a URI assembled at render (the 2026-10-01 snapshot ruling). Every other cell is Kestra's measured answer, which egret matches",
+  "loop_value_to_string": "code: io.kestra.core.runners.FlowableUtils.ionValueToString (private; called by reflection) over io.kestra.core.serializers.FileSerde.read of each line of raw_records.jshell_loop_value_cases, run in jshell (Corretto 25) with --class-path the artifact's own /app/kestra (sha256 = raw_records.kestra_jar_sha256, re-checked) and -Duser.timezone=UTC, the artifact container's zone (/etc/timezone Etc/UTC, measured 2026-10-03; a ZonedDateTime or OffsetDateTime is written in the JVM's zone, so it matters). value: what ionValueToString returned; error: what it threw (messages over 200 chars truncated and marked); read_error: FileSerde.read itself threw. readLoopValuesFromUri and readAndCountLoopValuesFromUri apply ionValueToString to each value and have no distinct() (javap -c of the same jar), unlike resolveValues' two array arms. Captured 2026-10-03 for the user's ruling on W9a Task 11's concern 2; its 12.50 and 2025-12-03T12:00:00Z rows equal loop_over_ion.edge_file's (measured)"
  },
  "raw_records": {
   "plugins_listing": {
@@ -10076,6 +10548,104 @@
      "outputs_required": null
     }
    }
-  }
+  },
+  "jshell_loop_value_cases": "42\n{a:1,b:{c:[1,2]}}\n[1,\"two\",null]\n\"plain string\"\n12.50\n2025-12-03T12:00:00Z\ntrue\n{d:12.50}\n[12.50, 1d3, 0.0]\n1d3\n1.0d-2\n-0.0\n0.\n1.23d10\n123456789012345678901234567890.123\n0.0000001\n2025-12-03T12:00:00+07:00\n2025-12-03T12:00:00.123456789Z\n2025-12-03T12:00:00.1Z\n2025-12-03T12:00Z\n2025-12-03\n2025-12T\n2025T\n2025-12-03T12:00:00-00:00\n2025-12-03T12:00:00.123-05:30\n{t:2025-12-03T12:00:00Z}\n[2025-12-03T12:00:00+07:00]\n1.5e0\n2e0\nnan\n+inf\n9007199254740993\n123456789012345678901234567890\n{{3q2+7w==}}\n{{\"clob text\"}}\nsym\n'quoted sym'\n(a b 1)\nLocalDateTime::\"2026-01-02T03:04:05.123456\"\n{a:null,b:1}\nfalse\n\"12.50\"\nnull.int\n2025-12-03T12:00:00.1239Z\n2025-12-03T12:00:00.9999Z\n1969-12-31T23:59:59.9999Z\n0001-01-01T00:00:00Z\n2025-12-03T12:00+07:00\n2025-12-03T12:00:00.000Z\n2025-12-03T12:00:00.000001Z\n{d:2025T,e:2025-12-03}\n1.0d-7\n100d-2\n-12.50\n0d5\n0.000\n1234.5d-8\n-0.0001\n0.000001\n0.0000001\n12345678d2\n1e20\n1e-5\n[1e20, nan, -inf, 1.5e0]\n1234567.0e0\n0.001e0\n2025-12-03T00:00:00Z\n2025-12-03T07:00:00+07:00\n2025-12-03T00:00:00.0001Z\n2025-12-03T00:00:00+00:00\n2025-12-03T00:00:00-00:00\n2025-12-03T00:00Z\nLocalDateTime::\"2026-01-02T03:04:05\"\nLocalDateTime::\"2026-01-02T03:04:05.100\"\nLocalDateTime::\"2026-01-02T03:04\"\nLocalDateTime::\"2026-01-02T03:04:05.123456789\"\nLocalDateTime::\"2026-01-02T00:00:00\"\nZonedDateTime::\"2026-01-01T20:04:05Z[Etc/UTC]\"\nZonedDateTime::\"2026-01-01T20:04:05+07:00[Asia/Ho_Chi_Minh]\"\nZonedDateTime::\"2026-01-01T20:04:05.123456789Z[Etc/UTC]\"\nZonedDateTime::\"2026-01-01T20:04:05+07:00\"\nZonedDateTime::\"2026-01-02T00:00:00Z\"\nInstant::\"2026-01-01T20:04:05.123456789Z\"\nInstant::\"2026-01-01T00:00:00Z\"\nOffsetDateTime::\"2026-01-01T20:04:05+07:00\"\nOffsetDateTime::\"2026-01-01T20:04:05.5Z\"\nLocalDate::\"2026-01-02\"\nLocalTime::\"03:04:05.123\"\nLocalTime::\"03:04\"\nOffsetTime::\"03:04:05+07:00\"\n{v:LocalDateTime::\"2026-01-02T03:04:05.123456\"}\n{v:ZonedDateTime::\"2026-01-01T20:04:05Z[Etc/UTC]\"}\nLocalDateTime::\"not a date\"\nfoo::\"x\"\n",
+  "jshell_loop_value_script": "import java.nio.file.*;\nvar m = io.kestra.core.runners.FlowableUtils.class.getDeclaredMethod(\"ionValueToString\", Object.class);\nm.setAccessible(true);\nfor (String line : Files.readAllLines(Paths.get(\"ion_cases.txt\"))) {\n  var vals = new java.util.ArrayList<Object>();\n  try (var in = new java.io.ByteArrayInputStream(line.getBytes(\"UTF-8\"))) { io.kestra.core.serializers.FileSerde.read(in, vals::add); }\n  catch (Exception e) { System.out.println(\"CASE\\t\" + line + \"\\t-\\tREAD_THROWS \" + e.getClass().getName() + \": \" + e.getMessage()); continue; }\n  for (Object o : vals) {\n    String out;\n    try { out = (String) m.invoke(null, o); } catch (java.lang.reflect.InvocationTargetException e) { String msg = String.valueOf(e.getCause().getMessage()); out = \"THROWS \" + (msg.length() > 200 ? msg.substring(0, 200) + \" [truncated]\" : msg); }\n    System.out.println(\"CASE\\t\" + line + \"\\t\" + (o == null ? \"null\" : o.getClass().getName()) + \"\\t\" + out);\n  }\n}\n/exit\n",
+  "jshell_loop_value_output": [
+   "CASE\t42\tjava.lang.Integer\t42",
+   "CASE\t{a:1,b:{c:[1,2]}}\tjava.util.LinkedHashMap\t{\"a\":1,\"b\":{\"c\":[1,2]}}",
+   "CASE\t[1,\"two\",null]\tjava.util.ArrayList\t[1,\"two\",null]",
+   "CASE\t\"plain string\"\tjava.lang.String\tplain string",
+   "CASE\t12.50\tjava.math.BigDecimal\t12.50",
+   "CASE\t2025-12-03T12:00:00Z\tjava.time.Instant\t\"2025-12-03T12:00:00.000000Z\"",
+   "CASE\ttrue\tjava.lang.Boolean\ttrue",
+   "CASE\t{d:12.50}\tjava.util.LinkedHashMap\t{\"d\":12.50}",
+   "CASE\t[12.50, 1d3, 0.0]\tjava.util.ArrayList\t[12.50,1E+3,0.0]",
+   "CASE\t1d3\tjava.math.BigDecimal\t1E+3",
+   "CASE\t1.0d-2\tjava.math.BigDecimal\t0.010",
+   "CASE\t-0.0\tjava.math.BigDecimal\t0.0",
+   "CASE\t0.\tjava.math.BigDecimal\t0",
+   "CASE\t1.23d10\tjava.math.BigDecimal\t1.23E+10",
+   "CASE\t123456789012345678901234567890.123\tjava.math.BigDecimal\t123456789012345678901234567890.123",
+   "CASE\t0.0000001\tjava.math.BigDecimal\t1E-7",
+   "CASE\t2025-12-03T12:00:00+07:00\tjava.time.ZonedDateTime\t\"2025-12-03T05:00:00.000000Z\"",
+   "CASE\t2025-12-03T12:00:00.123456789Z\tjava.time.Instant\t\"2025-12-03T12:00:00.123000Z\"",
+   "CASE\t2025-12-03T12:00:00.1Z\tjava.time.Instant\t\"2025-12-03T12:00:00.100000Z\"",
+   "CASE\t2025-12-03T12:00Z\tjava.time.Instant\t\"2025-12-03T12:00:00.000000Z\"",
+   "CASE\t2025-12-03\tjava.time.LocalDate\t\"2025-12-03\"",
+   "CASE\t2025-12T\tjava.time.LocalDate\t\"2025-12-01\"",
+   "CASE\t2025T\tjava.time.LocalDate\t\"2025-01-01\"",
+   "CASE\t2025-12-03T12:00:00-00:00\tjava.time.Instant\t\"2025-12-03T12:00:00.000000Z\"",
+   "CASE\t2025-12-03T12:00:00.123-05:30\tjava.time.ZonedDateTime\t\"2025-12-03T17:30:00.123000Z\"",
+   "CASE\t{t:2025-12-03T12:00:00Z}\tjava.util.LinkedHashMap\t{\"t\":\"2025-12-03T12:00:00.000000Z\"}",
+   "CASE\t[2025-12-03T12:00:00+07:00]\tjava.util.ArrayList\t[\"2025-12-03T05:00:00.000000Z\"]",
+   "CASE\t1.5e0\tjava.lang.Double\t1.5",
+   "CASE\t2e0\tjava.lang.Double\t2.0",
+   "CASE\tnan\tjava.lang.Double\tNaN",
+   "CASE\t+inf\tjava.lang.Double\tInfinity",
+   "CASE\t9007199254740993\tjava.lang.Long\t9007199254740993",
+   "CASE\t123456789012345678901234567890\tjava.math.BigInteger\t123456789012345678901234567890",
+   "CASE\t{{3q2+7w==}}\t[B\t\"3q2+7w==\"",
+   "CASE\t{{\"clob text\"}}\t[B\t\"Y2xvYiB0ZXh0\"",
+   "CASE\tsym\tjava.lang.String\tsym",
+   "CASE\t'quoted sym'\tjava.lang.String\tquoted sym",
+   "CASE\t(a b 1)\tjava.util.ArrayList\t[\"a\",\"b\",1]",
+   "CASE\tLocalDateTime::\"2026-01-02T03:04:05.123456\"\tjava.time.LocalDateTime\t\"2026-01-02T03:04:05.123456\"",
+   "CASE\t{a:null,b:1}\tjava.util.LinkedHashMap\t{\"b\":1}",
+   "CASE\tfalse\tjava.lang.Boolean\tfalse",
+   "CASE\t\"12.50\"\tjava.lang.String\t12.50",
+   "CASE\tnull.int\tnull\tTHROWS Found a null value in the ION file",
+   "CASE\t2025-12-03T12:00:00.1239Z\tjava.time.Instant\t\"2025-12-03T12:00:00.123000Z\"",
+   "CASE\t2025-12-03T12:00:00.9999Z\tjava.time.Instant\t\"2025-12-03T12:00:00.999000Z\"",
+   "CASE\t1969-12-31T23:59:59.9999Z\tjava.time.Instant\t\"1969-12-31T23:59:59.999000Z\"",
+   "CASE\t0001-01-01T00:00:00Z\tjava.time.LocalDate\t\"0000-12-30\"",
+   "CASE\t2025-12-03T12:00+07:00\tjava.time.ZonedDateTime\t\"2025-12-03T05:00:00.000000Z\"",
+   "CASE\t2025-12-03T12:00:00.000Z\tjava.time.Instant\t\"2025-12-03T12:00:00.000000Z\"",
+   "CASE\t2025-12-03T12:00:00.000001Z\tjava.time.Instant\t\"2025-12-03T12:00:00.000000Z\"",
+   "CASE\t{d:2025T,e:2025-12-03}\tjava.util.LinkedHashMap\t{\"d\":\"2025-01-01\",\"e\":\"2025-12-03\"}",
+   "CASE\t1.0d-7\tjava.math.BigDecimal\t1.0E-7",
+   "CASE\t100d-2\tjava.math.BigDecimal\t1.00",
+   "CASE\t-12.50\tjava.math.BigDecimal\t-12.50",
+   "CASE\t0d5\tjava.math.BigDecimal\t0E+5",
+   "CASE\t0.000\tjava.math.BigDecimal\t0.000",
+   "CASE\t1234.5d-8\tjava.math.BigDecimal\t0.000012345",
+   "CASE\t-0.0001\tjava.math.BigDecimal\t-0.0001",
+   "CASE\t0.000001\tjava.math.BigDecimal\t0.000001",
+   "CASE\t0.0000001\tjava.math.BigDecimal\t1E-7",
+   "CASE\t12345678d2\tjava.math.BigDecimal\t1.2345678E+9",
+   "CASE\t1e20\tjava.lang.Double\t1.0E20",
+   "CASE\t1e-5\tjava.lang.Double\t1.0E-5",
+   "CASE\t[1e20, nan, -inf, 1.5e0]\tjava.util.ArrayList\t[1.0E20,\"NaN\",\"-Infinity\",1.5]",
+   "CASE\t1234567.0e0\tjava.lang.Double\t1234567.0",
+   "CASE\t0.001e0\tjava.lang.Double\t0.001",
+   "CASE\t2025-12-03T00:00:00Z\tjava.time.LocalDate\t\"2025-12-03\"",
+   "CASE\t2025-12-03T07:00:00+07:00\tjava.time.ZonedDateTime\t\"2025-12-03T00:00:00.000000Z\"",
+   "CASE\t2025-12-03T00:00:00.0001Z\tjava.time.LocalDate\t\"2025-12-03\"",
+   "CASE\t2025-12-03T00:00:00+00:00\tjava.time.LocalDate\t\"2025-12-03\"",
+   "CASE\t2025-12-03T00:00:00-00:00\tjava.time.LocalDate\t\"2025-12-03\"",
+   "CASE\t2025-12-03T00:00Z\tjava.time.LocalDate\t\"2025-12-03\"",
+   "CASE\tLocalDateTime::\"2026-01-02T03:04:05\"\tjava.time.LocalDateTime\t\"2026-01-02T03:04:05\"",
+   "CASE\tLocalDateTime::\"2026-01-02T03:04:05.100\"\tjava.time.LocalDateTime\t\"2026-01-02T03:04:05.1\"",
+   "CASE\tLocalDateTime::\"2026-01-02T03:04\"\tjava.time.LocalDateTime\t\"2026-01-02T03:04:00\"",
+   "CASE\tLocalDateTime::\"2026-01-02T03:04:05.123456789\"\tjava.time.LocalDateTime\t\"2026-01-02T03:04:05.123456789\"",
+   "CASE\tLocalDateTime::\"2026-01-02T00:00:00\"\tjava.time.LocalDateTime\t\"2026-01-02T00:00:00\"",
+   "CASE\tZonedDateTime::\"2026-01-01T20:04:05Z[Etc/UTC]\"\tjava.time.ZonedDateTime\t\"2026-01-01T20:04:05.000000Z\"",
+   "CASE\tZonedDateTime::\"2026-01-01T20:04:05+07:00[Asia/Ho_Chi_Minh]\"\tjava.time.ZonedDateTime\t\"2026-01-01T13:04:05.000000Z\"",
+   "CASE\tZonedDateTime::\"2026-01-01T20:04:05.123456789Z[Etc/UTC]\"\tjava.time.ZonedDateTime\t\"2026-01-01T20:04:05.123456Z\"",
+   "CASE\tZonedDateTime::\"2026-01-01T20:04:05+07:00\"\tjava.time.ZonedDateTime\t\"2026-01-01T13:04:05.000000Z\"",
+   "CASE\tZonedDateTime::\"2026-01-02T00:00:00Z\"\tjava.time.ZonedDateTime\t\"2026-01-02T00:00:00.000000Z\"",
+   "CASE\tInstant::\"2026-01-01T20:04:05.123456789Z\"\tjava.time.Instant\t\"2026-01-01T20:04:05.123456Z\"",
+   "CASE\tInstant::\"2026-01-01T00:00:00Z\"\tjava.time.Instant\t\"2026-01-01T00:00:00.000000Z\"",
+   "CASE\tOffsetDateTime::\"2026-01-01T20:04:05+07:00\"\tjava.time.OffsetDateTime\t\"2026-01-01T13:04:05Z\"",
+   "CASE\tOffsetDateTime::\"2026-01-01T20:04:05.5Z\"\tjava.time.OffsetDateTime\t\"2026-01-01T20:04:05.5Z\"",
+   "CASE\tLocalDate::\"2026-01-02\"\tjava.time.LocalDate\t\"2026-01-02\"",
+   "CASE\tLocalTime::\"03:04:05.123\"\tjava.time.LocalTime\t\"03:04:05.123\"",
+   "CASE\tLocalTime::\"03:04\"\tjava.time.LocalTime\t\"03:04:00\"",
+   "CASE\tOffsetTime::\"03:04:05+07:00\"\tjava.time.OffsetTime\t\"03:04:05+07:00\"",
+   "CASE\t{v:LocalDateTime::\"2026-01-02T03:04:05.123456\"}\tjava.util.LinkedHashMap\t{\"v\":\"2026-01-02T03:04:05.123456\"}",
+   "CASE\t{v:ZonedDateTime::\"2026-01-01T20:04:05Z[Etc/UTC]\"}\tjava.util.LinkedHashMap\t{\"v\":\"2026-01-01T20:04:05.000000Z\"}",
+   "CASE\tLocalDateTime::\"not a date\"\t-\tREAD_THROWS java.time.format.DateTimeParseException: Text 'not a date' could not be parsed at index 0",
+   "CASE\tfoo::\"x\"\tcom.amazon.ion.impl.lite.IonStringLite\tTHROWS com.fasterxml.jackson.databind.exc.InvalidDefinitionException: Direct self-reference leading to cycle (through reference chain: com.amazon.ion.impl.lite.IonStringLite[\"symbolTable\"]->com.amazon.ion.im [truncated]"
+  ]
  }
 }

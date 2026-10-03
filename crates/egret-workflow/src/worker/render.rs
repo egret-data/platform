@@ -568,7 +568,8 @@ impl Surface {
     }
 
     /// W9a Task 11 (spec §9.3): the values of a `Loop` whose `values:`
-    /// rendered to `uri`, as the JSON array of strings `advance()` iterates --
+    /// rendered to `uri`, in `executor::rendered_from_file`'s form, which
+    /// `advance()` iterates as read (no `distinct()`, as Kestra's URI path) --
     /// or why not, which fails the loop run with that message.
     ///
     /// The file is resolved through this surface's snapshot -- the one
@@ -576,8 +577,9 @@ impl Surface {
     /// terminated task's outputs are -- and read whole, capped by
     /// `workflow.storage.max_read_bytes` (there is no loop-width limit in the
     /// code to reuse). It is read as BYTES, because a plugin's STORE file is
-    /// binary Ion and not UTF-8, and parsed by `storage::ion`, the one Ion
-    /// reader, one top-level value per iteration value. A store OUTAGE is
+    /// binary Ion and not UTF-8, and parsed by `storage::ion::loop_values`
+    /// (the one Ion reader, with Kestra's `ionValueToString` projection), one
+    /// top-level value per iteration value. A store OUTAGE is
     /// recorded on the scope, so `settle` turns it into an `Err`.
     ///
     /// Kestra reads the file in batches of `concurrencyLimit` as iterations
@@ -604,9 +606,11 @@ impl Surface {
                 return Err(format!("{uri} is not an ION file a Loop can iterate: {e}"))
             }
         };
+        // The first record that cannot be a value -- a `null`
+        // (`ion::LOOP_NULL_RECORD`, Kestra's message), a `java.time` text that
+        // does not parse -- fails the loop, as Kestra's read of it throws.
         let strings = values
             .into_iter()
-            .map(|v| v.ok_or_else(|| "Found a null value in the ION file".to_string()))
             .collect::<std::result::Result<Vec<String>, String>>()?;
         Ok(crate::executor::rendered_from_file(uri, &strings))
     }

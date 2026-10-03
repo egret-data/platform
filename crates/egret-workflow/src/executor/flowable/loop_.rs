@@ -187,25 +187,30 @@ fn first_batch(concurrency_limit: u32, size: usize) -> usize {
 /// bytes, capped by `workflow.storage.max_read_bytes` (no loop-width limit
 /// exists to reuse), parsed one top-level Ion value at a time by
 /// `storage::ion` (text or binary Ion), each value coalesced as Kestra's
-/// `FlowableUtils.ionValueToString`, and the JSON ARRAY of those strings is
-/// what lands in [`TaskRun::rendered`](crate::executor::TaskRun::rendered) --
-/// the caller's answer, as for an `If`. This function and [`open`] are
-/// unchanged and pure: they take that array down the array arm.
+/// `FlowableUtils.ionValueToString` (`storage::ion::loop_values`, Kestra's
+/// decimals, doubles and `java.time` forms), and what lands in
+/// [`TaskRun::rendered`](crate::executor::TaskRun::rendered) -- the caller's
+/// answer, as for an `If` -- is [`rendered_from_file`]'s form: the URI and
+/// the JSON array of those strings. This function and [`open`] stay pure:
+/// they recognise that form ([`values_name_a_file`]) and iterate it AS READ.
 ///
-/// Two consequences of going down the array arm, both registered by W9a Task
-/// 11: Kestra's URI path has no `distinct()` and egret's array arm has, so a
-/// file holding the same record twice iterates it once on egret; and the file
-/// is read whole before the first iteration, so a `null` record fails the loop
-/// before any iteration where Kestra fails it at the batch that reaches it.
+/// **No `distinct()` for a file** (the user's ruling of 2026-10-03; until
+/// then the array went down the array arm and a record the file held twice
+/// iterated once): Kestra's URI path, `readLoopValuesFromUri`, has none.
+/// One consequence remains, registered by W9a Task 11: the file is read whole
+/// before the first iteration, so a `null` record fails the loop before any
+/// iteration where Kestra fails it at the batch that reaches it.
 /// `valids/loop-values-from-uri` banks; `valids/loop-outputs-auto` iterates as
-/// Kestra does and is still baselined on the `Loop`'s own `outputs:`, which
-/// egret does not produce.
+/// Kestra does and is still baselined on the `Loop`'s own `outputs:` (STORE
+/// mode, `executions/{iteration}/{n}.ion`), which egret does not produce --
+/// out of W9a by the user's ruling of 2026-10-03 (spec §15).
 ///
 /// # `distinct()` is on the array arm and NOT on the object arm
 ///
 /// Kestra deduplicates the array's resolved values
 /// (`.stream().distinct().toList()`, twice — once in each of its two array
-/// arms) and does not deduplicate the object's. Both are reproduced. No corpus
+/// arms) and does not deduplicate the object's -- nor a file's (above). All
+/// three are reproduced. No corpus
 /// flow has a duplicate value, so
 /// `kestra_deduplicates_a_list_of_values_and_not_a_map_of_them` is what holds
 /// it rather than an entry.
@@ -321,13 +326,9 @@ fn values_read_from_a_file(rendered: &str) -> Result<Vec<String>, String> {
             "values names the file {rendered}, which the worker has not read"
         ));
     };
-    let values: Vec<String> = serde_json::from_str(array)
-        .map_err(|e| format!("the values read from {uri} are not a list of strings: {e}"))?;
-    let mut out: Vec<String> = Vec::with_capacity(values.len());
-    for value in values {
-        if !out.contains(&value) {
-            out.push(value);
-        }
-    }
-    Ok(out)
+    // As read: Kestra's URI path has no `distinct()` (see
+    // [`rendered_from_file`]), so a record the file holds twice is two
+    // iterations.
+    serde_json::from_str(array)
+        .map_err(|e| format!("the values read from {uri} are not a list of strings: {e}"))
 }
