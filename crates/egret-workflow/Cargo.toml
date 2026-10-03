@@ -200,6 +200,13 @@ unicode-normalization = "0.1"
 # the symbol table after each one, not only after a value (the elements of a
 # value are counted by the depth scan before the reader sees them, so no
 # lazy walk is needed). Pinned `=1.0.1`, the features' API cannot move.
+# PIN NOTE (fix round 5): `storage::ion` also relies on
+# `SystemReader::pending_context_changes()` returning a type `ion-rs` does
+# NOT export (`pub(crate) struct PendingContextChanges`, reachable only
+# through that `pub fn`) and calls its `local_symbols()` and
+# `imported_symbols()` on it. A later `ion-rs` may hide or rename it: on
+# ANY bump, re-check `lazy/system_reader.rs` and `tests/ion_memory.rs`'s
+# back-to-back symbol-table test before trusting the symbol charge.
 ion-rs = { version = "=1.0.1", features = [
     "experimental-reader-writer",
     "experimental-tooling-apis",

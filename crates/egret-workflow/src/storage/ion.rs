@@ -183,10 +183,12 @@ where
 ///   reads.
 /// - **Values.** The depth scan also counts the values a top-level value can
 ///   hold -- exactly in binary, over-counted in text: every byte that can
-///   start one (a timestamp counts several), and inside an s-expression
-///   EVERY identifier byte, since `ion-rs` splits a run there at each
-///   `$<digits>` symbol ID where a list or struct refuses the adjacency
-///   (the split rule is never mirrored: mirroring could under-count) -- and
+///   start one (a timestamp counts several), and under an s-expression at
+///   ANY depth (a comment's bracket opens a level the scan never closes,
+///   so the innermost level alone could hide it) EVERY identifier byte,
+///   since `ion-rs` splits a run there at each `$<digits>` symbol ID where
+///   a list or struct refuses the adjacency (the split rule is never
+///   mirrored: mirroring could under-count) -- and
 ///   a top-level value of more than `cap / ELEMENT_BYTES` is refused while
 ///   it is scanned, before the reader holds it. **Measured at the budget:**
 ///   33.8 MB under the 10 MiB cap for an s-expression of five million `$1`
@@ -197,8 +199,8 @@ where
 ///   the top level between values (binary: every container closed; text: a
 ///   top-level separator or closing bracket) and at each yield. The price
 ///   in text: one top-level value holding more than `cap / 64` values, or
-///   an s-expression of more than `cap / 64` identifier bytes (about 160
-///   KB at the default), is refused.
+///   more than `cap / 64` identifier bytes under an s-expression (about
+///   160 KB at the default), is refused.
 /// - **Symbols.** After EVERY item the reader consumes -- a version marker,
 ///   a symbol table, a value -- what its symbol table ADDED since the last
 ///   item is charged, its text plus [`SYMBOL_OVERHEAD`] a symbol, plus the
@@ -714,9 +716,17 @@ impl TextScan {
         Ok(())
     }
 
-    /// The innermost open container is an s-expression.
+    /// ANY open level is an s-expression (fix round 5; round 4 read the
+    /// innermost only). A bracket inside a comment opens a level the scan
+    /// never closes -- a phantom on top, whose bit `open` clears -- so the
+    /// innermost bit could hide a real s-expression (`( /*[*/ $1$2$3 )`). A
+    /// real s-expression's bit sits at a level the depth cannot drop below
+    /// while it is open, since only real closers in `Normal` decrement, and
+    /// `open` writes every level it enters, so no stale bit under `depth`
+    /// is read. Identifiers in a list or struct nested inside an
+    /// s-expression are over-counted: accepted.
     fn in_sexp(&self) -> bool {
-        self.depth > 0 && (self.sexps >> (self.depth - 1)) & 1 == 1
+        self.sexps & ((1u128 << self.depth) - 1) != 0
     }
 
     fn normal(&mut self, b: u8) -> Result<Text, Trip> {
@@ -727,14 +737,15 @@ impl TextScan {
         // bracket, a quote) once -- outside strings, symbols, lobs and
         // comments. A value is at least one such byte, so this is never
         // under what the reader builds; a timestamp or a decimal counts as
-        // several. Inside an s-expression EVERY identifier byte counts (fix
-        // round 4): there `ion-rs` 1.0.1 splits a run at each `$<digits>`
-        // symbol ID (`($1$2$3)` is three values; `($1a$1a)` is `($ion
-        // a$1a)`), where a list or a struct refuses the adjacency -- and the
-        // split rule is never mirrored, since mirroring it could count UNDER
-        // what the reader builds. The price: an s-expression of more than
-        // `cap / 64` identifier bytes (about 160 KB at the default) in one
-        // top-level value is refused; Kestra writes no s-expressions.
+        // several. Under an s-expression, at any depth, EVERY identifier
+        // byte counts (fix rounds 4-5): there `ion-rs` 1.0.1 splits a run
+        // at each `$<digits>` symbol ID (`($1$2$3)` is three values;
+        // `($1a$1a)` is `($ion a$1a)`), where a list or a struct refuses
+        // the adjacency -- and the split rule is never mirrored, since
+        // mirroring it could count UNDER what the reader builds. The price:
+        // more than `cap / 64` identifier bytes (about 160 KB at the
+        // default) under an s-expression in one top-level value is refused;
+        // Kestra writes no s-expressions.
         let word = b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
         if b.is_ascii_whitespace() || b == b',' {
             self.count.top |= self.depth == 0;
@@ -2367,6 +2378,54 @@ mod tests {
             rows[0],
             json!([1, 22, 333, "abc", "d_e", "2025-12-03T12:00:00.123Z", {"a": 1, "b": ["x", "y"]}, [1, 2], "s", "q"])
         );
+    }
+
+    /// **(B) fix round 5:** a bracket inside a comment opens a level the
+    /// scan never closes (so it is never behind `ion-rs`), and round 4 read
+    /// only the innermost level's s-expression bit, so a comment could hide
+    /// the s-expression from the word count. A word byte now counts while
+    /// ANY open level is an s-expression: 600 `$1` after `/*[*/`, after
+    /// `//{` and a newline, and in `[( /*[*/ … )]` are refused under a 64
+    /// KiB cap (the premise: each reads uncapped as the split symbols), and
+    /// the same comments before a list of 300 words still read.
+    #[test]
+    fn a_comment_bracket_cannot_hide_a_sexp() {
+        let cap = 64 * KIB as u64;
+        for (what, head, tail) in [
+            ("block comment", "( /*[*/ ", " )"),
+            ("line comment", "( //{\n ", " )"),
+            ("nested in a list", "[( /*[*/ ", " )]"),
+        ] {
+            let small = format!("{head}$1$2{tail}");
+            let (rows, stop) = capped(cursor(small), u64::MAX);
+            assert!(matches!(stop, Stop::End), "{what}: {stop:?}");
+            assert_eq!(rows.len(), 1, "{what}: the premise, ion-rs reads it");
+            let text = rows[0].to_string();
+            assert!(text.contains("$ion_1_0"), "{what}: not split: {text}");
+            let (rows, stop) = capped(cursor(format!("{head}{}{tail}", "$1".repeat(600))), cap);
+            assert!(rows.is_empty(), "{what}: {rows:?}");
+            let Stop::TooLarge(why) = stop else {
+                panic!("{what}: {stop:?}")
+            };
+            assert!(why.contains("more than 1024 values"), "{what}: {why}");
+        }
+        // The control: the same comments do not make a list a sexp -- 300
+        // words (1 200 identifier bytes, over the budget if they counted
+        // each) read as 300 values.
+        let words = vec!["abcd"; 300].join(", ");
+        for text in [
+            format!("[ /*[*/ {words} ]"),
+            format!("[ //{{\n {words} ]"),
+            format!("{{ /*{{*/ a: [{words}] }}"),
+        ] {
+            let (rows, stop) = capped(cursor(text.clone()), cap);
+            assert!(matches!(stop, Stop::End), "{text}: {stop:?}");
+            assert_eq!(rows.len(), 1, "{text}");
+        }
+        // The price, pinned: a `(` inside a comment opens a phantom
+        // s-expression level, under which the same list IS refused.
+        let (_, stop) = capped(cursor(format!("/*(*/ [{words}]")), cap);
+        assert!(matches!(stop, Stop::TooLarge(_)), "{stop:?}");
     }
 
     /// A reader that hands out at most `chunk` bytes a call, as the store does.

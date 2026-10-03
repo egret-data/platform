@@ -245,6 +245,40 @@ fn a_sexp_of_adjacent_symbol_ids_is_refused_before_it_is_split() {
     assert!(peak < 8 * 10 * MIB, "held {peak} bytes for a 10 MiB cap");
 }
 
+/// **(B) fix round 5: a comment's bracket cannot hide the s-expression.**
+/// The text scan counts an opening bracket inside a comment as a level
+/// (nothing closes it: the scan is never behind `ion-rs`), and round 4 read
+/// only the innermost level's s-expression bit -- so `( /*[*/ $1$2$3 )`,
+/// `( //{` + newline + `$1$2$3 )` and `[( /*[*/ $1$2 )]`, which `ion-rs`
+/// accepts, counted the run once again: five million `$1` built 5 000 000
+/// children at about 2.27 GB (the re-review's probe). Now a word byte counts
+/// while ANY open level is an s-expression, so each is refused while
+/// scanned, with the round-4 peak.
+#[test]
+fn a_comment_bracket_cannot_hide_a_sexp_from_the_word_count() {
+    let n = 5_000_000;
+    let run = "$1".repeat(n);
+    for (what, head, tail) in [
+        ("block comment", "( /*[*/ ", " )"),
+        ("line comment", "( //{\n ", " )"),
+        ("nested in a list", "[( /*[*/ ", " )]"),
+    ] {
+        let text = format!("{head}{run}{tail}");
+        let size = text.len();
+        let (rows, stop, peak) = read_measured(text.into_bytes(), 10 * MIB as u64);
+        eprintln!("{what}: {size} bytes, {rows} values, peak {peak} bytes, {stop:?}");
+        let Stop::TooLarge(why) = stop else {
+            panic!("{what}: not refused: {rows} values, peak {peak}, {stop:?}")
+        };
+        assert!(why.contains("more than 163840 values"), "{what}: {why}");
+        assert_eq!(rows, 0, "{what}");
+        assert!(
+            peak < 8 * 10 * MIB,
+            "{what}: held {peak} bytes for a 10 MiB cap"
+        );
+    }
+}
+
 /// The control: files egret and Kestra write read whole under the default
 /// 10 MiB cap -- Kestra's `FileSerde` binary (a version marker and a symbol
 /// table per row; the fixture's `DeduplicateItems` output, repeated to
