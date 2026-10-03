@@ -181,14 +181,16 @@ public final class EgretPluginHost {
         }
         Task task = loaded.task();
 
-        // The plugin's temp files go to the JVM's own temp directory, which its user owns; egret's
-        // staged inputs and collected outputs are under $WORKING_DIR. W9a Task 9, measured live:
-        // `docker cp` makes $WORKING_DIR root-owned and the image runs as USER 65532, so Kestra's
-        // LocalWorkingDir could not create its directory there and every STORE failed with
-        // NoSuchFileException on its temp file.
-        Path scratch = Path.of(System.getProperty("java.io.tmpdir"));
+        // The plugin's temp files go to $WORKING_DIR/.egret/tmp, which egret creates world-writable
+        // (W9a Task 9, measured live: `docker cp` makes $WORKING_DIR itself root-owned and the image
+        // runs as USER 65532, so Kestra's LocalWorkingDir could not create its directory there and
+        // every STORE failed with NoSuchFileException on its temp file). Under $WORKING_DIR, scratch
+        // stays bounded by the working directory's emptyDir sizeLimit on Kubernetes (fix round 1).
         String base = System.getenv("WORKING_DIR");
-        Path workingDirBase = base == null || base.isBlank() ? scratch : Path.of(base);
+        Path workingDirBase = base == null || base.isBlank()
+            ? Path.of(System.getProperty("java.io.tmpdir"))
+            : Path.of(base);
+        Path scratch = scratchUnder(workingDirBase);
         ShimRunContext runContext = new ShimRunContext(scratch, workingDirBase, task, loaded.storage());
 
         try {
@@ -237,6 +239,25 @@ public final class EgretPluginHost {
      */
     static String outputsLine(Map<String, Object> outputs) throws IOException {
         return "::" + MAPPER.writeValueAsString(Map.of("outputs", outputs)) + "::";
+    }
+
+    /**
+     * {@code <workingDir>/.egret/tmp} when it exists or can be made; else the JVM's temp directory (a
+     * host run by hand, without egret's runner), with a WARN line.
+     */
+    static Path scratchUnder(Path workingDirBase) {
+        Path scratch = workingDirBase.resolve(EgretStorage.TMP_DIR);
+        try {
+            Files.createDirectories(scratch);
+            if (Files.isWritable(scratch)) {
+                return scratch;
+            }
+        } catch (IOException e) {
+            // fall through
+        }
+        Path tmp = Path.of(System.getProperty("java.io.tmpdir"));
+        HOST_LOG.warn("{} is not writable; the plugin's temp files go to {}", scratch, tmp);
+        return tmp;
     }
 
     static final class Refused extends Exception {

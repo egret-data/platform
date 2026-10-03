@@ -256,8 +256,11 @@ public class ShimRunContext extends DefaultRunContext {
         if (storage == null) {
             Map<String, String> c = storageSpec.context();
             if (c == null) {
-                throw new IllegalStateException("task.json carries no storage `context`, which egret sends "
-                    + "with every task; this host cannot build a storage context without it");
+                // egret sends `context` with every task run of a flow's execution (fix round 1, I1); a
+                // task.json without one is not such a run, and has no storage to read or write.
+                throw new EgretUnsupported("storage() needs task.json's `context` (namespace, flow, "
+                    + "execution, task, task run), which egret sends for a task run of a flow's execution; "
+                    + "this task.json has none, so this run has no internal storage");
             }
             StorageContext context = StorageContext.forTask(null, c.get("namespace"), c.get("flowId"),
                 c.get("executionId"), c.get("taskId"), c.get("taskRunId"), null);

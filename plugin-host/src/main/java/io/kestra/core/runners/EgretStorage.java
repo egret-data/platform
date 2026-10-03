@@ -40,17 +40,27 @@ import io.kestra.core.storages.StorageObject;
  *   <li>The {@code *Instance*} resources are Kestra's instance-wide store, which egret does not have.</li>
  * </ul>
  *
- * <p><b>URIs.</b> A URI is matched on its decoded path: {@code kestra:///a/b} and the scheme-less
- * {@code ///a/b} that {@code StorageContext.Task#getContextStorageURI} builds (measured on 2.0.0-rc13:
- * {@code InternalStorage.putFile(stream, name)} passes {@code put} a URI with no scheme) name the same
- * file. A URI with another scheme, or with a {@code ..} segment, is refused. {@code put} returns
- * {@code kestra://} + the path, as Kestra's own {@code LocalStorage} does.
+ * <p><b>URIs.</b> A URI is matched on its RAW path (fix round 1, I2): egret never percent-decodes a
+ * URI, and a file name may hold a literal {@code %} ({@code inputs/f/a%20b.txt}). {@code kestra:///a/b}
+ * and the scheme-less {@code ///a/b} that {@code StorageContext.Task#getContextStorageURI} builds
+ * (measured on 2.0.0-rc13: {@code InternalStorage.putFile(stream, name)} passes {@code put} a URI with
+ * no scheme) name the same file. A URI with another scheme, or with a segment that is -- or decodes
+ * to -- {@code .} or {@code ..}, is refused. A file is written under its raw relative path and
+ * {@code put} returns {@code kestra://} + the raw path, as Kestra's own {@code LocalStorage} does;
+ * egret collects that file as {@code baseUri + raw relative path}, the same string.
+ *
+ * <p><b>A write in progress</b> is a {@code .part} file in {@code .egret/tmp}, moved atomically into
+ * {@code .egret/out} when complete (fix round 1, M3): a killed JVM never leaves a partial file that
+ * egret would collect and index.
  */
 final class EgretStorage implements StorageInterface {
     static final String SCHEME = "kestra";
     static final String OUT_DIR = ".egret/out";
+    /** Where writes in progress live; egret creates it world-writable beside {@link #OUT_DIR}. */
+    static final String TMP_DIR = ".egret/tmp";
 
     private final Path outDir;
+    private final Path tmpDir;
     /** decoded path -> the staged file. */
     private final Map<String, Path> staged = new TreeMap<>();
     /** decoded path -> size, for the files this task wrote. */
@@ -70,12 +80,13 @@ final class EgretStorage implements StorageInterface {
      */
     EgretStorage(Path workingDir, Map<String, String> stagedFiles, URI baseUri, long maxTaskBytes) {
         this.outDir = workingDir.resolve(OUT_DIR).toAbsolutePath().normalize();
+        this.tmpDir = workingDir.resolve(TMP_DIR).toAbsolutePath().normalize();
         stagedFiles.forEach((uri, rel) -> staged.put(keyOfStaged(uri), workingDir.resolve(rel)));
         this.baseUri = baseUri;
         if (baseUri == null) {
             this.basePath = null;
         } else {
-            String p = baseUri.getPath();
+            String p = baseUri.getRawPath();
             this.basePath = p.endsWith("/") ? p : p + "/";
         }
         this.maxTaskBytes = maxTaskBytes;
@@ -84,8 +95,8 @@ final class EgretStorage implements StorageInterface {
     // --- keys ----------------------------------------------------------------------------
 
     /**
-     * egret's own URIs are written unescaped ({@code kestra:///ns/flow/…}): the key is everything after
-     * the scheme's {@code kestra://}, the same string {@link URI#getPath()} decodes a request to.
+     * egret's own URIs are written as they are, never encoded or decoded: the key is everything after
+     * the scheme's {@code kestra://}, the same string {@link URI#getRawPath()} gives a request.
      */
     private static String keyOfStaged(String uri) {
         String prefix = SCHEME + "://";
@@ -100,29 +111,22 @@ final class EgretStorage implements StorageInterface {
         if (uri.getScheme() != null && !uri.getScheme().equals(SCHEME)) {
             throw new IllegalArgumentException(uri + " is not a kestra:// URI");
         }
-        String path = uri.getPath();
+        String path = uri.getRawPath();
         if (path == null || path.isEmpty() || !path.startsWith("/")) {
             throw new IllegalArgumentException(uri + " has no absolute path");
         }
         for (String segment : path.split("/")) {
-            if (segment.equals("..") || segment.equals(".")) {
+            String decoded = segment.replaceAll("(?i)%2e", ".");
+            if (decoded.equals("..") || decoded.equals(".")) {
                 throw new IllegalArgumentException(uri + " holds a '" + segment + "' segment");
             }
         }
         return path;
     }
 
+    /** A raw key back to a URI: it came from {@link URI#getRawPath()} or egret, so it is already legal. */
     private static URI toUri(String path) {
-        return URI.create(SCHEME + "://" + encodePath(path));
-    }
-
-    /** Percent-encodes what {@link URI} would refuse in a path (a space, '%', '#', '?'). */
-    private static String encodePath(String path) {
-        try {
-            return new URI(null, null, path, null).getRawPath();
-        } catch (java.net.URISyntaxException e) {
-            throw new IllegalArgumentException("the path " + path + " cannot be a URI", e);
-        }
+        return URI.create(SCHEME + "://" + path);
     }
 
     private Path outFile(String key) {
@@ -279,12 +283,19 @@ final class EgretStorage implements StorageInterface {
             throw new IOException("cannot write " + uri + ": egret's plugin host writes only under this task "
                 + "run's storage prefix " + baseUri);
         }
-        Path file = outFile(key);
+        Path file;
+        try {
+            file = outFile(key);
+        } catch (IllegalArgumentException e) {
+            throw new IOException("cannot write " + uri + ": egret's plugin host writes only under this task "
+                + "run's storage prefix " + baseUri + ", into " + OUT_DIR, e);
+        }
         Files.createDirectories(file.getParent());
+        Files.createDirectories(tmpDir);
         long before = written.getOrDefault(key, 0L);
         long budget = maxTaskBytes - (writtenBytes - before);
         long n = 0;
-        Path partial = Files.createTempFile(file.getParent(), ".egret-put-", ".part");
+        Path partial = Files.createTempFile(tmpDir, "put-", ".part");
         try (InputStream in = storageObject.inputStream(); OutputStream out = Files.newOutputStream(partial)) {
             byte[] buf = new byte[64 * 1024];
             int r;

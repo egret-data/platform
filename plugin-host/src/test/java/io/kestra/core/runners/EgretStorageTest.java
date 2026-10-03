@@ -135,11 +135,20 @@ class EgretStorageTest {
         storage.put(null, null, URI.create(BASE + "a"), bytes("x".repeat(60)));
     }
 
+    /**
+     * Fix round 1, I1: egret sends {@code context} with every task and {@code baseUri} only with
+     * internal storage. Without it, a plugin's write fails naming {@code [storage]} -- reached end to
+     * end through Kestra's InternalStorage, the call CopyOut makes.
+     */
     @Test
-    void without_a_base_uri_every_write_fails_naming_storage() {
-        var none = new EgretStorage(wd, Map.of(), null, 0);
-        var e = assertThrows(IOException.class, () -> none.put(null, null, URI.create(BASE + "a"), bytes("x")));
+    void without_internal_storage_a_plugin_write_fails_naming_storage() throws Exception {
+        var shim = new ShimRunContext(wd, new ShimRunContext.StorageSpec(Map.of(), null, 0,
+            Map.of("namespace", "w9a.plugins", "flowId", "pg-storage", "executionId", EXEC,
+                "taskId", "copy_out", "taskRunId", RUN)));
+        var e = assertThrows(IOException.class, () -> shim.storage()
+            .putFile(new ByteArrayInputStream("x".getBytes(StandardCharsets.UTF_8)), "copy-out"));
         assertTrue(e.getMessage().contains("[storage]"), e.getMessage());
+        assertEquals(3, EgretPluginHost.exitCodeFor(e), "the plugin's failure, naming the fix");
     }
 
     // --- delete, move, directories -----------------------------------------------------------
@@ -293,4 +302,95 @@ class EgretStorageTest {
             assertEquals(c.get("baseUri"), "kestra:" + kestra + "/", c.toString());
         }
     }
+
+    // --- fix round 1 -----------------------------------------------------------------------------
+
+    /**
+     * I2: egret never percent-decodes a URI, and a FILE input may carry a literal {@code %}
+     * ({@code inputs/f/a%20b.txt}). Staged and requested URIs are matched on the same raw path.
+     */
+    @Test
+    void a_staged_uri_with_a_literal_percent_is_read() throws Exception {
+        String pct = "kestra:///w9a/plugins/pg-storage/executions/" + EXEC + "/inputs/f/a%20b.txt";
+        Files.write(wd.resolve(".egret/storage/1"), STAGED_BYTES);
+        var s = new EgretStorage(wd, Map.of(STAGED, ".egret/storage/0", pct, ".egret/storage/1"), URI.create(BASE), 100);
+        assertArrayEquals(STAGED_BYTES, read(s.get(null, null, URI.create(pct))));
+        assertTrue(s.exists(null, null, URI.create(pct)));
+        // A different raw spelling is a different name, as it is to egret.
+        assertFalse(s.exists(null, null, URI.create(pct.replace("%20", "%2520"))));
+    }
+
+    /** I2: an encoded dot segment is refused like a literal one, on a read and on a write. */
+    @Test
+    void encoded_dot_segments_are_refused() {
+        for (String bad : List.of(BASE + "%2e%2e/%2e%2e/q-store/x/result.ion", BASE + "%2E/x", BASE + "a/%2e%2E/b")) {
+            var e = assertThrows(IllegalArgumentException.class, () -> storage.get(null, null, URI.create(bad)), bad);
+            assertTrue(e.getMessage().contains(bad), e.getMessage());
+            assertThrows(Exception.class, () -> storage.put(null, null, URI.create(bad), bytes("x")), bad);
+        }
+    }
+
+    /**
+     * M1: a key under {@code baseUri} whose relative part is absolute (a double slash) resolves outside
+     * {@code .egret/out}; only {@code outFile}'s containment check refuses it.
+     */
+    @Test
+    void a_double_slash_under_base_uri_does_not_escape_egret_out() throws Exception {
+        Path escape = wd.getParent().resolve("escaped-" + wd.getFileName());
+        String uri = "kestra://" + URI.create(BASE).getRawPath() + escape;
+        var e = assertThrows(IOException.class, () -> storage.put(null, null, URI.create(uri), bytes("x")), uri);
+        assertTrue(e.getMessage().contains(BASE), e.getMessage());
+        assertFalse(Files.exists(escape), "nothing was written outside .egret/out");
+    }
+
+    /**
+     * M3: a write in progress is never under {@code .egret/out}: a killed JVM must not leave a partial
+     * file that egret collects and indexes. The partial lives in {@code .egret/tmp}.
+     */
+    @Test
+    void a_write_in_progress_is_not_under_egret_out() throws Exception {
+        List<String> seenOut = new java.util.ArrayList<>();
+        List<String> seenTmp = new java.util.ArrayList<>();
+        InputStream watching = new InputStream() {
+            int left = 10;
+
+            @Override
+            public int read() throws IOException {
+                if (left == 5) {
+                    try (Stream<Path> out = Files.walk(wd.resolve(".egret/out"));
+                         Stream<Path> tmp = Files.walk(wd.resolve(".egret/tmp"))) {
+                        out.filter(Files::isRegularFile).forEach(p -> seenOut.add(p.toString()));
+                        tmp.filter(Files::isRegularFile).forEach(p -> seenTmp.add(p.toString()));
+                    }
+                }
+                return left-- > 0 ? 'x' : -1;
+            }
+        };
+        storage.put(null, null, URI.create(BASE + "f.ion"), new StorageObject(Map.of(), watching));
+        assertEquals(List.of(), seenOut, "mid-write, .egret/out holds nothing");
+        assertEquals(1, seenTmp.size(), "the partial is in .egret/tmp: " + seenTmp);
+        assertEquals("xxxxxxxxxx", Files.readString(wd.resolve(".egret/out/f.ion")));
+        try (Stream<Path> tmp = Files.list(wd.resolve(".egret/tmp"))) {
+            assertEquals(0, tmp.count(), "and nothing is left there after");
+        }
+    }
+
+    /** Fix round 1: scratch is under $WORKING_DIR/.egret/tmp, bounded with the working directory. */
+    @Test
+    void scratch_is_under_the_working_dirs_egret_tmp() {
+        assertEquals(wd.resolve(".egret/tmp"), EgretPluginHost.scratchUnder(wd));
+        assertTrue(Files.isDirectory(wd.resolve(".egret/tmp")));
+    }
+
+    /**
+     * A name Kestra percent-encodes ({@code putFile(stream, "a b")}) is written under its raw spelling,
+     * so the file egret collects ({@code baseUri + "a%20b"}) is the URI the plugin returns.
+     */
+    @Test
+    void an_encoded_name_is_written_and_returned_under_its_raw_spelling() throws Exception {
+        URI uri = shim().storage().putFile(new ByteArrayInputStream("x".getBytes(StandardCharsets.UTF_8)), "a b");
+        assertEquals(BASE + "a%20b", uri.toString());
+        assertTrue(Files.exists(wd.resolve(".egret/out/a%20b")));
+    }
 }
+
