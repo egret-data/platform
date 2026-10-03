@@ -131,7 +131,7 @@ struct SwitchPods(Mutex<Option<PodEndpoint>>);
 #[async_trait]
 impl PodResolver for SwitchPods {
     fn edit_ref(&self, user: UserId, ws: WorkspaceId) -> String {
-        egret_apps::pod_ref(user, ws)
+        egret_apps::edit_pod_ref(user, ws)
     }
     async fn edit_pod(&self, _: UserId, _: WorkspaceId) -> egret_core::Result<PodEndpoint> {
         self.0
@@ -140,7 +140,10 @@ impl PodResolver for SwitchPods {
             .clone()
             .ok_or_else(|| Error::NotFound("pod".into()))
     }
-    async fn run_pod(&self, _: Uuid, _: Uuid) -> egret_core::Result<PodEndpoint> {
+    fn run_ref(&self, user: UserId, version: Uuid) -> String {
+        egret_apps::run_pod_ref(user, version)
+    }
+    async fn run_pod(&self, _: UserId, _: Uuid, _: Uuid) -> egret_core::Result<PodEndpoint> {
         Err(Error::NotFound("pod".into()))
     }
 }
@@ -148,7 +151,7 @@ impl PodResolver for SwitchPods {
 #[async_trait]
 impl PodResolver for FakePods {
     fn edit_ref(&self, user: UserId, ws: WorkspaceId) -> String {
-        egret_apps::pod_ref(user, ws)
+        egret_apps::edit_pod_ref(user, ws)
     }
     async fn edit_pod(&self, _user: UserId, _ws: WorkspaceId) -> egret_core::Result<PodEndpoint> {
         Ok(PodEndpoint {
@@ -156,7 +159,18 @@ impl PodResolver for FakePods {
             marimo_token: MARIMO_TOKEN.into(),
         })
     }
-    async fn run_pod(&self, _app: Uuid, _version: Uuid) -> egret_core::Result<PodEndpoint> {
+    fn run_ref(&self, user: UserId, version: Uuid) -> String {
+        // A REAL per-(viewer, version) reference, same function production uses (D24): this is
+        // what lets `two_viewers_of_the_same_version_get_two_different_run_pod_references`
+        // actually distinguish them, even though every run pod in this fake is the same upstream.
+        egret_apps::run_pod_ref(user, version)
+    }
+    async fn run_pod(
+        &self,
+        _user: UserId,
+        _app: Uuid,
+        _version: Uuid,
+    ) -> egret_core::Result<PodEndpoint> {
         Ok(PodEndpoint {
             base: self.base.clone(),
             marimo_token: MARIMO_TOKEN.into(),
@@ -319,7 +333,17 @@ impl Fixture {
     }
 
     fn edit_ref(&self, who: &Person) -> String {
-        egret_apps::pod_ref(who.id, self.ws)
+        egret_apps::edit_pod_ref(who.id, self.ws)
+    }
+
+    /// A second (or third…) viewer in this fixture's workspace, with `app:read` only.
+    async fn new_person(&self, tag: &str, role: &str) -> Person {
+        let id = insert_user(&self.db, tag).await;
+        grant_role(&self.db, id, role, self.ws.0).await;
+        Person {
+            id: UserId(id),
+            login_sid: login_session(&self.db, id).await,
+        }
     }
 
     fn new_grant(&self, who: &Person, mode: AppMode) -> NewGrant {
@@ -653,6 +677,45 @@ async fn another_users_pod_reference_is_refused() {
         .await;
     assert_eq!(r.status, 401, "an edit grant on the run surface");
     assert!(fx.pod.all().is_empty());
+}
+
+/// D24: the fix to the gap D24 named in the already-merged P4c proxy — a run grant's "entitled"
+/// pod used to be computed from the version alone, so every viewer of one version was entitled
+/// to the same `{ref}`. After the fix, two different viewers of the SAME version are entitled to
+/// two different run pods, and neither's cookie opens the other's.
+#[tokio::test]
+async fn two_viewers_of_the_same_version_get_two_different_run_pod_references() {
+    let fx = Fixture::new().await;
+    let other = fx.new_person("second_viewer", "ws_viewer").await;
+
+    let ticket1 = fx.ticket_for(&fx.viewer, AppMode::Run).await;
+    let r1 = fx.get(&format!("/_ticket?t={ticket1}"), None).await;
+    let ticket2 = fx.ticket_for(&other, AppMode::Run).await;
+    let r2 = fx.get(&format!("/_ticket?t={ticket2}"), None).await;
+    let loc1 = r1.header("location")[0].to_string();
+    let loc2 = r2.header("location")[0].to_string();
+    assert_ne!(
+        loc1, loc2,
+        "two different viewers were redirected to the same run pod reference"
+    );
+
+    let (c1, _) = fx.cookie_for(&fx.viewer, AppMode::Run).await;
+    let (c2, _) = fx.cookie_for(&other, AppMode::Run).await;
+    let ref1 = loc1.split('/').nth(2).unwrap().to_string();
+    assert_eq!(
+        fx.get(&format!("/r/{ref1}/api/version"), Some(&c1))
+            .await
+            .status,
+        200,
+        "the viewer's own cookie opens their own pod"
+    );
+    assert_eq!(
+        fx.get(&format!("/r/{ref1}/api/version"), Some(&c2))
+            .await
+            .status,
+        403,
+        "the OTHER viewer's cookie must not open it — same version, different pod"
+    );
 }
 
 #[tokio::test]

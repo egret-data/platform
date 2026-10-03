@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use egret_apps::podtoken::PodTokenRepo;
-use egret_apps::{AppPodLauncher, EditPodKey, PodEndpoint};
+use egret_apps::{AppPodLauncher, EditPodKey, PodEndpoint, RunPodKey};
 use egret_core::{token, Error, Result, UserId, WorkspaceId};
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, EnvVarSource,
@@ -584,6 +584,24 @@ impl AppPodLauncher for KubernetesAppPodLauncher {
             })
             .map(|(k, _)| k)
             .collect())
+    }
+
+    // Stubs — Task 5b-2 replaces these with real run-pod Pods, reusing `ensure_once`'s
+    // retry/exit-code loop parameterised by pod kind instead of duplicating it.
+    async fn ensure_run(
+        &self,
+        _key: RunPodKey,
+        _timeout: Duration,
+    ) -> egret_core::Result<egret_apps::PodEndpoint> {
+        Err(anyhow::anyhow!("the Kubernetes launcher's run-pod support lands in Task 5b-2").into())
+    }
+
+    async fn stop_run(&self, _key: RunPodKey) -> egret_core::Result<()> {
+        Ok(())
+    }
+
+    async fn idle_run_pods(&self, _idle: Duration) -> egret_core::Result<Vec<RunPodKey>> {
+        Ok(Vec::new())
     }
 
     fn mode(&self) -> &'static str {

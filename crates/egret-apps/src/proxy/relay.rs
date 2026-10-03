@@ -100,8 +100,12 @@ pub(super) async fn redeem(State(st): State<ProxyState>, Query(q): Query<TicketQ
             )
         }
         AppMode::Run => {
-            let v = grant.version_id.map(|v| v.hyphenated().to_string());
-            let scope = format!("/r/{}/", v.unwrap_or_default());
+            // D24: this viewer's OWN run pod for the version, never the version's shared ref.
+            let r = grant
+                .version_id
+                .map(|v| st.inner.pods.run_ref(grant.user_id, v))
+                .unwrap_or_default();
+            let scope = format!("/r/{r}/");
             (scope.clone(), scope)
         }
     };
@@ -197,7 +201,12 @@ async fn handle(
                 .await
         }
         Surface::Run => match admitted.grant.version_id {
-            Some(v) => st.inner.pods.run_pod(admitted.grant.app_id, v).await,
+            Some(v) => {
+                st.inner
+                    .pods
+                    .run_pod(admitted.grant.user_id, admitted.grant.app_id, v)
+                    .await
+            }
             None => Err(Error::NotFound("version".into())),
         },
     }
@@ -306,7 +315,7 @@ async fn admit(
         Surface::Edit => st.inner.pods.edit_ref(grant.user_id, grant.workspace_id),
         Surface::Run => grant
             .version_id
-            .map(|v| v.hyphenated().to_string())
+            .map(|v| st.inner.pods.run_ref(grant.user_id, v))
             .unwrap_or_default(),
     };
     if pod_ref_decoded != entitled.to_ascii_lowercase() {

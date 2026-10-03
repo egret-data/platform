@@ -8,6 +8,7 @@
 
 pub mod headers;
 pub mod pathguard;
+pub mod pod_ref;
 pub mod policy;
 mod relay;
 mod tokens;
@@ -22,6 +23,8 @@ use egret_core::authz::Pdp;
 use egret_core::{Result, UserId, WorkspaceId};
 use egret_metastore::Db;
 use uuid::Uuid;
+
+use pod_ref::{edit_pod_ref, run_pod_ref};
 
 use crate::grant::GrantRepo;
 use crate::session::AppSessionRepo;
@@ -42,19 +45,13 @@ pub trait PodResolver: Send + Sync {
     fn edit_ref(&self, user: UserId, ws: WorkspaceId) -> String;
     /// The author's own edit pod, started if need be.
     async fn edit_pod(&self, user: UserId, ws: WorkspaceId) -> Result<PodEndpoint>;
-    /// The pod serving one published version. `NotFound` until P5 launches run pods.
-    async fn run_pod(&self, app: Uuid, version: Uuid) -> Result<PodEndpoint>;
-}
-
-/// The URL segment of an author's edit pod: stable per (user, workspace), opaque, and safe in
-/// a path and a pod name. Defined once, here, so the redirect after a ticket, the cookie's
-/// `Path`, the check on every request and the launcher's pod name cannot drift apart.
-pub fn pod_ref(user: UserId, ws: WorkspaceId) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(user.0.as_bytes());
-    h.update(ws.0.as_bytes());
-    hex::encode(&h.finalize()[..8])
+    /// The URL segment of a viewer's own run pod for one version (D24: never shared with
+    /// another viewer). Pure and stable, the same way `edit_ref` is.
+    fn run_ref(&self, user: UserId, version: Uuid) -> String;
+    /// That viewer's own pod, serving that version, started if need be. `app` is carried for
+    /// symmetry with the pod API's `(app, version)` pair and because callers already have it in
+    /// scope; the launcher only needs `version` to key the pod (D24).
+    async fn run_pod(&self, user: UserId, app: Uuid, version: Uuid) -> Result<PodEndpoint>;
 }
 
 /// The resolver while no launcher is wired in: the proxy and its checks are live, every pod
@@ -64,12 +61,15 @@ pub struct UnavailablePods;
 #[async_trait]
 impl PodResolver for UnavailablePods {
     fn edit_ref(&self, user: UserId, ws: WorkspaceId) -> String {
-        pod_ref(user, ws)
+        edit_pod_ref(user, ws)
     }
     async fn edit_pod(&self, _: UserId, _: WorkspaceId) -> Result<PodEndpoint> {
         Err(anyhow::anyhow!("no app pod launcher is configured").into())
     }
-    async fn run_pod(&self, _: Uuid, _: Uuid) -> Result<PodEndpoint> {
+    fn run_ref(&self, user: UserId, version: Uuid) -> String {
+        run_pod_ref(user, version)
+    }
+    async fn run_pod(&self, _: UserId, _: Uuid, _: Uuid) -> Result<PodEndpoint> {
         Err(egret_core::Error::NotFound("run pod".into()))
     }
 }
@@ -139,25 +139,4 @@ pub fn proxy_router(state: ProxyState) -> Router {
         .route("/_ticket", get(relay::redeem))
         .fallback(relay::proxy)
         .with_state(state)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_pod_ref_is_stable_distinct_per_pair_and_path_safe() {
-        let (u1, u2) = (UserId(Uuid::new_v4()), UserId(Uuid::new_v4()));
-        let (w1, w2) = (WorkspaceId(Uuid::new_v4()), WorkspaceId(Uuid::new_v4()));
-        assert_eq!(pod_ref(u1, w1), pod_ref(u1, w1));
-        assert_ne!(pod_ref(u1, w1), pod_ref(u2, w1));
-        assert_ne!(pod_ref(u1, w1), pod_ref(u1, w2));
-        let r = pod_ref(u1, w1);
-        assert_eq!(r.len(), 16);
-        assert!(
-            r.bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
-            "{r}"
-        );
-    }
 }

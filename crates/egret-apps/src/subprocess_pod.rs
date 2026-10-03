@@ -240,6 +240,26 @@ impl AppPodLauncher for SubprocessPodLauncher {
             .collect())
     }
 
+    // Stubs — Task 5b-1 replaces these with real run-pod processes, reusing `start()`'s shape
+    // (program, env, health-wait, kill-group) parameterised by mode instead of duplicating it.
+    async fn ensure_run(
+        &self,
+        _key: crate::launcher::RunPodKey,
+        _timeout: Duration,
+    ) -> Result<PodEndpoint> {
+        Err(Error::from(anyhow::anyhow!(
+            "the subprocess launcher's run-pod support lands in Task 5b-1"
+        )))
+    }
+
+    async fn stop_run(&self, _key: crate::launcher::RunPodKey) -> Result<()> {
+        Ok(())
+    }
+
+    async fn idle_run_pods(&self, _idle: Duration) -> Result<Vec<crate::launcher::RunPodKey>> {
+        Ok(Vec::new())
+    }
+
     fn mode(&self) -> &'static str {
         "subprocess"
     }

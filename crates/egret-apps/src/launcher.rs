@@ -15,10 +15,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use egret_core::{Error, Result, UserId, WorkspaceId};
+use egret_core::{Result, UserId, WorkspaceId};
 use uuid::Uuid;
 
-use crate::proxy::{pod_ref, PodEndpoint, PodResolver};
+use crate::proxy::pod_ref::{edit_pod_ref, run_pod_ref};
+use crate::proxy::{PodEndpoint, PodResolver};
 
 /// One edit pod per author per workspace (D8): every kernel in it runs as that one person.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -30,7 +31,23 @@ pub struct EditPodKey {
 impl EditPodKey {
     /// The URL segment and pod-name stem; the same function the proxy checks every request with.
     pub fn pod_ref(&self) -> String {
-        pod_ref(self.user_id, self.workspace_id)
+        edit_pod_ref(self.user_id, self.workspace_id)
+    }
+}
+
+/// One run pod per (viewer, published version) (D24): a run pod never holds a second viewer's
+/// kernel, because marimo's IPC channels have no authentication of their own (see the plan this
+/// decision came from) and run pods default to marimo's own thread-mode kernel, which is safe
+/// only because every session inside one pod already belongs to the one viewer it was opened for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RunPodKey {
+    pub user_id: UserId,
+    pub version_id: Uuid,
+}
+
+impl RunPodKey {
+    pub fn pod_ref(&self) -> String {
+        run_pod_ref(self.user_id, self.version_id)
     }
 }
 
@@ -47,6 +64,16 @@ pub trait AppPodLauncher: Send + Sync {
     /// Edit pods nobody has asked for in `idle`; the reaper stops them.
     async fn idle_edit_pods(&self, idle: Duration) -> Result<Vec<EditPodKey>>;
 
+    /// The viewer's own run pod for this version: reuse a live one, otherwise start it and wait
+    /// until it answers. Calling this IS the signal that the pod is in use.
+    async fn ensure_run(&self, key: RunPodKey, timeout: Duration) -> Result<PodEndpoint>;
+
+    /// Stop the pod. A pod that is already gone is not an error.
+    async fn stop_run(&self, key: RunPodKey) -> Result<()>;
+
+    /// Run pods nobody has asked for in `idle`; the reaper stops them.
+    async fn idle_run_pods(&self, idle: Duration) -> Result<Vec<RunPodKey>>;
+
     fn mode(&self) -> &'static str;
 }
 
@@ -61,6 +88,15 @@ impl<T: AppPodLauncher + ?Sized> AppPodLauncher for std::sync::Arc<T> {
     }
     async fn idle_edit_pods(&self, idle: Duration) -> Result<Vec<EditPodKey>> {
         (**self).idle_edit_pods(idle).await
+    }
+    async fn ensure_run(&self, key: RunPodKey, timeout: Duration) -> Result<PodEndpoint> {
+        (**self).ensure_run(key, timeout).await
+    }
+    async fn stop_run(&self, key: RunPodKey) -> Result<()> {
+        (**self).stop_run(key).await
+    }
+    async fn idle_run_pods(&self, idle: Duration) -> Result<Vec<RunPodKey>> {
+        (**self).idle_run_pods(idle).await
     }
     fn mode(&self) -> &'static str {
         (**self).mode()
@@ -106,7 +142,7 @@ pub struct LauncherPods<L> {
 #[async_trait]
 impl<L: AppPodLauncher> PodResolver for LauncherPods<L> {
     fn edit_ref(&self, user: UserId, ws: WorkspaceId) -> String {
-        pod_ref(user, ws)
+        edit_pod_ref(user, ws)
     }
 
     async fn edit_pod(&self, user: UserId, ws: WorkspaceId) -> Result<PodEndpoint> {
@@ -121,8 +157,20 @@ impl<L: AppPodLauncher> PodResolver for LauncherPods<L> {
             .await
     }
 
-    async fn run_pod(&self, _app: Uuid, _version: Uuid) -> Result<PodEndpoint> {
-        Err(Error::NotFound("run pod".into()))
+    fn run_ref(&self, user: UserId, version: Uuid) -> String {
+        run_pod_ref(user, version)
+    }
+
+    async fn run_pod(&self, user: UserId, _app: Uuid, version: Uuid) -> Result<PodEndpoint> {
+        self.launcher
+            .ensure_run(
+                RunPodKey {
+                    user_id: user,
+                    version_id: version,
+                },
+                self.ready_timeout,
+            )
+            .await
     }
 }
 
@@ -138,6 +186,10 @@ struct FakeState {
     started: Vec<EditPodKey>,
     stopped: Vec<EditPodKey>,
     idle: Vec<EditPodKey>,
+    live_run: HashMap<RunPodKey, u32>,
+    started_run: Vec<RunPodKey>,
+    stopped_run: Vec<RunPodKey>,
+    idle_run: Vec<RunPodKey>,
 }
 
 impl FakeAppPodLauncher {
@@ -160,6 +212,20 @@ impl FakeAppPodLauncher {
     /// What `idle_edit_pods` will report next.
     pub fn set_idle(&self, keys: Vec<EditPodKey>) {
         self.state.lock().unwrap().idle = keys;
+    }
+
+    /// Run pods started so far (a reused pod is not started again).
+    pub fn started_run(&self) -> Vec<RunPodKey> {
+        self.state.lock().unwrap().started_run.clone()
+    }
+
+    pub fn stopped_run(&self) -> Vec<RunPodKey> {
+        self.state.lock().unwrap().stopped_run.clone()
+    }
+
+    /// What `idle_run_pods` will report next.
+    pub fn set_idle_run(&self, keys: Vec<RunPodKey>) {
+        self.state.lock().unwrap().idle_run = keys;
     }
 }
 
@@ -186,6 +252,27 @@ impl AppPodLauncher for FakeAppPodLauncher {
         Ok(std::mem::take(&mut self.state.lock().unwrap().idle))
     }
 
+    async fn ensure_run(&self, key: RunPodKey, _timeout: Duration) -> Result<PodEndpoint> {
+        let mut st = self.state.lock().unwrap();
+        let uses = st.live_run.entry(key).or_insert(0);
+        *uses += 1;
+        if *uses == 1 {
+            st.started_run.push(key);
+        }
+        Ok(self.endpoint.clone())
+    }
+
+    async fn stop_run(&self, key: RunPodKey) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        st.live_run.remove(&key);
+        st.stopped_run.push(key);
+        Ok(())
+    }
+
+    async fn idle_run_pods(&self, _idle: Duration) -> Result<Vec<RunPodKey>> {
+        Ok(std::mem::take(&mut self.state.lock().unwrap().idle_run))
+    }
+
     fn mode(&self) -> &'static str {
         "fake"
     }
@@ -194,11 +281,19 @@ impl AppPodLauncher for FakeAppPodLauncher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egret_core::Error;
 
     fn key() -> EditPodKey {
         EditPodKey {
             user_id: UserId(Uuid::new_v4()),
             workspace_id: WorkspaceId(Uuid::new_v4()),
+        }
+    }
+
+    fn run_key() -> RunPodKey {
+        RunPodKey {
+            user_id: UserId(Uuid::new_v4()),
+            version_id: Uuid::new_v4(),
         }
     }
 
@@ -223,6 +318,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_pods_are_tracked_independently_of_edit_pods() {
+        let l = fake();
+        let (edit_key, run_key_a, run_key_b) = (key(), run_key(), run_key());
+        l.ensure_edit(edit_key, Duration::from_secs(1))
+            .await
+            .unwrap();
+        l.ensure_run(run_key_a, Duration::from_secs(1))
+            .await
+            .unwrap();
+        l.ensure_run(run_key_a, Duration::from_secs(1))
+            .await
+            .unwrap(); // reused, not started again
+        l.ensure_run(run_key_b, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            l.started(),
+            [edit_key],
+            "the run pods must not show up as edit pods"
+        );
+        assert_eq!(l.started_run(), [run_key_a, run_key_b]);
+        l.stop_run(run_key_a).await.unwrap();
+        assert_eq!(l.stopped_run(), [run_key_a]);
+        assert!(
+            l.stopped().is_empty(),
+            "stopping a run pod must not touch the edit list"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_run_idle_list_is_handed_over_once_and_separately_from_edit() {
+        let l = fake();
+        let rk = run_key();
+        l.set_idle_run(vec![rk]);
+        assert_eq!(l.idle_run_pods(Duration::from_secs(1)).await.unwrap(), [rk]);
+        assert!(l
+            .idle_run_pods(Duration::from_secs(1))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(l
+            .idle_edit_pods(Duration::from_secs(1))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn the_resolver_starts_the_callers_own_pod_and_names_it_with_the_shared_ref() {
         let k = key();
         let pods = LauncherPods {
@@ -233,10 +376,32 @@ mod tests {
         let ep = pods.edit_pod(k.user_id, k.workspace_id).await.unwrap();
         assert_eq!(ep.base.as_str(), "http://10.0.0.1:2718/");
         assert_eq!(pods.launcher.started(), [k]);
-        assert!(matches!(
-            pods.run_pod(Uuid::new_v4(), Uuid::new_v4()).await,
-            Err(Error::NotFound(_))
-        ));
+    }
+
+    #[tokio::test]
+    async fn the_resolver_also_starts_the_viewers_own_run_pod_by_version() {
+        let (u, v) = (UserId(Uuid::new_v4()), Uuid::new_v4());
+        let pods = LauncherPods {
+            launcher: fake(),
+            ready_timeout: Duration::from_secs(3),
+        };
+        assert_eq!(
+            pods.run_ref(u, v),
+            RunPodKey {
+                user_id: u,
+                version_id: v
+            }
+            .pod_ref()
+        );
+        let ep = pods.run_pod(u, Uuid::new_v4(), v).await.unwrap();
+        assert_eq!(ep.base.as_str(), "http://10.0.0.1:2718/");
+        assert_eq!(
+            pods.launcher.started_run(),
+            [RunPodKey {
+                user_id: u,
+                version_id: v
+            }]
+        );
     }
 
     #[tokio::test]
@@ -259,6 +424,15 @@ mod tests {
             }
             async fn idle_edit_pods(&self, i: Duration) -> Result<Vec<EditPodKey>> {
                 self.inner.idle_edit_pods(i).await
+            }
+            async fn ensure_run(&self, k: RunPodKey, t: Duration) -> Result<PodEndpoint> {
+                self.inner.ensure_run(k, t).await
+            }
+            async fn stop_run(&self, k: RunPodKey) -> Result<()> {
+                self.inner.stop_run(k).await
+            }
+            async fn idle_run_pods(&self, i: Duration) -> Result<Vec<RunPodKey>> {
+                self.inner.idle_run_pods(i).await
             }
             fn mode(&self) -> &'static str {
                 "flaky"

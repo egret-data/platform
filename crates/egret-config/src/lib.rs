@@ -301,6 +301,18 @@ pub struct AppPodConfig {
     /// The locked marimo configuration directory (`apps-image/config`), as the image's
     /// `EGRET_APPS_CONFIG`. Honoured by the launcher only outside the image.
     pub config_dir: String,
+    // ── run pods (D24: one pod per (viewer, published version), never shared) ──
+    /// A run pod nobody has used for this long is stopped. Separate from `idle_secs` (the edit
+    /// default, 30 min) because an abandoned viewer tab is cheaper to let go of than an author's
+    /// unpublished work.
+    pub run_idle_secs: u64,
+    /// Sessions (browser tabs) of the ONE viewer a run pod serves, open at once, before a new one
+    /// gets 503 "app busy". Not a multi-tenant cap — D24 makes one pod one person — it bounds a
+    /// reconnect loop, not concurrent strangers.
+    pub run_session_cap: u32,
+    /// `"thread"` (default: safe because D24 makes one pod one viewer) or `"forced_ipc"` (the P3
+    /// patch, kept for a possible future shared-pod revival; not a supported production path).
+    pub run_kernel_mode: String,
 }
 
 impl Default for AppPodConfig {
@@ -321,6 +333,9 @@ impl Default for AppPodConfig {
             command: Vec::new(),
             work_dir: "/tmp/egret-apps".into(),
             config_dir: String::new(),
+            run_idle_secs: 300,
+            run_session_cap: 8,
+            run_kernel_mode: "thread".into(),
         }
     }
 }
@@ -1607,6 +1622,15 @@ impl Config {
                         "apps.pod.launcher = \"subprocess\" needs command and config_dir".into(),
                     );
                 }
+                if !matches!(pod.run_kernel_mode.as_str(), "thread" | "forced_ipc") {
+                    return Err(format!(
+                        "apps.pod.run_kernel_mode must be thread or forced_ipc, not \"{}\"",
+                        pod.run_kernel_mode
+                    ));
+                }
+                if pod.run_session_cap == 0 {
+                    return Err("apps.pod.run_session_cap must be >= 1".into());
+                }
             }
             other => {
                 return Err(format!(
@@ -2372,6 +2396,30 @@ values = { allowed-images = [] }
         cfg.apps.pod.command = vec!["egret-apps".into()];
         cfg.apps.pod.config_dir = "apps-image/config".into();
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_checks_run_pod_settings_d24() {
+        let mut cfg = Config::default();
+        cfg.apps.origin = "https://apps.egret.example".into();
+        cfg.apps.egret_origin = "https://egret.example".into();
+        cfg.apps.pod.launcher = "subprocess".into();
+        cfg.apps.pod.command = vec!["egret-apps".into()];
+        cfg.apps.pod.config_dir = "apps-image/config".into();
+        cfg.apps.pod.callback_url = "http://egret:8080".into();
+        assert!(cfg.validate().is_ok(), "defaults (thread, cap 8) are valid");
+
+        cfg.apps.pod.run_kernel_mode = "pool".into();
+        assert!(cfg.validate().unwrap_err().contains("thread or forced_ipc"));
+        cfg.apps.pod.run_kernel_mode = "forced_ipc".into();
+        assert!(
+            cfg.validate().is_ok(),
+            "forced_ipc is the documented fallback, still accepted"
+        );
+        cfg.apps.pod.run_kernel_mode = "thread".into();
+
+        cfg.apps.pod.run_session_cap = 0;
+        assert!(cfg.validate().unwrap_err().contains("run_session_cap"));
     }
 
     #[test]
