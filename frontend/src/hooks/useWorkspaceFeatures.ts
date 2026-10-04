@@ -14,12 +14,8 @@ import { EXPLORE_MODULES } from "@/lib/exploreModules";
  * `EXPLORE_MODULES` itself. `workflows` is a feature entitlement key with no nav gate yet — the
  * group that will read it lands in a later package — but it still belongs here because this list
  * has to name every key the backend can return, not just the ones currently wired into the nav.
- * `notebooks` is no longer a nav module (Apps replaced it in the menu) but its routes still exist
- * and are still gated by `RequireFeature feature="notebooks"` until the notebook is removed, so
- * while `/me/workspaces` loads it must stay in the optimistic list or those routes would flash
- * Forbidden.
  */
-export const ALL_FEATURE_KEYS: string[] = [...EXPLORE_MODULES.map((m) => m.key), "notebooks", "data_api", "workflows"];
+export const ALL_FEATURE_KEYS: string[] = [...EXPLORE_MODULES.map((m) => m.key), "data_api", "workflows"];
 
 /**
  * The module keys the *current route's* workspace has switched on — the

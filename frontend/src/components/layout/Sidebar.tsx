@@ -19,7 +19,7 @@ import { EXPLORE_MODULES } from "@/lib/exploreModules";
 /** `perm` is the fine-grained read permission that unlocks this item in the
  * Control Plane or Governance; items with no `perm` (e.g. Workspaces, Audit log)
  * are platform_admin-only. `feature` is the workspace entitlement key (e.g.
- * `notebooks`) that unlocks an Explore item; items with no `feature` are
+ * `apps`) that unlocks an Explore item; items with no `feature` are
  * unaffected by entitlements. */
 type NavItem = { label: string; icon: LucideIcon; perm?: string; feature?: string; to?: string };
 type NavGroup = { heading: string; items: NavItem[] };

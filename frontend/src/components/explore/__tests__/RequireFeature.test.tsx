@@ -20,7 +20,7 @@ function renderGuarded(feature: string, fetchImpl: () => Promise<Response> = () 
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/explore/eng/notebooks"]}>
+      <MemoryRouter initialEntries={["/explore/eng/apps"]}>
         <Routes>
           <Route
             path="/explore/:workspace/*"
@@ -46,20 +46,20 @@ const wsResponse = (features: string[]) =>
 
 describe("RequireFeature", () => {
   test("blocks with Forbidden once the workspace's features load without it", async () => {
-    renderGuarded("notebooks", () => wsResponse(["sql_lab", "datasets"]));
+    renderGuarded("apps", () => wsResponse(["sql_lab", "datasets"]));
     await waitFor(() => expect(screen.getByText(/Forbidden/i)).toBeInTheDocument());
     expect(screen.queryByText("page content")).not.toBeInTheDocument();
   });
 
   test("renders children once the workspace's features load with it", async () => {
-    renderGuarded("notebooks", () => wsResponse(["notebooks"]));
+    renderGuarded("apps", () => wsResponse(["apps"]));
     await waitFor(() => expect(screen.getByText("page content")).toBeInTheDocument());
     expect(screen.queryByText(/Forbidden/i)).not.toBeInTheDocument();
   });
 
   test("does not flash Forbidden while /me/workspaces is still loading", () => {
     // fetchImpl never resolves — assertions run against the pending state.
-    renderGuarded("notebooks");
+    renderGuarded("apps");
     expect(screen.getByText("page content")).toBeInTheDocument();
     expect(screen.queryByText(/Forbidden/i)).not.toBeInTheDocument();
   });

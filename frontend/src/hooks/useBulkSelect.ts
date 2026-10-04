@@ -28,7 +28,7 @@ import { useCallback, useMemo, useState } from "react";
  * invisibly. Do not "simplify" it to `Array.from(selected)`.
  *
  * Every grouped list — `Charts`, `Datasets`, `Dashboards`, `Alerts`,
- * `Notebooks` and `Endpoints` — now derives a `visibleRows` from its groups,
+ * and `Endpoints` — now derives a `visibleRows` from its groups,
  * dropping the collapsed ones, and passes that. Copy one of them rather than
  * reaching for `rows`.
  *

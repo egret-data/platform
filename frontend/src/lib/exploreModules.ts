@@ -33,8 +33,7 @@ export const EXPLORE_MODULES: ExploreModule[] = [
   { key: "datasets", label: "Datasets", icon: Table2, path: "datasets" },
   { key: "charts", label: "Charts", icon: BarChart3, path: "charts" },
   { key: "dashboards", label: "Dashboards", icon: LayoutDashboard, path: "dashboards" },
-  // Data Apps replace the Jupyter notebook in this menu. The notebook routes still exist until the
-  // notebook is removed, but nothing links to them.
+  // Data Apps replaced the Jupyter notebook in this menu (Data Apps P6).
   { key: "apps", label: "Apps", icon: AppWindow, path: "apps" },
   // Last in nav order deliberately: Alerts & Reports acts ON the modules above
   // (it queries data and mails charts), so it reads as their consumer — and
