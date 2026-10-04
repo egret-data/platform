@@ -4500,6 +4500,51 @@ async fn a_cycle_whose_every_hop_crosses_a_loop_boundary_stops_too(pool: sqlx::P
     );
 }
 
+/// Run `body` on a thread whose stack is **2 MiB, tokio's worker default**
+/// (`tokio::runtime::Builder::thread_stack_size`), on its own current-thread
+/// runtime and its own pool to the same database.
+///
+/// The two subflow-chain tests below are the stack's tripwire (W9a final
+/// review): `settle` re-enters itself down a `Subflow` chain, and what they
+/// prove is that `MAX_SPAWN_CHAIN` levels fit in a production worker's stack.
+/// Run on the test harness's own thread they would prove it for whatever
+/// `RUST_MIN_STACK` the runner happened to export (the harness sizes its
+/// threads from it); pinned here, a future that grows past 2 MiB at the bound
+/// aborts this binary on every machine.
+async fn on_a_tokio_worker_stack<F, Fut>(pool: sqlx::PgPool, body: F)
+where
+    F: FnOnce(sqlx::PgPool) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    const TOKIO_WORKER_STACK: usize = 2 * 1024 * 1024;
+    let options = (*pool.connect_options()).clone();
+    let thread = std::thread::Builder::new()
+        .name("tokio-worker-stack".into())
+        .stack_size(TOKIO_WORKER_STACK)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime")
+                .block_on(async move {
+                    let pool = sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(4)
+                        .connect_with(options)
+                        .await
+                        .expect("connect to the test database");
+                    body(pool.clone()).await;
+                    pool.close().await;
+                })
+        })
+        .expect("spawn the 2 MiB thread");
+    let joined = tokio::task::spawn_blocking(move || thread.join())
+        .await
+        .expect("join");
+    if let Err(panic) = joined {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 /// **A chain deeper than `MAX_SPAWN_CHAIN` is refused rather than overflowing a
 /// stack.**
 ///
@@ -4529,6 +4574,17 @@ async fn a_cycle_whose_every_hop_crosses_a_loop_boundary_stops_too(pool: sqlx::P
 /// again) kills that one and leaves this one green.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowing(
+    pool: sqlx::PgPool,
+) {
+    on_a_tokio_worker_stack(
+        pool,
+        a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowing_body,
+    )
+    .await;
+}
+
+/// [`a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowing`]'s body, run by [`on_a_tokio_worker_stack`].
+async fn a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowing_body(
     pool: sqlx::PgPool,
 ) {
     egret_test_db::assert_database_url_is_exported();
@@ -4652,6 +4708,17 @@ async fn a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overfl
 /// the whole reason the numbers here are small.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter(pool: sqlx::PgPool) {
+    on_a_tokio_worker_stack(
+        pool,
+        a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter_body,
+    )
+    .await;
+}
+
+/// [`a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter`]'s body, run by [`on_a_tokio_worker_stack`].
+async fn a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter_body(
+    pool: sqlx::PgPool,
+) {
     egret_test_db::assert_database_url_is_exported();
     let db = Db { pool: pool.clone() };
     let (ws, user) = common::seed_workspace(&db).await;

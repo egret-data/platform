@@ -1319,6 +1319,37 @@ async fn a_reattached_pod_is_collected_under_the_same_uris() {
     assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
 }
 
+/// Deletes the pod it names when dropped DURING A PANIC, so a failed
+/// assertion does not leak it into [`NS`] (W9a final review; on success the
+/// test deletes it through `release` and asserts it gone). On its own thread
+/// and runtime with its own client: a `Drop` cannot await, and the test's
+/// runtime is the one unwinding. Best effort: a delete that fails is ignored.
+struct PodGuard(String);
+
+impl Drop for PodGuard {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        let name = self.0.clone();
+        let _ = std::thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(async move {
+                let c = client().await;
+                let _ = pods(&c)
+                    .delete(&name, &DeleteParams::default().grace_period(0))
+                    .await;
+            });
+        })
+        .join();
+    }
+}
+
 /// A line written on the node just before the reclaim, and never stored, is
 /// not lost — even when the previous holder's stored `ts` (egret's clock) is
 /// past the next second boundary. The overlap that WAS stored is not repeated.
@@ -1332,6 +1363,7 @@ async fn a_line_written_just_before_the_reclaim_is_not_lost() {
     let cmds = shell(&["echo one", "sleep 3", "echo almost", "sleep 5", "echo two"]);
     let (t1, rec1) = task_for(ws, execution, run);
     let name = name_of(&t1);
+    let _pod = PodGuard(name.clone());
     {
         let spec = k8s_spec();
         let first = r.run(&t1, &cmds, &spec, &NoObserver);
