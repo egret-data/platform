@@ -545,8 +545,12 @@ async fn a_pruned_file_is_404_saying_it_was_deleted_at_retention() {
     assert_eq!(
         body["error"],
         format!(
-            "not found: {gone} was deleted: files are kept {} days after their execution ends",
-            fx.fs.retention_days
+            "not found: {gone} was deleted: files are kept {} after their execution ends",
+            if fx.fs.retention_days == 1 {
+                "1 day".to_string()
+            } else {
+                format!("{} days", fx.fs.retention_days)
+            }
         ),
         "{body}"
     );

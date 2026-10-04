@@ -9228,7 +9228,7 @@ reports IGNORED or fails, never passes empty):
 | `tests/plugin_host_live.rs` `a_timed_out_query_is_cancelled_on_postgres` | `EGRET_PLUGIN_HOST_LIVE=1` | `pg_sleep(600)`, `timeout: PT30S`: query sent, then cancelled (`canceling statement due to user request`) |
 | `tests/container_docker_live.rs` `docker_cancel_with_grace_lets_a_sigterm_trap_run`, `docker_cancel_returns_only_after_the_container_stopped` | Docker daemon present; `EGRET_ALLOW_DOCKER_SKIP=1` opts out | the Docker runner's graceful cancel |
 | `tests/k8s_runner_live.rs` `k8s_cancel_with_grace_waits_for_termination_then_release_deletes` | `EGRET_TEST_KIND=1`, context `kind-egret` | the Kubernetes runner's graceful cancel, as the chart's Role |
-| `plugin-host` `EgretPluginHostTest` (15 tests) | none: `mvn -f plugin-host/pom.xml verify`, Java 25 | the shim's W9 traps, exit codes, the kill switch |
+| `plugin-host` `EgretPluginHostTest` (19 tests) | none: `mvn -f plugin-host/pom.xml verify`, Java 25 | the shim's W9 traps, exit codes, the kill switch |
 
 **Not measured, and stated so nobody infers it:**
 
@@ -9320,6 +9320,38 @@ The other changes a deployment sees:
   `fetchType: STORE` publishes; namespace files exit 4 naming W9b and
   `namespaceKv()` W9c.
 
+- **Retention (new).** `workflow.storage_retention_days` (env
+  `EGRET_WORKFLOW__STORAGE_RETENTION_DAYS`) defaults to **30**; `0` keeps files
+  for ever. An hourly pruner deletes the files of an execution that ended more
+  than that many days ago (a loop family together, counted from its loop root's
+  end; never one that has not ended, nor a source a running dependent can
+  still read). Afterwards the file API answers **404**, and `read()`,
+  `fileSize`, `fileExists` and `isFileEmpty`, staging and the plugin bridge
+  fail naming the URI and the window ("files are kept 30 days after their
+  execution ends"). It runs only where the worker is on and `[storage]` is
+  configured.
+- **File API (new)**, under `/api/ws/{workspace}/workflows/executions/{id}/`:
+  `file?path=` (download), `file/metas?path=` and
+  `file/preview?path=&maxRows=` (CSV, JSONL or Ion; at most 5000 rows). All
+  three need **`workflow:read`**, the same permission as reading the execution;
+  no new permission was added. `path` must be a file of the execution's loop
+  family, else 404.
+- **Config keys (new)**, besides retention: `[workflow.storage]` `prefix`
+  (default `workflow/`; non-empty, ends with `/`), `max_file_bytes` (1 GiB),
+  `max_task_bytes` (5 GiB) and `max_read_bytes` (10 MiB, also the cap of a
+  `Loop` over a file); each must be at least 1, and the server refuses to start
+  otherwise. A multipart start carries at most `max_file_bytes` + 1 MiB.
+- **Manual replay.** A replay copies the source's `FILE` inputs by URI; once
+  one of those files was pruned the replay is refused with **400** naming the
+  input, instead of starting an execution that cannot read it.
+- **Plugin pod memory.** The JVM runs with `-Xmx384m` (`pluginHost.jvmMaxHeap`)
+  under the default task-pod memory limit of **512Mi**. A limit of 128Mi is
+  OOM-killed (measured: `usage 131072kB, limit 131072kB`); keep the limit well
+  above the heap if you lower `default_resources`.
+- **Database.** Migrations 0166-0168 (renumbered from 0161/0169/0170 on the
+  branch; a dev database that ran the old numbers must be reset, see each
+  file's header).
+
 The programme spec's W9a correction (§9) carries the same note.
 
 #### What is covered live, and by which gate
@@ -9386,7 +9418,7 @@ from them):
 readable-set refusal lists *"its own execution's files, its loop family's …,
 its trigger execution's and, for a replay, its source's"* and omits the
 trigger's loop family the 2026-10-01 ruling added; the pruned message says
-*"1 days"*. The chart's MinIO images (`quay.io/minio/…`) answered **401** again,
+*"1 days"*. Both were fixed in Task 14 fix round 1 (the message now says *"1 day"* and names the trigger's loop family). The chart's MinIO images (`quay.io/minio/…`) answered **401** again,
 as in W5b; the e2e loaded a local `minio/minio` (RELEASE.2025-09-07, the same
 release, `mc` RELEASE.2025-08-13 inside) as `deps.minio.image` and `mcImage`.
 

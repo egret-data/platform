@@ -183,7 +183,8 @@ pub enum Unreadable {
     #[error(
         "{uri} belongs to an execution this flow may not read: a flow reads only its own \
          execution's files, its loop family's (its loop root and every iteration under it), \
-         its trigger execution's and, for a replay, its source's"
+         its trigger execution's and that trigger's loop family (its loop root and every \
+         iteration under it), and, for a replay, its source's"
     )]
     NotReadable { uri: String },
     /// Its execution is readable and no such file was ever committed.
@@ -193,8 +194,17 @@ pub enum Unreadable {
     /// that execution's files (`executions.files_pruned_at`, spec §10). Not
     /// [`Unreadable::Missing`]: `fileExists` answers `false` for a file that
     /// never existed, and fails on this one, naming the retention window.
-    #[error("{uri} was deleted: files are kept {retention_days} days after their execution ends")]
+    #[error("{uri} was deleted: files are kept {} after their execution ends", days(*.retention_days))]
     Pruned { uri: String, retention_days: u32 },
+}
+
+/// `1 day`, `30 days`: the retention window as a person reads it.
+fn days(n: u32) -> String {
+    if n == 1 {
+        "1 day".to_string()
+    } else {
+        format!("{n} days")
+    }
 }
 
 /// A readable file whose bytes are not UTF-8, refused by `read()` (spec §7.2;
@@ -389,6 +399,39 @@ mod tests {
                 max_task_bytes: 5 << 30,
                 max_read_bytes: 10 << 20,
             }
+        );
+    }
+}
+
+#[cfg(test)]
+mod message_tests {
+    use super::Unreadable;
+
+    #[test]
+    fn the_pruned_message_pluralises_the_window() {
+        let say = |n| {
+            Unreadable::Pruned {
+                uri: "u".into(),
+                retention_days: n,
+            }
+            .to_string()
+        };
+        assert_eq!(
+            say(1),
+            "u was deleted: files are kept 1 day after their execution ends"
+        );
+        assert_eq!(
+            say(30),
+            "u was deleted: files are kept 30 days after their execution ends"
+        );
+    }
+
+    #[test]
+    fn the_refusal_names_the_triggers_loop_family() {
+        let m = Unreadable::NotReadable { uri: "u".into() }.to_string();
+        assert!(
+            m.contains("its trigger execution's and that trigger's loop family"),
+            "{m}"
         );
     }
 }
