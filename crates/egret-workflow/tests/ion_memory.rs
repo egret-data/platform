@@ -51,14 +51,20 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
+/// Held for a WHOLE test body (Task 13 fix round 1): the peak counts every
+/// thread, so another test building its input (8 MB and more) while this one
+/// measures was counted in this one's peak -- a flake in the parallel suite.
 static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 const MIB: usize = 1 << 20;
 
 /// `read_values_capped(bytes, usize::MAX, cap)`, and the most heap it held
 /// above what was live before it.
 fn read_measured(bytes: Vec<u8>, cap: u64) -> (usize, Stop, usize) {
-    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let base = LIVE.load(Ordering::SeqCst);
     PEAK.store(base, Ordering::SeqCst);
     let (rows, stop) = read_values_capped(std::io::Cursor::new(bytes), usize::MAX, cap);
@@ -86,6 +92,7 @@ fn interleaved_appends(n: usize, per: usize) -> Vec<u8> {
 /// cap, holding under 8 MiB at its peak (unbounded it held every symbol).
 #[test]
 fn interleaved_symbol_tables_are_refused_with_a_bounded_peak() {
+    let _serial = serial();
     let file = interleaved_appends(2_000, 1_000);
     let size = file.len();
     let (rows, stop, peak) = read_measured(file, MIB as u64);
@@ -108,6 +115,7 @@ fn interleaved_symbol_tables_are_refused_with_a_bounded_peak() {
 /// unbounded, the text list took 481 MB here.
 #[test]
 fn a_huge_flat_list_is_refused_before_it_is_built() {
+    let _serial = serial();
     let n = 1_000_000;
     let mut text = String::with_capacity(2 * n + 2);
     text.push('[');
@@ -180,6 +188,7 @@ const IVM: [u8; 4] = [0xE0, 0x01, 0x00, 0xEA];
 /// about one table -- measured here against ONE such table, which reads.
 #[test]
 fn back_to_back_symbol_tables_are_refused_with_a_peak_of_one_table() {
+    let _serial = serial();
     let cap = 10 * MIB as u64;
     let table = binary_null_symbol_table(163_000);
     let mut one = IVM.to_vec();
@@ -227,6 +236,7 @@ fn back_to_back_symbol_tables_are_refused_with_a_peak_of_one_table() {
 /// the documented bound of about 8 × the cap).
 #[test]
 fn a_sexp_of_adjacent_symbol_ids_is_refused_before_it_is_split() {
+    let _serial = serial();
     let n = 5_000_000;
     let mut text = String::with_capacity(2 * n + 2);
     text.push('(');
@@ -256,6 +266,7 @@ fn a_sexp_of_adjacent_symbol_ids_is_refused_before_it_is_split() {
 /// scanned, with the round-4 peak.
 #[test]
 fn a_comment_bracket_cannot_hide_a_sexp_from_the_word_count() {
+    let _serial = serial();
     let n = 5_000_000;
     let run = "$1".repeat(n);
     for (what, head, tail) in [
@@ -286,6 +297,7 @@ fn a_comment_bracket_cannot_hide_a_sexp_from_the_word_count() {
 /// rows themselves hold, far under the file.
 #[test]
 fn kestra_binary_and_egret_text_files_read_whole() {
+    let _serial = serial();
     use base64::Engine as _;
     let kestra = base64::engine::general_purpose::STANDARD
         .decode(

@@ -13,43 +13,63 @@
 //! iteration's own id (§3), so an iteration that ended while its root still
 //! runs keeps its files and a task after the loop can still read them. A
 //! candidate is a **loop root** (a row with no `loop_index`) whose family
-//! still has index rows, whose state is terminal (`RunState::is_terminal`, the
-//! one list, as `ExecutionRepo::log_status`) and whose `updated_at` is more
-//! than `retention_days` old. A family one of whose iterations has not ended
-//! is skipped: **an execution that has not ended is never pruned**.
+//! still has index rows or `workflow.loop_file_values` rows, whose state is
+//! terminal (`RunState::is_terminal`, the one list, as
+//! `ExecutionRepo::log_status`) and whose `updated_at` is more than
+//! `retention_days` old.
+//!
+//! **Keep a source while a dependent runs** (the user's ruling of
+//! 2026-10-04): a family is skipped while any member is in the readable set
+//! ([`readable_executions`], inverted) of an execution that has not ended --
+//! a running iteration of its own, a running replay or retry of it, a running
+//! `Subflow` child or Flow-trigger execution it triggered. It is pruned by the
+//! first pass after the last such dependent ended. Since every execution is in
+//! its own readable set, this also keeps every execution that has not ended:
+//! **an execution that has not ended is never pruned.**
 //!
 //! Per family, in this order:
 //!
 //! 1. every member's **own** prefix is computed ([`own_prefix`]) and every index
 //!    row of the family is checked to lie under its member's prefix -- so the
 //!    prefix deletes below are proven to reach every indexed object;
-//! 2. `delete_prefix` for each member. **A failure stops here**: the rows stay,
-//!    the family is still a candidate, and the next pass retries it (a store
-//!    outage is logged, never a crash, and ends this pass's pruning);
+//! 2. `delete_prefix` for each member. **A failure stops here**: the rows stay
+//!    and the next pass retries the family. The pass skips it and goes on with
+//!    the next family; only [`STORE_FAILURES_IN_A_ROW`] failures in a row (an
+//!    outage) end the phase. Logged, never a crash;
 //! 3. ONE statement deletes the family's index rows and its
 //!    `workflow.loop_file_values` rows (a whole copy of a file's records, kept
 //!    for a `Loop` over a file, Task 11) and sets `files_pruned_at` on every
 //!    member -- which is what makes a later read of one of its URIs
-//!    [`Unreadable::Pruned`](super::Unreadable::Pruned) rather than `Missing`;
-//! 4. its prefixes are swept for orphans, as below.
+//!    [`Unreadable::Pruned`](super::Unreadable::Pruned) rather than `Missing`.
 //!
 //! Objects first, then rows: the opposite order would leave objects nothing
 //! points to whenever the store delete failed. (`Delete` and
 //! `PurgeCurrentExecutionFiles` delete the row first for the opposite reason:
 //! a running flow must stop seeing a file it deleted at once, and the object
-//! they may leave behind is exactly what this sweep takes.)
+//! they may leave behind is exactly what this sweep takes.) A pruned family
+//! is not listed afterwards: `delete_prefix` took every object under its
+//! prefixes, indexed or not.
 //!
 //! # Orphans
 //!
 //! Objects that were uploaded and never indexed (a refused start, a task run
 //! whose outcome never committed, a `Delete` whose object delete failed): for
-//! each family pruned in this pass, and each FAILED or KILLED loop root that
-//! ended more than [`StoragePruneConfig::orphan_age`] ago and was not swept
-//! yet (`files_swept_at IS NULL`), every member's prefix is **listed**, and
-//! each object with no index row and a `last_modified` older than
-//! `orphan_age` is deleted **by its key**. A key is deleted only when it reads
-//! back as a URI of that member ([`uri::parse`], round trip); an object whose
-//! age the store does not say is kept. A swept family gets `files_swept_at`.
+//! each FAILED or KILLED loop root that ended more than
+//! [`StoragePruneConfig::orphan_age`] ago and was neither swept
+//! (`files_swept_at`) nor pruned yet, and none of whose members is protected
+//! as above (a running iteration's upload in flight is not an orphan), every
+//! member's prefix is **listed**, and each object with no index row and a
+//! `last_modified` older than `orphan_age` is deleted **by its key**. A key is
+//! deleted only when it lies under that member's prefix and reads back as a
+//! URI of that member ([`uri::parse`], round trip), whatever the listing
+//! says; an object whose age the store does not say is kept. A swept family
+//! gets `files_swept_at`; a skipped or failed one does not, and a later pass
+//! retries it.
+//!
+//! # One pruner per database
+//!
+//! A pass runs under `pg_try_advisory_lock(`[`PRUNE_LOCK_KEY`]`)`: another
+//! replica's pass, meanwhile, does nothing.
 //!
 //! # Never another execution's or workspace's keys
 //!
@@ -63,8 +83,8 @@
 //! with no own prefix cannot have written a file (its builders refuse), and
 //! step 1 proves it has no row.
 //!
-//! Replicas pruning together are harmless: a second `delete_prefix`, a second
-//! `DELETE` of the same rows and a second `UPDATE` are no-ops.
+//! Were two passes to run together anyway (the lock lost with its session),
+//! a second `delete_prefix`, `DELETE` or `UPDATE` is a no-op.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -77,8 +97,12 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::{loop_family, uri, FileStore};
+use super::{loop_family, readable_executions, uri, FileStore};
 use crate::executor::RunState;
+
+/// The `pg_try_advisory_lock` key a pass takes, so one pruner runs per
+/// database at a time ("egretprn" as eight ASCII bytes).
+pub const PRUNE_LOCK_KEY: i64 = 0x6567_7265_7470_726e;
 
 /// The pruner's settings. [`StoragePruneConfig::new`] fills in the spec's cadence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,11 +190,52 @@ pub fn spawn_storage_pruner(
     }))
 }
 
+/// A run of store failures this long, family after family, is an outage: the
+/// phase ends and the next pass retries. A shorter run is one family's
+/// trouble: that family is skipped for the rest of the pass and the others go
+/// on.
+const STORE_FAILURES_IN_A_ROW: u32 = 3;
+
 /// One pass: prune, then sweep, until there is nothing left, the budget is
-/// spent or the store fails. `Err` is the database's; a store failure is
+/// spent or the store is down. `Err` is the database's; a store failure is
 /// logged and counted in [`PruneReport::failed`].
+///
+/// **One pruner per database.** The pass first takes the session-level
+/// advisory lock [`PRUNE_LOCK_KEY`] with `pg_try_advisory_lock`; when another
+/// replica holds it, the pass does nothing and answers an empty report. The
+/// lock is released before the connection goes back to the pool, and a
+/// connection whose unlock failed is closed instead (closing a session
+/// releases its locks).
 pub async fn prune_pass(
     pool: &PgPool,
+    fs: &FileStore,
+    cfg: &StoragePruneConfig,
+) -> Result<PruneReport> {
+    let mut conn = pool.acquire().await.map_err(db_err)?;
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(PRUNE_LOCK_KEY)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    if !locked {
+        tracing::debug!("workflow storage prune pass skipped: another pruner holds the lock");
+        return Ok(PruneReport::default());
+    }
+    let result = pass_locked(&mut conn, fs, cfg).await;
+    let unlocked: std::result::Result<bool, _> =
+        sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+            .bind(PRUNE_LOCK_KEY)
+            .fetch_one(&mut *conn)
+            .await;
+    if !matches!(unlocked, Ok(true)) {
+        // Never hand the pool a session that still holds the lock.
+        drop(conn.detach());
+    }
+    result
+}
+
+async fn pass_locked(
+    conn: &mut PgConnection,
     fs: &FileStore,
     cfg: &StoragePruneConfig,
 ) -> Result<PruneReport> {
@@ -178,12 +243,13 @@ pub async fn prune_pass(
     let mut report = PruneReport::default();
     let mut units = 0u64;
     let over = |units: u64| units > 0 && start.elapsed() >= cfg.pass_budget;
-    let mut conn = pool.acquire().await.map_err(db_err)?;
+    let protected = protected(conn).await?;
 
     // ── Prune ──────────────────────────────────────────────────────────────
     let mut skip: Vec<Uuid> = Vec::new();
+    let mut in_a_row = 0;
     'prune: loop {
-        let roots = prune_candidates(&mut conn, cfg, &skip).await?;
+        let roots = prune_candidates(conn, cfg, &skip).await?;
         let short = (roots.len() as i64) < cfg.batch;
         for (workspace, root) in roots {
             if over(units) {
@@ -192,19 +258,19 @@ pub async fn prune_pass(
             units += 1;
             // Never twice in one pass, whatever happened to it.
             skip.push(root);
-            match prune_family(&mut conn, fs, cfg, workspace, root).await? {
-                Pruned::Done {
-                    executions,
-                    orphans,
-                } => {
-                    report.executions += executions;
-                    report.orphans += orphans;
+            match prune_family(conn, fs, workspace, root, &protected).await? {
+                Outcome::Done(n) => {
+                    report.executions += n;
+                    in_a_row = 0;
                 }
-                Pruned::Kept => {}
-                Pruned::Anomaly => report.failed += 1,
-                Pruned::StoreDown => {
+                Outcome::Kept => {}
+                Outcome::Anomaly => report.failed += 1,
+                Outcome::StoreDown => {
                     report.failed += 1;
-                    break 'prune;
+                    in_a_row += 1;
+                    if in_a_row >= STORE_FAILURES_IN_A_ROW {
+                        break 'prune;
+                    }
                 }
             }
         }
@@ -215,42 +281,30 @@ pub async fn prune_pass(
 
     // ── Sweep FAILED/KILLED families ───────────────────────────────────────
     let mut skip: Vec<Uuid> = Vec::new();
-    loop {
-        let roots = sweep_candidates(&mut conn, cfg, &skip).await?;
+    let mut in_a_row = 0;
+    'sweep: loop {
+        let roots = sweep_candidates(conn, cfg, &skip).await?;
         let short = (roots.len() as i64) < cfg.batch;
         for (workspace, root) in roots {
             if over(units) {
                 return Ok(report);
             }
             units += 1;
-            let family = members(&mut conn, workspace, root).await?;
-            let mut deleted = 0;
-            let mut down = false;
-            for m in &family {
-                match sweep_member(&mut conn, fs, cfg, workspace, m).await? {
-                    Ok(n) => deleted += n,
-                    Err(()) => {
-                        down = true;
-                        break;
+            skip.push(root);
+            match sweep_family(conn, fs, cfg, workspace, root, &protected).await? {
+                Outcome::Done(n) => {
+                    report.orphans += n;
+                    in_a_row = 0;
+                }
+                Outcome::Kept | Outcome::Anomaly => {}
+                Outcome::StoreDown => {
+                    report.failed += 1;
+                    in_a_row += 1;
+                    if in_a_row >= STORE_FAILURES_IN_A_ROW {
+                        break 'sweep;
                     }
                 }
             }
-            report.orphans += deleted;
-            if down {
-                report.failed += 1;
-                return Ok(report);
-            }
-            let ids: Vec<Uuid> = family.iter().map(|m| m.id).collect();
-            sqlx::query(
-                "UPDATE workflow.executions SET files_swept_at = now() \
-                  WHERE workspace_id = $1 AND id = ANY($2)",
-            )
-            .bind(workspace)
-            .bind(&ids)
-            .execute(&mut *conn)
-            .await
-            .map_err(db_err)?;
-            skip.push(root);
         }
         if short {
             break;
@@ -271,10 +325,35 @@ fn terminal() -> Vec<&'static str> {
         .collect()
 }
 
+/// **The user's ruling of 2026-10-04: keep a source while a dependent runs.**
+/// Every execution in the readable set ([`readable_executions`], the one
+/// relation storage reads by) of an execution that has NOT ended: its loop
+/// family, its replay and retry chain, its trigger execution and that
+/// trigger's loop family. A family with a member here is neither pruned nor
+/// swept; it is taken by the first pass after its last dependent ended.
+///
+/// One query per execution that has not ended, once per pass.
+async fn protected(conn: &mut PgConnection) -> Result<BTreeSet<Uuid>> {
+    let live: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT workspace_id, id FROM workflow.executions WHERE NOT (state = ANY($1))",
+    )
+    .bind(terminal())
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let mut out = BTreeSet::new();
+    for (workspace, execution) in live {
+        out.extend(readable_executions(conn, workspace, execution).await?);
+    }
+    Ok(out)
+}
+
 /// Loop roots that ended more than `retention_days` ago and whose family
-/// still has index rows, oldest first. The walk starts from the files (the
-/// table holds only what is not pruned yet) and climbs `parent_execution_id`
-/// while the row is a loop iteration, as `index::loop_root` does.
+/// still has index rows or `Loop` values (`workflow.loop_file_values`: a
+/// `Loop` over a trigger's or a replay source's file writes values and no
+/// file), oldest first. The walk starts from those rows (both tables hold
+/// only what is not pruned yet) and climbs `parent_execution_id` while the
+/// row is a loop iteration, as `index::loop_root` does.
 async fn prune_candidates(
     conn: &mut PgConnection,
     cfg: &StoragePruneConfig,
@@ -287,7 +366,8 @@ async fn prune_candidates(
         "WITH RECURSIVE up(id, parent, loop_index, ws) AS ( \
            SELECT e.id, e.parent_execution_id, e.loop_index, e.workspace_id \
              FROM workflow.executions e \
-            WHERE e.id IN (SELECT DISTINCT execution_id FROM workflow.execution_files) \
+            WHERE e.id IN (SELECT execution_id FROM workflow.execution_files \
+                           UNION SELECT execution_id FROM workflow.loop_file_values) \
            UNION \
            SELECT e.id, e.parent_execution_id, e.loop_index, e.workspace_id \
              FROM workflow.executions e JOIN up ON e.id = up.parent AND e.workspace_id = up.ws \
@@ -311,26 +391,24 @@ async fn prune_candidates(
 }
 
 /// FAILED or KILLED loop roots that ended more than `orphan_age` ago, neither
-/// swept nor pruned yet, oldest first.
+/// swept nor pruned yet, oldest first. The states are literals, not bound, so
+/// the planner matches migration 0170's partial index
+/// `workflow_executions_unswept_idx` (the test
+/// `the_swept_states_are_the_wire_spellings` pins the spelling).
 async fn sweep_candidates(
     conn: &mut PgConnection,
     cfg: &StoragePruneConfig,
     skip: &[Uuid],
 ) -> Result<Vec<(Uuid, Uuid)>> {
-    let swept: Vec<&str> = [RunState::Failed, RunState::Killed]
-        .iter()
-        .map(|s| s.wire())
-        .collect();
     sqlx::query_as(
         "SELECT workspace_id, id FROM workflow.executions \
-          WHERE loop_index IS NULL AND state = ANY($1) \
-            AND updated_at < now() - make_interval(secs => $2) \
-            AND files_swept_at IS NULL AND files_pruned_at IS NULL \
-            AND NOT (id = ANY($3)) \
+          WHERE loop_index IS NULL AND files_swept_at IS NULL AND files_pruned_at IS NULL \
+            AND state IN ('FAILED', 'KILLED') \
+            AND updated_at < now() - make_interval(secs => $1) \
+            AND NOT (id = ANY($2)) \
           ORDER BY updated_at, id \
-          LIMIT $4",
+          LIMIT $3",
     )
-    .bind(swept)
     .bind(cfg.orphan_age.as_secs_f64())
     .bind(skip)
     .bind(cfg.batch)
@@ -344,15 +422,13 @@ struct Member {
     id: Uuid,
     namespace: String,
     flow: String,
-    iteration: bool,
-    state: String,
 }
 
 /// `root` and every iteration under it ([`loop_family`]), with their rows.
 async fn members(conn: &mut PgConnection, workspace: Uuid, root: Uuid) -> Result<Vec<Member>> {
     let family = loop_family(conn, workspace, root).await?;
-    let rows: Vec<(Uuid, String, String, bool, String)> = sqlx::query_as(
-        "SELECT id, namespace, flow_key, loop_index IS NOT NULL, state \
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, namespace, flow_key \
            FROM workflow.executions WHERE workspace_id = $1 AND id = ANY($2)",
     )
     .bind(workspace)
@@ -362,12 +438,10 @@ async fn members(conn: &mut PgConnection, workspace: Uuid, root: Uuid) -> Result
     .map_err(db_err)?;
     Ok(rows
         .into_iter()
-        .map(|(id, namespace, flow, iteration, state)| Member {
+        .map(|(id, namespace, flow)| Member {
             id,
             namespace,
             flow,
-            iteration,
-            state,
         })
         .collect())
 }
@@ -401,12 +475,12 @@ pub(crate) fn own_prefix(
     (own && same).then_some((store_prefix, uri_prefix))
 }
 
-enum Pruned {
-    Done {
-        executions: u64,
-        orphans: u64,
-    },
-    /// An iteration has not ended: kept, not retried in this pass.
+/// What became of one family.
+enum Outcome {
+    /// Pruned (the number of executions) or swept (the number of orphans).
+    Done(u64),
+    /// A member is in the readable set of an execution that has not ended:
+    /// kept, and taken by a later pass.
     Kept,
     /// Index rows outside their execution's prefix: kept, logged.
     Anomaly,
@@ -414,22 +488,23 @@ enum Pruned {
     StoreDown,
 }
 
+fn any_protected(family: &[Member], protected: &BTreeSet<Uuid>) -> bool {
+    family.iter().any(|m| protected.contains(&m.id))
+}
+
 async fn prune_family(
     conn: &mut PgConnection,
     fs: &FileStore,
-    cfg: &StoragePruneConfig,
     workspace: Uuid,
     root: Uuid,
-) -> Result<Pruned> {
+    protected: &BTreeSet<Uuid>,
+) -> Result<Outcome> {
     let family = members(conn, workspace, root).await?;
-    let terminal = terminal();
-    // The root's own end is the candidate query's; an iteration may still run
-    // (a root ended before every iteration did) and keeps the whole family.
-    if family
-        .iter()
-        .any(|m| m.iteration && !terminal.contains(&m.state.as_str()))
-    {
-        return Ok(Pruned::Kept);
+    // The root's own end is the candidate query's. A member some execution
+    // that has not ended may read -- a running iteration of its own, a
+    // running replay of it, a running child it triggered -- keeps the family.
+    if any_protected(&family, protected) {
+        return Ok(Outcome::Kept);
     }
     let prefixes: Vec<Option<(String, String)>> = family
         .iter()
@@ -462,7 +537,7 @@ async fn prune_family(
             "workflow storage: index rows of this loop family lie outside their execution's \
              prefix; its files are kept"
         );
-        return Ok(Pruned::Anomaly);
+        return Ok(Outcome::Anomaly);
     }
     // Step 2: the objects.
     for (store_prefix, _) in prefixes.iter().flatten() {
@@ -474,7 +549,7 @@ async fn prune_family(
                 "workflow storage: an execution's files could not be deleted; \
                  its index rows are kept and the next pass retries"
             );
-            return Ok(Pruned::StoreDown);
+            return Ok(Outcome::StoreDown);
         }
     }
     // Step 3: the rows, in one statement.
@@ -492,21 +567,45 @@ async fn prune_family(
     .execute(&mut *conn)
     .await
     .map_err(db_err)?;
-    // Step 4: what an upload in flight may have left.
-    let mut orphans = 0;
+    // No listing for orphans after this: `delete_prefix` took every object
+    // under these prefixes, indexed or not.
+    Ok(Outcome::Done(family.len() as u64))
+}
+
+/// Sweep one FAILED/KILLED family: every member's prefix, then
+/// `files_swept_at` on every member. A protected family or a store failure
+/// leaves `files_swept_at` NULL, so a later pass sweeps it.
+async fn sweep_family(
+    conn: &mut PgConnection,
+    fs: &FileStore,
+    cfg: &StoragePruneConfig,
+    workspace: Uuid,
+    root: Uuid,
+    protected: &BTreeSet<Uuid>,
+) -> Result<Outcome> {
+    let family = members(conn, workspace, root).await?;
+    // A running iteration's upload in flight is not an orphan (I1).
+    if any_protected(&family, protected) {
+        return Ok(Outcome::Kept);
+    }
+    let mut deleted = 0;
     for m in &family {
         match sweep_member(conn, fs, cfg, workspace, m).await? {
-            Ok(n) => orphans += n,
-            // The rows are gone and the family pruned; what is left there
-            // has no row and is taken when this prefix is listed again --
-            // which, for a SUCCESS family, is never. Logged by sweep_member.
-            Err(()) => break,
+            Ok(n) => deleted += n,
+            Err(()) => return Ok(Outcome::StoreDown),
         }
     }
-    Ok(Pruned::Done {
-        executions: family.len() as u64,
-        orphans,
-    })
+    let ids: Vec<Uuid> = family.iter().map(|m| m.id).collect();
+    sqlx::query(
+        "UPDATE workflow.executions SET files_swept_at = now() \
+          WHERE workspace_id = $1 AND id = ANY($2)",
+    )
+    .bind(workspace)
+    .bind(&ids)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(Outcome::Done(deleted))
 }
 
 /// List one member's own prefix and delete, by key, each object of that
@@ -632,6 +731,15 @@ mod tests {
         ] {
             assert_eq!(own_prefix(&fs(), ws, &ns, "tasks", e), None, "{ns}");
         }
+    }
+
+    /// `sweep_candidates` spells the states as literals (for the partial
+    /// index); they must be the wire spellings.
+    #[test]
+    fn the_swept_states_are_the_wire_spellings() {
+        assert_eq!(RunState::Failed.wire(), "FAILED");
+        assert_eq!(RunState::Killed.wire(), "KILLED");
+        assert!(RunState::Failed.is_terminal() && RunState::Killed.is_terminal());
     }
 
     #[test]

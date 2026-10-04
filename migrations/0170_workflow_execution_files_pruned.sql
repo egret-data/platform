@@ -16,3 +16,17 @@
 ALTER TABLE workflow.executions
   ADD COLUMN files_pruned_at timestamptz,   -- set when the pruner deleted this execution's files
   ADD COLUMN files_swept_at  timestamptz;   -- set when the orphan sweep of a FAILED/KILLED execution ran
+
+-- Task 13 fix round 1. The sweep's candidates (`storage::prune::sweep_candidates`,
+-- which spells the states as literals so this predicate matches): FAILED or
+-- KILLED loop roots neither swept nor pruned, oldest first. Once swept or
+-- pruned a row leaves the index, so it stays the size of the backlog.
+CREATE INDEX workflow_executions_unswept_idx
+  ON workflow.executions (updated_at, id)
+  WHERE loop_index IS NULL AND files_swept_at IS NULL AND files_pruned_at IS NULL
+    AND state IN ('FAILED', 'KILLED');
+
+-- Executions that ended before W9a wrote no file under internal storage:
+-- nothing to sweep. Marked so the first pass does not list every one of them.
+UPDATE workflow.executions SET files_swept_at = now()
+ WHERE state IN ('FAILED', 'KILLED');

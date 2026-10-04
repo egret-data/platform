@@ -53,8 +53,23 @@ struct Fake {
     /// key -> RFC 3339 `last_modified`; an absent key is "just written".
     modified: Mutex<HashMap<String, String>>,
     fail_delete_prefix: AtomicBool,
+    /// `delete_prefix` and `list` fail for a prefix holding any of these.
+    fail_containing: Mutex<Vec<String>>,
+    /// Keys every listing also answers, wherever its prefix is (a store that
+    /// misbehaves): the sweep must never trust a listing's prefix.
+    inject: Mutex<Vec<String>>,
     /// Every prefix `delete_prefix` was asked for, refused or not.
     prefixes: Mutex<Vec<String>>,
+}
+
+impl Fake {
+    fn failing(&self, prefix: &str) -> bool {
+        self.fail_containing
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|f| prefix.contains(f.as_str()))
+    }
 }
 
 fn key_of(object: &str) -> String {
@@ -80,7 +95,19 @@ impl ObjectStore for Fake {
         self.mem.copy(src, dst).await
     }
     async fn list(&self, prefix: &str, delimiter: Option<&str>) -> Result<Listing, StorageError> {
+        if self.failing(prefix) {
+            return Err(StorageError::S3(format!("{prefix}: the store is down")));
+        }
         let mut listing = self.mem.list(prefix, delimiter).await?;
+        for key in self.inject.lock().unwrap().iter() {
+            if !listing.objects.iter().any(|o| &o.key == key) {
+                listing.objects.push(egret_storage::ObjectMeta {
+                    key: key.clone(),
+                    size: 3,
+                    last_modified: None,
+                });
+            }
+        }
         let modified = self.modified.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
         for o in &mut listing.objects {
@@ -93,7 +120,7 @@ impl ObjectStore for Fake {
     }
     async fn delete_prefix(&self, uri: &str) -> Result<u64, StorageError> {
         self.prefixes.lock().unwrap().push(uri.to_string());
-        if self.fail_delete_prefix.load(Ordering::SeqCst) {
+        if self.fail_delete_prefix.load(Ordering::SeqCst) || self.failing(uri) {
             return Err(StorageError::S3(format!("{uri}: the store is down")));
         }
         self.mem.delete_prefix(uri).await
@@ -124,6 +151,47 @@ impl World {
 
     /// An execution row; `iteration_of` makes it a loop iteration.
     async fn exec(&self, state: &str, days_ago: i32, iteration_of: Option<(Uuid, i32)>) -> Uuid {
+        self.exec_unlinked(state, days_ago, iteration_of).await
+    }
+
+    /// A manual replay of `source` (`replayed_from_execution_id`).
+    async fn replay_of(&self, state: &str, days_ago: i32, source: Uuid) -> Uuid {
+        let e = self.exec_unlinked(state, days_ago, None).await;
+        self.link(e, "replayed_from_execution_id", source).await;
+        e
+    }
+
+    /// An execution started by `trigger` (a `Subflow` child or a Flow trigger).
+    async fn triggered_by(&self, state: &str, days_ago: i32, trigger: Uuid) -> Uuid {
+        let e = self.exec_unlinked(state, days_ago, None).await;
+        self.link(e, "trigger_execution_id", trigger).await;
+        e
+    }
+
+    async fn link(&self, e: Uuid, column: &str, to: Uuid) {
+        let sql = match column {
+            "replayed_from_execution_id" => {
+                "UPDATE workflow.executions SET replayed_from_execution_id = $2 WHERE id = $1"
+            }
+            "trigger_execution_id" => {
+                "UPDATE workflow.executions SET trigger_execution_id = $2 WHERE id = $1"
+            }
+            other => panic!("{other}"),
+        };
+        sqlx::query(sql)
+            .bind(e)
+            .bind(to)
+            .execute(&self.db.pool)
+            .await
+            .unwrap();
+    }
+
+    async fn exec_unlinked(
+        &self,
+        state: &str,
+        days_ago: i32,
+        iteration_of: Option<(Uuid, i32)>,
+    ) -> Uuid {
         let (parent, run_ix, loop_index, loop_value) = match iteration_of {
             Some((p, i)) => (Some(p), Some(0), Some(i), Some(format!("v{i}"))),
             None => (None, None, None, None),
@@ -190,6 +258,28 @@ impl World {
         )
         .await
         .expect("index the file");
+        uri
+    }
+
+    /// A FILE input of `execution`: indexed and stored.
+    async fn input(&self, execution: Uuid, name: &str) -> String {
+        let uri = uri::input_uri(NS, FLOW, execution, "f", name).unwrap();
+        self.store
+            .put(&self.object(&uri), b"abc".to_vec())
+            .await
+            .unwrap();
+        let mut conn = self.db.pool.acquire().await.unwrap();
+        storage::index_input_files(
+            &mut conn,
+            self.ws,
+            execution,
+            &[StoredFile {
+                uri: uri.clone(),
+                size: 3,
+            }],
+        )
+        .await
+        .expect("index the input");
         uri
     }
 
@@ -621,7 +711,16 @@ async fn zero_retention_starts_no_pruner() {
 async fn a_pruned_uri_is_an_error_naming_it_and_the_window() {
     let _g = SERIAL.lock().await;
     let Some(w) = World::new().await else { return };
-    storage::install_mem_for_tests();
+    // A window that is not the default, so the number can only come from the
+    // installed store (`Pruned` names `storage::current()`'s retention).
+    let fs17 = Arc::new(FileStore {
+        store: w.store.clone(),
+        bucket: BUCKET.into(),
+        prefix: "workflow/".into(),
+        caps: Caps::default(),
+        retention_days: 17,
+    });
+    storage::install(fs17.clone()).expect("no other test of this binary installs a store");
     let e = w.exec("SUCCESS", 400, None).await;
     let a = w.file(e, "a.txt").await;
     let never = format!(
@@ -634,7 +733,9 @@ async fn a_pruned_uri_is_an_error_naming_it_and_the_window() {
         "{}never.txt",
         uri::task_prefix(NS, FLOW, live, "Write_It", Uuid::new_v4()).unwrap()
     );
-    w.pass().await;
+    prune_pass(&w.db.pool, &fs17, &StoragePruneConfig::new(17))
+        .await
+        .unwrap();
 
     let mut conn = w.db.pool.acquire().await.unwrap();
     let got = resolve_readable(&mut conn, w.ws, e, &a).await.unwrap();
@@ -642,11 +743,11 @@ async fn a_pruned_uri_is_an_error_naming_it_and_the_window() {
         got,
         Err(Unreadable::Pruned {
             uri: a.clone(),
-            retention_days: 30
+            retention_days: 17
         })
     );
     let msg = got.unwrap_err().to_string();
-    assert!(msg.contains(&a) && msg.contains("30 days"), "{msg}");
+    assert!(msg.contains(&a) && msg.contains("17 days"), "{msg}");
     assert!(matches!(
         resolve_readable(&mut conn, w.ws, e, &never).await.unwrap(),
         Err(Unreadable::Pruned { .. })
@@ -665,7 +766,7 @@ async fn a_pruned_uri_is_an_error_naming_it_and_the_window() {
         .await
         .unwrap();
     match snap.lookup(&a) {
-        Err(FileUnavailable::Refused(m)) => assert!(m.contains("30 days"), "{m}"),
+        Err(FileUnavailable::Refused(m)) => assert!(m.contains("17 days"), "{m}"),
         other => panic!("{other:?}"),
     }
 }
@@ -674,9 +775,11 @@ async fn a_pruned_uri_is_an_error_naming_it_and_the_window() {
 async fn a_pass_stops_at_its_budget() {
     let _g = SERIAL.lock().await;
     let Some(w) = World::new().await else { return };
+    // Older than any other test's fixture (about 55 years), so these are the
+    // first candidates whatever another test left behind.
     let mut files = Vec::new();
     for _ in 0..3 {
-        let e = w.exec("SUCCESS", 400, None).await;
+        let e = w.exec("SUCCESS", 20_000, None).await;
         files.push(w.file(e, "a.txt").await);
     }
     let zero = StoragePruneConfig {
@@ -698,4 +801,224 @@ async fn a_pass_stops_at_its_budget() {
     for f in &files {
         assert!(w.gone(f).await);
     }
+}
+
+/// The user's ruling of 2026-10-04: a source is kept while a dependent runs.
+/// A manual replay reads its source's files (the readable set); while it has
+/// not ended, its 40-day-old source keeps them; once it ends, the next pass
+/// prunes the source.
+#[tokio::test]
+async fn a_running_replay_keeps_its_sources_input_files_until_it_ends() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let source = w.exec("SUCCESS", 40, None).await;
+    let input = w.input(source, "in.csv").await;
+    let replay = w.replay_of("RUNNING", 0, source).await;
+
+    let report = w.pass().await;
+    assert!(w.kept(&input).await, "{report:?}");
+    assert!(!w.pruned_at(source).await);
+
+    w.set(replay, "SUCCESS", 0).await;
+    let report = w.pass().await;
+    assert!(w.gone(&input).await, "{report:?}");
+    assert!(w.pruned_at(source).await);
+    assert!(
+        !w.pruned_at(replay).await,
+        "the replay is inside the window"
+    );
+}
+
+/// The same rule through `trigger_execution_id`: a running `Subflow` child or
+/// Flow-trigger execution keeps its trigger execution's files.
+#[tokio::test]
+async fn a_running_child_keeps_its_trigger_executions_files_until_it_ends() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let parent = w.exec("SUCCESS", 40, None).await;
+    let file = w.file(parent, "out.txt").await;
+    let child = w.triggered_by("PAUSED", 0, parent).await;
+
+    w.pass().await;
+    assert!(w.kept(&file).await);
+
+    w.set(child, "KILLED", 0).await;
+    w.pass().await;
+    assert!(w.gone(&file).await);
+}
+
+/// I1: the sweep twin of `a_running_iteration_keeps_its_ended_roots_family`.
+/// A FAILED root ended two days ago with an iteration still RUNNING: that
+/// iteration's upload in flight is not an orphan, the family is not swept and
+/// stays unswept, so a later pass sweeps it once the iteration has ended.
+#[tokio::test]
+async fn the_sweep_skips_a_family_with_a_running_iteration() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let root = w.exec("FAILED", 2, None).await;
+    let iteration = w.exec("RUNNING", 2, Some((root, 0))).await;
+    let uploading = w.unindexed(iteration, "big.bin").await;
+    w.age_object(&uploading, 25);
+    let old = w.unindexed(root, "old.txt").await;
+    w.age_object(&old, 25);
+
+    let report = w.pass().await;
+    assert!(
+        w.stored(&uploading),
+        "a running iteration's upload was swept ({report:?})"
+    );
+    assert!(w.stored(&old), "{report:?}");
+    assert!(!w.swept_at(root).await && !w.swept_at(iteration).await);
+
+    w.set(iteration, "KILLED", 2).await;
+    w.pass().await;
+    assert!(!w.stored(&uploading) && !w.stored(&old));
+    assert!(w.swept_at(root).await);
+}
+
+/// I2: a `Loop` over a file it did not write (a trigger's or a replay
+/// source's) leaves `loop_file_values` rows and no `execution_files` row of
+/// its own; the family is still a candidate, and its values go.
+#[tokio::test]
+async fn loop_values_without_files_are_pruned() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let root = w.exec("SUCCESS", 40, None).await;
+    let iteration = w.exec("SUCCESS", 40, Some((root, 0))).await;
+    sqlx::query(
+        "INSERT INTO workflow.loop_file_values (execution_id, run_ix, idx, value) \
+         VALUES ($1, 0, 0, '\"a\"'), ($1, 0, 1, '\"b\"')",
+    )
+    .bind(root)
+    .execute(&w.db.pool)
+    .await
+    .unwrap();
+
+    let report = w.pass().await;
+
+    let values: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.loop_file_values WHERE execution_id = $1",
+    )
+    .bind(root)
+    .fetch_one(&w.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(values, 0, "{report:?}");
+    assert!(w.pruned_at(root).await && w.pruned_at(iteration).await);
+}
+
+/// I3: a family whose store calls always fail is skipped for the rest of the
+/// pass; the families after it are still pruned and swept.
+#[tokio::test]
+async fn a_family_that_always_fails_does_not_stall_the_others() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    // Prune: the older family fails, the younger one is pruned.
+    let stuck = w.exec("SUCCESS", 19_000, None).await;
+    let stuck_file = w.file(stuck, "a.txt").await;
+    let next = w.exec("SUCCESS", 18_000, None).await;
+    let next_file = w.file(next, "a.txt").await;
+    // Sweep: the older FAILED root's listing fails, the younger one is swept.
+    let stuck_failed = w.exec("FAILED", 3, None).await;
+    let stuck_orphan = w.unindexed(stuck_failed, "o.txt").await;
+    w.age_object(&stuck_orphan, 25);
+    let next_failed = w.exec("FAILED", 2, None).await;
+    let next_orphan = w.unindexed(next_failed, "o.txt").await;
+    w.age_object(&next_orphan, 25);
+    w.store
+        .fail_containing
+        .lock()
+        .unwrap()
+        .extend([stuck.to_string(), stuck_failed.to_string()]);
+
+    let report = w.pass().await;
+
+    assert!(w.kept(&stuck_file).await && !w.pruned_at(stuck).await);
+    assert!(
+        w.gone(&next_file).await,
+        "a failing family stalled the prune ({report:?})"
+    );
+    assert!(w.stored(&stuck_orphan) && !w.swept_at(stuck_failed).await);
+    assert!(
+        !w.stored(&next_orphan),
+        "a failing family stalled the sweep ({report:?})"
+    );
+    assert!(w.swept_at(next_failed).await);
+    assert!(report.failed >= 2, "{report:?}");
+
+    // The store recovers: the next pass takes both.
+    w.store.fail_containing.lock().unwrap().clear();
+    w.pass().await;
+    assert!(w.gone(&stuck_file).await && !w.stored(&stuck_orphan));
+}
+
+/// One pruner per database: a pass that cannot take the advisory lock does
+/// nothing.
+#[tokio::test]
+async fn a_pass_does_nothing_while_another_pruner_holds_the_lock() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let e = w.exec("SUCCESS", 400, None).await;
+    let a = w.file(e, "a.txt").await;
+    let mut other = w.db.pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(egret_workflow::storage::prune::PRUNE_LOCK_KEY)
+        .execute(&mut *other)
+        .await
+        .unwrap();
+
+    let report = w.pass().await;
+    assert_eq!(report, PruneReport::default());
+    assert!(w.kept(&a).await);
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(egret_workflow::storage::prune::PRUNE_LOCK_KEY)
+        .execute(&mut *other)
+        .await
+        .unwrap();
+    drop(other);
+    w.pass().await;
+    assert!(w.gone(&a).await);
+}
+
+/// The sweep deletes a listed key only when it lies under the member's own
+/// prefix AND reads back, round trip, as that member's URI -- whatever the
+/// store's listing says.
+#[tokio::test]
+async fn the_sweep_deletes_only_keys_that_are_provably_the_members() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let root = w.exec("FAILED", 2, None).await;
+    // The control: an ordinary old orphan goes.
+    let orphan = w.unindexed(root, "o.txt").await;
+    w.age_object(&orphan, 25);
+    // Under the prefix, but no URI: an empty segment does not parse.
+    let odd = format!("{}tasks/x//y", w.fs.execution_prefix(w.ws, NS, FLOW, root));
+    // A URI of the same execution under ANOTHER namespace's path: outside
+    // the member's prefix, answered by a listing that misbehaves.
+    let outside = format!(
+        "s3://{BUCKET}/workflow/{}/w9a/elsewhere/prune-flow/executions/{root}/tasks/t/r/o.txt",
+        w.ws
+    );
+    for k in [&odd, &outside] {
+        w.store.put(k, b"abc".to_vec()).await.unwrap();
+        let at = chrono::Utc::now() - chrono::Duration::hours(25);
+        w.store
+            .modified
+            .lock()
+            .unwrap()
+            .insert(key_of(k), at.to_rfc3339());
+    }
+    w.store.inject.lock().unwrap().push(key_of(&outside));
+
+    let report = w.pass().await;
+    w.store.inject.lock().unwrap().clear();
+
+    assert!(!w.stored(&orphan), "the control was kept ({report:?})");
+    let keys = w.store.mem.keys();
+    assert!(keys.contains(&odd), "a key that is no URI was deleted");
+    assert!(
+        keys.contains(&outside),
+        "a key outside the prefix was deleted"
+    );
 }
