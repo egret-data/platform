@@ -8,7 +8,6 @@
 //! |---|---|---|---|
 //! | [`RefKind::Subflow`] | Yes | [`crate::repo::FlowRepo::find_by_name`] + [`crate::repo::FlowRepo::workspace_of`] | (this crate — no gap) |
 //! | [`RefKind::DataApiEndpoint`] | Yes | `egret_dataapi_api::DataApiEndpointPort::workspace_of` | already exists |
-//! | [`RefKind::Notebook`] | Yes | `egret_analytics_api::NotebookDocsPort::get_summary` | already exists |
 //! | [`RefKind::Database`] | **No — `None`, always** | nothing | a `query.databases`-owning port; `QueryExecPort` *executes* SQL, it does not answer "which workspace owns this database id" |
 //! | [`RefKind::Dataset`] | **No — `None`, always** | nothing | an `analytics.datasets`-owning port (none exists in the workspace) |
 //! | [`RefKind::Chart`] | **No — `None`, always** | nothing | an `analytics.charts`-owning port (none exists in the workspace) |
@@ -37,14 +36,12 @@
 //!
 //! `WorkflowRefPort` and `RefKind` live in the leaf `egret-workflow-api`
 //! crate so a consumer can depend on the Workflow vocabulary without pulling
-//! the engine. This composite is the OPPOSITE direction — it depends on TWO
-//! other seams' leaf contract crates (`egret-dataapi-api`,
-//! `egret-analytics-api`) to implement that vocabulary — so it belongs on
-//! the engine side, in the crate that already depends on
-//! `egret-workflow-api` to re-export `RefKind`/`WorkflowRefPort` in the
-//! first place. `egret-automation` already depends on both of those same two
-//! leaf crates for an identical reason (`DataApiEndpointPort` +
-//! `NotebookDocsPort` compose a bigger authorization surface there); this is
+//! the engine. This composite is the OPPOSITE direction — it depends on
+//! another seam's leaf contract crate (`egret-dataapi-api`) to implement
+//! that vocabulary — so it belongs on the engine side, in the crate that
+//! already depends on `egret-workflow-api` to re-export
+//! `RefKind`/`WorkflowRefPort` in the first place. `egret-automation`
+//! already depends on the same leaf crate for an identical reason; this is
 //! the same shape, one seam over.
 
 use std::sync::Arc;
@@ -61,7 +58,6 @@ use crate::repo::FlowRepo;
 pub struct WorkflowRefs {
     pub flows: FlowRepo,
     pub dataapi_endpoints: Arc<dyn egret_dataapi_api::DataApiEndpointPort>,
-    pub notebooks: Arc<dyn egret_analytics_api::NotebookDocsPort>,
 }
 
 /// `name_or_id` for every `RefKind` except [`RefKind::Subflow`] is a plain
@@ -100,13 +96,6 @@ impl WorkflowRefPort for WorkflowRefs {
                 let ws = self.dataapi_endpoints.workspace_of(id).await?;
                 Ok(ws.map(|ws| (id, ws)))
             }
-            RefKind::Notebook => {
-                let Some(id) = as_uuid(name_or_id) else {
-                    return Ok(None);
-                };
-                let found = self.notebooks.get_summary(id).await?;
-                Ok(found.map(|(_, ws)| (id, ws)))
-            }
             // No port anywhere in the workspace owns these three yet — see
             // the module doc's table. `None`, always, is the fail-closed
             // answer: `publish` refuses it exactly like a foreign reference,
@@ -125,40 +114,6 @@ mod tests {
     impl egret_dataapi_api::DataApiEndpointPort for UnreachableDataApi {
         async fn workspace_of(&self, _id: Uuid) -> Result<Option<Uuid>, Error> {
             unreachable!("Database/Dataset/Chart must never reach a port that does not exist")
-        }
-    }
-
-    struct UnreachableNotebooks;
-    #[async_trait::async_trait]
-    impl egret_analytics_api::NotebookDocsPort for UnreachableNotebooks {
-        async fn get_summary(
-            &self,
-            _id: Uuid,
-        ) -> Result<Option<(egret_analytics_api::NotebookSummary, Uuid)>, Error> {
-            unreachable!()
-        }
-        async fn list_engine_options(
-            &self,
-            _ws: Uuid,
-        ) -> Result<Vec<egret_analytics_api::EngineOption>, Error> {
-            unreachable!()
-        }
-        async fn record_output(
-            &self,
-            _nb: Uuid,
-            _cid: Uuid,
-            _outputs: &[egret_analytics_api::CellOutput],
-            _execution_count: Option<i32>,
-            _elapsed_ms: Option<i32>,
-        ) -> Result<(), Error> {
-            unreachable!()
-        }
-        async fn build_runtime(
-            &self,
-            _ws: Uuid,
-            _user_id: egret_core::UserId,
-        ) -> Result<egret_analytics_api::NotebookRuntime, Error> {
-            unreachable!()
         }
     }
 
@@ -185,7 +140,6 @@ mod tests {
                     .expect("parse a lazy, never-connected pool"),
             ),
             dataapi_endpoints: Arc::new(UnreachableDataApi),
-            notebooks: Arc::new(UnreachableNotebooks),
         };
         for kind in [RefKind::Database, RefKind::Dataset, RefKind::Chart] {
             let got = refs
@@ -216,7 +170,6 @@ mod tests {
                     .expect("parse a lazy, never-connected pool"),
             ),
             dataapi_endpoints: Arc::new(UnreachableDataApi),
-            notebooks: Arc::new(UnreachableNotebooks),
         };
         let well_formed = Uuid::new_v4().to_string();
         for kind in [RefKind::Database, RefKind::Dataset, RefKind::Chart] {
@@ -240,9 +193,8 @@ mod tests {
                     .expect("parse a lazy, never-connected pool"),
             ),
             dataapi_endpoints: Arc::new(UnreachableDataApi),
-            notebooks: Arc::new(UnreachableNotebooks),
         };
-        for kind in [RefKind::DataApiEndpoint, RefKind::Notebook] {
+        for kind in [RefKind::DataApiEndpoint] {
             let got = refs
                 .workspace_of(kind, "not-a-uuid")
                 .await

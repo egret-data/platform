@@ -235,7 +235,7 @@ async fn member_session(
 }
 
 /// `data_api_endpoints` is a valid `{kind}` on the generic folder router
-/// (`kind_perms`), the same way `notebooks` and `alerts` share it despite
+/// (`kind_perms`), the same way `alerts` shares it despite
 /// living in other crates. Without the arm, `kind_perms` returns `None` and the
 /// route 404s — which would mean Data API endpoints can never appear in the
 /// Access Control console's folder tree alongside dashboards and datasets. A

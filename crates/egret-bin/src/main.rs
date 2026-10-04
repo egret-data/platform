@@ -1972,9 +1972,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         manager: kernel_manager,
         // E5c-1: hand kernel the notebook-docs Port over the concrete
         // NotebookState (which impls `egret_analytics_api::NotebookDocsPort`).
-        // Cloned, not moved (Task 7): `workflow`'s own `WorkflowRefs`, built
-        // further down this function, needs the same port over the same
-        // concrete state.
         notebook_docs: std::sync::Arc::new(notebook_state.clone()),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
@@ -2336,7 +2333,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             flows: egret_workflow::FlowRepo::new(db.clone()),
             dataapi_endpoints: std::sync::Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
-            notebooks: std::sync::Arc::new(notebook_state.clone()),
         }),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),

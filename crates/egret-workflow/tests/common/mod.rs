@@ -96,8 +96,7 @@ pub async fn grant(db: &Db, ws: Uuid, user: UserId, perms: &[&str]) {
 /// Turn `feature` OFF for `ws` -- the row the platform-admin feature-toggle
 /// API would write. An absent row means the key's `default_enabled` (ON for
 /// every key but `workflow_containers`), so this is the only way to say "off"
-/// for those; mirrors `crates/egret-notebook/tests/feature_gate.rs`'s
-/// `disable`.
+/// for those.
 pub async fn disable_feature(db: &Db, ws: Uuid, feature: &str) {
     sqlx::query(
         "INSERT INTO workspace_features (workspace_id, feature, enabled) VALUES ($1, $2, false)",
@@ -205,7 +204,6 @@ pub async fn app_with_scripts(db: &Db, scripts: egret_workflow::scripts::ScriptS
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             flows: egret_workflow::FlowRepo::new(db.clone()),
             dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
-            notebooks: std::sync::Arc::new(UnreachableNotebooks),
         }),
         sessions: sessions.clone(),
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
@@ -253,13 +251,12 @@ pub fn audit_mutations(app: &App) -> Vec<(String, Option<String>, serde_json::Va
     out
 }
 
-/// A `WorkflowRefs` whose data-API and notebook ports must never be asked --
-/// for a direct `publish` of a flow that names neither.
+/// A `WorkflowRefs` whose data-API port must never be asked -- for a direct
+/// `publish` of a flow that does not name one.
 pub fn workflow_refs(db: &Db) -> egret_workflow::WorkflowRefs {
     egret_workflow::WorkflowRefs {
         flows: egret_workflow::FlowRepo::new(db.clone()),
         dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
-        notebooks: std::sync::Arc::new(UnreachableNotebooks),
     }
 }
 
@@ -272,39 +269,6 @@ struct UnreachableDataApi;
 impl egret_dataapi_api::DataApiEndpointPort for UnreachableDataApi {
     async fn workspace_of(&self, _id: Uuid) -> egret_core::Result<Option<Uuid>> {
         unreachable!("tests/routes.rs must not publish a flow with a dataapi.call task")
-    }
-}
-struct UnreachableNotebooks;
-#[async_trait::async_trait]
-impl egret_analytics_api::NotebookDocsPort for UnreachableNotebooks {
-    async fn get_summary(
-        &self,
-        _id: Uuid,
-    ) -> egret_core::Result<Option<(egret_analytics_api::NotebookSummary, Uuid)>> {
-        unreachable!("tests/routes.rs must not publish a flow with an egret.python task")
-    }
-    async fn list_engine_options(
-        &self,
-        _ws: Uuid,
-    ) -> egret_core::Result<Vec<egret_analytics_api::EngineOption>> {
-        unreachable!()
-    }
-    async fn record_output(
-        &self,
-        _nb: Uuid,
-        _cid: Uuid,
-        _outputs: &[egret_analytics_api::CellOutput],
-        _execution_count: Option<i32>,
-        _elapsed_ms: Option<i32>,
-    ) -> egret_core::Result<()> {
-        unreachable!()
-    }
-    async fn build_runtime(
-        &self,
-        _ws: Uuid,
-        _user_id: UserId,
-    ) -> egret_core::Result<egret_analytics_api::NotebookRuntime> {
-        unreachable!()
     }
 }
 
@@ -516,7 +480,6 @@ pub async fn webhook_app_with_guard(
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             flows: egret_workflow::FlowRepo::new(db.clone()),
             dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
-            notebooks: std::sync::Arc::new(UnreachableNotebooks),
         }),
         sessions,
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
