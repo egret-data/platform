@@ -24,18 +24,29 @@ fn db_err(e: sqlx::Error) -> Error {
 /// (`loop_index IS NOT NULL`), and the root is the row it stops at -- the one
 /// with no `loop_index`. A retry replay has `parent_execution_id` set and
 /// `loop_index` NULL, so the walk stops AT it and never reaches its source.
+///
+/// `$seed` is how the seed row is matched against `$2`: `"= $2"` for one
+/// execution (the default), `"= ANY($2)"` for a set (the pruner's
+/// [`readable_from_any`]).
 macro_rules! up_and_root {
     () => {
-        "\
+        up_and_root!("= $2")
+    };
+    ($seed:literal) => {
+        concat!(
+            "\
   up(id, parent, loop_index) AS ( \
     SELECT id, parent_execution_id, loop_index FROM workflow.executions \
-     WHERE workspace_id = $1 AND id = $2 \
+     WHERE workspace_id = $1 AND id ",
+            $seed,
+            " \
     UNION \
     SELECT e.id, e.parent_execution_id, e.loop_index \
       FROM workflow.executions e JOIN up ON e.id = up.parent \
      WHERE up.loop_index IS NOT NULL AND e.workspace_id = $1 \
   ), \
   root(id) AS (SELECT id FROM up WHERE loop_index IS NULL)"
+        )
     };
 }
 
@@ -96,6 +107,55 @@ pub async fn loop_family(
     .map_err(db_err)
 }
 
+/// The readable-set query of [`readable_executions`], one text for one
+/// execution (`$seed` = `"= $2"`) and for a set (`"= ANY($2)"`,
+/// [`readable_from_any`]). Every step is a `UNION` over its seeds, so the set
+/// form answers the union of the single forms.
+macro_rules! readable_sql {
+    ($seed:literal) => {
+        concat!(
+            "WITH RECURSIVE ",
+            up_and_root!($seed),
+            ", ",
+            family!(),
+            ", \
+             chain(id) AS ( \
+               SELECT id FROM root \
+               UNION \
+               SELECT src.id FROM chain c \
+                 JOIN workflow.executions l ON l.id = c.id AND l.workspace_id = $1 \
+                 JOIN workflow.executions src ON src.workspace_id = $1 \
+                  AND ((l.loop_index IS NULL AND src.id = l.parent_execution_id) \
+                       OR src.id = l.replayed_from_execution_id) \
+             ), \
+             triggers(id) AS ( \
+               SELECT e.trigger_execution_id FROM workflow.executions e \
+                WHERE e.workspace_id = $1 AND e.trigger_execution_id IS NOT NULL \
+                  AND (e.id ",
+            $seed,
+            " OR e.id IN (SELECT id FROM chain)) \
+             ), \
+             trigger_up(id, parent, loop_index) AS ( \
+               SELECT id, parent_execution_id, loop_index FROM workflow.executions \
+                WHERE workspace_id = $1 AND id IN (SELECT id FROM triggers) \
+               UNION \
+               SELECT e.id, e.parent_execution_id, e.loop_index \
+                 FROM workflow.executions e JOIN trigger_up u ON e.id = u.parent \
+                WHERE u.loop_index IS NOT NULL AND e.workspace_id = $1 \
+             ), \
+             trigger_family(id) AS ( \
+               SELECT id FROM trigger_up WHERE loop_index IS NULL \
+               UNION \
+               SELECT e.id FROM workflow.executions e JOIN trigger_family f \
+                   ON e.parent_execution_id = f.id \
+                WHERE e.loop_index IS NOT NULL AND e.workspace_id = $1 \
+             ) \
+             SELECT id FROM family UNION SELECT id FROM chain UNION SELECT id FROM triggers \
+             UNION SELECT id FROM trigger_family"
+        )
+    };
+}
+
 /// Spec §4.4: loop_family(execution) (which holds `execution` and its root R)
 /// ∪ the replay chain from R — (parent_execution_id WHERE loop_index IS NULL) or replayed_from_execution_id,
 ///   transitively (a replay copies its source's inputs verbatim, replay.rs:254-257, routes.rs:1943)
@@ -114,49 +174,32 @@ pub async fn readable_executions(
     workspace: Uuid,
     execution: Uuid,
 ) -> Result<Vec<Uuid>> {
-    sqlx::query_scalar(concat!(
-        "WITH RECURSIVE ",
-        up_and_root!(),
-        ", ",
-        family!(),
-        ", \
-         chain(id) AS ( \
-           SELECT id FROM root \
-           UNION \
-           SELECT src.id FROM chain c \
-             JOIN workflow.executions l ON l.id = c.id AND l.workspace_id = $1 \
-             JOIN workflow.executions src ON src.workspace_id = $1 \
-              AND ((l.loop_index IS NULL AND src.id = l.parent_execution_id) \
-                   OR src.id = l.replayed_from_execution_id) \
-         ), \
-         triggers(id) AS ( \
-           SELECT e.trigger_execution_id FROM workflow.executions e \
-            WHERE e.workspace_id = $1 AND e.trigger_execution_id IS NOT NULL \
-              AND (e.id = $2 OR e.id IN (SELECT id FROM chain)) \
-         ), \
-         trigger_up(id, parent, loop_index) AS ( \
-           SELECT id, parent_execution_id, loop_index FROM workflow.executions \
-            WHERE workspace_id = $1 AND id IN (SELECT id FROM triggers) \
-           UNION \
-           SELECT e.id, e.parent_execution_id, e.loop_index \
-             FROM workflow.executions e JOIN trigger_up u ON e.id = u.parent \
-            WHERE u.loop_index IS NOT NULL AND e.workspace_id = $1 \
-         ), \
-         trigger_family(id) AS ( \
-           SELECT id FROM trigger_up WHERE loop_index IS NULL \
-           UNION \
-           SELECT e.id FROM workflow.executions e JOIN trigger_family f \
-               ON e.parent_execution_id = f.id \
-            WHERE e.loop_index IS NOT NULL AND e.workspace_id = $1 \
-         ) \
-         SELECT id FROM family UNION SELECT id FROM chain UNION SELECT id FROM triggers \
-         UNION SELECT id FROM trigger_family"
-    ))
-    .bind(workspace)
-    .bind(execution)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(db_err)
+    sqlx::query_scalar(readable_sql!("= $2"))
+        .bind(workspace)
+        .bind(execution)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_err)
+}
+
+/// The union of [`readable_executions`] over `executions`, in ONE query (the
+/// same SQL, seeded with `id = ANY($2)`). The pruner's protected set (spec
+/// §10, the user's ruling of 2026-10-04) is this over every execution of
+/// `workspace` that has not ended.
+pub async fn readable_from_any(
+    conn: &mut PgConnection,
+    workspace: Uuid,
+    executions: &[Uuid],
+) -> Result<Vec<Uuid>> {
+    if executions.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_scalar(readable_sql!("= ANY($2)"))
+        .bind(workspace)
+        .bind(executions)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_err)
 }
 
 /// THE readability decision. Never reads a row of an execution outside `readable`.

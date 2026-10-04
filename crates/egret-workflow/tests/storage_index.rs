@@ -179,6 +179,73 @@ async fn a_loop_iteration_resolves_to_its_root_and_a_retry_replay_does_not() {
 /// chain's own loop iterations are not in the set); U is unrelated. T was
 /// itself triggered by T0, and T0 is EXCLUDED: the trigger rule is one level
 /// (fix round 1 M2).
+/// W9a Task 13 fix round 2: `readable_from_any` (the pruner's set form, the
+/// same SQL seeded with `= ANY($2)`) is the union of `readable_executions`
+/// over its seeds -- across loop, trigger, retry and manual-replay links.
+#[tokio::test]
+async fn readable_from_any_is_the_union_of_the_single_readable_sets() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let r = root(&db, ws).await;
+    let i = exec(
+        &db,
+        ws,
+        Link {
+            iteration_of: Some((r, 0)),
+            ..Link::default()
+        },
+    )
+    .await;
+    let child = exec(
+        &db,
+        ws,
+        Link {
+            trigger: Some(i),
+            ..Link::default()
+        },
+    )
+    .await;
+    let retry = exec(
+        &db,
+        ws,
+        Link {
+            retry_of: Some(r),
+            ..Link::default()
+        },
+    )
+    .await;
+    let replay = exec(
+        &db,
+        ws,
+        Link {
+            replay_of: Some(retry),
+            ..Link::default()
+        },
+    )
+    .await;
+    let lone = root(&db, ws).await;
+    let mut conn = db.pool.acquire().await.unwrap();
+    for seeds in [
+        vec![child],
+        vec![child, replay],
+        vec![i, lone],
+        vec![r, i, child, retry, replay, lone],
+        vec![],
+    ] {
+        let mut union = std::collections::BTreeSet::new();
+        for s in &seeds {
+            union.extend(readable_executions(&mut conn, ws, *s).await.unwrap());
+        }
+        let set: std::collections::BTreeSet<Uuid> =
+            storage::readable_from_any(&mut conn, ws, &seeds)
+                .await
+                .unwrap()
+                .into_iter()
+                .collect();
+        assert_eq!(set, union, "{seeds:?}");
+    }
+}
+
 #[tokio::test]
 async fn readable_covers_own_root_trigger_retry_replay_and_manual_replay_chain() {
     let Some(db) = common::db().await else { return };

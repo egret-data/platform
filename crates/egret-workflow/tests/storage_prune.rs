@@ -27,7 +27,7 @@ use egret_metastore::Db;
 use egret_storage::{Listing, MemStore, ObjectStore, StorageError};
 use egret_workflow::runners::{FileUnavailable, RenderFiles};
 use egret_workflow::storage::prune::{
-    prune_pass, spawn_storage_pruner, PruneReport, StoragePruneConfig,
+    prune_pass, prune_pass_with, spawn_storage_pruner, PruneReport, PruneState, StoragePruneConfig,
 };
 use egret_workflow::storage::scope::Snapshot;
 use egret_workflow::storage::{
@@ -60,6 +60,12 @@ struct Fake {
     inject: Mutex<Vec<String>>,
     /// Every prefix `delete_prefix` was asked for, refused or not.
     prefixes: Mutex<Vec<String>>,
+    /// `delete_prefix` never answers (a pass to cancel mid-way).
+    hang: AtomicBool,
+    /// When `delete_prefix` is first asked for a prefix holding `.0`: insert a
+    /// RUNNING manual replay of `.3` in workspace `.2` (a dependent that
+    /// appears after the pass took its protected set).
+    on_delete_prefix: Mutex<Option<(String, sqlx::PgPool, Uuid, Uuid)>>,
 }
 
 impl Fake {
@@ -120,6 +126,31 @@ impl ObjectStore for Fake {
     }
     async fn delete_prefix(&self, uri: &str) -> Result<u64, StorageError> {
         self.prefixes.lock().unwrap().push(uri.to_string());
+        if self.hang.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        let hook = {
+            let mut h = self.on_delete_prefix.lock().unwrap();
+            if h.as_ref().is_some_and(|(c, ..)| uri.contains(c.as_str())) {
+                h.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, pool, ws, source)) = hook {
+            sqlx::query(
+                "INSERT INTO workflow.executions (workspace_id, namespace, flow_key, source, \
+                   state, history, replayed_from_execution_id) \
+                 VALUES ($1, $2, $3, 'id: f\ntasks: []\n', 'RUNNING', '[\"RUNNING\"]'::jsonb, $4)",
+            )
+            .bind(ws)
+            .bind(NS)
+            .bind(FLOW)
+            .bind(source)
+            .execute(&pool)
+            .await
+            .expect("insert the late dependent");
+        }
         if self.fail_delete_prefix.load(Ordering::SeqCst) || self.failing(uri) {
             return Err(StorageError::S3(format!("{uri}: the store is down")));
         }
@@ -1021,4 +1052,160 @@ async fn the_sweep_deletes_only_keys_that_are_provably_the_members() {
         keys.contains(&outside),
         "a key outside the prefix was deleted"
     );
+}
+
+/// N1: families that failed at the store in an earlier pass are not outage
+/// evidence. Three stuck families at the head of the oldest-first order stop
+/// the first pass (it cannot tell them from an outage), but the second pass,
+/// remembering them, reaches the healthy family behind them -- in the prune
+/// and in the sweep.
+#[tokio::test]
+async fn families_that_failed_before_do_not_keep_the_pruner_from_a_healthy_one() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let mut stuck = Vec::new();
+    for days in [19_900, 19_800, 19_700] {
+        let e = w.exec("SUCCESS", days, None).await;
+        w.file(e, "a.txt").await;
+        stuck.push(e);
+    }
+    let healthy = w.exec("SUCCESS", 19_600, None).await;
+    let healthy_file = w.file(healthy, "a.txt").await;
+    let mut stuck_failed = Vec::new();
+    for days in [5, 4, 3] {
+        stuck_failed.push(w.exec("FAILED", days, None).await);
+    }
+    let healthy_failed = w.exec("FAILED", 2, None).await;
+    let orphan = w.unindexed(healthy_failed, "o.txt").await;
+    w.age_object(&orphan, 25);
+    w.store
+        .fail_containing
+        .lock()
+        .unwrap()
+        .extend(stuck.iter().chain(&stuck_failed).map(Uuid::to_string));
+    let mut state = PruneState::default();
+    let cfg = StoragePruneConfig::new(30);
+
+    let first = prune_pass_with(&w.db.pool, &w.fs, &cfg, &mut state)
+        .await
+        .unwrap();
+    let second = prune_pass_with(&w.db.pool, &w.fs, &cfg, &mut state)
+        .await
+        .unwrap();
+
+    assert!(w.gone(&healthy_file).await, "{first:?} {second:?}");
+    assert!(!w.stored(&orphan), "{first:?} {second:?}");
+    assert!(w.swept_at(healthy_failed).await);
+    for e in stuck.iter().chain(&stuck_failed) {
+        assert!(!w.pruned_at(*e).await && !w.swept_at(*e).await);
+    }
+    // Clean up: the stuck families go once the store lets them.
+    w.store.fail_containing.lock().unwrap().clear();
+    prune_pass_with(&w.db.pool, &w.fs, &cfg, &mut state)
+        .await
+        .unwrap();
+    for e in &stuck {
+        assert!(w.pruned_at(*e).await);
+    }
+}
+
+/// N1's other half: a store that fails for every family it has never failed
+/// for before is an outage, and the phase still ends after three.
+#[tokio::test]
+async fn a_real_outage_still_ends_the_phase_after_three_families() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let mut files = Vec::new();
+    for _ in 0..5 {
+        let e = w.exec("SUCCESS", 400, None).await;
+        files.push(w.file(e, "a.txt").await);
+    }
+    w.store.fail_delete_prefix.store(true, Ordering::SeqCst);
+    w.store.prefixes.lock().unwrap().clear();
+
+    let report = w.pass().await;
+
+    assert_eq!(w.store.prefixes.lock().unwrap().len(), 3, "{report:?}");
+    assert_eq!(report.failed, 3, "{report:?}");
+    w.store.fail_delete_prefix.store(false, Ordering::SeqCst);
+    w.pass().await;
+    for f in &files {
+        assert!(w.gone(f).await);
+    }
+}
+
+/// m1: a pass dropped mid-way (cancelled while the store hangs) does not hand
+/// the pool a session that still holds the advisory lock.
+#[tokio::test]
+async fn a_pass_dropped_mid_way_leaves_the_lock_free() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let e = w.exec("SUCCESS", 400, None).await;
+    let a = w.file(e, "a.txt").await;
+    w.store.hang.store(true, Ordering::SeqCst);
+
+    let dropped = tokio::time::timeout(Duration::from_secs(2), w.pass()).await;
+    assert!(dropped.is_err(), "the pass did not hang");
+    w.store.hang.store(false, Ordering::SeqCst);
+
+    // A session of its own, not the pool's: is the lock free?
+    let url = egret_test_db::url().await.expect("the test database");
+    let mut other = <sqlx::PgConnection as sqlx::Connection>::connect(&url)
+        .await
+        .unwrap();
+    let mut free = false;
+    for _ in 0..50 {
+        free = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+            .bind(egret_workflow::storage::prune::PRUNE_LOCK_KEY)
+            .fetch_one(&mut other)
+            .await
+            .unwrap();
+        if free {
+            break;
+        }
+        // The dropped session's close reaches the server asynchronously.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(free, "a dropped pass left the lock held");
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(egret_workflow::storage::prune::PRUNE_LOCK_KEY)
+        .execute(&mut other)
+        .await
+        .unwrap();
+    drop(other);
+    w.pass().await;
+    assert!(w.gone(&a).await);
+}
+
+/// m2: a dependent that appears after the pass took its protected set (here,
+/// a replay started while the pass deletes an older family) still keeps its
+/// source: the family is checked again, directly, just before its delete.
+#[tokio::test]
+async fn a_dependent_started_during_the_pass_keeps_its_source() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let first = w.exec("SUCCESS", 19_990, None).await;
+    let first_file = w.file(first, "a.txt").await;
+    let source = w.exec("SUCCESS", 19_980, None).await;
+    let source_file = w.input(source, "in.csv").await;
+    *w.store.on_delete_prefix.lock().unwrap() =
+        Some((first.to_string(), w.db.pool.clone(), w.ws, source));
+
+    let report = w.pass().await;
+
+    assert!(w.gone(&first_file).await, "{report:?}");
+    assert!(
+        w.kept(&source_file).await,
+        "a late dependent's source was pruned"
+    );
+    let replay: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE replayed_from_execution_id = $1",
+    )
+    .bind(source)
+    .fetch_one(&w.db.pool)
+    .await
+    .unwrap();
+    w.set(replay, "SUCCESS", 0).await;
+    w.pass().await;
+    assert!(w.gone(&source_file).await);
 }

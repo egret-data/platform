@@ -46,7 +46,8 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 pub use index::{
-    loop_family, loop_root, readable_executions, resolve_readable, resolve_readable_many,
+    loop_family, loop_root, readable_executions, readable_from_any, resolve_readable,
+    resolve_readable_many,
 };
 
 /// The size caps (spec §4.5, §7.2). Defaults are `egret-config`'s

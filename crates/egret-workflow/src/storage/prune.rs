@@ -25,7 +25,12 @@
 //! `Subflow` child or Flow-trigger execution it triggered. It is pruned by the
 //! first pass after the last such dependent ended. Since every execution is in
 //! its own readable set, this also keeps every execution that has not ended:
-//! **an execution that has not ended is never pruned.**
+//! **an execution that has not ended is never pruned.** The set is taken once
+//! per pass, when its first candidate appears, set-based (one
+//! [`readable_from_any`] query per workspace); a dependent started after that
+//! is caught by a direct check just before each family's delete (a not-ended
+//! execution whose `replayed_from_execution_id`, `trigger_execution_id` or
+//! `parent_execution_id` names a member).
 //!
 //! Per family, in this order:
 //!
@@ -34,8 +39,9 @@
 //!    prefix deletes below are proven to reach every indexed object;
 //! 2. `delete_prefix` for each member. **A failure stops here**: the rows stay
 //!    and the next pass retries the family. The pass skips it and goes on with
-//!    the next family; only [`STORE_FAILURES_IN_A_ROW`] failures in a row (an
-//!    outage) end the phase. Logged, never a crash;
+//!    the next family; only [`STORE_FAILURES_IN_A_ROW`] failures in a row of
+//!    families that had not failed before (an outage; [`PruneState`] carries
+//!    the ones that had from pass to pass) end the phase. Logged, never a crash;
 //! 3. ONE statement deletes the family's index rows and its
 //!    `workflow.loop_file_values` rows (a whole copy of a file's records, kept
 //!    for a `Loop` over a file, Task 11) and sets `files_pruned_at` on every
@@ -97,7 +103,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::{loop_family, readable_executions, uri, FileStore};
+use super::{loop_family, readable_from_any, uri, FileStore};
 use crate::executor::RunState;
 
 /// The `pg_try_advisory_lock` key a pass takes, so one pruner runs per
@@ -170,10 +176,11 @@ pub fn spawn_storage_pruner(
     Some(tokio::spawn(async move {
         let mut tick = tokio::time::interval(cfg.every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut state = PruneState::default();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
-                _ = tick.tick() => match prune_pass(&pool, &fs, &cfg).await {
+                _ = tick.tick() => match prune_pass_with(&pool, &fs, &cfg, &mut state).await {
                     Ok(r) if r != PruneReport::default() => tracing::info!(
                         executions = r.executions,
                         orphans = r.orphans,
@@ -196,54 +203,109 @@ pub fn spawn_storage_pruner(
 /// on.
 const STORE_FAILURES_IN_A_ROW: u32 = 3;
 
-/// One pass: prune, then sweep, until there is nothing left, the budget is
-/// spent or the store is down. `Err` is the database's; a store failure is
-/// logged and counted in [`PruneReport::failed`].
-///
-/// **One pruner per database.** The pass first takes the session-level
-/// advisory lock [`PRUNE_LOCK_KEY`] with `pg_try_advisory_lock`; when another
-/// replica holds it, the pass does nothing and answers an empty report. The
-/// lock is released before the connection goes back to the pool, and a
-/// connection whose unlock failed is closed instead (closing a session
-/// releases its locks).
+/// What the pruner remembers from one pass to the next: the families that
+/// failed at the store (fix round 2, N1). Such a family is skipped for the
+/// rest of a pass as any failing family is, but its failure in a later pass
+/// is **not** outage evidence: three families that always fail (a bucket
+/// policy or an object lock over their path) at the head of the oldest-first
+/// order would otherwise end every pass's phase before any healthy family
+/// behind them. Only a family that has not failed before counts toward
+/// [`STORE_FAILURES_IN_A_ROW`]; one that is pruned or swept is forgotten.
+#[derive(Debug, Default)]
+pub struct PruneState {
+    failed_prune: BTreeSet<Uuid>,
+    failed_sweep: BTreeSet<Uuid>,
+}
+
+/// One pass with nothing remembered from an earlier one: [`prune_pass_with`]
+/// over a fresh [`PruneState`].
 pub async fn prune_pass(
     pool: &PgPool,
     fs: &FileStore,
     cfg: &StoragePruneConfig,
 ) -> Result<PruneReport> {
-    let mut conn = pool.acquire().await.map_err(db_err)?;
+    prune_pass_with(pool, fs, cfg, &mut PruneState::default()).await
+}
+
+/// One pass: prune, then sweep, until there is nothing left, the budget is
+/// spent or the store is down. `Err` is the database's; a store failure is
+/// logged and counted in [`PruneReport::failed`]. `state` is carried from
+/// pass to pass by [`spawn_storage_pruner`].
+///
+/// **One pruner per database.** The pass first takes the session-level
+/// advisory lock [`PRUNE_LOCK_KEY`] with `pg_try_advisory_lock`; when another
+/// replica holds it, the pass does nothing and answers an empty report. The
+/// connection is held by a [`LockedSession`], which hands it back to the pool
+/// only after `pg_advisory_unlock` answered `true`: on any other way out --
+/// an unlock that failed, a panic, the pass's future dropped mid-way -- it
+/// closes the connection instead, and closing a session releases its locks.
+pub async fn prune_pass_with(
+    pool: &PgPool,
+    fs: &FileStore,
+    cfg: &StoragePruneConfig,
+    state: &mut PruneState,
+) -> Result<PruneReport> {
+    let conn = pool.acquire().await.map_err(db_err)?;
+    let mut session = LockedSession {
+        conn: Some(conn),
+        unlocked: false,
+    };
     let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
         .bind(PRUNE_LOCK_KEY)
-        .fetch_one(&mut *conn)
+        .fetch_one(session.conn())
         .await
         .map_err(db_err)?;
     if !locked {
+        session.unlocked = true; // nothing to release
         tracing::debug!("workflow storage prune pass skipped: another pruner holds the lock");
         return Ok(PruneReport::default());
     }
-    let result = pass_locked(&mut conn, fs, cfg).await;
+    let result = pass_locked(session.conn(), fs, cfg, state).await;
     let unlocked: std::result::Result<bool, _> =
         sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
             .bind(PRUNE_LOCK_KEY)
-            .fetch_one(&mut *conn)
+            .fetch_one(session.conn())
             .await;
-    if !matches!(unlocked, Ok(true)) {
-        // Never hand the pool a session that still holds the lock.
-        drop(conn.detach());
-    }
+    session.unlocked = matches!(unlocked, Ok(true));
     result
+}
+
+/// A pooled connection that may hold [`PRUNE_LOCK_KEY`]. Dropped without
+/// `unlocked`, it is detached from the pool and closed, never handed back.
+struct LockedSession {
+    conn: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
+    unlocked: bool,
+}
+
+impl LockedSession {
+    fn conn(&mut self) -> &mut PgConnection {
+        self.conn.as_mut().expect("held until drop")
+    }
+}
+
+impl Drop for LockedSession {
+    fn drop(&mut self) {
+        if !self.unlocked {
+            if let Some(conn) = self.conn.take() {
+                drop(conn.detach());
+            }
+        }
+    }
 }
 
 async fn pass_locked(
     conn: &mut PgConnection,
     fs: &FileStore,
     cfg: &StoragePruneConfig,
+    state: &mut PruneState,
 ) -> Result<PruneReport> {
     let start = Instant::now();
     let mut report = PruneReport::default();
     let mut units = 0u64;
     let over = |units: u64| units > 0 && start.elapsed() >= cfg.pass_budget;
-    let protected = protected(conn).await?;
+    // Taken once, when the first candidate appears (a pass with nothing to
+    // do costs no readable-set query).
+    let mut protected: Option<BTreeSet<Uuid>> = None;
 
     // ── Prune ──────────────────────────────────────────────────────────────
     let mut skip: Vec<Uuid> = Vec::new();
@@ -258,18 +320,27 @@ async fn pass_locked(
             units += 1;
             // Never twice in one pass, whatever happened to it.
             skip.push(root);
-            match prune_family(conn, fs, workspace, root, &protected).await? {
+            if protected.is_none() {
+                protected = Some(protected_set(conn).await?);
+            }
+            let protected = protected.as_ref().expect("just taken");
+            match prune_family(conn, fs, workspace, root, protected).await? {
                 Outcome::Done(n) => {
                     report.executions += n;
+                    state.failed_prune.remove(&root);
                     in_a_row = 0;
                 }
                 Outcome::Kept => {}
                 Outcome::Anomaly => report.failed += 1,
                 Outcome::StoreDown => {
                     report.failed += 1;
-                    in_a_row += 1;
-                    if in_a_row >= STORE_FAILURES_IN_A_ROW {
-                        break 'prune;
+                    // A family that failed before is its own trouble, not an
+                    // outage (N1).
+                    if state.failed_prune.insert(root) {
+                        in_a_row += 1;
+                        if in_a_row >= STORE_FAILURES_IN_A_ROW {
+                            break 'prune;
+                        }
                     }
                 }
             }
@@ -291,17 +362,24 @@ async fn pass_locked(
             }
             units += 1;
             skip.push(root);
-            match sweep_family(conn, fs, cfg, workspace, root, &protected).await? {
+            if protected.is_none() {
+                protected = Some(protected_set(conn).await?);
+            }
+            let protected = protected.as_ref().expect("just taken");
+            match sweep_family(conn, fs, cfg, workspace, root, protected).await? {
                 Outcome::Done(n) => {
                     report.orphans += n;
+                    state.failed_sweep.remove(&root);
                     in_a_row = 0;
                 }
                 Outcome::Kept | Outcome::Anomaly => {}
                 Outcome::StoreDown => {
                     report.failed += 1;
-                    in_a_row += 1;
-                    if in_a_row >= STORE_FAILURES_IN_A_ROW {
-                        break 'sweep;
+                    if state.failed_sweep.insert(root) {
+                        in_a_row += 1;
+                        if in_a_row >= STORE_FAILURES_IN_A_ROW {
+                            break 'sweep;
+                        }
                     }
                 }
             }
@@ -332,18 +410,21 @@ fn terminal() -> Vec<&'static str> {
 /// trigger's loop family. A family with a member here is neither pruned nor
 /// swept; it is taken by the first pass after its last dependent ended.
 ///
-/// One query per execution that has not ended, once per pass.
-async fn protected(conn: &mut PgConnection) -> Result<BTreeSet<Uuid>> {
-    let live: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT workspace_id, id FROM workflow.executions WHERE NOT (state = ANY($1))",
+/// Set-based: one [`readable_from_any`] query per workspace that has an
+/// execution that has not ended (the same SQL as `readable_executions`,
+/// seeded with all of them; the union of their readable sets).
+async fn protected_set(conn: &mut PgConnection) -> Result<BTreeSet<Uuid>> {
+    let live: Vec<(Uuid, Vec<Uuid>)> = sqlx::query_as(
+        "SELECT workspace_id, array_agg(id) FROM workflow.executions \
+          WHERE NOT (state = ANY($1)) GROUP BY workspace_id",
     )
     .bind(terminal())
     .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?;
     let mut out = BTreeSet::new();
-    for (workspace, execution) in live {
-        out.extend(readable_executions(conn, workspace, execution).await?);
+    for (workspace, executions) in live {
+        out.extend(readable_from_any(conn, workspace, &executions).await?);
     }
     Ok(out)
 }
@@ -538,6 +619,25 @@ async fn prune_family(
              prefix; its files are kept"
         );
         return Ok(Outcome::Anomaly);
+    }
+    // The protected set is a snapshot taken when the pass began. A
+    // dependent started since -- a replay of a member, a child it triggered,
+    // an iteration or retry under it -- is looked for directly, once more,
+    // just before the delete (fix round 2, m2).
+    let late: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM workflow.executions \
+          WHERE workspace_id = $1 AND NOT (state = ANY($2)) \
+            AND (replayed_from_execution_id = ANY($3) OR trigger_execution_id = ANY($3) \
+                 OR parent_execution_id = ANY($3)))",
+    )
+    .bind(workspace)
+    .bind(terminal())
+    .bind(&ids)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    if late {
+        return Ok(Outcome::Kept);
     }
     // Step 2: the objects.
     for (store_prefix, _) in prefixes.iter().flatten() {
