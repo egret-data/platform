@@ -7,7 +7,7 @@ import {
 
 /**
  * Per-workspace module entitlements (`sql_lab` / `datasets` / `charts` /
- * `dashboards` / `notebooks`) — deliberately distinct from RBAC.
+ * `dashboards` / `apps`) — deliberately distinct from RBAC.
  *
  * RBAC (`ws_viewer`/`ws_editor`/`ws_admin`) decides what a *user* inside a
  * workspace may do. A feature switch decides what the workspace *is*: it

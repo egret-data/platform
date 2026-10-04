@@ -21,9 +21,10 @@ interface CommandPaletteProps {
   actions: PaletteAction[];
 }
 
-/** ⌘K command palette: a search box over a flat list of notebook actions.
- *  Built on the shadcn Dialog primitive (no cmdk dependency) — see plan
- *  docs/en/plans/2026-07-19-notebook-ergonomics-sprint4.md Task S4-1. */
+/** ⌘K command palette: a search box over a flat list of actions.
+ *  Built on the shadcn Dialog primitive (no cmdk dependency) — originally
+ *  written for the notebook (plan docs/en/plans/2026-07-19-notebook-ergonomics-sprint4.md
+ *  Task S4-1), now shared with SQL Lab's `SqlTab`. */
 export function CommandPalette({ open, onOpenChange, actions }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);

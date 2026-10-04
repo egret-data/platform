@@ -30,7 +30,7 @@ import { SaveQueryDialog } from "@/components/sqllab/SaveQueryDialog";
 import { HistoryTab } from "@/components/sqllab/HistoryTab";
 import { SavedTab } from "@/components/sqllab/SavedTab";
 import { SnippetsTab } from "@/components/sqllab/SnippetsTab";
-import { CommandPalette, type PaletteAction } from "@/components/notebook/CommandPalette";
+import { CommandPalette, type PaletteAction } from "@/components/sqllab/CommandPalette";
 import { CreateDatasetDialog } from "@/components/dataset/CreateDatasetDialog";
 import { emptySchemaIndex, type SchemaIndex } from "@/components/sqllab/schemaIndex";
 import type { SqlTabState } from "@/hooks/useTabs";
