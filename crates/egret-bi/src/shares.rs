@@ -250,7 +250,7 @@ pub(crate) async fn resolve(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
     ),
     request_body = ObjectGrantBody,
@@ -358,7 +358,7 @@ async fn grant_put(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
         ("grant_id" = Uuid, Path, description = "Grant id to revoke"),
     ),
@@ -407,7 +407,7 @@ async fn grant_delete(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
     ),
     responses(
@@ -486,7 +486,7 @@ async fn grant_list(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
     ),
     responses(
@@ -520,7 +520,7 @@ async fn object_tags_list(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
         ("tag_id" = Uuid, Path, description = "Tag id to assign"),
     ),
@@ -563,7 +563,7 @@ async fn object_tag_assign(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
         ("tag_id" = Uuid, Path, description = "Tag id to unassign"),
     ),

@@ -34,9 +34,9 @@ import "monaco-editor/editor/contrib/suggest/browser/suggestController";
 import "monaco-editor/editor/common/standaloneStrings";
 
 // Only the two languages egret edits: SQL (SQL Lab, Data API Query, dataset
-// detail) and Python (notebook cells). The full entry registers ~80 more plus
-// the TypeScript, CSS, HTML and JSON language services, which cost ~10MB of
-// dist for nothing here.
+// detail) and Python (Data API Query/response scripting). The full entry
+// registers ~80 more plus the TypeScript, CSS, HTML and JSON language
+// services, which cost ~10MB of dist for nothing here.
 import "monaco-editor/languages/definitions/sql/register";
 import "monaco-editor/languages/definitions/python/register";
 

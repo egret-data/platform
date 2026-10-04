@@ -24154,7 +24154,7 @@
           {
             "name": "kind",
             "in": "path",
-            "description": "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app",
+            "description": "Object kind: dashboard | chart | dataset | folder | saved_query | app",
             "required": true,
             "schema": {
               "type": "string"
@@ -24263,7 +24263,7 @@
           {
             "name": "kind",
             "in": "path",
-            "description": "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app",
+            "description": "Object kind: dashboard | chart | dataset | folder | saved_query | app",
             "required": true,
             "schema": {
               "type": "string"
@@ -24381,7 +24381,7 @@
           {
             "name": "kind",
             "in": "path",
-            "description": "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app",
+            "description": "Object kind: dashboard | chart | dataset | folder | saved_query | app",
             "required": true,
             "schema": {
               "type": "string"
@@ -24499,7 +24499,7 @@
           {
             "name": "kind",
             "in": "path",
-            "description": "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app",
+            "description": "Object kind: dashboard | chart | dataset | folder | saved_query | app",
             "required": true,
             "schema": {
               "type": "string"
@@ -24610,7 +24610,7 @@
           {
             "name": "kind",
             "in": "path",
-            "description": "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app",
+            "description": "Object kind: dashboard | chart | dataset | folder | saved_query | app",
             "required": true,
             "schema": {
               "type": "string"
@@ -24726,7 +24726,7 @@
           {
             "name": "kind",
             "in": "path",
-            "description": "Object kind: dashboard | chart | dataset | folder | notebook | saved_query | app",
+            "description": "Object kind: dashboard | chart | dataset | folder | saved_query | app",
             "required": true,
             "schema": {
               "type": "string"
@@ -25424,7 +25424,7 @@
         "tags": [
           "workspace-members"
         ],
-        "summary": "`GET /ws/{workspace}/shares` — every OBJECT grant whose object lives in THIS\nworkspace (charts, dashboards, datasets, folders, notebooks, saved queries),\nenriched with object name, role name, principal name and effect. Read-only, so\na workspace admin can SEE what has been shared; gated on\n`workspace:manage_members` (the same gate as the member/role routes). The\nobject set is restricted to this workspace in SQL — a grant on an object in\nanother workspace is never returned (cross-workspace IDOR guard).",
+        "summary": "`GET /ws/{workspace}/shares` — every OBJECT grant whose object lives in THIS\nworkspace (charts, dashboards, datasets, folders, saved queries, apps),\nenriched with object name, role name, principal name and effect. Read-only, so\na workspace admin can SEE what has been shared; gated on\n`workspace:manage_members` (the same gate as the member/role routes). The\nobject set is restricted to this workspace in SQL — a grant on an object in\nanother workspace is never returned (cross-workspace IDOR guard).",
         "operationId": "list_workspace_shares",
         "parameters": [
           {
@@ -32615,7 +32615,7 @@
             }
           }
         ],
-        "description": "One row of the endpoint LIST: the draft, plus the calling user's own\n`bookmarked` flag.\n\nA separate type rather than a field on [`DataApiEndpointDto`] because that\nDTO is also what `GET /endpoints/{id}`, `POST /endpoints`, `PATCH\n/endpoints/{id}`, disable/enable and the publish lifecycle's locked read\nreturn — and half of those have no user to be per-user ABOUT. A\n`bookmarked` on the create response would be a field that is always `false`\nby construction, and one on the lifecycle's read would be a field with\nnobody to answer for; either is a value a client could believe. The flag\nexists where it is asked for and nowhere else.\n\n`#[serde(flatten)]` so the wire shape stays FLAT — `{...endpoint,\n\"bookmarked\": true}`, one object, exactly as if the field lived on the DTO —\nand so a field added to [`DataApiEndpointDto`] tomorrow appears in the list\nwith nothing here to update. The same idiom `NotebookDetail` and\n`EngineDetailDto` use; utoipa renders it as an `allOf`."
+        "description": "One row of the endpoint LIST: the draft, plus the calling user's own\n`bookmarked` flag.\n\nA separate type rather than a field on [`DataApiEndpointDto`] because that\nDTO is also what `GET /endpoints/{id}`, `POST /endpoints`, `PATCH\n/endpoints/{id}`, disable/enable and the publish lifecycle's locked read\nreturn — and half of those have no user to be per-user ABOUT. A\n`bookmarked` on the create response would be a field that is always `false`\nby construction, and one on the lifecycle's read would be a field with\nnobody to answer for; either is a value a client could believe. The flag\nexists where it is asked for and nowhere else.\n\n`#[serde(flatten)]` so the wire shape stays FLAT — `{...endpoint,\n\"bookmarked\": true}`, one object, exactly as if the field lived on the DTO —\nand so a field added to [`DataApiEndpointDto`] tomorrow appears in the list\nwith nothing here to update. The same idiom `EngineDetailDto` uses; utoipa\nrenders it as an `allOf`."
       },
       "DataApiEndpointVersionDto": {
         "type": "object",
