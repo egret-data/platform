@@ -1,30 +1,9 @@
 -- 0168 (written as 0170; renumbered in W9a Task 14 on rebasing onto
 -- origin/main, which owns 0161-0165 for Data Apps; relative order kept).
 --
--- DOWN-COMPAT (a dev/kind database that already ran this under its old number):
--- sqlx keys applied migrations by version, so a database that ran the old
--- number 170 ("workflow execution files pruned") will refuse the renumbered files
--- (a missing or mismatched migration). The branch has not merged; there is no
--- production database in this state. Recover one of two ways:
---   1. reset it: `just reset-testdata` (drops and re-seeds the dev data); or
---   2. undo by hand, in this order, then let the server re-apply 0166-0168:
---        DROP TABLE IF EXISTS workflow.loop_file_values;
---        ALTER TABLE workflow.executions
---          DROP COLUMN IF EXISTS files_pruned_at,        -- takes workflow_executions_unswept_idx with it
---          DROP COLUMN IF EXISTS files_swept_at;
---        DROP TABLE IF EXISTS workflow.execution_files;
---        ALTER TABLE workflow.executions
---          DROP COLUMN IF EXISTS replayed_from_execution_id;  -- takes its FK, CHECKs and index
---        DELETE FROM public._sqlx_migrations
---         WHERE (version, description) IN
---           ((161, 'workflow execution files'),
---            (169, 'workflow loop file values'),
---            (170, 'workflow execution files pruned'));
---      Match on the description as well as the version: origin/main's own
---      0161-0165 (Data Apps) share those numbers on a database that took main
---      first. Use the schema your `_sqlx_migrations` lives in (`public` by default).
--- The local branch feat/sp4d-debt-and-guardrails also holds 0166-0168:
--- whichever branch merges second renumbers its files.
+-- Old number 170 ("workflow execution files pruned"). A database that applied that, or this
+-- file before its header gained these comments, must be reset: recovery in
+-- crates/egret-workflow/oracle-exec/README.md (W9a release note, "Database").
 --
 -- Workflow W9a Task 13: the retention pruner of execution files and the
 -- orphan sweep (docs/en/specs/2026-10-01-workflow-w9a-internal-storage-design.md

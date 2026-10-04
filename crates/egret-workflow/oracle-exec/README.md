@@ -9348,9 +9348,43 @@ The other changes a deployment sees:
   under the default task-pod memory limit of **512Mi**. A limit of 128Mi is
   OOM-killed (measured: `usage 131072kB, limit 131072kB`); keep the limit well
   above the heap if you lower `default_resources`.
-- **Database.** Migrations 0166-0168 (renumbered from 0161/0169/0170 on the
-  branch; a dev database that ran the old numbers must be reset, see each
-  file's header).
+- **Database: recovery for a dev/kind DB (the one place the recipe lives).**
+  Migrations 0166-0168 were written as 0161/0169/0170 and renumbered. Two
+  cases are affected, both on databases that are not production (the branch
+  has not merged):
+  1. **It applied the OLD numbers** (161 "workflow execution files", 169
+     "workflow loop file values", 170 "workflow execution files pruned").
+  2. **It applied the NEW 166-168 before the Task 14 fix-round-1 commit
+     (40455dc4)**, which added comments to the three headers: sqlx hashes the
+     whole file, comments included, so these answer `VersionMismatch`.
+
+  Either reset it (`just reset-testdata`), or undo by hand and let the server
+  re-apply:
+
+  ```sql
+  DROP TABLE IF EXISTS workflow.loop_file_values;
+  ALTER TABLE workflow.executions
+    DROP COLUMN IF EXISTS files_pruned_at,   -- takes workflow_executions_unswept_idx with it
+    DROP COLUMN IF EXISTS files_swept_at;
+  DROP TABLE IF EXISTS workflow.execution_files;
+  ALTER TABLE workflow.executions
+    DROP COLUMN IF EXISTS replayed_from_execution_id;  -- takes its FK, CHECKs and index
+  -- case 1:
+  DELETE FROM public._sqlx_migrations WHERE (version, description) IN
+    ((161, 'workflow execution files'), (169, 'workflow loop file values'),
+     (170, 'workflow execution files pruned'));
+  -- case 2:
+  DELETE FROM public._sqlx_migrations WHERE (version, description) IN
+    ((166, 'workflow execution files'), (167, 'workflow loop file values'),
+     (168, 'workflow execution files pruned'));
+  ```
+
+  Match on description as well as version (main's own 0161-0165 are Data Apps).
+  Also drop `egret_test_template` on any Postgres a checkout runs tests
+  against, so test templates rebuild. **No migration file is touched after
+  merge**: the three files change their checksum only once more, here, before
+  it. The local branch feat/sp4d-debt-and-guardrails also holds 0166-0168;
+  whichever merges second renumbers.
 
 The programme spec's W9a correction (§9) carries the same note.
 
