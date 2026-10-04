@@ -323,6 +323,7 @@ fn input(f: &Live, spec: serde_json::Value, cx: serde_json::Value) -> TaskInput 
         // to its own `DEFAULT_TIMEOUT` exactly as it did before W4 Task 2.
         timeout: None,
         principal: Some(f.owner),
+        claimed_at: chrono::DateTime::UNIX_EPOCH,
         log: egret_workflow::logs::RunLog::discard(),
     }
 }

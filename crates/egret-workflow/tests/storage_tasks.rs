@@ -1047,6 +1047,180 @@ async fn deletes_statement_cannot_reach_a_row_of_another_execution() {
     assert_eq!(object_of(&fs, ws, &file).await, Some(b"odd".to_vec()));
 }
 
+/// What a worker frozen inside its handler hands that handler: the run it
+/// claimed, its claim instant, and nothing rendered but `uri`'s snapshot.
+async fn frozen_input(
+    db: &Db,
+    fs: &Arc<FileStore>,
+    zombie: &egret_workflow::worker::Claimed,
+    type_id: &str,
+    spec: Value,
+    uri: Option<&str>,
+) -> egret_workflow::worker::TaskInput {
+    let mut conn = db.pool.acquire().await.unwrap();
+    let texts: Vec<&str> = uri.into_iter().collect();
+    let scope = storage::scope::scope_for(
+        &mut conn,
+        Some(fs.clone()),
+        zombie.workspace_id,
+        zombie.execution_id,
+        &texts,
+        &[],
+        None,
+    )
+    .await
+    .unwrap();
+    egret_workflow::worker::TaskInput {
+        workspace_id: zombie.workspace_id,
+        execution_id: zombie.execution_id,
+        run_id: zombie.id,
+        task_id: zombie.task_id.clone(),
+        type_id: type_id.to_string(),
+        value: None,
+        attempt: 1,
+        spec,
+        render: egret_workflow::runners::RenderContext::new().with_files(scope),
+        timeout: None,
+        principal: None,
+        claimed_at: zombie.claimed_at,
+        log: egret_workflow::logs::RunLog::discard(),
+    }
+}
+
+/// Claim the next run as a worker that then FREEZES: assert it is `task`,
+/// let its lease lapse, and let another worker re-claim it and finish the
+/// execution. Returns the frozen claim.
+async fn freeze_then_reclaim(db: &Db, task: &str) -> egret_workflow::worker::Claimed {
+    let mut claimed = claim(&db.pool, 1).await.unwrap();
+    assert_eq!(claimed.len(), 1, "{task} is runnable");
+    let zombie = claimed.remove(0);
+    assert_eq!(zombie.task_id, task);
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(reap(&db.pool, std::time::Duration::ZERO).await.unwrap(), 1);
+    drain(&db.pool).await;
+    zombie
+}
+
+/// **A `PurgeCurrentExecutionFiles` whose worker froze cannot delete a file
+/// committed after its claim** (W9a final review I1). Its rows are deleted
+/// outside the fenced commit, so the fence cannot stop it; what does is the
+/// statement's bound, `created_at <=` the claim instant. Here the run is
+/// re-claimed, the re-claim purges, `w_after` commits its file, and only
+/// then does the frozen worker's handler run: `w_after`'s row and object
+/// stay. (The purges driven through `tick` above are the control: there the
+/// bound is the shipping claim's, and every earlier file goes.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_frozen_purge_cannot_delete_a_file_committed_after_its_claim() {
+    use egret_workflow::worker::TaskHandler as _;
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let source = format!(
+        "id: frozen-purge\nnamespace: {NS}\ntasks:\n\
+         \x20 - id: w_before\n    type: {WRITE}\n    content: a\n\
+         \x20 - id: purge\n    type: {PURGE}\n\
+         \x20 - id: w_after\n    type: {WRITE}\n    content: b\n"
+    );
+    let ex = start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(tick(&db.pool, 1, &registry(&db.pool)).await.unwrap(), 1);
+    let before = uri_of(&db.pool, ex, "w_before").await;
+    let zombie = freeze_then_reclaim(&db, "purge").await;
+    assert_eq!(
+        rows_named(&db.pool, &before).await,
+        0,
+        "the re-claim purged"
+    );
+    let after = uri_of(&db.pool, ex, "w_after").await;
+    assert_eq!(rows_named(&db.pool, &after).await, 1);
+
+    let input = frozen_input(&db, &fs, &zombie, PURGE, json!({}), None).await;
+    let out = egret_workflow::worker::handlers::storage::PurgeCurrentExecutionFiles::new(
+        db.pool.clone(),
+        Some(fs.clone()),
+    )
+    .run(&input)
+    .await
+    .unwrap();
+    assert_eq!(out.outputs, Some(json!({ "uris": [] })), "{out:?}");
+    assert_eq!(rows_named(&db.pool, &after).await, 1, "its row stays");
+    assert_eq!(
+        object_of(&fs, ws, &after).await,
+        Some(b"b".to_vec()),
+        "its object stays"
+    );
+}
+
+/// **A `Delete` whose worker froze cannot delete a row written after its
+/// claim** (W9a final review I1), `Delete`'s twin of the purge above. The
+/// re-claim deletes the file; the same URI is then indexed again (as a
+/// re-claim of its writer re-commits it: the upsert bumps `created_at`),
+/// and the frozen worker's `Delete` of it answers `deleted: false`, leaving
+/// the row and the object.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_frozen_delete_cannot_delete_a_row_written_after_its_claim() {
+    use egret_workflow::worker::TaskHandler as _;
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let source = format!(
+        "id: frozen-delete\nnamespace: {NS}\ntasks:\n\
+         \x20 - id: w\n    type: {WRITE}\n    content: a\n\
+         \x20 - id: del\n    type: {DELETE}\n    uri: \"{{{{ outputs.w.uri }}}}\"\n"
+    );
+    let ex = start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(tick(&db.pool, 1, &registry(&db.pool)).await.unwrap(), 1);
+    let file = uri_of(&db.pool, ex, "w").await;
+    let zombie = freeze_then_reclaim(&db, "del").await;
+    let (state, outputs, message) = result_in(&db.pool, ex, "del").await;
+    assert_eq!(
+        (state.as_str(), outputs),
+        ("SUCCESS", Some(json!({"uri": file, "deleted": true}))),
+        "the re-claim deleted it: {message:?}"
+    );
+    sqlx::query(
+        "INSERT INTO workflow.execution_files (workspace_id, execution_id, uri, size) \
+         VALUES ($1, $2, $3, 1)",
+    )
+    .bind(ws)
+    .bind(ex)
+    .bind(&file)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    fs.store
+        .put(&fs.object_uri(ws, &file).unwrap(), b"c".to_vec())
+        .await
+        .unwrap();
+
+    let input = frozen_input(
+        &db,
+        &fs,
+        &zombie,
+        DELETE,
+        json!({ "uri": file }),
+        Some(&file),
+    )
+    .await;
+    let out =
+        egret_workflow::worker::handlers::storage::Delete::new(db.pool.clone(), Some(fs.clone()))
+            .run(&input)
+            .await
+            .unwrap();
+    assert_eq!(
+        out.outputs,
+        Some(json!({"uri": file, "deleted": false})),
+        "{out:?}"
+    );
+    assert_eq!(rows_named(&db.pool, &file).await, 1, "its row stays");
+    assert_eq!(object_of(&fs, ws, &file).await, Some(b"c".to_vec()));
+}
+
 /// **A `Loop` over a file keeps the file's values out of its task run**
 /// (fix round 1, I1): the run's `rendered` -- what every load of the
 /// execution reads and the task-run API returns -- is the URI and the

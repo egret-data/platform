@@ -235,6 +235,22 @@ pub struct TaskInput {
     /// scheduled run acts as, so it is left to own that column rather than
     /// guessed at here.
     pub principal: Option<egret_core::UserId>,
+    /// **The instant this claim of the run was taken** -- the value the
+    /// claim's own `UPDATE … SET claimed_at = now()` wrote
+    /// ([`Claimed::claimed_at`] as claimed, before any renewal moved it).
+    ///
+    /// **A bound, never a name and never a fence.** It is NOT the lease
+    /// token `apply_outcome` fences on (a renewal moves that, and the handler
+    /// never sees the moved value), and nothing may name a resource after it
+    /// ([`TaskHandler::cancel`]'s doc: a re-claim must compute the SAME name).
+    /// Its one use is W9a's final review I1: `core.storage.Delete` and
+    /// `PurgeCurrentExecutionFiles` delete index rows outside the fenced
+    /// commit, so they bound their `DELETE` to rows `created_at <=` this
+    /// instant. A worker frozen past its lease and woken after the run was
+    /// re-claimed and later tasks committed files therefore cannot delete
+    /// those later files: their rows were written (or re-written -- the
+    /// upsert bumps `created_at`) by transactions that started after it.
+    pub claimed_at: chrono::DateTime<chrono::Utc>,
     /// **This attempt's log** (W11): every line a handler or its runner
     /// writes goes through it with `task.log.line(level, msg).await`.
     ///

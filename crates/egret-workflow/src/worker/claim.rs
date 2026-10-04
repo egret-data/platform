@@ -212,6 +212,7 @@ impl Claimed {
                 render,
                 timeout: budget.duration(),
                 principal: self.principal_id.map(egret_core::UserId),
+                claimed_at: self.claimed_at,
                 log: crate::logs::RunLog::new(
                     crate::logs::RunIdentity {
                         workspace_id: self.workspace_id,

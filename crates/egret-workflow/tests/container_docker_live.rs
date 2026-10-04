@@ -427,6 +427,7 @@ fn task_over(type_id: &str, spec: serde_json::Value, files: Arc<FileStore>) -> T
         render: egret_workflow::runners::RenderContext::new(),
         timeout: None,
         principal: None,
+        claimed_at: chrono::DateTime::UNIX_EPOCH,
         log: RunLog::discard(),
     };
     let snapshot = egret_workflow::storage::scope::Snapshot::from_parts(

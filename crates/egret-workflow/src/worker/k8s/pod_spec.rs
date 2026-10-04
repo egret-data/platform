@@ -679,6 +679,7 @@ mod tests {
             render: crate::runners::RenderContext::new(),
             timeout: None,
             principal: None,
+            claimed_at: chrono::DateTime::UNIX_EPOCH,
             log: crate::logs::RunLog::discard(),
         }
     }

@@ -219,11 +219,11 @@ pub(crate) mod testing {
             // they cannot use must not be there to be quietly relied on.
             // `handlers::sql` builds its own input for that reason.
             principal: None,
-            // A fixed instant rather than `Utc::now()`: this helper's callers
-            // assert on values derived from the input, and a clock reading
-            // would make `commands::container_name`'s output differ between
-            // two runs of the same test. `handlers::container`'s tests build
-            // their own input when they need two DIFFERENT leases.
+            // A fixed instant rather than `Utc::now()`, so two runs of the
+            // same test build the same input. It bounds only `Delete`'s and
+            // `PurgeCurrentExecutionFiles`'s row `DELETE` (W9a final review
+            // I1), and no test of this helper reaches a database with one.
+            claimed_at: chrono::DateTime::UNIX_EPOCH,
             // `tracing`, under a nil identity. A test that reads the lines
             // uses `recorded` instead.
             log: RunLog::discard(),

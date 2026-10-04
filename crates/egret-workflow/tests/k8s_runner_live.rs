@@ -307,6 +307,7 @@ fn task_for(ws: Uuid, execution: Uuid, run: Uuid) -> (TaskInput, Arc<Recorder>) 
         render: egret_workflow::runners::RenderContext::new(),
         timeout: None,
         principal: None,
+        claimed_at: chrono::DateTime::UNIX_EPOCH,
         log: RunLog::new(
             RunIdentity {
                 workspace_id: ws,

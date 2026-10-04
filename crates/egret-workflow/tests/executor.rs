@@ -6840,6 +6840,7 @@ async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_no
             render: egret_workflow::runners::RenderContext::new(),
             timeout: None,
             principal: None,
+            claimed_at: chrono::DateTime::UNIX_EPOCH,
             log: egret_workflow::logs::RunLog::discard(),
         };
         egret_workflow::worker::Registry::cancel(&registry, &task)

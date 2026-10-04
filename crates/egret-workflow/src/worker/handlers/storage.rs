@@ -48,9 +48,28 @@
 //!   file is deleted for every reader, and a store that then fails to delete
 //!   the object leaves an ORPHAN -- swept at retention (§10) -- and never a
 //!   row naming an object that is gone. The task succeeds and logs the orphan
-//!   at `WARN`. The row is deleted in its own transaction, before the run's
-//!   outcome commits: a worker fenced after that has still deleted the file,
-//!   and its re-claim answers `deleted: false`, as a second `Delete` would.
+//!   at `WARN` -- by its `kestra://` URI; the store's error, which embeds the
+//!   object's `s3://` key, goes to the server log only. The row is deleted in
+//!   its own transaction, before the run's outcome commits: a worker fenced
+//!   after that has still deleted the file, and its re-claim answers
+//!   `deleted: false`, as a second `Delete` would.
+//! - **Both deletions are bounded by the claim, not fenced by the lease**
+//!   (W9a final review I1). The row `DELETE` runs on a pool connection, not
+//!   in `apply_outcome`'s fenced transaction, so a worker frozen past its
+//!   lease could otherwise wake, after the run was re-claimed and LATER tasks
+//!   committed files, and delete those files' rows and objects. Each
+//!   statement therefore carries `created_at <= ` [`TaskInput::claimed_at`]
+//!   (the instant this claim was taken; the upsert of a re-written file bumps
+//!   `created_at`), and only the objects of the rows it RETURNED are deleted.
+//!   *The window that remains, stated:* a row whose committing transaction
+//!   STARTED before the claim (`now()` is the transaction's start) is in
+//!   bound even if it committed after -- in practice a sibling task of a
+//!   parallel branch committing at the same instant, which a purge racing
+//!   its siblings deletes in Kestra too; and a frozen worker can still delete
+//!   what was in bound at its claim, which the re-claim deleted already. A
+//!   file committed after the claim, by a parallel sibling as by a later
+//!   task, is left (Kestra would delete a sibling's; egret leaves it until
+//!   retention).
 //! - **`PurgeCurrentExecutionFiles` deletes the objects of the rows it
 //!   deleted, one by one**, not the execution's whole prefix: a task of the
 //!   same execution may be uploading a file whose row its own commit will
@@ -621,15 +640,20 @@ impl TaskHandler for Delete {
             return fail(not_deletable(&file));
         }
         // THE INDEX ROW FIRST. Scoped to the family in SQL too, so the
-        // statement itself cannot reach another execution's row.
+        // statement itself cannot reach another execution's row; and bounded
+        // by this claim's instant (`created_at <= $4`, see the module doc),
+        // so a worker frozen past its lease cannot delete a row written after
+        // the run was re-claimed.
         let gone: Option<String> = sqlx::query_scalar(
             "DELETE FROM workflow.execution_files \
               WHERE workspace_id = $1 AND uri = $2 AND execution_id = ANY($3) \
+                AND created_at <= $4 \
               RETURNING uri",
         )
         .bind(task.workspace_id)
         .bind(&file)
         .bind(&family)
+        .bind(task.claimed_at)
         .fetch_optional(&mut *conn)
         .await
         .map_err(|e| db_err(DELETE, e))?;
@@ -664,13 +688,23 @@ async fn delete_object(fs: &FileStore, task: &TaskInput, file: &str) {
         Err(why) => Some(why),
     };
     if let Some(why) = failed {
+        // The store's error embeds `s3://{bucket}/{prefix}{workspace}/…`,
+        // egret's own layout: it goes to the server log, and the author's
+        // task log names the `kestra://` URI only.
+        tracing::warn!(
+            workspace = %task.workspace_id,
+            execution = %task.execution_id,
+            file,
+            error = %why,
+            "an orphaned object was left for the pruner"
+        );
         task.log
             .line(
                 LogLevel::Warn,
                 &format!(
                     "{file} is deleted (its index row is gone), but its object could not be \
-                     removed from internal storage and is left as an orphan for the pruner: \
-                     {why}"
+                     removed from internal storage and is left as an orphan for the pruner; \
+                     the server log has the store's error"
                 ),
             )
             .await;
@@ -718,13 +752,17 @@ impl TaskHandler for PurgeCurrentExecutionFiles {
         // never the loop root's or a sibling's (the controller's ruling of
         // 2026-10-03; spec §9.3). Kestra's "current execution"; what its
         // `deleteByPrefix` does inside an iteration was not measured.
+        // Bounded by this claim's instant (see the module doc): only the
+        // rows deleted HERE have their objects deleted below, so a file
+        // committed after the claim keeps its row and its object.
         let gone: Vec<String> = sqlx::query_scalar(
             "DELETE FROM workflow.execution_files \
-              WHERE workspace_id = $1 AND execution_id = $2 \
+              WHERE workspace_id = $1 AND execution_id = $2 AND created_at <= $3 \
               RETURNING uri",
         )
         .bind(task.workspace_id)
         .bind(task.execution_id)
+        .bind(task.claimed_at)
         .fetch_all(&mut *conn)
         .await
         .map_err(|e| db_err(PURGE_CURRENT_EXECUTION_FILES, e))?;
@@ -1119,6 +1157,72 @@ mod tests {
             .await
             .unwrap();
         assert!(message(&out).contains("[storage]"), "{out:?}");
+    }
+
+    /// A store whose `delete` fails the way S3's does: the error text embeds
+    /// the object's `s3://bucket/key`.
+    struct CannotDelete(MemStore);
+
+    #[async_trait::async_trait]
+    impl ObjectStore for CannotDelete {
+        async fn put(&self, uri: &str, bytes: Vec<u8>) -> std::result::Result<(), StorageError> {
+            self.0.put(uri, bytes).await
+        }
+        async fn get(&self, uri: &str) -> std::result::Result<Vec<u8>, StorageError> {
+            self.0.get(uri).await
+        }
+        async fn delete(&self, object: &str) -> std::result::Result<(), StorageError> {
+            Err(StorageError::S3(format!(
+                "{object}: AccessDenied: dispatch failure"
+            )))
+        }
+        async fn copy(&self, _: &str, _: &str) -> std::result::Result<(), StorageError> {
+            unreachable!()
+        }
+        async fn list(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> std::result::Result<egret_storage::Listing, StorageError> {
+            unreachable!()
+        }
+        async fn get_stream(
+            &self,
+            uri: &str,
+        ) -> std::result::Result<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>, StorageError>
+        {
+            self.0.get_stream(uri).await
+        }
+        async fn put_stream(
+            &self,
+            uri: &str,
+            body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+            size_hint: Option<u64>,
+        ) -> std::result::Result<u64, StorageError> {
+            self.0.put_stream(uri, body, size_hint).await
+        }
+    }
+
+    /// **The orphan WARN in the author's task log names the `kestra://` URI
+    /// and never the store's object** (W9a final review, minor): the store's
+    /// error embeds `s3://{bucket}/{prefix}{workspace}/…`, egret's own layout,
+    /// which goes to the server log only.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_orphaned_object_is_logged_to_the_author_by_its_kestra_uri_only() {
+        let fs = store_with(Arc::new(CannotDelete(MemStore::new())), Caps::default());
+        let file = format!("{}a.txt", prefix());
+        let (mut t, rec) = super::super::testing::recorded(DELETE, serde_json::json!({}));
+        t.execution_id = EX;
+        delete_object(&fs, &t, &file).await;
+        let lines = rec.texts();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let (level, text) = &lines[0];
+        assert_eq!(*level, LogLevel::Warn);
+        assert!(text.contains(&file), "{text}");
+        assert!(text.contains("orphan"), "{text}");
+        for leak in ["s3://", "egret-test", "workflow/", "AccessDenied"] {
+            assert!(!text.contains(leak), "{text:?} leaks {leak:?}");
+        }
     }
 
     #[tokio::test]
