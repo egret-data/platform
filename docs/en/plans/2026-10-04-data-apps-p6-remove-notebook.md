@@ -52,7 +52,7 @@ Deleted entirely:
   `__tests__`, `frontend/src/components/notebook/`, `frontend/src/api/{notebooks,notebookSettings}.ts`
   + `frontend/src/api/__tests__/notebooks.test.tsx`, `frontend/src/api/generated/notebooks/`, every
   `frontend/src/api/generated/model/{notebook*,createNotebook,updateNotebook}.ts` (the orval output
-  for the routes this plan removes — regenerated away in Task 6c-3, not hand-deleted up front).
+  for the routes this plan removes — regenerated away in Task 6c-4, not hand-deleted up front).
 - `deploy/helm/egret/templates/{namespace-kernels,rbac-kernels,networkpolicy-kernels}.yaml`.
 
 Modified:
@@ -126,24 +126,18 @@ so Part P6c can delete the crates without anything else referring to them.
   registry, e.g. anything iterating all task types generically).
 - [ ] **Step 6:** Commit `feat(workflow): remove the egret.python task type and RefKind::Notebook (D25)`.
 
-### Task 6a-2: Delete `NotebookDocsPort`
+> **Correction found while executing Task 6a-1 (2026-10-04):** this plan originally put "delete
+> `NotebookDocsPort`" here, as Task 6a-2, reasoning that after D25 it "has no consumer left:
+> `egret-kernel` is deleted, `egret-workflow`'s `RefKind::Notebook` is gone." That reasoning
+> quietly assumed `egret-kernel` was ALREADY deleted — it is not; that is Part P6c, not P6a.
+> `egret-kernel::routes::KernelState` has a real, compiling `pub notebook_docs: Arc<dyn
+> NotebookDocsPort>` field (confirmed: `grep -n "NotebookDocsPort" crates/egret-kernel/src/routes.rs`
+> finds 7 live references) right now. Deleting the trait here would break `egret-kernel`'s build for
+> no reason, two parts early. **Moved to Part P6c**, as its own task right after `egret-kernel` and
+> `egret-notebook` are both actually gone and the trait genuinely has no consumer left. Task numbers
+> below are renumbered accordingly (old 6a-3/6a-4/6a-5 → 6a-2/6a-3/6a-4).
 
-**Files:**
-- Modify: `crates/egret-analytics-api/src/port.rs` (remove the trait)
-- Modify: `crates/egret-analytics-api/src/lib.rs` (remove its re-export)
-
-- [ ] **Step 1:** After Task 6a-1, confirm by `grep -rn "NotebookDocsPort" crates/` that the only
-  remaining references are its definition (`egret-analytics-api`) and its implementation
-  (`egret-notebook/src/docs_port.rs`, deleted whole-crate in Part P6c — leave it for now, this task
-  only removes the trait side). If anything else still references it, stop and investigate before
-  deleting — the file-structure section's claim that nothing else consumes it should be re-verified
-  here, not assumed.
-- [ ] **Step 2:** Remove the trait and its re-export.
-- [ ] **Step 3:** `cargo check -p egret-analytics-api` — clean (nothing in this crate implements or
-  calls the trait itself, so removing it should not cascade).
-- [ ] **Step 4:** Commit `feat(analytics-api): remove NotebookDocsPort — no consumer after D25`.
-
-### Task 6a-3: RBAC — remove the two notebook permissions
+### Task 6a-2: RBAC — remove the two notebook permissions
 
 **Files:**
 - Modify: `crates/egret-core/src/rbac.rs` (the `notebook:read`/`notebook:write` `perm!()` rows)
@@ -166,7 +160,7 @@ so Part P6c can delete the crates without anything else referring to them.
 - [ ] **Step 4:** `cargo test -p egret-core -p egret-auth -p egret-controlplane` — green.
 - [ ] **Step 5:** Commit `feat(rbac): remove notebook:read and notebook:write`.
 
-### Task 6a-4: Sharing — remove the `"notebook"`/`"notebooks"` kind
+### Task 6a-3: Sharing — remove the `"notebook"`/`"notebooks"` kind
 
 **Files:**
 - Modify: `crates/egret-bi/src/shares.rs` (the `"notebook" => Some("notebook:write")` arm, the
@@ -190,7 +184,7 @@ so Part P6c can delete the crates without anything else referring to them.
 - [ ] **Step 3:** `cargo test -p egret-bi` — green, or fixed forward per Step 1's finding.
 - [ ] **Step 4:** Commit `feat(bi): remove the notebook sharing kind`.
 
-### Task 6a-5: PR P6a
+### Task 6a-4: PR P6a
 
 - [ ] `cargo fmt --all`, clippy on touched crates, full suites for
   `egret-workflow`/`egret-analytics-api`/`egret-core`/`egret-auth`/`egret-controlplane`/`egret-bi`.
@@ -231,7 +225,7 @@ routes it was generated from are actually gone.
   generated notebook client; if `tsc` reports errors OUTSIDE those two files, something in Step 1's
   list was missed.
 - [ ] **Step 5:** Commit `feat(frontend): remove the notebook routes, pages, and components`
-  (expect this commit to leave `tsc` red on the API-wrapper files on purpose — Task 6c-3 closes that
+  (expect this commit to leave `tsc` red on the API-wrapper files on purpose — Task 6c-4 closes that
   gap once the backend routes are gone and the client is regenerated; say so in the commit body so a
   reviewer does not mistake it for an oversight).
 
@@ -299,7 +293,23 @@ green at the end — this is the part that finally closes the `tsc` gap Task 6b-
 - [ ] **Step 3:** `cargo check --workspace` — clean.
 - [ ] **Step 4:** Commit `feat(apps): delete egret-notebook — the notebook storage/runtime crate`.
 
-### Task 6c-3: Regenerate the OpenAPI doc and the frontend client; close the Task 6b-1 gap
+### Task 6c-3: Delete `NotebookDocsPort` (relocated from Part P6a — see the note there)
+
+With both `egret-kernel` (Task 6c-1) and `egret-notebook` (Task 6c-2) gone, the trait genuinely has
+no consumer left: nothing implements it, nothing holds an `Arc<dyn NotebookDocsPort>`.
+
+**Files:**
+- Modify: `crates/egret-analytics-api/src/port.rs` (remove the trait)
+- Modify: `crates/egret-analytics-api/src/lib.rs` (remove its re-export)
+
+- [ ] **Step 1:** `grep -rn "NotebookDocsPort" crates/` — after Tasks 6c-1 and 6c-2, confirm the only
+  remaining references are its own definition in `egret-analytics-api`. If anything else still
+  references it, stop and investigate before deleting.
+- [ ] **Step 2:** Remove the trait and its re-export.
+- [ ] **Step 3:** `cargo check -p egret-analytics-api` — clean.
+- [ ] **Step 4:** Commit `feat(analytics-api): remove NotebookDocsPort — no consumer after egret-kernel/egret-notebook are gone`.
+
+### Task 6c-4: Regenerate the OpenAPI doc and the frontend client; close the Task 6b-1 gap
 
 **Files:**
 - Modify: `openapi.json` (regenerated)
@@ -322,7 +332,7 @@ green at the end — this is the part that finally closes the `tsc` gap Task 6b-
 - [ ] **Step 5:** `npx eslint .` — no new errors.
 - [ ] **Step 6:** Commit `chore(frontend): regenerate the API client without the notebook routes`.
 
-### Task 6c-4: PR P6c
+### Task 6c-5: PR P6c
 
 - [ ] `cargo fmt --all`, clippy on touched crates, `cargo test -p egret-bin -p egret-server` (plus
   any crate whose `Cargo.toml` changed), `npx tsc --noEmit`, `npx vitest run`, `npx eslint .`. Open
@@ -403,7 +413,7 @@ this plainly in the PR description; do not bundle it quietly with anything else.
 - [ ] **Step 2:** Write `0166_remove_notebook.sql` in dependency order: `DELETE FROM
   role_permissions WHERE permission IN ('notebook:read','notebook:write')` (or whatever the actual
   column/table is called — confirmed in Step 1) before dropping the permission catalog row if one
-  exists in the DB (Task 6a-3 removed it from the Rust static catalog; check whether `rbac.rs`'s
+  exists in the DB (Task 6a-2 removed it from the Rust static catalog; check whether `rbac.rs`'s
   `perm!()` list is ALSO mirrored into a DB table that needs its own row deleted, or whether the
   catalog is Rust-only and the DB only holds `role_permissions` grants referencing it by string);
   then `DROP TABLE` for every notebook-specific table, child tables before parents (e.g. whatever
@@ -435,9 +445,9 @@ this plainly in the PR description; do not bundle it quietly with anything else.
 | `egret-notebook` removed | 6c-2 |
 | Jupyter half of `egret-kernel` removed | 6c-1 (the whole crate — confirmed no non-Jupyter half exists) |
 | `kernel-image/` removed | 6d-1 |
-| The notebook frontend removed | 6b-1, 6c-3 (generated client) |
+| The notebook frontend removed | 6b-1, 6c-4 (generated client) |
 | The notebook tables removed | 6e-1 |
-| `notebook:*` removed | 6a-3 (permissions), 6a-4 (sharing kind) |
+| `notebook:*` removed | 6a-2 (permissions), 6a-3 (sharing kind) |
 | `egret.python` re-pointed or marked unsupported — decided in P6's plan | 6a-1 (D25: deleted outright, user's explicit choice over the two options the spec left open) |
 
 Gaps and honest limits, stated rather than hidden:
@@ -446,10 +456,10 @@ Gaps and honest limits, stated rather than hidden:
   to its full depth while writing this (a `grep` found the Rust catalog and the seeding migrations,
   not a full schema read). Task 6e-1 Step 1 is written to require reading the real schema before
   writing SQL, not to assume a shape.
-- **`catalog_drift.rs`'s relationship to the sharing-kind table (Task 6a-4) is not confirmed** — if
+- **`catalog_drift.rs`'s relationship to the sharing-kind table (Task 6a-3) is not confirmed** — if
   it enforces that every DB-known share kind has a Rust dispatch entry (and not just the reverse),
   removing the Rust side in Part P6a before the DB side is gone in Part P6e could make that check
-  fail from P6a through P6d. Task 6a-4 Step 1 is written to read that check first and decide the
+  fail from P6a through P6d. Task 6a-3 Step 1 is written to read that check first and decide the
   real order before touching anything, rather than this plan guessing wrong up front.
 - **Helm `values.yaml`'s exact `kernel:` key range and the exact kernel-conditional blocks inside
   `backend-deployment.yaml`/`ingress.yaml` are not line-numbered here** — confirmed only that they
