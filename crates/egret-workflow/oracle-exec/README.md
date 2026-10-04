@@ -9344,6 +9344,18 @@ The other changes a deployment sees:
 - **Manual replay.** A replay copies the source's `FILE` inputs by URI; once
   one of those files was pruned the replay is refused with **400** naming the
   input, instead of starting an execution that cannot read it.
+- **A permanent store error is retried, not failed** (W9a final review I2).
+  `AccessDenied`, `NoSuchBucket` or a refused key is handled as an outage: the
+  run is re-claimed every `working_timeout`, no attempt is spent, and it never
+  fails on its own. It can only be egret's own `[storage]` credentials or
+  bucket; the server log names the error, and fixing the configuration lets
+  the waiting runs finish. Follow-up: classify permanent S3 errors.
+- **Memory per reader** (spec §15). An Ion value read by an item task, a
+  `Loop` or the preview can cost about 8 × `max_read_bytes`, per concurrent
+  reader, and each concurrent `read()` up to `max_read_bytes` more; raising
+  `max_read_bytes` raises both. A `Loop` over a file has no record-count cap
+  (as Kestra): a 10 MiB file of two-byte records spawns ~5 million
+  iterations.
 - **Plugin pod memory.** The JVM runs with `-Xmx384m` (`pluginHost.jvmMaxHeap`)
   under the default task-pod memory limit of **512Mi**. A limit of 128Mi is
   OOM-killed (measured: `usage 131072kB, limit 131072kB`); keep the limit well

@@ -677,8 +677,10 @@ pub async fn reaper_pass(
 /// **The worker's registry for a deployment (W5a Task 5)**: `egret-bin`'s one
 /// call, so the decision is here where a test can reach it.
 ///
-/// * `container_runner = none`: [`Handlers::with_core_tasks`], **exactly** --
-///   no script handler, no orphan sweep -- and `None` for the publish gate's
+/// * `container_runner = none`: [`Handlers::with_core_tasks`] plus the core
+///   storage tasks that need the pool (`Delete`, `PurgeCurrentExecutionFiles`,
+///   [`crate::worker::handlers::storage::register`], W9a Task 11) -- no
+///   script handler, no orphan sweep -- and `None` for the publish gate's
 ///   default runner.
 /// * `docker` / `kubernetes`: the same, plus the four script types and their
 ///   two aliases over ONE runner built here ([`crate::worker::handlers::script::register`]),
