@@ -260,7 +260,7 @@ async fn cedar_pdp_reproduces_legacy_decisions() {
         "engine:read",
         "dashboard:read",
         "dashboard:manage",
-        "notebook:write",
+        "app:write",
     ];
     let users = [
         ("A/platform_admin", user_a),
