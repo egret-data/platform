@@ -1,8 +1,8 @@
 //! `DataApiEndpointPort` — the minimal Data API endpoint surface
-//! `egret-automation` needs to authorize a `dataapi_alert`, mirroring
-//! `egret_analytics_api::NotebookDocsPort`'s exact shape: `egret-automation`
-//! holds an `Arc<dyn DataApiEndpointPort>`, never concrete `egret-dataapi`,
-//! and `egret-dataapi` implements this over its concrete `EndpointStore`.
+//! `egret-automation` needs to authorize a `dataapi_alert`, the same leaf-port
+//! shape as `egret_query_api::QueryExecPort`: `egret-automation` holds an
+//! `Arc<dyn DataApiEndpointPort>`, never concrete `egret-dataapi`, and
+//! `egret-dataapi` implements this over its concrete `EndpointStore`.
 //!
 //! Added in Task 5's fix round 2, to close a hole `require_dataapi_endpoint_
 //! read` had from the moment it could take an `id`: `dataapi_endpoint_id` is a

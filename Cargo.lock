@@ -3089,6 +3089,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "egret-analytics-api",
  "egret-apps",
  "egret-audit",
  "egret-auth",
@@ -3103,10 +3104,8 @@ dependencies = [
  "egret-engine-mgmt",
  "egret-engine-mgmt-api",
  "egret-events",
- "egret-kernel",
  "egret-machine-idp",
  "egret-metastore",
- "egret-notebook",
  "egret-perm",
  "egret-perm-compile",
  "egret-policy",
@@ -3422,45 +3421,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "egret-kernel"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "chrono",
- "egret-analytics-api",
- "egret-auth",
- "egret-catalog-engine",
- "egret-core",
- "egret-events",
- "egret-kernel",
- "egret-machine-idp",
- "egret-metastore",
- "egret-notebook",
- "egret-test-db",
- "egret-workspace",
- "futures-channel",
- "futures-util",
- "hex",
- "http-body-util",
- "rand 0.8.7",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "thiserror 2.0.20",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "tokio-util",
- "tower",
- "tracing",
- "utoipa",
- "uuid",
-]
-
-[[package]]
 name = "egret-machine-idp"
 version = "0.1.0"
 dependencies = [
@@ -3491,36 +3451,6 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "egret-notebook"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "chrono",
- "egret-analytics-api",
- "egret-audit",
- "egret-auth",
- "egret-catalog-engine",
- "egret-core",
- "egret-events",
- "egret-machine-idp",
- "egret-metastore",
- "egret-test-db",
- "egret-workspace",
- "http-body-util",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.20",
- "tokio",
- "tower",
- "tracing",
- "utoipa",
- "uuid",
 ]
 
 [[package]]
@@ -3720,10 +3650,8 @@ dependencies = [
  "egret-dataapi",
  "egret-dataapi-api",
  "egret-engine-mgmt",
- "egret-kernel",
  "egret-machine-idp",
  "egret-metastore",
- "egret-notebook",
  "egret-perm-compile",
  "egret-policy",
  "egret-query",

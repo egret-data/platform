@@ -34,8 +34,6 @@ egret-automation-api = { path = "crates/egret-automation-api" }
 egret-automation = { path = "crates/egret-automation" }
 egret-workflow-api = { path = "crates/egret-workflow-api" }
 egret-workflow = { path = "crates/egret-workflow" }
-egret-notebook = { path = "crates/egret-notebook" }
-egret-kernel = { path = "crates/egret-kernel" }
 egret-provisioner = { path = "crates/egret-provisioner" }
 egret-engine-mgmt-api = { path = "crates/egret-engine-mgmt-api" }
 egret-engine-mgmt = { path = "crates/egret-engine-mgmt" }

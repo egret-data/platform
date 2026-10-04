@@ -3,7 +3,6 @@
 mod apps_pod_k8s;
 mod backfill;
 mod cli;
-mod kernel_launcher_k8s;
 
 use anyhow::Context;
 use chrono::Duration;
@@ -199,39 +198,6 @@ async fn workspace_cmd(config: Config, action: WorkspaceAction) -> anyhow::Resul
             println!("Granted group '{group}' role '{role}' in workspace '{workspace}'");
             Ok(())
         }
-    }
-}
-
-/// Engine-connection resolver wired into `KernelState` (T4).
-///
-/// Resolves a `database_id` to the coordinates a kernel needs to open a direct
-/// Daft connection. Backed by the same `DatabaseRepo` registry the query runner
-/// uses; the engine label matches `EngineOption.engine` via `Engine::as_str`.
-struct EngineConnResolverImpl {
-    databases: egret_query::DatabaseRepo,
-}
-
-#[async_trait::async_trait]
-impl egret_kernel::engine_conn::EngineConnResolver for EngineConnResolverImpl {
-    async fn resolve(
-        &self,
-        database_id: uuid::Uuid,
-    ) -> Result<egret_kernel::engine_conn::EngineConn, egret_kernel::engine_conn::EngineConnError>
-    {
-        use egret_kernel::engine_conn::{EngineConn, EngineConnError};
-        let db = self
-            .databases
-            .get(database_id)
-            .await
-            .map_err(|e| EngineConnError::NotFound(e.to_string()))?;
-        Ok(EngineConn {
-            kind: db.engine.as_str().to_string(),
-            host: db.host,
-            port: db.port,
-            // Deliver the engine's self-signed cert so the kernel can PIN it
-            // (verify against this cert only) rather than disabling TLS verification.
-            tls_cert: db.options.tls_cert,
-        })
     }
 }
 
@@ -1180,7 +1146,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // have drifted apart during development, cheaper to catch at `cargo run` time than as
     // a silent dead grant in prod. Only platform-scope grants are checked here:
     // `egret_core::rbac` is the platform vocabulary; workspace-scope roles (ws_*) use a
-    // separate permission vocabulary owned by egret-workspace (dataset/chart/notebook/…).
+    // separate permission vocabulary owned by egret-workspace (dataset/chart/app/…).
     if let Ok(rows) = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT rp.permission FROM role_permissions rp \
          JOIN roles r ON r.id = rp.role_id WHERE r.scope = 'platform'",
@@ -1389,14 +1355,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // and database connections reference named secrets.
     let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
 
-    // Externally-reachable catalog base URL, forwarded to the notebook-runtime
-    // manifest as the catalog URL (what pyiceberg/Daft hit).
-    let catalog_base_url = config
-        .catalog
-        .public_url
-        .clone()
-        .unwrap_or_else(|| "http://localhost:8080".into());
-
     let oidc = match (oidc_service.clone(), oidc_cookie_key.clone()) {
         (Some(service), Some(cookie_key)) => Some(egret_auth::oidc_routes::OidcRoutesState {
             oidc: service,
@@ -1554,12 +1512,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     };
 
     // Task 4 (STS cutover): the machine-IdP mints the short-lived per-user
-    // engine JWT carried in the notebook-runtime manifest — replacing the old
-    // Keycloak refresh-grant broker (deleted; couldn't mint for local users or
-    // when OIDC is disabled). Reused by EngineState (B3a SQL Lab delegation),
-    // BiState (B3a per-user delegation), NotebookState, and KernelState — one
-    // shared Arc.
-    let engine_minter: std::sync::Arc<dyn egret_notebook::engine_token::EngineTokenMinter> =
+    // engine JWT — replacing the old Keycloak refresh-grant broker (deleted;
+    // couldn't mint for local users or when OIDC is disabled). Reused by
+    // EngineState (B3a SQL Lab delegation) and BiState (B3a per-user
+    // delegation) — one shared Arc.
+    let engine_minter: std::sync::Arc<dyn egret_analytics_api::engine_token::EngineTokenMinter> =
         std::sync::Arc::new(egret_bin::engine_minter::MachineIdpEngineMinter::new(
             egret_machine_idp::PgSigningKeyStore::new(db.clone()),
             egret_auth::users::UserRepo::new(db.clone()),
@@ -1737,77 +1694,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         runner: automation_runner.clone(),
     });
 
-    let notebook_state = egret_notebook::NotebookState {
-        store: egret_notebook::NotebookStore::new(db.clone()),
-        catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
-        sessions: sessions.clone(),
-        workspaces: WorkspaceRepo::new(db.clone()),
-        authz: Authorizer::new(db.clone()),
-        pdp: pdp.clone(),
-        users: UserRepo::new(db.clone()),
-        catalog_base_url: catalog_base_url.clone(),
-        engine_minter: engine_minter.clone(),
-        keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
-        // Same value the machine-IdP (`IdpState.issuer`) uses below, so a
-        // notebook-minted catalog JWT carries the same `iss` as OAuth-minted ones.
-        idp_issuer: identity.issuer().to_string(),
-    };
-    let notebook = Some(notebook_state.clone());
-
-    // ── Kernel lifecycle wiring (D1b T8) ────────────────────────────────────────
-    // Startup sweep: subprocess kernels from a prior run are gone — clear stale rows.
-    sqlx::query("DELETE FROM kernel.kernels")
-        .execute(&db.pool)
-        .await
-        .ok();
-
-    let kernel_registry = egret_kernel::KernelRegistry::new(db.clone());
-    let kernel_launcher: std::sync::Arc<dyn egret_kernel::KernelLauncher> =
-        if config.kernel.launcher == "kubernetes" {
-            let client = kube::Client::try_default()
-                .await
-                .expect("kernel.launcher=kubernetes but no in-cluster kube config");
-            let kcfg = crate::kernel_launcher_k8s::K8sKernelConfig {
-                namespace: config.kernel.namespace.clone(),
-                image: config.kernel.image.clone(),
-                image_pull_policy: config.kernel.image_pull_policy.clone(),
-                cpu_request: config.kernel.cpu_request.clone(),
-                mem_request: config.kernel.mem_request.clone(),
-                cpu_limit: config.kernel.cpu_limit.clone(),
-                mem_limit: config.kernel.mem_limit.clone(),
-                pull_secret: config.kernel.pull_secret.clone(),
-                engine_tls_insecure: config.kernel.engine_tls_insecure,
-            };
-            std::sync::Arc::new(crate::kernel_launcher_k8s::KubernetesLauncher::new(
-                client, kcfg,
-            ))
-        } else {
-            std::sync::Arc::new(egret_kernel::SubprocessLauncher::default())
-        };
-    let kernel_idle = std::time::Duration::from_secs(30 * 60); // 30 min idle timeout
-
-    let kernel_manager = std::sync::Arc::new(egret_kernel::KernelManager::new(
-        kernel_registry.clone(),
-        kernel_launcher.clone(),
-        kernel_idle,
-    ));
-
-    // Spawn the idle reaper (sweeps every 60 s). `reaper_cancel` is the
-    // background loops' shared token, cancelled on SIGTERM or SIGINT by the
-    // task spawned after the workflow runtime below.
+    // `reaper_cancel` is the background loops' shared cancellation token: the
+    // automation ticker and the workflow runtime below, cancelled together on
+    // SIGTERM or SIGINT by the task spawned after the workflow runtime.
     let reaper_cancel = tokio_util::sync::CancellationToken::new();
-    egret_kernel::spawn_reaper(
-        kernel_registry,
-        kernel_launcher,
-        kernel_idle,
-        std::time::Duration::from_secs(60),
-        reaper_cancel.clone(),
-    );
 
     // ── Alerts & Reports ticker (P2) ───────────────────────────────────────
     //
-    // One per replica, beside the kernel reaper and cancelled by the same
-    // token. No leader election: the claim uses FOR UPDATE SKIP LOCKED, so N
+    // One per replica, cancelled by the same token as the workflow runtime
+    // below. No leader election: the claim uses FOR UPDATE SKIP LOCKED, so N
     // replicas ticking together is the design rather than a hazard.
     //
     // `automation_runner` itself is always built (above, shared with
@@ -1933,9 +1828,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         reaper_cancel.clone(),
     );
     // SIGTERM or SIGINT (`shutdown_signal` observes both) stops every
-    // background loop on `reaper_cancel` -- the kernel idle reaper, the
-    // automation ticker and the workflow runtime -- at the signal, while the
-    // HTTP server drains. (Before W11 only Ctrl-C cancelled it, from a task of
+    // background loop on `reaper_cancel` -- the automation ticker and the
+    // workflow runtime -- at the signal, while the HTTP server drains.
+    // (Before W11 only Ctrl-C cancelled it, from a task of
     // its own; on SIGTERM the loops ran on until `main` returned.) So the
     // workflow claim loop stops claiming and its log writer drains inside the
     // grace period, and other replicas pick up the runs.
@@ -1947,47 +1842,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             reaper_cancel.cancel();
         });
     }
-
-    // api_url: the server's own externally-reachable base URL (for EGRET_API_URL
-    // forwarded to kernel processes as a callback base). Defaults to
-    // http://127.0.0.1:{port} from the configured listen address when catalog
-    // public_url is not set.
-    let api_url = config
-        .catalog
-        .public_url
-        .clone()
-        .unwrap_or_else(|| format!("http://127.0.0.1:{}", config.server.port));
-    // kernel_api_url: the callback base handed to kernel processes/pods as
-    // EGRET_API_URL (via `manifest_to_env`). Distinct from `api_url` above
-    // because a `kubernetes` launcher's pods often can't reach the server's
-    // externally-facing `public_url` (e.g. an ingress host) and need a
-    // cluster-internal address (e.g. a Service DNS name) instead.
-    let kernel_api_url = config
-        .kernel
-        .callback_url
-        .clone()
-        .unwrap_or_else(|| api_url.clone());
-
-    let kernel = Some(egret_kernel::KernelState {
-        manager: kernel_manager,
-        // E5c-1: hand kernel the notebook-docs Port over the concrete
-        // NotebookState (which impls `egret_analytics_api::NotebookDocsPort`).
-        notebook_docs: std::sync::Arc::new(notebook_state.clone()),
-        sessions: sessions.clone(),
-        workspaces: WorkspaceRepo::new(db.clone()),
-        authz: Authorizer::new(db.clone()),
-        pdp: pdp.clone(),
-        api_url: kernel_api_url,
-        notebook_kernels: egret_kernel::NotebookKernelStore::new(db.clone()),
-        proxy: std::sync::Arc::new(egret_kernel::BackendWsProxy),
-        engine_conn: std::sync::Arc::new(EngineConnResolverImpl {
-            databases: databases.clone(),
-        }),
-        // Task 7: reuse the SAME broker Arc as NotebookState — one minter.
-        engine_minter: engine_minter.clone(),
-        active: egret_kernel::recorder::ActiveExecutions::default(),
-    });
-    // ── end kernel wiring ───────────────────────────────────────────────────────
 
     // Embedded catalog (EB-1/EB-3): mount lakekeeper in-process at /catalog/v1
     // (fronted by egret's CatalogGuard), and build the warehouse provisioner —
@@ -2397,8 +2251,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     }
 
     // Data Apps management API (`/api/ws/{workspace}/apps…`): the same session
-    // service, workspace repo, authorizer, PDP, audit sink and Db as the notebook
-    // seam.
+    // service, workspace repo, authorizer, PDP, audit sink and Db every other
+    // feature seam shares.
     let apps_api = Some(egret_apps::AppsApiState {
         store: egret_apps::store::AppStore::new(db.clone()),
         db: db.clone(),
@@ -2511,8 +2365,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         engine,
         bi,
         automation,
-        notebook,
-        kernel,
         control_plane,
         catalog_admin,
         policy_admin,

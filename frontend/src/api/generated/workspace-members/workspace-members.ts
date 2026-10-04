@@ -1045,7 +1045,7 @@ export const getWorkspaceMembersListWorkspaceSharesUrl = (workspace: string,) =>
 
 /**
  * @summary `GET /ws/{workspace}/shares` — every OBJECT grant whose object lives in THIS
-workspace (charts, dashboards, datasets, folders, notebooks, saved queries),
+workspace (charts, dashboards, datasets, folders, saved queries, apps),
 enriched with object name, role name, principal name and effect. Read-only, so
 a workspace admin can SEE what has been shared; gated on
 `workspace:manage_members` (the same gate as the member/role routes). The
@@ -1122,7 +1122,7 @@ export function useWorkspaceMembersListWorkspaceShares<TData = Awaited<ReturnTyp
   ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
 /**
  * @summary `GET /ws/{workspace}/shares` — every OBJECT grant whose object lives in THIS
-workspace (charts, dashboards, datasets, folders, notebooks, saved queries),
+workspace (charts, dashboards, datasets, folders, saved queries, apps),
 enriched with object name, role name, principal name and effect. Read-only, so
 a workspace admin can SEE what has been shared; gated on
 `workspace:manage_members` (the same gate as the member/role routes). The

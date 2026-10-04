@@ -1364,8 +1364,9 @@ fn rows_to_text_table(columns: &[String], rows: &[Vec<serde_json::Value>]) -> St
 }
 
 /// Spawn the ticker; returns immediately. Cancelled via `cancel`, exactly like
-/// `egret-kernel`'s reaper — one periodic task per replica, no leader election,
-/// with `SKIP LOCKED` in the claim making that safe.
+/// the workflow runtime's tickers (`egret_workflow::runtime::spawn_with_logs`)
+/// — one periodic task per replica, no leader election, with `SKIP LOCKED` in
+/// the claim making that safe.
 pub fn spawn(runner: Arc<AutomationRunner>, every: Duration, cancel: CancellationToken) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(every);

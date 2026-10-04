@@ -40,10 +40,6 @@ pub struct AppState {
     pub bi: Option<egret_bi::BiState>,
     /// Present once the Alerts & Reports seam is wired (in `egret-bin`); `None` in unit tests.
     pub automation: Option<egret_automation::AutomationState>,
-    /// Present once the notebook layer is wired (in `egret-bin`); `None` in unit tests.
-    pub notebook: Option<egret_notebook::NotebookState>,
-    /// Present once the kernel layer is wired (in `egret-bin`); `None` in unit tests.
-    pub kernel: Option<egret_kernel::KernelState>,
     /// Present once the control plane is wired (in `egret-bin`); `None` in unit tests.
     pub control_plane: Option<egret_controlplane::CpState>,
     /// Present once the Catalog seam admin router is wired (E3d-3); `None` in unit tests.
@@ -115,8 +111,6 @@ impl AppState {
             engine: None,
             bi: None,
             automation: None,
-            notebook: None,
-            kernel: None,
             control_plane: None,
             catalog_admin: None,
             policy_admin: None,
@@ -249,8 +243,6 @@ pub fn openapi_doc() -> utoipa::openapi::OpenApi {
     doc.merge(egret_automation::openapi());
     doc.merge(egret_auth::openapi());
     doc.merge(egret_workspace::openapi());
-    doc.merge(egret_notebook::openapi());
-    doc.merge(egret_kernel::openapi());
     doc.merge(egret_controlplane::openapi());
     doc.merge(egret_catalog_engine::openapi());
     doc.merge(egret_policy::openapi());
@@ -382,30 +374,6 @@ pub fn build_router(state: AppState) -> Router {
         router = router.merge(render);
     }
 
-    if let Some(notebook) = state.notebook.clone() {
-        let group = Router::new()
-            .nest("/api", egret_notebook::notebook_router())
-            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
-            .with_state(notebook);
-        router = router.merge(group);
-    }
-
-    if let Some(kernel) = state.kernel.clone() {
-        // Session-cookie kernel lifecycle/channels routes: CSRF-protected.
-        let session_group = Router::new()
-            .nest("/api", egret_kernel::kernel_router())
-            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
-            .with_state(kernel.clone());
-        router = router.merge(session_group);
-        // Kernel-token bearer callbacks (invoked by the kernel subprocess, which
-        // has no browser session/CSRF cookie): CSRF-exempt, like /catalog/v1 and
-        // the Ranger /service routes. Auth is the EGRET_KERNEL_TOKEN bearer.
-        let callback_group = Router::new()
-            .nest("/api", egret_kernel::kernel_callback_router())
-            .with_state(kernel);
-        router = router.merge(callback_group);
-    }
-
     if let Some(apps) = state.apps.clone() {
         // Data Apps gateway: bearer-token (per marimo session) callers inside app pods; no
         // cookie is involved, so no CSRF layer (spec §4.2). Gated for the `apps` feature inside the handler.
@@ -426,7 +394,7 @@ pub fn build_router(state: AppState) -> Router {
 
     if let Some(apps_api) = state.apps_api.clone() {
         // Data Apps management (CRUD, drafts, publish, versions): browser-session
-        // routes, CSRF-protected like the notebook group.
+        // routes, CSRF-protected like every other cookie-session group here.
         let group = Router::new()
             .nest("/api", egret_apps::apps_router())
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))

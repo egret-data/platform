@@ -1500,7 +1500,7 @@ impl From<crate::access_views::ObjectGrantRollup> for ObjectGrantRollupDto {
 }
 
 /// `GET /ws/{workspace}/shares` — every OBJECT grant whose object lives in THIS
-/// workspace (charts, dashboards, datasets, folders, notebooks, saved queries),
+/// workspace (charts, dashboards, datasets, folders, saved queries, apps),
 /// enriched with object name, role name, principal name and effect. Read-only, so
 /// a workspace admin can SEE what has been shared; gated on
 /// `workspace:manage_members` (the same gate as the member/role routes). The
