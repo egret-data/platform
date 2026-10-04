@@ -2575,9 +2575,9 @@ pub(crate) fn relative_problem(rel: &str) -> Option<String> {
     // collection; this closes the spellings that ask for one by name.
     if rel.split('/').any(|seg| seg == ".") || rel.ends_with('/') {
         return Some(format!(
-            "{rel:?} names a DIRECTORY rather than a file. An output is JSON and egret \
-             has no internal storage to hand back an archive URI for (W9 owns it), so \
-             name the files inside it instead"
+            "{rel:?} names a DIRECTORY rather than a file. `outputFiles` collects files, \
+             each into its own `kestra://` URI, and never a directory, so name the files \
+             inside it instead"
         ));
     }
     if rel.contains(['*', '?', '[']) {
@@ -2683,8 +2683,8 @@ pub(crate) fn expand_outputs(
     let too_many = |what: &str| {
         format!(
             "`outputFiles` {what} more than {max_names} names; egret reads back at most \
-             {max_names} output files per task (each is a copy and an output key, stored on \
-             the task run: W9 owns storage)"
+             {max_names} output files per task (each is an upload to internal storage and \
+             an output key stored on the task run)"
         )
     };
     if let Some(problem) = output_list_problem(declared.iter().map(String::as_str)) {
