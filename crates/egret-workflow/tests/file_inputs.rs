@@ -795,6 +795,61 @@ async fn a_subflow_passing_an_unreadable_uri_fails_the_parents_run_not_the_worke
     assert_eq!(children(&fx, child).await.len(), 1);
 }
 
+/// **A FILE input passed TWO `Subflow` levels down is refused at spawn**
+/// (W9a final review I3; spec §15): G uploads a file and calls P with it, P
+/// reads it (one trigger level: P's trigger execution is G -- the control)
+/// and passes the same `{{ inputs.f }}` on to C. For C, G is its trigger's
+/// trigger, never readable (spec §4.4), so P's `Subflow` run fails naming
+/// the input and no C row is left. A fan-out re-passing a grandparent's
+/// file must re-materialise it (e.g. a `Write` in P) to hand it further.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_input_passed_two_subflow_levels_down_is_refused_at_the_second_spawn() {
+    let Some(fx) = fx().await else { return };
+    let leaf = fx.flow(&child_flow()).await;
+    let mid = fx
+        .flow(&format!(
+            "id: mid\nnamespace: {NS}\ninputs:\n  - id: f\n    type: FILE\n\
+             tasks:\n  - id: r\n    type: io.kestra.plugin.core.debug.Return\n    \
+             format: \"{{{{ read(inputs.f) }}}}\"\n\
+             \x20 - id: call\n    type: io.kestra.plugin.core.flow.Subflow\n    \
+             namespace: {NS}\n    flowId: child\n    inputs:\n      f: \"{{{{ inputs.f }}}}\"\n"
+        ))
+        .await;
+    let grand = fx
+        .flow(&format!(
+            "id: grand\nnamespace: {NS}\ninputs:\n  - id: f\n    type: FILE\n\
+         tasks:\n  - id: call\n    type: io.kestra.plugin.core.flow.Subflow\n    \
+         namespace: {NS}\n    flowId: mid\n    inputs:\n      f: \"{{{{ inputs.f }}}}\"\n"
+        ))
+        .await;
+    let res = fx
+        .upload(grand, &[Part::File("f", "g.txt", b"from the grandparent")])
+        .await;
+    assert_eq!(res.status(), 201);
+    let g = id_of(res).await;
+    let uri = fx.inputs_of(g).await["f"].as_str().unwrap().to_string();
+    fx.drain().await;
+
+    // One level: P is spawned with G's URI and reads it.
+    let mids = children(&fx, mid).await;
+    assert_eq!(mids.len(), 1, "{mids:?}");
+    let p = mids[0].0;
+    assert_eq!(mids[0].1["f"], json!(uri));
+    let (state, outputs, msg) = fx.run(p, "r").await;
+    assert_eq!(state, "SUCCESS", "{msg:?}");
+    assert_eq!(outputs.unwrap()["value"], json!("from the grandparent"));
+
+    // Two levels: P's spawn of C is refused, naming the input.
+    let (state, _, msg) = fx.run(p, "call").await;
+    assert_eq!(state, "FAILED");
+    let msg = msg.unwrap_or_default();
+    assert!(
+        msg.contains("input `f`") && msg.contains("may not read") && msg.contains(&uri),
+        "{msg}"
+    );
+    assert_eq!(children(&fx, leaf).await, vec![], "no C row");
+}
+
 /// A `Flow` trigger passes its source's uploaded file on (the listener's
 /// `inputs:` render against the source); the fired execution's FILE input is
 /// that URI, readable from it (its trigger execution is the source), and its
