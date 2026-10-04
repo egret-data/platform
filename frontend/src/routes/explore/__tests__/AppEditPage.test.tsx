@@ -8,11 +8,14 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 const requestAppTicket = vi.fn();
 const publishMutateAsync = vi.fn();
 const useAppMock = vi.fn();
+const restoreMutateAsync = vi.fn();
 
 vi.mock("@/api/apps", () => ({
   requestAppTicket: (...a: unknown[]) => requestAppTicket(...a),
   useApp: (...a: unknown[]) => useAppMock(...a),
   usePublishApp: () => ({ mutateAsync: publishMutateAsync, isPending: false }),
+  useAppVersions: () => ({ data: [] }),
+  useRestoreVersion: () => ({ mutateAsync: restoreMutateAsync, isPending: false }),
 }));
 
 const toastError = vi.fn();
@@ -152,5 +155,14 @@ describe("AppEditPage", () => {
     renderPage();
     await screen.findByTitle("Revenue editor");
     expect(useAppMock).toHaveBeenCalledWith("acme", "a1", { refetchMs: 5000 });
+  });
+
+  it("Versions opens the versions dialog", async () => {
+    requestAppTicket.mockResolvedValue("https://apps.egret.test/_ticket?t=egt_abc");
+    renderPage();
+    await screen.findByTitle("Revenue editor");
+    expect(screen.queryByText("Versions")).toBeTruthy(); // the button itself
+    fireEvent.click(screen.getByRole("button", { name: /Versions/ }));
+    expect(await screen.findByRole("heading", { name: "Versions" })).toBeTruthy();
   });
 });
