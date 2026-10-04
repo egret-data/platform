@@ -1,6 +1,7 @@
-//! The engine-token seam. Concrete minting (Keycloak refresh grant) is injected
+//! The engine-token seam. Concrete minting (the machine-IdP signer) is injected
 //! from egret-bin, so this crate stays free of an HTTP/IdP dependency. Moved
-//! verbatim from `egret-notebook`, which re-exports these for its own callers.
+//! verbatim from `egret-notebook` (now deleted, Data Apps P6); every consumer
+//! imports these types from here directly.
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 

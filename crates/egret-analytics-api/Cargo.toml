@@ -4,15 +4,16 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
-# Leaf contract crate for the Analytics/Notebook seam (E5c-1). Holds the shared
-# notebook-docs vocabulary — `NotebookSummary`/`EngineOption`/`NotebookRuntime`,
-# the `CellOutput` output type, and the engine-token seam types — plus the
-# `NotebookDocsPort` reader/writer trait that `egret-kernel` depends on instead
-# of concrete `egret-notebook`. Mirrors egret-query-api (E4d) /
-# egret-catalog-api (E3b) / egret-policy-api (E2a): pure-serde DTOs + a Port
-# trait, no sqlx/axum. Depending on egret-core is fine — it's the foundation
-# crate; the leaf stays light. `serde_json` is required only because
-# `CellOutput` carries a `serde_json::Value` payload (nbformat display data).
+# Leaf contract crate for the Analytics seam (E5c-1). Holds the engine-token
+# seam types (shared by EngineState/BiState delegation) and the pure-serde BI
+# wire DTOs (dataset/chart/dashboard/SQL-Lab params and results, hence
+# `serde_json`). Mirrors egret-query-api (E4d) / egret-catalog-api (E3b) /
+# egret-policy-api (E2a): pure-serde DTOs, no sqlx/axum. Depending on
+# egret-core is fine — it's the foundation crate; the leaf stays light.
+#
+# Data Apps P6 removed this crate's notebook-docs vocabulary and its
+# `NotebookDocsPort` trait once `egret-kernel`/`egret-notebook`, its only
+# consumers, were deleted — see lib.rs's module doc.
 [dependencies]
 egret-core.workspace = true
 serde.workspace = true

@@ -2,8 +2,7 @@
 //!
 //! This is the dataapi-side of the fix-round-2 seam: `egret-automation` holds
 //! `Arc<dyn egret_dataapi_api::DataApiEndpointPort>`, and `egret-bin` hands it
-//! an `Arc<EndpointStore>` via this impl — mirrors
-//! `egret-notebook::docs_port`'s `NotebookDocsPort` impl over `NotebookState`.
+//! an `Arc<EndpointStore>` via this impl.
 //!
 //! `self.workspace_of(id)` inside the trait method below calls the INHERENT
 //! method of the same name on `EndpointStore` (`endpoints.rs`), not this
