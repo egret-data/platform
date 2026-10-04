@@ -174,6 +174,22 @@ fn pod_config() -> PodConfig {
     }
 }
 
+/// The runner the plugin cases use: [`runner`] with egret's DEFAULT memory
+/// limit (512Mi, max 2Gi) instead of the suite's 128Mi. The plugin host's JVM
+/// runs with `-Xmx` [`egret_config::PluginHostConfig`]'s default `384m`,
+/// sized "below the pod's default memory limit (512Mi)"; under the suite's
+/// 128Mi the JVM was OOM-killed by its memory cgroup in 2 of 3 runs of
+/// `a_plugin_stores_and_reads_storage_in_a_pod` (W9a Task 14, measured on a
+/// temporary kind cluster: `memory: usage 131072kB, limit 131072kB`, java
+/// anon-rss 129 MB). The chart's defaults never had that mismatch.
+async fn plugin_runner() -> KubernetesRunner {
+    let mut cfg = pod_config();
+    cfg.default_resources.limit.memory = Some("512Mi".into());
+    cfg.max_resources.limit.memory = Some("2Gi".into());
+    KubernetesRunner::new(runner_client().await, cfg, LogRepo::new(pool().await))
+        .with_files(suite_files())
+}
+
 async fn pool() -> sqlx::PgPool {
     common::db()
         .await
@@ -2078,7 +2094,7 @@ async fn plugin_handlers() -> egret_workflow::worker::Handlers {
     egret_workflow::worker::handlers::kestra::register(
         &mut h,
         Arc::new(egret_workflow::worker::handlers::kestra::KestraRuntime {
-            runner: Arc::new(runner().await),
+            runner: Arc::new(plugin_runner().await),
             runner_kind: RunnerKind::Kubernetes,
             features: Arc::new(egret_workflow::worker::handlers::script::FixedFeatureState(
                 true,
