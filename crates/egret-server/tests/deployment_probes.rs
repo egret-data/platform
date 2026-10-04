@@ -457,3 +457,21 @@ fn run_pod_settings_reach_the_backend_env_under_the_kubernetes_launcher_guard() 
         );
     }
 }
+
+/// P5e found live: the apps NetworkPolicy's ingress rule allowed port 2718 (edit) only, so a run
+/// pod (port 2719) got a readiness probe PASS (kubelet-sourced, not policy-gated) but every real
+/// pod-to-pod request from the proxy timed out silently. Both ports must be in the one ingress
+/// rule that names the proxy as the allowed source.
+#[test]
+fn the_apps_network_policy_opens_both_the_edit_and_the_run_port() {
+    let np = read("deploy/helm/egret/templates/networkpolicy-apps.yaml");
+    let ingress_at = np.find("ingress:").expect("an ingress section");
+    let egress_at = np.find("egress:").expect("an egress section");
+    let ingress = &np[ingress_at..egress_at];
+    for port in ["2718", "2719"] {
+        assert!(
+            ingress.contains(&format!("port: {port}")),
+            "the ingress rule must open port {port}; got:\n{ingress}"
+        );
+    }
+}

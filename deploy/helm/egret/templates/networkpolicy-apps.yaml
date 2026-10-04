@@ -1,7 +1,10 @@
 {{- /*
-NOTE: kind's default CNI (kindnet) does NOT enforce NetworkPolicy — this policy is declared
-correctly and is the production posture (spec §6.3), but on a plain kind cluster it has no runtime
-effect. Enforcement needs a NetworkPolicy-capable CNI (Calico, Cilium, ...).
+NOTE on enforcement: this is the production posture (spec §6.3) regardless of CNI. Do not assume
+kindnet leaves it inert for local testing — P5e found it DOES drop traffic on an unlisted port on
+this project's kind setup (readiness probes still passed, because those are kubelet-sourced and
+not subject to this policy; the proxy's own pod-to-pod request silently timed out instead of
+getting a connection refused). Verify live on kind after touching the port list, not just by
+reading this comment.
 
 An app pod runs author code. It may be reached only by egret (the proxy lives in egret's pods), and
 it may reach only DNS and egret's own port 8080 (the pod API and the query gateway) — not the engines,
@@ -23,7 +26,10 @@ spec:
           podSelector:
             matchLabels: { app: egret }
       ports:
+        # edit (egret_marimo.launcher's PORTS["edit"]) and run (PORTS["run"]) each need their own
+        # port open — a run pod bound to only 2718 would never be reachable (found live, P5e).
         - { protocol: TCP, port: 2718 }
+        - { protocol: TCP, port: 2719 }
   egress:
     # DNS
     - to: []
