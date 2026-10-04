@@ -100,12 +100,14 @@ egret-audit.workspace = true
 egret-query-api.workspace = true
 
 # Task 7's `refs.rs`: the real `WorkflowRefPort` implementation resolves
-# `RefKind::DataApiEndpoint`/`RefKind::Notebook` through these two LEAF
-# contract crates (no sqlx/axum, mirroring `egret-automation`'s identical
-# pair) rather than depending on `egret-dataapi`/`egret-notebook` themselves.
-# `RefKind::Database`/`Dataset`/`Chart` have no such port anywhere in the
-# workspace yet and resolve to `None` (fail-closed) -- see `refs.rs`'s module
-# comment for the per-kind table.
+# `RefKind::DataApiEndpoint` through this LEAF contract crate (no sqlx/axum,
+# mirroring `egret-automation`'s identical pair) rather than depending on
+# `egret-dataapi` itself. `RefKind::Database`/`Dataset`/`Chart` have no such
+# port anywhere in the workspace yet and resolve to `None` (fail-closed) --
+# see `refs.rs`'s module comment for the per-kind table. (`RefKind::Notebook`
+# resolved through `egret-analytics-api` below the same way until Data Apps
+# P6 removed it; that dependency stays for the `engine_token` seam its own
+# live test, `tests/sql_starrocks_live.rs`, still uses.)
 egret-dataapi-api.workspace = true
 egret-analytics-api.workspace = true
 

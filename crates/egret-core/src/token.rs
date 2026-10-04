@@ -2,10 +2,10 @@
 //!
 //! Mint a random url-safe opaque token and hash a token for at-rest storage.
 //! Shared so the hashing algorithm is defined **once** — session tokens
-//! (`egret-auth`) and kernel callback tokens (`egret-kernel`) both delegate here,
-//! keeping their stored hashes byte-identical. Consumers that need a different
-//! wire format for the plaintext (e.g. an `egk_` prefix) keep their own minting
-//! and reuse [`hash_token`].
+//! (`egret-auth`) and Data Apps gateway/session tokens (`egret-apps`) both
+//! delegate here, keeping their stored hashes byte-identical. Consumers that
+//! need a different wire format for the plaintext (e.g. an `egk_` prefix)
+//! keep their own minting and reuse [`hash_token`].
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;

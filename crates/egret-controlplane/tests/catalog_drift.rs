@@ -20,12 +20,11 @@
 //! `catalog_registry:*` (migration 0153), so it no longer names a distinct key.
 //!
 //! Workspace-feature keys (`query:run`, `dataset:*`, `chart:*`, `dashboard:*`,
-//! `notebook:*`, `workspace:manage_members`) are enforced by
-//! `egret_workspace::rbac::Authorizer::require_workspace` in the feature-route
-//! crates (`egret-bi`, `egret-notebook`, `egret-query`, `egret-kernel`). Those
-//! routes usually pass a `const NAME: &str = "resource:action"` rather than an
-//! inline literal, so the scan resolves const identifiers referenced on a
-//! gate-call line back to their defining literal (see `enforced_in_file`).
+//! `workspace:manage_members`) are enforced by `egret_core::authz::require`/
+//! `require_object` in the feature-route crates (`egret-bi`, `egret-query`).
+//! Those routes usually pass a `const NAME: &str = "resource:action"` rather
+//! than an inline literal, so the scan resolves const identifiers referenced
+//! on a gate-call line back to their defining literal (see `enforced_in_file`).
 
 use std::collections::HashSet;
 
@@ -57,15 +56,13 @@ const EXTRA_FILES: &[&str] = &[
     // family (`warehouse:*`) was retired in SP3c-2; it now enforces
     // `catalog_registry:*`, the same keys `catalogs.rs` above already gates.
     "../egret-catalog-engine/src/warehouse_admin/mod.rs",
-    // Workspace-feature keys are gated via `require_workspace` in the
-    // feature-route crates (mostly via `const` args, resolved below).
+    // Workspace-feature keys are gated via `authz::require`/`require_object`
+    // in the feature-route crates (mostly via `const` args, resolved below).
     "../egret-bi/src/routes.rs",
     // `alert:manage` is gated via `authz::require` in the Alerts & Reports seam.
     "../egret-automation/src/routes.rs",
-    "../egret-notebook/src/routes.rs",
     "../egret-query/src/execution/routes.rs",
     "../egret-query/src/registry/routes.rs",
-    "../egret-kernel/src/routes.rs",
     // `service_account:*` (Data API P2) is gated via `authz::require` in the
     // Data API seam's management router, using the `SA_READ`/`SA_MANAGE` consts
     // the scan resolves below.
@@ -368,12 +365,10 @@ fn scan_actually_finds_known_call_sites() {
         "policy:read",
         "workspace:read",
         "catalog_registry:read",
-        // Workspace-feature keys via `require_workspace`: `query:run` and
-        // `dashboard:read` come from a `const` arg; `notebook:read` from an
-        // inline literal (egret-kernel) — exercises both resolution paths.
+        // Workspace-feature keys resolved through a `const` arg (the other
+        // five above are inline literals, already exercising that path).
         "query:run",
         "dashboard:read",
-        "notebook:read",
     ] {
         assert!(
             enforced.contains(key),

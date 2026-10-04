@@ -24,7 +24,6 @@ egret-perm-compile.workspace = true
 egret-query.workspace = true
 egret-bi.workspace = true
 egret-automation.workspace = true
-egret-notebook.workspace = true
 egret-apps.workspace = true
 axum.workspace = true
 # `serve_with_drain` + `shutdown_signal`: the SIGTERM handler, the `watch`

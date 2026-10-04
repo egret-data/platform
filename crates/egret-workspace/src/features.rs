@@ -20,20 +20,17 @@
 //! # What this catalog does NOT cover
 //!
 //! The gate in `WsContext` matches on the request path, so it reaches a route
-//! only if that route builds a `WsContext`. Two kernel-subprocess callbacks
-//! never do — they are authenticated by an `EGRET_KERNEL_TOKEN` bearer with no
-//! browser session — and so assert the entitlement by hand instead, against the
-//! workspace their kernel token is bound to:
+//! only if that route builds a `WsContext`. One route never does:
 //!
-//! - `notebook_runtime_token` (`POST /api/ws/{workspace}/notebook-runtime/token`)
-//! - `engine_token` (`POST /api/kernel/engine-token`, not workspace-scoped by
-//!   URL at all, so no catalog rule could match it)
 //! - `POST /api/apps/query` (Data Apps gateway) — no `/ws/{ws}` segment;
 //!   `egret-apps` checks `disabled_features` itself
 //!
-//! The first two live in `egret-kernel`'s `routes.rs`. Auditing this feature by reading
-//! the catalog alone would miss them, which is why they are named here. Anything
-//! else that mints a capability without a `WsContext` belongs on this list.
+//! (Data Apps P6 removed the other two entries this list used to carry,
+//! `notebook_runtime_token` and the kernel-subprocess `engine_token` callback,
+//! along with `egret-kernel` itself.) Auditing this feature by reading the
+//! catalog alone would miss routes like the one above, which is why it is
+//! named here. Anything else that mints a capability without a `WsContext`
+//! belongs on this list.
 //!
 //! One background consumer asserts an entitlement too, with no request at all:
 //!

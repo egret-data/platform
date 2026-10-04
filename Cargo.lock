@@ -3089,6 +3089,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "egret-analytics-api",
  "egret-apps",
  "egret-audit",
  "egret-auth",
@@ -3105,7 +3106,6 @@ dependencies = [
  "egret-events",
  "egret-machine-idp",
  "egret-metastore",
- "egret-notebook",
  "egret-perm",
  "egret-perm-compile",
  "egret-policy",
@@ -3454,36 +3454,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "egret-notebook"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "chrono",
- "egret-analytics-api",
- "egret-audit",
- "egret-auth",
- "egret-catalog-engine",
- "egret-core",
- "egret-events",
- "egret-machine-idp",
- "egret-metastore",
- "egret-test-db",
- "egret-workspace",
- "http-body-util",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.20",
- "tokio",
- "tower",
- "tracing",
- "utoipa",
- "uuid",
-]
-
-[[package]]
 name = "egret-perm"
 version = "0.1.0"
 dependencies = [
@@ -3682,7 +3652,6 @@ dependencies = [
  "egret-engine-mgmt",
  "egret-machine-idp",
  "egret-metastore",
- "egret-notebook",
  "egret-perm-compile",
  "egret-policy",
  "egret-query",

@@ -39,7 +39,7 @@ egret-secrets.workspace = true
 egret-query.workspace = true
 egret-bi.workspace = true
 egret-automation.workspace = true
-egret-notebook.workspace = true
+egret-analytics-api.workspace = true
 egret-provisioner.workspace = true
 # `EgretEngineProvisioner::exec` names `kube::api::AttachedProcess` explicitly
 # to satisfy the `egret_controlplane::EngineProvisioner` trait signature.

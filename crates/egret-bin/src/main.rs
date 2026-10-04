@@ -1146,7 +1146,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // have drifted apart during development, cheaper to catch at `cargo run` time than as
     // a silent dead grant in prod. Only platform-scope grants are checked here:
     // `egret_core::rbac` is the platform vocabulary; workspace-scope roles (ws_*) use a
-    // separate permission vocabulary owned by egret-workspace (dataset/chart/notebook/…).
+    // separate permission vocabulary owned by egret-workspace (dataset/chart/app/…).
     if let Ok(rows) = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT rp.permission FROM role_permissions rp \
          JOIN roles r ON r.id = rp.role_id WHERE r.scope = 'platform'",
@@ -1355,14 +1355,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // and database connections reference named secrets.
     let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
 
-    // Externally-reachable catalog base URL, forwarded to the notebook-runtime
-    // manifest as the catalog URL (what pyiceberg/Daft hit).
-    let catalog_base_url = config
-        .catalog
-        .public_url
-        .clone()
-        .unwrap_or_else(|| "http://localhost:8080".into());
-
     let oidc = match (oidc_service.clone(), oidc_cookie_key.clone()) {
         (Some(service), Some(cookie_key)) => Some(egret_auth::oidc_routes::OidcRoutesState {
             oidc: service,
@@ -1520,11 +1512,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     };
 
     // Task 4 (STS cutover): the machine-IdP mints the short-lived per-user
-    // engine JWT carried in the notebook-runtime manifest — replacing the old
-    // Keycloak refresh-grant broker (deleted; couldn't mint for local users or
-    // when OIDC is disabled). Reused by EngineState (B3a SQL Lab delegation),
-    // BiState (B3a per-user delegation) and NotebookState — one shared Arc.
-    let engine_minter: std::sync::Arc<dyn egret_notebook::engine_token::EngineTokenMinter> =
+    // engine JWT — replacing the old Keycloak refresh-grant broker (deleted;
+    // couldn't mint for local users or when OIDC is disabled). Reused by
+    // EngineState (B3a SQL Lab delegation) and BiState (B3a per-user
+    // delegation) — one shared Arc.
+    let engine_minter: std::sync::Arc<dyn egret_analytics_api::engine_token::EngineTokenMinter> =
         std::sync::Arc::new(egret_bin::engine_minter::MachineIdpEngineMinter::new(
             egret_machine_idp::PgSigningKeyStore::new(db.clone()),
             egret_auth::users::UserRepo::new(db.clone()),
@@ -1701,23 +1693,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         }),
         runner: automation_runner.clone(),
     });
-
-    let notebook_state = egret_notebook::NotebookState {
-        store: egret_notebook::NotebookStore::new(db.clone()),
-        catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
-        sessions: sessions.clone(),
-        workspaces: WorkspaceRepo::new(db.clone()),
-        authz: Authorizer::new(db.clone()),
-        pdp: pdp.clone(),
-        users: UserRepo::new(db.clone()),
-        catalog_base_url: catalog_base_url.clone(),
-        engine_minter: engine_minter.clone(),
-        keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
-        // Same value the machine-IdP (`IdpState.issuer`) uses below, so a
-        // notebook-minted catalog JWT carries the same `iss` as OAuth-minted ones.
-        idp_issuer: identity.issuer().to_string(),
-    };
-    let notebook = Some(notebook_state.clone());
 
     // `reaper_cancel` is the background loops' shared cancellation token: the
     // automation ticker and the workflow runtime below, cancelled together on
@@ -2276,8 +2251,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     }
 
     // Data Apps management API (`/api/ws/{workspace}/apps…`): the same session
-    // service, workspace repo, authorizer, PDP, audit sink and Db as the notebook
-    // seam.
+    // service, workspace repo, authorizer, PDP, audit sink and Db every other
+    // feature seam shares.
     let apps_api = Some(egret_apps::AppsApiState {
         store: egret_apps::store::AppStore::new(db.clone()),
         db: db.clone(),
@@ -2390,7 +2365,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         engine,
         bi,
         automation,
-        notebook,
         control_plane,
         catalog_admin,
         policy_admin,

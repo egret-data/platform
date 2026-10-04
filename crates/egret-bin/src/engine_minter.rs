@@ -56,14 +56,16 @@ impl MachineIdpEngineMinter {
 }
 
 #[async_trait::async_trait]
-impl egret_notebook::engine_token::EngineTokenMinter for MachineIdpEngineMinter {
+impl egret_analytics_api::engine_token::EngineTokenMinter for MachineIdpEngineMinter {
     async fn mint(
         &self,
         user_id: uuid::Uuid,
-    ) -> Result<egret_notebook::engine_token::EngineToken, egret_notebook::engine_token::BrokerError>
-    {
+    ) -> Result<
+        egret_analytics_api::engine_token::EngineToken,
+        egret_analytics_api::engine_token::BrokerError,
+    > {
+        use egret_analytics_api::engine_token::BrokerError;
         use egret_machine_idp::SigningKeyStore as _;
-        use egret_notebook::engine_token::BrokerError;
 
         let uid = egret_core::UserId(user_id);
         // DB lookups return `egret_core::Error`; `?` converts to
@@ -84,7 +86,7 @@ impl egret_notebook::engine_token::EngineTokenMinter for MachineIdpEngineMinter 
         let expires_at = chrono::DateTime::from_timestamp(iat + self.ttl_secs, 0)
             .ok_or_else(|| BrokerError::Idp("exp out of range".into()))?;
 
-        Ok(egret_notebook::engine_token::EngineToken {
+        Ok(egret_analytics_api::engine_token::EngineToken {
             access_token: jwt,
             expires_at,
         })
