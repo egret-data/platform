@@ -291,7 +291,6 @@ pub async fn publish_corpus(pool: &PgPool, ws: Uuid, by: UserId) -> BTreeMap<Str
         inner: WorkflowRefs {
             flows: FlowRepo::new(Db { pool: pool.clone() }),
             dataapi_endpoints: Arc::new(NoDataApi),
-            notebooks: Arc::new(NoNotebooks),
         },
         subflow_lookups: std::sync::atomic::AtomicUsize::new(0),
     };
@@ -870,60 +869,23 @@ fn publish_class(message: &str) -> String {
     }
 }
 
-/// `RefKind::DataApiEndpoint` and `RefKind::Notebook` are structurally
-/// unreachable from this corpus, and these two doubles are how that is
-/// asserted rather than assumed.
+/// `RefKind::DataApiEndpoint` is structurally unreachable from this corpus,
+/// and this double is how that is asserted rather than assumed.
 ///
-/// Both kinds are declared by an `egret.*` task type
-/// (`spec::registry::TASK_TYPES`), `publish` only reads a `RefField` after
-/// `registry::known_type` has already matched, and
-/// `no_corpus_entry_can_exercise_the_egret_sql_handler` measures that no corpus
-/// flow names an `egret.*` type at all. A double that answered `Ok(None)`
-/// instead would turn a corpus that had grown one into a silent `NotFound`
-/// indistinguishable from the 300-odd refusals beside it. Same shape, and the
-/// same reason, as `refs.rs`'s own `UnreachableDataApi`/`UnreachableNotebooks`.
+/// It is declared by an `egret.*` task type (`spec::registry::TASK_TYPES`),
+/// `publish` only reads a `RefField` after `registry::known_type` has
+/// already matched, and `no_corpus_entry_can_exercise_the_egret_sql_handler`
+/// measures that no corpus flow names an `egret.*` type at all. A double
+/// that answered `Ok(None)` instead would turn a corpus that had grown one
+/// into a silent `NotFound` indistinguishable from the 300-odd refusals
+/// beside it. Same shape, and the same reason, as `refs.rs`'s own
+/// `UnreachableDataApi`.
 struct NoDataApi;
 
 #[async_trait::async_trait]
 impl egret_dataapi_api::DataApiEndpointPort for NoDataApi {
     async fn workspace_of(&self, _id: Uuid) -> Result<Option<Uuid>, egret_core::Error> {
         unreachable!("no corpus flow names an `egret.dataapi.call`")
-    }
-}
-
-/// See [`NoDataApi`].
-struct NoNotebooks;
-
-#[async_trait::async_trait]
-impl egret_analytics_api::NotebookDocsPort for NoNotebooks {
-    async fn get_summary(
-        &self,
-        _id: Uuid,
-    ) -> Result<Option<(egret_analytics_api::NotebookSummary, Uuid)>, egret_core::Error> {
-        unreachable!("no corpus flow names an `egret.python`")
-    }
-    async fn list_engine_options(
-        &self,
-        _ws: Uuid,
-    ) -> Result<Vec<egret_analytics_api::EngineOption>, egret_core::Error> {
-        unreachable!()
-    }
-    async fn record_output(
-        &self,
-        _nb: Uuid,
-        _cid: Uuid,
-        _outputs: &[egret_analytics_api::CellOutput],
-        _execution_count: Option<i32>,
-        _elapsed_ms: Option<i32>,
-    ) -> Result<(), egret_core::Error> {
-        unreachable!()
-    }
-    async fn build_runtime(
-        &self,
-        _ws: Uuid,
-        _user_id: UserId,
-    ) -> Result<egret_analytics_api::NotebookRuntime, egret_core::Error> {
-        unreachable!()
     }
 }
 

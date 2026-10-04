@@ -1166,8 +1166,6 @@ mod tests {
                 "{id}: an image and a script are not egret objects, so no RefField"
             );
         }
-        // `egret.python` is still the NOTEBOOK task and is not served here.
-        assert!(reg.get("egret.python").is_none());
     }
 
     // ---- the final review's fixes -------------------------------------------

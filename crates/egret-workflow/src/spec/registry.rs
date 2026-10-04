@@ -83,14 +83,6 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
             kind: RefKind::Database,
         }],
     },
-    TaskTypeSpec {
-        r#type: "egret.python",
-        aliases: &[],
-        references: &[RefField {
-            field: "notebook",
-            kind: RefKind::Notebook,
-        }],
-    },
     // ── W5a: Kestra's four script tasks (`crate::scripts`) ─────────────────
     //
     // FQCN canonical (rule 4). W4's `egret.container` and `egret.script.python`
@@ -100,10 +92,13 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
     // spellings. No `RefField`: a script and an image name are not egret
     // objects.
     //
-    // W4 Task 5 fix round 1's reason for `egret.script.python` still stands:
-    // `egret.python` one row above is the NOTEBOOK-kernel task, with a
-    // required `notebook` reference, so the container-backed `script:` task
-    // took a different name rather than bending that one.
+    // HISTORICAL (W4 Task 5 fix round 1): `egret.script.python` took a
+    // different name from the container-backed `script:` task rather than
+    // colliding with a row named `egret.python` one line above this comment
+    // used to be -- that row was the notebook-kernel task (a required
+    // `notebook` `RefField`), removed in Data Apps P6 along with the rest of
+    // the notebook. The name `egret.script.python` stays as it is; renaming
+    // it back would be churn for a collision that can no longer happen.
     TaskTypeSpec {
         r#type: crate::scripts::SHELL_COMMANDS,
         aliases: &[crate::scripts::ALIAS_CONTAINER],

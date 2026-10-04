@@ -465,8 +465,9 @@ tasks:
     type: core.parallel
     tasks:
       - id: enrich
-        type: egret.python
-        notebook: nb_enrich
+        type: egret.sql
+        database: trino_prod
+        sql: SELECT 2
 errors:
   - id: alert
     type: core.slack
