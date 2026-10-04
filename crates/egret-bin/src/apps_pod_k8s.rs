@@ -38,7 +38,11 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use uuid::Uuid;
 
-const MARIMO_PORT: i32 = 2718;
+/// `egret_marimo.launcher`'s `PORTS` map: edit and run listen on different ports (so a dev
+/// running both subprocess launchers side by side on one host does not collide). A pod only ever
+/// runs one mode, but the two pod kinds must each probe and dial their own.
+const EDIT_MARIMO_PORT: i32 = 2718;
+const RUN_MARIMO_PORT: i32 = 2719;
 const APP_LABEL: &str = "egret-apps";
 const ANN_USER: &str = "egret.io/user";
 const ANN_WORKSPACE: &str = "egret.io/workspace";
@@ -217,6 +221,7 @@ fn mount(name: &str, path: &str) -> VolumeMount {
 fn marimo_container(
     name: &str,
     mode: &str,
+    port: i32,
     base_url: String,
     extra_env: Vec<EnvVar>,
     cfg: &K8sAppPodConfig,
@@ -236,7 +241,7 @@ fn marimo_container(
         // The image's ENTRYPOINT is `tini -- python -I -m egret_marimo.launcher`.
         args: Some(vec![mode.to_string()]),
         ports: Some(vec![ContainerPort {
-            container_port: MARIMO_PORT,
+            container_port: port,
             protocol: Some("TCP".to_string()),
             ..Default::default()
         }]),
@@ -254,7 +259,7 @@ fn marimo_container(
         }),
         readiness_probe: Some(Probe {
             tcp_socket: Some(TCPSocketAction {
-                port: IntOrString::Int(MARIMO_PORT),
+                port: IntOrString::Int(port),
                 host: None,
             }),
             initial_delay_seconds: Some(2),
@@ -315,7 +320,14 @@ fn pod_spec(container: Container, cfg: &K8sAppPodConfig) -> PodSpec {
 /// The hardened Pod for an author's edit pod. Pure (unit-tested without a cluster).
 pub fn build_pod(key: &EditPodKey, cfg: &K8sAppPodConfig) -> Pod {
     let name = pod_name(key);
-    let container = marimo_container(&name, "edit", format!("/e/{}", key.pod_ref()), vec![], cfg);
+    let container = marimo_container(
+        &name,
+        "edit",
+        EDIT_MARIMO_PORT,
+        format!("/e/{}", key.pod_ref()),
+        vec![],
+        cfg,
+    );
     Pod {
         metadata: ObjectMeta {
             name: Some(name),
@@ -342,6 +354,7 @@ pub fn build_run_pod(key: &RunPodKey, app_id: Uuid, cfg: &K8sAppPodConfig) -> Po
     let container = marimo_container(
         &name,
         "run",
+        RUN_MARIMO_PORT,
         format!("/r/{}", key.pod_ref()),
         extra_env,
         cfg,
@@ -520,10 +533,9 @@ impl KubernetesAppPodLauncher {
         String::from_utf8(bytes.0).map_err(|e| anyhow::Error::from(e).into())
     }
 
-    async fn endpoint(&self, name: &str, ip: &str) -> Result<PodEndpoint> {
+    async fn endpoint(&self, name: &str, ip: &str, port: i32) -> Result<PodEndpoint> {
         Ok(PodEndpoint {
-            base: url::Url::parse(&format!("http://{ip}:{MARIMO_PORT}"))
-                .map_err(anyhow::Error::from)?,
+            base: url::Url::parse(&format!("http://{ip}:{port}")).map_err(anyhow::Error::from)?,
             marimo_token: self.marimo_token(name).await?,
         })
     }
@@ -637,7 +649,7 @@ impl KubernetesAppPodLauncher {
                 Ok(p) => match pod_state(&p) {
                     PodState::Ready(ip) => {
                         self.touch(key, &name).await;
-                        return self.endpoint(&name, &ip).await;
+                        return self.endpoint(&name, &ip, EDIT_MARIMO_PORT).await;
                     }
                     PodState::Spawning => {}
                     PodState::Exited(code) => match exit_action(code) {
@@ -794,7 +806,7 @@ impl KubernetesAppPodLauncher {
                 Ok(p) => match pod_state(&p) {
                     PodState::Ready(ip) => {
                         self.touch_run(key, &name).await;
-                        return self.endpoint(&name, &ip).await;
+                        return self.endpoint(&name, &ip, RUN_MARIMO_PORT).await;
                     }
                     PodState::Spawning => {}
                     PodState::Exited(code) => match exit_action(code) {
@@ -1211,6 +1223,24 @@ mod tests {
             );
         }
         assert_eq!(spec.containers[0].args, Some(vec!["run".to_string()]));
+        // egret_marimo.launcher's PORTS map: run listens on 2719, never 2718 (the edit port) —
+        // a run pod bound to the edit port fails its own readiness probe (connection refused) and
+        // is never schedulable, as found live on kind before this was pinned.
+        assert_eq!(
+            spec.containers[0].ports.as_ref().unwrap()[0].container_port,
+            2719
+        );
+        assert_eq!(
+            spec.containers[0]
+                .readiness_probe
+                .as_ref()
+                .unwrap()
+                .tcp_socket
+                .as_ref()
+                .unwrap()
+                .port,
+            IntOrString::Int(2719)
+        );
 
         let secret = build_run_secret(&k, "tok-pod", "tok-marimo", &cfg());
         let data = secret.string_data.unwrap();
