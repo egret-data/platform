@@ -3382,18 +3382,15 @@ fn kind_perms(kind: &str) -> Option<(&'static str, &'static str, &'static str)> 
         "charts" => Some(("chart", CH_READ, CH_MANAGE)),
         "dashboards" => Some(("dashboard", DB_READ, DB_MANAGE)),
         "datasets" => Some(("dataset", DS_READ, DS_MANAGE)),
-        // Notebooks live in egret-notebook but share the generic folder router;
-        // the perms already exist in the DB (migration 0037). Literal strings so
-        // we don't take a cross-crate dependency.
-        "notebooks" => Some(("notebook", "notebook:read", "notebook:write")),
         "saved_queries" => Some(("saved_query", SQ_READ, SQ_MANAGE)),
-        // Alerts live in egret-automation and share this router the same way
-        // notebooks do; `alert:read` was added by migration 0113 precisely so
-        // this pair exists. Literal strings, again to avoid a cross-crate dep.
+        // Alerts live in egret-automation but share this router the same way
+        // charts/dashboards/datasets do; `alert:read` was added by migration
+        // 0113 precisely so this pair exists. Literal strings so we don't take
+        // a cross-crate dependency.
         "alerts" => Some(("alert", "alert:read", "alert:manage")),
         // Data API endpoints live in egret-dataapi and share this router the way
-        // notebooks and alerts do; both permissions exist from migration 0122.
-        // Literal strings, again to avoid a cross-crate dependency.
+        // alerts does; both permissions exist from migration 0122. Literal
+        // strings, again to avoid a cross-crate dependency.
         "data_api_endpoints" => Some((
             "data_api_endpoint",
             "data_api_endpoint:read",
@@ -3425,7 +3422,7 @@ pub fn folder_router() -> Router<BiState> {
     tag = "folders",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Entity kind: charts | dashboards | datasets | notebooks"),
+        ("kind" = String, Path, description = "Entity kind: charts | dashboards | datasets"),
     ),
     responses(
         (status = 200, description = "Folders for the entity kind in the workspace", body = Vec<FolderDto>),
@@ -3460,7 +3457,7 @@ async fn folders_list(
     tag = "folders",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Entity kind: charts | dashboards | datasets | notebooks"),
+        ("kind" = String, Path, description = "Entity kind: charts | dashboards | datasets"),
     ),
     request_body = CreateFolder,
     responses(
@@ -3500,7 +3497,7 @@ async fn folders_create(
     tag = "folders",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Entity kind: charts | dashboards | datasets | notebooks"),
+        ("kind" = String, Path, description = "Entity kind: charts | dashboards | datasets"),
         ("id" = Uuid, Path, description = "Folder id"),
     ),
     request_body = RenameFolder,
@@ -3538,7 +3535,7 @@ async fn folders_rename(
     tag = "folders",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Entity kind: charts | dashboards | datasets | notebooks"),
+        ("kind" = String, Path, description = "Entity kind: charts | dashboards | datasets"),
         ("id" = Uuid, Path, description = "Folder id"),
     ),
     responses(
@@ -3678,7 +3675,7 @@ pub struct BiChartApi;
 #[openapi(
     paths(folders_list, folders_create, folders_rename, folders_delete),
     components(schemas(FolderDto, CreateFolder, RenameFolder, Ack, ErrorBody)),
-    tags((name = "folders", description = "Generic per-kind folders (charts / dashboards / datasets / notebooks)")),
+    tags((name = "folders", description = "Generic per-kind folders (charts / dashboards / datasets)")),
 )]
 pub struct BiFolderApi;
 
