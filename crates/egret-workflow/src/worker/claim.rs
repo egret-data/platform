@@ -803,7 +803,9 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// `egret.report.send`, `core.http`, `core.slack`) produce a run that
 /// `claim` leases, finds no handler for, and leaves `RUNNING` -- as does a
 /// script task reached without publish (a draft run) under `none`. *(This
-/// read "4 handlers ... 15 rows ... 7 of 15" until W9a Task 12 fix round 1,
+/// read "11 + 2 handlers ... 24 rows ... 7 of 24" until the W9a rebase onto
+/// Data Apps P6a (#629), which removed `egret.python`; "4 handlers ... 15
+/// rows ... 7 of 15" until W9a Task 12 fix round 1,
 /// whose W9a Tasks 11-12 added nine core storage rows and handlers; and
 /// "13 rows ... 9 of 13" until W5a Task 6: W5a folded
 /// `egret.container`/`egret.script.python` into aliases and added the four

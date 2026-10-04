@@ -1777,7 +1777,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `core.storage.Concat`/`Split`/`Reverse`/`DeduplicateItems`/`FilterItems`,
     // the storage ones over the store installed above -- plus
     // `core.storage.Delete`/`PurgeCurrentExecutionFiles`, which need the
-    // pool: thirteen of `spec::registry::TASK_TYPES`' twenty-four rows. With `docker` or `kubernetes` it adds Kestra's four script
+    // pool: thirteen of `spec::registry::TASK_TYPES`' twenty-three rows. With `docker` or `kubernetes` it adds Kestra's four script
     // task types and W4's two aliases over ONE runner built here, gated at run
     // time by the workspace feature `workflow_containers` (off by default) and
     // the `plugin_configurations` image allowlist, and the reaper's tick
@@ -1792,15 +1792,16 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // does not fail the run: it propagates out of `run_one`, the run keeps its
     // lease, `reap` clears only `claimed_at` a `working_timeout` later, `claim`
     // re-selects it, and the cycle repeats for ever with one `warn` per cycle.
-    // `oracle-exec/README.md` item 19 carries this. **Seven of twenty-four
+    // `oracle-exec/README.md` item 19 carries this. **Six of twenty-three
     // publishable types hang in production, whatever the runner** (`egret.sql`,
-    // `egret.python`, `egret.dataapi.call`, `egret.dataset.refresh`,
-    // `egret.report.send`, `core.http`, `core.slack`): 24 rows = these 7 + the
+    // `egret.dataapi.call`, `egret.dataset.refresh`,
+    // `egret.report.send`, `core.http`, `core.slack`): 23 rows = these 6 + the
     // 13 core handlers above + the 4 script types a runner serves. All nine
     // core storage tasks are registered -- W9a Task 11's `Write` and `Size`
     // and Task 12's five in `with_core_tasks`, `Delete` and
     // `PurgeCurrentExecutionFiles` by `handlers::storage::register` inside
-    // `handlers_for`. This comment said "seven of nineteen" until W9a Task 12
+    // `handlers_for`. This comment said "seven of twenty-four" until the W9a rebase onto Data
+    // Apps P6a (#629), which removed `egret.python`; "seven of nineteen" until W9a Task 12
     // fix round 1, "seven of fifteen" until W9a Task 11, and "nine of
     // thirteen" before W5a folded `egret.container`/`egret.script.python`
     // into aliases of four script types that a runner now serves. Publish
