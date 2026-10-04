@@ -628,13 +628,17 @@ fail khi code nó bảo vệ bị cố ý làm hỏng.
   tải lại trang hoặc mở tab thứ hai ở giữa (§5.1).
 - Proxy từ chối các dạng dot-segment, `//` và mã hoá phần trăm của một route bị chặn (40 biến thể raw
   socket của S0), trên HTTP và WebSocket.
-- N session run của một app chạy trong N tiến trình kernel.
+- **Hai người xem khác nhau của cùng một app đã publish rơi vào hai pod khác nhau, không bao giờ
+  chung một pod** (D24) — đã kiểm chứng sống trên kind: [kết quả P5e](plans/2026-10-04-data-apps-p5-live-result.md),
+  cũng tìm ra và sửa hai lỗi thật (cổng container của run pod, và danh sách cổng ingress của
+  NetworkPolicy apps) mà chỉ cluster sống mới lộ ra được.
 - Kiểm thử sống bằng trình duyệt trên kind cho P4 và P5.
 
 ## 11. Hoàn thành khi
 
 - Tác giả xây một app có SQL cell và widget UI trên Trino và trên StarRocks, rồi publish.
-- Hai người xem thấy kết quả theo quyền của chính họ.
+- Hai người xem thấy kết quả theo quyền của chính họ — bao gồm cả run mode, kể từ P5e (2026-10-04):
+  [kết quả sống](plans/2026-10-04-data-apps-p5-live-result.md).
 - Admin mở một app độc hại không ghi được dữ liệu, không đọc được cookie hay response của egret, và không
   hoàn tất được bất kỳ thay đổi trạng thái nào trên egret.
 - Notebook Jupyter đã được gỡ.

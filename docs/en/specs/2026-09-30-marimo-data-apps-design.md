@@ -636,13 +636,17 @@ when the code it guards is broken on purpose.
   editor reloaded or opened a second tab in between (§5.1).
 - The proxy rejects dot-segment, `//` and percent-encoded forms of a blocked route (S0's 40 raw-socket
   variants), on HTTP and WebSocket.
-- N run sessions of one app run in N kernel processes.
+- **Two different viewers of one published app land in two different pods, never one shared pod**
+  (D24) — verified live on kind: [P5e result](plans/2026-10-04-data-apps-p5-live-result.md), which
+  also found and fixed two real defects (a run pod's container port, and the apps NetworkPolicy's
+  ingress port list) that only a live cluster could have shown.
 - Live browser verification on kind for P4 and P5.
 
 ## 11. Done when
 
 - An author builds an app with a SQL cell and a UI widget over Trino and over StarRocks, and publishes it.
-- Two viewers see results under their own permissions.
+- Two viewers see results under their own permissions — covers run mode too, as of P5e
+  (2026-10-04): [live result](plans/2026-10-04-data-apps-p5-live-result.md).
 - An admin opening a malicious app cannot write data, read egret's cookies or responses, or complete any
   state change on egret.
 - The Jupyter notebook is gone.
