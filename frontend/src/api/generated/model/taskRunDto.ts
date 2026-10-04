@@ -50,7 +50,15 @@ export interface TaskRunDto {
   parent_ix?: number | null;
   /** @nullable */
   value?: string | null;
-  /** @nullable */
+  /**
+     * The run's rendered expression (an `If`'s condition, a `Switch`'s
+     * value, a `Loop`'s `values:`, ...), `NULL` until it is rendered. For a
+     * `Loop` whose `values:` named a file it is `"<kestra:/// URI>\n<count>"`
+     * -- the file and how many records it holds -- and **never the records**
+     * (W9a Task 11 fix round 1): they are the file's, read through the
+     * execution file API, and stay out of every task-run response.
+     * @nullable
+     */
   rendered?: string | null;
   /** @nullable */
   rendered_run_if?: string | null;

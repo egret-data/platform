@@ -473,7 +473,7 @@ async fn prune_candidates(
 
 /// FAILED or KILLED loop roots that ended more than `orphan_age` ago, neither
 /// swept nor pruned yet, oldest first. The states are literals, not bound, so
-/// the planner matches migration 0170's partial index
+/// the planner matches migration 0168's partial index
 /// `workflow_executions_unswept_idx` (the test
 /// `the_swept_states_are_the_wire_spellings` pins the spelling).
 async fn sweep_candidates(

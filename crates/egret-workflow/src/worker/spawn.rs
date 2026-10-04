@@ -619,7 +619,7 @@ fn values_of(ctx: &claim::ExecutionCtx, state: &ExecutionState, run: RunIx) -> R
 }
 
 /// Values `from..from + n` of a file `Loop` run, in index order, read from
-/// `workflow.loop_file_values` (migration 0169) by their index: one indexed
+/// `workflow.loop_file_values` (migration 0167) by their index: one indexed
 /// range per spawn, never the whole file (W9a Task 11, fix round 1). Fewer
 /// rows than asked for is corruption -- the run's `rendered` counted them.
 async fn file_values(

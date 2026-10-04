@@ -79,8 +79,9 @@
 ## File Structure
 
 ```text
-migrations/0161_workflow_execution_files.sql                 NEW  T3: the index; executions.replayed_from_execution_id
-migrations/0162_workflow_execution_files_pruned.sql          NEW  T13: executions.files_pruned_at, files_swept_at
+migrations/0166_workflow_execution_files.sql                 NEW  T3: the index; executions.replayed_from_execution_id
+migrations/0167_workflow_loop_file_values.sql                NEW  T11 fix round 1: the values of a Loop over a file
+migrations/0168_workflow_execution_files_pruned.sql          NEW  T13: executions.files_pruned_at, files_swept_at
 crates/egret-storage/Cargo.toml                              MOD  T2: tokio (normal dep), `test-util` feature
 crates/egret-storage/src/lib.rs                              MOD  T2: put_stream, get_stream, head, delete_prefix; MemStore re-export
 crates/egret-storage/src/s3.rs                               MOD  T2: the four methods on S3Store
@@ -284,7 +285,7 @@ async fn a_refused_credential_error_names_the_uri_and_not_the_secret() {
 ## Task 3: The index, URIs, `resolve_readable_many` and the `FileStore`
 
 **Files:**
-- Create `migrations/0161_workflow_execution_files.sql`, `crates/egret-workflow/src/storage/{mod.rs,uri.rs,index.rs}`, `crates/egret-workflow/tests/storage_index.rs`.
+- Create `migrations/0166_workflow_execution_files.sql`, `crates/egret-workflow/src/storage/{mod.rs,uri.rs,index.rs}`, `crates/egret-workflow/tests/storage_index.rs`.
 - Modify `crates/egret-workflow/src/lib.rs` (`pub mod storage;`), `Cargo.toml` (`egret-storage.workspace = true` moves to `[dependencies]`; a self dev-dependency with `features = ["test-util"]`, and `[features] test-util = ["egret-storage/test-util"]`).
 - Modify `src/runners/filters.rs` (extract `slugify_str`), `src/runners/functions.rs` (`base62` → `pub(crate)`).
 - Modify `crates/egret-config/src/lib.rs`, `crates/egret-bin/src/main.rs`.
@@ -293,7 +294,7 @@ async fn a_refused_credential_error_names_the_uri_and_not_the_secret() {
 **Interfaces:**
 
 ```sql
--- migrations/0161_workflow_execution_files.sql (exact DDL; comments as 0138's)
+-- migrations/0166_workflow_execution_files.sql (exact DDL; comments as 0138's)
 CREATE TABLE workflow.execution_files (
   id            bigserial   PRIMARY KEY,
   workspace_id  uuid        NOT NULL,
@@ -1000,13 +1001,13 @@ pub struct Write; pub struct Size; pub struct Delete; pub struct PurgeCurrentExe
 ## Task 13: The pruner
 
 **Files:**
-- Create `migrations/0162_workflow_execution_files_pruned.sql`, `src/storage/prune.rs`, `tests/storage_prune.rs`.
+- Create `migrations/0168_workflow_execution_files_pruned.sql`, `src/storage/prune.rs`, `tests/storage_prune.rs`.
 - Modify `src/storage/mod.rs` (`Unreadable::Pruned`), `src/storage/index.rs`, `src/runtime.rs` (`spawn_with_logs` `:344`, `RuntimeConfig` `:247`), `crates/egret-bin/src/main.rs` (`:1926` area).
 
 **Interfaces:**
 
 ```sql
--- migrations/0162_workflow_execution_files_pruned.sql (exact DDL)
+-- migrations/0168_workflow_execution_files_pruned.sql (exact DDL)
 ALTER TABLE workflow.executions
   ADD COLUMN files_pruned_at timestamptz,   -- set when the pruner deleted this execution's files
   ADD COLUMN files_swept_at  timestamptz;   -- set when the orphan sweep of a FAILED/KILLED execution ran

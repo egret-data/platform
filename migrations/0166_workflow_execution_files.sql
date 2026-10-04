@@ -1,5 +1,5 @@
--- 0161: origin/main ends at 0160 and no remote branch holds a 0161 (checked on
--- every `origin/*` ref before naming this file).
+-- 0166 (written as 0161; renumbered in W9a Task 14 on rebasing onto
+-- origin/main, which owns 0161-0165 for Data Apps; relative order kept).
 --
 -- Workflow W9a Task 3: the index of an execution's files, and the manual
 -- replay's link. See docs/en/specs/2026-10-01-workflow-w9a-internal-storage-design.md

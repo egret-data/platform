@@ -1937,7 +1937,7 @@ async fn a_replay_runs_the_frozen_source_and_inputs_and_not_the_drafts() {
     // `CREATE_NEW_EXECUTION` replacement. A manual replay that took it would
     // make a later retry-replay of the same execution fail a constraint. The
     // manual replay's link is its own column, `replayed_from_execution_id`
-    // (W9a, migration 0161; `tests/storage_index.rs`
+    // (W9a, migration 0166; `tests/storage_index.rs`
     // `the_manual_replay_route_records_its_source`).
     assert_eq!(parent, None);
     assert_eq!(

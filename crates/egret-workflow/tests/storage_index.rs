@@ -1,4 +1,4 @@
-//! W9a Task 3: the file index (`workflow.execution_files`, migration 0161),
+//! W9a Task 3: the file index (`workflow.execution_files`, migration 0166),
 //! the readable set and `storage::resolve_readable_many` -- the ONE function
 //! that decides whether a URI is readable (spec §4.4). Requires DATABASE_URL.
 //!

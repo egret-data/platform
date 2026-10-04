@@ -2043,7 +2043,7 @@ pub struct NewExecution<'a> {
     pub born_failed: bool,
     /// The manual replay's link (W9a spec §4.4 item 3): the execution
     /// `POST .../executions/{id}/replay` replays, written to
-    /// `workflow.executions.replayed_from_execution_id` (migration 0161).
+    /// `workflow.executions.replayed_from_execution_id` (migration 0166).
     /// `None` for every other start. A replay reads its source chain's files.
     pub replayed_from_execution_id: Option<Uuid>,
     /// The execution's id, when the caller had to know it before the row
@@ -2704,7 +2704,7 @@ fn sla_terminal(surface: &Surface, ctx: &ExecutionCtx, state: &ExecutionState) -
 
 /// W9a Task 11: what a render produced beside the state (see `settle`): the
 /// message of each run a render failed with one, and each file `Loop`'s
-/// values, one row per record in file order (migration 0169) -- replacing
+/// values, one row per record in file order (migration 0167) -- replacing
 /// any rows a previous rendering of the same run left, so a run's values
 /// are the ones its current `rendered` counts.
 fn write_render_side(

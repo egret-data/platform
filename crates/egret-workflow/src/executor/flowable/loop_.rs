@@ -363,7 +363,7 @@ pub fn resolve_loop_values(rendered: &str) -> Result<LoopValues, String> {
 /// **not the records** (W9a Task 11, fix round 1). `rendered` is read by
 /// every load of the execution and returned by the task-run API, and a
 /// values file is up to `workflow.storage.max_read_bytes`; the records go to
-/// `workflow.loop_file_values` (migration 0169) in the same transaction, and
+/// `workflow.loop_file_values` (migration 0167) in the same transaction, and
 /// stay there unchanged for the run's life.
 ///
 /// It starts with the URI, so [`values_name_a_file`] tells it apart from

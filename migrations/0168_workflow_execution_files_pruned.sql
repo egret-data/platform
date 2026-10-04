@@ -1,5 +1,5 @@
--- 0170: origin/main holds 0161-0165 and this branch 0161 + 0169; 0170 is clear
--- of both (this branch's own 0161 is renumbered at rebase, W9a Task 14).
+-- 0168 (written as 0170; renumbered in W9a Task 14 on rebasing onto
+-- origin/main, which owns 0161-0165 for Data Apps; relative order kept).
 --
 -- Workflow W9a Task 13: the retention pruner of execution files and the
 -- orphan sweep (docs/en/specs/2026-10-01-workflow-w9a-internal-storage-design.md

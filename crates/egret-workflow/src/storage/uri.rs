@@ -12,7 +12,7 @@ use md5::{Digest, Md5};
 use uuid::Uuid;
 
 /// Kestra's `StorageContext.KESTRA_PROTOCOL` plus the empty authority: every
-/// URI egret accepts starts with exactly these ten bytes (migration 0161
+/// URI egret accepts starts with exactly these ten bytes (migration 0166
 /// checks the same with `left(uri, 10)`).
 pub const SCHEME_PREFIX: &str = "kestra:///";
 

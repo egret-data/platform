@@ -1,7 +1,6 @@
--- 0169: every origin/* ref and local branch was checked before naming this
--- file; the highest migration on any of them is 0168. (This branch's own 0161
--- collides with origin/main's 0161_data_apps_gateway.sql and is renumbered at
--- rebase; this one is clear of both.)
+-- 0167 (written as 0169; renumbered in W9a Task 14 on rebasing onto
+-- origin/main, which owns 0161-0165 for Data Apps; relative order kept:
+-- after 0166_workflow_execution_files, before 0168).
 --
 -- Workflow W9a Task 11, fix round 1: the values of a `Loop` over a file
 -- (spec §9.3), one row per record, in file order.
