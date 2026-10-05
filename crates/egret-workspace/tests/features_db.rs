@@ -123,16 +123,12 @@ async fn set_features_persists_only_the_disabled_ones() {
     let repo = WorkspaceRepo::new(db.clone());
     let ws = seed_ws(&db, &repo).await;
 
-    repo.set_features(
-        ws,
-        &[("notebooks".into(), false), ("charts".into(), true)],
-        None,
-    )
-    .await
-    .unwrap();
+    repo.set_features(ws, &[("apps".into(), false), ("charts".into(), true)], None)
+        .await
+        .unwrap();
 
     let disabled = repo.disabled_features(ws).await.unwrap();
-    assert!(disabled.contains("notebooks"));
+    assert!(disabled.contains("apps"));
     assert!(!disabled.contains("charts"));
 }
 
@@ -142,10 +138,10 @@ async fn re_enabling_clears_the_disabled_set() {
     let repo = WorkspaceRepo::new(db.clone());
     let ws = seed_ws(&db, &repo).await;
 
-    repo.set_features(ws, &[("notebooks".into(), false)], None)
+    repo.set_features(ws, &[("apps".into(), false)], None)
         .await
         .unwrap();
-    repo.set_features(ws, &[("notebooks".into(), true)], None)
+    repo.set_features(ws, &[("apps".into(), true)], None)
         .await
         .unwrap();
 
@@ -178,7 +174,7 @@ async fn set_features_is_atomic_on_a_bad_key() {
     let _ = repo
         .set_features(
             ws,
-            &[("notebooks".into(), false), ("teleporter".into(), false)],
+            &[("apps".into(), false), ("teleporter".into(), false)],
             None,
         )
         .await;

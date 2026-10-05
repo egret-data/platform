@@ -198,69 +198,6 @@ async fn replace_platform_roles_and_check() {
         .is_err());
 }
 
-/// B2-2 Task 1: a user whose ONLY grant is an object grant on a notebook in the
-/// workspace is admitted as an object-guest (`has_object_grant_in_workspace` →
-/// true), matching the folder/dashboard/chart/dataset arms. A user with no grant
-/// is NOT admitted.
-#[tokio::test]
-async fn notebook_object_grant_admits_guest() {
-    let Some(db) = connect().await else {
-        eprintln!("skip");
-        return;
-    };
-    let owner = seed_user(&db).await;
-    let guest = seed_user(&db).await;
-    let stranger = seed_user(&db).await;
-    let authz = Authorizer::new(db.clone());
-    let ws = WorkspaceRepo::new(db.clone())
-        .create(&uniq("nb-ws"), "NB", owner)
-        .await
-        .unwrap();
-
-    // A notebook living in this workspace.
-    let notebook_id: uuid::Uuid = sqlx::query_scalar(
-        "INSERT INTO analytics.notebooks (workspace_id, owner_user_id, name) VALUES ($1, $2, 'NB') RETURNING id",
-    )
-    .bind(ws.id.0)
-    .bind(owner.0)
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-
-    // Grant the guest an object-scoped grant on the notebook (any workspace role).
-    let role_id: uuid::Uuid =
-        sqlx::query_scalar("SELECT id FROM roles WHERE scope = 'workspace' AND name = 'ws_viewer'")
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-    sqlx::query(
-        "INSERT INTO access_grants \
-           (principal_type, principal_id, role_id, scope_type, object_type, scope_id, granted_by) \
-         VALUES ('user', $1, $2, 'object', 'notebook', $3, $1)",
-    )
-    .bind(guest.0)
-    .bind(role_id)
-    .bind(notebook_id)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-
-    assert!(
-        authz
-            .has_object_grant_in_workspace(guest, ws.id)
-            .await
-            .unwrap(),
-        "notebook object grant must admit the guest"
-    );
-    assert!(
-        !authz
-            .has_object_grant_in_workspace(stranger, ws.id)
-            .await
-            .unwrap(),
-        "a user with no notebook grant must NOT be admitted"
-    );
-}
-
 /// B2-flip Task 3: `MemberRepo::add` is one-role-per-member — adding a second
 /// role for the same principal in the same workspace REPLACES the first, leaving
 /// exactly one workspace grant (the delete-then-insert-in-a-tx invariant).

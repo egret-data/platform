@@ -609,7 +609,7 @@ async fn deleting_a_publisher_keeps_their_versions_with_publisher_null() {
     assert_eq!(v.published_by, Some(publisher));
 
     let deleted = egret_auth::users::UserRepo::new(fx.db.clone())
-        .hard_delete(UserId(publisher), fx.uid())
+        .hard_delete(UserId(publisher))
         .await
         .expect("a publisher can be deleted");
     assert!(deleted.is_some(), "the user row was deleted");

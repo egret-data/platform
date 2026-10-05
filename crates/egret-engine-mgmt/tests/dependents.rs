@@ -188,7 +188,7 @@ async fn every_fk_child_of_query_databases_is_classified_by_the_preflight() {
         .collect();
     assert_eq!(
         live.len(),
-        6,
+        5,
         "positive control — the query found the known children: {live:?}"
     );
     assert_eq!(
