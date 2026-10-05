@@ -175,13 +175,14 @@ pub fn too_large(input: &str, cap: u64) -> String {
 
 /// The uploaded body as `put_stream` reads it: counts bytes, refuses the one
 /// that crosses the cap, and keeps the body's own error so it is told apart
-/// from the store's (which `put_stream` reports as its own).
-struct Guarded<'a> {
-    inner: &'a mut (dyn tokio::io::AsyncRead + Send + Unpin),
-    cap: u64,
-    read: u64,
-    over: bool,
-    failed: Option<std::io::Error>,
+/// from the store's (which `put_stream` reports as its own). W9b's
+/// `nsfiles::store::put` counts a namespace file's body with it too.
+pub(super) struct Guarded<'a> {
+    pub(super) inner: &'a mut (dyn tokio::io::AsyncRead + Send + Unpin),
+    pub(super) cap: u64,
+    pub(super) read: u64,
+    pub(super) over: bool,
+    pub(super) failed: Option<std::io::Error>,
 }
 
 impl tokio::io::AsyncRead for Guarded<'_> {

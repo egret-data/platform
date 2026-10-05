@@ -432,6 +432,7 @@ pub async fn open(fs: &FileStore, grant: &Grant, e: &NsEntry)
 
 **Files:**
 - Create `src/storage/lock.rs`. Modify `src/storage/prune.rs` (`LockedSession` `:275-294` moves to `lock.rs`; `prune_pass_with` `:242` uses it unchanged in behaviour), `src/storage/nsfiles/store.rs`, `tests/nsfiles_store.rs`, `tests/storage_prune.rs`; create `tests/nsfiles_s3_live.rs`.
+- *(Added 2026-10-05, finding R3 of Task 2's review.)* Modify `crates/egret-config/src/lib.rs`: `WorkflowStorageConfig::validate` refuses a `workflow.storage.prefix` over 200 bytes, naming the setting (a test at 200 accepted, 201 refused); spec §3 (EN and VI) records the budget.
 
 **Interfaces:**
 - Consumes: Task 2's `Grant`, `NsPath`, `NsEntry`, `NsError`, `CreatedBy`, `resolve`, `FileStore::namespace_object_uri`; W9a's `ObjectStore::{put_stream, head, get_stream, delete}` (`crates/egret-storage/src/lib.rs:46-91`).

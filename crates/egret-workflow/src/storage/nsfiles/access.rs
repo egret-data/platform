@@ -142,8 +142,6 @@ pub fn authorize(
 /// grant (`authorize` only grants Write or Purge where Read is granted too);
 /// Write and Purge need a grant of exactly that access (a Purge grant reaches
 /// child namespaces a Write may not).
-// Task 3's writes are its callers.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn require(grant: &Grant, access: Access) -> egret_core::Result<()> {
     if access == Access::Read || grant.access == access {
         return Ok(());

@@ -1,9 +1,21 @@
 //! W9b Task 2: the read side of `workflow.namespace_files` (migration 0169)
-//! and the objects behind it. Requires DATABASE_URL.
+//! and the objects behind it; W9b Task 3: the write side (`put`,
+//! `create_directory`, `soft_delete`, `move_path`, `purge_revisions`) and its
+//! per-path advisory lock. Requires DATABASE_URL.
 //!
-//! Rows are inserted with plain SQL: Task 3 writes the writer. Every test
-//! makes its own workspaces, so the tests cannot see each other's rows. The
-//! only object store touched is the `MemStore` of `install_mem_for_tests`.
+//! Task 2's read tests insert rows with plain SQL. Every test makes its own
+//! workspaces, so the tests cannot see each other's rows. The only object
+//! stores touched are `MemStore`s (`install_mem_for_tests`'s, or a test's own
+//! fresh one): every delete, purge and move here runs in memory.
+//!
+//! # The concurrency tests are ordered, not timed
+//!
+//! A writer's body is a [`Gated`] reader: it hands over its first byte, says
+//! so, and then waits to be released. "Writer A holds the lock mid-upload" is
+//! therefore an event the test waits for, and so is "writer B is blocked":
+//! either B's body says it started (no lock stopped it) or `pg_locks` shows B
+//! waiting on the path's advisory key ([`blocked_or_started`]). Nothing is
+//! asserted about time; the poll of `pg_locks` only waits for a state.
 
 mod common;
 
@@ -12,9 +24,10 @@ use egret_workflow::storage;
 use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Grant};
 use egret_workflow::storage::nsfiles::path::NsPath;
 use egret_workflow::storage::nsfiles::store::{
-    list_live, namespaces_with_files, open, resolve, revisions, search, NsEntry, Want,
+    create_directory, list_live, move_path, namespaces_with_files, open, purge_revisions, put,
+    resolve, revisions, search, soft_delete, Conflict, NsEntry, Want, Written,
 };
-use egret_workflow::storage::nsfiles::NsError;
+use egret_workflow::storage::nsfiles::{CreatedBy, NsError};
 use tokio::io::AsyncReadExt as _;
 use uuid::Uuid;
 
@@ -603,4 +616,1311 @@ async fn a_store_outage_on_open_is_a_store_error_that_names_no_key() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// W9b Task 3: the write side
+// ═══════════════════════════════════════════════════════════════════════════
+
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+
+use egret_storage::{MemStore, ObjectStore, StorageError};
+use tokio::io::{AsyncRead, ReadBuf};
+use tokio::sync::oneshot;
+
+const W: &str = "w9b.t3";
+
+fn grant(ws: Uuid, access: Access) -> Grant {
+    authorize(ws, Actor::Api, W, access).unwrap()
+}
+
+fn by() -> CreatedBy {
+    CreatedBy::Execution(Uuid::nil())
+}
+
+/// A store hooked for the tests below; with nothing armed it is a `MemStore`.
+#[derive(Default)]
+struct Hooked {
+    mem: MemStore,
+    /// `put_stream` number N (1-based) fails; 0 = none.
+    fail_put_stream_at: AtomicUsize,
+    put_streams: AtomicUsize,
+    /// Every `delete`, in order.
+    deletes: Mutex<Vec<String>>,
+    fail_deletes: AtomicBool,
+    /// The next `delete` says it started and waits to be released.
+    gate_delete: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+}
+
+impl Hooked {
+    fn bytes(&self, key: &str) -> Option<String> {
+        let keys = self.mem.keys();
+        keys.contains(&key.to_string()).then(|| {
+            let mem = self.mem.clone();
+            let key = key.to_string();
+            String::from_utf8(futures_lite_block(
+                async move { mem.get(&key).await.unwrap() },
+            ))
+            .unwrap()
+        })
+    }
+
+    /// Every key under this workspace's namespace-file prefix, with its bytes.
+    fn objects(&self, fs: &storage::FileStore, ws: Uuid) -> Vec<(String, String)> {
+        let prefix = format!("s3://{}/{}{ws}/", fs.bucket, fs.prefix);
+        self.mem
+            .keys()
+            .into_iter()
+            .filter(|k| k.starts_with(&prefix))
+            .map(|k| {
+                let b = self.bytes(&k).unwrap();
+                (k[prefix.len()..].to_string(), b)
+            })
+            .collect()
+    }
+
+    /// Arms the delete gate: answers (started, release).
+    fn arm_delete_gate(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *self.gate_delete.lock().unwrap() = Some((started_tx, release_rx));
+        (started_rx, release_tx)
+    }
+}
+
+/// `MemStore::get` never awaits anything: poll it once.
+fn futures_lite_block<T>(f: impl std::future::Future<Output = T>) -> T {
+    let mut f = std::pin::pin!(f);
+    let waker = std::task::Waker::noop();
+    match f.as_mut().poll(&mut Context::from_waker(waker)) {
+        Poll::Ready(v) => v,
+        Poll::Pending => panic!("MemStore awaited"),
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for Hooked {
+    async fn put(&self, uri: &str, bytes: Vec<u8>) -> Result<(), StorageError> {
+        self.mem.put(uri, bytes).await
+    }
+    async fn get(&self, uri: &str) -> Result<Vec<u8>, StorageError> {
+        self.mem.get(uri).await
+    }
+    async fn delete(&self, uri: &str) -> Result<(), StorageError> {
+        self.deletes.lock().unwrap().push(uri.to_string());
+        let gate = self.gate_delete.lock().unwrap().take();
+        if let Some((started, release)) = gate {
+            let _ = started.send(());
+            let _ = release.await;
+        }
+        if self.fail_deletes.load(Ordering::SeqCst) {
+            return Err(StorageError::S3(format!("{uri}: the store is down")));
+        }
+        self.mem.delete(uri).await
+    }
+    async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError> {
+        self.mem.copy(src, dst).await
+    }
+    async fn list(
+        &self,
+        prefix: &str,
+        delimiter: Option<&str>,
+    ) -> Result<egret_storage::Listing, StorageError> {
+        self.mem.list(prefix, delimiter).await
+    }
+    async fn put_stream(
+        &self,
+        uri: &str,
+        body: &mut (dyn AsyncRead + Send + Unpin),
+        size_hint: Option<u64>,
+    ) -> Result<u64, StorageError> {
+        let n = self.put_streams.fetch_add(1, Ordering::SeqCst) + 1;
+        if n == self.fail_put_stream_at.load(Ordering::SeqCst) {
+            return Err(StorageError::S3(format!("{uri}: put number {n} failed")));
+        }
+        self.mem.put_stream(uri, body, size_hint).await
+    }
+    async fn get_stream(
+        &self,
+        uri: &str,
+    ) -> Result<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>, StorageError> {
+        self.mem.get_stream(uri).await
+    }
+    async fn head(&self, uri: &str) -> Result<Option<u64>, StorageError> {
+        self.mem.head(uri).await
+    }
+}
+
+fn hooked_fs(max_file_bytes: Option<u64>) -> (Arc<Hooked>, storage::FileStore) {
+    let store = Arc::new(Hooked::default());
+    let mut caps = storage::Caps::default();
+    if let Some(cap) = max_file_bytes {
+        caps.max_file_bytes = cap;
+    }
+    let fs = storage::FileStore {
+        store: store.clone(),
+        bucket: "egret-test".into(),
+        prefix: "workflow/".into(),
+        caps,
+        retention_days: 30,
+    };
+    (store, fs)
+}
+
+async fn write(
+    db: &Db,
+    fs: &storage::FileStore,
+    g: &Grant,
+    p: &str,
+    bytes: &str,
+    conflict: Conflict,
+) -> Result<Written, NsError> {
+    let mut body: &[u8] = bytes.as_bytes();
+    put(&db.pool, fs, g, &file(p), &mut body, conflict, by()).await
+}
+
+async fn written(db: &Db, fs: &storage::FileStore, g: &Grant, p: &str, bytes: &str) -> NsEntry {
+    match write(db, fs, g, p, bytes, Conflict::Overwrite).await {
+        Ok(Written::Written(e)) => e,
+        other => panic!("{p}: {other:?}"),
+    }
+}
+
+/// `(revision, deleted)` of every row of `p` (stored form), ascending.
+async fn rows_of(db: &Db, ws: Uuid, p: &str) -> Vec<(i32, bool)> {
+    sqlx::query_as(
+        "SELECT revision, deleted FROM workflow.namespace_files \
+          WHERE workspace_id = $1 AND namespace = $2 AND path = $3 ORDER BY revision",
+    )
+    .bind(ws)
+    .bind(W)
+    .bind(p)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap()
+}
+
+/// Every row of the namespace: (path, revision, deleted, size), by path.
+async fn all_rows(db: &Db, ws: Uuid) -> Vec<(String, i32, bool, i64)> {
+    sqlx::query_as(
+        "SELECT path, revision, deleted, size FROM workflow.namespace_files \
+          WHERE workspace_id = $1 AND namespace = $2 ORDER BY path COLLATE \"C\", revision",
+    )
+    .bind(ws)
+    .bind(W)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap()
+}
+
+async fn read_rev(fs: &storage::FileStore, db: &Db, g: &Grant, p: &str, want: Want) -> String {
+    let mut c = conn(db).await;
+    let e = resolve(&mut c, g, &file(p), want).await.unwrap();
+    let mut s = String::new();
+    open(fs, g, &e)
+        .await
+        .unwrap()
+        .read_to_string(&mut s)
+        .await
+        .unwrap();
+    s
+}
+
+/// A body that hands over `first`, says so on `started`, waits for `release`,
+/// then hands over `rest`.
+struct Gated {
+    first: Option<Vec<u8>>,
+    rest: Vec<u8>,
+    started: Option<oneshot::Sender<()>>,
+    release: Option<oneshot::Receiver<()>>,
+}
+
+impl AsyncRead for Gated {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if let Some(first) = self.first.take() {
+            buf.put_slice(&first);
+            if let Some(tx) = self.started.take() {
+                let _ = tx.send(());
+            }
+            return Poll::Ready(Ok(()));
+        }
+        if let Some(rx) = self.release.as_mut() {
+            match Pin::new(rx).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(_) => self.release = None,
+            }
+        }
+        let rest = std::mem::take(&mut self.rest);
+        buf.put_slice(&rest);
+        Poll::Ready(Ok(()))
+    }
+}
+
+use std::future::Future as _;
+
+/// A gated body and its two handles: (body, started, release).
+fn gated(first: &str, rest: &str) -> (Gated, oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    (
+        Gated {
+            first: Some(first.as_bytes().to_vec()),
+            rest: rest.as_bytes().to_vec(),
+            started: Some(started_tx),
+            release: Some(release_rx),
+        },
+        started_rx,
+        release_tx,
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Seen {
+    /// `pg_locks` shows a session waiting on the key.
+    Blocked,
+    /// The writer's body was read: nothing stopped it.
+    Started,
+}
+
+/// Waits until a session waits on the advisory key of `lock_path` (the FIRST
+/// key the second writer takes: its outermost parent, or itself at the root),
+/// or until `started` fires -- whichever happens. Polling `pg_locks` waits for a
+/// state; nothing here depends on how long anything takes.
+async fn blocked_or_started(
+    db: &Db,
+    ws: Uuid,
+    lock_path: &str,
+    started: &mut oneshot::Receiver<()>,
+) -> Seen {
+    let key: i64 = sqlx::query_scalar("SELECT hashtextextended($1, 0)")
+        .bind(format!("w9b:{ws}:{W}:{lock_path}"))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let waiting = async {
+        loop {
+            let n: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+                   AND ((classid::bigint << 32) | objid::bigint) = $1",
+            )
+            .bind(key)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            if n > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    };
+    // A guard against a hang, not a measurement: either event comes at once
+    // when the code is right, and a wrong key here would otherwise wait for ever.
+    let either = async {
+        tokio::select! {
+            _ = started => Seen::Started,
+            () = waiting => Seen::Blocked,
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(60), either)
+        .await
+        .unwrap_or_else(|_| panic!("neither a wait on {lock_path:?} nor the body's start was seen"))
+}
+
+fn spawn_put(
+    db: &Db,
+    fs: &Arc<storage::FileStore>,
+    g: &Grant,
+    p: &str,
+    mut body: Gated,
+) -> tokio::task::JoinHandle<Result<Written, NsError>> {
+    let (pool, fs, g, p) = (db.pool.clone(), fs.clone(), g.clone(), file(p));
+    tokio::spawn(async move { put(&pool, &fs, &g, &p, &mut body, Conflict::Overwrite, by()).await })
+}
+
+/// THE lock test (§4.2). Writer A holds the path's lock mid-upload when
+/// writer B starts; B must wait, then take the next revision.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_concurrent_writers_of_one_path_get_distinct_revisions_and_keys() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let fs = Arc::new(fs);
+    let g = grant(ws, Access::Write);
+    let mut blocked = 0;
+    for round in 0..20 {
+        // At the root: the path is its only lock key, the one B waits on.
+        let p = format!("/race-{round}.txt");
+        written(&db, &fs, &g, &p, "initial").await;
+        let (body_a, started_a, release_a) = gated("A", "-a");
+        let (body_b, mut started_b, release_b) = gated("B", "-b");
+        let a = spawn_put(&db, &fs, &g, &p, body_a);
+        started_a
+            .await
+            .expect("A's body was read: A holds the lock");
+        let b = spawn_put(&db, &fs, &g, &p, body_b);
+        let seen = blocked_or_started(&db, ws, &p, &mut started_b).await;
+        release_a.send(()).unwrap();
+        let _ = release_b.send(());
+        let (ra, rb) = (a.await.unwrap(), b.await.unwrap());
+        let (ea, eb) = match (ra, rb) {
+            (Ok(Written::Written(ea)), Ok(Written::Written(eb))) => (ea, eb),
+            other => panic!("round {round}: both writers must succeed: {other:?}"),
+        };
+        assert_eq!(
+            (ea.revision, eb.revision),
+            (2, 3),
+            "round {round}: A took 2 while holding the lock, B the next"
+        );
+        let (ka, kb) = (
+            fs.namespace_object_uri(&g, &file(&p), ea.revision),
+            fs.namespace_object_uri(&g, &file(&p), eb.revision),
+        );
+        assert_ne!(ka, kb, "round {round}");
+        assert_eq!(store.bytes(&ka).as_deref(), Some("A-a"), "round {round}");
+        assert_eq!(store.bytes(&kb).as_deref(), Some("B-b"), "round {round}");
+        assert_eq!(
+            rows_of(&db, ws, &p).await,
+            [(1, false), (2, false), (3, false)]
+        );
+        assert_eq!(
+            seen,
+            Seen::Blocked,
+            "round {round}: B was not stopped by the lock"
+        );
+        blocked += 1;
+    }
+    assert_eq!(blocked, 20);
+}
+
+/// `/a/x` locks `/a` as a parent and the file `/a` locks `/a`: the same key
+/// (`lock_path`), so one waits and then sees the other's row. Both orders.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_writer_of_a_child_and_a_writer_of_a_file_named_like_its_parent_never_both_win() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (_store, fs) = hooked_fs(None);
+    let fs = Arc::new(fs);
+    let g = grant(ws, Access::Write);
+    for round in 0..20 {
+        let parent = format!("/p{round}");
+        let child = format!("{parent}/x");
+        let child_first = round % 2 == 0;
+        let (first, second) = if child_first {
+            (&child, &parent)
+        } else {
+            (&parent, &child)
+        };
+        let (body_1, started_1, release_1) = gated("1", "");
+        let (body_2, mut started_2, release_2) = gated("2", "");
+        let h1 = spawn_put(&db, &fs, &g, first, body_1);
+        started_1.await.unwrap();
+        let h2 = spawn_put(&db, &fs, &g, second, body_2);
+        let seen = blocked_or_started(&db, ws, &parent, &mut started_2).await;
+        release_1.send(()).unwrap();
+        let _ = release_2.send(());
+        let (r1, r2) = (h1.await.unwrap(), h2.await.unwrap());
+        let won = [&r1, &r2]
+            .iter()
+            .filter(|r| matches!(r, Ok(Written::Written(_))))
+            .count();
+        assert_eq!(won, 1, "round {round}: exactly one wins: {r1:?} / {r2:?}");
+        // The one that waited lost, naming its path.
+        match &r2 {
+            Err(NsError::Conflict(m)) => {
+                assert!(m.contains(&format!("'{second}'")), "round {round}: {m}");
+                let why = if child_first {
+                    "a directory already exists"
+                } else {
+                    "is a file"
+                };
+                assert!(m.contains(why), "round {round}: {m}");
+            }
+            other => panic!("round {round}: {other:?}"),
+        }
+        assert_eq!(seen, Seen::Blocked, "round {round}");
+    }
+}
+
+/// w9b `layout`: revision 1 at the path, then `.v2`, `.v3`; the parent
+/// directory has a row and no object.
+#[tokio::test]
+async fn revisions_number_one_then_v2_v3_as_the_artifact_lays_them_out() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    for (want, body) in [(1, "one"), (2, "two!"), (3, "three")] {
+        let e = written(&db, &fs, &g, "/a/b.txt", body).await;
+        assert_eq!(
+            (e.revision, e.size, e.deleted),
+            (want, body.len() as u64, false)
+        );
+        assert_eq!((e.workspace, e.namespace.as_str()), (ws, W));
+    }
+    let base = "w9b/t3/_files/a/b.txt";
+    assert_eq!(
+        store.objects(&fs, ws),
+        [
+            (base.to_string(), "one".to_string()),
+            (format!("{base}.v2"), "two!".to_string()),
+            (format!("{base}.v3"), "three".to_string()),
+        ]
+    );
+    assert_eq!(
+        all_rows(&db, ws).await,
+        [
+            ("/a/".into(), 1, false, 0),
+            ("/a/b.txt".into(), 1, false, 3),
+            ("/a/b.txt".into(), 2, false, 4),
+            ("/a/b.txt".into(), 3, false, 5),
+        ]
+    );
+    assert_eq!(
+        read_rev(&fs, &db, &g, "/a/b.txt", Want::Latest).await,
+        "three"
+    );
+    assert_eq!(
+        read_rev(&fs, &db, &g, "/a/b.txt", Want::Revision(2)).await,
+        "two!"
+    );
+}
+
+#[tokio::test]
+async fn conflict_error_and_skip() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/up/m.txt", "first").await;
+    let err = write(&db, &fs, &g, "/up/m.txt", "second", Conflict::Error)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Conflict(m)
+            if m.contains("'/up/m.txt'") && m.contains("ERROR") && m.contains(W)),
+        "{err:?}"
+    );
+    let skipped = write(&db, &fs, &g, "/up/m.txt", "third", Conflict::Skip)
+        .await
+        .unwrap();
+    assert_eq!(skipped, Written::Skipped(file("/up/m.txt")));
+    // Nothing written by either: one row, one object, its bytes.
+    assert_eq!(rows_of(&db, ws, "/up/m.txt").await, [(1, false)]);
+    assert_eq!(
+        store.objects(&fs, ws),
+        [("w9b/t3/_files/up/m.txt".to_string(), "first".to_string())]
+    );
+    // The controls: a new path is written whatever the rule, and so is a
+    // soft-deleted one (it does not exist to a reader).
+    for (p, c) in [
+        ("/up/n.txt", Conflict::Error),
+        ("/up/o.txt", Conflict::Skip),
+    ] {
+        assert!(matches!(
+            write(&db, &fs, &g, p, "x", c).await,
+            Ok(Written::Written(_))
+        ));
+    }
+    soft_delete(&db.pool, &g, &file("/up/m.txt")).await.unwrap();
+    let e = match write(&db, &fs, &g, "/up/m.txt", "again", Conflict::Error).await {
+        Ok(Written::Written(e)) => e,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(e.revision, 2);
+}
+
+/// R1, w9b `layout`: three revisions, a delete, a rewrite.
+#[tokio::test]
+async fn rewriting_a_soft_deleted_path_creates_the_next_revision_live() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (_store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    for body in ["one", "two!", "three"] {
+        written(&db, &fs, &g, "/a/b.txt", body).await;
+    }
+    let marked = soft_delete(&db.pool, &g, &file("/a/b.txt")).await.unwrap();
+    assert_eq!(
+        marked
+            .iter()
+            .map(|e| (e.path.as_str(), e.revision, e.deleted))
+            .collect::<Vec<_>>(),
+        [("/a/b.txt", 3, true)]
+    );
+    let mut c = conn(&db).await;
+    assert!(matches!(
+        resolve(&mut c, &g, &file("/a/b.txt"), Want::Latest).await,
+        Err(NsError::NotFound(_))
+    ));
+    let e = written(&db, &fs, &g, "/a/b.txt", "four").await;
+    assert_eq!((e.revision, e.deleted), (4, false));
+    let revs = revisions(&mut c, &g, &file("/a/b.txt")).await.unwrap();
+    assert_eq!(
+        revs.iter()
+            .map(|e| (e.revision, e.deleted))
+            .collect::<Vec<_>>(),
+        [(1, false), (2, false), (3, true), (4, false)]
+    );
+    // `layout.read_by_revision_after_rewrite`.
+    for (n, body) in [(1, "one"), (2, "two!"), (3, "three"), (4, "four")] {
+        assert_eq!(
+            read_rev(&fs, &db, &g, "/a/b.txt", Want::Revision(n)).await,
+            body
+        );
+    }
+    assert_eq!(
+        read_rev(&fs, &db, &g, "/a/b.txt", Want::Latest).await,
+        "four"
+    );
+}
+
+/// §4.2 step 4, both ways and at a parent: a live row of the other kind is a
+/// conflict naming the path; a soft-deleted one is purged first (a file's
+/// objects with its rows).
+#[tokio::test]
+async fn a_live_directory_where_a_file_is_written_is_a_conflict_and_a_deleted_one_is_purged_first()
+{
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    let mut c = conn(&db).await;
+
+    // A file where a live directory is.
+    create_directory(&db.pool, &fs, &g, &dir("/d"), by())
+        .await
+        .unwrap();
+    let err = write(&db, &fs, &g, "/d", "x", Conflict::Overwrite)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Conflict(m) if m.contains("'/d'") && m.contains("a directory already exists")),
+        "{err:?}"
+    );
+    assert_eq!(rows_of(&db, ws, "/d").await, []);
+    // ... deleted: the directory's row goes, the file is written.
+    soft_delete(&db.pool, &g, &dir("/d")).await.unwrap();
+    assert_eq!(written(&db, &fs, &g, "/d", "file").await.revision, 1);
+    assert_eq!(
+        rows_of(&db, ws, "/d/").await,
+        [],
+        "the deleted directory was purged"
+    );
+
+    // A directory where a live file is.
+    written(&db, &fs, &g, "/f", "f1").await;
+    written(&db, &fs, &g, "/f", "f2").await;
+    let err = create_directory(&db.pool, &fs, &g, &dir("/f"), by())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Conflict(m) if m.contains("'/f'") && m.contains("a file already exists")),
+        "{err:?}"
+    );
+    // ... deleted: every revision's row and object goes first.
+    soft_delete(&db.pool, &g, &file("/f")).await.unwrap();
+    let d = create_directory(&db.pool, &fs, &g, &dir("/f"), by())
+        .await
+        .unwrap();
+    assert_eq!(
+        (d.path.as_str(), d.is_directory, d.deleted),
+        ("/f/", true, false)
+    );
+    assert!(matches!(
+        revisions(&mut c, &g, &file("/f")).await,
+        Err(NsError::NotFound(_))
+    ));
+    let keys: Vec<String> = store.objects(&fs, ws).into_iter().map(|(k, _)| k).collect();
+    assert_eq!(
+        keys,
+        ["w9b/t3/_files/d"],
+        "the deleted file's two objects are gone"
+    );
+
+    // A live file where a parent directory goes, then deleted.
+    written(&db, &fs, &g, "/p", "p").await;
+    let err = write(&db, &fs, &g, "/p/x", "x", Conflict::Overwrite)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Conflict(m) if m.contains("'/p/x'") && m.contains("its parent '/p' is a file")),
+        "{err:?}"
+    );
+    soft_delete(&db.pool, &g, &file("/p")).await.unwrap();
+    written(&db, &fs, &g, "/p/x", "x").await;
+    assert_eq!(rows_of(&db, ws, "/p").await, []);
+    assert_eq!(rows_of(&db, ws, "/p/").await, [(1, false)]);
+    assert!(store
+        .objects(&fs, ws)
+        .iter()
+        .all(|(k, _)| k != "w9b/t3/_files/p"));
+}
+
+#[tokio::test]
+async fn parents_are_created_and_an_existing_parent_is_left_alone() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    let u = CreatedBy::User(user.0);
+    let execution = Uuid::new_v4();
+    let who = |p: &'static str| {
+        let pool = db.pool.clone();
+        async move {
+            sqlx::query_as::<
+                _,
+                (
+                    Option<Uuid>,
+                    Option<Uuid>,
+                    chrono::DateTime<chrono::Utc>,
+                    bool,
+                ),
+            >(
+                "SELECT created_by_user, created_by_execution, created_at, deleted \
+                   FROM workflow.namespace_files \
+                  WHERE workspace_id = $1 AND namespace = $2 AND path = $3",
+            )
+            .bind(ws)
+            .bind(W)
+            .bind(p)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    // `layout.create_directory`: `/d1/d2` makes both rows, no object.
+    let d2 = create_directory(&db.pool, &fs, &g, &dir("d1/d2"), u)
+        .await
+        .unwrap();
+    assert_eq!(d2.path.as_str(), "/d1/d2/");
+    assert_eq!(
+        all_rows(&db, ws).await,
+        [
+            ("/d1/".into(), 1, false, 0),
+            ("/d1/d2/".into(), 1, false, 0)
+        ]
+    );
+    assert!(store.objects(&fs, ws).is_empty());
+    // Idempotent.
+    let again = create_directory(&db.pool, &fs, &g, &dir("/d1/d2/"), by())
+        .await
+        .unwrap();
+    assert_eq!(again, d2);
+
+    let before = who("/d1/").await;
+    let mut body: &[u8] = b"z";
+    put(
+        &db.pool,
+        &fs,
+        &g,
+        &file("/d1/e/z.txt"),
+        &mut body,
+        Conflict::Overwrite,
+        CreatedBy::Execution(execution),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        who("/d1/").await,
+        before,
+        "an existing parent is left alone"
+    );
+    let (u_e, x_e, _, _) = who("/d1/e/").await;
+    assert_eq!(
+        (u_e, x_e),
+        (None, Some(execution)),
+        "the new parent is the writer's"
+    );
+    assert_eq!(before.0, Some(user.0));
+
+    // A soft-deleted parent is live again once something is written under it.
+    soft_delete(&db.pool, &g, &dir("/d1")).await.unwrap();
+    written(&db, &fs, &g, "/d1/e/w.txt", "w").await;
+    let mut c = conn(&db).await;
+    let live = list_live(&mut c, &g, None, true, 100).await.unwrap();
+    assert_eq!(paths(&live), ["/d1/", "/d1/e/", "/d1/e/w.txt"]);
+    assert!(who("/d1/d2/").await.3, "a sibling stays deleted");
+    assert_eq!(rows_of(&db, ws, "/d1/e/z.txt").await, [(1, true)]);
+}
+
+/// A body that hands over `n` bytes, then fails.
+struct Breaks(usize);
+
+impl AsyncRead for Breaks {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.0 == 0 {
+            return Poll::Ready(Err(std::io::Error::other("the body broke (detail-xyz)")));
+        }
+        let n = self.0.min(buf.remaining());
+        buf.put_slice(&b"abc"[..n]);
+        self.0 -= n;
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn a_failed_upload_rolls_back_and_the_next_write_reuses_the_revision() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/f.txt", "one").await;
+    // An orphan at revision 2's key, as a failed multipart upload might leave.
+    let v2 = fs.namespace_object_uri(&g, &file("/f.txt"), 2);
+    store.mem.put(&v2, b"orphan".to_vec()).await.unwrap();
+    let mut body = Breaks(3);
+    let err = put(
+        &db.pool,
+        &fs,
+        &g,
+        &file("/f.txt"),
+        &mut body,
+        Conflict::Overwrite,
+        by(),
+    )
+    .await
+    .unwrap_err();
+    match &err {
+        NsError::Store(m) => {
+            assert!(m.contains("'/f.txt'"), "{m}");
+            for leak in ["s3://", "detail-xyz"] {
+                assert!(!m.contains(leak), "{m} leaks {leak}");
+            }
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(rows_of(&db, ws, "/f.txt").await, [(1, false)], "no row");
+    let e = written(&db, &fs, &g, "/f.txt", "two").await;
+    assert_eq!(e.revision, 2, "the same revision again");
+    assert_eq!(
+        store.bytes(&v2).as_deref(),
+        Some("two"),
+        "the orphan is overwritten"
+    );
+}
+
+#[tokio::test]
+async fn a_file_over_max_file_bytes_is_refused_naming_the_cap_and_leaves_no_row() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(Some(4));
+    let g = grant(ws, Access::Write);
+    let err = write(&db, &fs, &g, "/big/x.bin", "12345", Conflict::Overwrite)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::TooLarge(m)
+            if m.contains("workflow.storage.max_file_bytes") && m.contains(" 4 bytes") && m.contains("'/big/x.bin'")),
+        "{err:?}"
+    );
+    assert_eq!(all_rows(&db, ws).await, [], "no row, not even the parent's");
+    assert!(store.objects(&fs, ws).is_empty());
+    // The control: at the cap.
+    assert_eq!(written(&db, &fs, &g, "/big/x.bin", "1234").await.size, 4);
+}
+
+#[tokio::test]
+async fn soft_delete_marks_the_path_and_every_child_in_one_statement() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/d/a", "a1").await;
+    written(&db, &fs, &g, "/d/a", "a2").await;
+    written(&db, &fs, &g, "/d/b/c", "c").await;
+    written(&db, &fs, &g, "/e", "e").await;
+    let objects = store.objects(&fs, ws);
+    let marked = soft_delete(&db.pool, &g, &dir("/d")).await.unwrap();
+    assert_eq!(
+        marked
+            .iter()
+            .map(|e| (e.path.as_str(), e.revision, e.deleted))
+            .collect::<Vec<_>>(),
+        [
+            ("/d/", 1, true),
+            ("/d/a", 2, true),
+            ("/d/b/", 1, true),
+            ("/d/b/c", 1, true)
+        ]
+    );
+    // Only each path's latest row is marked; objects are kept.
+    assert_eq!(rows_of(&db, ws, "/d/a").await, [(1, false), (2, true)]);
+    assert_eq!(rows_of(&db, ws, "/e").await, [(1, false)]);
+    assert_eq!(store.objects(&fs, ws), objects);
+    let mut c = conn(&db).await;
+    assert_eq!(
+        paths(&list_live(&mut c, &g, None, true, 10).await.unwrap()),
+        ["/e"]
+    );
+    // Idempotent, and a missing path is not an error (§9).
+    assert!(soft_delete(&db.pool, &g, &dir("/d"))
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(soft_delete(&db.pool, &g, &file("/nope"))
+        .await
+        .unwrap()
+        .is_empty());
+    // A file path takes nothing under a same-named directory.
+    written(&db, &fs, &g, "/k/x", "x").await;
+    assert!(soft_delete(&db.pool, &g, &file("/k"))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(rows_of(&db, ws, "/k/x").await, [(1, false)]);
+}
+
+/// `left(path, length($3)) = $3`, never `LIKE`: `_` is a wildcard there.
+#[tokio::test]
+async fn soft_delete_does_not_touch_a_sibling_with_a_shared_prefix() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (_store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    for p in ["/a/x", "/ab/x", "/a_/x", "/a_b", "/aXb"] {
+        written(&db, &fs, &g, p, "x").await;
+    }
+    let marked = soft_delete(&db.pool, &g, &dir("/a_")).await.unwrap();
+    assert_eq!(paths(&marked), ["/a_/", "/a_/x"]);
+    let marked = soft_delete(&db.pool, &g, &dir("/a")).await.unwrap();
+    assert_eq!(paths(&marked), ["/a/", "/a/x"]);
+    let marked = soft_delete(&db.pool, &g, &file("/a_b")).await.unwrap();
+    assert_eq!(paths(&marked), ["/a_b"]);
+    let mut c = conn(&db).await;
+    assert_eq!(
+        paths(&list_live(&mut c, &g, None, true, 10).await.unwrap()),
+        ["/aXb", "/ab/", "/ab/x"]
+    );
+}
+
+#[tokio::test]
+async fn move_refuses_a_live_target() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/m/a", "a").await;
+    written(&db, &fs, &g, "/m/b", "b").await;
+    let before = (all_rows(&db, ws).await, store.objects(&fs, ws));
+    let err = move_path(&db.pool, &fs, &g, &file("/m/a"), &file("/m/b"), by())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Conflict(m) if m.contains("'/m/b' already exists") && m.contains("'/m/a'")),
+        "{err:?}"
+    );
+    // A live directory of the other kind at the target, and a live file
+    // where the target's parent goes.
+    create_directory(&db.pool, &fs, &g, &dir("/m/c"), by())
+        .await
+        .unwrap();
+    let err = move_path(&db.pool, &fs, &g, &file("/m/a"), &file("/m/c"), by())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Conflict(m) if m.contains("'/m/c/' already exists")),
+        "{err:?}"
+    );
+    let err = move_path(&db.pool, &fs, &g, &file("/m/a"), &file("/m/b/z"), by())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Conflict(m) if m.contains("its parent '/m/b' is a file")),
+        "{err:?}"
+    );
+    // A missing source: 404 naming it (application of R3), nothing written.
+    let err = move_path(
+        &db.pool,
+        &fs,
+        &g,
+        &file("/nope.txt"),
+        &file("/nope2.txt"),
+        by(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&err, NsError::NotFound(m) if m.contains("'/nope.txt'")),
+        "{err:?}"
+    );
+    // Under itself.
+    let err = move_path(&db.pool, &fs, &g, &dir("/m"), &dir("/m/inner"), by())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Author(m) if m.contains("under itself")),
+        "{err:?}"
+    );
+    let mut rows = before.0.clone();
+    rows.push(("/m/c/".into(), 1, false, 0));
+    rows.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()).then(a.1.cmp(&b.1)));
+    assert_eq!(
+        (all_rows(&db, ws).await, store.objects(&fs, ws)),
+        (rows, before.1)
+    );
+    // The control: a soft-deleted target is history, purged, and the move goes.
+    soft_delete(&db.pool, &g, &file("/m/b")).await.unwrap();
+    let moved = move_path(&db.pool, &fs, &g, &file("/m/a"), &file("/m/b"), by())
+        .await
+        .unwrap();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(rows_of(&db, ws, "/m/b").await, [(1, false)]);
+    assert_eq!(read_rev(&fs, &db, &g, "/m/b", Want::Latest).await, "a");
+}
+
+#[tokio::test]
+async fn move_copies_every_revision_and_child_then_purges_the_source() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    for body in ["f1", "f2", "f3"] {
+        written(&db, &fs, &g, "/src/f", body).await;
+    }
+    written(&db, &fs, &g, "/src/sub/g", "g1").await;
+    written(&db, &fs, &g, "/src/gone", "x").await;
+    soft_delete(&db.pool, &g, &file("/src/gone")).await.unwrap();
+    written(&db, &fs, &g, "/srcx", "neighbour").await;
+    let pairs = move_path(&db.pool, &fs, &g, &dir("/src"), &dir("/dst/in"), by())
+        .await
+        .unwrap();
+    assert_eq!(
+        pairs
+            .iter()
+            .map(|(s, d)| (
+                s.path.as_str(),
+                d.path.as_str(),
+                s.revision,
+                d.revision,
+                d.deleted
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("/src/", "/dst/in/", 1, 1, false),
+            ("/src/f", "/dst/in/f", 1, 1, false),
+            ("/src/f", "/dst/in/f", 2, 2, false),
+            ("/src/f", "/dst/in/f", 3, 3, false),
+            ("/src/gone", "/dst/in/gone", 1, 1, true),
+            ("/src/sub/", "/dst/in/sub/", 1, 1, false),
+            ("/src/sub/g", "/dst/in/sub/g", 1, 1, false),
+        ]
+    );
+    assert_eq!(
+        all_rows(&db, ws).await,
+        [
+            ("/dst/".into(), 1, false, 0),
+            ("/dst/in/".into(), 1, false, 0),
+            ("/dst/in/f".into(), 1, false, 2),
+            ("/dst/in/f".into(), 2, false, 2),
+            ("/dst/in/f".into(), 3, false, 2),
+            ("/dst/in/gone".into(), 1, true, 1),
+            ("/dst/in/sub/".into(), 1, false, 0),
+            ("/dst/in/sub/g".into(), 1, false, 2),
+            ("/srcx".into(), 1, false, 9),
+        ]
+    );
+    let base = "w9b/t3/_files";
+    assert_eq!(
+        store.objects(&fs, ws),
+        [
+            (format!("{base}/dst/in/f"), "f1".into()),
+            (format!("{base}/dst/in/f.v2"), "f2".into()),
+            (format!("{base}/dst/in/f.v3"), "f3".into()),
+            (format!("{base}/dst/in/gone"), "x".into()),
+            (format!("{base}/dst/in/sub/g"), "g1".into()),
+            (format!("{base}/srcx"), "neighbour".into()),
+        ]
+    );
+    for (n, body) in [(1, "f1"), (2, "f2"), (3, "f3")] {
+        assert_eq!(
+            read_rev(&fs, &db, &g, "/dst/in/f", Want::Revision(n)).await,
+            body
+        );
+    }
+    // A file with its revisions, into a new directory.
+    written(&db, &fs, &g, "/one.txt", "1").await;
+    written(&db, &fs, &g, "/one.txt", "22").await;
+    let pairs = move_path(
+        &db.pool,
+        &fs,
+        &g,
+        &file("/one.txt"),
+        &file("/deep/two.txt"),
+        by(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(pairs.len(), 2);
+    assert_eq!(rows_of(&db, ws, "/deep/").await, [(1, false)]);
+    assert_eq!(
+        rows_of(&db, ws, "/deep/two.txt").await,
+        [(1, false), (2, false)]
+    );
+    assert_eq!(rows_of(&db, ws, "/one.txt").await, []);
+    assert_eq!(
+        read_rev(&fs, &db, &g, "/deep/two.txt", Want::Latest).await,
+        "22"
+    );
+}
+
+#[tokio::test]
+async fn move_that_fails_mid_copy_purges_its_copies_in_reverse_and_leaves_the_source() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/s/a", "a1").await;
+    written(&db, &fs, &g, "/s/a", "a2").await;
+    written(&db, &fs, &g, "/s/b", "b1").await;
+    let before = (all_rows(&db, ws).await, store.objects(&fs, ws));
+    // The copies' put_streams are 4, 5, 6: the third copy fails.
+    assert_eq!(store.put_streams.load(Ordering::SeqCst), 3);
+    store.fail_put_stream_at.store(6, Ordering::SeqCst);
+    store.deletes.lock().unwrap().clear();
+    let err = move_path(&db.pool, &fs, &g, &dir("/s"), &dir("/t"), by())
+        .await
+        .unwrap_err();
+    match &err {
+        NsError::Store(m) => {
+            assert!(
+                m.contains("'/s/'") && m.contains("'/t/'") && m.contains("nothing was moved"),
+                "{m}"
+            );
+            assert!(!m.contains("s3://"), "{m}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        (all_rows(&db, ws).await, store.objects(&fs, ws)),
+        before,
+        "the source is untouched and no copy is left"
+    );
+    // The copies made (`/t/a` revisions 1 and 2) were removed last first.
+    let prefix = format!("s3://egret-test/workflow/{ws}/w9b/t3/_files");
+    assert_eq!(
+        *store.deletes.lock().unwrap(),
+        [format!("{prefix}/t/a.v2"), format!("{prefix}/t/a")]
+    );
+}
+
+/// §8.4 with a writer in the window: the purge has committed its row deletes
+/// and is about to delete the object when a writer of the same path starts.
+/// The writer must wait for the purge's SESSION lock; a transaction lock
+/// (released by that commit) would let it write revision 1 to the very key
+/// the purge then deletes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_purge_and_a_writer_never_leave_a_row_without_an_object() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let fs = Arc::new(fs);
+    let g = grant(ws, Access::Write);
+    let p = "/purged.txt";
+    written(&db, &fs, &g, p, "old").await;
+    let (delete_started, release_delete) = store.arm_delete_gate();
+    let purge = {
+        let (pool, fs, g) = (db.pool.clone(), fs.clone(), g.clone());
+        tokio::spawn(async move { purge_revisions(&pool, &fs, &g, &file(p), &[1]).await })
+    };
+    delete_started.await.unwrap();
+    assert_eq!(
+        rows_of(&db, ws, p).await,
+        [],
+        "the rows went first, committed"
+    );
+    let (body, mut started, release_writer) = gated("n", "ew");
+    let writer = spawn_put(&db, &fs, &g, p, body);
+    let seen = blocked_or_started(&db, ws, p, &mut started).await;
+    if seen == Seen::Started {
+        // Nothing stopped the writer: let it finish before the purge goes on.
+        release_writer.send(()).unwrap();
+        writer.await.unwrap().unwrap();
+        release_delete.send(()).unwrap();
+        assert_eq!(purge.await.unwrap().unwrap(), 1);
+    } else {
+        release_delete.send(()).unwrap();
+        assert_eq!(purge.await.unwrap().unwrap(), 1);
+        let _ = release_writer.send(());
+        writer.await.unwrap().unwrap();
+    }
+    let rows = rows_of(&db, ws, p).await;
+    assert!(!rows.is_empty());
+    for (rev, _) in rows {
+        let key = fs.namespace_object_uri(&g, &file(p), rev as u32);
+        assert!(
+            fs.store.head(&key).await.unwrap().is_some(),
+            "revision {rev}'s row names no object"
+        );
+    }
+    assert_eq!(read_rev(&fs, &db, &g, p, Want::Latest).await, "new");
+    assert_eq!(seen, Seen::Blocked);
+}
+
+/// §8.4's order, observed: when the object delete runs, the row delete is
+/// already committed (another connection sees no row).
+#[tokio::test]
+async fn a_purge_commits_its_row_deletes_before_it_deletes_an_object() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let fs = Arc::new(fs);
+    let g = grant(ws, Access::Purge);
+    let w = grant(ws, Access::Write);
+    written(&db, &fs, &w, "/o.txt", "1").await;
+    written(&db, &fs, &w, "/o.txt", "2").await;
+    let (delete_started, release_delete) = store.arm_delete_gate();
+    let purge = {
+        let (pool, fs, g) = (db.pool.clone(), fs.clone(), g.clone());
+        tokio::spawn(async move { purge_revisions(&pool, &fs, &g, &file("/o.txt"), &[1, 7]).await })
+    };
+    delete_started.await.unwrap();
+    assert_eq!(rows_of(&db, ws, "/o.txt").await, [(2, false)]);
+    let v1 = fs.namespace_object_uri(&w, &file("/o.txt"), 1);
+    assert!(store.bytes(&v1).is_some(), "the object is deleted after");
+    release_delete.send(()).unwrap();
+    assert_eq!(
+        purge.await.unwrap().unwrap(),
+        1,
+        "revision 7 has no row: not counted"
+    );
+    assert!(store.bytes(&v1).is_none());
+    assert_eq!(*store.deletes.lock().unwrap(), [v1]);
+}
+
+/// §11: the row is gone, so the file is gone for every reader; a failed
+/// object delete is an orphan, not an error.
+#[tokio::test]
+async fn an_object_delete_that_fails_after_the_commit_is_an_orphan_not_an_error() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/x", "x").await;
+    store.fail_deletes.store(true, Ordering::SeqCst);
+    assert_eq!(
+        purge_revisions(&db.pool, &fs, &g, &file("/x"), &[1])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(rows_of(&db, ws, "/x").await, []);
+    assert_eq!(store.objects(&fs, ws).len(), 1, "the orphan");
+}
+
+/// The PostgreSQL fact the purge relies on, measured on this database: a
+/// session advisory lock and a transaction advisory lock on one key conflict,
+/// both ways.
+#[tokio::test]
+async fn a_session_lock_blocks_a_transaction_lock_on_the_same_key() {
+    let Some(db) = common::db().await else { return };
+    let key: i64 = sqlx::query_scalar("SELECT hashtextextended($1, 0)")
+        .bind(format!("w9b:{}:t3:fact", Uuid::new_v4()))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let mut session = conn(&db).await;
+    let mut other = conn(&db).await;
+    let (try_xact, try_session, unlock) = (
+        "SELECT pg_try_advisory_xact_lock($1)",
+        "SELECT pg_try_advisory_lock($1)",
+        "SELECT pg_advisory_unlock($1)",
+    );
+    assert!(ask(&mut session, try_session, key).await);
+    let mut tx = sqlx::Connection::begin(&mut *other).await.unwrap();
+    assert!(
+        !ask(&mut tx, try_xact, key).await,
+        "a session lock blocks a transaction lock"
+    );
+    tx.rollback().await.unwrap();
+    assert!(ask(&mut session, unlock, key).await);
+    // The control: free, it is taken.
+    let mut tx = sqlx::Connection::begin(&mut *other).await.unwrap();
+    assert!(ask(&mut tx, try_xact, key).await);
+    // And the other way: a transaction lock blocks a session lock.
+    assert!(
+        !ask(&mut session, try_session, key).await,
+        "a transaction lock blocks a session lock"
+    );
+    tx.commit().await.unwrap();
+    assert!(
+        ask(&mut session, try_session, key).await,
+        "released by the commit"
+    );
+    assert!(ask(&mut session, unlock, key).await);
+}
+
+async fn ask(c: &mut sqlx::PgConnection, sql: &'static str, key: i64) -> bool {
+    sqlx::query_scalar(sql)
+        .bind(key)
+        .fetch_one(c)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_write_with_a_read_grant_is_an_internal_error() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let w = grant(ws, Access::Write);
+    written(&db, &fs, &w, "/k", "k").await;
+    let before = (all_rows(&db, ws).await, store.objects(&fs, ws));
+    let r = grant(ws, Access::Read);
+    let internal = |e: NsError| matches!(e, NsError::Db(egret_core::Error::Internal(_)));
+    assert!(internal(
+        write(&db, &fs, &r, "/n", "n", Conflict::Overwrite)
+            .await
+            .unwrap_err()
+    ));
+    assert!(internal(
+        create_directory(&db.pool, &fs, &r, &dir("/n"), by())
+            .await
+            .unwrap_err()
+    ));
+    assert!(internal(
+        soft_delete(&db.pool, &r, &file("/k")).await.unwrap_err()
+    ));
+    assert!(internal(
+        move_path(&db.pool, &fs, &r, &file("/k"), &file("/n"), by())
+            .await
+            .unwrap_err()
+    ));
+    assert!(internal(
+        purge_revisions(&db.pool, &fs, &r, &file("/k"), &[1])
+            .await
+            .unwrap_err()
+    ));
+    // A Purge grant writes nothing either, and purges.
+    let p = grant(ws, Access::Purge);
+    assert!(internal(
+        write(&db, &fs, &p, "/n", "n", Conflict::Overwrite)
+            .await
+            .unwrap_err()
+    ));
+    assert_eq!((all_rows(&db, ws).await, store.objects(&fs, ws)), before);
+    assert_eq!(
+        purge_revisions(&db.pool, &fs, &p, &file("/k"), &[1])
+            .await
+            .unwrap(),
+        1
+    );
+    // The control: a Write grant purges too (move does).
+    written(&db, &fs, &w, "/k2", "k").await;
+    assert_eq!(
+        purge_revisions(&db.pool, &fs, &w, &file("/k2"), &[1])
+            .await
+            .unwrap(),
+        1
+    );
 }

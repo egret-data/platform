@@ -98,6 +98,8 @@ use std::time::Duration;
 
 use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool};
+
+use super::lock::LockedSession;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -246,10 +248,7 @@ pub async fn prune_pass_with(
     state: &mut PruneState,
 ) -> Result<PruneReport> {
     let conn = pool.acquire().await.map_err(db_err)?;
-    let mut session = LockedSession {
-        conn: Some(conn),
-        unlocked: false,
-    };
+    let mut session = LockedSession::hold(conn);
     let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
         .bind(PRUNE_LOCK_KEY)
         .fetch_one(session.conn())
@@ -268,29 +267,6 @@ pub async fn prune_pass_with(
             .await;
     session.unlocked = matches!(unlocked, Ok(true));
     result
-}
-
-/// A pooled connection that may hold [`PRUNE_LOCK_KEY`]. Dropped without
-/// `unlocked`, it is detached from the pool and closed, never handed back.
-struct LockedSession {
-    conn: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
-    unlocked: bool,
-}
-
-impl LockedSession {
-    fn conn(&mut self) -> &mut PgConnection {
-        self.conn.as_mut().expect("held until drop")
-    }
-}
-
-impl Drop for LockedSession {
-    fn drop(&mut self) {
-        if !self.unlocked {
-            if let Some(conn) = self.conn.take() {
-                drop(conn.detach());
-            }
-        }
-    }
 }
 
 async fn pass_locked(

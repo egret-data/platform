@@ -26,6 +26,10 @@ use std::time::Duration;
 use egret_metastore::Db;
 use egret_storage::{Listing, MemStore, ObjectStore, StorageError};
 use egret_workflow::runners::{FileUnavailable, RenderFiles};
+use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor};
+use egret_workflow::storage::nsfiles::path::NsPath;
+use egret_workflow::storage::nsfiles::store::{put, soft_delete, Conflict};
+use egret_workflow::storage::nsfiles::CreatedBy;
 use egret_workflow::storage::prune::{
     prune_pass, prune_pass_with, spawn_storage_pruner, PruneReport, PruneState, StoragePruneConfig,
 };
@@ -155,6 +159,15 @@ impl ObjectStore for Fake {
             return Err(StorageError::S3(format!("{uri}: the store is down")));
         }
         self.mem.delete_prefix(uri).await
+    }
+    // W9b Task 3: namespace files are written through `put_stream`.
+    async fn put_stream(
+        &self,
+        uri: &str,
+        body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+        size_hint: Option<u64>,
+    ) -> Result<u64, StorageError> {
+        self.mem.put_stream(uri, body, size_hint).await
     }
 }
 
@@ -1208,4 +1221,105 @@ async fn a_dependent_started_during_the_pass_keeps_its_source() {
     w.set(replay, "SUCCESS", 0).await;
     w.pass().await;
     assert!(w.gone(&source_file).await);
+}
+
+/// W9b spec §11: the pruner deletes under execution prefixes only. Namespace
+/// files of the flow's own namespace -- the same `{ws}/w9a/t13/` directory
+/// its executions live under -- written by `put`, one soft-deleted, rows and
+/// objects aged far past every window, survive a pass that prunes an old
+/// execution and sweeps an old orphan of that namespace (the controls).
+#[tokio::test]
+async fn a_prune_pass_leaves_namespace_files_untouched() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let g = authorize(w.ws, Actor::Api, NS, Access::Write).unwrap();
+    for (p, body) in [
+        ("/a.txt", "one"),
+        ("/a.txt", "two"),
+        ("/d/b.txt", "b"),
+        ("/gone.txt", "g"),
+        ("/executions/x.txt", "x"),
+    ] {
+        let mut body: &[u8] = body.as_bytes();
+        put(
+            &w.db.pool,
+            &w.fs,
+            &g,
+            &NsPath::parse_file(p).unwrap(),
+            &mut body,
+            Conflict::Overwrite,
+            CreatedBy::User(Uuid::nil()),
+        )
+        .await
+        .unwrap();
+    }
+    soft_delete(&w.db.pool, &g, &NsPath::parse_file("/gone.txt").unwrap())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE workflow.namespace_files SET created_at = now() - make_interval(days => 400) \
+          WHERE workspace_id = $1",
+    )
+    .bind(w.ws)
+    .execute(&w.db.pool)
+    .await
+    .unwrap();
+    let ns_prefix = format!("{}/w9a/t13/_files/", w.ws);
+    let ns_keys = || -> Vec<String> {
+        w.store
+            .mem
+            .keys()
+            .into_iter()
+            .filter(|k| k.contains(&ns_prefix))
+            .collect()
+    };
+    let old = (chrono::Utc::now() - chrono::Duration::days(400)).to_rfc3339();
+    for k in ns_keys() {
+        w.store
+            .modified
+            .lock()
+            .unwrap()
+            .insert(key_of(&k), old.clone());
+    }
+    let rows = || async {
+        sqlx::query_as::<_, (String, i32, bool)>(
+            "SELECT path, revision, deleted FROM workflow.namespace_files \
+              WHERE workspace_id = $1 ORDER BY path, revision",
+        )
+        .bind(w.ws)
+        .fetch_all(&w.db.pool)
+        .await
+        .unwrap()
+    };
+    let (rows_before, keys_before) = (rows().await, ns_keys());
+    assert_eq!(
+        (rows_before.len(), keys_before.len()),
+        (7, 5),
+        "{rows_before:?}"
+    );
+    // The controls: an ended execution past the window, and a FAILED one's
+    // old orphan, both of this namespace.
+    let ended = w.exec("SUCCESS", 400, None).await;
+    let pruned = w.file(ended, "a.txt").await;
+    let failed = w.exec("FAILED", 2, None).await;
+    let orphan = w.unindexed(failed, "old.txt").await;
+    w.age_object(&orphan, 25);
+
+    let report = w.pass().await;
+
+    assert!(w.gone(&pruned).await, "the prune control: {report:?}");
+    assert!(!w.stored(&orphan), "the sweep control: {report:?}");
+    assert_eq!(
+        rows().await,
+        rows_before,
+        "a namespace file row was touched"
+    );
+    assert_eq!(
+        ns_keys(),
+        keys_before,
+        "a namespace file object was deleted"
+    );
+    for p in w.store.prefixes.lock().unwrap().iter() {
+        assert!(!p.contains("/_files"), "delete_prefix {p}");
+    }
 }

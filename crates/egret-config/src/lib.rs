@@ -833,18 +833,35 @@ pub struct WorkflowStorageConfig {
     pub max_namespace_files: u64,
 }
 
+/// The longest `workflow.storage.prefix` may be, in bytes (W9b Task 3, the
+/// Task 2 review's R3, 2026-10-05). A namespace file's key is
+/// `{prefix}{workspace}/{ns-as-path}/_files{path}.v{N}`: 36 (workspace) + 1 +
+/// 150 (namespace) + 1 + 6 (`_files`) + 512 (path, W9b's `MAX_PATH_BYTES`) +
+/// 12 (`.v` and a `u32`) = 718 bytes after the prefix, so 200 keeps every key
+/// under S3's 1024-byte limit with room to spare.
+pub const MAX_WORKFLOW_STORAGE_PREFIX_BYTES: usize = 200;
+
 impl WorkflowStorageConfig {
     /// The boot check (W9a fix round 1 M4), called from [`Config::validate`]:
     /// `prefix` is a non-empty key prefix ending with `/` and not starting
     /// with one (an object key has no leading `/`, and without the trailing
-    /// one `workflow` and `workflowX/` would share keys), and every cap is at
-    /// least 1. Each refusal names its key.
+    /// one `workflow` and `workflowX/` would share keys) and at most
+    /// [`MAX_WORKFLOW_STORAGE_PREFIX_BYTES`] bytes, and every cap is at least
+    /// 1. Each refusal names its key.
     pub fn validate(&self) -> Result<(), String> {
         let p = &self.prefix;
         if p.is_empty() || !p.ends_with('/') || p.starts_with('/') {
             return Err(format!(
                 "workflow.storage.prefix {p:?} must be non-empty, end with '/' and not start \
                  with '/' (e.g. \"workflow/\"; EGRET_WORKFLOW__STORAGE__PREFIX)"
+            ));
+        }
+        if p.len() > MAX_WORKFLOW_STORAGE_PREFIX_BYTES {
+            return Err(format!(
+                "workflow.storage.prefix is {} bytes long; it may be at most \
+                 {MAX_WORKFLOW_STORAGE_PREFIX_BYTES} bytes, so that a namespace file's object key \
+                 stays under S3's 1024-byte limit (EGRET_WORKFLOW__STORAGE__PREFIX)",
+                p.len()
             ));
         }
         for (key, value) in [
@@ -2044,6 +2061,20 @@ values = { allowed-images = [] }
             let err = check(&|s| s.prefix = bad.into()).expect_err(bad);
             assert!(err.contains("workflow.storage.prefix"), "{bad:?}: {err}");
         }
+        // W9b Task 3 (R3 of Task 2's review): 200 bytes pass, 201 do not --
+        // counted in bytes ('é' is two), so a rule counting characters fails.
+        let at = format!("{}/", "é".repeat(99) + "a"); // 198 + 1 + 1 = 200 bytes
+        assert_eq!(at.len(), 200);
+        assert_eq!(check(&|s| s.prefix = at.clone()), Ok(()));
+        let over = format!("a{at}");
+        assert_eq!((over.len(), over.chars().count()), (201, 102));
+        let err = check(&|s| s.prefix = over.clone()).unwrap_err();
+        assert!(
+            err.contains("workflow.storage.prefix")
+                && err.contains("201 bytes")
+                && err.contains("at most 200"),
+            "{err}"
+        );
         let err = check(&|s| s.max_file_bytes = 0).unwrap_err();
         assert!(err.contains("workflow.storage.max_file_bytes"), "{err}");
         let err = check(&|s| s.max_task_bytes = 0).unwrap_err();

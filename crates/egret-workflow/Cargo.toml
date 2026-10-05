@@ -396,3 +396,10 @@ harness = false
 [[test]]
 name = "storage_prune_s3_live"
 harness = false
+
+# W9b Task 3: namespace file writes on MinIO (a 20 MiB multipart file; a move
+# and a purge of names with spaces and non-ASCII), under a throwaway prefix
+# and a fence refusing any delete outside it; IGNORED without the gate.
+[[test]]
+name = "nsfiles_s3_live"
+harness = false
