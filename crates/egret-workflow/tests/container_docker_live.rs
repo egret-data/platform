@@ -1918,7 +1918,7 @@ async fn namespace_files_setup() -> sqlx::PgPool {
         let grant = authorize(suite_workspace(), Actor::Api, ns, Access::Write).unwrap();
         let path = NsPath::parse_file(path).unwrap();
         let has = egret_workflow::storage::nsfiles::store::resolve(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             &grant,
             &path,
             egret_workflow::storage::nsfiles::store::Want::Latest,

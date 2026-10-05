@@ -454,14 +454,14 @@ mod tests {
     #[test]
     fn an_oversized_pattern_is_refused_naming_it_not_a_panic() {
         let huge = "regex:(?:a{1000}){1000}".to_string();
-        let err = PathMatcher::new(&[huge.clone()], &[]).unwrap_err();
+        let err = PathMatcher::new(std::slice::from_ref(&huge), &[]).unwrap_err();
         assert!(
             err.contains(&format!("{huge:?}")) && err.contains("more than"),
             "{err}"
         );
         // The brief's spelling: refused by name, whichever rule refuses it.
         let stacked = "regex:a{1000}{1000}".to_string();
-        let err = PathMatcher::new(&[stacked.clone()], &[]).unwrap_err();
+        let err = PathMatcher::new(std::slice::from_ref(&stacked), &[]).unwrap_err();
         assert!(err.contains(&format!("{stacked:?}")), "{err}");
         // A glob that grows past the limit is refused the same way.
         let long_glob = format!("/{}", "{a,b}*?".repeat(20_000));
