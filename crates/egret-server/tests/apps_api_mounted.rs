@@ -26,6 +26,13 @@ use egret_workspace::workspaces::WorkspaceRepo;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+const TEST_BUCKET: &str = "test-bucket";
+const TEST_PREFIX: &str = "apps/";
+
+fn test_object_store() -> Arc<dyn egret_storage::ObjectStore> {
+    Arc::new(egret_storage::MemStore::new())
+}
+
 /// DENY-everything: every test here is about mounting, so none may depend on
 /// an authorization outcome.
 struct DenyPdp;
@@ -49,7 +56,12 @@ impl Pdp for DenyPdp {
 fn composed_app_with_apps_api() -> axum::Router {
     let db = Db::connect_lazy("postgres://egret:egret@127.0.0.1:1/egret").expect("lazy pool");
     let state = egret_apps::AppsApiState {
-        store: egret_apps::store::AppStore::new(db.clone()),
+        store: egret_apps::store::AppStore::new(
+            db.clone(),
+            test_object_store(),
+            TEST_BUCKET.to_string(),
+            TEST_PREFIX.to_string(),
+        ),
         db: db.clone(),
         sessions: SessionService::new(
             db.clone(),

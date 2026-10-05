@@ -13,6 +13,13 @@ use egret_server::{build_router, AppState};
 use std::sync::Arc;
 use tower::ServiceExt;
 
+const TEST_BUCKET: &str = "test-bucket";
+const TEST_PREFIX: &str = "apps/";
+
+fn test_object_store() -> Arc<dyn egret_storage::ObjectStore> {
+    Arc::new(egret_storage::MemStore::new())
+}
+
 struct DenyPdp;
 
 #[async_trait::async_trait]
@@ -36,7 +43,12 @@ fn composed_app_with_pod_api() -> axum::Router {
         db: db.clone(),
         pdp: Arc::new(DenyPdp),
         pods: egret_apps::podtoken::PodTokenRepo::new(db.clone()),
-        store: egret_apps::store::AppStore::new(db),
+        store: egret_apps::store::AppStore::new(
+            db,
+            test_object_store(),
+            TEST_BUCKET.to_string(),
+            TEST_PREFIX.to_string(),
+        ),
     };
     build_router(AppState::without_db().with_apps_pod(state))
 }
