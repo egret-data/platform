@@ -828,13 +828,17 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
     // "/up/" + "m.txt" -> "/up/m.txt"; default "/" + "rootm.txt" -> "/rootm.txt"
 }
 #[tokio::test(flavor = "multi_thread")] async fn upload_files_to_another_namespace_is_refused_naming_it_and_writes_nothing() {}
-#[tokio::test(flavor = "multi_thread")] async fn upload_files_conflict_error_and_skip() {}
+#[tokio::test(flavor = "multi_thread")] async fn upload_files_conflict_error_and_skip() {
+    // the upload-flow variant of w9b tasks.UploadFiles.premise (absent.txt removed, wd removed, up_other_ns last), nothing seeded;
+    // runs.up_map_default_dest, up_conflict_error, up_conflict_skip, up_nothing and rows_after match as recorded
+}
 #[tokio::test(flavor = "multi_thread")] async fn upload_files_glob_never_reaches_an_unreadable_execution() {
     // an unrelated execution in the same workspace holds "x.txt"; "**.txt" does not upload it (the readable set)
 }
 #[tokio::test(flavor = "multi_thread")] async fn upload_files_glob_past_the_cap_is_refused_naming_it() {}
 #[tokio::test(flavor = "multi_thread")] async fn download_files_copies_into_the_task_prefix_and_indexes_at_commit() {
-    // seeds w9b.tasks with store::put as w9b tasks.DownloadFiles.premise says (/up/*, /globbed/*), then runs dl, dl_dest, dl_string
+    // seeds w9b.tasks with store::put as w9b tasks.DownloadFiles.premise says (/up/*, /globbed/*), then runs dl, dl_dest, dl_string;
+    // output URIs are compared with the execution and task-run ids masked (w9b tasks.DownloadFiles.compare)
     // outputs.files: path -> kestra:// URI; rows in execution_files only after apply_outcome commits
 }
 #[tokio::test(flavor = "multi_thread")] async fn download_files_reads_another_namespace_of_the_workspace() {}
@@ -868,10 +872,15 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 
 ```rust
 #[tokio::test] async fn declared_properties_and_outputs_match_the_artifact() { /* DeleteFiles, PurgeFiles; DeleteFiles.namespace optional, default the flow's (ruling D, chosen cell) */ }
-#[tokio::test(flavor = "multi_thread")] async fn delete_files_soft_deletes_matches_and_keeps_objects() {}
+#[tokio::test(flavor = "multi_thread")] async fn delete_files_soft_deletes_matches_and_keeps_objects() {
+    // seeds w9b.tasks with store::put as w9b tasks.DeleteFiles.premise says (Kestra's rows after the upload flow), then runs
+    // del_glob_parent, del_string, del_none; asserts runs.* and objects_after (the file objects, no directory entries)
+}
 #[tokio::test(flavor = "multi_thread")] async fn delete_parent_folder_removes_parents_left_empty_deepest_first() {}
 #[tokio::test(flavor = "multi_thread")] async fn delete_files_in_another_namespace_is_refused_and_deletes_nothing() { /* w9b tasks.DeleteFiles.runs.del_other_ns */ }
-#[tokio::test(flavor = "multi_thread")] async fn a_deleted_files_revisions_stay_listed_and_readable_by_number() { /* R1; w9b tasks.DeleteFiles.rows_after */ }
+#[tokio::test(flavor = "multi_thread")] async fn a_deleted_files_revisions_stay_listed_and_readable_by_number() {
+    // R1; seeds with store::put per w9b tasks.DeleteFiles.premise, runs the delete flow, then asserts tasks.DeleteFiles.rows_after
+}
 #[tokio::test(flavor = "multi_thread")] async fn purge_files_defaults_to_own_namespace_and_its_children_on_a_dot_boundary() {
     // own "a.b": rows of "a.b", "a.b.c" purged; "a.bc" and "a" untouched
 }
@@ -948,7 +957,10 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 #[tokio::test] async fn move_of_a_missing_source_is_404_and_delete_of_a_missing_path_is_200() { /* application of R3 (2026-10-05); w9b api.routes.move_missing_source, delete_missing; nothing written */ }
 #[tokio::test] async fn a_download_of_a_directory_is_400_naming_it() { /* application of R3 (2026-10-05); w9b api.routes.get_file_directory */ }
 #[tokio::test] async fn revisions_of_a_directory_is_400_naming_it() { /* application of R3 (2026-10-05); w9b api.routes.revisions_dir */ }
-#[tokio::test] async fn a_zip_upload_leaves_one_file_in_the_listing_and_the_search() { /* w9b api.routes.directory_root, search q='.txt' (chosen, fix round 2): /top.zip, no /inner.txt, no /zdir */ }
+#[tokio::test] async fn a_zip_upload_leaves_one_file_in_the_listing_and_the_search() {
+    // w9b api.routes.directory_root, search q='.txt' (chosen, fix round 2): /top.zip, no /inner.txt, no /zdir; /top.zip's size is
+    // compared to the length of the bytes the test uploads (the fixture's 233 is the measuring script's archive), `created` not compared
+}
 #[tokio::test] async fn stats_revisions_search_and_directory_match_the_fixtures_summary_cells() { /* w9b api.summary: egret's DTOs; search as Kestra's (R3) */ }
 #[tokio::test] async fn a_soft_deleted_paths_revisions_are_listed_flagged_and_a_given_revision_is_served() {
     // R1; w9b api.routes.revisions_after_delete (200, [1] deleted) and get_after_delete_rev1 (200 "gee"); get_after_delete stays 404

@@ -6967,7 +6967,8 @@
       "written": [
        "/rootm.txt"
       ],
-      "basis": "measured"
+      "basis": "measured",
+      "premise": "runs in the upload-flow variant of tasks.UploadFiles.premise: no earlier divergence touches /rootm.txt; the output matches as recorded"
      },
      "wd": {
       "not_comparable": "egret does not run WorkingDirectory (spec §1, §14): mk and up_glob never run, so /globbed is not comparable",
@@ -7007,13 +7008,15 @@
       "state": "WARNING",
       "outputs": {},
       "error": "File '/up/m.txt' already exists in namespace 'w9b.tasks' and conflict is set to ERROR",
-      "basis": "measured"
+      "basis": "measured",
+      "premise": "runs in the upload-flow variant of tasks.UploadFiles.premise: /up/m.txt exists because up_map (absent.txt removed) wrote it, so conflict ERROR fails naming it, as recorded"
      },
      "up_conflict_skip": {
       "state": "SUCCESS",
       "outputs": {},
       "error": null,
-      "basis": "measured"
+      "basis": "measured",
+      "premise": "runs in the upload-flow variant of tasks.UploadFiles.premise: /up/m.txt exists (revision 1), so SKIP writes nothing, as recorded"
      },
      "up_other_ns": {
       "state": "FAILED",
@@ -7037,11 +7040,12 @@
       "state": "WARNING",
       "outputs": {},
       "error": "files or filesMap is required",
-      "basis": "measured"
+      "basis": "measured",
+      "premise": "runs in the upload-flow variant of tasks.UploadFiles.premise: up_other_ns moved last, so up_nothing is reached; it reads no state"
      }
     },
     "rows_after": {
-     "premise": "egret's rows for the same flow with up_map's `absent.txt` entry left out (with it, egret fails up_map naming the URI and writes nothing: runs.up_map), so the rows compare one for one",
+     "premise": "egret's rows after the upload-flow variant of tasks.UploadFiles.premise (absent.txt removed, wd removed, up_other_ns last), so the rows compare one for one; with absent.txt, egret fails up_map naming the URI and writes nothing (runs.up_map)",
      "/up/m.txt": [
       1
      ],
@@ -7130,7 +7134,8 @@
       "destination": "concatenated with the key without a separator ('up2' + 'm.txt' -> '/up2m.txt')"
      }
     },
-    "basis": "schema + measured, except the cells marked chosen"
+    "basis": "schema + measured, except the cells marked chosen",
+    "premise": "the measured run cells after up_map are egret's answers for the upload flow (raw_records.flows['w9b.tasks/upload']) run with three edits, and nothing seeded: (1) `absent.txt` removed from up_map's filesMap, so up_map writes /up/m.txt and /up/sub/n.txt (revision 1) as Kestra's did; (2) the `wd` task removed (egret does not run WorkingDirectory); (3) `up_other_ns` moved to the end, because its refusal (no allowFailure) would otherwise stop the run before up_nothing. This variant reproduces every recorded measured output exactly; seeding /up/m.txt instead would not, because up_map itself would then see an existing file. runs.up_map (as recorded, with absent.txt) and runs.up_other_ns are egret's answers for the tasks as written, each in its own test"
    },
    "DownloadFiles": {
     "schema": {
@@ -7176,7 +7181,8 @@
         "/up/sub/n.txt": "kestra:///w9b/tasks/download/executions/5V5Q8dPtgnvRU6Px3gfrrk/tasks/dl/11BQXVXuQS4uUojNiAPZ8e/up/sub/n.txt"
        }
       },
-      "premise": "/up/m.txt and /up/sub/n.txt are seeded with store::put: egret's own upload flow fails up_map on its missing-URI entry (tasks.UploadFiles.runs.up_map) and would not write /up/sub/n.txt"
+      "premise": "/up/m.txt and /up/sub/n.txt are seeded with store::put: egret's own upload flow fails up_map on its missing-URI entry (tasks.UploadFiles.runs.up_map) and would not write /up/sub/n.txt",
+      "compare": "the URIs are compared after masking the execution id and the task-run id (`…/executions/<exec>/tasks/<task-slug>/<taskrun>/…`); the namespace path, the flow id, the task slug, the destination and the file path are compared exactly"
      },
      "dl_dest": {
       "state": "SUCCESS",
@@ -7186,7 +7192,8 @@
         "/globbed/g/one.txt": "kestra:///w9b/tasks/download/executions/5V5Q8dPtgnvRU6Px3gfrrk/tasks/dl-dest/2jPPgKYfWDIulxLr2UvCuf/dl/globbed/g/one.txt"
        }
       },
-      "premise": "/globbed/top.txt and /globbed/g/one.txt come from UploadFiles inside a WorkingDirectory, which egret does not run: the Task 6 test seeds both with store::put (contents 'top', 'g1') before DownloadFiles runs; then the URIs below compare one for one"
+      "premise": "/globbed/top.txt and /globbed/g/one.txt come from UploadFiles inside a WorkingDirectory, which egret does not run: the Task 6 test seeds both with store::put (contents 'top', 'g1') before DownloadFiles runs; then the URIs below compare one for one once masked (`compare`)",
+      "compare": "the URIs are compared after masking the execution id and the task-run id (`…/executions/<exec>/tasks/<task-slug>/<taskrun>/…`); the namespace path, the flow id, the task slug, the destination and the file path are compared exactly"
      },
      "dl_string": {
       "state": "SUCCESS",
@@ -7194,7 +7201,8 @@
        "files": {
         "/up/m.txt": "kestra:///w9b/tasks/download/executions/5V5Q8dPtgnvRU6Px3gfrrk/tasks/dl-string/3n90iqAwFoiISaU50yHy6u/up/m.txt"
        }
-      }
+      },
+      "compare": "the URIs are compared after masking the execution id and the task-run id (`…/executions/<exec>/tasks/<task-slug>/<taskrun>/…`); the namespace path, the flow id, the task slug, the destination and the file path are compared exactly"
      },
      "dl_other": {
       "state": "SUCCESS",
@@ -7203,7 +7211,8 @@
         "/x.txt": "kestra:///w9b/tasks/download/executions/5V5Q8dPtgnvRU6Px3gfrrk/tasks/dl-other/4TvNvsb9WsXsJqCp5Zn560/x.txt",
         "/only1.txt": "kestra:///w9b/tasks/download/executions/5V5Q8dPtgnvRU6Px3gfrrk/tasks/dl-other/4TvNvsb9WsXsJqCp5Zn560/only1.txt"
        }
-      }
+      },
+      "compare": "the URIs are compared after masking the execution id and the task-run id (`…/executions/<exec>/tasks/<task-slug>/<taskrun>/…`); the namespace path, the flow id, the task slug, the destination and the file path are compared exactly"
      },
      "dl_none": {
       "state": "SUCCESS",
@@ -7215,7 +7224,8 @@
       "state": "SUCCESS",
       "outputs": {
        "value": "{\"/up/m.txt\":\"kestra:///w9b/tasks/download/executions/5V5Q8dPtgnvRU6Px3gfrrk/tasks/dl/11BQXVXuQS4uUojNiAPZ8e/up/m.txt\",\"/up/sub/n.txt\":\"kestra:///w9b/tasks/download/executions/5V5Q8dPtgnvRU6Px3gfrrk/tasks/dl/11BQXVXuQS4uUojNiAPZ8e/up/sub/n.txt\"} :: map content"
-      }
+      },
+      "compare": "the URIs are compared after masking the execution id and the task-run id (`…/executions/<exec>/tasks/<task-slug>/<taskrun>/…`); the namespace path, the flow id, the task slug, the destination and the file path are compared exactly"
      }
     },
     "findings": [
@@ -7225,7 +7235,8 @@
      "another namespace (w9b.s1) is readable"
     ],
     "basis": "measured",
-    "premise": "the namespace w9b.tasks holds, before the run, the rows Kestra's held after the upload flow (raw_records.tasks_after.upload): /up/m.txt, /up/sub/n.txt, /rootm.txt, /up2m.txt, /globbed/top.txt, /globbed/g/one.txt, each revision 1. egret's upload flow would not produce them all (UploadFiles' missing-URI refusal, its destination join, and the WorkingDirectory egret does not run), so a Task 6/7 test SEEDS them with store::put (CreatedBy::User) before running the task; the cells then compare one for one"
+    "premise": "the namespace w9b.tasks holds, before the run, the rows Kestra's held after the upload flow (raw_records.tasks_after.upload): /up/m.txt, /up/sub/n.txt, /rootm.txt, /up2m.txt, /globbed/top.txt, /globbed/g/one.txt, each revision 1. egret's upload flow would not produce them all (UploadFiles' missing-URI refusal, its destination join, and the WorkingDirectory egret does not run), so a Task 6/7 test SEEDS them with store::put (CreatedBy::User) before running the task; the cells then compare one for one, URIs masked as `compare` says",
+    "compare": "the URIs are compared after masking the execution id and the task-run id (`…/executions/<exec>/tasks/<task-slug>/<taskrun>/…`); the namespace path, the flow id, the task slug, the destination and the file path are compared exactly"
    },
    "DeleteFiles": {
     "schema": {
@@ -8346,7 +8357,7 @@
        "revision": 1
       }
      ],
-     "note": "a set: the order is not part of the contract; each entry is an NsFileStatsDto whose `created` (a timestamp) is not compared; /top.zip's size 233 is the archive the measuring script built (python zipfile, inner.txt + zdir/inner2.txt)",
+     "note": "a set: the order is not part of the contract; each entry is an NsFileStatsDto whose `created` (a timestamp) is not compared; /top.zip's `size` is the byte length of the uploaded archive (233 for the archive the measuring script built with python zipfile): a Task 8 test compares it to the length of the bytes it uploads, not to 233",
      "basis": "chosen",
      "why": "spec §2/§9 and the header's approved choices: a .zip upload is stored as one file, not expanded; this cell was captured on Kestra after /top.zip was expanded (api.routes.post_zip), so Kestra's answer holds /inner.txt and /zdir/inner2.txt, which egret never creates (fix round 2, I-1)",
      "kestra": {
@@ -9841,7 +9852,7 @@
   "read": "measured, except kestra_other and binary (chosen); _extra.kestra_own_soft_deleted is measured: egret agrees under R1 (see its note)",
   "four_functions_ns": "measured; *.kestra_own_soft_deleted agree with Kestra under R1 (see their notes)",
   "staging": "measured, except staging.egret (chosen, agrees with 5/5 measured)",
-  "tasks": "schema + measured, except the cells marked chosen (UploadFiles: runs.up_map, runs.up_map_dest_no_slash, runs.wd/mk/up_glob, runs.up_other_ns, rows_after, semantics; DeleteFiles: runs.del_other_ns, rows_after); UploadFiles/DeleteFiles schema.properties.namespace and UploadFiles.publish_without_namespace chosen (ruling D); DownloadFiles and DeleteFiles state a premise (seeded rows)",
+  "tasks": "schema + measured, except the cells marked chosen (UploadFiles: runs.up_map, runs.up_map_dest_no_slash, runs.wd/mk/up_glob, runs.up_other_ns, rows_after, semantics; DeleteFiles: runs.del_other_ns, rows_after); UploadFiles/DeleteFiles schema.properties.namespace and UploadFiles.publish_without_namespace chosen (ruling D); DownloadFiles and DeleteFiles state a premise (seeded rows); UploadFiles states its flow variant (premise); DownloadFiles URIs are compared with ids masked (`compare`)",
   "purge": "measured (before); keepAmount_1_on_soft_deleted, namespacePattern (R2), includeChildNamespaces_a.b_vs_a.bc, default_behavior chosen",
   "api": "measured, except the api.summary and api.routes cells marked chosen (move_missing_source, revisions_dir, get_file_directory: application of R3; directory_root, search q='.txt': the zip is stored, not expanded); read api.routes_basis",
   "plugin_namespace_use": "code (javap over the jars sha256-checked against plugins.lock; quoted lines per class)",
