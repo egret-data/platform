@@ -8,12 +8,15 @@
 - **A running flow reads namespace files of any namespace in its workspace, and writes only to its own namespace.** Writes are `UploadFiles`, `DeleteFiles`, `PurgeFiles` (own namespace and its child namespaces) and a plugin's `putFile`. The workspace is the hard boundary, taken from the running execution and never from a URI (§5).
 - **API permissions:** reading (download, list, search, stats, revisions, export) needs `workflow:read`; writing (upload, create directory, move, delete, purge) needs `workflow:manage`. No new permission (§9).
 - **In scope:** the store and its metadata (`workflow.namespace_files`, objects at `{prefix}{ws}/{ns-as-path}/_files/{path}[.vN]`, `kestra:///{ns-as-path}/_files/…` URIs through a new `Tail::NamespaceFile`, `nsfile://` parsing) (§3, §4), the expression functions (§6), `namespaceFiles` on script tasks, parsed and validated only on `WorkingDirectory` (§7), the four `io.kestra.plugin.core.namespace` tasks as native handlers (§8), the REST API (§9) and the plugin bridge (§10).
-- **(Added 2026-10-05, the user's ruling on the spec's `WorkingDirectory` finding.) `WorkingDirectory` stays out of W9b.** W9b runs `namespaceFiles` on script tasks only. On `WorkingDirectory` the block is parsed and validated at publish: a malformed block is refused, naming the property; a valid one is accepted and kept in the model for the later package that runs `WorkingDirectory`. Nothing changes at run, because egret still does not execute `WorkingDirectory` (§1, §7). The two corpus flows stay baselined, and no ratchet change is expected (§13).
+- **(Added 2026-10-05, the user's ruling on the spec's `WorkingDirectory` finding.) `WorkingDirectory` stays out of W9b.** W9b runs `namespaceFiles` on script tasks only. On `WorkingDirectory` the block is parsed and validated at publish: a malformed block is refused, naming the property; a valid one is accepted and kept in the model for the later package that runs `WorkingDirectory`. Nothing changes at run, because egret still does not execute `WorkingDirectory` (§1, §7). The two corpus flows stay baselined, and no ratchet change is expected (§13). *(Note 2026-10-05, Task 1 measured; the ruling's text above is unchanged: the two corpus flows are not baselined, they stand **outside the ratchet entirely** — the artifact refused both at publish (422 `Invalid type: io.kestra.core.tasks.test.Read`), so they have no golden entry and no line in `baseline.txt`. The ruling's substance holds: no ratchet change can come from them.)*
 - **(Added 2026-10-05, the user's ruling on `inputFiles`.) As in Kestra, namespace files load first and `inputFiles` always overwrite a same-named namespace file, whatever `ifExists` says; `ifExists` governs only collisions between namespaces** (§7). Task 1 still measures it.
 - **(Added 2026-10-05, the user's ruling on `_files` namespaces.) A namespace with a `_files` segment is refused** at publish and in every namespace-file operation (API, tasks, functions), with an error naming it. Task 1 counts the existing flows and corpus entries with such a namespace, and its report lists each one (§3).
 - **(Added 2026-10-05, the user's ruling on the plan's open item 9.) A script task's `inputFiles` value that is a namespace-file URI (`nsfile:///…`, `nsfile://other.ns/…`, or `kestra:///…/_files/…`, e.g. from `fileURI`) is accepted, as Kestra does:** it is staged into the task's working directory through the same one namespace-file read check (any namespace of the workspace), alongside W9a's execution-file URIs (§7).
 - **(Added 2026-10-05, the controller's ruling on the plan's open item 10.) `task.json` carries namespace files in a separate `namespaceFiles` array** (URI, namespace, path, revision, size, staged path); W9a's `storage` map (URI → staged path) is unchanged (§10).
 - **(Added 2026-10-05, the user's ruling on the detailed choices.) Approved as egret's choices**, each a row in §2: `PurgeFiles` defaults to the flow's own namespace; child namespaces match on a dot boundary; the API's `DELETE` does not remove parents left empty; export is a streamed, files-only zip; `fileURI` without `revision` is an error on a missing path; reading `kestra:///other/ns/_files/…` is allowed within the workspace.
+- **(Added 2026-10-05, the user's ruling R1 in Task 1's fix round 1.) Soft-deleted history stays visible**, unlike Kestra's 404s: the `revisions` API lists every revision of a soft-deleted path, the deleted ones flagged; an explicit-revision read (`GET …/files?path&revision=N`, `read(path, revision)`, `fileURI(path, revision)`) of a revision of a soft-deleted path succeeds; a **latest** read (no revision) of a soft-deleted path is not-found. Rewriting it creates a new revision, as before (§2, §4.3, §4.5, §6, §9).
+- **(Added 2026-10-05, the user's ruling R2.) `PurgeFiles.namespacePattern` uses Kestra's wildcard grammar** (`FilenameUtils.wildcardMatch`: `*`, `?`; `w9b.pp.*` does not match `w9b.ppx.c`), restricted to the flow's own namespace and its children (the purge rule, §5) (§2, §8.4).
+- **(Added 2026-10-05, the user's ruling R3.) `fileURI` of a directory is an error naming the path; search is as Kestra's (case-insensitive substring, files only); `GET …/files/directory` on a file's path is 400; GET routes never create anything (stats with no path answers a virtual root directory and creates nothing)** (§2, §6, §9).
 
 **Delivery:** one PR (docs and code), ten tasks in §12, implemented by a plan written after this spec.
 
@@ -64,6 +67,12 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 | `GET files/export` builds the zip in memory (the checkout's code adds the namespace's flows; the artifact measured by Task 1 adds none, amended 2026-10-05) | streamed zip of the files only (§9) | memory is bounded; flows are exported by the flow API |
 | `DELETE files` also deletes parent directories left empty, with a parent check not scoped to the namespace (`NamespaceFileController.java:352-363`, by the code) | deletes the named path and its children only (§9) | the walk-up is a side effect the caller did not name |
 | a namespace whose segment is `_files` (`a._files`) is accepted, so its flows' keys share a prefix with `a`'s namespace files | refused at publish and by every namespace file operation (§3) | the two key spaces must not overlap |
+| a soft-deleted path answers 404 to `revisions` and to every revision read, and after a rewrite its deleted revision stays unreadable (`?revision=3` of `[1, 2, 3, 4]` is 404) (Task 1 measured) | `revisions` lists every revision, deleted ones flagged; an explicit-revision read succeeds; only a latest read is not-found (§4.3, §4.5, §6, §9) | the user's ruling R1 (2026-10-05): history stays visible until `PurgeFiles` removes it |
+| `PurgeFiles.namespacePattern` is a wildcard matched against the namespaces that hold **flows**, any namespace (Task 1 measured: `w9b.pp.*` left `w9b.pp.noflow`, which held files and no flow) | the same wildcard grammar, matched against the namespaces that hold **files** and are the flow's own or its children (§8.4) | the user's ruling R2 (2026-10-05); the purge rule (§5) |
+| `fileURI` of a directory answers a URI with no object behind it (Task 1 measured) | an error naming the path (§6) | the user's ruling R3 (2026-10-05): a URI that names no file would fail later, far from its cause |
+| `GET files/directory` on a file's path answers 200 `[]` (Task 1 measured) | 400 naming the path (§9) | the user's ruling R3 (2026-10-05) |
+| `GET files/stats` with no path creates the namespace's root directory on the fly (Task 1 measured) | answers a virtual root directory and creates nothing; no GET route creates anything (§9) | the user's ruling R3 (2026-10-05): a read does not write |
+| `UploadFiles` skips a `filesMap` URI that does not exist, silently, and concatenates `destination` with each key (`up2` + `m.txt` → `/up2m.txt`) (Task 1 measured) | a URI that does not resolve fails the task naming it, before anything is written; `destination` is a directory joined with exactly one `/` (`/up2/m.txt`) (§8.1) | fix round 1 of Task 1 (2026-10-05): §8.1's read check, and a path the author can predict |
 
 ## 3. Storage layout and URIs
 
@@ -94,7 +103,7 @@ Caps: `workflow.storage.max_file_bytes` per file, as W9a.
 
 ### 4.3 Soft delete
 
-`delete(path)` marks the latest row of the path and of every child deleted, in one statement; objects are kept. Deleting a directory deletes its children. A soft-deleted path is invisible to reads, listings, `exists` and globs, and visible to `revisions` and to `PurgeFiles`.
+`delete(path)` marks the latest row of the path and of every child deleted, in one statement; objects are kept. Deleting a directory deletes its children. A soft-deleted path is invisible to reads, listings, `exists` and globs, and visible to `revisions` and to `PurgeFiles`. *(Amended 2026-10-05, the user's ruling R1: "reads" here are **latest** reads; an explicit-revision read of a soft-deleted path — `?revision=N`, `read(path, revision)`, `fileURI(path, revision)`, or a `kestra:///…/_files/…` URI, which names one revision — succeeds, and `revisions` lists every revision with the deleted ones flagged.)*
 
 ### 4.4 Move
 
@@ -102,7 +111,7 @@ Caps: `workflow.storage.max_file_bytes` per file, as W9a.
 
 ### 4.5 Reading
 
-A read resolves `(namespace, path, revision?)` to a row (the latest live one, or the given revision, which must exist and whose path must not be soft-deleted at its latest revision for a latest-read), then streams that revision's key. **A missing object behind a row is an author error naming the path and revision**; egret does not fall back to an older revision (§2). An unreachable store is an infrastructure error (§11).
+A read resolves `(namespace, path, revision?)` to a row (the latest live one, or the given revision, which must exist and whose path must not be soft-deleted at its latest revision for a latest-read), then streams that revision's key. **A missing object behind a row is an author error naming the path and revision**; egret does not fall back to an older revision (§2). An unreachable store is an infrastructure error (§11). *(Amended 2026-10-05, the user's ruling R1: a given revision is served even when the path is soft-deleted; only a latest read of a soft-deleted path is not-found.)*
 
 ### 4.6 One readability and writability function
 
@@ -120,7 +129,7 @@ A read resolves `(namespace, path, revision?)` to a row (the latest live one, or
 
 | function | behaviour |
 |---|---|
-| `fileURI(path, revision?)` | `kestra:///{ns}/_files/{path}` for the latest live revision (`…{path}.vN` when N > 1), or for the given revision, which must exist. A `kestra://` argument is returned unchanged after it parses. `../`, a non-integer `revision`, a missing or soft-deleted path are errors naming the path |
+| `fileURI(path, revision?)` | `kestra:///{ns}/_files/{path}` for the latest live revision (`…{path}.vN` when N > 1), or for the given revision, which must exist. A `kestra://` argument is returned unchanged after it parses. `../`, a non-integer `revision`, a missing or soft-deleted path are errors naming the path. *(Amended 2026-10-05: "soft-deleted" applies without `revision`; with one, a revision of a soft-deleted path is returned (R1). A directory is an error naming the path (R3).)* |
 | `read(path, revision?)` | UTF-8 contents; non-UTF-8 is an error naming the path (§2); capped by `max_read_bytes` |
 | `fileSize`, `fileExists`, `isFileEmpty` | from the metadata row; `fileExists` of a well-formed path with no live row is `false`, as W9a's *missing* |
 
@@ -138,7 +147,7 @@ A read resolves `(namespace, path, revision?)` to a row (the latest live one, or
 - **`inputFiles` values that are namespace-file URIs** (`nsfile:///…`, `nsfile://other.ns/…`, `kestra:///…/_files/…`; the user's ruling, header) are staged like `namespaceFiles` entries: read-checked by the same function (§4.6, §5), streamed by W9a's transfer under the `inputFiles` name. A refused namespace or a missing path fails the task before it starts, naming the path.
 - **Bounds are structural:** the listing is capped by a count (`workflow.storage.max_namespace_files`, default 10 000), counted on the rows egret actually listed, with a refusal naming the cap; staged bytes count against `max_task_bytes` as the transfer streams them. No bound mirrors a glob grammar.
 - **Script tasks:** `namespaceFiles` leaves `COMMON_REFUSED` (`scripts/mod.rs:202`); `tests/scripts_gate.rs:940-945` flips to a test that the property publishes, and a refusal test remains for a malformed block.
-- **`WorkingDirectory` (out of W9b, the user's ruling, header):** **egret's executor does not run `WorkingDirectory` at all** (§1: planned opaque, the claim answers `None`). W9b therefore only stops its model from silently dropping `namespaceFiles` (`models/task.rs:555-565`). **At publish**, the block is parsed and validated with the same rules as on a script task: a malformed block is refused, naming the property; a valid one is accepted and kept in the model, for the later package that runs `WorkingDirectory`. **At run**, nothing changes: `WorkingDirectory` behaves exactly as before W9b and no namespace file is staged. The staging function is the one script tasks use, so that package only calls it. The two corpus flows stay baselined; Task 1 records their current outcome and Task 10 measures the ratchet before and after (no change is expected). *(Amended 2026-10-05, Task 1 measured: neither flow is in `baseline.txt` or `golden.json`. The artifact refused both at publish — `corpus.json`: 422 `Invalid type: io.kestra.core.tasks.test.Read`, `task-type-not-in-image` — so they have no golden entry and stand outside the ratchet's 294; "stay baselined" reads "stay outside the ratchet". The ratchet at the base is `294 golden entries, 108 mismatching, 108 baselined, 0 broken`.)*
+- **`WorkingDirectory` (out of W9b, the user's ruling, header):** **egret's executor does not run `WorkingDirectory` at all** (§1: planned opaque, the claim answers `None`). W9b therefore only stops its model from silently dropping `namespaceFiles` (`models/task.rs:555-565`). **At publish**, the block is parsed and validated with the same rules as on a script task: a malformed block is refused, naming the property; a valid one is accepted and kept in the model, for the later package that runs `WorkingDirectory`. **At run**, nothing changes: `WorkingDirectory` behaves exactly as before W9b and no namespace file is staged. The staging function is the one script tasks use, so that package only calls it. The two corpus flows stand outside the ratchet; Task 1 records their current outcome and plan Task 11 (spec §12 item 10) measures the ratchet before and after (no change is expected). *(Amended 2026-10-05, Task 1 measured: neither flow is in `baseline.txt` or `golden.json`. The artifact refused both at publish — `corpus.json`: 422 `Invalid type: io.kestra.core.tasks.test.Read`, `task-type-not-in-image` — so they have no golden entry and stand outside the ratchet's 294; before Task 1's fix round 1 this sentence said they "stay baselined". The ratchet at the base is `294 golden entries, 108 mismatching, 108 baselined, 0 broken`.)*
 
 ## 8. The `io.kestra.plugin.core.namespace` tasks
 
@@ -148,8 +157,8 @@ Native handlers in the worker, like W9a's `core.storage` tasks. Each follows its
 
 - `namespace`: default the flow's; anything else is refused (§5).
 - `files`: a list whose items are whole `kestra://` URIs or globs over the **execution's readable files** (W9a §4.4's readable set, matched on the URI's file path); Kestra globs its own working directory (§2).
-- `filesMap`: name → `kestra://` URI (read-checked) or literal contents.
-- `destination` default `/`; `conflict` default `OVERWRITE` (`ERROR`, `SKIP`).
+- `filesMap`: name → `kestra://` URI (read-checked) or literal contents. *(Amended 2026-10-05, Task 1 fix round 1: every URI of `files` and `filesMap` is resolved before the first write; one that does not resolve fails the task naming it, and nothing is written. Kestra skips it silently.)*
+- `destination` default `/`; `conflict` default `OVERWRITE` (`ERROR`, `SKIP`). *(Amended 2026-10-05, Task 1 fix round 1: `destination` is a directory; a missing leading `/` is added and each file's name is joined to it with exactly one `/` — `destination: up2` and key `m.txt` write `/up2/m.txt`, where Kestra wrote `/up2m.txt`.)*
 - Each file is written by §4.2. Output: empty, as Kestra's run returns.
 
 ### 8.2 `DownloadFiles`
@@ -162,7 +171,7 @@ Native handlers in the worker, like W9a's `core.storage` tasks. Each follows its
 
 ### 8.4 `PurgeFiles`
 
-- `namespaces` / `namespacePattern` (exclusive, as Kestra), default the flow's own; `includeChildNamespaces` default true (dot-boundary match); every resolved namespace must pass the purge rule (§5), and a pattern is matched only against the namespaces that hold files in the workspace.
+- `namespaces` / `namespacePattern` (exclusive, as Kestra), default the flow's own; `includeChildNamespaces` default true (dot-boundary match); every resolved namespace must pass the purge rule (§5), and a pattern is matched only against the namespaces that hold files in the workspace. *(Amended 2026-10-05, the user's ruling R2: `namespacePattern` uses Kestra's wildcard grammar, `FilenameUtils.wildcardMatch` — `*` any run of characters, dots included, `?` one character, case-sensitive; `w9b.pp.*` does not match `w9b.ppx.c` — and its candidates are restricted to the namespaces holding files that are the flow's own or its children, so a pattern never reaches another namespace and nothing is refused for one it could not match. A listed `namespaces` entry outside the purge rule is still refused by name.)*
 - `filePattern`: Commons-IO wildcard (`*`, `?`) on the path, as Kestra's `filterItems`. *(Amended 2026-10-05, Task 1 measured: the string matched is the path **without** its leading `/` — `filePattern: "/q.txt"` purged nothing, `"q.txt"` purged two revisions — so egret matches the pattern against the path with the leading `/` removed.)*
 - `behavior`: `Version { keepAmount, before }`, default `keepAmount: 1`. `keepAmount` keeps the N highest revisions of each path; `before` purges revisions updated before the instant and never the latest; a soft-deleted path is purged entirely (§2).
 - **Hard delete:** metadata rows first, then objects (W9a's safe order: a crash leaves an orphan object, never a row pointing at nothing). Output `size`: the number of revisions purged.
@@ -173,11 +182,11 @@ Under `/api/ws/{ws}/workflows/namespaces/{ns}/files`, mirroring `NamespaceFileCo
 
 | route | permission | answer |
 |---|---|---|
-| `GET …/files?path&revision` | `workflow:read` | the bytes, streamed, with W9a's download headers (`application/octet-stream`, sanitised `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, `storage/routes.rs:262`) |
-| `GET …/files/stats?path` | `workflow:read` | size, type, revision, created |
-| `GET …/files/revisions?path` | `workflow:read` | every revision, deleted ones flagged |
-| `GET …/files/search?q` | `workflow:read` | live paths containing `q`, capped by count |
-| `GET …/files/directory?path` | `workflow:read` | live children of the directory |
+| `GET …/files?path&revision` | `workflow:read` | the bytes, streamed, with W9a's download headers (`application/octet-stream`, sanitised `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, `storage/routes.rs:262`); a given `revision` of a soft-deleted path is served, a latest read of one is 404 (R1, 2026-10-05) |
+| `GET …/files/stats?path` | `workflow:read` | size, type, revision, created; no `path` answers a virtual root directory and creates nothing (R3, 2026-10-05) |
+| `GET …/files/revisions?path` | `workflow:read` | every revision, deleted ones flagged, a soft-deleted path's included (R1, 2026-10-05) |
+| `GET …/files/search?q` | `workflow:read` | live paths containing `q`, capped by count; as Kestra's: a case-insensitive substring of the path, files only (R3, 2026-10-05) |
+| `GET …/files/directory?path` | `workflow:read` | live children of the directory; a file's path is 400 naming it (R3, 2026-10-05) |
 | `GET …/files/export` | `workflow:read` | a streamed zip of the latest live files (no flows) |
 | `POST …/files?path` (multipart) | `workflow:manage` | §4.2 with `OVERWRITE`; reuses W9a's bounded multipart parser; a `.zip` is stored as a file, not expanded |
 | `POST …/files/directory?path` | `workflow:manage` | creates the directory and its parents |
@@ -186,6 +195,7 @@ Under `/api/ws/{ws}/workflows/namespaces/{ns}/files`, mirroring `NamespaceFileCo
 
 - `{ns}` is checked with `is_valid_namespace` and the `_files` segment rule (§3); a namespace with no flows can still hold files. Unknown path → 404; another workspace's namespace is unreachable by construction (`{ws}` scopes every query).
 - `/_flows` is refused (400) on every route; egret imports no flow from here (§2).
+- **No GET route creates anything** (the user's ruling R3, 2026-10-05), where Kestra's `stats` creates the namespace's root (§2).
 - utoipa-documented; the frontend client is regenerated with `npm run gen:api`. The UI is W7's.
 
 ## 10. The plugin bridge
@@ -224,7 +234,7 @@ Under `/api/ws/{ws}/workflows/namespaces/{ns}/files`, mirroring `NamespaceFileCo
 - API: authz (`workflow:read` vs `workflow:manage`), 404 for another workspace's and an unknown path, download headers, `/_flows` refused, multipart bounds.
 - Live Docker and Kubernetes: `namespaceFiles` on a script task with several namespaces, `folderPerNamespace`, each `ifExists`.
 - Pruner: a pass leaves `_files` untouched.
-- Oracle: the ratchet is measured before and after and recorded in `oracle-exec/README.md`; the two corpus flows are `WorkingDirectory` and stay baselined, so no ratchet change is expected (§7). Publish: a malformed `namespaceFiles` on `WorkingDirectory` is refused by name and a valid one publishes; a namespace with a `_files` segment is refused at publish, by the API, by the tasks and by the functions, by name.
+- Oracle: the ratchet is measured before and after and recorded in `oracle-exec/README.md`; the two corpus flows are `WorkingDirectory` and stand outside the ratchet (the artifact refused both at publish, so they have no golden entry; corrected 2026-10-05), so no ratchet change is expected (§7). Publish: a malformed `namespaceFiles` on `WorkingDirectory` is refused by name and a valid one publishes; a namespace with a `_files` segment is refused at publish, by the API, by the tasks and by the functions, by name.
 - Live: an `inputFiles` entry overwrites a same-named namespace file under every `ifExists`.
 - End to end on a temporary kind cluster, as W9a.
 
@@ -244,4 +254,6 @@ The KV store (W9c); running `WorkingDirectory` itself (and so its `namespaceFile
 - `UploadFiles.files` globs the execution's files, not a working directory (§8.1).
 - No retention: namespace files and soft-deleted revisions keep storage until purged (§11).
 - A namespace with a segment `_files` is refused (§3).
+- `fileURI` of a directory is an error, where Kestra returns a URI with no object behind it (§6; R3, 2026-10-05).
+- `UploadFiles` fails on a `filesMap` or `files` URI that does not resolve, where Kestra skips it; `destination` is joined to each name with `/` (§8.1; 2026-10-05).
 - There is no namespace table, so deleting every flow of a namespace leaves its files; they are reachable through the API (§9).

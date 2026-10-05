@@ -22,12 +22,17 @@
   - **Namespace files keep revisions, as Kestra does.** Revision 1 lives at `path`, revision N > 1 at `path.vN`; a delete is soft; `PurgeFiles` hard-purges.
   - **A running flow reads namespace files of any namespace in its workspace, and writes only to its own namespace.** Writes are `UploadFiles`, `DeleteFiles`, `PurgeFiles` (own namespace and its child namespaces) and a plugin's `putFile`. The workspace is the hard boundary, taken from the running execution and never from a URI.
   - **API permissions:** reading (download, list, search, stats, revisions, export) needs `workflow:read`; writing (upload, create directory, move, delete, purge) needs `workflow:manage`. No new permission.
-  - **`WorkingDirectory` stays out of W9b.** `namespaceFiles` runs on script tasks only; on `WorkingDirectory` the block is parsed and validated at publish (a malformed block refused naming the property, a valid one kept in the model). Nothing changes at run. The two corpus flows stay baselined; no ratchet change is expected.
+  - **`WorkingDirectory` stays out of W9b.** `namespaceFiles` runs on script tasks only; on `WorkingDirectory` the block is parsed and validated at publish (a malformed block refused naming the property, a valid one kept in the model). Nothing changes at run. The two corpus flows stay baselined; no ratchet change is expected. *(Note 2026-10-05, Task 1 measured; the ruling's text is unchanged: the two corpus flows are not baselined but **outside the ratchet entirely** — the artifact refused both at publish (422 `Invalid type: io.kestra.core.tasks.test.Read`), so they have no golden entry and no `baseline.txt` line. No ratchet change can come from them.)*
   - **Namespace files load first and `inputFiles` always overwrite a same-named namespace file, whatever `ifExists` says; `ifExists` governs only collisions between namespaces.**
   - **A namespace with a `_files` segment is refused** at publish and in every namespace-file operation (API, tasks, functions), with an error naming it.
   - **(2026-10-05, the user's ruling on this plan's item 9.) A script task's `inputFiles` value that is a namespace-file URI (`nsfile:///…`, `nsfile://other.ns/…`, `kestra:///…/_files/…`, e.g. from `fileURI`) is accepted, as Kestra does**, staged through the same one namespace-file read check (any namespace of the workspace), alongside W9a's execution-file URIs (Task 5).
   - **(2026-10-05, the controller's ruling on this plan's item 10.) `task.json` carries namespace files in a separate `namespaceFiles` array**; W9a's `storage` map is unchanged (Task 10).
   - **Approved as egret's choices:** `PurgeFiles` defaults to the flow's own namespace; child namespaces match on a dot boundary; the API's `DELETE` does not remove parents left empty; export is a streamed, files-only zip; `fileURI` without `revision` is an error on a missing path; reading `kestra:///other/ns/_files/…` is allowed within the workspace.
+  - **(2026-10-05, the user's ruling R1.) Soft-deleted history stays visible**, unlike Kestra's 404s: `revisions` lists every revision of a soft-deleted path, deleted ones flagged; an explicit-revision read (`GET …/files?path&revision=N`, `read(path, revision)`, `fileURI(path, revision)`, and a `kestra:///…/_files/…[.vN]` URI, which names one revision) of it succeeds; a **latest** read (no revision) of a soft-deleted path is not-found. Rewriting creates a new revision, as before (Tasks 2, 3, 4, 7, 8).
+  - **(2026-10-05, the user's ruling R2.) `PurgeFiles.namespacePattern` uses Kestra's wildcard grammar** (`FilenameUtils.wildcardMatch`: `*`, `?`, case-sensitive; `w9b.pp.*` does not match `w9b.ppx.c`), and its candidates are the namespaces holding files that are the flow's own or its children (the purge rule) (Task 7).
+  - **(2026-10-05, the user's ruling R3.) `fileURI` of a directory is an error naming the path; search is as Kestra's (case-insensitive substring, files only); `GET …/files/directory` on a file's path is 400; GET routes never create anything (`stats` with no path answers a virtual root directory and creates nothing)** (Tasks 4, 8).
+  - **(2026-10-05, Task 1 fix round 1, the controller's choices recorded as chosen fixture cells.)** `UploadFiles` resolves every `files`/`filesMap` URI before its first write, and one that does not resolve fails the task naming it (Kestra skips it); `destination` is a directory joined to each name with exactly one `/` (`up2` + `m.txt` → `/up2/m.txt`; Kestra wrote `/up2m.txt`) (Task 6).
+- **Reading the fixture.** In `w9b-namespace-files.json`'s `egret_expected`, egret's answer is a cell's **top-level** value; a cell with `"basis": "chosen"` carries Kestra's measured answer under `kestra`, and every such cell is listed in `egret_expected_basis.chosen_cells` (dotted `path` and RFC 6901 `pointer`). A test asserts the top level, never `kestra`. `api.routes` cells are Kestra's answers unless chosen; read `api.routes_basis` and `api.routes_superseded_by_summary` before asserting one.
 - **Layout (§3):** object key `{workflow.storage.prefix}{workspace_id}/{ns-as-path}/_files{path}` for revision 1 and `…{path}.v{N}` for N ≥ 2 (`path` always starts with `/`); a directory has a row and **no object**. URI a flow sees: `kestra:///{ns-as-path}/_files{path}[.vN]`, no workspace in it.
 - **Defaults:** `workflow.storage.max_namespace_files` **10 000** (new, §7); `max_file_bytes` 1 GiB, `max_task_bytes` 5 GiB, `max_read_bytes` 10 MiB (W9a's, unchanged). Search and listing answers are capped by the same count.
 - **One access function, one readability path.** `storage::nsfiles::access::authorize` is the only code that decides whether a namespace may be read, written or purged; every store function takes the `Grant` it returns, so an unauthorised call does not type-check. Functions, staging, the four tasks, the API and the plugin bridge all reach `authorize` and then `nsfiles::store::resolve`/`list_live`. A second predicate anywhere is a review failure. **The workspace is always the execution's (or the API route's `{ws}` after the permission check), never parsed out of a URI or a property.**
@@ -43,6 +48,7 @@
 - **Migration 0169** (`migrations/0168_workflow_execution_files_pruned.sql` is the last at HEAD). Its comments are final at its first commit: sqlx hashes comments (`VersionMismatch`, W9a's release note), so the file is not edited after Task 2's commit except by a fix-round commit on this branch, before merge, and the report says so.
 - **Render-time reads need the multi-thread runtime** (W9a constraint, unchanged): every test that renders a namespace function against a real database or store is `#[tokio::test(flavor = "multi_thread")]`.
 - **The ratchet** is measured before (Task 1) and after (Task 11): at the base it reads **`294 golden entries, 108 mismatching, 108 baselined, 0 broken`** (`oracle-exec/README.md:9258`). No change is expected (§7, §13); a change is a finding to explain, not to bank.
+- **A known load flake in the executor golden test** (Task 1, 2026-10-05; not yet proven by a repeat or a mutation): under host load (Task 1's first run overlapped Kestra's start-up and a 7 GB image pull), `tests/executor.rs` failed `executor_matches_golden` and `every_mismatching_entry_is_attributed_to_the_field_it_differs_on`, with `valids/retry-expo` stuck `RETRYING`, *"egret left 46 execution(s) unfinished"*, and a ratchet line of **109** mismatching instead of 108; the executor binary run alone passed 58/58 with the expected line. Hypothesis: a tick-then-`pass_time` TOCTOU in the oracle driver (`oracle-exec/driver.rs:996-1012`, `:1061-1065`). A gate that shows **this signature** re-runs the executor binary alone before attributing anything to its task, and reports both runs; any other executor failure is the task's until measured otherwise (memory `pre-existing-is-a-hypothesis`).
 - **A zero is reported beside a number that can disagree.** Sweeps are N examined / M corrected per population, with `/usr/bin/grep` and file arguments (never `rtk grep` piped; memory `rtk-grep-swallows-stdin`).
 - **Commits:** Conventional Commits; trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; the worktree's configured identity, never `--author`. Check `git branch --show-current` == `feat/workflow-w9b-namespace-files` before every commit (memory `a-detached-head-passes-every-check`). Never commit `.superpowers/`, jars, `plugin-host/target/`, scratch files or a mutant. **No PR.**
 - **Environment:**
@@ -80,7 +86,7 @@ Each is reported to the user with the plan; an implementer who finds the code sa
 1. **`Tail::NamespaceFile` cannot join W9a's `Tail`** (§3): `ExecUri` (`uri.rs:44`) carries a `flow_slug` and an `execution: Uuid` that a namespace file has not. The plan adds `StorageUri::{Execution, NamespaceFile}` from one `parse_any`, whose `_files` check runs first, as §3 requires; W9a's `parse` and its 17 call sites keep their shape (Task 2).
 2. **`authorize(workspace, running_flow_namespace, …)` "with the user's permission instead of a flow" for the API** (§4.6): the plan's `Actor::{Flow, Api}`; `authorize` returns a `Grant` every store function requires (Task 2).
 3. **"The render looks them up directly through the pool"** (§6): `settle` and all eight of its callers hold only a connection. The plan opens one connection lazily per render scope from connect options `egret-bin` installs (Task 4).
-4. **A revision read of a soft-deleted path** (§4.5's sentence *"the given revision, which must exist and whose path must not be soft-deleted at its latest revision for a latest-read"*): the plan follows §4.3 — a soft-deleted path is invisible to every read, whatever the revision; only `revisions` and `PurgeFiles` see it.
+4. **A revision read of a soft-deleted path** (§4.5's sentence *"the given revision, which must exist and whose path must not be soft-deleted at its latest revision for a latest-read"*). **Ruled 2026-10-05 by the user (R1): soft-deleted history stays visible** — `Want::Revision(n)` of a soft-deleted path answers that row (the deleted revision itself included), `Want::Latest` of it is `NotFound`, and `revisions` lists every row with `deleted` flagged. *(This item first said the plan followed §4.3 and hid every revision; R1 replaced that.)* A `kestra:///…/_files/p[.vN]` URI names one revision (item 5), so it reads as `Want::Revision`.
 5. **A `kestra:///…/_files/p` URI with no `.vN` suffix** names revision 1's object (it is that object's key), not "the latest": the plan parses it as revision 1, subject to Task 1's measurement (Task 1 Step 3 stops if Kestra reads the latest).
 6. **`UploadFiles.files` globs "matched on the URI's file path"** (§8.1): the plan matches the URI's `Tail` file component with a leading `/` (Task 6).
 7. **"Rows first, then objects" for a hard purge** (§4.2, §8.4) races a writer that recomputes the purged revision number and reuses its key once a transaction lock is released; the plan holds a **session** advisory lock across "delete rows, commit, delete objects" (Task 3).
@@ -154,7 +160,7 @@ docs/{en,vi}/specs/2026-10-05-workflow-w9b-namespace-files-design.md  MOD  T1 (o
 | `layout` | for one path written three times, deleted, then rewritten: every object key in the store per step (listed from the artifact's storage volume), the revision numbers, and whether `createDirectory` puts an object | T2, T3 |
 | `path_rules` | per raw path (`a/b.txt`, `/a/b.txt`, `a/../b`, `./a`, `a//b`, a 256-char segment, a 255-char segment, `/_flows/x`, `/_flowsx`, `x.v2`, `x.v`, `x.v02`, `a\b`, `a?b`, `a#b`, a control char, `a b.txt`, `é.txt`) → the API's status and message on upload | T2 |
 | `uri` | `fileURI` and `namespaceFile.uri()` for revisions 1, 2, 3 of `/a/b.txt` in `io.kestra.tests` and of a directory | T2, T4 |
-| `globs` | `[{pattern, path, matches}]`, ≥ 30 rows: what string the predicate sees (leading `/` or not), a pattern starting with a word character (`*.txt`, `a/*.txt`), `/**`, `**/x`, `{a,b}`, `[ab]`, `?`, `regex:^/a/.*$`, an exclude, a directory row | T5, T6, T7 |
+| `globs` | `[{pattern, path, matches}]`, ≥ 30 rows: what string the predicate sees (leading `/` or not), a pattern starting with a word character (`a/*.txt`, `sub/*.txt`; *corrected 2026-10-05: `*.txt` does not start with one — `*` is not `\w` — so it gets no `**/` and matches nothing against a leading-`/` path, Task 1 run g00*), `/**`, `**/x`, `{a,b}`, `[ab]`, `?`, `regex:^/a/.*$`, an exclude, a directory row | T5, T6, T7 |
 | `file_uri` | `{present_rev1, present_rev3, with_revision_2, with_revision_missing, revision_non_integer, missing, soft_deleted, dotdot, kestra_arg, other_namespace_authority}` → `{"value"}` or `{"error"}` | T4 |
 | `read` | `read` of: a bare path, `nsfile:///p`, `nsfile://other.ns/p`, `nsfile://other.ns/p` with `namespace=`, a `kestra:///{own}/_files/p` (latest = v3: **which revision's bytes**), `kestra:///{other}/_files/p`, `read(p, revision=2)`, a binary file | T4 |
 | `four_functions_ns` | `fileSize`, `fileExists`, `isFileEmpty` on present, missing, soft-deleted, directory | T4 |
@@ -181,7 +187,7 @@ docs/{en,vi}/specs/2026-10-05-workflow-w9b-namespace-files-design.md  MOD  T1 (o
   - `cargo test -p egret-workflow --no-fail-fast 2>&1`, the name/result list as `w9b-baseline-gate.txt`;
   - `cargo test -p egret-server --lib` (must be green at the base; if `committed_openapi_json_is_current` is red there, **stop and report**);
   - the ratchet: `cargo test -p egret-workflow --test executor executor_matches_golden -- --nocapture`, its line as `w9b-baseline-ratchet.txt`; expected `294 golden entries, 108 mismatching, 108 baselined, 0 broken` — a different line is reported before anything else;
-  - the two corpus flows' current outcome: their entries in `oracle-exec/baseline.txt` (both baselined) and their `executor_matches_golden` rows, recorded verbatim;
+  - the two corpus flows' current outcome: their entries in `oracle-exec/baseline.txt` and their `executor_matches_golden` rows, recorded verbatim (*corrected 2026-10-05, Task 1 measured: neither has an entry or a row — both stand outside the ratchet, refused by the artifact at publish*);
   - clippy, **both lists**: `cargo clippy --workspace --all-targets --keep-going 2>&1` (no `-D warnings`) → the sorted `warning:` locations as `w9b-baseline-clippy-warn.txt`; `cargo clippy --workspace --all-targets -- -D warnings 2>&1` → its `error:` locations as `w9b-baseline-clippy-deny.txt`. Task 11 gates on **no new location** in the first and reports the second beside it (W9a: under `-D` `egret-workspace` fails to compile and hides every crate depending on it).
 - [ ] **Step 6:** Commit `docs(workflow): W9b Task 1 — namespace files measured on the artifact`.
 
@@ -323,14 +329,16 @@ pub struct NsEntry { pub path: NsPath, pub revision: u32, pub is_directory: bool
                      pub deleted: bool, pub created_at: chrono::DateTime<chrono::Utc> }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Want { Latest, Revision(u32) }
-/// The live row: Latest = the highest revision, which must not be deleted; Revision(n) = that row,
-/// and the path's highest revision must not be deleted (a soft-deleted path is invisible, §4.3).
+/// Latest = the highest revision, which must not be deleted (a soft-deleted path is NotFound to a latest read);
+/// Revision(n) = that row, served even when the path is soft-deleted and even when row n is the deleted one
+/// (the user's ruling R1, 2026-10-05; w9b layout.read_by_revision_after_rewrite.3).
 pub async fn resolve(conn: &mut PgConnection, grant: &Grant, path: &NsPath, want: Want) -> Result<NsEntry, NsError>;
 /// Live latest rows under `dir` (None = the namespace root); recursive or one level.
 /// Fetches at most `cap + 1` rows; the `+1` is `NsError::TooLarge` naming workflow.storage.max_namespace_files.
 pub async fn list_live(conn: &mut PgConnection, grant: &Grant, dir: Option<&NsPath>, recursive: bool, cap: u64) -> Result<Vec<NsEntry>, NsError>;
-pub async fn revisions(conn: &mut PgConnection, grant: &Grant, path: &NsPath) -> Result<Vec<NsEntry>, NsError>; // deleted flagged
-pub async fn search(conn: &mut PgConnection, grant: &Grant, needle: &str, cap: u64) -> Result<Vec<NsEntry>, NsError>; // per Task 1 `api.search`
+/// Every row of the path, ascending, `deleted` flagged; a soft-deleted path's rows included (R1). No row: NotFound.
+pub async fn revisions(conn: &mut PgConnection, grant: &Grant, path: &NsPath) -> Result<Vec<NsEntry>, NsError>;
+pub async fn search(conn: &mut PgConnection, grant: &Grant, needle: &str, cap: u64) -> Result<Vec<NsEntry>, NsError>; // as Kestra's (R3): a case-insensitive substring of the path, files only; w9b `api.summary.search_rule`
 /// The namespaces of `workspace` that hold at least one row (PurgeFiles' namespacePattern, T7).
 pub async fn namespaces_with_files(conn: &mut PgConnection, workspace: Uuid) -> Result<Vec<String>, NsError>;
 /// Stream the entry's object. A missing object is NsError::Author naming the path and revision (§4.5,
@@ -381,7 +389,11 @@ pub async fn open(fs: &FileStore, grant: &Grant, e: &NsEntry)
 
 // tests/nsfiles_store.rs (Postgres :5439; rows inserted with plain SQL in this task)
 #[tokio::test] async fn latest_is_the_highest_live_revision() {}
-#[tokio::test] async fn a_soft_deleted_latest_hides_every_revision() { /* Want::Latest and Want::Revision(1) both NotFound */ }
+#[tokio::test] async fn a_soft_deleted_path_hides_its_latest_and_serves_each_revision() {
+    // R1: Want::Latest NotFound; Want::Revision(1) and Want::Revision(3) (the deleted row) Ok;
+    // after a rewrite (revision 4) Revision(3) is still Ok (w9b layout.read_by_revision_after_rewrite)
+}
+#[tokio::test] async fn revisions_lists_every_revision_of_a_soft_deleted_path_flagged() { /* w9b layout.steps[delete].revisions_api */ }
 #[tokio::test] async fn the_same_path_in_two_workspaces_resolves_to_the_grants_row_only() {
     // identical (ns, path) in ws A (size 1) and B (size 2); grant for A -> 1; grant for C -> NotFound, never 2
 }
@@ -400,7 +412,7 @@ pub async fn open(fs: &FileStore, grant: &Grant, e: &NsEntry)
   - **The `_files` publish rule:** `validate_namespace` (`validate.rs:625`) pushes a second finding, code `namespace_files_segment`, message from `check_namespace`'s error, path `namespace`. `check_namespace` itself calls `is_valid_namespace` first; publish keeps its existing `invalid_namespace` finding and adds the segment one only when the pattern passes, so a message is never doubled. Name in the report which test pins the save-time refusal and which the run-time twin (`a_files_segment_namespace_is_refused_for_every_access_and_actor`).
   - `NsPath`: the rules in the order the interface lists; each `Err` is `format!("namespace file path {raw:?}: {rule}")`.
   - `authorize`: `check_namespace(target)?`, then by actor and access. `Actor::Flow { namespace }` with an invalid own namespace is `Err` too (a flow published before the `_files` rule; Task 1 lists any).
-  - `store.rs` reads: one `concat!` query each, `WHERE workspace_id = $1 AND namespace = $2` in every statement. Latest row per path: `SELECT DISTINCT ON (path) … ORDER BY path, revision DESC`, then filter `NOT deleted` in Rust **after** taking the latest (filtering in SQL first would resurrect an older live revision of a deleted path — a test pins it: `a_soft_deleted_latest_hides_every_revision`). Children: `left(path, length($3)) = $3`; one level: no further `/` after the prefix except a directory's trailing one.
+  - `store.rs` reads: one `concat!` query each, `WHERE workspace_id = $1 AND namespace = $2` in every statement. Latest row per path: `SELECT DISTINCT ON (path) … ORDER BY path, revision DESC`, then filter `NOT deleted` in Rust **after** taking the latest (filtering in SQL first would resurrect an older live revision of a deleted path — a test pins it: `a_soft_deleted_path_hides_its_latest_and_serves_each_revision`). `Want::Revision(n)` reads row `n` whatever the path's latest state (R1). Children: `left(path, length($3)) = $3`; one level: no further `/` after the prefix except a directory's trailing one.
   - `namespace_object_uri`: `format!("s3://{}/{}{}/{}/{}{}{}", bucket, prefix, ws, namespace_as_path(ns), "_files", path, suffix)`, `suffix` `""` or `.v{N}`. A directory never gets one (the caller never asks; `debug_assert!`).
   - `egret-config`: `max_namespace_files: u64`, serde default 10 000, `EGRET_WORKFLOW__STORAGE__MAX_NAMESPACE_FILES`, ≥ 1 in `validate`.
   - `egret-bin` (`main.rs:1586`): after `storage::install`, `egret_workflow::storage::nsfiles::install_db((*db.pool.connect_options()).clone())` — read how `db` (the `egret_metastore::Db`) exposes its pool first; `sqlx::Pool::connect_options` exists in sqlx-core 0.9.0 (`pool/mod.rs:545`). A second install is a boot error, as for the store.
@@ -486,7 +498,9 @@ async fn a_writer_of_a_child_and_a_writer_of_a_file_named_like_its_parent_never_
 }
 #[tokio::test] async fn revisions_number_one_then_v2_v3_as_the_artifact_lays_them_out() { /* w9b layout */ }
 #[tokio::test] async fn conflict_error_and_skip() { /* ERROR -> Conflict naming the path, nothing written; SKIP -> Skipped, no object */ }
-#[tokio::test] async fn rewriting_a_soft_deleted_path_creates_the_next_revision_live() {}
+#[tokio::test] async fn rewriting_a_soft_deleted_path_creates_the_next_revision_live() {
+    // w9b layout: revision 4; revisions [1, 2, 3, 4] with 3 flagged deleted; revision 3 still readable by number (R1)
+}
 #[tokio::test] async fn a_live_directory_where_a_file_is_written_is_a_conflict_and_a_deleted_one_is_purged_first() {}
 #[tokio::test] async fn parents_are_created_and_an_existing_parent_is_left_alone() {}
 #[tokio::test] async fn a_failed_upload_rolls_back_and_the_next_write_reuses_the_revision() {
@@ -548,7 +562,8 @@ pub fn classify(path: &str) -> FileTarget;
 /// What a function was asked for, unparsed: storage parses it (path rule, nsfile authority, revision).
 pub struct NsFileArgs<'a> { pub path: &'a str, pub namespace: Option<&'a str>, pub revision: Option<String> }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NsFileMeta { pub size: u64, pub uri: String /* kestra:///…/_files/…[.vN] of the resolved revision */ }
+pub struct NsFileMeta { pub size: u64, pub is_directory: bool,
+                       pub uri: String /* kestra:///…/_files/…[.vN] of the resolved revision; "" for a directory */ }
 pub trait RenderFiles {  // existing methods unchanged; two added, with defaults that refuse
     /// Missing: well-formed, readable, no live row (fileExists answers false). Refused: everything else.
     fn namespace_file(&self, args: &NsFileArgs<'_>) -> Result<NsFileMeta, FileUnavailable> { /* Refused: needs a running execution with storage */ }
@@ -579,6 +594,7 @@ pub async fn scope_for(conn: &mut PgConnection, store: Option<Arc<FileStore>>, w
 #[test] fn a_namespace_argument_together_with_an_authority_is_an_error() { /* AbstractFileFunction.java:181-191 */ }
 #[test] fn a_bare_path_and_nsfile_reach_the_namespace_route_and_an_execution_uri_does_not() { /* spy on which trait method ran */ }
 #[test] fn file_exists_of_a_missing_namespace_file_is_false() {}
+#[test] fn file_uri_of_a_directory_is_an_error_naming_the_path() { /* R3; w9b file_uri._extra.directory, uri.directory */ }
 #[test] fn kv_still_names_w9c_and_the_refused_list_shrinks_to_seven() { /* renamed from the_eight_refusals… */ }
 // tests/nsfiles_render.rs (Postgres + MemStore; flavor = "multi_thread"; install_db_for_tests)
 #[tokio::test(flavor = "multi_thread")] async fn the_functions_match_the_artifact() {
@@ -588,6 +604,11 @@ pub async fn scope_for(conn: &mut PgConnection, store: Option<Arc<FileStore>>, w
     // the settle path, which has no pool: runIf "{{ fileExists('cfg/on.txt') }}" -> the task runs
 }
 #[tokio::test(flavor = "multi_thread")] async fn a_path_assembled_at_render_is_read() { /* "{{ read('a/' ~ inputs.x) }}" */ }
+#[tokio::test(flavor = "multi_thread")] async fn a_revision_of_a_soft_deleted_path_is_read_and_its_latest_is_not() {
+    // R1: read('/fu/gone.txt', revision=1) and fileURI('/fu/gone.txt', revision=1) answer; read('/fu/gone.txt') and
+    // fileURI('/fu/gone.txt') fail naming the path; the four functions on kestra:///…/_files/fu/gone.txt answer as
+    // Kestra (w9b file_uri._extra.soft_deleted_revision_1, read._extra.kestra_own_soft_deleted, four_functions_ns)
+}
 #[tokio::test(flavor = "multi_thread")] async fn another_namespace_of_the_workspace_is_read_by_authority_and_by_kestra_uri() {}
 #[tokio::test(flavor = "multi_thread")] async fn another_workspaces_namespace_file_is_not_found_and_never_its_bytes() {
     // same ns + path in ws B; the render in ws A fails naming the path, the message says nothing about B
@@ -606,13 +627,13 @@ pub async fn scope_for(conn: &mut PgConnection, store: Option<Arc<FileStore>>, w
 - [ ] **Step 2: Run them to watch them fail.**
 - [ ] **Step 3: Implement.**
   - `file_function` (`functions.rs:316`): after the scope lookup, replace the W9b refusal (`:357-362`) with `match classify(path)`. `Execution` → W9a's path unchanged, except that a `namespace` or `revision` argument is an error naming the argument (Kestra ignores them there; record what Task 1 saw, and if Kestra ignores them, follow Kestra and say so). `Namespace` → `scope.0.namespace_file(&args)` / `read_namespace_file`, with `FileUnavailable::Missing` → `false` for `fileExists` exactly as the execution arm does.
-  - `fileURI`: leaves `REFUSED`; registered beside the four (`functions.rs:175-185`, `env.add_function("read", …)` and its siblings) the same way; a `kestra://` argument parses through `parse_any` (via the scope, which owns storage types — add nothing to runners) and returns unchanged; else `namespace_file(&args)?.uri`. The `REFUSED` doc paragraph *"Updated 2026-10-01 (W9a Task 4): eight names now"* gains a dated W9b line; the count becomes seven.
-  - `Snapshot::namespace_file`: the same thread guards as `read_bytes` (`scope.rs:162-180`: not on a runtime worker, multi-thread only) — extract them into one private fn both call; then on `handle.block_on`: parse (`NsFileArgs` → namespace from the authority, the `namespace` argument or `flow_namespace`; `NsPath::parse_file`; revision from the URI suffix or `revision.parse::<u32>()`, a non-integer an error naming the path), `authorize(self.workspace, Actor::Flow { namespace: flow_namespace }, &ns, Access::Read)`, `resolve(conn, &grant, &path, want)`, map `NotFound` → `FileUnavailable::Missing`, `Db`/connect errors → `self.outage(..)` + `Refused`. `read_namespace_file` then `open` + read at most `max_read_bytes + 1` + `decode_utf8` (W9a's, `storage/mod.rs:226`, its message names the URI: pass the `kestra:///…/_files/…` URI).
+  - `fileURI`: leaves `REFUSED`; registered beside the four (`functions.rs:175-185`, `env.add_function("read", …)` and its siblings) the same way; a `kestra://` argument parses through `parse_any` (via the scope, which owns storage types — add nothing to runners) and returns unchanged; else `namespace_file(&args)?`: when `is_directory`, an error naming the path (R3), else its `uri`. The `REFUSED` doc paragraph *"Updated 2026-10-01 (W9a Task 4): eight names now"* gains a dated W9b line; the count becomes seven.
+  - `Snapshot::namespace_file`: the same thread guards as `read_bytes` (`scope.rs:162-180`: not on a runtime worker, multi-thread only) — extract them into one private fn both call; then on `handle.block_on`: parse (`NsFileArgs` → namespace from the authority, the `namespace` argument or `flow_namespace`; `NsPath::parse_file`; revision from the URI suffix or `revision.parse::<u32>()`, a non-integer an error naming the path), `authorize(self.workspace, Actor::Flow { namespace: flow_namespace }, &ns, Access::Read)`, `resolve(conn, &grant, &path, want)` — a path with no file row is looked up as a directory (`four_functions_ns.*.directory`: size 0, `fileExists` true, `isFileEmpty` true, measured), answered with `is_directory: true`; `fileURI` of one is an error naming the path (R3) and `read` of one an error naming it (measured `read._extra.directory`) — map `NotFound` → `FileUnavailable::Missing`, `Db`/connect errors → `self.outage(..)` + `Refused`. `read_namespace_file` then `open` + read at most `max_read_bytes + 1` + `decode_utf8` (W9a's, `storage/mod.rs:226`, its message names the URI: pass the `kestra:///…/_files/…` URI).
   - `Snapshot::flow_namespace` answers its field; the `Unconfigured` scope answers `None`.
   - `scope_for` gains `flow_namespace`; both call sites pass `surface.flow().map(|f| f.namespace.clone())` (`render.rs:632`). The `Unconfigured` scope's two new methods answer its existing `[storage]` message.
   - The module docs of `runners/files.rs` (*"Why a snapshot and not a lookup at render"*) and `storage/scope.rs` gain a dated W9b paragraph: execution files are snapshot-only; namespace files are looked up at render, and why.
 - [ ] **Step 4: Run the tests to see them pass**, `cargo test -p egret-workflow --test oracle` (the render oracle's file-function entries must still match), then the per-task gate.
-- [ ] **Step 5: Mutations:** (a) `authorize` skipped in `Snapshot::namespace_file` (the `_files`-authority test dies; the two-workspace test still passes, because `resolve` is scoped by the grant's workspace — say so); (b) `resolve` without `workspace_id = $1` (the two-workspace render test dies, independently of Task 2's store test); (c) a DB error mapped to `Missing` (the outage test dies: `fileExists` would answer `false`); (d) `classify` treating a bare path as an execution URI (the W9a refusal returns; the artifact test dies).
+- [ ] **Step 5: Mutations:** (a) `authorize` skipped in `Snapshot::namespace_file` (the `_files`-authority test dies; the two-workspace test still passes, because `resolve` is scoped by the grant's workspace — say so); (b) `resolve` without `workspace_id = $1` (the two-workspace render test dies, independently of Task 2's store test); (c) a DB error mapped to `Missing` (the outage test dies: `fileExists` would answer `false`); (d) `classify` treating a bare path as an execution URI (the W9a refusal returns; the artifact test dies); (e) `fileURI` returning a directory's URI (the R3 test dies); (f) `resolve` refusing `Want::Revision` of a soft-deleted path (the R1 test dies).
 - [ ] **Step 6: Commit** `feat(workflow): W9b Task 4 — fileURI, and the file functions over namespace files`.
 
 ---
@@ -641,7 +662,10 @@ impl PathMatcher {
     /// includes AND NOT excludes, on the string the fixture says the predicate sees.
     pub fn matches(&self, path: &NsPath) -> bool;
 }
-/// Commons-IO FilenameUtils.wildcardMatch: '*' and '?' only (PurgeFiles.filePattern, Task 7).
+/// Commons-IO FilenameUtils.wildcardMatch (case-sensitive): '*' and '?' only, on any string. PurgeFiles.namespacePattern
+/// matches namespaces with it (R2, Task 7).
+pub fn wildcard_match(pattern: &str, subject: &str) -> bool;
+/// PurgeFiles.filePattern (Task 7): wildcard_match on the path WITHOUT its leading '/' (spec §8.4, measured).
 pub fn wildcard_matches(pattern: &str, path: &NsPath) -> bool;
 
 // src/storage/nsfiles/stage.rs
@@ -697,7 +721,7 @@ pub struct WorkingDirectory { pub tasks: Vec<Task>,
 #[test] fn regex_patterns_are_supported_and_an_invalid_one_is_refused_naming_it() {}
 #[test] fn an_oversized_pattern_is_refused_naming_it_not_a_panic() { /* "a{1000}{1000}" style -> size_limit */ }
 #[test] fn excludes_win_over_includes() {}
-#[test] fn wildcard_star_and_question_mark_only() {}
+#[test] fn wildcard_star_and_question_mark_only() { /* also: '.' is literal ("w9b.pp.*" vs "w9b.ppx.c" false), case-sensitive */ }
 // stage.rs (unit for parse; Postgres for stage)
 #[test] fn parse_accepts_the_two_corpus_blocks_and_templates() { /* oracle-exec/corpus/valids/working-directory-namespace-files*.yaml */ }
 #[test] fn parse_refuses_each_malformed_property_by_name() { /* namespaces: "x"; ifExists: NOPE; include: [1]; unknown: 1 */ }
@@ -723,7 +747,9 @@ pub struct WorkingDirectory { pub tasks: Vec<Task>,
 }
 #[tokio::test] async fn an_input_files_uri_of_a_files_segment_namespace_is_refused_by_name_before_the_runner() {}
 #[tokio::test] async fn an_input_files_uri_of_a_missing_path_fails_the_task_naming_it_before_the_runner() {
-    // also: a soft-deleted path, and another workspace's identical (ns, path) -> the same "missing" answer
+    // also: a soft-deleted path named without a revision (nsfile:///p, a latest read), and another workspace's
+    // identical (ns, path) -> the same "missing" answer; a kestra:///…/_files/p[.vN] URI of a soft-deleted path names
+    // a revision and IS staged (R1)
 }
 #[tokio::test] async fn an_input_files_namespace_uri_overwrites_a_namespace_files_entry_of_the_same_name() {
     // the merge rule: inputFiles always win, whatever the value's kind
@@ -790,6 +816,13 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
     // output is empty (Kestra's run returns an empty Output)
 }
 #[tokio::test(flavor = "multi_thread")] async fn upload_files_map_takes_a_uri_or_literal_contents() {}
+#[tokio::test(flavor = "multi_thread")] async fn upload_files_with_a_uri_that_does_not_resolve_fails_naming_it_and_writes_nothing() {
+    // w9b tasks.UploadFiles.runs.up_map (chosen; Kestra skips it silently): the other entries are not written either
+}
+#[tokio::test(flavor = "multi_thread")] async fn upload_files_destination_is_a_directory_joined_with_one_slash() {
+    // w9b tasks.UploadFiles.runs.up_map_dest_no_slash: "up2" + "m.txt" -> "/up2/m.txt" (Kestra: "/up2m.txt");
+    // "/up/" + "m.txt" -> "/up/m.txt"; default "/" + "rootm.txt" -> "/rootm.txt"
+}
 #[tokio::test(flavor = "multi_thread")] async fn upload_files_to_another_namespace_is_refused_naming_it_and_writes_nothing() {}
 #[tokio::test(flavor = "multi_thread")] async fn upload_files_conflict_error_and_skip() {}
 #[tokio::test(flavor = "multi_thread")] async fn upload_files_glob_never_reaches_an_unreadable_execution() {
@@ -809,7 +842,7 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 - [ ] **Step 3: Implement.**
   - Properties through `serde` structs with W9a's `spec()` helper pattern (`storage.rs:353`), rendered with `render_str` on `task.render` as W9a's handlers do (read `handlers/storage.rs:388-460`, `Write`, first).
   - **The running namespace** is `task.render.files().and_then(|f| f.0.flow_namespace())` (Task 5's method) and nothing else; `None` fails the task naming that it is not a task run of a flow's execution.
-  - `UploadFiles`: `namespace` rendered, default the flow's; `authorize(task.workspace_id, Actor::Flow{…}, ns, Access::Write)`. `files` items: a whole `kestra:///` string is resolved through the **render snapshot** (`scope.0.lookup`, W9a's one readability decision); any other string is a glob matched with `PathMatcher` over the readable execution files, listed on a pool connection with `readable_executions(conn, ws, task.execution_id)` + `SELECT uri, size FROM workflow.execution_files WHERE workspace_id = $1 AND execution_id = ANY($2) LIMIT $3` (cap + 1 = `max_namespace_files` + 1), each matched on its `Tail`'s `file` with a leading `/` (the spec's *"the URI's file path"*; see the report's ambiguity 6). Destination path = `destination` joined with that file path, through `NsPath::parse_file`. Each file: `get_stream` of the execution object → `put` with `CreatedBy::Execution(task.execution_id)`.
+  - `UploadFiles`: `namespace` rendered, default the flow's; `authorize(task.workspace_id, Actor::Flow{…}, ns, Access::Write)`. `files` items: a whole `kestra:///` string is resolved through the **render snapshot** (`scope.0.lookup`, W9a's one readability decision); any other string is a glob matched with `PathMatcher` over the readable execution files, listed on a pool connection with `readable_executions(conn, ws, task.execution_id)` + `SELECT uri, size FROM workflow.execution_files WHERE workspace_id = $1 AND execution_id = ANY($2) LIMIT $3` (cap + 1 = `max_namespace_files` + 1), each matched on its `Tail`'s `file` with a leading `/` (the spec's *"the URI's file path"*; see the report's ambiguity 6). Destination path = `destination` as a directory (a missing leading `/` added, a trailing `/` dropped) joined to the file's name with exactly one `/`, through `NsPath::parse_file` (`up2` + `m.txt` → `/up2/m.txt`; Task 1 fix round 1). **Every** `files` and `filesMap` entry is resolved before the first `put`: a URI that does not resolve fails the task naming it and nothing is written. Each file: `get_stream` of the execution object → `put` with `CreatedBy::Execution(task.execution_id)`.
   - `DownloadFiles`: `namespace` required, `authorize(Read)`; `list_live` + `PathMatcher`; each match `open` → `put_stream` at `uri::verbatim_file_uri(task_prefix, &format!("{destination}{path_without_leading_slash}"))` (normalise exactly one `/`); `head` for the size; returned in `Outcome.files` (indexed by `apply_outcome`, W9a). Output `files`: `{path → uri}`.
   - Errors: `NsError::{Store, Db}` → `Err` (infrastructure); everything else a failed `Outcome` naming the path or cap.
 - [ ] **Step 4: Run the tests to see them pass**, the ratchet (unchanged line), then the per-task gate.
@@ -823,7 +856,7 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 **Files:** `src/worker/handlers/namespace.rs`, `src/spec/registry.rs`, the same lists as Task 6, `tests/nsfiles_tasks.rs`.
 
 **Interfaces:**
-- Consumes: Task 3 `soft_delete`, `purge_revisions`; Task 2 `list_live`, `revisions`, `namespaces_with_files`; Task 5 `PathMatcher`, `wildcard_matches`.
+- Consumes: Task 3 `soft_delete`, `purge_revisions`; Task 2 `list_live`, `revisions`, `namespaces_with_files`; Task 5 `PathMatcher`, `wildcard_match`, `wildcard_matches`.
 - Produces: `pub struct DeleteFiles`, `pub struct PurgeFiles`, each `new(pool: PgPool, files: Option<Arc<FileStore>>)`, registered by `namespace::register`.
 
 - [ ] **Step 1: Write the failing tests:**
@@ -832,13 +865,18 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 #[tokio::test] async fn declared_properties_and_outputs_match_the_artifact() { /* DeleteFiles, PurgeFiles */ }
 #[tokio::test(flavor = "multi_thread")] async fn delete_files_soft_deletes_matches_and_keeps_objects() {}
 #[tokio::test(flavor = "multi_thread")] async fn delete_parent_folder_removes_parents_left_empty_deepest_first() {}
-#[tokio::test(flavor = "multi_thread")] async fn delete_files_in_another_namespace_is_refused_and_deletes_nothing() {}
+#[tokio::test(flavor = "multi_thread")] async fn delete_files_in_another_namespace_is_refused_and_deletes_nothing() { /* w9b tasks.DeleteFiles.runs.del_other_ns */ }
+#[tokio::test(flavor = "multi_thread")] async fn a_deleted_files_revisions_stay_listed_and_readable_by_number() { /* R1; w9b tasks.DeleteFiles.rows_after */ }
 #[tokio::test(flavor = "multi_thread")] async fn purge_files_defaults_to_own_namespace_and_its_children_on_a_dot_boundary() {
     // own "a.b": rows of "a.b", "a.b.c" purged; "a.bc" and "a" untouched
 }
 #[tokio::test(flavor = "multi_thread")] async fn purge_files_refuses_a_listed_namespace_outside_the_purge_rule() {}
 #[tokio::test(flavor = "multi_thread")] async fn namespaces_and_namespace_pattern_are_exclusive() {}
-#[tokio::test(flavor = "multi_thread")] async fn namespace_pattern_matches_only_namespaces_holding_files_and_each_passes_the_rule() {}
+#[tokio::test(flavor = "multi_thread")] async fn namespace_pattern_is_a_wildcard_over_own_and_child_namespaces_holding_files() {
+    // R2; w9b purge.namespacePattern: from w9b.pp, "w9b.pp.*" purges w9b.pp.a, w9b.pp.b and w9b.pp.noflow (files, no flow),
+    // size 3; w9b.ppx.c untouched; a pattern whose wildcard would match a namespace outside own/children never reaches it;
+    // children w9b.pp.a.b and w9b.pp.a-b with pattern "w9b.pp.a.b": only the first is purged (a regex would take both)
+}
 #[tokio::test(flavor = "multi_thread")] async fn keep_amount_keeps_the_n_highest_revisions_and_size_counts_revisions_purged() {}
 #[tokio::test(flavor = "multi_thread")] async fn before_purges_older_revisions_and_never_the_latest() {}
 #[tokio::test(flavor = "multi_thread")] async fn a_soft_deleted_path_is_purged_entirely() { /* §2: chosen; Kestra's answer recorded beside */ }
@@ -849,10 +887,10 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 - [ ] **Step 2: Run them to watch them fail.**
 - [ ] **Step 3: Implement.**
   - `DeleteFiles`: `namespace` default the flow's, `authorize(Write)`; matches by `PathMatcher` over `list_live`; each `soft_delete`; `deleteParentFolder`: after the deletes, for each distinct parent of a deleted path, deepest first, `soft_delete` it only if `list_live(dir, recursive=false)` is empty. Output per Task 1.
-  - `PurgeFiles`: resolve the namespace set — `namespaces` (rendered list) or `namespacePattern` (regex over `namespaces_with_files`), default `[own]`; with `includeChildNamespaces` add every `namespaces_with_files` entry that is `ns + "."`-prefixed; **every** resolved namespace through `authorize(Purge)`, the first refusal fails the task naming it before anything is purged. Per namespace, per path (`revisions`): the set to purge by `behavior` — `keepAmount` keeps the N highest; `before` takes revisions with `created_at < before` except the highest; a path whose highest revision is deleted: every revision. Then `purge_revisions`. Output `size` = revisions purged.
+  - `PurgeFiles`: resolve the namespace set — `namespaces` (rendered list) or `namespacePattern` (R2: Kestra's wildcard, `glob::wildcard_match` over the namespace string — `*`, `?`, case-sensitive — matched against `namespaces_with_files` restricted to `own` and `own + "."`-prefixed entries; never a regex), default `[own]`; with `includeChildNamespaces` add every `namespaces_with_files` entry that is `ns + "."`-prefixed; **every** resolved namespace through `authorize(Purge)`, the first refusal fails the task naming it before anything is purged. Per namespace, per path (`revisions`): the set to purge by `behavior` — `keepAmount` keeps the N highest; `before` takes revisions with `created_at < before` except the highest; a path whose highest revision is deleted: every revision. Then `purge_revisions`. Output `size` = revisions purged.
   - Properties `behavior.type` per Kestra's `FilesPurgeBehavior`/`Version` (read `Version.java` in the checkout for the type discriminator spelling; the fixture decides).
 - [ ] **Step 4: Run the tests to see them pass**, the ratchet, the per-task gate.
-- [ ] **Step 5: Mutations:** (a) child match without the dot (`a.bc` dies); (b) the namespace check per-namespace after purging earlier ones (the refusal test asserts nothing was purged: it dies); (c) `before` purging the latest; (d) soft-deleted latest kept by `keepAmount` (Kestra's behaviour; the chosen test dies); (e) `DeleteFiles` with `Access::Read`.
+- [ ] **Step 5: Mutations:** (a) child match without the dot (`a.bc` dies); (b) the namespace check per-namespace after purging earlier ones (the refusal test asserts nothing was purged: it dies); (c) `before` purging the latest; (d) soft-deleted latest kept by `keepAmount` (Kestra's behaviour; the chosen test dies); (e) `DeleteFiles` with `Access::Read`; (f) `namespacePattern` compiled as a regex (`.` then matches any character). The fixture's `w9b.ppx.c` cannot kill it, because the candidate restriction already excludes it; the pattern test therefore also holds two **children** of own, `w9b.pp.a.b` and `w9b.pp.a-b`, and the pattern `w9b.pp.a.b`: the wildcard purges only the first, the regex both; (g) the pattern's candidates not restricted to own and children (a pattern `*` from `w9b.pp` purges `w9b.ppx.c`).
 - [ ] **Step 6: Commit** `feat(workflow): W9b Task 7 — DeleteFiles and PurgeFiles`.
 
 ---
@@ -870,17 +908,19 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 
 ```rust
 // GET    /ws/{workspace}/workflows/namespaces/{namespace}/files?path&revision     workflow:read   bytes, W9a download headers
-// GET    /ws/{workspace}/workflows/namespaces/{namespace}/files/stats?path        workflow:read   NsFileStatsDto
-// GET    /ws/{workspace}/workflows/namespaces/{namespace}/files/revisions?path    workflow:read   Vec<NsFileRevisionDto>
-// GET    /ws/{workspace}/workflows/namespaces/{namespace}/files/search?q          workflow:read   Vec<String> (live paths), capped
-// GET    /ws/{workspace}/workflows/namespaces/{namespace}/files/directory?path    workflow:read   Vec<NsFileStatsDto> (live children)
+// GET    /ws/{workspace}/workflows/namespaces/{namespace}/files/stats?path        workflow:read   NsFileStatsDto; no path: a virtual root, nothing created (R3)
+// GET    /ws/{workspace}/workflows/namespaces/{namespace}/files/revisions?path    workflow:read   Vec<NsFileRevisionDto>, a soft-deleted path's included (R1)
+// GET    /ws/{workspace}/workflows/namespaces/{namespace}/files/search?q          workflow:read   Vec<String> (live FILE paths, case-insensitive substring, as Kestra: R3), capped
+// GET    /ws/{workspace}/workflows/namespaces/{namespace}/files/directory?path    workflow:read   Vec<NsFileStatsDto> (live children); a file's path: 400 (R3)
 // POST   /ws/{workspace}/workflows/namespaces/{namespace}/files?path  (multipart) workflow:manage put(OVERWRITE); .zip stored as a file
 // POST   /ws/{workspace}/workflows/namespaces/{namespace}/files/directory?path    workflow:manage create_directory
 // PUT    /ws/{workspace}/workflows/namespaces/{namespace}/files?from&to           workflow:manage move_path
 // DELETE /ws/{workspace}/workflows/namespaces/{namespace}/files?path              workflow:manage soft_delete (path + children only)
-#[derive(Serialize, utoipa::ToSchema)] pub struct NsFileStatsDto { pub path: String, pub r#type: String /* "File"|"Directory" per Task 1 */, pub size: u64, pub revision: u32, pub created: chrono::DateTime<chrono::Utc> }
+#[derive(Serialize, utoipa::ToSchema)] pub struct NsFileStatsDto { pub path: String, pub r#type: String /* "File"|"Directory" per Task 1 */, pub size: u64, pub revision: u32,
+    pub created: Option<chrono::DateTime<chrono::Utc>> /* None only for the virtual root: path "/", Directory, size 0, revision 1 (R3) */ }
 #[derive(Serialize, utoipa::ToSchema)] pub struct NsFileRevisionDto { pub revision: u32, pub deleted: bool, pub size: u64, pub created: chrono::DateTime<chrono::Utc> }
 #[derive(Deserialize, utoipa::IntoParams)] pub struct NsPathQuery { pub path: String, pub revision: Option<u32> }
+#[derive(Deserialize, utoipa::IntoParams)] pub struct NsDirQuery { pub path: Option<String> }   // stats and directory: None = the root (R3)
 #[derive(Deserialize, utoipa::IntoParams)] pub struct NsMoveQuery { pub from: String, pub to: String }
 #[derive(Deserialize, utoipa::IntoParams)] pub struct NsSearchQuery { pub q: String }
 ```
@@ -900,7 +940,16 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 #[tokio::test] async fn an_upload_over_the_body_limit_is_413_and_an_unterminated_header_is_400() { /* W9a's multipart bounds, reused */ }
 #[tokio::test] async fn delete_removes_the_path_and_its_children_and_not_an_emptied_parent() {}
 #[tokio::test] async fn move_onto_a_live_target_is_409() {}
-#[tokio::test] async fn stats_revisions_search_and_directory_have_the_artifacts_shapes() {}
+#[tokio::test] async fn stats_revisions_search_and_directory_match_the_fixtures_summary_cells() { /* w9b api.summary: egret's DTOs; search as Kestra's (R3) */ }
+#[tokio::test] async fn a_soft_deleted_paths_revisions_are_listed_flagged_and_a_given_revision_is_served() {
+    // R1; w9b api.routes.revisions_after_delete (200, [1] deleted) and get_after_delete_rev1 (200 "gee"); get_after_delete stays 404
+}
+#[tokio::test] async fn directory_on_a_file_path_is_400_naming_it() { /* R3; w9b api.routes.directory_of_a_file */ }
+#[tokio::test] async fn no_get_route_creates_anything() {
+    // R3; w9b api.routes.stats_root_no_path / stats_fresh_namespace_root: a namespace with no rows answers the virtual
+    // root; the row count of workflow.namespace_files is the same before and after every GET route
+}
+#[tokio::test] async fn search_is_case_insensitive_and_lists_files_only() { /* R3; w9b api.routes search q='F.TXT', q='CASE', q='dir1' */ }
 #[tokio::test] async fn search_and_directory_past_the_cap_are_refused_naming_it() {}
 #[tokio::test] async fn a_store_outage_is_503() {}
 #[tokio::test] async fn every_write_route_emits_one_audit_mutation() { /* tests/common audit_mutations */ }
@@ -915,7 +964,7 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
   - Audit: `workflow_namespace_file:{upload,create_directory,move,delete}`, resource type `workflow_namespace_file`, detail `{namespace, path}` (+ `to` for move).
   - utoipa: every response documented, as W9a's `download_execution_file` (`storage/routes.rs:256-269`).
 - [ ] **Step 4: Run the tests to see them pass**; `cargo run -p egret-bin -- openapi > openapi.json`; `cargo test -p egret-server --lib`; `cd frontend && npm run gen:api && npm run lint && npx tsc --noEmit`; the per-task gate.
-- [ ] **Step 5: Mutations:** (a) a write route checking `WF_READ` (the permission test dies); (b) `Actor::Api` replaced by skipping `authorize` (the `_files` test dies); (c) `Content-Disposition` unsanitised; (d) the body limit removed (413 test dies); (e) `DELETE` walking up to empty parents.
+- [ ] **Step 5: Mutations:** (a) a write route checking `WF_READ` (the permission test dies); (b) `Actor::Api` replaced by skipping `authorize` (the `_files` test dies); (c) `Content-Disposition` unsanitised; (d) the body limit removed (413 test dies); (e) `DELETE` walking up to empty parents; (f) `directory` on a file answering `[]` (the R3 test dies); (g) `revisions` filtering deleted rows (the R1 test dies); (h) `stats` with no path inserting a root row (the no-create test dies).
 - [ ] **Step 6: Commit** `feat(workflow): W9b Task 8 — the namespace file API`.
 
 ---
@@ -1033,7 +1082,7 @@ final class EgretNamespace implements Namespace {
   7. Export: the zip downloads and `unzip -t` passes.
 - [ ] **Step 3:** `kind delete cluster --name egret-w9b-e2e`.
 - [ ] **Step 4: Coverage and docs.**
-  - `oracle-exec/README.md` gains a `### W9b — namespace files` section after W9a's (`README.md:9251`, before `:9525`): the ratchet **measured** before (Task 1's `w9b-baseline-ratchet.txt`) and after (`executor_matches_golden -- --nocapture` now); the two `WorkingDirectory` corpus flows' outcome before and after (unchanged, both baselined — or the measured difference explained); every live test with its gate; what was measured live (Step 2) and what was not; the `_files`-namespace count from Task 1.
+  - `oracle-exec/README.md` gains a `### W9b — namespace files` section after W9a's (`README.md:9251`, before `:9525`): the ratchet **measured** before (Task 1's `w9b-baseline-ratchet.txt`) and after (`executor_matches_golden -- --nocapture` now); the two `WorkingDirectory` corpus flows' outcome before and after (unchanged: both outside the ratchet with no golden entry, as Task 1 measured — or the measured difference explained); every live test with its gate; what was measured live (Step 2) and what was not; the `_files`-namespace count from Task 1.
   - Programme spec §9 EN+VI (`docs/{en,vi}/specs/2026-09-01-workflow-programme-design.md:484`): the W9 row says W9b shipped; a dated **W9b correction** paragraph after W9a's (`:502-506`), as W9a's: what exists, the one access function, the user's rulings, what is still not true (`WorkingDirectory`, plugin writes, KV W9c). §3 finding 4 (`:93`) updated.
   - **The release note** (in that correction, as W9a's `:504`): new config key `workflow.storage.max_namespace_files` (10 000); migration 0169; publish now refuses a namespace with a `_files` segment (Task 1's count says whom it affects); `namespaceFiles` publishes on script tasks, and an `inputFiles` value may be a namespace-file URI; `WorkingDirectory.namespaceFiles` is validated at publish (a previously-accepted malformed block now fails to publish); nine API routes + export under `workflow:read`/`workflow:manage`; the plugin host no longer exits 4 on `storage().namespace(..)`; the known limits of spec §15.
   - The W9b spec EN+VI: the corrections this plan's reports list (each dated), including the ambiguities ruled in Tasks 2-10.
