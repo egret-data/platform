@@ -6,7 +6,7 @@ import {
   type BrowserContext,
   type APIRequestContext,
 } from "@playwright/test";
-import { loginLocalAdmin, csrf, postJson, firstWorkspace, addWorkspaceMember } from "./helpers";
+import { loginLocalAdmin, csrf, postJson } from "./helpers";
 
 /**
  * Local user management e2e (sub-project 2, Task 5) against a kind deploy.
@@ -23,12 +23,6 @@ import { loginLocalAdmin, csrf, postJson, firstWorkspace, addWorkspaceMember } f
  * sessions the same way) and hard-delete (`DELETE /users/{id}`, plus a fresh
  * login with the now-gone credentials failing) as cheap follow-ons that reuse
  * the same setup.
- *
- * Finally proves the content-owner delete path (UDR-T3): `hard_delete`
- * reassigns the target's notebooks to the deleting admin instead of leaving
- * the delete blocked, so a local user who owns a notebook can still be
- * removed — the delete returns 204 (not 409) and the notebook survives,
- * now owned by the admin (`owner_user_id` flips to the admin's id).
  *
  * Opt-in (EGRET_E2E_KIND=1); NOT in `npm test` / GitHub CI. Run via
  * `just e2e-kind-local-user`. The admin logs in via the UI exactly ONCE
@@ -165,58 +159,5 @@ test.describe("local user management on kind", () => {
     } finally {
       await userCtx.close();
     }
-  });
-
-  test("deleting a notebook owner reassigns and succeeds", async ({ browser }) => {
-    const request = page.request;
-    const h = await csrf(page.context());
-    const email = `e2e-nb-owner-${RUN_ID}@egret.local`;
-    const password = "NbOwner12345!";
-    const userId = await createLocalUser(request, h, email, password);
-
-    // Make the user a workspace member with `ws_editor` (grants `notebook:write` —
-    // see migrations/0037_notebooks.sql — so the user can create a notebook of
-    // their own; `ws_viewer` only gets `notebook:read`).
-    const ws = await firstWorkspace(request);
-    await addWorkspaceMember(request, h, ws.slug, email, "ws_editor");
-
-    const adminMe = await (await request.get("/api/auth/me")).json();
-    const adminUserId = adminMe.user_id as string;
-
-    const { context: userCtx, request: userReq } = await loginAsLocalUser(browser, email, password);
-    // The "" is dead to eslint but load-bearing for tsc: `notebookId` is read after
-    // the try/finally, and without an initializer TypeScript rejects it as possibly
-    // unassigned (the try may not complete).
-    // eslint-disable-next-line no-useless-assignment
-    let notebookId = "";
-    try {
-      const userH = await csrf(userCtx);
-      const notebook = await postJson(userReq, `/api/ws/${ws.slug}/notebooks`, userH, {
-        name: `e2e nb-owner ${RUN_ID}`,
-      });
-      notebookId = notebook.id as string;
-      expect(notebook.owner_user_id, "notebook is owned by its creator").toBe(userId);
-    } finally {
-      await userCtx.close();
-    }
-
-    // Deleting the notebook-owning user must succeed (204), NOT 409 — hard_delete
-    // reassigns the target's notebooks to the deleting admin rather than blocking.
-    const del = await request.delete(`/api/control-plane/users/${userId}`, { headers: h });
-    expect(del.status(), `delete notebook-owning user → ${del.status()} ${await del.text()}`).toBe(
-      204,
-    );
-
-    // The notebook survives the owner's deletion, now owned by the admin who
-    // performed the delete.
-    const after = await request.get(`/api/ws/${ws.slug}/notebooks/${notebookId}`);
-    expect(
-      after.ok(),
-      `notebook survives its owner's delete → ${after.status()} ${await after.text()}`,
-    ).toBeTruthy();
-    const notebookAfter = await after.json();
-    expect(notebookAfter.owner_user_id, "notebook reassigned to the deleting admin").toBe(
-      adminUserId,
-    );
   });
 });

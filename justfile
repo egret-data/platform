@@ -239,38 +239,34 @@ k8s-up:
 k8s-down:
     kind delete cluster --name egret
 
-# Build all egret images (backend + frontend + kernel + renderer).
+# Build all egret images (backend + frontend + apps + renderer).
 images-build:
     docker build -f deploy/docker/backend.Dockerfile -t egret-backend:dev .
     docker build -f frontend/Dockerfile -t egret-frontend:dev frontend
-    docker build -t egret-kernel:dev kernel-image
     docker build -t egret-apps:dev apps-image
     docker build -t egret-renderer:dev renderer
 
 # Build images, load them into the kind `egret` cluster, and (re)install the chart.
 # Force fresh pods onto the just-loaded `:dev` images. A `helm upgrade` with an
 # unchanged image tag does NOT restart pods, so a rebuilt `:dev` image is ignored
-# without this — the classic same-tag gotcha. Also refreshes per-user kernel pods
-# (spawned on-demand, they'd otherwise keep the old kernel image). NOTE: never run
-# two image builds concurrently — both tag `:dev` and the last to finish wins,
-# which can deploy stale code.
+# without this — the classic same-tag gotcha. NOTE: never run two image builds
+# concurrently — both tag `:dev` and the last to finish wins, which can deploy
+# stale code.
 _kind-refresh:
     kubectl rollout restart deploy/egret deploy/egret-frontend -n egret-system
     kubectl rollout status deploy/egret -n egret-system --timeout=180s
-    kubectl delete pods -n egret-notebooks --all --ignore-not-found=true
 
 deploy-kind: images-build
-    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev egret-renderer:dev egret-apps:dev --name egret
+    kind load docker-image egret-backend:dev egret-frontend:dev egret-renderer:dev egret-apps:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m
     just _kind-refresh
     @echo "egret SPA: http://localhost:30080  (login admin@egret.local / Admin12345!)"
 
 # Like deploy-kind but OIDC-on + ingress (Milestone B) — required for the data-plane e2e.
-# Also enables the k8s per-user kernel launcher: this is the canonical notebook-execution path.
 deploy-kind-oidc: images-build
-    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev egret-apps:dev --name egret
+    kind load docker-image egret-backend:dev egret-frontend:dev egret-apps:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
-      --set oidc.enabled=true --set ingress.enabled=true --set kernel.launcher=kubernetes
+      --set oidc.enabled=true --set ingress.enabled=true
     just _kind-refresh
     @echo "egret SPA: http://egret.localtest.me  (login admin@egret.local / Admin12345!)"
 
@@ -325,29 +321,12 @@ e2e-kind: deploy-kind-oidc
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       npx playwright test dataplane-kind
 
-# Opt-in notebook write-isolation e2e: an admin reserves the workspace's notebook
-# (scratch) warehouse + namespace, then a real per-user kernel round-trips a Daft
-# frame through that private Iceberg namespace and a raw out-of-namespace write is
-# denied by the catalog guard. NO Ranger — the notebook kernel stack suffices.
-e2e-kind-notebook-write: deploy-kind-oidc
-    ./deploy/k8s/wait-ready.sh
-    cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
-      npx playwright test notebook-write-isolation-kind
-
-# Opt-in notebook visualization e2e: a real per-user kernel renders a plotly figure
-# (application/vnd.plotly.v1+json → notebook-plotly + lazy plotly.js) and a matplotlib
-# figure (image/png → inline <img>). NO Ranger — the notebook kernel stack suffices.
-e2e-kind-notebook-viz: deploy-kind-oidc
-    ./deploy/k8s/wait-ready.sh
-    cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
-      npx playwright test notebook-viz-kind
-
 # Like deploy-kind-oidc but ALSO Ranger-on — provisioned Trino engines bind Ranger
 # (egret embeds the Ranger admin at /service). For the governance enforcement e2e.
 deploy-kind-governance: images-build
-    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev egret-apps:dev --name egret
+    kind load docker-image egret-backend:dev egret-frontend:dev egret-apps:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
-      --set oidc.enabled=true --set ingress.enabled=true --set ranger.enabled=true --set kernel.launcher=kubernetes
+      --set oidc.enabled=true --set ingress.enabled=true --set ranger.enabled=true
     just _kind-refresh
     @echo "egret (ranger-on): http://egret.localtest.me"
 
@@ -369,8 +348,9 @@ e2e-kind-ranger-auto: deploy-kind-governance
       npx playwright test ranger-auto-admin-kind
 
 # Opt-in per-user-enforcement e2e: drives two OIDC identities (admin-sso full vs
-# member-sso masked+row-filtered) against the same table/dataset/chart/dashboard/
-# notebook, proving per-user Ranger enforcement is consistent across all surfaces.
+# member-sso masked+row-filtered) against the same table via SQL Lab, dataset
+# preview, chart data, and dashboard tile, proving per-user Ranger enforcement
+# is consistent across all four surfaces.
 e2e-kind-per-user: deploy-kind-governance
     ./deploy/k8s/wait-ready.sh
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
@@ -379,7 +359,7 @@ e2e-kind-per-user: deploy-kind-governance
       npx playwright test per-user-enforcement-kind
 
 # Opt-in STS token-broker e2e: a break-glass local admin (NO Keycloak refresh token)
-# queries a governed StarRocks engine from a notebook purely off an egret-minted
+# queries a governed StarRocks engine via SQL Lab purely off an egret-minted
 # token, and admin-sso/member-sso Ranger enforcement (full vs masked) still holds
 # under that same egret-minted-token path.
 e2e-kind-sts: deploy-kind-governance

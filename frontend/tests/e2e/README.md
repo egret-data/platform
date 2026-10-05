@@ -2,40 +2,29 @@
 
 These drive a **real browser against a running local stack**. They are separate
 from the Vitest unit suite (`npm test`) and are **not** run in standard CI —
-they need a live backend and a real Jupyter kernel, so they are a manual /
-opt-in smoke of the notebook execution money-path (Notebook epic E).
+most need a live backend (some also a real in-cluster kind deploy), so they
+are a manual / opt-in smoke of their respective money-paths.
 
 ## Prerequisites
+
+The plain-local-stack specs (not the `*-kind` ones, which deploy their own
+in-cluster stack via `just e2e-kind*`) need:
 
 1. **Docker services** up:
    ```bash
    docker compose -f ../../deploy/docker-compose.dev.yml up -d
    ```
-2. **A Python env with the kernel deps on PATH** (so notebook cells can spawn a
-   real kernel — the backend's `SubprocessLauncher` runs `jupyter kernelgateway`):
-   ```bash
-   python3.12 -m venv /tmp/kernelenv
-   /tmp/kernelenv/bin/pip install jupyter_kernel_gateway ipykernel   # + daft for %%egret_sql --target daft
-   ```
-3. **Backend** running on `:8080` with that venv on PATH + catalog enabled:
+2. **Backend** running on `:8080`:
    ```bash
    cd ../..   # egret repo root
-   PATH="/tmp/kernelenv/bin:$PATH" \
    EGRET_DATABASE__URL="postgres://egret:egret@localhost:5432/egret" \
    EGRET_CATALOG__ENABLED=true EGRET_CATALOG__AUTH_TOKEN=dev \
    cargo run -p egret-bin -- serve
    ```
-4. **Frontend dev server** on `:5173` (the Vite proxy forwards `/api` incl. the
-   kernel WebSocket — `ws: true` in `vite.config.ts`):
+3. **Frontend dev server** on `:5173` (the Vite proxy forwards `/api`):
    ```bash
    npm run dev
    ```
-5. **A provisioned Iceberg warehouse** for the target workspace. The notebook
-   kernel resolves the workspace's warehouse on connect; without one, Run shows
-   `KernelError: no warehouse configured for this workspace`. Provision it once
-   via the UI: **Storage → Add connection** (S3/MinIO: endpoint
-   `http://localhost:9000`, bucket `warehouse`, access key `egret`, secret
-   `egretsecret`) → **Catalog → Add warehouse** on that connection.
 
 ## SSO login (Keycloak)
 
@@ -95,41 +84,10 @@ Override the target / credentials via env: `EGRET_E2E_BASE_URL`, the SSO creds
 `EGRET_E2E_OIDC_USER` / `EGRET_E2E_OIDC_PASSWORD`, and the break-glass local
 admin `EGRET_E2E_EMAIL` / `EGRET_E2E_PASSWORD`.
 
-## What's covered
-
-- `notebook.spec.ts`:
-  - **run a Python cell end-to-end** — login → create notebook → set cell source
-    → Run → assert the printed output renders live → reload → assert the output
-    **restores** from the persisted `last_output` (E-P2 recorder + E-P3 restore).
-  - **toolbar controls** — Run all / Interrupt / Restart / Clear outputs + the
-    per-cell Run + Run options are present (E-P4).
-
-## Dataframe-first spec (`notebook-dataframe.spec.ts`)
-
-Opt-in, exactly like `notebook.spec.ts` (a live-stack money-path smoke, **not**
-in CI). It exercises the dataframe-first helpers auto-loaded in the kernel:
-`write_iceberg(df, table, mode=…)` writes a Daft DataFrame to the notebook's
-read-write Iceberg catalog (auto-creating the table), `iceberg(table)` reads it
-back, and `trino(sql)` / `starrocks(sql)` read the governed engines. The one
-test does an Iceberg **write→read roundtrip** and asserts the round-tripped
-marker renders.
-
-In addition to the prerequisites above, the target workspace needs:
-
-1. **A warehouse named `notebook`** — the notebook read-write Iceberg catalog
-   (catalog B), backed by a provisioned **Storage** connection, so
-   `write_iceberg` / `iceberg` have a read-write catalog to land in. Provision
-   it via **Storage → Add connection** (MinIO defaults as above) → **Catalog →
-   Add warehouse** with the warehouse name `notebook`.
-2. *(Optional, for a governed-engine read via `trino(…)` / `starrocks(…)`)* at
-   least one **registered + enabled engine** for the workspace.
-
-Without (1), Run reports no read-write catalog and the roundtrip fails.
-
 ## User impersonation e2e (`impersonation.spec.ts`)
 
 Opt-in (`EGRET_E2E_IMPERSONATION=1`) against the ordinary dev stack, same
-pattern as `notebook.spec.ts` / `workspace-features.spec.ts` (not `*-kind`).
+pattern as `embedded-catalog.spec.ts` / `workspace-features.spec.ts` (not `*-kind`).
 
 The break-glass local admin logs in once, seeds a plain local member with no
 control-plane permission (`POST /api/control-plane/users`, then added to the
