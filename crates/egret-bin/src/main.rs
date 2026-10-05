@@ -118,22 +118,17 @@ async fn backfill_apps_storage(config: Config) -> anyhow::Result<()> {
         config.apps.storage.prefix.clone(),
     );
 
-    let drafts = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, String, Option<String>)>(
-        "SELECT a.workspace_id, d.app_id, d.source, d.layout_json \
+    let drafts = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid)>(
+        "SELECT a.workspace_id, d.app_id \
            FROM analytics.app_drafts d JOIN analytics.apps a ON a.id = d.app_id",
     )
     .fetch_all(&db.pool)
     .await
     .context("fetching drafts to backfill")?;
     let mut n = 0u64;
-    for (ws, app_id, source, layout) in drafts {
+    for (ws, app_id) in drafts {
         app_store
-            .backfill_draft(
-                egret_core::WorkspaceId(ws),
-                app_id,
-                &source,
-                layout.as_deref(),
-            )
+            .backfill_draft_locked(egret_core::WorkspaceId(ws), app_id)
             .await
             .with_context(|| format!("backfilling draft for app {app_id}"))?;
         n += 1;

@@ -1110,3 +1110,114 @@ async fn backfill_writes_pre_s2_rows_content_to_the_object_store() {
         b"pre-s2 version layout"
     );
 }
+
+/// I5 (final whole-branch review): `backfill_draft` alone takes an unlocked
+/// caller-supplied snapshot, so a backfill run racing a concurrent
+/// `save_draft` can overwrite the live save's S3 content with the stale
+/// snapshot it read before the save landed. `backfill_draft_locked` closes
+/// this by taking the same `FOR UPDATE` row lock `save_draft` does and
+/// re-reading the row itself from inside that lock, rather than trusting a
+/// snapshot: here the "concurrent save" has already committed by the time
+/// `backfill_draft_locked` runs, so it must see and write the save's content,
+/// not the draft's original "v1" source.
+#[tokio::test]
+async fn backfill_draft_locked_never_overwrites_a_concurrent_live_save() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+
+    // The "concurrent save that already landed" the finding describes.
+    let outcome = st
+        .save_draft(
+            fx.ws(),
+            app,
+            fx.uid(),
+            1,
+            "v2 (live edit)",
+            Some("live layout"),
+        )
+        .await
+        .unwrap();
+    let SaveOutcome::Saved { revision } = outcome else {
+        panic!("expected Saved, got {outcome:?}");
+    };
+    assert_eq!(revision, 2);
+
+    // No earlier caller-passed snapshot to go stale: this must re-read the
+    // CURRENT row content, not "v1".
+    st.backfill_draft_locked(fx.ws(), app)
+        .await
+        .expect("backfill_draft_locked");
+
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!(d.source, "v2 (live edit)");
+    assert_eq!(d.layout_json.as_deref(), Some("live layout"));
+
+    // Direct against the object store too, not just through `draft()`'s
+    // reader (which a broken S3 write could mask via Postgres fallback).
+    let draft_source_key = format!(
+        "s3://{}/apps/{}/{}/draft.py",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        app.hyphenated()
+    );
+    let draft_layout_key = format!(
+        "s3://{}/apps/{}/{}/draft.layout.json",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        app.hyphenated()
+    );
+    assert_eq!(
+        fx.mem_store().get(&draft_source_key).await.unwrap(),
+        b"v2 (live edit)"
+    );
+    assert_eq!(
+        fx.mem_store().get(&draft_layout_key).await.unwrap(),
+        b"live layout"
+    );
+}
+
+/// Bundled with the I5 fix per the final reviewer's recommendation (same code
+/// path): `backfill_draft_locked` must clear a stale layout object it finds
+/// at the draft's layout key when the CURRENT row has `layout_json = NULL` --
+/// mirroring `publishing_with_no_layout_clears_any_stale_layout_object`'s
+/// orphan-object shape, but for the locked backfill path.
+#[tokio::test]
+async fn backfill_draft_locked_clears_a_stale_layout_when_the_current_row_has_none() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+
+    // Give the draft a layout, then clear it via a normal save -- the
+    // current row now has `layout_json = NULL`.
+    st.save_draft(fx.ws(), app, fx.uid(), 1, "v1", Some("old layout"))
+        .await
+        .unwrap();
+    st.save_draft(fx.ws(), app, fx.uid(), 2, "v1", None)
+        .await
+        .unwrap();
+
+    let draft_layout_key = format!(
+        "s3://{}/apps/{}/{}/draft.layout.json",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        app.hyphenated()
+    );
+    // Pre-seed an orphaned layout object at that same key, as if a prior
+    // crashed/partial write left one behind.
+    fx.mem_store()
+        .put(&draft_layout_key, b"orphaned layout".to_vec())
+        .await
+        .unwrap();
+
+    st.backfill_draft_locked(fx.ws(), app)
+        .await
+        .expect("backfill_draft_locked");
+
+    assert!(matches!(
+        fx.mem_store().get(&draft_layout_key).await,
+        Err(StorageError::NotFound(_))
+    ));
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!(d.layout_json, None);
+}
