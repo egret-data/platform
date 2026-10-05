@@ -6310,6 +6310,39 @@
     "unsupported_scheme": {
      "error": "io.pebbletemplates.pebble.error.PebbleException: Cannot process the URI s3://bucket/x: scheme not supported. ({{ fileURI('s3://bucket/x') }}:1)",
      "task_state": "WARNING"
+    },
+    "kestra_arg_with_revision": {
+     "probe": "fileURI('kestra:///w9b/fn/_files/fu/three.txt', revision=2)",
+     "error": "a 'revision' argument beside a kestra:// URI (names the argument and the URI)",
+     "basis": "chosen",
+     "why": "coordinator ruling 2026-10-05 on W9b Task 4 concern 1 (an application of the user's R3, 'fix the odd, keep the sensible'): a kestra:///…/_files/… URI names exactly one revision of one namespace's file, so on the namespace route a `revision` argument beside it, or a `namespace` argument that differs from the URI's namespace, is an error naming both the argument and the URI; Kestra's `kestra` branch ignores both (by the code: FileURIFunction KESTRA_SCHEME -> path.toString(), ReadFileFunction reads the URI's object), so egret refuses the silent wrong answer. The execution route keeps Kestra's ignore",
+     "kestra": {
+      "value": "kestra:///w9b/fn/_files/fu/three.txt",
+      "basis": "code",
+      "note": "FileURIFunction: KESTRA_SCHEME -> path.toString(); not measured on the artifact"
+     }
+    },
+    "kestra_arg_missing": {
+     "probe": "fileURI('kestra:///w9b/fn/_files/fu/nope.txt')",
+     "error": "missing path (names the path)",
+     "basis": "chosen",
+     "why": "coordinator ruling 2026-10-05 on W9b Task 4 M3 (accepted as an egret choice): fileURI of a kestra:///…/_files/… URI is returned unchanged once it parses AND names a file that exists (an explicit revision, so a soft-deleted path's revision 1 is returned, R1); a URI that names nothing would fail later, far from its cause (§2, R3). Kestra returns any kestra:// string unchecked (by the code)",
+     "kestra": {
+      "value": "kestra:///w9b/fn/_files/fu/nope.txt",
+      "basis": "code",
+      "note": "FileURIFunction: KESTRA_SCHEME -> path.toString(); not measured on the artifact"
+     }
+    },
+    "kestra_arg_soft_deleted": {
+     "probe": "fileURI('kestra:///w9b/fn/_files/fu/gone.txt')",
+     "value": "kestra:///w9b/fn/_files/fu/gone.txt",
+     "basis": "chosen",
+     "why": "coordinator ruling 2026-10-05 on W9b Task 4 M3 (accepted as an egret choice): fileURI of a kestra:///…/_files/… URI is returned unchanged once it parses AND names a file that exists (an explicit revision, so a soft-deleted path's revision 1 is returned, R1); a URI that names nothing would fail later, far from its cause (§2, R3). Kestra returns any kestra:// string unchecked (by the code)",
+     "kestra": {
+      "value": "kestra:///w9b/fn/_files/fu/gone.txt",
+      "basis": "code",
+      "note": "FileURIFunction: KESTRA_SCHEME -> path.toString(); not measured on the artifact"
+     }
     }
    },
    "_setup": "namespace w9b.fn: /fu/one.txt (1 rev), /fu/three.txt (r1,r2,r3), /fu/gone.txt (written then DELETEd), /fu/empty.txt, /fu/bin.dat; w9b.other: /o.txt"
@@ -6405,6 +6438,34 @@
     "dotdot": {
      "error": "io.pebbletemplates.pebble.error.PebbleException: File should be accessed with their full path and not using relative '..' path. ({{ read('/fu/../fu/one.txt') }}:1)",
      "task_state": "WARNING"
+    },
+    "kestra_with_revision": {
+     "probe": "read('kestra:///w9b/fn/_files/fu/three.txt', revision=2)",
+     "error": "a 'revision' argument beside a kestra:// URI (names the argument and the URI)",
+     "basis": "chosen",
+     "why": "coordinator ruling 2026-10-05 on W9b Task 4 concern 1 (an application of the user's R3, 'fix the odd, keep the sensible'): a kestra:///…/_files/… URI names exactly one revision of one namespace's file, so on the namespace route a `revision` argument beside it, or a `namespace` argument that differs from the URI's namespace, is an error naming both the argument and the URI; Kestra's `kestra` branch ignores both (by the code: FileURIFunction KESTRA_SCHEME -> path.toString(), ReadFileFunction reads the URI's object), so egret refuses the silent wrong answer. The execution route keeps Kestra's ignore",
+     "kestra": {
+      "value": "r1",
+      "basis": "code",
+      "note": "ReadFileFunction: KESTRA_SCHEME reads the URI's object, revision 1's bytes; not measured on the artifact"
+     }
+    },
+    "kestra_with_other_namespace_arg": {
+     "probe": "read('kestra:///w9b/fn/_files/fu/one.txt', namespace='w9b.other')",
+     "error": "a 'namespace' argument that differs from the URI's namespace (names the argument and the URI)",
+     "basis": "chosen",
+     "why": "coordinator ruling 2026-10-05 on W9b Task 4 concern 1 (an application of the user's R3, 'fix the odd, keep the sensible'): a kestra:///…/_files/… URI names exactly one revision of one namespace's file, so on the namespace route a `revision` argument beside it, or a `namespace` argument that differs from the URI's namespace, is an error naming both the argument and the URI; Kestra's `kestra` branch ignores both (by the code: FileURIFunction KESTRA_SCHEME -> path.toString(), ReadFileFunction reads the URI's object), so egret refuses the silent wrong answer. The execution route keeps Kestra's ignore",
+     "kestra": {
+      "value": "one",
+      "basis": "code",
+      "note": "AbstractFileFunction: a kestra:// path takes its namespace from the flow, the argument is unread; not measured on the artifact"
+     }
+    },
+    "kestra_with_same_namespace_arg": {
+     "probe": "read('kestra:///w9b/fn/_files/fu/one.txt', namespace='w9b.fn')",
+     "value": "one",
+     "basis": "code",
+     "note": "the same namespace as the URI's is not an error (the ruling refuses one that DIFFERS); Kestra reads the URI's object, by the code; not measured on the artifact"
     }
    }
   },
@@ -10167,6 +10228,31 @@
     "path": "api.summary.namespace_validation",
     "pointer": "/api/summary/namespace_validation",
     "why": "spec §2/§9 and the header's approved choices"
+   },
+   {
+    "path": "file_uri._extra.kestra_arg_with_revision",
+    "pointer": "/file_uri/_extra/kestra_arg_with_revision",
+    "why": "coordinator ruling 2026-10-05 on W9b Task 4 concern 1 (an application of the user's R3, 'fix the odd, keep the sensible'): a kestra:///…/_files/… URI names exactly one revision of one namespace's file, so on the namespace route a `revision` argument beside it, or a `namespace` argument that differs from the URI's namespace, is an error naming both the argument and the URI; Kestra's `kestra` branch ignores both (by the code: FileURIFunction KESTRA_SCHEME -> path.toString(), ReadFileFunction reads the URI's object), so egret refuses the silent wrong answer. The execution route keeps Kestra's ignore"
+   },
+   {
+    "path": "file_uri._extra.kestra_arg_missing",
+    "pointer": "/file_uri/_extra/kestra_arg_missing",
+    "why": "coordinator ruling 2026-10-05 on W9b Task 4 M3 (accepted as an egret choice): fileURI of a kestra:///…/_files/… URI is returned unchanged once it parses AND names a file that exists (an explicit revision, so a soft-deleted path's revision 1 is returned, R1); a URI that names nothing would fail later, far from its cause (§2, R3). Kestra returns any kestra:// string unchecked (by the code)"
+   },
+   {
+    "path": "file_uri._extra.kestra_arg_soft_deleted",
+    "pointer": "/file_uri/_extra/kestra_arg_soft_deleted",
+    "why": "coordinator ruling 2026-10-05 on W9b Task 4 M3 (accepted as an egret choice): fileURI of a kestra:///…/_files/… URI is returned unchanged once it parses AND names a file that exists (an explicit revision, so a soft-deleted path's revision 1 is returned, R1); a URI that names nothing would fail later, far from its cause (§2, R3). Kestra returns any kestra:// string unchecked (by the code)"
+   },
+   {
+    "path": "read._extra.kestra_with_revision",
+    "pointer": "/read/_extra/kestra_with_revision",
+    "why": "coordinator ruling 2026-10-05 on W9b Task 4 concern 1 (an application of the user's R3, 'fix the odd, keep the sensible'): a kestra:///…/_files/… URI names exactly one revision of one namespace's file, so on the namespace route a `revision` argument beside it, or a `namespace` argument that differs from the URI's namespace, is an error naming both the argument and the URI; Kestra's `kestra` branch ignores both (by the code: FileURIFunction KESTRA_SCHEME -> path.toString(), ReadFileFunction reads the URI's object), so egret refuses the silent wrong answer. The execution route keeps Kestra's ignore"
+   },
+   {
+    "path": "read._extra.kestra_with_other_namespace_arg",
+    "pointer": "/read/_extra/kestra_with_other_namespace_arg",
+    "why": "coordinator ruling 2026-10-05 on W9b Task 4 concern 1 (an application of the user's R3, 'fix the odd, keep the sensible'): a kestra:///…/_files/… URI names exactly one revision of one namespace's file, so on the namespace route a `revision` argument beside it, or a `namespace` argument that differs from the URI's namespace, is an error naming both the argument and the URI; Kestra's `kestra` branch ignores both (by the code: FileURIFunction KESTRA_SCHEME -> path.toString(), ReadFileFunction reads the URI's object), so egret refuses the silent wrong answer. The execution route keeps Kestra's ignore"
    }
   ]
  },

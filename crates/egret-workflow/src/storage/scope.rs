@@ -248,7 +248,28 @@ impl Snapshot {
         let or_own = |arg: Option<&str>| arg.unwrap_or(own).to_string();
         let (namespace, path, uri_revision) = if raw.starts_with(uri::SCHEME_PREFIX) {
             match uri::parse_any(raw) {
-                Ok(uri::StorageUri::NamespaceFile(n)) => (n.namespace, n.path, Some(n.revision)),
+                Ok(uri::StorageUri::NamespaceFile(n)) => {
+                    // The coordinator's ruling on concern 1 (2026-10-05, an
+                    // application of R3): the URI names one revision of one
+                    // namespace's file, so an argument that says otherwise
+                    // is an error naming both, never silently ignored as
+                    // Kestra's `kestra` branch does.
+                    if let Some(given) = &args.revision {
+                        return Err(refused(format!(
+                            "the 'revision' argument ({given}) cannot be given beside {raw}: a \
+                             kestra:// URI names exactly one revision (here {})",
+                            n.revision
+                        )));
+                    }
+                    if let Some(given) = args.namespace.filter(|g| *g != n.namespace) {
+                        return Err(refused(format!(
+                            "the 'namespace' argument '{given}' differs from namespace '{}', \
+                             which {raw} names",
+                            n.namespace
+                        )));
+                    }
+                    (n.namespace, n.path, Some(n.revision))
+                }
                 Ok(uri::StorageUri::Execution(_)) => {
                     return Err(refused(format!(
                         "{raw} is an execution file URI, not a namespace file's"
@@ -294,8 +315,7 @@ impl Snapshot {
         )
         .map_err(refused)?;
         // A `kestra:///…/_files/p[.vN]` URI names exactly one revision (R1);
-        // a `revision` argument beside it is ignored, as Kestra's `kestra`
-        // branch ignores it.
+        // a `revision` argument beside it was refused above.
         let want = match (uri_revision, &args.revision) {
             (Some(n), _) => Want::Revision(n),
             (None, None) => Want::Latest,
@@ -324,7 +344,9 @@ impl Snapshot {
             (None, Some(NsPath::parse_dir(&path).map_err(refused)?))
         } else {
             let file = NsPath::parse_file(&path).map_err(refused)?;
-            let dir = if want == Want::Latest {
+            // A directory is always revision 1 (`NamespaceFile.java:138-148`),
+            // so a URI with no `.vN` names it as well as a path does (M8).
+            let dir = if want == Want::Latest || uri_revision == Some(1) {
                 NsPath::parse_dir(&path).ok()
             } else {
                 None
@@ -345,8 +367,13 @@ impl Snapshot {
     }
 
     /// Run `target`'s lookup on this scope's one namespace connection,
-    /// opening it first if this is the scope's first lookup. Blocks the
-    /// render thread on [`Self::handle`], as W9a's store reads do.
+    /// opening it first if this render has not yet. Blocks the render thread
+    /// on [`Self::handle`], as W9a's store reads do.
+    ///
+    /// W9b fix round 1 (I1): the connection lives for one render at most --
+    /// [`RenderFiles::end_render`] closes it -- and a lookup that fails on a
+    /// connection an earlier lookup of the same render opened (the server
+    /// may have ended it since) reconnects once before it is an outage.
     fn ns_lookup(
         &self,
         target: &NsTarget,
@@ -360,32 +387,54 @@ impl Snapshot {
         self.may_block(&what).map_err(FileUnavailable::Refused)?;
         let mut held = self.ns_conn.lock().unwrap_or_else(|p| p.into_inner());
         let found = self.handle.block_on(async {
-            if held.is_none() {
-                let Some(opts) = self.ns_db.as_deref() else {
-                    return Err(NsError::Author(format!(
-                        "{what} cannot be read: this egret process has no database \
-                         connection for namespace files"
-                    )));
+            let mut reused = held.is_some();
+            loop {
+                if held.is_none() {
+                    let Some(opts) = self.ns_db.as_deref() else {
+                        return Err(NsError::Author(format!(
+                            "{what} cannot be read: this egret process has no database \
+                             connection for namespace files"
+                        )));
+                    };
+                    let conn = PgConnection::connect_with(opts).await.map_err(db_err)?;
+                    *held = Some(conn);
+                }
+                let conn = held.as_mut().expect("opened above");
+                let looked = match find(conn, target).await {
+                    Ok(entry) => match read_cap {
+                        None => Ok((entry, None)),
+                        Some(cap) => match self.ns_read(target, &entry, cap).await {
+                            Ok(bytes) => Ok((entry, Some(bytes))),
+                            Err(e) => Err(e),
+                        },
+                    },
+                    Err(e) => Err(e),
                 };
-                let conn = PgConnection::connect_with(opts).await.map_err(db_err)?;
-                *held = Some(conn);
+                match looked {
+                    Err(e) if is_db_outage(&e) => {
+                        // The connection may be the broken thing: never reuse it.
+                        if let Some(broken) = held.take() {
+                            let _ = broken.close().await;
+                        }
+                        if std::mem::take(&mut reused) {
+                            continue;
+                        }
+                        return Err(e);
+                    }
+                    other => return other,
+                }
             }
-            let conn = held.as_mut().expect("opened above");
-            let entry = find(conn, target).await?;
-            let Some(cap) = read_cap else {
-                return Ok((entry, None));
-            };
-            let bytes = self.ns_read(target, &entry, cap).await?;
-            Ok((entry, Some(bytes)))
         });
-        found.map_err(|e| {
-            if is_db_outage(&e) {
-                // The connection may be the broken thing: the next lookup
-                // opens a fresh one.
-                *held = None;
-            }
-            self.ns_unavailable(&what, e)
-        })
+        found.map_err(|e| self.ns_unavailable(&what, e))
+    }
+
+    /// For tests: whether this scope holds a namespace connection now.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn holds_a_namespace_connection(&self) -> bool {
+        self.ns_conn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
     }
 
     /// `entry`'s bytes, at most `cap + 1` of them (the `+1` is how a file
@@ -593,8 +642,10 @@ impl RenderFiles for Snapshot {
     ) -> std::result::Result<NsFileMeta, FileUnavailable> {
         let target = self.ns_target(args)?;
         let (entry, _) = self.ns_lookup(&target, None)?;
+        let path = entry.path.lock_path().to_string();
         if entry.is_directory {
             return Ok(NsFileMeta {
+                path,
                 size: 0,
                 is_directory: true,
                 uri: String::new(),
@@ -603,6 +654,7 @@ impl RenderFiles for Snapshot {
         let uri = uri::namespace_file_uri(target.grant.namespace(), &entry.path, entry.revision)
             .map_err(FileUnavailable::Refused)?;
         Ok(NsFileMeta {
+            path,
             size: entry.size,
             is_directory: false,
             uri,
@@ -625,6 +677,23 @@ impl RenderFiles for Snapshot {
 
     fn flow_namespace(&self) -> Option<&str> {
         self.flow_namespace.as_deref()
+    }
+
+    /// Close this render's namespace connection, if it opened one (I1):
+    /// `close()`, so the server sees a goodbye and not an unexpected EOF.
+    fn end_render(&self) {
+        let taken = self
+            .ns_conn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        if let Some(conn) = taken {
+            // Only a lookup on a thread that may block opened it, so this
+            // thread may block too; anywhere else the connection is dropped.
+            if self.may_block("a namespace connection").is_ok() {
+                let _ = self.handle.block_on(conn.close());
+            }
+        }
     }
 }
 

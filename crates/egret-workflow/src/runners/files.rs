@@ -92,6 +92,11 @@ pub trait RenderFiles: Send + Sync {
     fn flow_namespace(&self) -> Option<&str> {
         None
     }
+    /// W9b fix round 1 (I1): a render has ended. A scope that holds a
+    /// connection for its namespace lookups releases it here, so none
+    /// outlives the render that opened it. Called on the render thread by
+    /// every template render (`env::render_str` and its kin, `render_bound`).
+    fn end_render(&self) {}
 }
 
 /// The refusal of a scope that cannot reach namespace files.
@@ -147,6 +152,9 @@ pub struct NsFileArgs<'a> {
 /// One namespace file, or a directory (R3), as the functions see it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NsFileMeta {
+    /// The path in its stored form, a directory's without its trailing '/'
+    /// (`/fu`): what a message names.
+    pub path: String,
     /// A directory's is 0.
     pub size: u64,
     pub is_directory: bool,

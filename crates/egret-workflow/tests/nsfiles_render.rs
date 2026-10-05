@@ -22,6 +22,7 @@ mod common;
 use std::sync::Arc;
 
 use egret_metastore::Db;
+use egret_workflow::runners::files::{FileScope, NsFileArgs, RenderFiles};
 use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor};
 use egret_workflow::storage::nsfiles::path::NsPath;
 use egret_workflow::storage::nsfiles::store::{
@@ -356,6 +357,37 @@ fn probes() -> Vec<(&'static str, &'static str, &'static str)> {
         ("w9b.fn", "/read/_extra/empty", "read('/fu/empty.txt')"),
         ("w9b.fn", "/read/binary", "read('/fu/bin.dat')"),
         ("w9b.fn", "/read/_extra/dotdot", "read('/fu/../fu/one.txt')"),
+        // Fix round 1: the coordinator's rulings (M2, M3), as chosen cells.
+        (
+            "w9b.fn",
+            "/file_uri/_extra/kestra_arg_with_revision",
+            "fileURI('kestra:///w9b/fn/_files/fu/three.txt', revision=2)",
+        ),
+        (
+            "w9b.fn",
+            "/file_uri/_extra/kestra_arg_missing",
+            "fileURI('kestra:///w9b/fn/_files/fu/nope.txt')",
+        ),
+        (
+            "w9b.fn",
+            "/file_uri/_extra/kestra_arg_soft_deleted",
+            "fileURI('kestra:///w9b/fn/_files/fu/gone.txt')",
+        ),
+        (
+            "w9b.fn",
+            "/read/_extra/kestra_with_revision",
+            "read('kestra:///w9b/fn/_files/fu/three.txt', revision=2)",
+        ),
+        (
+            "w9b.fn",
+            "/read/_extra/kestra_with_other_namespace_arg",
+            "read('kestra:///w9b/fn/_files/fu/one.txt', namespace='w9b.other')",
+        ),
+        (
+            "w9b.fn",
+            "/read/_extra/kestra_with_same_namespace_arg",
+            "read('kestra:///w9b/fn/_files/fu/one.txt', namespace='w9b.fn')",
+        ),
         (
             "io.kestra.tests",
             "/uri/fileURI/latest(3)",
@@ -433,7 +465,7 @@ const FOUR_TARGETS: &[(&str, &str)] = &[
 ];
 
 /// What an error cell's message must name: the path its probe passed, in
-/// the form egret names it (a leading '/'; no scheme or authority; a
+/// the form egret names it (a leading '/' and no trailing one; no scheme or authority; a
 /// `kestra:///` URI's path after `_files`). A scheme egret does not read is
 /// named whole.
 fn named_path(expr: &str) -> String {
@@ -447,11 +479,8 @@ fn named_path(expr: &str) -> String {
     if arg.contains("://") {
         return arg.to_string();
     }
-    if arg.starts_with('/') {
-        arg.to_string()
-    } else {
-        format!("/{arg}")
-    }
+    // The stored form a message names: a leading '/', no trailing one (M7).
+    format!("/{}", arg.trim_matches('/'))
 }
 
 /// Every cell of `file_uri`, `read`, `four_functions_ns` and `uri` that
@@ -891,4 +920,314 @@ async fn the_cost_of_one_connect_per_render_scope() {
         "connect x50: median {:?}, min {:?}, max {:?}",
         took[25], took[0], took[49]
     );
+}
+
+// ─── Fix round 1 ─────────────────────────────────────────────────────────────
+
+/// The coordinator's ruling on concern 1 (M2): beside a `kestra:///…/_files/…`
+/// URI, a `revision` argument, or a `namespace` argument that differs from
+/// the URI's, is an error naming both the argument and the URI; the same
+/// namespace is not. And M3: `fileURI` of such a URI checks that it names a
+/// file -- a missing one fails naming the path, a soft-deleted path's
+/// revision 1 is returned (R1).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kestra_uri_beside_a_revision_or_another_namespace_is_an_error_naming_both() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    seed_the_artifacts_namespaces(&db, &fs, ws).await;
+    let three = "kestra:///w9b/fn/_files/fu/three.txt";
+    let one = "kestra:///w9b/fn/_files/fu/one.txt";
+    let tasks = [
+        ret("rrev", &format!("read('{three}', revision=2)")),
+        ret("urev", &format!("fileURI('{three}', revision=2)")),
+        ret("rns", &format!("read('{one}', namespace='w9b.other')")),
+        ret("sns", &format!("fileSize('{one}', namespace='w9b.other')")),
+        ret("same", &format!("read('{one}', namespace='w9b.fn')")),
+        ret("missing", "fileURI('kestra:///w9b/fn/_files/fu/nope.txt')"),
+        ret("gone", "fileURI('kestra:///w9b/fn/_files/fu/gone.txt')"),
+        ret("plain", &format!("read('{three}')")),
+    ];
+    let ex = run(&db, ws, &flow("m2", "w9b.fn", &tasks), json!({})).await;
+    for task in ["rrev", "urev"] {
+        let m = error_of(&db, ex, task).await;
+        assert!(
+            m.contains("'revision' argument (2)") && m.contains(three),
+            "{task}: {m}"
+        );
+    }
+    for task in ["rns", "sns"] {
+        let m = error_of(&db, ex, task).await;
+        assert!(
+            m.contains("'namespace' argument 'w9b.other'") && m.contains(one),
+            "{task}: {m}"
+        );
+    }
+    assert_eq!(value_of(&db, ex, "same").await, "one");
+    assert_eq!(
+        value_of(&db, ex, "plain").await,
+        "r1",
+        "the control: revision 1"
+    );
+    let m = error_of(&db, ex, "missing").await;
+    assert!(
+        m.contains("'/fu/nope.txt'") && m.contains("does not exist"),
+        "{m}"
+    );
+    assert_eq!(
+        value_of(&db, ex, "gone").await,
+        "kestra:///w9b/fn/_files/fu/gone.txt"
+    );
+}
+
+/// M8: a directory is always revision 1, so a `kestra:///…/_files/d` URI
+/// names it as its path does -- `fileExists` true, `fileSize` 0,
+/// `isFileEmpty` true -- and `read` and `fileURI` of it fail naming it (R3).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_directory_named_by_a_kestra_uri_answers_as_by_its_path() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    seed_the_artifacts_namespaces(&db, &fs, ws).await;
+    let d = "'kestra:///w9b/fn/_files/fu'";
+    let tasks = [
+        ret("e", &format!("fileExists({d})")),
+        ret("s", &format!("fileSize({d})")),
+        ret("i", &format!("isFileEmpty({d})")),
+        ret("r", &format!("read({d})")),
+        ret("u", &format!("fileURI({d})")),
+        ret("pe", "fileExists('/fu')"),
+        ret("v2", "fileExists('kestra:///w9b/fn/_files/fu.v2')"),
+    ];
+    let ex = run(&db, ws, &flow("m8", "w9b.fn", &tasks), json!({})).await;
+    for (task, want) in [("e", "true"), ("s", "0"), ("i", "true"), ("pe", "true")] {
+        assert_eq!(value_of(&db, ex, task).await, want, "{task}");
+    }
+    // A `.vN` URI is a file's revision N; a directory has none.
+    assert_eq!(value_of(&db, ex, "v2").await, "false");
+    let m = error_of(&db, ex, "r").await;
+    assert!(m.contains("'/fu' is a directory"), "{m}");
+    let m = error_of(&db, ex, "u").await;
+    assert!(
+        m.contains("'/fu' is a directory") && m.contains("no file URI"),
+        "{m}"
+    );
+}
+
+/// Connect options for one test's namespace lookups, told apart from every
+/// other connection in `pg_stat_activity` by their application name.
+fn tagged(db: &Db, tag: &str) -> Arc<sqlx::postgres::PgConnectOptions> {
+    Arc::new((*db.pool.connect_options()).clone().application_name(tag))
+}
+
+async fn backends(db: &Db, tag: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1")
+        .bind(tag)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+/// `backends(tag)` reaches `want` within 5 s (a closed connection's backend
+/// exits a moment after the goodbye), or the last count.
+async fn settles_at(db: &Db, tag: &str, want: i64) -> i64 {
+    let mut n = backends(db, tag).await;
+    for _ in 0..250 {
+        if n == want {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        n = backends(db, tag).await;
+    }
+    n
+}
+
+/// A snapshot over the installed store, reaching namespace files as `ns`'s
+/// flow with `opts`, kept as itself so the test can ask what it holds.
+fn snapshot(
+    fs: &Arc<FileStore>,
+    ws: Uuid,
+    ns: &str,
+    opts: Arc<sqlx::postgres::PgConnectOptions>,
+) -> Arc<Snapshot> {
+    Arc::new(
+        Snapshot::from_parts(Default::default(), fs.clone(), ws, None)
+            .with_namespace_files(Some(ns.into()), Some(opts)),
+    )
+}
+
+/// I1: a render's namespace connection does not outlive the render. Two
+/// lookups in one render share it (one backend while the render runs is
+/// not observable from here, so the test checks the end): once `render_str`
+/// returns, the scope holds nothing and the server has no backend of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_render_closes_its_namespace_connection_when_it_ends() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    put_file(&db, &fs, ws, "w9b.life", "/a.txt", b"A").await;
+    let tag = format!("w9b-t4-life-{}", Uuid::new_v4().simple());
+    let snap = snapshot(&fs, ws, "w9b.life", tagged(&db, &tag));
+    let cx = RenderContext::new().with_files(FileScope(snap.clone()));
+    for _ in 0..2 {
+        assert_eq!(
+            render_str("{{ read('a.txt') }}{{ fileSize('a.txt') }}", &cx).unwrap(),
+            "A1"
+        );
+        assert!(
+            !snap.holds_a_namespace_connection(),
+            "the render ended holding it"
+        );
+        assert_eq!(
+            settles_at(&db, &tag, 0).await,
+            0,
+            "a backend outlived the render"
+        );
+    }
+    assert_eq!(snap.infrastructure_failure(), None);
+}
+
+/// I1: a lookup that fails on a connection an earlier lookup of the same
+/// render opened -- here the server ended it (`pg_terminate_backend`) --
+/// reconnects once and answers; it is not an outage. Driven through the
+/// trait from a plain thread (a render thread's situation), with no render
+/// end between the two lookups.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lookup_on_a_connection_the_server_ended_reconnects_once() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    put_file(&db, &fs, ws, "w9b.rc", "/a.txt", b"A").await;
+    let tag = format!("w9b-t4-rc-{}", Uuid::new_v4().simple());
+    let snap = snapshot(&fs, ws, "w9b.rc", tagged(&db, &tag));
+    let args = NsFileArgs {
+        path: "a.txt",
+        namespace: None,
+        revision: None,
+    };
+    let (s, handle, pool, t) = (
+        snap.clone(),
+        tokio::runtime::Handle::current(),
+        db.pool.clone(),
+        tag.clone(),
+    );
+    let out = std::thread::spawn(move || {
+        let first = s.namespace_file(&args).map(|m| m.size);
+        assert!(s.holds_a_namespace_connection(), "the lookup keeps it for the render");
+        let killed: Vec<bool> = handle.block_on(
+            sqlx::query_scalar(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1",
+            )
+            .bind(&t)
+            .fetch_all(&pool),
+        )
+        .unwrap();
+        let second = s.namespace_file(&args).map(|m| m.size);
+        let third = s.read_namespace_file(&args);
+        s.end_render();
+        (first, killed, second, third)
+    })
+    .join()
+    .unwrap();
+    assert_eq!(out.0, Ok(1));
+    assert_eq!(
+        out.1,
+        vec![true],
+        "the server ended exactly the scope's backend"
+    );
+    assert_eq!(out.2, Ok(1), "reconnected once and answered");
+    assert_eq!(out.3, Ok("A".to_string()));
+    assert_eq!(snap.infrastructure_failure(), None, "not an outage");
+    assert!(!snap.holds_a_namespace_connection());
+    assert_eq!(settles_at(&db, &tag, 0).await, 0);
+}
+
+/// M6: a QUERY that fails (not the connect) is an outage too, and the
+/// connection it failed on is not kept. The role connects but may not read
+/// `workflow` (M4, deferred: every sqlx error is an outage today).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_query_failure_is_an_outage_and_its_connection_is_not_kept() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    // The dedicated test database's own role, created once; it may connect
+    // and may not use the `workflow` schema.
+    sqlx::query(
+        "DO $$ BEGIN \
+           IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'w9b_t4_noread') THEN \
+             CREATE ROLE w9b_t4_noread LOGIN PASSWORD 'w9b_t4_noread'; \
+           END IF; \
+         END $$",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let opts = Arc::new(
+        (*db.pool.connect_options())
+            .clone()
+            .username("w9b_t4_noread")
+            .password("w9b_t4_noread"),
+    );
+    let snap = snapshot(&fs, ws, "w9b.q", opts);
+    let cx = RenderContext::new().with_files(FileScope(snap.clone()));
+    let err = render_str("{{ fileExists('a.txt') }}", &cx)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("'/a.txt'") && err.contains("database is unavailable"),
+        "{err}"
+    );
+    let failure = snap
+        .infrastructure_failure()
+        .expect("an outage is recorded");
+    assert!(
+        failure.contains("permission denied"),
+        "a query, not a connect: {failure}"
+    );
+    assert!(!snap.holds_a_namespace_connection());
+}
+
+/// M6: the stream guard. An object larger than its row says (the row says
+/// 4 bytes, the object holds 5) is refused naming the cap, though the row's
+/// own size passed the check before the download.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_stream_guard_refuses_an_object_larger_than_its_row() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    put_file(&db, &fs, ws, "w9b.lies", "/l.txt", b"abcd").await;
+    let grant = authorize(ws, Actor::Api, "w9b.lies", Access::Read).unwrap();
+    let key = fs.namespace_object_uri(&grant, &NsPath::parse_file("/l.txt").unwrap(), 1);
+    fs.store.put(&key, b"abcde".to_vec()).await.unwrap();
+    let small = Arc::new(FileStore {
+        store: fs.store.clone(),
+        bucket: fs.bucket.clone(),
+        prefix: fs.prefix.clone(),
+        caps: storage::Caps {
+            max_read_bytes: 4,
+            ..storage::Caps::default()
+        },
+        retention_days: 30,
+    });
+    let snap = snapshot(
+        &small,
+        ws,
+        "w9b.lies",
+        Arc::new((*db.pool.connect_options()).clone()),
+    );
+    let cx = RenderContext::new().with_files(FileScope(snap.clone()));
+    let err = render_str("{{ read('l.txt') }}", &cx)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("'/l.txt'") && err.contains("max_read_bytes (4 bytes)"),
+        "{err}"
+    );
+    assert_eq!(render_str("{{ fileSize('l.txt') }}", &cx).unwrap(), "4");
 }

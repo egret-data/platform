@@ -388,6 +388,15 @@ fn file_function(
         )));
     };
     let failed = |message: &str| pebble_error(format!("The '{name}' function failed: {message}"));
+    // M1 (follow Kestra): `fileSize`, `fileExists` and `isFileEmpty` declare
+    // `path, namespace` only, and Pebble refuses an undeclared named argument
+    // with this sentence (`ArgumentsNode`) -- on either route.
+    if !which.takes_revision() && args.named_keys().any(|k| k == "revision") {
+        return Err(pebble_error(format!(
+            "The following named argument does not exist: revision (the '{name}' function \
+             takes path and namespace)"
+        )));
+    }
 
     if classify(path) == FileTarget::Execution {
         let meta = match scope.0.lookup(path) {
@@ -462,7 +471,8 @@ fn file_function(
         // R3 (the user's ruling, 2026-10-05): a directory has no file URI.
         FileFunction::Uri if meta.is_directory => {
             return Err(failed(&format!(
-                "'{path}' is a directory: it has no file URI"
+                "'{}' is a directory: it has no file URI",
+                meta.path
             )))
         }
         // §6: a `kestra://` argument is returned as given, once it parsed
@@ -3964,6 +3974,7 @@ mod tests {
                 self.ns.insert(
                     path.into(),
                     Ok(NsFileMeta {
+                        path: path.into(),
                         size: text.len() as u64,
                         is_directory: false,
                         uri: uri.into(),
@@ -3976,6 +3987,8 @@ mod tests {
                 self.ns.insert(
                     path.into(),
                     Ok(NsFileMeta {
+                        // The stored form storage answers: no trailing '/'.
+                        path: format!("/{}", path.trim_matches('/')),
                         size: 0,
                         is_directory: true,
                         uri: String::new(),
@@ -4298,11 +4311,7 @@ mod tests {
             let (cx, spy) = spied();
             render_str("{{ read('data/x.csv', 'w9b.fn', 2) }}", &cx).unwrap();
             render_str("{{ fileURI('data/x.csv', revision='x') }}", &cx).unwrap();
-            render_str(
-                "{{ fileSize('data/x.csv', namespace='w9b.fn', revision=2) }}",
-                &cx,
-            )
-            .unwrap();
+            render_str("{{ fileSize('data/x.csv', namespace='w9b.fn') }}", &cx).unwrap();
             assert_eq!(
                 *spy.lock().unwrap(),
                 vec![
@@ -4312,6 +4321,34 @@ mod tests {
                     "namespace_file data/x.csv ns=Some(\"w9b.fn\") rev=None".to_string(),
                 ]
             );
+        }
+
+        /// M1 (follow Kestra): `fileSize`, `fileExists` and `isFileEmpty`
+        /// declare `path, namespace` only, and Pebble refuses an undeclared
+        /// named argument (`The following named argument does not exist`),
+        /// on either route, before storage is asked. `read` and `fileURI`
+        /// take it (the control).
+        #[test]
+        fn the_three_metadata_functions_refuse_a_revision_argument() {
+            for name in ["fileSize", "fileExists", "isFileEmpty"] {
+                for path in ["data/x.csv", OWN] {
+                    let (cx, spy) = spied();
+                    let err = render_str(&format!("{{{{ {name}('{path}', revision=2) }}}}"), &cx)
+                        .unwrap_err()
+                        .to_string();
+                    assert!(
+                        err.contains("The following named argument does not exist: revision")
+                            && err.contains(&format!("'{name}'")),
+                        "{name}({path}): {err}"
+                    );
+                    assert!(spy.lock().unwrap().is_empty(), "{name}: storage was asked");
+                }
+            }
+            let (cx, _) = spied();
+            for name in ["read", "fileURI"] {
+                render_str(&format!("{{{{ {name}('data/x.csv', revision=2) }}}}"), &cx)
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+            }
         }
 
         /// `four_functions_ns.*.missing`: `fileExists` is `false`; the other
@@ -4357,11 +4394,13 @@ mod tests {
         /// `uri.directory`).
         #[test]
         fn file_uri_of_a_directory_is_an_error_naming_the_path() {
-            let cx = Fake::default().ns_dir("/fu").ns_dir("/d/").cx();
-            for path in ["/fu", "/d/"] {
+            let cx = Fake::default().ns_dir("fu").ns_dir("/d/").cx();
+            // M7: the message names the stored form storage answered, not the
+            // argument as written (`'/d'` for `'/d/'`, `'/fu'` for `'fu'`).
+            for (path, named) in [("fu", "/fu"), ("/d/", "/d")] {
                 let err = call("fileURI", path, &cx).unwrap_err();
                 assert!(
-                    err.contains(&format!("'{path}' is a directory"))
+                    err.contains(&format!("'{named}' is a directory"))
                         && err.contains("no file URI"),
                     "{path}: {err}"
                 );
@@ -4371,7 +4410,7 @@ mod tests {
                 ("fileExists", "true"),
                 ("isFileEmpty", "true"),
             ] {
-                assert_eq!(call(name, "/fu", &cx).as_deref(), Ok(want), "{name}");
+                assert_eq!(call(name, "fu", &cx).as_deref(), Ok(want), "{name}");
             }
         }
 

@@ -372,6 +372,14 @@ impl RenderContext {
         self.files.as_ref()
     }
 
+    /// A render against this context has ended: the file scope releases what
+    /// it held for it ([`super::files::RenderFiles::end_render`]).
+    pub(crate) fn end_render(&self) {
+        if let Some(files) = &self.files {
+            files.0.end_render();
+        }
+    }
+
     /// Builds a context from a JSON object.
     ///
     /// **Key order here is incidental, not guaranteed.** `serde_json::Map`
@@ -2038,7 +2046,10 @@ fn render_guarded_with(
                 .name("egret-render".to_string())
                 .stack_size(RENDER_STACK_BYTES)
                 .spawn_scoped(scope, || {
-                    render_on_this_thread(template, cx, forbidden, extend, passes)
+                    let out = render_on_this_thread(template, cx, forbidden, extend, passes);
+                    // W9b fix round 1 (I1): nothing the render opened outlives it.
+                    cx.end_render();
+                    out
                 })
                 .map_err(|e| {
                     RenderError::Template(format!("could not start a render thread: {e}"))
@@ -2366,7 +2377,12 @@ pub(crate) fn render_bound(
             let worker = std::thread::Builder::new()
                 .name("egret-render-bound".to_string())
                 .stack_size(RENDER_STACK_BYTES)
-                .spawn_scoped(scope, || bind_on_this_thread(template, cx))
+                .spawn_scoped(scope, || {
+                    let out = bind_on_this_thread(template, cx);
+                    // W9b fix round 1 (I1): as `render_guarded_with`.
+                    cx.end_render();
+                    out
+                })
                 .map_err(|e| {
                     RenderError::Template(format!("could not start a render thread: {e}"))
                 })?;
