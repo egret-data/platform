@@ -237,6 +237,9 @@ pub struct AppsConfig {
     /// its checks are live and every pod is unavailable.
     #[serde(default)]
     pub pod: AppPodConfig,
+    /// Data Apps' draft/version source and grid-layout JSON.
+    #[serde(default)]
+    pub storage: AppsStorageConfig,
 }
 
 /// `[apps.pod]` — the edit-pod launcher (spec §6.3). Env: `EGRET_APPS__POD__<KEY>`.
@@ -325,6 +328,7 @@ impl Default for AppsConfig {
             cookie_ttl_secs: 28_800,
             listen: "0.0.0.0:8081".into(),
             pod: AppPodConfig::default(),
+            storage: AppsStorageConfig::default(),
         }
     }
 }
@@ -875,6 +879,47 @@ fn default_max_task_bytes() -> u64 {
 /// 10 MiB -- see [`WorkflowStorageConfig::max_read_bytes`].
 fn default_max_read_bytes() -> u64 {
     10 << 20
+}
+
+/// `[apps.storage]`: Data Apps' draft/version source and grid-layout JSON. The
+/// bucket and its credentials are `[storage]`'s; this is the key prefix inside
+/// it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppsStorageConfig {
+    /// The key prefix: a draft's key is `{prefix}{workspace_id}/{app_id}/draft.py`
+    /// (and `draft.layout.json`); a version's is
+    /// `{prefix}{workspace_id}/{app_id}/versions/{version_no}/source.py`.
+    /// Default `apps/`.
+    #[serde(default = "default_apps_storage_prefix")]
+    pub prefix: String,
+}
+
+fn default_apps_storage_prefix() -> String {
+    "apps/".to_string()
+}
+
+impl Default for AppsStorageConfig {
+    fn default() -> Self {
+        Self {
+            prefix: default_apps_storage_prefix(),
+        }
+    }
+}
+
+impl AppsStorageConfig {
+    /// Same two rules as `WorkflowStorageConfig::validate`: `prefix` is a
+    /// non-empty key prefix ending with `/` and not starting with one.
+    pub fn validate(&self) -> Result<(), String> {
+        let p = &self.prefix;
+        if p.is_empty() || !p.ends_with('/') || p.starts_with('/') {
+            return Err(format!(
+                "apps.storage.prefix {p:?} must be non-empty, end with '/' and not start \
+                 with '/' (e.g. \"apps/\"; EGRET_APPS__STORAGE__PREFIX)"
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// `30` -- see [`WorkflowConfig::storage_retention_days`].
@@ -1714,6 +1759,16 @@ impl Config {
                 ))
             }
         }
+        if self.apps.pod.launcher != "none"
+            && (self.storage.bucket.is_empty()
+                || self.storage.access_key.is_empty()
+                || self.storage.secret_key.is_empty())
+        {
+            return Err(
+                "apps.pod.launcher other than \"none\" requires [storage] bucket, access_key, secret_key".into(),
+            );
+        }
+        self.apps.storage.validate()?;
         Ok(())
     }
 }
@@ -1742,6 +1797,7 @@ mod tests {
                     cookie_ttl_secs: 28_800,
                     listen: "0.0.0.0:8081".into(),
                     pod: AppPodConfig::default(),
+                    storage: AppsStorageConfig::default(),
                 }
             );
             Ok(())
@@ -2551,6 +2607,10 @@ values = { allowed-images = [] }
         cfg.apps.egret_origin = "https://egret.example".into();
         assert!(cfg.validate().unwrap_err().contains("callback_url"));
         cfg.apps.pod.callback_url = "http://egret:8080".into();
+        // Set storage to allow validation to proceed
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
         cfg.apps.pod.idle_secs = 10;
         assert!(cfg.validate().unwrap_err().contains("idle_secs"));
@@ -2574,6 +2634,10 @@ values = { allowed-images = [] }
         cfg.apps.pod.command = vec!["egret-apps".into()];
         cfg.apps.pod.config_dir = "apps-image/config".into();
         cfg.apps.pod.callback_url = "http://egret:8080".into();
+        // Set storage to allow validation to proceed
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok(), "defaults (thread, cap 8) are valid");
 
         cfg.apps.pod.run_kernel_mode = "pool".into();
@@ -3031,5 +3095,27 @@ values = { allowed-images = [] }
             );
             Ok(())
         });
+    }
+
+    #[test]
+    fn apps_pod_launcher_other_than_none_requires_storage() {
+        let mut cfg = Config::default();
+        // Set up required fields so we reach the storage requirement check
+        cfg.apps.origin = "https://apps.egret.example".into();
+        cfg.apps.egret_origin = "https://egret.example".into();
+        cfg.apps.pod.launcher = "subprocess".into();
+        cfg.apps.pod.callback_url = "http://egret:8080".into();
+        cfg.apps.pod.command = vec!["egret-apps".into()];
+        cfg.apps.pod.config_dir = "apps-image/config".into();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("[storage]"), "{err}");
+    }
+
+    #[test]
+    fn apps_storage_prefix_must_end_with_a_slash() {
+        let cfg = AppsStorageConfig {
+            prefix: "apps".into(),
+        };
+        assert!(cfg.validate().is_err());
     }
 }
