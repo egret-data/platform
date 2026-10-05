@@ -25,6 +25,8 @@
   - **`WorkingDirectory` stays out of W9b.** `namespaceFiles` runs on script tasks only; on `WorkingDirectory` the block is parsed and validated at publish (a malformed block refused naming the property, a valid one kept in the model). Nothing changes at run. The two corpus flows stay baselined; no ratchet change is expected.
   - **Namespace files load first and `inputFiles` always overwrite a same-named namespace file, whatever `ifExists` says; `ifExists` governs only collisions between namespaces.**
   - **A namespace with a `_files` segment is refused** at publish and in every namespace-file operation (API, tasks, functions), with an error naming it.
+  - **(2026-10-05, the user's ruling on this plan's item 9.) A script task's `inputFiles` value that is a namespace-file URI (`nsfile:///…`, `nsfile://other.ns/…`, `kestra:///…/_files/…`, e.g. from `fileURI`) is accepted, as Kestra does**, staged through the same one namespace-file read check (any namespace of the workspace), alongside W9a's execution-file URIs (Task 5).
+  - **(2026-10-05, the controller's ruling on this plan's item 10.) `task.json` carries namespace files in a separate `namespaceFiles` array**; W9a's `storage` map is unchanged (Task 10).
   - **Approved as egret's choices:** `PurgeFiles` defaults to the flow's own namespace; child namespaces match on a dot boundary; the API's `DELETE` does not remove parents left empty; export is a streamed, files-only zip; `fileURI` without `revision` is an error on a missing path; reading `kestra:///other/ns/_files/…` is allowed within the workspace.
 - **Layout (§3):** object key `{workflow.storage.prefix}{workspace_id}/{ns-as-path}/_files{path}` for revision 1 and `…{path}.v{N}` for N ≥ 2 (`path` always starts with `/`); a directory has a row and **no object**. URI a flow sees: `kestra:///{ns-as-path}/_files{path}[.vN]`, no workspace in it.
 - **Defaults:** `workflow.storage.max_namespace_files` **10 000** (new, §7); `max_file_bytes` 1 GiB, `max_task_bytes` 5 GiB, `max_read_bytes` 10 MiB (W9a's, unchanged). Search and listing answers are capped by the same count.
@@ -83,8 +85,8 @@ Each is reported to the user with the plan; an implementer who finds the code sa
 6. **`UploadFiles.files` globs "matched on the URI's file path"** (§8.1): the plan matches the URI's `Tail` file component with a leading `/` (Task 6).
 7. **"Rows first, then objects" for a hard purge** (§4.2, §8.4) races a writer that recomputes the purged revision number and reuses its key once a transaction lock is released; the plan holds a **session** advisory lock across "delete rows, commit, delete objects" (Task 3).
 8. **§4.1's index on `(workspace_id, namespace, path)`** is the leading prefix of the unique constraint's index; the plan adds no duplicate (Task 2).
-9. **An `inputFiles` value that is a namespace file URI** (`{{ fileURI('x') }}`) is in no section. The plan leaves W9a's behaviour: refused by name (now naming `namespaceFiles` and the plugin bridge as the ways a namespace file reaches a task) — Task 5 adds that message and its test. Supporting it is a one-function change if the user rules so.
-10. **§10's "task.json's `storage` map gains the namespace file entries with namespace, path and revision"**: the existing map is `URI → path` strings read by `EgretPluginHost.storageSpec` (`:343-353`); the plan adds a separate `namespaceFiles` array instead of changing that map's value type (Task 10).
+9. **An `inputFiles` value that is a namespace file URI** (`{{ fileURI('x') }}`) was in no section. **Ruled 2026-10-05 by the user: accepted, as Kestra does**, staged through the same read check as `namespaceFiles` (Task 5); the spec's header and §7 now say so.
+10. **§10's "task.json's `storage` map gains the namespace file entries"**: the existing map is `URI → path` strings read by `EgretPluginHost.storageSpec` (`:343-353`). **Ruled 2026-10-05 by the controller: a separate `namespaceFiles` array**, W9a's map unchanged (Task 10); the spec's §10 sentence is corrected.
 11. **§8.2's `tasks/{taskId}/{taskRunId}/{destination}{path}`** joins `""` and `/a.txt` into `…//a.txt`; the plan normalises to exactly one `/` (Task 6).
 12. **§12 has ten tasks; the plan has eleven** (*Task map*).
 
@@ -671,6 +673,10 @@ pub struct Staged { pub files: BTreeMap<String /*rel path in the working dir*/, 
 /// NsError::{Store,Db} for infrastructure.
 pub async fn stage(conn: &mut PgConnection, fs: &FileStore, workspace: Uuid, flow_namespace: &str,
                    spec: &RenderedNamespaceFiles) -> Result<Result<Staged, String>, NsError>;
+/// One `inputFiles` value that is a namespace-file URI (nsfile:///…, nsfile://ns/…, kestra:///…/_files/…[.vN]):
+/// parse -> authorize(Read) -> resolve -> StoredInput. Err(String) = the author's, naming the path.
+pub async fn resolve_input_uri(conn: &mut PgConnection, fs: &FileStore, workspace: Uuid, flow_namespace: &str,
+                               uri: &str) -> Result<Result<crate::worker::commands::StoredInput, String>, NsError>;
 
 // scripts/mod.rs
 pub struct ScriptTask { /* … */ pub namespace_files: Option<crate::storage::nsfiles::stage::NamespaceFilesSpec> }
@@ -707,8 +713,20 @@ pub struct WorkingDirectory { pub tasks: Vec<Task>,
 }
 #[tokio::test] async fn a_store_outage_while_staging_is_a_worker_error() {}
 #[tokio::test] async fn enabled_false_stages_nothing_and_calls_the_runner() {}
-#[tokio::test] async fn an_input_files_value_that_is_a_namespace_file_uri_is_refused_naming_namespace_files() {
-    // ambiguity 9: "{{ fileURI('x') }}" as an inputFiles value fails before the runner, naming `namespaceFiles`
+// inputFiles values that are namespace-file URIs (the user's ruling of 2026-10-05; spec header, §7)
+#[tokio::test] async fn an_input_files_nsfile_uri_of_the_own_namespace_is_staged_under_its_input_name() {
+    // "nsfile:///cfg/a.txt" and "{{ fileURI('cfg/a.txt') }}" (a kestra:///…/_files/…v2 URI): StoredInput with
+    // the namespace object's key and size, under the inputFiles key; the execution-URI path still works beside it
+}
+#[tokio::test] async fn an_input_files_uri_of_another_namespace_of_the_workspace_is_staged() {
+    // "nsfile://other.ns/x.txt" and "kestra:///other/ns/_files/x.txt"
+}
+#[tokio::test] async fn an_input_files_uri_of_a_files_segment_namespace_is_refused_by_name_before_the_runner() {}
+#[tokio::test] async fn an_input_files_uri_of_a_missing_path_fails_the_task_naming_it_before_the_runner() {
+    // also: a soft-deleted path, and another workspace's identical (ns, path) -> the same "missing" answer
+}
+#[tokio::test] async fn an_input_files_namespace_uri_overwrites_a_namespace_files_entry_of_the_same_name() {
+    // the merge rule: inputFiles always win, whatever the value's kind
 }
 // tests/scripts_gate.rs: the `namespaceFiles` refusal at :932-945 becomes `targetOS` (still refused, by name) and a
 // new test publishes a script task with a valid namespaceFiles and refuses a malformed one naming
@@ -727,10 +745,10 @@ pub struct WorkingDirectory { pub tasks: Vec<Task>,
   - `validate.rs:1505`: when `w.namespace_files` is `Some(v)`, `NamespaceFilesSpec::parse(v)`; an error is a finding `working_directory_namespace_files_invalid` at `{path}.namespaceFiles.{p}`. Nothing else about `WorkingDirectory` changes; `executor/plan.rs:1230` and `claim.rs:258` are untouched — the report confirms with `git diff --stat` on both.
   - `models/task.rs`: the comment *"`cache`, `namespaceFiles`, `inputFiles`, `outputFiles` are execution-plane concerns dropped here"* gains a dated W9b line: `namespaceFiles` is kept (validated, not run).
   - **Handler order** (`script.rs` `run` `:458`): `render` stays synchronous (`:235`) and renders the block's strings (`include`, `exclude`, `namespaces`, `enabled`, `folderPerNamespace`) with the same `cx`; then, in `run`, with `rt.pool` and `rt.files`, `stage` on a pool connection with `flow_namespace` from `task.render.files().and_then(|f| f.0.flow_namespace())` (Task 4's method; never `render_str("{{ flow.namespace }}")`, the way `kestra.rs:406` reads it today); then **merge**: start from `Staged.files`, remove every name `inputFiles` declares (inline or stored), then add `input_files`/`stored_inputs` as today. One merge function, unit-tested over the four `ifExists` values. `Staged.warnings` go to `task.log.line(LogLevel::Warn, …)` (`logs/run_log.rs:163`).
-  - `stage_inputs` (`script.rs:383`): a value that `classify`s as `FileTarget::Namespace` and starts with `kestra:///` or `nsfile://` fails before the runner with a message naming `namespaceFiles` (ambiguity 9); the existing execution-URI path is unchanged.
+  - **`inputFiles` namespace-file URIs** (the user's ruling, item 9): `stage_inputs` (`script.rs:383`) is synchronous and has no connection, so the resolution happens in `run`, before `render`'s result is used: every rendered `inputFiles` value that starts with `nsfile://`, or with `kestra:///` and `classify`s as `FileTarget::Namespace`, is resolved by **one** function in `stage.rs` — `pub async fn resolve_input_uri(conn: &mut PgConnection, fs: &FileStore, workspace: Uuid, flow_namespace: &str, uri: &str) -> Result<Result<StoredInput, String>, NsError>` — which parses (`parse_any` / the `nsfile` authority rule Task 4 uses — share that parser, do not copy it), calls `authorize(Read)`, `resolve(Want::Latest | Revision)`, and returns a `StoredInput { uri, object_uri: fs.namespace_object_uri(..), size }`. `stage` uses the same `resolve` for its listings, so `namespaceFiles` and `inputFiles` read through the one check. Values that are execution URIs keep W9a's snapshot path unchanged; a bare path (no scheme) stays **inline contents**, as W9a/W5a treat it (Kestra's `inputFiles` writes a non-URI string as contents). An author error fails the task before the runner, naming the input and the path; `NsError::{Store, Db}` is a worker `Err`. A bare `{{ fileURI(..) }}` in `inputFiles` is rendered by Task 4's function first, then resolved here.
   - `commands.rs` module doc (`:105-107`): *"No `namespaceFiles`, no `targetOS`"* becomes a dated line: `namespaceFiles` arrive as `stored_inputs`, staged by the handler.
 - [ ] **Step 4: Run the tests to see them pass**, both live suites with their gates, the ratchet (must read the same line as Task 1: the two corpus flows are `WorkingDirectory`), then the per-task gate.
-- [ ] **Step 5: Mutations:** (a) staging after `inputFiles` (the overwrite test dies under OVERWRITE... and must also die under FAIL: show it); (b) `Fail` triggered by an `inputFiles` collision; (c) namespaces staged in reverse order; (d) the cap counted per namespace instead of across all; (e) `authorize` dropped from `stage` (the `_files` test dies); (f) `namespaceFiles` re-added to `COMMON_REFUSED` (the publish test dies); (g) `validate.rs` not calling `parse` for `WorkingDirectory` (the malformed-WD test dies).
+- [ ] **Step 5: Mutations:** (a) staging after `inputFiles` (the overwrite test dies under OVERWRITE... and must also die under FAIL: show it); (b) `Fail` triggered by an `inputFiles` collision; (c) namespaces staged in reverse order; (d) the cap counted per namespace instead of across all; (e) `authorize` dropped from `stage` (the `_files` test dies); (e2) `authorize` dropped from `resolve_input_uri` (the `inputFiles` `_files`-segment test dies), and separately `resolve_input_uri` treating a `NotFound` as inline contents (the missing-path test dies: the runner would be called); (f) `namespaceFiles` re-added to `COMMON_REFUSED` (the publish test dies); (g) `validate.rs` not calling `parse` for `WorkingDirectory` (the malformed-WD test dies).
 - [ ] **Step 6: Commit** `feat(workflow): W9b Task 5 — namespaceFiles staged into script tasks; WorkingDirectory's validated`.
 
 ---
@@ -984,6 +1002,7 @@ final class EgretNamespace implements Namespace {
 - [ ] **Step 1: Write the failing tests.**
   - Java (`EgretNamespaceTest`, JUnit 5): `getFileContent` of a staged path returns its bytes; of another path `FileNotFoundException` naming it; `exists`; `findAllFilesMatching` over the staged set; `putFile`/`delete`/`move`/`createDirectory` throw `UnsupportedOperationException` with the reason; `storage().namespace("other.ns")` gives an empty namespace, not an exit 4. `EgretStorageTest.java:261` (the W9b message) flips to a test that `storage().namespace(ns)` no longer throws `EgretUnsupported`. `EgretStorage.get` of a staged `kestra:///…/_files/…` URI returns its bytes (the existing staged map).
   - Rust (`kestra.rs` spy tests): every **whole** string leaf of the rendered properties that is `nsfile://…` or a `kestra:///…/_files/…` URI is resolved through `authorize(Read)` + `resolve` on `rt.pool`, staged at `.egret/storage/<n>`, and listed under `namespaceFiles` in `task.json`; a substring inside SQL is not staged; a refused namespace fails the task at render, before any runner; a missing path fails naming it; a store outage is `Err`.
+  - `task.json`'s `storage` map (W9a) is unchanged; a spy test asserts a namespace file appears in `namespaceFiles` and **not** in `storage` (the controller's ruling, item 10).
   - Live (`tests/plugin_host_live.rs`, `EGRET_PLUGIN_HOST_LIVE=1`, Docker, MinIO-gated): `postgresql.Query` with `sql: "{{ read('q.sql') }}"` (a function, no bridge) and a `postgresql.CopyIn` whose `from` is `"{{ fileURI('data.csv') }}"` (the bridge) both run against a namespace file.
 - [ ] **Step 2: Run them to watch them fail** (`mvn -f plugin-host/pom.xml test` with `JAVA_HOME`; `cargo test -p egret-workflow --lib kestra`).
 - [ ] **Step 3: Implement.**
@@ -1006,7 +1025,7 @@ final class EgretNamespace implements Namespace {
   - **Do not touch the shared `egret` cluster.**
 - [ ] **Step 2: Drive the scenario through the API**, transcripts into the SDD workspace (`w9b-e2e-*`):
   1. Upload `cfg/a.txt` twice and `data.csv` through the API; `revisions` shows 1 and 2; download revision 1 and the latest (bytes differ as uploaded).
-  2. A flow in that namespace: `Log` `{{ read('cfg/a.txt') }}` and `{{ fileURI('cfg/a.txt') }}` (ends `.v2`); a script task with `namespaceFiles` over two namespaces, `folderPerNamespace: true`, and an `inputFiles` entry overwriting one namespace file; its `cat` output checked.
+  2. A flow in that namespace: `Log` `{{ read('cfg/a.txt') }}` and `{{ fileURI('cfg/a.txt') }}` (ends `.v2`); a script task with `namespaceFiles` over two namespaces, `folderPerNamespace: true`, an `inputFiles` entry overwriting one namespace file, and `inputFiles` values `nsfile://<other ns>/x.txt` and `{{ fileURI('data.csv') }}`; its `cat` output checked.
   3. `UploadFiles` from a `Write` URI → `DownloadFiles` → `DeleteFiles` → `PurgeFiles` (`keepAmount: 1`); the API's `revisions` after each.
   4. A `kestra.…postgresql.CopyIn` whose `from` is `{{ fileURI('data.csv') }}`; row count in Postgres.
   5. **The pod holds no storage credential:** `kubectl get pod -o yaml` during a run (hold it with `sleep 20`) contains none of `[storage]`'s access key, secret key or endpoint; control: the image name appears.
@@ -1016,7 +1035,7 @@ final class EgretNamespace implements Namespace {
 - [ ] **Step 4: Coverage and docs.**
   - `oracle-exec/README.md` gains a `### W9b — namespace files` section after W9a's (`README.md:9251`, before `:9525`): the ratchet **measured** before (Task 1's `w9b-baseline-ratchet.txt`) and after (`executor_matches_golden -- --nocapture` now); the two `WorkingDirectory` corpus flows' outcome before and after (unchanged, both baselined — or the measured difference explained); every live test with its gate; what was measured live (Step 2) and what was not; the `_files`-namespace count from Task 1.
   - Programme spec §9 EN+VI (`docs/{en,vi}/specs/2026-09-01-workflow-programme-design.md:484`): the W9 row says W9b shipped; a dated **W9b correction** paragraph after W9a's (`:502-506`), as W9a's: what exists, the one access function, the user's rulings, what is still not true (`WorkingDirectory`, plugin writes, KV W9c). §3 finding 4 (`:93`) updated.
-  - **The release note** (in that correction, as W9a's `:504`): new config key `workflow.storage.max_namespace_files` (10 000); migration 0169; publish now refuses a namespace with a `_files` segment (Task 1's count says whom it affects); `namespaceFiles` publishes on script tasks; `WorkingDirectory.namespaceFiles` is validated at publish (a previously-accepted malformed block now fails to publish); nine API routes + export under `workflow:read`/`workflow:manage`; the plugin host no longer exits 4 on `storage().namespace(..)`; the known limits of spec §15.
+  - **The release note** (in that correction, as W9a's `:504`): new config key `workflow.storage.max_namespace_files` (10 000); migration 0169; publish now refuses a namespace with a `_files` segment (Task 1's count says whom it affects); `namespaceFiles` publishes on script tasks, and an `inputFiles` value may be a namespace-file URI; `WorkingDirectory.namespaceFiles` is validated at publish (a previously-accepted malformed block now fails to publish); nine API routes + export under `workflow:read`/`workflow:manage`; the plugin host no longer exits 4 on `storage().namespace(..)`; the known limits of spec §15.
   - The W9b spec EN+VI: the corrections this plan's reports list (each dated), including the ambiguities ruled in Tasks 2-10.
   - **Sweep** (N examined / M corrected per population, `/usr/bin/grep` with file arguments): (1) `\bW9b\b` in `crates/egret-workflow/src`, `plugin-host/src`, both programme specs — a message saying namespace files "need W9b" is now false; (2) `namespaceFiles` in docs and doc comments saying it is refused; (3) `NO_NAMESPACE_FILES`.
 - [ ] **Step 5: Full local CI**, compared with Task 1's baselines:
