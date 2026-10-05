@@ -1147,31 +1147,29 @@ async fn a_lookup_on_a_connection_the_server_ended_reconnects_once() {
 }
 
 /// M6: a QUERY that fails (not the connect) is an outage too, and the
-/// connection it failed on is not kept. The role connects but may not read
-/// `workflow` (M4, deferred: every sqlx error is an outage today).
+/// connection it failed on is not kept (M4, deferred: every sqlx error is an
+/// outage today).
+///
+/// The failure needs no role: a pool transaction holds `ACCESS EXCLUSIVE` on
+/// `workflow.namespace_files`, and the scope's connection carries a 50 ms
+/// `lock_timeout`, so its `SELECT` fails with a lock timeout on a live
+/// connection. The database is private to this process (`egret-test-db`) and
+/// the lock is released when the transaction drops.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_query_failure_is_an_outage_and_its_connection_is_not_kept() {
     let _turn = SERIAL.lock().await;
     let Some((db, ws, fs)) = setup().await else {
         return;
     };
-    // The dedicated test database's own role, created once; it may connect
-    // and may not use the `workflow` schema.
-    sqlx::query(
-        "DO $$ BEGIN \
-           IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'w9b_t4_noread') THEN \
-             CREATE ROLE w9b_t4_noread LOGIN PASSWORD 'w9b_t4_noread'; \
-           END IF; \
-         END $$",
-    )
-    .execute(&db.pool)
-    .await
-    .unwrap();
+    let mut lock = db.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE workflow.namespace_files IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
     let opts = Arc::new(
         (*db.pool.connect_options())
             .clone()
-            .username("w9b_t4_noread")
-            .password("w9b_t4_noread"),
+            .options([("lock_timeout", "50ms")]),
     );
     let snap = snapshot(&fs, ws, "w9b.q", opts);
     let cx = RenderContext::new().with_files(FileScope(snap.clone()));
@@ -1186,7 +1184,7 @@ async fn a_query_failure_is_an_outage_and_its_connection_is_not_kept() {
         .infrastructure_failure()
         .expect("an outage is recorded");
     assert!(
-        failure.contains("permission denied"),
+        failure.contains("lock timeout"),
         "a query, not a connect: {failure}"
     );
     // The render's end closes whatever it held, so ask the scope directly,
@@ -1207,6 +1205,7 @@ async fn a_query_failure_is_an_outage_and_its_connection_is_not_kept() {
     .join()
     .unwrap();
     assert_eq!(kept, (true, false), "the lookup failed and kept nothing");
+    lock.rollback().await.unwrap();
 }
 
 /// M6: the stream guard. An object larger than its row says (the row says

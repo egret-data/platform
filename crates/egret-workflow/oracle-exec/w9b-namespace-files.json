@@ -6336,13 +6336,8 @@
     "kestra_arg_soft_deleted": {
      "probe": "fileURI('kestra:///w9b/fn/_files/fu/gone.txt')",
      "value": "kestra:///w9b/fn/_files/fu/gone.txt",
-     "basis": "chosen",
-     "why": "coordinator ruling 2026-10-05 on W9b Task 4 M3 (accepted as an egret choice): fileURI of a kestra:///…/_files/… URI is returned unchanged once it parses AND names a file that exists (an explicit revision, so a soft-deleted path's revision 1 is returned, R1); a URI that names nothing would fail later, far from its cause (§2, R3). Kestra returns any kestra:// string unchecked (by the code)",
-     "kestra": {
-      "value": "kestra:///w9b/fn/_files/fu/gone.txt",
-      "basis": "code",
-      "note": "FileURIFunction: KESTRA_SCHEME -> path.toString(); not measured on the artifact"
-     }
+     "basis": "code",
+     "note": "agrees with Kestra: FileURIFunction returns any kestra:// string unchanged (KESTRA_SCHEME -> path.toString()), and egret returns it unchanged too because the URI parses and names an existing file (an explicit revision, so a soft-deleted path's revision 1 is returned, R1); egret's check differs, the answer does not; not measured on the artifact"
     }
    },
    "_setup": "namespace w9b.fn: /fu/one.txt (1 rev), /fu/three.txt (r1,r2,r3), /fu/gone.txt (written then DELETEd), /fu/empty.txt, /fu/bin.dat; w9b.other: /o.txt"
@@ -9913,8 +9908,8 @@
   "path_rules": "measured where egret agrees, chosen elsewhere (per cell)",
   "uri": "measured + code, except directory.fileURI('/d') and directory.fileURI('/d/') (chosen, R3)",
   "globs": "measured + code; every row in one shape (globs.row_shape)",
-  "file_uri": "measured, except missing, soft_deleted, _extra.kestra_arg_other_ns, _extra.soft_deleted_revision_1 (R1), _extra.directory (R3) (chosen)",
-  "read": "measured, except kestra_other and binary (chosen); _extra.kestra_own_soft_deleted is measured: egret agrees under R1 (see its note)",
+  "file_uri": "measured, except missing, soft_deleted, _extra.kestra_arg_other_ns, _extra.soft_deleted_revision_1 (R1), _extra.directory (R3), _extra.kestra_arg_with_revision, _extra.kestra_arg_missing (chosen); _extra.kestra_arg_soft_deleted is code and agrees with Kestra (see its note)",
+  "read": "measured, except kestra_other, binary, _extra.kestra_with_revision and _extra.kestra_with_other_namespace_arg (chosen); _extra.kestra_with_same_namespace_arg is code and agrees with Kestra; _extra.kestra_own_soft_deleted is measured: egret agrees under R1 (see its note)",
   "four_functions_ns": "measured; *.kestra_own_soft_deleted agree with Kestra under R1 (see their notes)",
   "staging": "measured, except staging.egret (chosen, agrees with 5/5 measured)",
   "tasks": "schema + measured, except the cells marked chosen (UploadFiles: runs.up_map, runs.up_map_dest_no_slash, runs.wd/mk/up_glob, runs.up_other_ns, rows_after, semantics; DeleteFiles: runs.del_other_ns, rows_after); UploadFiles/DeleteFiles schema.properties.namespace and UploadFiles.publish_without_namespace chosen (ruling D); DownloadFiles and DeleteFiles state a premise (seeded rows); UploadFiles states its flow variant (premise); DownloadFiles URIs are compared with ids masked (`compare`)",
@@ -10237,11 +10232,6 @@
    {
     "path": "file_uri._extra.kestra_arg_missing",
     "pointer": "/file_uri/_extra/kestra_arg_missing",
-    "why": "coordinator ruling 2026-10-05 on W9b Task 4 M3 (accepted as an egret choice): fileURI of a kestra:///…/_files/… URI is returned unchanged once it parses AND names a file that exists (an explicit revision, so a soft-deleted path's revision 1 is returned, R1); a URI that names nothing would fail later, far from its cause (§2, R3). Kestra returns any kestra:// string unchecked (by the code)"
-   },
-   {
-    "path": "file_uri._extra.kestra_arg_soft_deleted",
-    "pointer": "/file_uri/_extra/kestra_arg_soft_deleted",
     "why": "coordinator ruling 2026-10-05 on W9b Task 4 M3 (accepted as an egret choice): fileURI of a kestra:///…/_files/… URI is returned unchanged once it parses AND names a file that exists (an explicit revision, so a soft-deleted path's revision 1 is returned, R1); a URI that names nothing would fail later, far from its cause (§2, R3). Kestra returns any kestra:// string unchecked (by the code)"
    },
    {

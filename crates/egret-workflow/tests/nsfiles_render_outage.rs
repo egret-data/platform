@@ -9,8 +9,8 @@
 //!
 //! # It touches only what it created (fix round 1, I2 and M10)
 //!
-//! Each test process already gets a private database (`egret-test-db`,
-//! cloned from the migrated template and dropped at exit), so what this test
+//! The database is private per process (`egret-test-db` clones the migrated
+//! template for each test process and drops it at exit), so what this test
 //! leaves cannot reach another binary's `reap(ZERO) == 1` -- measured: run
 //! together with `storage_render`, both pass. It is still written not to
 //! depend on that:
