@@ -87,7 +87,7 @@ async fn statement(
     let still_failing = st.always_503
         || st
             .fail_with_503
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok();
     if still_failing {
         let mut resp = (StatusCode::SERVICE_UNAVAILABLE, "").into_response();

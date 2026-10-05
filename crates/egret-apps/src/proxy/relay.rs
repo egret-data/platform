@@ -158,6 +158,7 @@ pub(super) async fn proxy(
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn handle(
     st: &ProxyState,
     ws: Option<WebSocketUpgrade>,
@@ -258,6 +259,7 @@ fn is_edit_root(raw_path: &str) -> bool {
     matches!(segs.next(), None | Some("")) && segs.next().is_none()
 }
 
+#[allow(clippy::result_large_err)]
 async fn admit(
     st: &ProxyState,
     headers: &HeaderMap,
@@ -366,6 +368,7 @@ fn unavailable() -> Response {
     plain(StatusCode::BAD_GATEWAY, "the app is unavailable")
 }
 
+#[allow(clippy::result_large_err)]
 async fn relay_http(
     st: &ProxyState,
     req: Request,
@@ -438,6 +441,7 @@ impl Drop for RunCapClaim<'_> {
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn relay_ws(
     st: &ProxyState,
     upgrade: WebSocketUpgrade,
