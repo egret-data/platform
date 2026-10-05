@@ -808,7 +808,7 @@ async fn draft_get(
     require_object(&*st.pdp, &ctx, APP_WRITE, obj).await?;
     let d = st
         .store
-        .draft(id)
+        .draft(ctx.workspace_id, id)
         .await?
         .ok_or_else(|| Error::NotFound("draft".into()))?;
     Ok((
@@ -864,6 +864,7 @@ async fn draft_put(
     match st
         .store
         .save_draft(
+            ctx.workspace_id,
             id,
             ctx.principal.user_id,
             expected,

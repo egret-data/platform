@@ -8,7 +8,9 @@
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result, UserId, WorkspaceId};
 use egret_metastore::Db;
+use egret_storage::{ObjectStore, StorageError};
 use sqlx::{FromRow, Row};
+use std::sync::Arc;
 use uuid::Uuid;
 
 pub const MAX_SOURCE_BYTES: usize = 1_048_576;
@@ -124,6 +126,10 @@ fn db_err(e: sqlx::Error) -> Error {
     anyhow::Error::from(e).into()
 }
 
+fn store_err(e: StorageError) -> Error {
+    anyhow::Error::from(e).into()
+}
+
 fn check_len(source: &str) -> Result<()> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err(Error::InvalidInput("source exceeds 1 MiB".into()));
@@ -134,11 +140,64 @@ fn check_len(source: &str) -> Result<()> {
 #[derive(Clone)]
 pub struct AppStore {
     db: Db,
+    store: Arc<dyn ObjectStore>,
+    bucket: String,
+    prefix: String,
 }
 
 impl AppStore {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, store: Arc<dyn ObjectStore>, bucket: String, prefix: String) -> Self {
+        Self {
+            db,
+            store,
+            bucket,
+            prefix,
+        }
+    }
+
+    /// Mirrors `FileStore::object_uri`'s shape: `s3://{bucket}/{prefix}{workspace}/...`.
+    fn draft_key(&self, ws: WorkspaceId, app: Uuid) -> String {
+        format!(
+            "s3://{}/{}{}/{}/draft.py",
+            self.bucket,
+            self.prefix,
+            ws.0.hyphenated(),
+            app.hyphenated()
+        )
+    }
+
+    fn draft_layout_key(&self, ws: WorkspaceId, app: Uuid) -> String {
+        format!(
+            "s3://{}/{}{}/{}/draft.layout.json",
+            self.bucket,
+            self.prefix,
+            ws.0.hyphenated(),
+            app.hyphenated()
+        )
+    }
+
+    #[allow(dead_code)] // wired up by a later task (publish/version/restore_version)
+    fn version_key(&self, ws: WorkspaceId, app: Uuid, version_no: i32) -> String {
+        format!(
+            "s3://{}/{}{}/{}/versions/{}/source.py",
+            self.bucket,
+            self.prefix,
+            ws.0.hyphenated(),
+            app.hyphenated(),
+            version_no
+        )
+    }
+
+    #[allow(dead_code)] // wired up by a later task (publish/version/restore_version)
+    fn version_layout_key(&self, ws: WorkspaceId, app: Uuid, version_no: i32) -> String {
+        format!(
+            "s3://{}/{}{}/{}/versions/{}/layout.json",
+            self.bucket,
+            self.prefix,
+            ws.0.hyphenated(),
+            app.hyphenated(),
+            version_no
+        )
     }
 
     /// Workspace-scoped (the workspace is the row's own). App and rev-1 draft in one tx.
@@ -165,6 +224,14 @@ impl AppStore {
         .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?;
+        // `draft()` reads exclusively from the object store (S1-3); the rev-1
+        // draft's content must land there too, or the app this just created
+        // would be unreadable. Written before the tx commits, same fail-fast
+        // ordering as `save_draft` (nothing durable if the PUT fails).
+        self.store
+            .put(&self.draft_key(ws, id), source.as_bytes().to_vec())
+            .await
+            .map_err(store_err)?;
         sqlx::query(
             "INSERT INTO analytics.app_drafts (app_id, source, updated_by) VALUES ($1, $2, $3)",
         )
@@ -301,23 +368,74 @@ impl AppStore {
         Ok(())
     }
 
-    /// Called only after the handler resolved the app in the workspace.
-    pub async fn draft(&self, id: Uuid) -> Result<Option<Draft>> {
-        sqlx::query_as::<_, Draft>(
-            "SELECT source, layout_json, revision, updated_at FROM analytics.app_drafts WHERE app_id = $1",
+    /// Called only after the handler resolved the app in the workspace. The
+    /// content (`source`, `layout_json`) now lives in the object store, not
+    /// Postgres; only the revision counter and audit timestamp are read here.
+    pub async fn draft(&self, ws: WorkspaceId, id: Uuid) -> Result<Option<Draft>> {
+        let Some(row) = sqlx::query(
+            "SELECT revision, updated_at FROM analytics.app_drafts WHERE app_id = $1",
         )
         .bind(id)
         .fetch_optional(&self.db.pool)
         .await
-        .map_err(db_err)
+        .map_err(db_err)?
+        else {
+            return Ok(None);
+        };
+        let revision: i64 = row.get("revision");
+        let updated_at: DateTime<Utc> = row.get("updated_at");
+
+        // The draft row exists, so its source key must too; a missing key here is
+        // a real inconsistency, not "empty draft".
+        let source = match self.store.get(&self.draft_key(ws, id)).await {
+            Ok(bytes) => String::from_utf8(bytes)
+                .map_err(|e| Error::Internal(anyhow::anyhow!("draft {id} source is not UTF-8: {e}")))?,
+            Err(StorageError::NotFound(key)) => {
+                return Err(Error::Internal(anyhow::anyhow!(
+                    "draft {id} has a row but its object-store key {key} is missing"
+                )));
+            }
+            Err(e) => return Err(store_err(e)),
+        };
+        // A missing layout key, in contrast, IS the normal "no layout" state
+        // (matching today's `Option<String>` semantics).
+        let layout_json = match self.store.get(&self.draft_layout_key(ws, id)).await {
+            Ok(bytes) => Some(String::from_utf8(bytes).map_err(|e| {
+                Error::Internal(anyhow::anyhow!("draft {id} layout is not UTF-8: {e}"))
+            })?),
+            Err(StorageError::NotFound(_)) => None,
+            Err(e) => return Err(store_err(e)),
+        };
+
+        Ok(Some(Draft {
+            source,
+            layout_json,
+            revision,
+            updated_at,
+        }))
     }
 
     /// Called only after the handler resolved the app in the workspace.
     /// Compare-and-swap on `revision`; over-limit source is `InvalidInput`.
     /// `layout` is the complete new state (`None` clears it) -- the pod patch always
     /// sends marimo's current layout, so there is no "leave unchanged" case to track.
+    ///
+    /// Checks `expected` against the current revision BEFORE writing to the object
+    /// store: the object store has no row-level CAS of its own, so a stale caller
+    /// that skipped this check could overwrite a newer save's content in S3 even
+    /// though its own `UPDATE` below loses the Postgres compare-and-swap (this is
+    /// exactly what `save_draft_bumps_revision_and_refuses_stale` caught). Then
+    /// writes to the object store (source, then layout), so a PUT failure fails
+    /// fast with nothing written to Postgres. `source`/`layout_json` are still
+    /// bound into the `UPDATE` below too -- kept as a rollback safety net (a
+    /// revert to the pre-S1 binary reads them from Postgres again). The `UPDATE`'s
+    /// own CAS remains the authority for a genuinely concurrent pair of callers
+    /// that both pass this pre-check at once; it still refuses the loser's revision
+    /// bump, though the loser's content may have landed in S3 after the winner's --
+    /// a narrower window than the sequential case this check closes.
     pub async fn save_draft(
         &self,
+        ws: WorkspaceId,
         id: Uuid,
         by: UserId,
         expected: i64,
@@ -325,6 +443,36 @@ impl AppStore {
         layout: Option<&str>,
     ) -> Result<SaveOutcome> {
         check_len(source)?;
+        let current: Option<i64> =
+            sqlx::query_scalar("SELECT revision FROM analytics.app_drafts WHERE app_id = $1")
+                .bind(id)
+                .fetch_optional(&self.db.pool)
+                .await
+                .map_err(db_err)?;
+        match current {
+            None => return Err(Error::NotFound(format!("draft of app {id}"))),
+            Some(current_revision) if current_revision != expected => {
+                return Ok(SaveOutcome::Stale { current_revision });
+            }
+            Some(_) => {}
+        }
+        self.store
+            .put(&self.draft_key(ws, id), source.as_bytes().to_vec())
+            .await
+            .map_err(store_err)?;
+        match layout {
+            Some(l) => self
+                .store
+                .put(&self.draft_layout_key(ws, id), l.as_bytes().to_vec())
+                .await
+                .map_err(store_err)?,
+            // "Key already absent" is success -- no existence check needed first.
+            None => self
+                .store
+                .delete(&self.draft_layout_key(ws, id))
+                .await
+                .map_err(store_err)?,
+        }
         let saved: Option<i64> = sqlx::query_scalar(
             "UPDATE analytics.app_drafts SET source = $3, layout_json = $5, revision = revision + 1, updated_by = $2, updated_at = now() \
               WHERE app_id = $1 AND revision = $4 RETURNING revision",

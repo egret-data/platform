@@ -6,7 +6,9 @@ use egret_apps::store::{AppStore, PublishOutcome, SaveOutcome, MAX_SOURCE_BYTES}
 use egret_apps::template::new_app_source;
 use egret_core::{Error, UserId, WorkspaceId};
 use egret_metastore::Db;
+use egret_storage::{MemStore, ObjectStore};
 use std::collections::HashSet;
+use std::sync::Arc;
 use uuid::Uuid;
 
 struct Fixture {
@@ -15,6 +17,13 @@ struct Fixture {
     ws: Uuid,
     app: Uuid,
     login_sid: Uuid,
+    // S1-6 will move every `Fixture` in this crate to a `MemStore`-backed
+    // `AppStore` properly; this one is minimal, just enough for S1-3's own
+    // test (`draft_content_round_trips_through_the_object_store_not_postgres`)
+    // and for the pre-existing `draft`/`save_draft` call sites to compile.
+    mem: Arc<MemStore>,
+    bucket: String,
+    prefix: String,
 }
 
 impl Fixture {
@@ -54,6 +63,9 @@ impl Fixture {
             ws,
             app: Uuid::nil(),
             login_sid,
+            mem: Arc::new(MemStore::new()),
+            bucket: "test-bucket".to_string(),
+            prefix: "apps/".to_string(),
         };
         fx.app = fx.new_app().await;
         fx
@@ -315,13 +327,24 @@ async fn deleting_a_folder_uncategorizes_its_apps() {
 
 impl Fixture {
     fn store(&self) -> AppStore {
-        AppStore::new(self.db.clone())
+        AppStore::new(
+            self.db.clone(),
+            self.mem.clone(),
+            self.bucket.clone(),
+            self.prefix.clone(),
+        )
     }
     fn ws(&self) -> WorkspaceId {
         WorkspaceId(self.ws)
     }
     fn uid(&self) -> UserId {
         UserId(self.user)
+    }
+    fn bucket(&self) -> &str {
+        &self.bucket
+    }
+    fn mem_store(&self) -> Arc<MemStore> {
+        self.mem.clone()
     }
     /// An app made through the store (so it has a rev-1 draft).
     async fn store_app(&self, source: &str) -> Uuid {
@@ -353,7 +376,7 @@ async fn create_makes_an_app_with_a_rev1_draft_from_the_template() {
     assert_eq!(app.draft_revision, 1);
     assert_eq!(app.latest_version_no, None);
     assert!(!app.bookmarked);
-    let draft = fx.store().draft(app.id).await.unwrap().unwrap();
+    let draft = fx.store().draft(fx.ws(), app.id).await.unwrap().unwrap();
     assert_eq!(draft.revision, 1);
     assert_eq!(draft.source, src);
 }
@@ -364,21 +387,45 @@ async fn save_draft_bumps_revision_and_refuses_stale() {
     let app = fx.store_app("v1").await;
     let st = fx.store();
     assert_eq!(
-        st.save_draft(app, fx.uid(), 1, "first", None)
+        st.save_draft(fx.ws(), app, fx.uid(), 1, "first", None)
             .await
             .unwrap(),
         SaveOutcome::Saved { revision: 2 }
     );
     assert_eq!(
-        st.save_draft(app, fx.uid(), 1, "second", None)
+        st.save_draft(fx.ws(), app, fx.uid(), 1, "second", None)
             .await
             .unwrap(),
         SaveOutcome::Stale {
             current_revision: 2
         }
     );
-    let d = st.draft(app).await.unwrap().unwrap();
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
     assert_eq!((d.source.as_str(), d.revision), ("first", 2));
+}
+
+#[tokio::test]
+async fn draft_content_round_trips_through_the_object_store_not_postgres() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("hello").await;
+    let st = fx.store();
+    st.save_draft(fx.ws(), app, fx.uid(), 1, "x = 2", None)
+        .await
+        .unwrap();
+
+    // The content is NOT in the row's source column (it's unused going forward) --
+    // prove it came from the object store by reading the key directly.
+    let key = format!(
+        "s3://{}/apps/{}/{}/draft.py",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        app.hyphenated()
+    );
+    let bytes = fx.mem_store().get(&key).await.unwrap();
+    assert_eq!(String::from_utf8(bytes).unwrap(), "x = 2");
+
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!(d.source, "x = 2");
 }
 
 #[tokio::test]
@@ -388,17 +435,17 @@ async fn save_draft_over_limit_is_an_error_not_a_save() {
     let big = "a".repeat(MAX_SOURCE_BYTES + 1);
     let err = fx
         .store()
-        .save_draft(app, fx.uid(), 1, &big, None)
+        .save_draft(fx.ws(), app, fx.uid(), 1, &big, None)
         .await
         .unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
-    let d = fx.store().draft(app).await.unwrap().unwrap();
+    let d = fx.store().draft(fx.ws(), app).await.unwrap().unwrap();
     assert_eq!((d.source.as_str(), d.revision), ("v1", 1));
     // Exactly the limit is accepted.
     let ok = "a".repeat(MAX_SOURCE_BYTES);
     assert_eq!(
         fx.store()
-            .save_draft(app, fx.uid(), 1, &ok, None)
+            .save_draft(fx.ws(), app, fx.uid(), 1, &ok, None)
             .await
             .unwrap(),
         SaveOutcome::Saved { revision: 2 }
@@ -413,7 +460,9 @@ async fn publish_numbers_versions_and_honours_expected_revision() {
     let v1 = published(st.publish(app, fx.uid(), None).await.unwrap());
     assert_eq!((v1.version_no, v1.from_revision), (1, Some(1)));
     assert_eq!(v1.published_by, Some(fx.user));
-    st.save_draft(app, fx.uid(), 1, "b", None).await.unwrap();
+    st.save_draft(fx.ws(), app, fx.uid(), 1, "b", None)
+        .await
+        .unwrap();
     match st.publish(app, fx.uid(), Some(1)).await.unwrap() {
         PublishOutcome::Stale { current_revision } => assert_eq!(current_revision, 2),
         other => panic!("expected stale, got {other:?}"),
@@ -497,7 +546,9 @@ async fn restore_republishes_old_source_as_a_new_version() {
     let app = fx.store_app("a").await;
     let st = fx.store();
     let v1 = published(st.publish(app, fx.uid(), None).await.unwrap());
-    st.save_draft(app, fx.uid(), 1, "b", None).await.unwrap();
+    st.save_draft(fx.ws(), app, fx.uid(), 1, "b", None)
+        .await
+        .unwrap();
     published(st.publish(app, fx.uid(), None).await.unwrap());
     let v3 = st
         .restore_version(app, v1.id, fx.uid())
@@ -509,7 +560,7 @@ async fn restore_republishes_old_source_as_a_new_version() {
     assert_eq!(v3.from_revision, None);
     assert_eq!(st.version(app, v3.id).await.unwrap().unwrap().source, "a");
     // The draft is untouched by a restore.
-    let d = st.draft(app).await.unwrap().unwrap();
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
     assert_eq!((d.source.as_str(), d.revision), ("b", 2));
     // A version of another app is not restorable here.
     let other = fx.store_app("x").await;

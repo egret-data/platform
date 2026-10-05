@@ -43,6 +43,16 @@ utoipa.workspace = true
 # The read-only gate (src/readonly.rs). Workspace features only (`visitor`): `derive-dialect`
 # reads sqlparser's source from the cargo registry at compile time, which is not hermetic.
 sqlparser.workspace = true
+# S1-2: `AppStore` holds the object store a draft's/version's actual file content
+# (`.py` source, grid-layout JSON) lives in; Postgres keeps the revision counter
+# and audit columns. The caller (`egret-bin`) resolves bucket/prefix from config
+# and passes the already-built handle in, same pattern as
+# `egret_workflow::storage::FileStore`.
+egret-storage.workspace = true
+
+[features]
+# `tests/lifecycle_store.rs`'s `MemStore`-backed fixture.
+test-util = ["egret-storage/test-util"]
 
 [dev-dependencies]
 # The gateway and route tests run against the REAL Cedar PDP (`CedarPdp::build`
@@ -50,3 +60,6 @@ sqlparser.workspace = true
 egret-events.workspace = true
 tower.workspace = true
 egret-test-db.workspace = true
+# Activates `test-util` (and transitively `egret-storage/test-util`) for every
+# test target of this crate, the pattern `egret-workflow`'s own Cargo.toml uses.
+egret-apps = { path = ".", features = ["test-util"] }
