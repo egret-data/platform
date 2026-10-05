@@ -411,6 +411,12 @@ Not a code change — a manual check before the PR, same discipline as every oth
 - No new "S3 key" column anywhere — keys are computed. ✓ (Task S1-2).
 - Postgres `source`/`layout_json` still written (not yet dropped) so this part alone is safely revertible. ✓ (Task S1-3 step 3's explicit design).
 
+### Known limitation carried into Part S2/S3 (not fixed in S1)
+
+The final whole-branch review (`.superpowers/sdd/2026-10-05-data-apps-storage-s3/final-review-report.md`, finding I3) found: `save_draft`'s row lock (Task S1-3) stops a CAS *loser* from ever writing to S3, but it does not stop the CAS *winner*'s own S3 `put` from landing before its Postgres `UPDATE`/commit. If the commit fails, or the request's handler future is dropped between the `put` and the commit (e.g. the client disconnects mid-request), S3 can hold content that Postgres never committed — `draft()` then serves that content under the *old* revision, breaking the invariant that one revision identifies one piece of content. The same shape of gap exists in `publish`/`insert_version` (an S3 write lands before the matching Postgres row commits).
+
+This is accepted as a known limitation for Part S1 (the window is narrow — it requires a commit failure or a dropped future between the object-store write and the commit — and Postgres remains the system of record until Part S3's cutover, so a stale S3 object is shadowed by the correct Postgres column in every read path today). **It must be resolved before Part S3 removes the Postgres fallback reads**, because after cutover there is no column left to disagree with a stale S3 object. The reviewer's suggested fix: key draft content by revision (e.g. `draft/{revision}.py` instead of the fixed `draft.py`) — still a computed key, since `revision` is already a Postgres column — so a reader only ever sees the committed revision's object, and the orphaned pre-commit object can be deleted best-effort afterwards. Part S2's backfill command and Part S3's cutover task should address this (or explicitly re-affirm acceptance of the window) before Part S3 ships.
+
 ---
 
 # Part S2 — Backfill existing rows into the object store
