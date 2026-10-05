@@ -219,7 +219,7 @@ async fn version_get(
     }
     let v = st
         .store
-        .version(app_id, version_id)
+        .version(p.workspace_id, app_id, version_id)
         .await?
         .ok_or_else(|| Error::NotFound("version".into()))?;
     Ok(Json(PodVersion {

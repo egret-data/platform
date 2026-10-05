@@ -176,7 +176,6 @@ impl AppStore {
         )
     }
 
-    #[allow(dead_code)] // wired up by a later task (publish/version/restore_version)
     fn version_key(&self, ws: WorkspaceId, app: Uuid, version_no: i32) -> String {
         format!(
             "s3://{}/{}{}/{}/versions/{}/source.py",
@@ -188,7 +187,6 @@ impl AppStore {
         )
     }
 
-    #[allow(dead_code)] // wired up by a later task (publish/version/restore_version)
     fn version_layout_key(&self, ws: WorkspaceId, app: Uuid, version_no: i32) -> String {
         format!(
             "s3://{}/{}{}/{}/versions/{}/layout.json",
@@ -509,39 +507,53 @@ impl AppStore {
 
     /// Called only after the handler resolved the app in the workspace. Locking the
     /// draft row serialises publishes (and restores) of one app.
+    ///
+    /// Locks first, then reads the draft's *current* content via [`Self::draft`]
+    /// (object-store-first, Postgres-fallback, same as every other reader) --
+    /// `draft()`'s own SELECT is a plain read, which Postgres never blocks behind
+    /// this transaction's row lock, and nothing can have changed the draft since
+    /// the lock was taken. The version's own object-store write then happens
+    /// inside [`insert_version`], before that function's `INSERT`, and so before
+    /// this transaction commits: a crash between the two leaves an orphaned S3
+    /// object (harmless) rather than a published-looking Postgres row with no
+    /// content in the object store.
     pub async fn publish(
         &self,
+        ws: WorkspaceId,
         id: Uuid,
         by: UserId,
         expected: Option<i64>,
     ) -> Result<PublishOutcome> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
-        let draft = sqlx::query(
-            "SELECT source, layout_json, revision FROM analytics.app_drafts WHERE app_id = $1 FOR UPDATE",
+        let revision: i64 = sqlx::query_scalar(
+            "SELECT revision FROM analytics.app_drafts WHERE app_id = $1 FOR UPDATE",
         )
         .bind(id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(db_err)?
         .ok_or_else(|| Error::NotFound(format!("draft of app {id}")))?;
-        let source: String = draft.get("source");
-        let layout_json: Option<String> = draft.get("layout_json");
-        let revision: i64 = draft.get("revision");
         if expected.is_some_and(|e| e != revision) {
             return Ok(PublishOutcome::Stale {
                 current_revision: revision,
             });
         }
-        let v = insert_version(
-            &mut tx,
-            id,
-            &source,
-            layout_json.as_deref(),
-            Some(revision),
-            None,
-            by,
-        )
-        .await?;
+        let draft = self
+            .draft(ws, id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("draft of app {id}")))?;
+        let v = self
+            .insert_version(
+                &mut tx,
+                ws,
+                id,
+                &draft.source,
+                draft.layout_json.as_deref(),
+                Some(revision),
+                None,
+                by,
+            )
+            .await?;
         tx.commit().await.map_err(db_err)?;
         Ok(PublishOutcome::Published(v))
     }
@@ -559,9 +571,20 @@ impl AppStore {
     }
 
     /// Scoped to the app by the query itself (`app_id = $1 AND id = $2`), so it is
-    /// safe even with an unresolved version id.
-    pub async fn version(&self, id: Uuid, version_id: Uuid) -> Result<Option<Version>> {
-        let row = sqlx::query(
+    /// safe even with an unresolved version id. Mirrors [`Self::draft`]'s fallback:
+    /// prefers the object store for `source`/`layout_json`, falling back to the
+    /// row's own columns on `StorageError::NotFound` -- a version published before
+    /// this code shipped has real content in Postgres and nothing in the object
+    /// store yet (Task 9/S3-1 removes this once Task 8/S2's backfill is confirmed
+    /// to have run everywhere). The columns are therefore still selected here, not
+    /// dead weight.
+    pub async fn version(
+        &self,
+        ws: WorkspaceId,
+        id: Uuid,
+        version_id: Uuid,
+    ) -> Result<Option<Version>> {
+        let Some(row) = sqlx::query(
             "SELECT id, version_no, from_revision, restored_from, published_by, published_at, source, layout_json \
                FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
         )
@@ -569,15 +592,42 @@ impl AppStore {
         .bind(version_id)
         .fetch_optional(&self.db.pool)
         .await
-        .map_err(db_err)?;
-        row.map(|r| {
-            Ok(Version {
-                summary: VersionSummary::from_row(&r).map_err(db_err)?,
-                source: r.get("source"),
-                layout_json: r.get("layout_json"),
-            })
-        })
-        .transpose()
+        .map_err(db_err)?
+        else {
+            return Ok(None);
+        };
+        let summary = VersionSummary::from_row(&row).map_err(db_err)?;
+        let pg_source: String = row.get("source");
+        let pg_layout_json: Option<String> = row.get("layout_json");
+
+        let source = match self.store.get(&self.version_key(ws, id, summary.version_no)).await {
+            Ok(bytes) => String::from_utf8(bytes).map_err(|e| {
+                Error::Internal(anyhow::anyhow!(
+                    "version {version_id} source is not UTF-8: {e}"
+                ))
+            })?,
+            Err(StorageError::NotFound(_)) => pg_source,
+            Err(e) => return Err(store_err(e)),
+        };
+        let layout_json = match self
+            .store
+            .get(&self.version_layout_key(ws, id, summary.version_no))
+            .await
+        {
+            Ok(bytes) => Some(String::from_utf8(bytes).map_err(|e| {
+                Error::Internal(anyhow::anyhow!(
+                    "version {version_id} layout is not UTF-8: {e}"
+                ))
+            })?),
+            Err(StorageError::NotFound(_)) => pg_layout_json,
+            Err(e) => return Err(store_err(e)),
+        };
+
+        Ok(Some(Version {
+            summary,
+            source,
+            layout_json,
+        }))
     }
 
     /// Called only after the handler resolved the app in the workspace; the old
@@ -587,8 +637,20 @@ impl AppStore {
     /// Takes the same draft-row lock as [`Self::publish`], and requires it: with no
     /// draft row there is nothing to serialise on, so that is `NotFound` (as in
     /// publish), never an unlocked insert racing a concurrent publish.
+    ///
+    /// Versions are immutable and each already has its own object-store key, so
+    /// "restoring" is a pure server-side [`ObjectStore::copy`] of the old
+    /// version's objects into the new version's keys -- no bytes pass through
+    /// this process. The layout is only copied if the old version actually has
+    /// one (most won't). If the OLD version predates object-store-backed
+    /// versions, `copy()`'s source is missing and fails with `NotFound`; that one
+    /// case falls back to `put`-ing the old version's Postgres columns straight
+    /// to the new key -- the one place a GET-then-PUT through this process is
+    /// unavoidable, and only for the one-time migration of a version that
+    /// predates this rollout.
     pub async fn restore_version(
         &self,
+        ws: WorkspaceId,
         id: Uuid,
         version_id: Uuid,
         by: UserId,
@@ -600,8 +662,8 @@ impl AppStore {
             .await
             .map_err(db_err)?
             .ok_or_else(|| Error::NotFound(format!("draft of app {id}")))?;
-        let Some((source, layout_json)) = sqlx::query_as::<_, (String, Option<String>)>(
-            "SELECT source, layout_json FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
+        let Some((old_no, source, layout_json)) = sqlx::query_as::<_, (i32, String, Option<String>)>(
+            "SELECT version_no, source, layout_json FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
         )
         .bind(id)
         .bind(version_id)
@@ -611,43 +673,132 @@ impl AppStore {
         else {
             return Ok(None);
         };
-        let v = insert_version(
-            &mut tx,
-            id,
-            &source,
-            layout_json.as_deref(),
-            None,
-            Some(version_id),
-            by,
+
+        // Still holding the draft-row lock: no concurrent publish/restore of this
+        // app can have changed `app_versions` since.
+        let new_no: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(version_no), 0) + 1 FROM analytics.app_versions WHERE app_id = $1",
         )
-        .await?;
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        match self
+            .store
+            .copy(
+                &self.version_key(ws, id, old_no),
+                &self.version_key(ws, id, new_no),
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(StorageError::NotFound(_)) => {
+                self.store
+                    .put(&self.version_key(ws, id, new_no), source.as_bytes().to_vec())
+                    .await
+                    .map_err(store_err)?;
+            }
+            Err(e) => return Err(store_err(e)),
+        }
+        if let Some(l) = &layout_json {
+            match self
+                .store
+                .copy(
+                    &self.version_layout_key(ws, id, old_no),
+                    &self.version_layout_key(ws, id, new_no),
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(StorageError::NotFound(_)) => {
+                    self.store
+                        .put(
+                            &self.version_layout_key(ws, id, new_no),
+                            l.as_bytes().to_vec(),
+                        )
+                        .await
+                        .map_err(store_err)?;
+                }
+                Err(e) => return Err(store_err(e)),
+            }
+        }
+
+        let v = sqlx::query_as::<_, VersionSummary>(
+            "INSERT INTO analytics.app_versions (app_id, version_no, source, layout_json, from_revision, restored_from, published_by) \
+             VALUES ($1, $2, $3, $4, NULL, $5, $6) \
+             RETURNING id, version_no, from_revision, restored_from, published_by, published_at",
+        )
+        .bind(id)
+        .bind(new_no)
+        .bind(&source)
+        .bind(&layout_json)
+        .bind(version_id)
+        .bind(by.0)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
         tx.commit().await.map_err(db_err)?;
         Ok(Some(v))
     }
-}
 
-/// Next version number is `max + 1`; callers hold the draft row lock.
-async fn insert_version(
-    tx: &mut sqlx::PgConnection,
-    app: Uuid,
-    source: &str,
-    layout_json: Option<&str>,
-    from_revision: Option<i64>,
-    restored_from: Option<Uuid>,
-    by: UserId,
-) -> Result<VersionSummary> {
-    sqlx::query_as::<_, VersionSummary>("INSERT INTO analytics.app_versions (app_id, version_no, source, layout_json, from_revision, restored_from, published_by) \
-         SELECT $1, COALESCE(MAX(version_no), 0) + 1, $2, $3, $4, $5, $6 \
-           FROM analytics.app_versions WHERE app_id = $1 \
-         RETURNING id, version_no, from_revision, restored_from, published_by, published_at",
-    )
-    .bind(app)
-    .bind(source)
-    .bind(layout_json)
-    .bind(from_revision)
-    .bind(restored_from)
-    .bind(by.0)
-    .fetch_one(tx)
-    .await
-    .map_err(db_err)
+    /// Computes the next `version_no` (callers hold the draft row lock, which
+    /// serialises this against every other publish/restore of the same app),
+    /// writes `source`/`layout_json` to that version's object-store key(s), then
+    /// inserts the Postgres row -- in that order, so a crash between the PUT and
+    /// the INSERT leaves an orphaned S3 object (harmless, collected by nothing
+    /// today) rather than a Postgres row whose content never made it to S3.
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_version(
+        &self,
+        tx: &mut sqlx::PgConnection,
+        ws: WorkspaceId,
+        app: Uuid,
+        source: &str,
+        layout_json: Option<&str>,
+        from_revision: Option<i64>,
+        restored_from: Option<Uuid>,
+        by: UserId,
+    ) -> Result<VersionSummary> {
+        let version_no: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(version_no), 0) + 1 FROM analytics.app_versions WHERE app_id = $1",
+        )
+        .bind(app)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        self.store
+            .put(
+                &self.version_key(ws, app, version_no),
+                source.as_bytes().to_vec(),
+            )
+            .await
+            .map_err(store_err)?;
+        if let Some(l) = layout_json {
+            self.store
+                .put(
+                    &self.version_layout_key(ws, app, version_no),
+                    l.as_bytes().to_vec(),
+                )
+                .await
+                .map_err(store_err)?;
+        }
+
+        sqlx::query_as::<_, VersionSummary>(
+            "INSERT INTO analytics.app_versions (app_id, version_no, source, layout_json, from_revision, restored_from, published_by) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             RETURNING id, version_no, from_revision, restored_from, published_by, published_at",
+        )
+        .bind(app)
+        .bind(version_no)
+        .bind(source)
+        .bind(layout_json)
+        .bind(from_revision)
+        .bind(restored_from)
+        .bind(by.0)
+        .fetch_one(tx)
+        .await
+        .map_err(db_err)
+    }
 }

@@ -474,7 +474,7 @@ async fn an_app_of_another_workspace_is_404_on_every_route_like_a_random_id() {
         .await
         .unwrap()
         .id;
-    let b_ver = match store.publish(b_app, fx.owner, None).await.unwrap() {
+    let b_ver = match store.publish(fx.ws_b, b_app, fx.owner, None).await.unwrap() {
         egret_apps::store::PublishOutcome::Published(v) => v.id,
         other => panic!("{other:?}"),
     };

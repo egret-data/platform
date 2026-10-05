@@ -519,17 +519,17 @@ async fn publish_numbers_versions_and_honours_expected_revision() {
     let fx = Fixture::new().await;
     let app = fx.store_app("a").await;
     let st = fx.store();
-    let v1 = published(st.publish(app, fx.uid(), None).await.unwrap());
+    let v1 = published(st.publish(fx.ws(), app, fx.uid(), None).await.unwrap());
     assert_eq!((v1.version_no, v1.from_revision), (1, Some(1)));
     assert_eq!(v1.published_by, Some(fx.user));
     st.save_draft(fx.ws(), app, fx.uid(), 1, "b", None)
         .await
         .unwrap();
-    match st.publish(app, fx.uid(), Some(1)).await.unwrap() {
+    match st.publish(fx.ws(), app, fx.uid(), Some(1)).await.unwrap() {
         PublishOutcome::Stale { current_revision } => assert_eq!(current_revision, 2),
         other => panic!("expected stale, got {other:?}"),
     }
-    let v2 = published(st.publish(app, fx.uid(), Some(2)).await.unwrap());
+    let v2 = published(st.publish(fx.ws(), app, fx.uid(), Some(2)).await.unwrap());
     assert_eq!((v2.version_no, v2.from_revision), (2, Some(2)));
     let nos: Vec<i32> = st
         .versions(app)
@@ -550,8 +550,8 @@ async fn concurrent_publishes_get_distinct_numbers() {
     for i in 0..20 {
         let app = fx.store_app("a").await;
         let (a, b) = tokio::join!(
-            st.publish(app, fx.uid(), None),
-            st.publish(app, fx.uid(), None)
+            st.publish(fx.ws(), app, fx.uid(), None),
+            st.publish(fx.ws(), app, fx.uid(), None)
         );
         let mut nos = vec![
             published(a.unwrap_or_else(|e| panic!("iteration {i}: {e:?}"))).version_no,
@@ -571,10 +571,10 @@ async fn concurrent_publish_and_restore_get_distinct_numbers() {
     let st = fx.store();
     for i in 0..20 {
         let app = fx.store_app("a").await;
-        let v1 = published(st.publish(app, fx.uid(), None).await.unwrap());
+        let v1 = published(st.publish(fx.ws(), app, fx.uid(), None).await.unwrap());
         let (a, b) = tokio::join!(
-            st.publish(app, fx.uid(), None),
-            st.restore_version(app, v1.id, fx.uid())
+            st.publish(fx.ws(), app, fx.uid(), None),
+            st.restore_version(fx.ws(), app, v1.id, fx.uid())
         );
         let mut nos = vec![
             published(a.unwrap_or_else(|e| panic!("iteration {i}: publish {e:?}"))).version_no,
@@ -596,7 +596,7 @@ async fn restore_without_a_draft_row_is_not_found() {
     let v = fx.version(fx.app, 1).await;
     let err = fx
         .store()
-        .restore_version(fx.app, v, fx.uid())
+        .restore_version(fx.ws(), fx.app, v, fx.uid())
         .await
         .unwrap_err();
     assert!(matches!(err, Error::NotFound(_)), "{err:?}");
@@ -607,28 +607,31 @@ async fn restore_republishes_old_source_as_a_new_version() {
     let fx = Fixture::new().await;
     let app = fx.store_app("a").await;
     let st = fx.store();
-    let v1 = published(st.publish(app, fx.uid(), None).await.unwrap());
+    let v1 = published(st.publish(fx.ws(), app, fx.uid(), None).await.unwrap());
     st.save_draft(fx.ws(), app, fx.uid(), 1, "b", None)
         .await
         .unwrap();
-    published(st.publish(app, fx.uid(), None).await.unwrap());
+    published(st.publish(fx.ws(), app, fx.uid(), None).await.unwrap());
     let v3 = st
-        .restore_version(app, v1.id, fx.uid())
+        .restore_version(fx.ws(), app, v1.id, fx.uid())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(v3.version_no, 3);
     assert_eq!(v3.restored_from, Some(v1.id));
     assert_eq!(v3.from_revision, None);
-    assert_eq!(st.version(app, v3.id).await.unwrap().unwrap().source, "a");
+    assert_eq!(
+        st.version(fx.ws(), app, v3.id).await.unwrap().unwrap().source,
+        "a"
+    );
     // The draft is untouched by a restore.
     let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
     assert_eq!((d.source.as_str(), d.revision), ("b", 2));
     // A version of another app is not restorable here.
     let other = fx.store_app("x").await;
-    let ov = published(st.publish(other, fx.uid(), None).await.unwrap());
+    let ov = published(st.publish(fx.ws(), other, fx.uid(), None).await.unwrap());
     assert!(st
-        .restore_version(app, ov.id, fx.uid())
+        .restore_version(fx.ws(), app, ov.id, fx.uid())
         .await
         .unwrap()
         .is_none());
@@ -640,9 +643,97 @@ async fn version_lookup_is_scoped_to_its_app() {
     let app_a = fx.store_app("a").await;
     let app_b = fx.store_app("b").await;
     let st = fx.store();
-    let va = published(st.publish(app_a, fx.uid(), None).await.unwrap());
-    assert!(st.version(app_b, va.id).await.unwrap().is_none());
-    assert_eq!(st.version(app_a, va.id).await.unwrap().unwrap().source, "a");
+    let va = published(st.publish(fx.ws(), app_a, fx.uid(), None).await.unwrap());
+    assert!(st.version(fx.ws(), app_b, va.id).await.unwrap().is_none());
+    assert_eq!(
+        st.version(fx.ws(), app_a, va.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .source,
+        "a"
+    );
+}
+
+#[tokio::test]
+async fn publishing_writes_the_versions_content_to_the_object_store() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+    let v = published(st.publish(fx.ws(), app, fx.uid(), None).await.unwrap());
+
+    let key = format!(
+        "s3://{}/apps/{}/{}/versions/{}/source.py",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        app.hyphenated(),
+        v.version_no
+    );
+    assert_eq!(fx.mem_store().get(&key).await.unwrap(), b"v1");
+}
+
+#[tokio::test]
+async fn restoring_a_version_copies_its_object_server_side_without_reading_it_into_the_app() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+    let v1 = published(st.publish(fx.ws(), app, fx.uid(), None).await.unwrap());
+    st.save_draft(fx.ws(), app, fx.uid(), 1, "v2", None)
+        .await
+        .unwrap();
+    published(st.publish(fx.ws(), app, fx.uid(), None).await.unwrap());
+
+    let v3 = st
+        .restore_version(fx.ws(), app, v1.id, fx.uid())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let key = |no: i32| {
+        format!(
+            "s3://{}/apps/{}/{}/versions/{}/source.py",
+            fx.bucket(),
+            fx.ws().0.hyphenated(),
+            app.hyphenated(),
+            no
+        )
+    };
+    assert_eq!(
+        fx.mem_store().get(&key(v3.version_no)).await.unwrap(),
+        b"v1"
+    );
+    // This test proves the CONTENT is right. It does not prove restore_version
+    // used `copy()` rather than `get()`+`put()` -- `egret_storage::MemStore`
+    // (checked during this plan's research: crates/egret-storage/src/mem.rs)
+    // has no call-tracking today, and adding one is a separate, wider-blast-
+    // radius change to a shared test-util crate this task should not casually
+    // make. Confirm the `copy()` call site by reading the diff in review
+    // instead of asserting it here.
+}
+
+/// Same fallback as Task 3's `draft()` -- a version published before this code
+/// shipped has real content in `analytics.app_versions.source` and nothing in
+/// the object store.
+#[tokio::test]
+async fn a_pre_s1_version_with_no_object_store_content_falls_back_to_postgres() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let (version_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO analytics.app_versions (app_id, version_no, source) \
+         VALUES ($1, 1, 'legacy v1') RETURNING id",
+    )
+    .bind(app)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+
+    let v = fx
+        .store()
+        .version(fx.ws(), app, version_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(v.source, "legacy v1");
 }
 
 #[tokio::test]
@@ -678,7 +769,7 @@ async fn list_separates_trashed_and_marks_bookmarks() {
     ));
     // get returns trashed apps too, with the latest version number once published.
     assert!(st.get(fx.ws(), fx.uid(), gone).await.unwrap().is_some());
-    published(st.publish(live, fx.uid(), None).await.unwrap());
+    published(st.publish(fx.ws(), live, fx.uid(), None).await.unwrap());
     assert_eq!(
         st.get(fx.ws(), fx.uid(), live)
             .await
@@ -725,7 +816,7 @@ async fn deleting_a_publisher_keeps_their_versions_with_publisher_null() {
     .expect("insert publisher");
     let app = fx.store_app("by the publisher").await;
     let st = fx.store();
-    let v = published(st.publish(app, UserId(publisher), None).await.unwrap());
+    let v = published(st.publish(fx.ws(), app, UserId(publisher), None).await.unwrap());
     assert_eq!(v.published_by, Some(publisher));
 
     let deleted = egret_auth::users::UserRepo::new(fx.db.clone())
@@ -747,7 +838,7 @@ async fn deleting_a_publisher_keeps_their_versions_with_publisher_null() {
 
     // The allowance is exact: nulling `published_by` while changing anything else
     // is still an UPDATE of a published version.
-    let v2 = published(st.publish(app, fx.uid(), None).await.unwrap());
+    let v2 = published(st.publish(fx.ws(), app, fx.uid(), None).await.unwrap());
     let r = sqlx::query(
         "UPDATE analytics.app_versions SET published_by = NULL, source = 'tampered' WHERE id = $1",
     )
