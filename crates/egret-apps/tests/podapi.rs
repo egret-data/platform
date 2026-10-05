@@ -139,8 +139,10 @@ impl Fixture {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-        // `draft()` now reads the source from the object store, not this row's
-        // `source` column -- seed the matching key so it matches the row above.
+        // `draft()` reads the source from the object store first, falling back
+        // to this row's `source` column only on a miss -- seed the matching key
+        // so the object store is what actually answers here (the column is a
+        // legitimate fallback source, not dead weight).
         let store = Arc::new(MemStore::new());
         store
             .put(&draft_object_key(ws, app), b"draft v1".to_vec())

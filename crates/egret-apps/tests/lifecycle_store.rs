@@ -6,7 +6,7 @@ use egret_apps::store::{AppStore, PublishOutcome, SaveOutcome, MAX_SOURCE_BYTES}
 use egret_apps::template::new_app_source;
 use egret_core::{Error, UserId, WorkspaceId};
 use egret_metastore::Db;
-use egret_storage::{MemStore, ObjectStore};
+use egret_storage::{MemStore, ObjectStore, StorageError};
 use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -856,4 +856,163 @@ async fn deleting_a_publisher_keeps_their_versions_with_publisher_null() {
     .execute(&fx.db.pool)
     .await;
     assert_eq!(code(r), "23001");
+}
+
+// ---------------------------------------------------------------------------
+// Final-review fixes (I1/I2): stale layout keys on publish/restore, and
+// fallback-path coverage for restore/draft layouts.
+// ---------------------------------------------------------------------------
+
+/// I1: `version_no` is a freshly computed `MAX+1`, so it can collide with an
+/// orphaned layout object left behind by a previous failed publish attempt
+/// (e.g. the handler future dropped after `insert_version`'s layout PUT but
+/// before the transaction committed). Pre-seed exactly such an orphan at the
+/// key version 1 will use, then publish a draft with NO layout -- `version()`
+/// must report `None` (Postgres's genuinely NULL column), not the stale object.
+#[tokio::test]
+async fn publishing_with_no_layout_clears_any_stale_layout_object() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+
+    let orphan_key = format!(
+        "s3://{}/apps/{}/{}/versions/1/layout.json",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        app.hyphenated()
+    );
+    fx.mem_store()
+        .put(&orphan_key, b"orphaned layout".to_vec())
+        .await
+        .unwrap();
+
+    // The draft has no layout (saved with `None`), so the resulting v1 must
+    // have `layout_json: None`, not the pre-seeded orphan.
+    st.save_draft(fx.ws(), app, fx.uid(), 1, "v1", None)
+        .await
+        .unwrap();
+    let v1 = published(st.publish(fx.ws(), app, fx.uid(), Some(2)).await.unwrap());
+    assert_eq!(v1.version_no, 1);
+
+    let v = st.version(fx.ws(), app, v1.id).await.unwrap().unwrap();
+    assert_eq!(v.layout_json, None);
+}
+
+/// I2 Test A: restoring a pre-S1 version (no object-store content for either
+/// source or layout) falls back to Postgres's columns -- the path
+/// `S3Store::copy`'s `NotFound`-mapping fix exists to make reachable.
+#[tokio::test]
+async fn restoring_a_pre_s1_version_falls_back_to_postgres_content() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+    let (version_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO analytics.app_versions (app_id, version_no, source, layout_json) \
+         VALUES ($1, 1, 'legacy source', 'legacy layout') RETURNING id",
+    )
+    .bind(app)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+
+    let new_summary = st
+        .restore_version(fx.ws(), app, version_id, fx.uid())
+        .await
+        .unwrap()
+        .expect("version belongs to the app");
+    assert_eq!(new_summary.version_no, 2);
+
+    let new_version = st
+        .version(fx.ws(), app, new_summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(new_version.source, "legacy source");
+    assert_eq!(new_version.layout_json.as_deref(), Some("legacy layout"));
+
+    // Prove the fallback `put` path actually ran: the new version's own
+    // object-store keys hold the right bytes, not just that some reader
+    // (which could itself fall back) found the right content.
+    let source_key = format!(
+        "s3://{}/apps/{}/{}/versions/2/source.py",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        app.hyphenated()
+    );
+    let layout_key = format!(
+        "s3://{}/apps/{}/{}/versions/2/layout.json",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        app.hyphenated()
+    );
+    assert_eq!(
+        fx.mem_store().get(&source_key).await.unwrap(),
+        b"legacy source"
+    );
+    assert_eq!(
+        fx.mem_store().get(&layout_key).await.unwrap(),
+        b"legacy layout"
+    );
+}
+
+/// I2 Test B: a draft layout put-then-clear round-trips through the object
+/// store in both directions -- saving a layout writes the object, and saving
+/// again with `None` actually deletes it (not just stops exposing it).
+#[tokio::test]
+async fn saving_with_no_layout_clears_a_previously_saved_one() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+    let layout_key = format!(
+        "s3://{}/apps/{}/{}/draft.layout.json",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        app.hyphenated()
+    );
+
+    st.save_draft(fx.ws(), app, fx.uid(), 1, "v1", Some("some layout"))
+        .await
+        .unwrap();
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!(d.layout_json.as_deref(), Some("some layout"));
+    assert_eq!(
+        fx.mem_store().get(&layout_key).await.unwrap(),
+        b"some layout"
+    );
+
+    st.save_draft(fx.ws(), app, fx.uid(), 2, "v1", None)
+        .await
+        .unwrap();
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!(d.layout_json, None);
+    assert!(matches!(
+        fx.mem_store().get(&layout_key).await,
+        Err(StorageError::NotFound(_))
+    ));
+}
+
+/// I2 Test C: a pre-S1 draft row's `layout_json` column also falls back
+/// correctly, mirroring `a_pre_s1_row_with_no_object_store_content_falls_back_to_postgres`
+/// for `source` but extended to the layout column too.
+#[tokio::test]
+async fn a_pre_s1_drafts_layout_also_falls_back_to_postgres() {
+    let fx = Fixture::new().await;
+    let app_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO analytics.apps (workspace_id, name, description) VALUES ($1, 'legacy', '') RETURNING id",
+    )
+    .bind(fx.ws().0)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO analytics.app_drafts (app_id, source, layout_json) VALUES ($1, 'legacy', 'legacy layout')",
+    )
+    .bind(app_id)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+
+    let d = fx.store().draft(fx.ws(), app_id).await.unwrap().unwrap();
+    assert_eq!(d.source, "legacy");
+    assert_eq!(d.layout_json.as_deref(), Some("legacy layout"));
 }

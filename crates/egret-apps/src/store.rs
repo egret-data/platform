@@ -222,10 +222,12 @@ impl AppStore {
         .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?;
-        // `draft()` reads exclusively from the object store (S1-3); the rev-1
-        // draft's content must land there too, or the app this just created
-        // would be unreadable. Written before the tx commits, same fail-fast
-        // ordering as `save_draft` (nothing durable if the PUT fails).
+        // `draft()` reads from the object store first, falling back to this
+        // row's columns only for a pre-S1 row with no object-store content yet;
+        // the rev-1 draft's content must land there too, or the app this just
+        // created would be unreadable until a fallback rescued it. Written
+        // before the tx commits, same fail-fast ordering as `save_draft`
+        // (nothing durable if the PUT fails).
         self.store
             .put(&self.draft_key(ws, id), source.as_bytes().to_vec())
             .await
@@ -731,6 +733,14 @@ impl AppStore {
                 }
                 Err(e) => return Err(store_err(e)),
             }
+        } else {
+            // The old version has no layout: clear any stale object that might
+            // already sit at the new key (same orphan-from-a-collided-version_no
+            // reasoning as `insert_version`'s `else` arm).
+            self.store
+                .delete(&self.version_layout_key(ws, id, new_no))
+                .await
+                .map_err(store_err)?;
         }
 
         let v = sqlx::query_as::<_, VersionSummary>(
@@ -790,6 +800,16 @@ impl AppStore {
                     &self.version_layout_key(ws, app, version_no),
                     l.as_bytes().to_vec(),
                 )
+                .await
+                .map_err(store_err)?;
+        } else {
+            // `version_no` is a freshly computed MAX+1: if a previous publish
+            // attempt wrote this same key (e.g. the handler future was dropped
+            // after this PUT but before the transaction committed) and this
+            // publish has no layout, an orphaned layout object would otherwise
+            // survive and be served ahead of the genuinely NULL Postgres column.
+            self.store
+                .delete(&self.version_layout_key(ws, app, version_no))
                 .await
                 .map_err(store_err)?;
         }
