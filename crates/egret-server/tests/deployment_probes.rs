@@ -296,8 +296,25 @@ fn the_drain_deadline_outlasts_a_full_length_request() {
 /// beside the line the assertion is about — which means a comment could spell
 /// the very string being looked for, and a test a comment can satisfy is the
 /// shape this repo has shipped a green test over sixteen times.
+///
+/// Strips BOTH comment styles this chart uses: `#` line comments, and the
+/// `{{- /* ... */ -}}` (or `{{/* ... */}}`) Helm block comments several
+/// templates open with as a module doc — a single pass over `#` lines alone
+/// would leave that block's prose in place, able to satisfy a `.contains()`
+/// check the same way a `#` comment could.
 fn without_comments(yaml: &str) -> String {
-    yaml.lines()
+    let mut without_blocks = yaml.to_string();
+    while let Some(start) = without_blocks.find("/*") {
+        match without_blocks[start..].find("*/") {
+            Some(end_rel) => {
+                let end = start + end_rel + 2;
+                without_blocks.replace_range(start..end, "");
+            }
+            None => break,
+        }
+    }
+    without_blocks
+        .lines()
         .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n")
@@ -456,6 +473,60 @@ fn run_pod_settings_reach_the_backend_env_under_the_kubernetes_launcher_guard() 
             "{name} must be conditional on apps.pod.launcher == kubernetes"
         );
     }
+}
+
+/// The test that would have caught a half-finished removal: Part P6d deleted
+/// `egret-kernel`'s dedicated Helm files (`namespace-kernels.yaml`,
+/// `rbac-kernels.yaml`, `networkpolicy-kernels.yaml`) and its conditional
+/// blocks inside `backend-deployment.yaml`/`ingress.yaml`. Scans every
+/// template so a reintroduced `kernel.launcher` or `EGRET_KERNEL__*` env var
+/// fails loudly here instead of reappearing unnoticed one file at a time.
+///
+/// Comments are stripped first (`without_comments`) because two deployments
+/// legitimately name the OS kernel's OOM killer in prose
+/// (`renderer-deployment.yaml`, `backend-deployment.yaml`) — real kernel
+/// debt would be functional template text (an env var, an image name, an
+/// `if`), never prose.
+///
+/// `kernelmode`/`kernel_mode` are also stripped before the check: Data Apps'
+/// OWN, unrelated pod execution-mode setting
+/// (`apps.pod.run.kernelMode` / `EGRET_APPS__POD__RUN_KERNEL_MODE`,
+/// `backend-deployment.yaml`) happens to contain "kernel" as a substring. A
+/// real reintroduced kernel reference is always `kernel` as its own path
+/// segment or word (`.kernel.`, `KERNEL__`, `-kernels.`), never glued
+/// directly to "mode" the way this one is — so stripping exactly that known
+/// collision, rather than loosening the check generally, keeps the test
+/// narrow instead of blind to a real one bounded the same way.
+#[test]
+fn no_template_mentions_the_deleted_notebook_kernel() {
+    let dir = format!(
+        "{}/../../deploy/helm/egret/templates",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut offenders = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("reading {dir}: {e}")) {
+        let path = entry
+            .unwrap_or_else(|e| panic!("reading entry in {dir}: {e}"))
+            .path();
+        let ext = path.extension().and_then(|e| e.to_str());
+        if !matches!(ext, Some("yaml") | Some("tpl")) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let scrubbed = without_comments(&text)
+            .to_lowercase()
+            .replace("kernelmode", "")
+            .replace("kernel_mode", "");
+        if scrubbed.contains("kernel") {
+            offenders.push(path.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these templates still mention the deleted notebook kernel outside a \
+         comment: {offenders:?}"
+    );
 }
 
 /// P5e found live: the apps NetworkPolicy's ingress rule allowed port 2718 (edit) only, so a run
