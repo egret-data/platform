@@ -85,7 +85,12 @@ async fn build_router(db: &Db, store: Arc<MemStore>) -> axum::Router {
         db: db.clone(),
         pdp,
         pods: PodTokenRepo::new(db.clone()),
-        store: AppStore::new(db.clone(), store, TEST_BUCKET.to_string(), TEST_PREFIX.to_string()),
+        store: AppStore::new(
+            db.clone(),
+            store,
+            TEST_BUCKET.to_string(),
+            TEST_PREFIX.to_string(),
+        ),
     };
     axum::Router::new()
         .nest("/api", egret_apps::pod_router())

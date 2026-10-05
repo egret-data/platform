@@ -3699,6 +3699,7 @@ dependencies = [
  "egret-policy",
  "egret-query",
  "egret-query-api",
+ "egret-storage",
  "egret-test-db",
  "egret-workflow",
  "egret-workspace",
