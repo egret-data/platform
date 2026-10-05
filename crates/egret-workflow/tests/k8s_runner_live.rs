@@ -2005,6 +2005,197 @@ async fn delete_namespace() -> bool {
     false
 }
 
+// ---- W9b Task 5: namespace files staged into the pod ----------------------
+
+/// A real workspace row (the namespace-file table's FK) holding the files of
+/// w9b `staging.setup`'s two shared namespaces, in `files`.
+async fn namespace_files_setup(
+    pool: &sqlx::PgPool,
+    files: &egret_workflow::storage::FileStore,
+) -> Uuid {
+    use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor};
+    use egret_workflow::storage::nsfiles::path::NsPath;
+    use egret_workflow::storage::nsfiles::store::{put, Conflict};
+    let (ws, user) = common::seed_workspace(&common::db().await.expect("DATABASE_URL")).await;
+    for (ns, path, body) in [
+        ("w9b.s1", "/x.txt", "from-s1"),
+        ("w9b.s1", "/only1.txt", "only1"),
+        ("w9b.s2", "/x.txt", "from-s2"),
+        ("w9b.s2", "/sub/y.txt", "y2"),
+    ] {
+        let grant = authorize(ws, Actor::Api, ns, Access::Write).unwrap();
+        put(
+            pool,
+            files,
+            &grant,
+            &NsPath::parse_file(path).unwrap(),
+            &mut body.as_bytes(),
+            Conflict::Overwrite,
+            egret_workflow::storage::nsfiles::CreatedBy::User(user.0),
+        )
+        .await
+        .expect("written");
+    }
+    ws
+}
+
+/// One shell task through the SCRIPT HANDLER on the Kubernetes runner, with
+/// `namespaceFiles: block` and `inputFiles`; the `FILE <path>=<bytes>` lines
+/// the pod printed.
+async fn run_with_namespace_files(
+    pool: &sqlx::PgPool,
+    files: &Arc<egret_workflow::storage::FileStore>,
+    ws: Uuid,
+    block: serde_json::Value,
+    input_files: serde_json::Value,
+) -> (egret_workflow::worker::Outcome, Vec<String>) {
+    use egret_config::{PluginConfiguration, PluginConfigurationValues, PluginConfigurations};
+    use egret_workflow::worker::handlers::script::{FixedFeatureState, Script, ScriptRuntime};
+    use egret_workflow::worker::TaskHandler;
+    let h = Script::new(
+        egret_workflow::scripts::ScriptKind::ShellCommands,
+        Arc::new(ScriptRuntime {
+            runner_kind: RunnerKind::Kubernetes,
+            runner: Arc::new(runner().await.with_files(files.clone())),
+            plugin_configurations: PluginConfigurations(vec![PluginConfiguration {
+                r#type: RunnerKind::Kubernetes.fqcn().to_string(),
+                values: PluginConfigurationValues {
+                    allowed_images: Some(vec!["*".into(), "*/*".into(), "*/*/*".into()]),
+                    allowed_types: None,
+                },
+            }]),
+            features: Arc::new(FixedFeatureState(true)),
+            files: Some(files.clone()),
+            pool: Some(pool.clone()),
+        }),
+    );
+    let (mut t, rec) = task_for(ws, Uuid::new_v4(), Uuid::new_v4());
+    t.spec = serde_json::json!({
+        "containerImage": SHELL_IMAGE,
+        "namespaceFiles": block,
+        "inputFiles": input_files,
+        "commands": [
+            "find . -type f ! -path './.egret/*' | sort | while read f; do echo \"FILE $f=$(cat \"$f\")\"; done",
+        ],
+    });
+    let snapshot = egret_workflow::storage::scope::Snapshot::from_parts(
+        BTreeMap::new(),
+        files.clone(),
+        ws,
+        None,
+    )
+    .with_namespace_files(Some("w9b.stage".to_string()), None);
+    t.render = egret_workflow::runners::RenderContext::new().with_files(snapshot.into_scope());
+    let out = h.run(&t).await.expect("no worker failure");
+    h.release(&t).await.expect("release");
+    let lines = rec
+        .texts()
+        .into_iter()
+        .filter(|l| l.starts_with("FILE "))
+        .collect();
+    (out, lines)
+}
+
+fn file_lines(pairs: &[(&str, &str)]) -> Vec<String> {
+    pairs
+        .iter()
+        .map(|(f, c)| format!("FILE ./{f}={c}"))
+        .collect()
+}
+
+/// **W9b spec §7, §13 (live): two namespaces, `folderPerNamespace`, each
+/// `ifExists`, and an `inputFiles` entry overwriting a namespace file under
+/// EVERY `ifExists`** -- `cat` in the pod prints the bytes.
+async fn namespace_files_are_staged_into_the_pod_as_the_artifact_does() {
+    let pool = pool().await;
+    let files = Arc::new(egret_workflow::storage::FileStore {
+        store: Arc::new(egret_storage::MemStore::new()),
+        bucket: "egret-test".into(),
+        prefix: "workflow/".into(),
+        caps: egret_workflow::storage::Caps::default(),
+        retention_days: 30,
+    });
+    let ws = namespace_files_setup(&pool, &files).await;
+    let run = |block: serde_json::Value, inputs: serde_json::Value| {
+        let (pool, files) = (pool.clone(), files.clone());
+        async move { run_with_namespace_files(&pool, &files, ws, block, inputs).await }
+    };
+    let both = serde_json::json!(["w9b.s1", "w9b.s2"]);
+    for (mode, x) in [
+        ("OVERWRITE", "from-s2"),
+        ("WARN", "from-s1"),
+        ("IGNORE", "from-s1"),
+    ] {
+        let (out, lines) = run(
+            serde_json::json!({"namespaces": both, "ifExists": mode}),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(
+            out.state,
+            egret_workflow::executor::RunState::Success,
+            "{mode}: {out:?}"
+        );
+        assert_eq!(
+            lines,
+            file_lines(&[("only1.txt", "only1"), ("sub/y.txt", "y2"), ("x.txt", x)]),
+            "{mode}"
+        );
+    }
+    let (out, lines) = run(
+        serde_json::json!({"namespaces": both, "ifExists": "FAIL"}),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(out.state, egret_workflow::executor::RunState::Failed);
+    let m = out.message.unwrap_or_default();
+    assert!(
+        m.contains("'x.txt'") && m.contains("'w9b.s1'") && m.contains("'w9b.s2'"),
+        "{m}"
+    );
+    assert!(lines.is_empty(), "no pod ran: {lines:?}");
+    let (out, lines) = run(
+        serde_json::json!({"namespaces": both, "folderPerNamespace": true}),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        out.state,
+        egret_workflow::executor::RunState::Success,
+        "{out:?}"
+    );
+    assert_eq!(
+        lines,
+        file_lines(&[
+            ("w9b.s1/only1.txt", "only1"),
+            ("w9b.s1/x.txt", "from-s1"),
+            ("w9b.s2/sub/y.txt", "y2"),
+            ("w9b.s2/x.txt", "from-s2"),
+        ])
+    );
+    for mode in ["OVERWRITE", "FAIL", "WARN", "IGNORE"] {
+        let (out, lines) = run(
+            serde_json::json!({"namespaces": ["w9b.s1"], "ifExists": mode}),
+            serde_json::json!({"x.txt": "from-input", "y.txt": "nsfile://w9b.s2/sub/y.txt"}),
+        )
+        .await;
+        assert_eq!(
+            out.state,
+            egret_workflow::executor::RunState::Success,
+            "{mode}: {out:?}"
+        );
+        assert_eq!(
+            lines,
+            file_lines(&[
+                ("only1.txt", "only1"),
+                ("x.txt", "from-input"),
+                ("y.txt", "y2")
+            ]),
+            "{mode}"
+        );
+    }
+}
+
 type Case = fn() -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
 macro_rules! case {
@@ -2352,6 +2543,7 @@ fn cases() -> Vec<(&'static str, Case)> {
         case!(a_task_that_fills_its_disk_is_evicted_and_fails_saying_so),
         case!(the_plugin_host_scratch_and_output_dirs_are_writable_as_run_as_user),
         case!(a_plugin_stores_and_reads_storage_in_a_pod),
+        case!(namespace_files_are_staged_into_the_pod_as_the_artifact_does),
     ]
 }
 

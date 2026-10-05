@@ -976,6 +976,7 @@ async fn a_later_task_stages_an_earlier_tasks_output_uri_end_to_end() {
             }]),
             features: Arc::new(FixedFeatureState(true)),
             files: Some(fs.clone()),
+            pool: None,
         }),
     );
     let source = format!(
@@ -1140,6 +1141,7 @@ fn collecting_registry(
             }]),
             features: Arc::new(FixedFeatureState(true)),
             files: Some(fs.clone()),
+            pool: None,
         }),
     );
     reg

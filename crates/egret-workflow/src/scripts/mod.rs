@@ -168,6 +168,7 @@ const COMMON_IMPLEMENTED: &[&str] = &[
     "failFast",
     "inputFiles",
     "interpreter",
+    "namespaceFiles",
     "outputDirectory",
     "outputFiles",
     "taskRunner",
@@ -192,14 +193,14 @@ pub const HANDLED_BY_TASK_MODEL: &[&str] = &[
 /// Refused on all four types. Seven of these are base-`Task` properties
 /// (`assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`,
 /// `workerSelector`) that egret's `Task` model would otherwise drop without
-/// effect; the other three (`namespaceFiles`, `runner`, `targetOS`) are the
-/// script tasks' own. `outputDirectory` left this list in W9a Task 6: it is
-/// implemented over internal storage.
+/// effect; the other two (`runner`, `targetOS`) are the script tasks' own.
+/// `outputDirectory` left this list in W9a Task 6: it is implemented over
+/// internal storage. *(2026-10-05, W9b Task 5: `namespaceFiles` left it too,
+/// staged from namespace files -- `storage::nsfiles::stage`.)*
 const COMMON_REFUSED: &[&str] = &[
     "assets",
     "logLevel",
     "logToFile",
-    "namespaceFiles",
     "policyRefs",
     "runner",
     "targetOS",
@@ -362,6 +363,10 @@ pub struct ScriptTask {
     pub warning_on_std_err: bool,
     /// `None`: absent or `null`, i.e. the configured default runner.
     pub task_runner: Option<RunnerSpec>,
+    /// `namespaceFiles` (W9b Task 5), parsed by
+    /// [`NamespaceFilesSpec::parse`](crate::storage::nsfiles::stage::NamespaceFilesSpec::parse);
+    /// `None`: absent or `null`, no namespace file is staged.
+    pub namespace_files: Option<crate::storage::nsfiles::stage::NamespaceFilesSpec>,
 }
 
 impl ScriptTask {
@@ -477,6 +482,7 @@ pub fn parse(type_id: &str, spec: &Value) -> Result<ScriptTask, Vec<ScriptRefusa
         fail_fast: true,
         warning_on_std_err: true,
         task_runner: None,
+        namespace_files: None,
     };
     let mut errs = Vec::new();
     let implemented = kind.implemented_properties();
@@ -528,6 +534,23 @@ pub fn parse(type_id: &str, spec: &Value) -> Result<ScriptTask, Vec<ScriptRefusa
             "beforeCommands" => out.before_commands = string_list(value, key, &mut errs),
             "interpreter" => out.interpreter = Some(string_list(value, key, &mut errs)),
             "env" => out.env = string_map(value, key, &mut errs),
+            "namespaceFiles" => {
+                match crate::storage::nsfiles::stage::NamespaceFilesSpec::parse(value) {
+                    Ok(spec) => out.namespace_files = Some(spec),
+                    Err((p, message)) => {
+                        let at = if p.is_empty() {
+                            key.to_string()
+                        } else {
+                            format!("{key}.{p}")
+                        };
+                        errs.push(refusal(
+                            CODE_INVALID,
+                            at.clone(),
+                            format!("'{at}' {message}"),
+                        ));
+                    }
+                }
+            }
             "inputFiles" => {
                 if value.is_string() {
                     errs.push(refusal(
@@ -1045,6 +1068,43 @@ mod tests {
         .unwrap();
         let found: Vec<String> = script_tasks(&flow).into_iter().map(|(p, ..)| p).collect();
         assert_eq!(found, vec!["tasks.s.e"]);
+    }
+
+    /// W9b Task 5: `namespaceFiles` is implemented on all four types,
+    /// parsed by the one `NamespaceFilesSpec::parse`, and a malformed block
+    /// is refused naming the property inside it.
+    #[test]
+    fn namespace_files_is_implemented_and_a_malformed_block_is_refused_by_name() {
+        for kind in ScriptKind::ALL {
+            assert!(kind.implemented_properties().contains(&"namespaceFiles"));
+            assert!(!kind.refused_properties().contains(&"namespaceFiles"));
+            let body = |nf: serde_json::Value| match kind.body_property() {
+                "commands" => json!({"commands": ["x"], "namespaceFiles": nf}),
+                _ => json!({"script": "x", "namespaceFiles": nf}),
+            };
+            let parsed = parse(
+                kind.fqcn(),
+                &body(json!({"namespaces": ["a.b"], "ifExists": "WARN"})),
+            )
+            .unwrap_or_else(|e| panic!("{}: {e:?}", kind.fqcn()));
+            let nf = parsed.namespace_files.expect("kept");
+            assert_eq!(nf.if_exists, crate::storage::nsfiles::stage::IfExists::Warn);
+            let errs = parse(kind.fqcn(), &body(json!({"namespaces": "a.b"}))).unwrap_err();
+            assert_eq!(errs.len(), 1, "{errs:?}");
+            assert_eq!(
+                (errs[0].code, errs[0].path.as_str()),
+                (CODE_INVALID, "namespaceFiles.namespaces")
+            );
+            assert!(
+                errs[0].message.contains("must be a list of strings"),
+                "{errs:?}"
+            );
+            let errs = parse(kind.fqcn(), &body(json!("x"))).unwrap_err();
+            assert_eq!(errs[0].path, "namespaceFiles", "{errs:?}");
+            // `null` is absent.
+            let parsed = parse(kind.fqcn(), &body(serde_json::Value::Null)).unwrap();
+            assert!(parsed.namespace_files.is_none());
+        }
     }
 
     /// W9a Task 6: `outputDirectory` is implemented on all four types, read

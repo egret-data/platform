@@ -1528,6 +1528,25 @@ fn walk_task(
                     path: format!("{path}.tasks"),
                 });
             }
+            // W9b Task 5 (spec §7, the user's ruling): the block is parsed by
+            // the script tasks' own parse and kept; egret does not run
+            // `WorkingDirectory`, so nothing about it changes at run.
+            if let Some(v) = &w.namespace_files {
+                if let Err((p, message)) =
+                    crate::storage::nsfiles::stage::NamespaceFilesSpec::parse(v)
+                {
+                    let at = if p.is_empty() {
+                        "namespaceFiles".to_string()
+                    } else {
+                        format!("namespaceFiles.{p}")
+                    };
+                    report.errors.push(Finding {
+                        code: "working_directory_namespace_files_invalid",
+                        message: format!("task '{}': '{at}' {message}", task.id),
+                        path: format!("{path}.{at}"),
+                    });
+                }
+            }
             // kestra: `WorkingDirectoryTaskValidator.isValid` --
             // `value.getTasks().stream().anyMatch(task -> !(task instanceof
             // RunnableTask<?>))` -> "Only runnable tasks are allowed as

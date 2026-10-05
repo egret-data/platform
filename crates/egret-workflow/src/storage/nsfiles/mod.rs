@@ -6,13 +6,19 @@
 //! - [`store`]: the metadata table `workflow.namespace_files` (migration
 //!   0169) and the objects behind it. Every function takes the
 //!   [`access::Grant`] `authorize` returned; the workspace is the grant's.
+//! - [`glob`]: Kestra's `PathMatcherPredicate` and Commons-IO's wildcard
+//!   (Task 5; Tasks 6 and 7 reuse them).
+//! - [`stage`]: `namespaceFiles` on script tasks and `inputFiles` values that
+//!   name a namespace file (spec §7, Task 5).
 //!
 //! The objects live in W9a's [`super::FileStore`], under
 //! `{prefix}{workspace}/{ns-as-path}/_files{path}[.v{N}]`
 //! ([`super::FileStore::namespace_object_uri`]).
 
 pub mod access;
+pub mod glob;
 pub mod path;
+pub mod stage;
 pub mod store;
 
 use std::sync::{Arc, OnceLock};

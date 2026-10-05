@@ -102,10 +102,13 @@
 //!   §6.2) -- `workflow.storage.max_file_bytes` and `max_task_bytes` bound
 //!   what a task stores. An `inputFiles` value that is a `kestra://` URI is
 //!   staged from the store ([`TaskCommands::stored_inputs`]).
-//! * **No `namespaceFiles`, no `targetOS`.** Each needs a seam this crate
-//!   does not have (namespace files are W9b, Windows workers none).
-//!   [`TaskCommands::input_files`] carries the inline case -- a script
-//!   written by the handler itself, or an author's literal contents.
+//! * **No `targetOS`.** It needs a seam this crate does not have (Windows
+//!   workers). [`TaskCommands::input_files`] carries the inline case -- a
+//!   script written by the handler itself, or an author's literal contents.
+//!   *(2026-10-05, W9b Task 5: `namespaceFiles` arrive as
+//!   [`TaskCommands::stored_inputs`], staged by the script handler from
+//!   namespace files -- `storage::nsfiles::stage` -- and streamed from the
+//!   store like any other stored input.)*
 //! * **No registry credentials, no `shmSize`, `deviceRequests`, `privileged`,
 //!   `networkMode`, volumes.** W5a Task 5 implements `pullPolicy`, `cpu.cpus`,
 //!   `memory.memory` and `delete` (see [`create_args`]); every other Kestra

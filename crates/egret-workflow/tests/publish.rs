@@ -448,3 +448,101 @@ async fn publish_refuses_a_files_segment_namespace_by_name() {
         .await
         .expect("a.files.b publishes");
 }
+
+/// A `WorkingDirectory` flow whose `namespaceFiles` block is `block` (YAML,
+/// indented under the key).
+fn working_directory(id: &str, block: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: w9b.wd\ntasks:\n  - id: wd\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    namespaceFiles:\n{block}    tasks:\n      - id: t\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n"
+    )
+}
+
+/// W9b Task 5 (spec §7, the user's ruling): a `WorkingDirectory`'s
+/// `namespaceFiles` is parsed at publish by the script tasks' own parse; a
+/// malformed block is refused naming the property, a valid one publishes.
+#[tokio::test]
+async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name_and_a_valid_one_publishes(
+) {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    for (id, block, property) in [
+        (
+            "bad-ns",
+            "      namespaces: w9b.s1\n",
+            "namespaceFiles.namespaces",
+        ),
+        (
+            "bad-if",
+            "      ifExists: NOPE\n",
+            "namespaceFiles.ifExists",
+        ),
+        ("bad-key", "      unknown: 1\n", "namespaceFiles.unknown"),
+    ] {
+        let bad = common::draft(&repo, ws, user, &working_directory(id, block)).await;
+        let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, bad.id, "")
+            .await
+            .expect_err("a malformed namespaceFiles must not publish");
+        match err {
+            egret_core::Error::InvalidInput(m) => {
+                assert!(
+                    m.contains(&format!("tasks.wd.{property}")) || m.contains(property),
+                    "{m}"
+                )
+            }
+            other => panic!("{id}: {other:?}"),
+        }
+    }
+    // The control: the corpus flow's block, and a templated one, publish.
+    for (id, block) in [
+        (
+            "good",
+            "      namespaces: [io.test.first, io.test.second]\n      enabled: true\n      folderPerNamespace: true\n      exclude: [/ignore/**]\n",
+        ),
+        (
+            "templated",
+            "      enabled: \"{{ true }}\"\n      ifExists: WARN\n      include: [\"{{ flow.id }}/**\"]\n",
+        ),
+    ] {
+        let good = common::draft(&repo, ws, user, &working_directory(id, block)).await;
+        egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
+            .await
+            .unwrap_or_else(|e| panic!("{id} publishes: {e:?}"));
+    }
+}
+
+/// The block is kept in the model, verbatim: serialize -> parse -> equal,
+/// and the parse of the kept value is the parse of the written one.
+#[tokio::test]
+async fn a_working_directory_namespace_files_round_trips_through_the_model() {
+    use egret_workflow::models::{Task, TaskKind};
+    let yaml = "id: wd\ntype: io.kestra.plugin.core.flow.WorkingDirectory\nnamespaceFiles:\n  namespaces: [a.b, c]\n  include: ['**.txt']\n  ifExists: FAIL\n  folderPerNamespace: true\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+    let task: Task = serde_norway::from_str(yaml).expect("a task");
+    let TaskKind::WorkingDirectory(w) = &task.kind else {
+        panic!("{:?}", task.kind)
+    };
+    let kept = w.namespace_files.clone().expect("namespaceFiles is kept");
+    assert_eq!(
+        kept,
+        serde_json::json!({
+            "namespaces": ["a.b", "c"], "include": ["**.txt"], "ifExists": "FAIL",
+            "folderPerNamespace": true,
+        })
+    );
+    let value = serde_json::to_value(&task).expect("serialize");
+    assert_eq!(value["namespaceFiles"], kept, "{value}");
+    let again: Task = serde_json::from_value(value).expect("parse again");
+    assert_eq!(again, task);
+    let spec = egret_workflow::storage::nsfiles::stage::NamespaceFilesSpec::parse(&kept).unwrap();
+    assert_eq!(
+        spec.if_exists,
+        egret_workflow::storage::nsfiles::stage::IfExists::Fail
+    );
+    // Absent stays absent, and is not serialized.
+    let bare: Task = serde_norway::from_str(
+        "id: wd\ntype: io.kestra.plugin.core.flow.WorkingDirectory\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n",
+    )
+    .unwrap();
+    let value = serde_json::to_value(&bare).unwrap();
+    assert!(value.get("namespaceFiles").is_none(), "{value}");
+}

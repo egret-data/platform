@@ -245,66 +245,32 @@ impl Snapshot {
                  whose namespace a namespace file is read as"
             ))
         })?;
-        let or_own = |arg: Option<&str>| arg.unwrap_or(own).to_string();
-        let (namespace, path, uri_revision) = if raw.starts_with(uri::SCHEME_PREFIX) {
-            match uri::parse_any(raw) {
-                Ok(uri::StorageUri::NamespaceFile(n)) => {
-                    // The coordinator's ruling on concern 1 (2026-10-05, an
-                    // application of R3): the URI names one revision of one
-                    // namespace's file, so an argument that says otherwise
-                    // is an error naming both, never silently ignored as
-                    // Kestra's `kestra` branch does.
-                    if let Some(given) = &args.revision {
-                        return Err(refused(format!(
-                            "the 'revision' argument ({given}) cannot be given beside {raw}: a \
-                             kestra:// URI names exactly one revision (here {})",
-                            n.revision
-                        )));
-                    }
-                    if let Some(given) = args.namespace.filter(|g| *g != n.namespace) {
-                        return Err(refused(format!(
-                            "the 'namespace' argument '{given}' differs from namespace '{}', \
-                             which {raw} names",
-                            n.namespace
-                        )));
-                    }
-                    (n.namespace, n.path, Some(n.revision))
-                }
-                Ok(uri::StorageUri::Execution(_)) => {
-                    return Err(refused(format!(
-                        "{raw} is an execution file URI, not a namespace file's"
-                    )))
-                }
-                Err(reason) => {
-                    return Err(refused(
-                        Unreadable::Malformed {
-                            uri: raw.to_string(),
-                            reason,
-                        }
-                        .to_string(),
-                    ))
-                }
-            }
-        } else if let Some(rest) = raw.strip_prefix(NSFILE_SCHEME) {
-            let (authority, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
-            if path.is_empty() {
+        let named = ns_ref(raw, own, args.namespace).map_err(refused)?;
+        if let Some(uri_revision) = named.uri_revision {
+            // The coordinator's ruling on concern 1 (2026-10-05, an
+            // application of R3): the URI names one revision of one
+            // namespace's file, so an argument that says otherwise is an
+            // error naming both, never silently ignored as Kestra's `kestra`
+            // branch does.
+            if let Some(given) = &args.revision {
                 return Err(refused(format!(
-                    "{raw} names no file: an nsfile URI is nsfile:///<path> (the flow's own \
-                     namespace) or nsfile://<namespace>/<path>"
+                    "the 'revision' argument ({given}) cannot be given beside {raw}: a \
+                     kestra:// URI names exactly one revision (here {uri_revision})"
                 )));
             }
-            // An authority wins. A `namespace` argument beside one is refused
-            // by the caller, before this is asked (`runners::functions`'s
-            // `file_function`, `AbstractFileFunction.java:181-191`).
-            let namespace = if authority.is_empty() {
-                or_own(args.namespace)
-            } else {
-                authority.to_string()
-            };
-            (namespace, path.to_string(), None)
-        } else {
-            (or_own(args.namespace), raw.to_string(), None)
-        };
+            if let Some(given) = args.namespace.filter(|g| *g != named.namespace) {
+                return Err(refused(format!(
+                    "the 'namespace' argument '{given}' differs from namespace '{}', \
+                     which {raw} names",
+                    named.namespace
+                )));
+            }
+        }
+        let NsRef {
+            namespace,
+            path,
+            uri_revision,
+        } = named;
         // THE access decision: any namespace of this workspace, and the
         // running flow's own namespace must itself be one that holds files.
         let grant = authorize(
@@ -487,6 +453,78 @@ impl Snapshot {
             other => FileUnavailable::Refused(other.to_string()),
         }
     }
+}
+
+/// What a namespace-file reference names, before any access decision: its
+/// namespace, its path as written, and -- for a `kestra:///…/_files/…[.vN]`
+/// URI, which names exactly one revision -- that revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NsRef {
+    pub(crate) namespace: String,
+    pub(crate) path: String,
+    pub(crate) uri_revision: Option<u32>,
+}
+
+/// THE parse of a namespace-file reference (W9b spec §3, §6), shared by the
+/// functions ([`Snapshot::ns_target`]) and script `inputFiles` staging
+/// (`nsfiles::stage::resolve_input_uri`, Task 5):
+///
+/// * `kestra:///…/_files/…[.vN]`: `uri::parse_any`'s namespace and path, and
+///   the revision the URI names; an execution URI is refused;
+/// * `nsfile:///path`: `own`'s (or `namespace_arg`'s) namespace;
+///   `nsfile://other.ns/path`: the authority's, which wins over
+///   `namespace_arg` (a caller that must refuse the pair does so first);
+/// * anything else is a bare path, in `namespace_arg`'s namespace or `own`'s.
+///
+/// Pure: no access decision (the caller's `authorize` makes it) and no path
+/// rule (the caller's `NsPath::parse_*`).
+pub(crate) fn ns_ref(
+    raw: &str,
+    own: &str,
+    namespace_arg: Option<&str>,
+) -> std::result::Result<NsRef, String> {
+    let or_own = |arg: Option<&str>| arg.unwrap_or(own).to_string();
+    if raw.starts_with(uri::SCHEME_PREFIX) {
+        return match uri::parse_any(raw) {
+            Ok(uri::StorageUri::NamespaceFile(n)) => Ok(NsRef {
+                namespace: n.namespace,
+                path: n.path,
+                uri_revision: Some(n.revision),
+            }),
+            Ok(uri::StorageUri::Execution(_)) => Err(format!(
+                "{raw} is an execution file URI, not a namespace file's"
+            )),
+            Err(reason) => Err(Unreadable::Malformed {
+                uri: raw.to_string(),
+                reason,
+            }
+            .to_string()),
+        };
+    }
+    if let Some(rest) = raw.strip_prefix(NSFILE_SCHEME) {
+        let (authority, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+        if path.is_empty() {
+            return Err(format!(
+                "{raw} names no file: an nsfile URI is nsfile:///<path> (the flow's own \
+                 namespace) or nsfile://<namespace>/<path>"
+            ));
+        }
+        let namespace = if authority.is_empty() {
+            or_own(namespace_arg)
+        } else {
+            authority.to_string()
+        };
+        return Ok(NsRef {
+            namespace,
+            path: path.to_string(),
+            uri_revision: None,
+        });
+    }
+    Ok(NsRef {
+        namespace: or_own(namespace_arg),
+        path: raw.to_string(),
+        uri_revision: None,
+    })
 }
 
 /// `nsfile://`, Kestra's `Namespace.NAMESPACE_FILE_SCHEME` and its `://`.

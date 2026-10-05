@@ -759,7 +759,7 @@ pub async fn handlers_for(
         }
     };
     let features: Arc<dyn crate::worker::handlers::script::FeatureState> =
-        Arc::new(PgFeatureState::new(pool));
+        Arc::new(PgFeatureState::new(pool.clone()));
     register(
         &mut handlers,
         Arc::new(ScriptRuntime {
@@ -768,6 +768,8 @@ pub async fn handlers_for(
             plugin_configurations: cfg.plugin_configurations.clone(),
             features: features.clone(),
             files: crate::storage::current(),
+            // W9b Task 5: namespace files are staged on this pool.
+            pool: Some(pool),
         }),
     );
     crate::worker::handlers::kestra::register(

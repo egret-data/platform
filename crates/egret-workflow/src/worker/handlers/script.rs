@@ -91,8 +91,13 @@ use super::container::{
 };
 use super::python::{NameHintSink, ENV_DEFAULTS, SCRIPT_FILE};
 use crate::logs::LogLevel;
+use crate::runners::files::{classify, FileTarget};
 use crate::runners::render_str;
 use crate::scripts::{self, gate, RunnerKind, RunnerSpec, ScriptKind, ScriptTask};
+use crate::storage::nsfiles::stage::{
+    merge, resolve_input_uri, stage, RenderedNamespaceFiles, Staged,
+};
+use crate::storage::nsfiles::NsError;
 
 /// The render variable Kestra binds to the working directory (`{{ workingDir }}`).
 pub const WORKING_DIR_VAR: &str = "workingDir";
@@ -201,6 +206,11 @@ pub struct ScriptRuntime {
     /// Internal storage (`[storage]`), where a `kestra://` `inputFiles` value
     /// is read from (W9a spec §5). `None`: such a value fails the task.
     pub files: Option<Arc<crate::storage::FileStore>>,
+    /// W9b Task 5: the database namespace files are listed and resolved on
+    /// (`namespaceFiles`, and an `inputFiles` value naming a namespace file),
+    /// one connection per run, outside any render. `None`: a task that
+    /// declares either fails naming `[storage]`.
+    pub pool: Option<sqlx::PgPool>,
 }
 
 impl std::fmt::Debug for ScriptRuntime {
@@ -240,7 +250,7 @@ impl Script {
         type_id: &str,
         task: &TaskInput,
         p: &ScriptTask,
-    ) -> std::result::Result<TaskCommands, String> {
+    ) -> std::result::Result<Rendered, String> {
         let mut cx = task.render.clone();
         cx.insert(WORKING_DIR_VAR, serde_json::json!(WORKING_DIR));
         // Kestra's `{{ outputDir }}`, bound with the directory enabled
@@ -260,7 +270,17 @@ impl Script {
         let before = render_all(type_id, "beforeCommands", &p.before_commands, &cx)?;
         let author_env = render_values(type_id, "env", &p.env, &cx)?;
         let rendered_inputs = render_values(type_id, "inputFiles", &p.input_files, &cx)?;
-        let (mut input_files, stored_inputs) = self.stage_inputs(type_id, task, rendered_inputs)?;
+        let (mut input_files, stored_inputs, ns_inputs) =
+            self.stage_inputs(type_id, task, rendered_inputs)?;
+        // W9b Task 5: the block's strings, with the same context; staged by
+        // `run` (`stage_namespace_files`), which has a connection.
+        let flow_namespace = task.render.files().and_then(|f| f.0.flow_namespace());
+        let namespace_files = match &p.namespace_files {
+            Some(nf) => Some(nf.render(flow_namespace, |what, s| {
+                render_str(s, &cx).map_err(|e| format!("{type_id}: `{what}` did not render: {e}"))
+            })?),
+            None => None,
+        };
         let output_files = render_all(type_id, "outputFiles", &p.output_files, &cx)?;
         let script = p.script.as_deref().unwrap_or_default();
 
@@ -271,7 +291,9 @@ impl Script {
             ScriptKind::ShellScript => vec![one("script", script)?],
             ScriptKind::PythonScript => {
                 let body = one("script", script)?;
-                if input_files.contains_key(SCRIPT_FILE) || stored_inputs.contains_key(SCRIPT_FILE)
+                if input_files.contains_key(SCRIPT_FILE)
+                    || stored_inputs.contains_key(SCRIPT_FILE)
+                    || ns_inputs.contains_key(SCRIPT_FILE)
                 {
                     return Err(format!(
                         "{type_id}: `inputFiles` declares {SCRIPT_FILE:?}, which is where egret \
@@ -285,7 +307,11 @@ impl Script {
 
         // An input file's NAME is the author's: a problem with it is this
         // task's failure, decided before the gate and before any runner.
-        for rel in input_files.keys().chain(stored_inputs.keys()) {
+        for rel in input_files
+            .keys()
+            .chain(stored_inputs.keys())
+            .chain(ns_inputs.keys())
+        {
             if let Some(problem) = relative_problem(rel) {
                 return Err(format!("{type_id}: `inputFiles`: {problem}"));
             }
@@ -305,7 +331,7 @@ impl Script {
         };
         env.extend(author_env);
 
-        Ok(TaskCommands {
+        let cmds = TaskCommands {
             container_image: image,
             interpreter,
             before_commands: prefix(p.fail_fast, before),
@@ -318,7 +344,91 @@ impl Script {
             // Set by `run` once the commands render: see `collect_to`.
             collect_to: None,
             host_protocol: false,
+        };
+        Ok(Rendered {
+            cmds,
+            ns_inputs,
+            namespace_files,
         })
+    }
+
+    /// W9b Task 5 (spec §7): resolve every `inputFiles` value that names a
+    /// namespace file, stage the `namespaceFiles` block, and merge them into
+    /// `cmds.stored_inputs` -- namespace files first, every `inputFiles`
+    /// name over them whatever `ifExists` says (the user's ruling). One pool
+    /// connection, taken here and returned before the runner is called; no
+    /// render is involved, so no render connection is held.
+    ///
+    /// `Ok(Err(_))` is the task's failure, before the gate and before any
+    /// runner; `Err` is egret's outage (the database or the store), so the
+    /// run stays leased and is re-claimed with no attempt spent (spec §11).
+    async fn stage_namespace_files(
+        &self,
+        type_id: &str,
+        task: &TaskInput,
+        cmds: &mut TaskCommands,
+        ns_inputs: BTreeMap<String, String>,
+        block: Option<RenderedNamespaceFiles>,
+    ) -> Result<std::result::Result<(), String>> {
+        let block = block.filter(|b| b.enabled);
+        if block.is_none() && ns_inputs.is_empty() {
+            return Ok(Ok(()));
+        }
+        let fail = |why: String| format!("{type_id}: {why}");
+        let (Some(pool), Some(files)) = (&self.rt.pool, &self.rt.files) else {
+            return Ok(Err(fail(
+                "namespace files cannot be staged: egret has no internal storage configured \
+                 (the `[storage]` section of its configuration)"
+                    .to_string(),
+            )));
+        };
+        // Task 4's one source of the running flow's namespace: the
+        // execution's flow, never a rendered `{{ flow.namespace }}`.
+        let Some(own) = task.render.files().and_then(|f| f.0.flow_namespace()) else {
+            return Ok(Err(fail(
+                "namespace files cannot be staged: this run is not a task run of a flow's \
+                 execution, whose namespace they are read as"
+                    .to_string(),
+            )));
+        };
+        let outage = |e: NsError| {
+            Error::Internal(anyhow::anyhow!("{type_id}: staging namespace files: {e}"))
+        };
+        let mut conn = pool.acquire().await.map_err(|e| {
+            Error::Internal(anyhow::anyhow!(
+                "{type_id}: staging namespace files: the database is unavailable: {e}"
+            ))
+        })?;
+        let mut resolved = BTreeMap::new();
+        for (name, uri) in ns_inputs {
+            match resolve_input_uri(&mut conn, files, task.workspace_id, own, &uri)
+                .await
+                .map_err(outage)?
+            {
+                Ok(input) => {
+                    resolved.insert(name, input);
+                }
+                Err(why) => return Ok(Err(fail(format!("`inputFiles` {name:?}: {why}")))),
+            }
+        }
+        let staged = match block {
+            None => Staged::default(),
+            Some(b) => match stage(&mut conn, files, task.workspace_id, own, &b)
+                .await
+                .map_err(outage)?
+            {
+                Ok(staged) => staged,
+                Err(why) => return Ok(Err(fail(why))),
+            },
+        };
+        drop(conn);
+        for line in &staged.warnings {
+            task.log.line(LogLevel::Warn, line).await;
+        }
+        let mut stored = std::mem::take(&mut cmds.stored_inputs);
+        stored.extend(resolved);
+        cmds.stored_inputs = merge(staged.files, &cmds.input_files, stored);
+        Ok(Ok(()))
     }
 
     /// Where this run's output files go (W9a spec §5, §6.2): its workspace
@@ -388,7 +498,15 @@ impl Script {
     ) -> std::result::Result<StagedInputs, String> {
         let mut contents = BTreeMap::new();
         let mut stored = BTreeMap::new();
+        let mut namespace = BTreeMap::new();
         for (name, value) in rendered {
+            // W9b Task 5 (the user's ruling on item 9): a namespace-file URI
+            // is resolved by `run`, which has a connection. A bare path stays
+            // contents, as W5a/W9a (Kestra writes a non-URI string as is).
+            if is_namespace_file_uri(&value) {
+                namespace.insert(name, value);
+                continue;
+            }
             if !value.starts_with(STORAGE_SCHEME) {
                 contents.insert(name, value);
                 continue;
@@ -418,12 +536,38 @@ impl Script {
                 },
             );
         }
-        Ok((contents, stored))
+        Ok((contents, stored, namespace))
     }
 }
 
-/// `inputFiles` split: inline contents, and files staged from storage.
-type StagedInputs = (BTreeMap<String, String>, BTreeMap<String, StoredInput>);
+/// `inputFiles` split: inline contents, files staged from storage, and
+/// namespace-file URIs (name -> URI) `run` resolves.
+type StagedInputs = (
+    BTreeMap<String, String>,
+    BTreeMap<String, StoredInput>,
+    BTreeMap<String, String>,
+);
+
+/// What [`Script::render`] hands `run`: the commands, and what `run` stages
+/// from namespace files before anything else uses them.
+struct Rendered {
+    cmds: TaskCommands,
+    /// `inputFiles` values naming a namespace file, by input name.
+    ns_inputs: BTreeMap<String, String>,
+    /// The rendered `namespaceFiles` block, if the task has one.
+    namespace_files: Option<RenderedNamespaceFiles>,
+}
+
+/// An `inputFiles` value naming a namespace file: `nsfile://…`, or a
+/// `kestra:///` URI with the `_files` marker before any `executions/{uuid}`
+/// pair (`runners::files::classify`, the functions' own test; I1).
+fn is_namespace_file_uri(value: &str) -> bool {
+    value.starts_with(NSFILE_SCHEME)
+        || (value.starts_with(STORAGE_SCHEME) && classify(value) == FileTarget::Namespace)
+}
+
+/// Kestra's `Namespace.NAMESPACE_FILE_SCHEME` and its `://`.
+const NSFILE_SCHEME: &str = "nsfile://";
 
 /// What makes an `inputFiles` value a file in internal storage rather than
 /// contents -- Kestra's own test (`value.startsWith("kestra://")`). A value
@@ -473,10 +617,22 @@ impl TaskHandler for Script {
         };
 
         // 2. render.
-        let mut cmds = match self.render(type_id, task, &parsed) {
-            Ok(c) => c,
+        let Rendered {
+            mut cmds,
+            ns_inputs,
+            namespace_files,
+        } = match self.render(type_id, task, &parsed) {
+            Ok(r) => r,
             Err(why) => return Ok(Outcome::failed_with(why)),
         };
+        // 2b. namespace files (W9b Task 5): staged before anything uses the
+        // inputs, and before the gate, so a refusal calls no runner.
+        if let Err(why) = self
+            .stage_namespace_files(type_id, task, &mut cmds, ns_inputs, namespace_files)
+            .await?
+        {
+            return Ok(Outcome::failed_with(why));
+        }
         if cmds.has_outputs() {
             cmds.collect_to = match self.collect_to(type_id, task) {
                 Ok(to) => Some(to),
@@ -637,6 +793,7 @@ mod tests {
                 plugin_configurations: allow(RunnerKind::Docker, images),
                 features: Arc::new(FixedFeatureState(feature)),
                 files: None,
+                pool: None,
             }),
         )
     }
@@ -788,6 +945,7 @@ mod tests {
                 ]),
                 features: Arc::new(FixedFeatureState(true)),
                 files: None,
+                pool: None,
             }),
         );
         let out = h
@@ -1063,6 +1221,7 @@ mod tests {
                 plugin_configurations: allow(RunnerKind::Docker, &["*"]),
                 features: Arc::new(FixedFeatureState(true)),
                 files: Some(files),
+                pool: None,
             }),
         )
     }
@@ -1170,61 +1329,56 @@ mod tests {
         );
     }
 
+    /// An object store whose every call fails as an unreachable S3 does.
+    struct DownStore;
+    #[async_trait::async_trait]
+    impl egret_storage::ObjectStore for DownStore {
+        async fn put(
+            &self,
+            _: &str,
+            _: Vec<u8>,
+        ) -> std::result::Result<(), egret_storage::StorageError> {
+            Err(egret_storage::StorageError::S3("connection refused".into()))
+        }
+        async fn get(&self, _: &str) -> std::result::Result<Vec<u8>, egret_storage::StorageError> {
+            Err(egret_storage::StorageError::S3("connection refused".into()))
+        }
+        async fn delete(&self, _: &str) -> std::result::Result<(), egret_storage::StorageError> {
+            Err(egret_storage::StorageError::S3("connection refused".into()))
+        }
+        async fn copy(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> std::result::Result<(), egret_storage::StorageError> {
+            Err(egret_storage::StorageError::S3("connection refused".into()))
+        }
+        async fn list(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> std::result::Result<egret_storage::Listing, egret_storage::StorageError> {
+            Err(egret_storage::StorageError::S3("connection refused".into()))
+        }
+        async fn get_stream(
+            &self,
+            _: &str,
+        ) -> std::result::Result<
+            Box<dyn tokio::io::AsyncBufRead + Send + Unpin>,
+            egret_storage::StorageError,
+        > {
+            Err(egret_storage::StorageError::S3("connection refused".into()))
+        }
+    }
+
     /// Spec §11: the store unreachable while the runner stages is egret's
     /// outage -- a worker `Err`, no outcome -- while an object missing behind
     /// its index row is the author's failed task naming the URI.
     #[tokio::test]
     async fn an_unreachable_store_while_staging_is_a_worker_error_not_a_failed_task() {
-        struct Down;
-        #[async_trait::async_trait]
-        impl egret_storage::ObjectStore for Down {
-            async fn put(
-                &self,
-                _: &str,
-                _: Vec<u8>,
-            ) -> std::result::Result<(), egret_storage::StorageError> {
-                Err(egret_storage::StorageError::S3("connection refused".into()))
-            }
-            async fn get(
-                &self,
-                _: &str,
-            ) -> std::result::Result<Vec<u8>, egret_storage::StorageError> {
-                Err(egret_storage::StorageError::S3("connection refused".into()))
-            }
-            async fn delete(
-                &self,
-                _: &str,
-            ) -> std::result::Result<(), egret_storage::StorageError> {
-                Err(egret_storage::StorageError::S3("connection refused".into()))
-            }
-            async fn copy(
-                &self,
-                _: &str,
-                _: &str,
-            ) -> std::result::Result<(), egret_storage::StorageError> {
-                Err(egret_storage::StorageError::S3("connection refused".into()))
-            }
-            async fn list(
-                &self,
-                _: &str,
-                _: Option<&str>,
-            ) -> std::result::Result<egret_storage::Listing, egret_storage::StorageError>
-            {
-                Err(egret_storage::StorageError::S3("connection refused".into()))
-            }
-            async fn get_stream(
-                &self,
-                _: &str,
-            ) -> std::result::Result<
-                Box<dyn tokio::io::AsyncBufRead + Send + Unpin>,
-                egret_storage::StorageError,
-            > {
-                Err(egret_storage::StorageError::S3("connection refused".into()))
-            }
-        }
         let uri = staged_uri();
         let down = Arc::new(crate::storage::FileStore {
-            store: Arc::new(Down),
+            store: Arc::new(DownStore),
             ..Arc::into_inner(mem_files()).unwrap()
         });
         let spy = Spy::ok(CommandsResult::default()).staging(down.clone());
@@ -1519,6 +1673,7 @@ mod tests {
                 plugin_configurations: allow(RunnerKind::Docker, &["*"]),
                 features: Arc::new(Down),
                 files: None,
+                pool: None,
             }),
         );
         h.run(&input(scripts::ALIAS_CONTAINER, alias_spec()))
@@ -1588,6 +1743,7 @@ mod tests {
                 plugin_configurations: PluginConfigurations::default(),
                 features: Arc::new(FixedFeatureState(false)),
                 files: None,
+                pool: None,
             }),
         );
         assert_eq!(
@@ -1922,5 +2078,510 @@ mod tests {
             .expect_err("egret's outage, never the author's failed task");
         assert!(matches!(err, Error::Internal(_)), "{err:?}");
         assert!(err.to_string().contains("abc-a.txt"), "{err}");
+    }
+
+    // ---- W9b Task 5: namespace files -----------------------------------------
+
+    use crate::storage::nsfiles::stage::testing::{self as ns, contents, write, OWN};
+
+    /// A script handler over `spy`, staging namespace files from `files` on `pool`.
+    fn with_namespace_files(
+        spy: Arc<Spy>,
+        files: Arc<crate::storage::FileStore>,
+        pool: Option<sqlx::PgPool>,
+    ) -> Script {
+        Script::new(
+            ScriptKind::ShellCommands,
+            Arc::new(ScriptRuntime {
+                runner_kind: RunnerKind::Docker,
+                runner: spy,
+                plugin_configurations: allow(RunnerKind::Docker, &["*"]),
+                features: Arc::new(FixedFeatureState(true)),
+                files: Some(files),
+                pool,
+            }),
+        )
+    }
+
+    /// A task of flow namespace [`OWN`] in workspace `ws` whose render scope
+    /// reaches namespace files (`fileURI`) on `pool` and resolves the
+    /// execution URI [`staged_uri`] (14 bytes).
+    fn ns_task(
+        files: &Arc<crate::storage::FileStore>,
+        pool: &sqlx::PgPool,
+        ws: uuid::Uuid,
+        spec: serde_json::Value,
+    ) -> (TaskInput, Arc<crate::worker::handlers::testing::Recorder>) {
+        let uri = staged_uri();
+        let snapshot = crate::storage::scope::Snapshot::from_parts(
+            BTreeMap::from([(uri.clone(), Ok(indexed(&uri, 14)))]),
+            files.clone(),
+            ws,
+            None,
+        )
+        .with_namespace_files(
+            Some(OWN.to_string()),
+            Some(Arc::new((*pool.connect_options()).clone())),
+        );
+        let mut cx = crate::runners::RenderContext::from_json_object(&serde_json::json!({
+            "outputs": {"w": {"uri": uri}},
+        }))
+        .expect("an object")
+        .with_files(snapshot.into_scope());
+        cx.insert("flow", serde_json::json!({"id": "stage", "namespace": OWN}));
+        let (mut task, rec) = recorded(scripts::SHELL_COMMANDS, spec);
+        task.workspace_id = ws;
+        task.render = cx;
+        (task, rec)
+    }
+
+    fn shell(extra: serde_json::Value) -> serde_json::Value {
+        let mut spec = serde_json::json!({"containerImage": "alpine:3.20", "commands": ["ls"]});
+        spec.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        spec
+    }
+
+    /// Every staged input's bytes, by its name in the working directory.
+    async fn staged_contents(
+        files: &crate::storage::FileStore,
+        cmds: &TaskCommands,
+    ) -> BTreeMap<String, String> {
+        let mut out: BTreeMap<String, String> = cmds
+            .input_files
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (k, v) in &cmds.stored_inputs {
+            out.insert(k.clone(), contents(files, &v.object_uri).await);
+        }
+        out
+    }
+
+    /// Spec §7, the user's ruling, w9b `staging.input_files_over_namespace_file`:
+    /// under EVERY `ifExists`, the `inputFiles` entry `x.txt` overwrites the
+    /// namespace file of that name, and FAIL does not fail for it. All four
+    /// runs are made before anything is asserted, so a mutant shows which
+    /// modes it breaks. A WARN collision between namespaces is logged.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn namespace_files_are_staged_as_stored_inputs_and_input_files_overwrite_them_under_every_if_exists(
+    ) {
+        let Some(pool) = ns::pool().await else { return };
+        let files = ns::mem_files(crate::storage::Caps::default());
+        let ws = ns::workspace(&pool).await;
+        ns::setup(&pool, &files, ws).await;
+        let doc = crate::storage::nsfiles::stage::tests::fixture();
+        let fixture = &doc["egret_expected"]["staging"]["input_files_over_namespace_file"];
+        let mut broken = Vec::new();
+        for mode in ["OVERWRITE", "FAIL", "WARN", "IGNORE"] {
+            let spy = Spy::ok(CommandsResult::default()).staging(files.clone());
+            let (task, _) = ns_task(
+                &files,
+                &pool,
+                ws,
+                shell(serde_json::json!({
+                    "namespaceFiles": {"namespaces": ["w9b.s1"], "ifExists": mode},
+                    "inputFiles": {"x.txt": "from-input"},
+                })),
+            );
+            let out = with_namespace_files(spy.clone(), files.clone(), Some(pool.clone()))
+                .run(&task)
+                .await
+                .expect("no worker error");
+            if out.state != RunState::Success {
+                broken.push(format!("{mode}: {:?}", out.message));
+                continue;
+            }
+            let cmds = spy.only();
+            let got = staged_contents(&files, &cmds).await;
+            let want: BTreeMap<String, String> = fixture[mode]["files"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.trim_start_matches("./").to_string(),
+                        v.as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            if got != want || cmds.stored_inputs.contains_key("x.txt") {
+                broken.push(format!(
+                    "{mode}: staged {got:?}, stored {:?}",
+                    cmds.stored_inputs.keys()
+                ));
+            }
+        }
+        assert!(
+            broken.is_empty(),
+            "inputFiles must win under every ifExists: {broken:#?}"
+        );
+
+        // WARN between namespaces: the first kept, one WARN line naming the path.
+        let spy = Spy::ok(CommandsResult::default());
+        let (task, rec) = ns_task(
+            &files,
+            &pool,
+            ws,
+            shell(serde_json::json!({
+                "namespaceFiles": {"namespaces": ["w9b.s1", "w9b.s2"], "ifExists": "WARN"},
+            })),
+        );
+        let out = with_namespace_files(spy.clone(), files.clone(), Some(pool.clone()))
+            .run(&task)
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        assert_eq!(
+            staged_contents(&files, &spy.only()).await["x.txt"],
+            "from-s1"
+        );
+        let warned: Vec<String> = rec
+            .texts()
+            .into_iter()
+            .filter(|(l, _)| *l == LogLevel::Warn)
+            .map(|(_, m)| m)
+            .collect();
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("'x.txt'"), "{warned:?}");
+    }
+
+    /// Spec §11: the database unreachable while staging is egret's outage --
+    /// a worker `Err`, no runner call -- and so is the store unreachable
+    /// while the runner streams a staged namespace file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_store_outage_while_staging_is_a_worker_error() {
+        let Some(pool) = ns::pool().await else { return };
+        let files = ns::mem_files(crate::storage::Caps::default());
+        let ws = ns::workspace(&pool).await;
+        ns::setup(&pool, &files, ws).await;
+        let spec = shell(serde_json::json!({"namespaceFiles": {"namespaces": ["w9b.s1"]}}));
+
+        // The store: listed from the database, streamed from a store that is down.
+        let down = Arc::new(crate::storage::FileStore {
+            store: Arc::new(DownStore),
+            ..(*files).clone()
+        });
+        let spy = Spy::ok(CommandsResult::default()).staging(down.clone());
+        let (task, _) = ns_task(&down, &pool, ws, spec.clone());
+        let err = with_namespace_files(spy, down, Some(pool.clone()))
+            .run(&task)
+            .await
+            .expect_err("an unreachable store is egret's outage");
+        assert!(matches!(err, Error::Internal(_)), "{err:?}");
+
+        // The database: a closed pool.
+        let closed = ns::pool().await.unwrap();
+        closed.close().await;
+        let spy = Spy::ok(CommandsResult::default());
+        let (task, _) = ns_task(&files, &pool, ws, spec.clone());
+        let err = with_namespace_files(spy.clone(), files.clone(), Some(closed))
+            .run(&task)
+            .await
+            .expect_err("an unreachable database is egret's outage");
+        assert!(matches!(err, Error::Internal(_)), "{err:?}");
+        assert!(err.to_string().contains("staging namespace files"), "{err}");
+        assert!(spy.seen.lock().unwrap().is_empty(), "no runner call");
+
+        // The control: the same task, both up, runs.
+        let spy = Spy::ok(CommandsResult::default()).staging(files.clone());
+        let out = with_namespace_files(spy, files, Some(pool))
+            .run(&task)
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+    }
+
+    /// `enabled: false` stages nothing and needs no database; the runner runs.
+    /// With no database, an enabled block fails naming `[storage]`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn enabled_false_stages_nothing_and_calls_the_runner() {
+        let Some(pool) = ns::pool().await else { return };
+        let files = ns::mem_files(crate::storage::Caps::default());
+        let ws = ns::workspace(&pool).await;
+        ns::setup(&pool, &files, ws).await;
+        let spy = Spy::ok(CommandsResult::default());
+        let (task, _) = ns_task(
+            &files,
+            &pool,
+            ws,
+            shell(serde_json::json!({"namespaceFiles": {"enabled": "{{ 1 == 2 }}"}})),
+        );
+        let out = with_namespace_files(spy.clone(), files.clone(), None)
+            .run(&task)
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        assert!(spy.only().stored_inputs.is_empty());
+
+        let spy = Spy::ok(CommandsResult::default());
+        let (task, _) = ns_task(
+            &files,
+            &pool,
+            ws,
+            shell(serde_json::json!({"namespaceFiles": {"enabled": true}})),
+        );
+        let out = with_namespace_files(spy.clone(), files.clone(), None)
+            .run(&task)
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Failed);
+        assert!(out.message.unwrap().contains("[storage]"));
+        assert!(spy.seen.lock().unwrap().is_empty());
+
+        // The control: the block enabled, with the database: own.txt and x.txt.
+        let spy = Spy::ok(CommandsResult::default());
+        let out = with_namespace_files(spy.clone(), files.clone(), Some(pool))
+            .run(&task)
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        assert_eq!(
+            staged_contents(&files, &spy.only()).await,
+            BTreeMap::from([
+                ("own.txt".to_string(), "own".to_string()),
+                ("x.txt".to_string(), "from-stage".to_string()),
+            ])
+        );
+    }
+
+    /// The user's ruling on item 9: `nsfile:///cfg/a.txt` and
+    /// `{{ fileURI('cfg/a.txt') }}` (a `kestra:///…/_files/…v2` URI) are
+    /// staged under their `inputFiles` names, from the namespace object, with
+    /// the row's size; an execution URI beside them keeps W9a's path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_input_files_nsfile_uri_of_the_own_namespace_is_staged_under_its_input_name() {
+        let Some(pool) = ns::pool().await else { return };
+        let files = ns::mem_files(crate::storage::Caps::default());
+        let ws = ns::workspace(&pool).await;
+        write(&pool, &files, ws, OWN, "/cfg/a.txt", "one").await;
+        assert_eq!(
+            write(&pool, &files, ws, OWN, "/cfg/a.txt", "second").await,
+            2
+        );
+        let spy = Spy::ok(CommandsResult::default());
+        let (task, _) = ns_task(
+            &files,
+            &pool,
+            ws,
+            shell(serde_json::json!({"inputFiles": {
+                "a.txt": "nsfile:///cfg/a.txt",
+                "b.txt": "{{ fileURI('cfg/a.txt') }}",
+                "exec.txt": "{{ outputs.w.uri }}",
+                "plain.txt": "cfg/a.txt",
+            }})),
+        );
+        let out = with_namespace_files(spy.clone(), files.clone(), Some(pool))
+            .run(&task)
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        let cmds = spy.only();
+        let grant = crate::storage::nsfiles::access::authorize(
+            ws,
+            crate::storage::nsfiles::access::Actor::Api,
+            OWN,
+            crate::storage::nsfiles::access::Access::Read,
+        )
+        .unwrap();
+        let object = files.namespace_object_uri(
+            &grant,
+            &crate::storage::nsfiles::path::NsPath::parse_file("/cfg/a.txt").unwrap(),
+            2,
+        );
+        assert_eq!(
+            cmds.stored_inputs["a.txt"],
+            StoredInput {
+                uri: "nsfile:///cfg/a.txt".into(),
+                object_uri: object.clone(),
+                size: 6
+            }
+        );
+        assert_eq!(
+            cmds.stored_inputs["b.txt"],
+            StoredInput {
+                uri: "kestra:///w9b/stage/_files/cfg/a.txt.v2".into(),
+                object_uri: object,
+                size: 6
+            }
+        );
+        let exec = staged_uri();
+        assert_eq!(cmds.stored_inputs["exec.txt"].uri, exec);
+        assert_eq!(
+            cmds.stored_inputs["exec.txt"].object_uri,
+            files.object_uri(ws, &exec).unwrap()
+        );
+        // A bare path stays contents, as W5a/W9a.
+        assert_eq!(cmds.input_files["plain.txt"], "cfg/a.txt");
+        assert_eq!(
+            contents(&files, &cmds.stored_inputs["a.txt"].object_uri).await,
+            "second"
+        );
+    }
+
+    /// Any namespace of the workspace: `nsfile://w9b.s1/x.txt` and
+    /// `kestra:///w9b/s2/_files/x.txt` (w9b `staging.input_files_namespace_uris`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_input_files_uri_of_another_namespace_of_the_workspace_is_staged() {
+        let Some(pool) = ns::pool().await else { return };
+        let files = ns::mem_files(crate::storage::Caps::default());
+        let ws = ns::workspace(&pool).await;
+        ns::setup(&pool, &files, ws).await;
+        let doc = crate::storage::nsfiles::stage::tests::fixture();
+        let measured = &doc["egret_expected"]["staging"]["input_files_namespace_uris"];
+        assert_eq!(measured["values"]["a.txt"], "nsfile://w9b.s1/x.txt");
+        let spy = Spy::ok(CommandsResult::default());
+        let (task, _) = ns_task(
+            &files,
+            &pool,
+            ws,
+            shell(serde_json::json!({"inputFiles": measured["values"].clone()})),
+        );
+        let out = with_namespace_files(spy.clone(), files.clone(), Some(pool))
+            .run(&task)
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        let got = staged_contents(&files, &spy.only()).await;
+        let want: BTreeMap<String, String> = measured["files"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.trim_start_matches("./").to_string(),
+                    v.as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    /// A namespace with a `_files` segment (or an empty one) named by an
+    /// `inputFiles` URI is refused by `authorize`, naming it, before any
+    /// runner -- though the flow's own namespace holds a file of that path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_input_files_uri_of_a_files_segment_namespace_is_refused_by_name_before_the_runner()
+    {
+        let Some(pool) = ns::pool().await else { return };
+        let files = ns::mem_files(crate::storage::Caps::default());
+        let ws = ns::workspace(&pool).await;
+        ns::setup(&pool, &files, ws).await;
+        for (uri, named, rule) in [
+            ("nsfile://a._files/x.txt", "'a._files'", "'_files'"),
+            ("nsfile://w9b..s1/x.txt", "'w9b..s1'", "empty segment"),
+        ] {
+            let spy = Spy::ok(CommandsResult::default());
+            let (task, _) = ns_task(
+                &files,
+                &pool,
+                ws,
+                shell(serde_json::json!({"inputFiles": {"in.txt": uri}})),
+            );
+            let out = with_namespace_files(spy.clone(), files.clone(), Some(pool.clone()))
+                .run(&task)
+                .await
+                .unwrap();
+            assert_eq!(out.state, RunState::Failed, "{uri}");
+            let m = out.message.unwrap();
+            assert!(
+                m.contains("\"in.txt\"") && m.contains(named) && m.contains(rule),
+                "{uri}: {m}"
+            );
+            assert!(spy.seen.lock().unwrap().is_empty(), "{uri}: no runner call");
+        }
+    }
+
+    /// A missing path, a soft-deleted path read as latest, and another
+    /// workspace's identical (namespace, path) all fail the task naming the
+    /// path, before the runner, with the same "missing" answer; a
+    /// `kestra:///…/_files/p` URI of the soft-deleted path names revision 1
+    /// and IS staged (R1).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_input_files_uri_of_a_missing_path_fails_the_task_naming_it_before_the_runner() {
+        let Some(pool) = ns::pool().await else { return };
+        let files = ns::mem_files(crate::storage::Caps::default());
+        let (ws, other) = (ns::workspace(&pool).await, ns::workspace(&pool).await);
+        write(&pool, &files, ws, OWN, "/gone.txt", "was here").await;
+        ns::delete(&pool, ws, OWN, "/gone.txt").await;
+        write(&pool, &files, other, OWN, "/theirs.txt", "not yours").await;
+        let run = |uri: &'static str| {
+            let (files, pool) = (files.clone(), pool.clone());
+            async move {
+                let spy = Spy::ok(CommandsResult::default());
+                let (task, _) = ns_task(
+                    &files,
+                    &pool,
+                    ws,
+                    shell(serde_json::json!({"inputFiles": {"in.txt": uri}})),
+                );
+                let out = with_namespace_files(spy.clone(), files, Some(pool))
+                    .run(&task)
+                    .await
+                    .unwrap();
+                let called = !spy.seen.lock().unwrap().is_empty();
+                (out, called, spy)
+            }
+        };
+        for (uri, path) in [
+            ("nsfile:///nope.txt", "'/nope.txt'"),
+            ("nsfile:///gone.txt", "'/gone.txt'"),
+            ("nsfile:///theirs.txt", "'/theirs.txt'"),
+            ("kestra:///w9b/stage/_files/nope.txt", "'/nope.txt'"),
+        ] {
+            let (out, called, _) = run(uri).await;
+            assert_eq!(out.state, RunState::Failed, "{uri}");
+            let m = out.message.unwrap();
+            assert!(
+                m.contains("\"in.txt\"") && m.contains(path) && m.contains("does not exist"),
+                "{uri}: {m}"
+            );
+            assert!(!called, "{uri}: the runner was called");
+        }
+        let (out, called, spy) = run("kestra:///w9b/stage/_files/gone.txt").await;
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        assert!(called);
+        assert_eq!(
+            staged_contents(&files, &spy.only()).await["in.txt"],
+            "was here"
+        );
+    }
+
+    /// The merge rule, whatever the value's kind: an `inputFiles` namespace
+    /// URI overwrites a `namespaceFiles` entry of the same name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_input_files_namespace_uri_overwrites_a_namespace_files_entry_of_the_same_name() {
+        let Some(pool) = ns::pool().await else { return };
+        let files = ns::mem_files(crate::storage::Caps::default());
+        let ws = ns::workspace(&pool).await;
+        ns::setup(&pool, &files, ws).await;
+        for mode in ["OVERWRITE", "FAIL"] {
+            let spy = Spy::ok(CommandsResult::default());
+            let (task, _) = ns_task(
+                &files,
+                &pool,
+                ws,
+                shell(serde_json::json!({
+                    "namespaceFiles": {"namespaces": ["w9b.s1"], "ifExists": mode},
+                    "inputFiles": {"x.txt": "nsfile://w9b.s2/x.txt"},
+                })),
+            );
+            let out = with_namespace_files(spy.clone(), files.clone(), Some(pool.clone()))
+                .run(&task)
+                .await
+                .unwrap();
+            assert_eq!(out.state, RunState::Success, "{mode}: {:?}", out.message);
+            let cmds = spy.only();
+            assert_eq!(cmds.stored_inputs["x.txt"].uri, "nsfile://w9b.s2/x.txt");
+            assert_eq!(
+                staged_contents(&files, &cmds).await,
+                BTreeMap::from([
+                    ("only1.txt".to_string(), "only1".to_string()),
+                    ("x.txt".to_string(), "from-s2".to_string()),
+                ]),
+                "{mode}"
+            );
+        }
     }
 }
