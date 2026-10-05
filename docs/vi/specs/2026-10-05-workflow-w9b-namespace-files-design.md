@@ -9,7 +9,11 @@
 - **Namespace file giữ revision, như Kestra.** Revision 1 nằm ở `path`, revision N > 1 ở `path.vN`; xoá là xoá mềm; `PurgeFiles` xoá cứng (§3, §4, §8.4).
 - **Một flow đang chạy đọc namespace file của bất kỳ namespace nào trong workspace của nó, và chỉ ghi vào namespace của chính nó.** Ghi là `UploadFiles`, `DeleteFiles`, `PurgeFiles` (namespace của chính nó và các namespace con) và `putFile` của plugin. Workspace là ranh giới cứng, lấy từ execution đang chạy, không bao giờ từ một URI (§5).
 - **Quyền API:** đọc (download, list, search, stats, revisions, export) cần `workflow:read`; ghi (upload, tạo thư mục, move, delete, purge) cần `workflow:manage`. Không có quyền mới (§9).
-- **Trong phạm vi:** store và metadata của nó (`workflow.namespace_files`, object ở `{prefix}{ws}/{ns-as-path}/_files/{path}[.vN]`, URI `kestra:///{ns-as-path}/_files/…` qua một `Tail::NamespaceFile` mới, parse `nsfile://`) (§3, §4), các hàm biểu thức (§6), `namespaceFiles` trên script task và `WorkingDirectory` (§7), bốn task `io.kestra.plugin.core.namespace` dưới dạng handler native (§8), REST API (§9) và cầu plugin (§10).
+- **Trong phạm vi:** store và metadata của nó (`workflow.namespace_files`, object ở `{prefix}{ws}/{ns-as-path}/_files/{path}[.vN]`, URI `kestra:///{ns-as-path}/_files/…` qua một `Tail::NamespaceFile` mới, parse `nsfile://`) (§3, §4), các hàm biểu thức (§6), `namespaceFiles` trên script task, chỉ parse và kiểm tra trên `WorkingDirectory` (§7), bốn task `io.kestra.plugin.core.namespace` dưới dạng handler native (§8), REST API (§9) và cầu plugin (§10).
+- **(Thêm ngày 2026-10-05, phán quyết của người dùng về phát hiện `WorkingDirectory` của spec.) `WorkingDirectory` nằm ngoài W9b.** W9b chỉ chạy `namespaceFiles` trên script task. Trên `WorkingDirectory`, khối này được parse và kiểm tra lúc publish: khối sai dạng bị từ chối, nêu tên thuộc tính; khối hợp lệ được nhận và giữ trong model cho gói sau sẽ chạy `WorkingDirectory`. Lúc chạy không gì thay đổi, vì egret vẫn không thực thi `WorkingDirectory` (§1, §7). Hai flow corpus vẫn nằm trong baseline, và không dự kiến ratchet thay đổi (§13).
+- **(Thêm ngày 2026-10-05, phán quyết của người dùng về `inputFiles`.) Như Kestra: namespace file được nạp trước và `inputFiles` luôn ghi đè namespace file cùng tên, bất kể `ifExists`; `ifExists` chỉ quyết định khi các namespace đụng nhau** (§7). Task 1 vẫn đo điều này.
+- **(Thêm ngày 2026-10-05, phán quyết của người dùng về namespace `_files`.) Namespace có segment `_files` bị từ chối** lúc publish và ở mọi thao tác namespace file (API, task, hàm), với lỗi nêu tên nó. Task 1 đếm các flow hiện có và các entry corpus có namespace như vậy, và báo cáo của nó liệt kê từng cái (§3).
+- **(Thêm ngày 2026-10-05, phán quyết của người dùng về các lựa chọn chi tiết.) Được duyệt làm lựa chọn của egret**, mỗi cái là một dòng ở §2: `PurgeFiles` mặc định là namespace của chính flow; namespace con khớp theo ranh giới dấu chấm; `DELETE` của API không xoá cha bị rỗng; export là zip streamed chỉ gồm file; `fileURI` không có `revision` là lỗi với path thiếu; đọc `kestra:///other/ns/_files/…` được phép trong workspace.
 
 **Bàn giao:** một PR (tài liệu + mã), mười task ở §12, thực hiện theo một plan viết sau spec này.
 
@@ -53,7 +57,6 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 | `fileURI(path)` không có `revision` không kiểm file tồn tại (theo mã; Task 1 đo) | path thiếu hoặc đã xoá mềm là lỗi nêu nó (§6) | một URI không chỉ tới gì sẽ hỏng về sau, xa nguyên nhân |
 | `read` trả `byte[]` cho Ion nhị phân | không phải UTF-8 là lỗi nêu path, như `read` của W9a (§6) | kết quả được ghép vào một chuỗi đã render |
 | `namespaceFiles` qua nhiều namespace ghi song song, thứ tự không bảo đảm | tất định: namespace đứng sau trong `namespaces` thắng (dưới `OVERWRITE`) (§7) | run tái lập được |
-| `inputFiles` ghi sau namespace file thay chúng bất kể `ifExists` | đụng tên với `inputFiles` cũng theo `ifExists` (§7) | quyết định của người dùng (2026-10-05); Task 1 đo hành vi của Kestra và fixture ghi lại khác biệt |
 | `UploadFiles.files` glob trên working directory của chính task | glob trên **các file đọc được của execution** (handler native không có working directory); `files` cũng có thể là nguyên URI `kestra://` (§8.1) | egret chạy `UploadFiles` trong worker, không trong pod |
 | `PurgeFiles` không có `namespaces` purge mọi namespace có flow; namespace con khớp theo tiền tố chuỗi (`ns.startsWith(…)`, `PurgeTask.java:56`; không có `namespaces` thì lấy mọi `findDistinctNamespace`, `:34`, `:82`), nên `a.b` khớp `a.bc` | mặc định là namespace của chính flow; con khớp theo ranh giới dấu chấm (§8.4) | quy tắc ghi; `a.bc` không phải con của `a.b` |
 | `PurgeFiles` `keepAmount: 1` giữ revision mới nhất kể cả khi nó đã xoá mềm (theo mã; Task 1 đo) | path đã xoá mềm bị purge toàn bộ (§8.4) | quyết định của người dùng: file đã xoá không nên giữ storage mãi |
@@ -67,7 +70,7 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 - **Object key:** `{workflow.storage.prefix}{workspace_id}/{ns-as-path}/_files/{path}` cho revision 1, `…/{path}.v{N}` cho N > 1; thư mục không có object (dòng của nó là thư mục), khác `createDirectory` trên store của Kestra. Cùng bucket và prefix với W9a.
 - **URI flow thấy:** `kestra:///{ns-as-path}/_files/{path}[.vN]`, dạng của Kestra. Như của W9a nó không mang workspace: egret ánh xạ nó sang key bằng cách thêm workspace của execution đang chạy.
 - **`Tail::NamespaceFile { path, revision }`** gia nhập `Tail` của W9a trong `storage/uri.rs`. `parse` nhận segment **đầu tiên** bằng `_files` ở chỉ số ≥ 1 làm dấu namespace file: các segment trước là namespace, sau là path; một đuôi `.v{N}` (N ≥ 2, chỉ chữ số) là revision. Phép kiểm này chạy trước khi tìm `executions/{uuid}`, nên `kestra:///a/_files/x/executions/<uuid>/f` là file `/x/executions/<uuid>/f` của namespace `a`, không bao giờ là URI execution của một flow `_files` (vốn không thể tồn tại, §1).
-- **Namespace có segment `_files`** (`a._files`, hợp lệ theo `is_valid_namespace`) sẽ đặt key execution của flow của nó dưới file của namespace `a`. Từ W9b, publish từ chối namespace như vậy, nêu segment; mọi thao tác namespace file từ chối nó làm đích hay authority. Task 1 đếm số flow đã publish trong một database dev và trong corpus có segment đó (dự kiến 0).
+- **Namespace có segment `_files`** (`a._files`, hợp lệ theo `is_valid_namespace`) sẽ đặt key execution của flow của nó dưới file của namespace `a`. Namespace như vậy bị từ chối (phán quyết của người dùng, header): từ W9b publish từ chối nó, và mọi thao tác namespace file (API, task, hàm) từ chối nó làm đích hay authority, mỗi lần với lỗi nêu namespace và segment. Task 1 đếm các flow đã publish trong một database dev và các entry corpus có namespace chứa segment đó, và báo cáo của nó liệt kê từng cái (dự kiến không có).
 - **`nsfile://`** được parse: không authority (`nsfile:///path`) → namespace của flow đang chạy; có authority (`nsfile://other.ns/path`) → namespace đó, kiểm bằng `is_valid_namespace`. Path trần (không có `://`) là `nsfile:///path`.
 - **Quy tắc path**, một hàm cho mọi lối vào (hàm, task, API, cầu plugin): có `/` đầu (thêm nếu thiếu); không segment rỗng, `.` hay `..`; mỗi segment ≤ 255 ký tự; không phải `/_flows` hay nằm dưới nó; các ký tự W9a từ chối (`\`, `?`, `#`, ký tự điều khiển); segment cuối của một file không được kết thúc bằng `.v{chữ số}` (nó sẽ bị đọc như revision của path khác). Path vi phạm là lỗi của tác giả nêu path và quy tắc.
 
@@ -131,10 +134,10 @@ Một lần đọc phân giải `(namespace, path, revision?)` thành một dòn
 - **Thuộc tính như của Kestra:** `enabled` (mặc định true khi khối có mặt), `include`, `exclude`, `namespaces` (mặc định namespace của flow), `ifExists` (`OVERWRITE`/`FAIL`/`WARN`/`IGNORE`, mặc định `OVERWRITE`), `folderPerNamespace` (mặc định false).
 - **Glob** theo `PathMatcherPredicate`: mặc định `glob:`, thêm `**/` trước pattern bắt đầu bằng ký tự chữ, hỗ trợ `regex:`, includes AND NOT excludes. Chuỗi path chính xác mà glob thấy (có `/` đầu hay không) là **phép đo của Task 1**, ghim bằng fixture; egret cài theo fixture, không theo cách đọc mã Java.
 - **Lúc claim** egret liệt kê các file còn sống mới nhất khớp của mỗi namespace trong `namespaces` (mỗi cái được kiểm quyền đọc, §5), và stage chúng qua cơ chế chuyển streamed của W9a tại `path` (hoặc `{namespace}/{path}` với `folderPerNamespace`).
-- **Thứ tự tất định:** các namespace được stage theo thứ tự danh sách, nên dưới `OVERWRITE` namespace sau thắng; `FAIL` làm task fail nêu cả hai nguồn; `WARN` giữ cái đầu và ghi một dòng log nêu path; `IGNORE` giữ cái đầu. Đụng tên với `inputFiles` cũng theo `ifExists` (quyết định của người dùng; Kestra thay nó, §2).
+- **Thứ tự tất định:** các namespace được stage theo thứ tự danh sách, nên dưới `OVERWRITE` namespace sau thắng; `FAIL` làm task fail nêu cả hai nguồn; `WARN` giữ cái đầu và ghi một dòng log nêu path; `IGNORE` giữ cái đầu. **`inputFiles` được stage sau namespace file và luôn ghi đè cái cùng tên, bất kể `ifExists`**, như Kestra (phán quyết của người dùng, header); `ifExists` chỉ quyết định khi các namespace đụng nhau.
 - **Giới hạn có tính cấu trúc:** việc liệt kê bị chặn theo số lượng (`workflow.storage.max_namespace_files`, mặc định 10 000), đếm trên các dòng egret thực sự liệt kê, với lần từ chối nêu trần; byte đã stage tính vào `max_task_bytes` khi chuyển streamed. Không giới hạn nào mô phỏng ngữ pháp glob.
 - **Script task:** `namespaceFiles` rời `COMMON_REFUSED` (`scripts/mod.rs:202`); `tests/scripts_gate.rs:940-945` lật thành test cho thấy thuộc tính publish được, và vẫn còn một test từ chối cho khối sai dạng.
-- **`WorkingDirectory`:** model thôi bỏ `namespaceFiles` (`models/task.rs:555-565`) và kiểm tra nó. **Executor của egret hoàn toàn không chạy `WorkingDirectory`** (§1: lập kế hoạch mờ, claim trả `None`), nên W9b không thể chạy `namespaceFiles` của nó: staging là một hàm dùng chung với script task, và nó chạy cho `WorkingDirectory` khi chính `WorkingDirectory` được cài (không thuộc W9b). Task 1 đo kết quả hiện tại của hai flow corpus và Task 10 ghi ratchet trước và sau; không dự kiến thay đổi.
+- **`WorkingDirectory` (ngoài W9b, phán quyết của người dùng, header):** **executor của egret hoàn toàn không chạy `WorkingDirectory`** (§1: lập kế hoạch mờ, claim trả `None`). Vì vậy W9b chỉ làm model của nó thôi lặng lẽ bỏ `namespaceFiles` (`models/task.rs:555-565`). **Lúc publish**, khối được parse và kiểm tra theo cùng quy tắc như trên script task: khối sai dạng bị từ chối, nêu tên thuộc tính; khối hợp lệ được nhận và giữ trong model, cho gói sau sẽ chạy `WorkingDirectory`. **Lúc chạy**, không gì thay đổi: `WorkingDirectory` hoạt động đúng như trước W9b và không namespace file nào được stage. Hàm staging là hàm script task dùng, nên gói đó chỉ cần gọi nó. Hai flow corpus vẫn nằm trong baseline; Task 1 ghi kết quả hiện tại của chúng và Task 10 đo ratchet trước và sau (không dự kiến thay đổi).
 
 ## 8. Các task `io.kestra.plugin.core.namespace`
 
@@ -200,11 +203,11 @@ Dưới `/api/ws/{ws}/workflows/namespaces/{ns}/files`, phản chiếu `Namespac
 
 ## 12. Task
 
-1. **Đo Kestra** (`oracle-exec/w9b-namespace-files.json`): đường dẫn object theo revision, thư mục, xoá mềm rồi ghi lại; ngữ nghĩa glob (chuỗi path mà glob thấy, thêm `**/`, `regex:`, excludes); `fileURI` có và không có `revision` trên path có, thiếu và đã xoá; `read` một `kestra:///…/_files/…` của namespace khác; `ifExists` giữa các namespace và với `inputFiles`; output của bốn task; `PurgeFiles` trên path đã xoá mềm; quy tắc path; cộng các baseline (test, ratchet, clippy) và số segment namespace `_files`.
+1. **Đo Kestra** (`oracle-exec/w9b-namespace-files.json`): đường dẫn object theo revision, thư mục, xoá mềm rồi ghi lại; ngữ nghĩa glob (chuỗi path mà glob thấy, thêm `**/`, `regex:`, excludes); `fileURI` có và không có `revision` trên path có, thiếu và đã xoá; `read` một `kestra:///…/_files/…` của namespace khác; `ifExists` giữa các namespace, và `inputFiles` ghi đè namespace file cùng tên; output của bốn task; `PurgeFiles` trên path đã xoá mềm; quy tắc path; cộng các baseline (test, ratchet, clippy), và số lượng cùng danh sách các flow đã publish và entry corpus có namespace chứa segment `_files`.
 2. **Metadata, URI, quy tắc path, thao tác store** (migration 0169, `Tail::NamespaceFile`, parse `nsfile://`, quy tắc segment `_files` lúc publish, `authorize`, ghi/đọc).
 3. **Revision, xung đột, move, xoá mềm** (khoá, writer đồng thời, rollback).
 4. **Các hàm biểu thức** (`fileURI`, bốn hàm trên namespace file, tra qua pool trên thread render).
-5. **Staging `namespaceFiles`** (script task; model `WorkingDirectory`; lật cổng publish).
+5. **Staging `namespaceFiles`** (script task; lật cổng publish; trên `WorkingDirectory` chỉ parse và kiểm tra khối).
 6. **`UploadFiles`, `DownloadFiles`.**
 7. **`DeleteFiles`, `PurgeFiles`.**
 8. **API namespace file** (route, utoipa, `npm run gen:api`).
@@ -220,7 +223,8 @@ Dưới `/api/ws/{ws}/workflows/namespaces/{ns}/files`, phản chiếu `Namespac
 - API: phân quyền (`workflow:read` vs `workflow:manage`), 404 cho workspace khác và path không biết, header download, từ chối `/_flows`, giới hạn multipart.
 - Docker và Kubernetes sống: `namespaceFiles` trên script task với nhiều namespace, `folderPerNamespace`, từng `ifExists`.
 - Pruner: một lượt để nguyên `_files`.
-- Oracle: ratchet được đo trước và sau và ghi trong `oracle-exec/README.md`; hai flow corpus là `WorkingDirectory` (§7).
+- Oracle: ratchet được đo trước và sau và ghi trong `oracle-exec/README.md`; hai flow corpus là `WorkingDirectory` và vẫn nằm trong baseline, nên không dự kiến ratchet thay đổi (§7). Publish: `namespaceFiles` sai dạng trên `WorkingDirectory` bị từ chối theo tên và khối hợp lệ publish được; namespace có segment `_files` bị từ chối theo tên lúc publish, bởi API, bởi các task và bởi các hàm.
+- Sống: một entry `inputFiles` ghi đè namespace file cùng tên dưới mọi `ifExists`.
 - End to end trên một cluster kind tạm, như W9a.
 
 ## 14. Ngoài phạm vi
@@ -231,7 +235,8 @@ KV store (W9c); chạy chính `WorkingDirectory` (và vì thế `namespaceFiles`
 
 - Một flow chỉ ghi vào namespace của chính nó; một flow Kestra upload vào, xoá khỏi hay purge namespace khác sẽ fail trên egret, nêu namespace (§5).
 - `PurgeFiles` không có `namespaces` purge namespace của chính flow (và các con), không phải mọi namespace (§8.4).
-- `namespaceFiles` của `WorkingDirectory` được parse nhưng không chạy, vì egret không chạy `WorkingDirectory` (§7).
+- `namespaceFiles` của `WorkingDirectory` được kiểm tra lúc publish và giữ lại, nhưng không chạy, vì egret không chạy `WorkingDirectory`; chạy nó là một gói sau (§7).
+- `ifExists` không bảo vệ namespace file khỏi một entry `inputFiles` cùng tên, như Kestra (§7).
 - Plugin chỉ đọc được namespace file được nêu bằng nguyên một giá trị thuộc tính; plugin tính path namespace lúc chạy, hoặc ghi namespace file, sẽ fail kèm lý do (§10).
 - Object thiếu sau một dòng metadata là lỗi, trong khi Kestra phục vụ revision cũ hơn (§4.5).
 - `read` một file nhị phân là lỗi, trong khi Kestra trả byte (§6).
