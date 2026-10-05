@@ -6921,7 +6921,9 @@
       "outputs": {
        "uri": "kestra:///w9b/tasks/upload/executions/4N1dtBLHvkwBlz9FxtZ0E4/tasks/w/5rx6NqHyJ3M47zDYmY6pTX/13077518892006768644.txt"
       },
-      "error": null
+      "error": null,
+      "compare": "state exactly; `outputs.uri` compared after masking the execution id, the task-run id and the generated file name (`…/executions/<exec>/tasks/w/<taskrun>/<name>.txt`); the namespace path, flow id, task slug and the `.txt` extension exactly",
+      "basis": "measured"
      },
      "up_map": {
       "state": "FAILED",
@@ -7009,7 +7011,8 @@
       "outputs": {},
       "error": "File '/up/m.txt' already exists in namespace 'w9b.tasks' and conflict is set to ERROR",
       "basis": "measured",
-      "premise": "runs in the upload-flow variant of tasks.UploadFiles.premise: /up/m.txt exists because up_map (absent.txt removed) wrote it, so conflict ERROR fails naming it, as recorded"
+      "premise": "runs in the upload-flow variant of tasks.UploadFiles.premise: /up/m.txt exists because up_map (absent.txt removed) wrote it, so conflict ERROR fails naming it, as recorded",
+      "compare": "state exactly (WARNING, allowFailure); `error` must name the path /up/m.txt and the ERROR conflict (spec §4.2: an author error naming the path); the recorded text is Kestra's, kept as reference, not compared verbatim"
      },
      "up_conflict_skip": {
       "state": "SUCCESS",
@@ -7041,7 +7044,8 @@
       "outputs": {},
       "error": "files or filesMap is required",
       "basis": "measured",
-      "premise": "runs in the upload-flow variant of tasks.UploadFiles.premise: up_other_ns moved last, so up_nothing is reached; it reads no state"
+      "premise": "runs in the upload-flow variant of tasks.UploadFiles.premise: up_other_ns moved last, so up_nothing is reached; it reads no state",
+      "compare": "state exactly (WARNING); `error` must say that `files` or `filesMap` is required, naming both properties; the recorded text is Kestra's, kept as reference, not compared verbatim"
      }
     },
     "rows_after": {
@@ -7135,7 +7139,7 @@
      }
     },
     "basis": "schema + measured, except the cells marked chosen",
-    "premise": "the measured run cells after up_map are egret's answers for the upload flow (raw_records.flows['w9b.tasks/upload']) run with three edits, and nothing seeded: (1) `absent.txt` removed from up_map's filesMap, so up_map writes /up/m.txt and /up/sub/n.txt (revision 1) as Kestra's did; (2) the `wd` task removed (egret does not run WorkingDirectory); (3) `up_other_ns` moved to the end, because its refusal (no allowFailure) would otherwise stop the run before up_nothing. This variant reproduces every recorded measured output exactly; seeding /up/m.txt instead would not, because up_map itself would then see an existing file. runs.up_map (as recorded, with absent.txt) and runs.up_other_ns are egret's answers for the tasks as written, each in its own test"
+    "premise": "the measured run cells after up_map are egret's answers for the upload flow (raw_records.flows['w9b.tasks/upload']) run with three edits, and nothing seeded: (1) `absent.txt` removed from up_map's filesMap, so up_map writes /up/m.txt and /up/sub/n.txt (revision 1) as Kestra's did; (2) the `wd` task removed (egret does not run WorkingDirectory); (3) `up_other_ns` moved to the end, because its refusal (no allowFailure) would otherwise stop the run before up_nothing. This variant reaches every recorded measured run with the recorded state, compared as each run's `compare` says (state and written rows exactly; an error by the path or rule it names, Kestra's text kept as reference; a URI with its ids masked); seeding /up/m.txt instead would not, because up_map itself would then see an existing file. runs.up_map (as recorded, with absent.txt) and runs.up_other_ns are egret's answers for the tasks as written, each in its own test"
    },
    "DownloadFiles": {
     "schema": {
@@ -7378,7 +7382,7 @@
     ],
     "basis": "measured, except runs.del_other_ns and rows_after (chosen)",
     "objects_note": "objects_after is the artifact's filesystem listing: `d` entries are directories, not objects; egret keeps the same file objects (a soft delete removes none)",
-    "premise": "the namespace w9b.tasks holds, before the run, the rows Kestra's held after the upload flow (raw_records.tasks_after.upload): /up/m.txt, /up/sub/n.txt, /rootm.txt, /up2m.txt, /globbed/top.txt, /globbed/g/one.txt, each revision 1. egret's upload flow would not produce them all (UploadFiles' missing-URI refusal, its destination join, and the WorkingDirectory egret does not run), so a Task 6/7 test SEEDS them with store::put (CreatedBy::User) before running the task; the cells then compare one for one (objects_after is the artifact's listing; under this premise egret keeps the same file objects)"
+    "premise": "the namespace w9b.tasks holds, before the run, the rows Kestra's held after the upload flow (raw_records.tasks_after.upload): /up/m.txt, /up/sub/n.txt, /rootm.txt, /up2m.txt, /globbed/top.txt, /globbed/g/one.txt, each revision 1; and the namespace w9b.elsewhere holds /e.txt (revision 1), which Kestra's up_other_ns wrote and egret refuses to write. egret's upload flow would not produce them all (UploadFiles' missing-URI refusal, its destination join, and the WorkingDirectory egret does not run), so a Task 6/7 test SEEDS them with store::put (CreatedBy::User) before running the task; the cells then compare one for one (objects_after is the artifact's listing; under this premise egret keeps the same file objects)"
    },
    "PurgeFiles": {
     "schema": {

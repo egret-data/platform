@@ -830,7 +830,9 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 #[tokio::test(flavor = "multi_thread")] async fn upload_files_to_another_namespace_is_refused_naming_it_and_writes_nothing() {}
 #[tokio::test(flavor = "multi_thread")] async fn upload_files_conflict_error_and_skip() {
     // the upload-flow variant of w9b tasks.UploadFiles.premise (absent.txt removed, wd removed, up_other_ns last), nothing seeded;
-    // runs.up_map_default_dest, up_conflict_error, up_conflict_skip, up_nothing and rows_after match as recorded
+    // runs.up_map_default_dest, up_conflict_error, up_conflict_skip, up_nothing and rows_after are asserted as each cell's `compare`
+    // says: states and written rows exactly; an error by the path/properties it names (Kestra's text is reference only);
+    // runs.w's uri with the execution id, task-run id and generated file name masked
 }
 #[tokio::test(flavor = "multi_thread")] async fn upload_files_glob_never_reaches_an_unreadable_execution() {
     // an unrelated execution in the same workspace holds "x.txt"; "**.txt" does not upload it (the readable set)
@@ -879,7 +881,8 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 #[tokio::test(flavor = "multi_thread")] async fn delete_parent_folder_removes_parents_left_empty_deepest_first() {}
 #[tokio::test(flavor = "multi_thread")] async fn delete_files_in_another_namespace_is_refused_and_deletes_nothing() { /* w9b tasks.DeleteFiles.runs.del_other_ns */ }
 #[tokio::test(flavor = "multi_thread")] async fn a_deleted_files_revisions_stay_listed_and_readable_by_number() {
-    // R1; seeds with store::put per w9b tasks.DeleteFiles.premise, runs the delete flow, then asserts tasks.DeleteFiles.rows_after
+    // R1; seeds with store::put per w9b tasks.DeleteFiles.premise -- w9b.tasks' six rows AND w9b.elsewhere's /e.txt (revision 1),
+    // which egret's refused up_other_ns never writes -- runs the delete flow, then asserts tasks.DeleteFiles.rows_after
 }
 #[tokio::test(flavor = "multi_thread")] async fn purge_files_defaults_to_own_namespace_and_its_children_on_a_dot_boundary() {
     // own "a.b": rows of "a.b", "a.b.c" purged; "a.bc" and "a" untouched
