@@ -247,7 +247,24 @@ impl ObjectStore for S3Store {
             .key(dst_key)
             .send()
             .await
-            .map_err(|e| StorageError::S3(e.to_string()))?;
+            .map_err(|e| {
+                // `CopyObjectError` has no modeled "no such key" variant the way
+                // `GetObjectError` does (confirmed against the vendored
+                // aws-sdk-s3 source: its only modeled variant is
+                // `ObjectNotInActiveTierError`) -- a missing source key falls
+                // into `CopyObjectError::Unhandled`, so `is_no_such_key()` does
+                // not exist here to call. S3 still reports the same error CODE
+                // ("NoSuchKey") on the wire regardless of whether the SDK has a
+                // typed variant for it, so check that instead via
+                // `ProvideErrorMetadata`, which `Unhandled` still carries.
+                if let aws_sdk_s3::error::SdkError::ServiceError(se) = &e {
+                    if aws_sdk_s3::error::ProvideErrorMetadata::code(se.err()) == Some("NoSuchKey")
+                    {
+                        return StorageError::NotFound(src.to_string());
+                    }
+                }
+                StorageError::S3(e.to_string())
+            })?;
         Ok(())
     }
 
