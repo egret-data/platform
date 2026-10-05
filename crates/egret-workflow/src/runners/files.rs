@@ -120,7 +120,7 @@ pub enum FileTarget {
 /// pair) -> `Namespace`; anything else -> [`FileTarget::Execution`], where
 /// W9a's rules apply unchanged (and refuse `s3://`, `file://`, …).
 pub fn classify(path: &str) -> FileTarget {
-    if !path.contains("://") || path.starts_with("nsfile://") {
+    if !path.contains("://") || path.starts_with(NSFILE_SCHEME) {
         return FileTarget::Namespace;
     }
     match path.strip_prefix(crate::storage::uri::SCHEME_PREFIX) {
@@ -134,6 +134,19 @@ pub fn classify(path: &str) -> FileTarget {
         }
         None => FileTarget::Execution,
     }
+}
+
+/// `nsfile://`: Kestra's `Namespace.NAMESPACE_FILE_SCHEME` and its `://`.
+/// The one spelling (W9b Task 5 fix round 1, M8): [`classify`],
+/// `storage::scope::ns_ref` and [`is_namespace_file_uri`] all read it here.
+pub const NSFILE_SCHEME: &str = "nsfile://";
+
+/// A URI (not a bare path) naming a namespace file: `nsfile://…`, or a
+/// `kestra:///` URI with the `_files` marker before any `executions/{uuid}`
+/// pair -- [`classify`]'s answer, for a value that has a scheme. The script
+/// handler's `inputFiles` test (W9b Task 5): a bare path there is contents.
+pub fn is_namespace_file_uri(value: &str) -> bool {
+    value.contains("://") && classify(value) == FileTarget::Namespace
 }
 
 /// What a function was asked for, unparsed: storage parses it (the path

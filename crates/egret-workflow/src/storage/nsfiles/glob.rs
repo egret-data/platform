@@ -31,17 +31,41 @@
 //! `.` (no line terminator) spelled out. A `regex:` pattern is compiled by the
 //! `regex` crate, whose grammar is not `java.util.regex`'s (no look-around,
 //! no back-references; `.` excludes only `\n`): a pattern it refuses is an
-//! author error naming it. Every pattern is compiled under
-//! [`REGEX_SIZE_LIMIT`], so a pattern that would blow up is refused by name,
-//! never a panic or an allocation the author chose.
+//! author error naming it.
+//!
+//! *(W9b Task 5 fix round 1, M3, 2026-10-06.)* Java's Perl classes are ASCII
+//! (`\w` is `[a-zA-Z_0-9]`, `\d` `[0-9]`, `\s` `[ \t\n\x0B\f\r]`, and `\b`
+//! the boundary of that `\w`, without `UNICODE_CHARACTER_CLASS`); the `regex`
+//! crate's are Unicode. So a `regex:` body has each of `\w \W \d \D \s \S
+//! \b \B` spelled as the ASCII class Java means ([`java_ascii_classes`]):
+//! `regex:/\w` does not match `/é`, as in Kestra. `unicode(false)` cannot do
+//! it, because it also makes `.` and a negated class match single bytes, which
+//! a `&str` regex refuses and which would match half of `é`. Still Unicode, as
+//! the record: `(?i)` folds case beyond ASCII and `\p{Alpha}` is Unicode's
+//! `Alphabetic`, where Java's are ASCII.
+//!
+//! # Bounds (W9b Task 5 fix round 1, I1, 2026-10-06)
+//!
+//! One list (the includes, or the excludes) holds at most [`MAX_PATTERNS`]
+//! patterns, and the whole list is compiled as ONE [`RegexSet`] under ONE
+//! [`REGEX_SIZE_LIMIT`] (`size_limit` and `dfa_size_limit`): the budget is
+//! what the compiler actually builds for every pattern together, so a
+//! thousand patterns each under the limit cannot add up to gigabytes. Nothing
+//! here inspects a pattern's grammar to bound it. [`PathMatcher::new`] is CPU
+//! work; `stage` runs it off the async runtime.
 
-use regex::{Regex, RegexBuilder};
+use regex::{RegexSet, RegexSetBuilder};
 
 use super::path::NsPath;
 
-/// The most memory one compiled pattern may take (`RegexBuilder::size_limit`
-/// and `dfa_size_limit`). Real globs compile to a few KiB.
+/// The most memory ONE LIST of patterns may take once compiled
+/// (`RegexSetBuilder::size_limit` and `dfa_size_limit`), shared by every
+/// pattern of the list. Real globs compile to a few KiB each.
 pub const REGEX_SIZE_LIMIT: usize = 1 << 20;
+
+/// The most patterns one list (`include`, or `exclude`) may hold. egret's
+/// bound (Kestra has none); a refusal names it.
+pub const MAX_PATTERNS: usize = 256;
 
 const SYNTAX_GLOB: &str = "glob:";
 const SYNTAX_REGEX: &str = "regex:";
@@ -52,24 +76,26 @@ const JAVA_DOT: &str = r"[^\n\r\x{85}\x{2028}\x{2029}]";
 /// `includes AND NOT excludes`, each a list of glob or regex patterns.
 #[derive(Clone, Debug)]
 pub struct PathMatcher {
-    includes: Vec<Regex>,
-    excludes: Vec<Regex>,
+    /// `None`: no includes, so everything is included.
+    includes: Option<RegexSet>,
+    excludes: RegexSet,
 }
 
 impl PathMatcher {
     /// `glob:` is the default syntax, `regex:` is supported, `**/` is
     /// prepended to a pattern starting with a word character
-    /// (`PathMatcherPredicate.java:112-114`). Each pattern is compiled with
-    /// [`REGEX_SIZE_LIMIT`]. A refusal names the pattern and why.
+    /// (`PathMatcherPredicate.java:112-114`). Each list holds at most
+    /// [`MAX_PATTERNS`] and is compiled as one set under [`REGEX_SIZE_LIMIT`].
+    /// A refusal names the pattern and why, or the list and the bound it
+    /// crossed.
     pub fn new(includes: &[String], excludes: &[String]) -> Result<Self, String> {
-        let compile = |list: &[String], which: &str| -> Result<Vec<Regex>, String> {
-            list.iter()
-                .map(|p| compile(p).map_err(|why| format!("{which} pattern {p:?}: {why}")))
-                .collect()
-        };
         Ok(Self {
-            includes: compile(includes, "include")?,
-            excludes: compile(excludes, "exclude")?,
+            includes: if includes.is_empty() {
+                None
+            } else {
+                Some(compile_list(includes, "include")?)
+            },
+            excludes: compile_list(excludes, "exclude")?,
         })
     }
 
@@ -82,9 +108,40 @@ impl PathMatcher {
     /// The predicate on any string -- the fixture's contrast rows test paths
     /// with no leading `/`, which no [`NsPath`] is.
     pub(crate) fn matches_str(&self, path: &str) -> bool {
-        let included = self.includes.is_empty() || self.includes.iter().any(|r| r.is_match(path));
-        included && !self.excludes.iter().any(|r| r.is_match(path))
+        let included = self.includes.as_ref().is_none_or(|set| set.is_match(path));
+        included && !self.excludes.is_match(path)
     }
+}
+
+/// One list, to one set: the count first, then each pattern checked alone
+/// (so a refusal names it), then the whole list compiled under ONE budget.
+fn compile_list(list: &[String], which: &str) -> Result<RegexSet, String> {
+    if list.len() > MAX_PATTERNS {
+        return Err(format!(
+            "{} {which} patterns, more than the {MAX_PATTERNS} one list may hold",
+            list.len()
+        ));
+    }
+    let sources = list
+        .iter()
+        .map(|p| source(p).map_err(|why| format!("{which} pattern {p:?}: {why}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    RegexSetBuilder::new(&sources)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_SIZE_LIMIT)
+        .build()
+        .map_err(|e| match (e, list) {
+            (regex::Error::CompiledTooBig(limit), [one]) => format!(
+                "{which} pattern {one:?}: it compiles to more than {limit} bytes, the most \
+                 one list of patterns may take"
+            ),
+            (regex::Error::CompiledTooBig(limit), _) => format!(
+                "the {} {which} patterns together compile to more than {limit} bytes, the \
+                 most one list of patterns may take",
+                list.len()
+            ),
+            (other, _) => format!("the {which} patterns are not valid: {other}"),
+        })
 }
 
 /// The pattern as `PathMatcherPredicate` hands it to `getPathMatcher`
@@ -105,32 +162,63 @@ pub fn effective(pattern: &str) -> String {
     format!("{SYNTAX_GLOB}{}", prefixed.replace('\\', "/"))
 }
 
-/// One pattern, through [`effective`], to an anchored regex.
-fn compile(pattern: &str) -> Result<Regex, String> {
+/// One pattern, through [`effective`], to the anchored regex source the set
+/// compiles; checked by the `regex` crate's own parser (no compilation, so
+/// no cost the author chose), so a refusal names this pattern.
+fn source(pattern: &str) -> Result<String, String> {
     let eff = effective(pattern);
     let source = if let Some(body) = eff.strip_prefix(SYNTAX_REGEX) {
+        let body = java_ascii_classes(body);
         // Checked alone first, so a body with an unbalanced ')' cannot close
         // the group it is wrapped in and change what it means.
-        build(body)?;
+        parse(&body)?;
         format!("^(?:{body})$")
     } else {
         let glob = eff.strip_prefix(SYNTAX_GLOB).unwrap_or(&eff);
         glob_to_regex(glob)?
     };
-    build(&source)
+    parse(&source)?;
+    Ok(source)
 }
 
-fn build(source: &str) -> Result<Regex, String> {
-    RegexBuilder::new(source)
-        .size_limit(REGEX_SIZE_LIMIT)
-        .dfa_size_limit(REGEX_SIZE_LIMIT)
-        .build()
-        .map_err(|e| match e {
-            regex::Error::CompiledTooBig(limit) => {
-                format!("it compiles to more than {limit} bytes, the most one pattern may take")
+/// The parse `regex::RegexSetBuilder` runs, with its defaults (Unicode and
+/// UTF-8 on, nest limit 250): a syntax error is the author's, by name.
+fn parse(source: &str) -> Result<(), String> {
+    regex_syntax::Parser::new()
+        .parse(source)
+        .map(drop)
+        .map_err(|e| format!("it is not a valid pattern: {e}"))
+}
+
+/// A `regex:` body with Java's ASCII Perl classes spelled out (module doc,
+/// M3). Only an escape's next character is looked at, so `\\w` stays a
+/// backslash and a `w`; inside a class the replacement is a nested class,
+/// which the `regex` crate accepts (`[\w-]` -> `[[0-9A-Za-z_]-]`).
+fn java_ascii_classes(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('w') => out.push_str("[0-9A-Za-z_]"),
+            Some('W') => out.push_str("[^0-9A-Za-z_]"),
+            Some('d') => out.push_str("[0-9]"),
+            Some('D') => out.push_str("[^0-9]"),
+            Some('s') => out.push_str(r"[\t\n\x0B\x0C\r ]"),
+            Some('S') => out.push_str(r"[^\t\n\x0B\x0C\r ]"),
+            Some('b') => out.push_str(r"(?-u:\b)"),
+            Some('B') => out.push_str(r"(?-u:\B)"),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
             }
-            other => format!("it is not a valid pattern: {other}"),
-        })
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// One character, literal in a regex (inside a class too).
@@ -470,6 +558,84 @@ mod tests {
             err.contains("exclude pattern") && err.contains("more than"),
             "{err}"
         );
+    }
+
+    /// Fix round 1, I1: the review's list -- 1,000 patterns `regex:\w{20}N`,
+    /// each under the limit alone -- is refused at once by the count, naming
+    /// it, before anything is compiled; a list AT the count compiles.
+    #[test]
+    fn a_thousand_patterns_are_refused_quickly_naming_the_cap() {
+        let list: Vec<String> = (0..1000).map(|i| format!(r"regex:\w{{20}}{i}")).collect();
+        let started = std::time::Instant::now();
+        let err = PathMatcher::new(&list, &[]).unwrap_err();
+        let took = started.elapsed();
+        assert!(
+            err.contains("1000 include patterns")
+                && err.contains(&format!("the {MAX_PATTERNS} one list may hold")),
+            "{err}"
+        );
+        assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
+        let err = PathMatcher::new(&[], &list).unwrap_err();
+        assert!(err.contains("1000 exclude patterns"), "{err}");
+        // The control: MAX_PATTERNS of them compile, and match.
+        let at_cap = &list[..MAX_PATTERNS];
+        let m = PathMatcher::new(at_cap, &[]).expect("a list at the cap");
+        assert!(m.matches_str(&format!("{}7", "a".repeat(20))));
+        assert!(!m.matches_str(&format!("{}x", "a".repeat(20))));
+    }
+
+    /// Fix round 1, I1: ONE budget per list, not one per pattern. Two
+    /// patterns that each compile under [`REGEX_SIZE_LIMIT`] alone are
+    /// refused together, naming the budget, quickly.
+    #[test]
+    fn patterns_each_under_the_limit_are_refused_together_by_one_budget() {
+        let one = |s: &str| vec![s.to_string()];
+        let (a, b) = (r"regex:/\pL{20}a", r"regex:/\pL{20}b");
+        PathMatcher::new(&one(a), &[]).expect("a alone is under the limit");
+        PathMatcher::new(&one(b), &[]).expect("b alone is under the limit");
+        let both = vec![a.to_string(), b.to_string()];
+        let started = std::time::Instant::now();
+        let err = PathMatcher::new(&both, &[]).unwrap_err();
+        assert!(
+            err.contains("the 2 include patterns together compile to more than")
+                && err.contains(&REGEX_SIZE_LIMIT.to_string()),
+            "{err}"
+        );
+        let err = PathMatcher::new(&[], &both).unwrap_err();
+        assert!(err.contains("2 exclude patterns together"), "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        // An include list and an exclude list each have their own budget.
+        PathMatcher::new(&one(a), &one(b)).expect("one per list");
+    }
+
+    /// Fix round 1, M3: `regex:` Perl classes are Java's, ASCII; `.` and
+    /// literals still work on characters, so a non-ASCII path is matched
+    /// per character, not per byte.
+    #[test]
+    fn regex_perl_classes_are_ascii_as_in_java() {
+        let m = |p: &str, path: &str| matcher(&[p], &[]).matches(&file(path));
+        assert!(!m(r"regex:/\w", "/é") && m(r"regex:/\w", "/a"));
+        assert!(m(r"regex:/\W", "/é") && !m(r"regex:/\W", "/a"));
+        assert!(!m(r"regex:/\d", "/\u{663}") && m(r"regex:/\d", "/3"));
+        assert!(m(r"regex:/\D", "/\u{663}"));
+        assert!(!m(r"regex:/a\sb", "/a\u{a0}b") && m(r"regex:/a\sb", "/a b"));
+        assert!(m(r"regex:/a\Sb", "/a\u{a0}b"));
+        // `\b` is the ASCII `\w`'s boundary: between `a` and `é` is one.
+        assert!(m(r"regex:/a\b.*", "/aé") && !m(r"regex:/a\b.*", "/ab"));
+        assert!(m(r"regex:/a\B.*", "/ab") && !m(r"regex:/a\B.*", "/aé"));
+        // `.` is one character, `é` included; a literal non-ASCII matches.
+        assert!(m(r"regex:/.\.txt", "/é.txt") && m("regex:/é+", "/éé"));
+        assert!(m(r"regex:/[^a]x", "/éx"));
+        // An escaped backslash stays one: `\\w` is a backslash, then `w`.
+        assert!(!matcher(&[r"regex:/\\w"], &[]).matches_str("/a"));
+        assert!(matcher(&[r"regex:/\\w"], &[]).matches_str(r"/\w"));
+        // Inside a class too, and the review's pattern now compiles small.
+        let parquet = r"regex:/data/[\w-]{1,64}\.parquet";
+        assert!(m(parquet, "/data/a-b_1.parquet"));
+        assert!(!m(parquet, "/data/é.parquet"));
+        assert!(m(r"regex:/[^\W]", "/a") && !m(r"regex:/[^\W]", "/é"));
+        // A glob's `[a-z]` and `?` were already the JDK's.
+        assert!(!m("/[a-z]", "/é") && m("/?", "/é"));
     }
 
     #[test]

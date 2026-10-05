@@ -437,7 +437,7 @@ fn file_function(
     // `AbstractFileFunction.java:181-191`: Kestra's sentence, before anything
     // is parsed. Storage takes the authority when there is one.
     let authority = path
-        .strip_prefix("nsfile://")
+        .strip_prefix(crate::runners::files::NSFILE_SCHEME)
         .is_some_and(|rest| !rest.starts_with('/'));
     if authority && namespace.is_some() {
         return Err(failed(&format!(

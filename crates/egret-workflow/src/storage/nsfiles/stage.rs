@@ -24,8 +24,10 @@
 //! listed (`list_live` fetches at most the remaining count + 1; a directory's
 //! row counts, as it was listed). The staged bytes, as their rows record them
 //! (the transfer then refuses an object of any other size), are capped by
-//! `workflow.storage.max_task_bytes`. Each crossing is the author's failure
-//! naming the cap.
+//! `workflow.storage.max_task_bytes` over the MERGED stored inputs
+//! ([`check_task_bytes`], fix round 1 M1). The patterns are bounded by
+//! `glob`'s count and one compile budget per list (fix round 1 I1). Each
+//! crossing is the author's failure naming the cap.
 
 use std::collections::BTreeMap;
 
@@ -72,17 +74,48 @@ impl IfExists {
     }
 }
 
+/// `ifExists` as written (fix round 1, M4, the user's ruling of
+/// 2026-10-06): Kestra's `Property<FileExistComportment>`, so a literal value
+/// checked at publish, or an expression checked once rendered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IfExistsProp {
+    Value(IfExists),
+    /// A string holding `{{ }}`/`{% %}`: rendered at run, then it must be
+    /// one of the four values.
+    Expression(String),
+}
+
+/// `include`, `exclude` or `namespaces` as written (fix round 1, M4):
+/// Kestra's `Property<List<String>>`, read as `Property.asList` reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListProp {
+    /// A list (or a string holding a JSON list, as `asList` accepts); each
+    /// item may hold a template, rendered on its own.
+    Items(Vec<String>),
+    /// A string that starts with `{{`/`{%` and ends with `}}`/`%}`
+    /// (`PebbleUtil`'s test in `asList`): rendered at run, and what it
+    /// renders to must be a JSON list of strings.
+    Expression(String),
+}
+
+impl ListProp {
+    fn empty() -> Self {
+        Self::Items(Vec::new())
+    }
+}
+
 /// The block as written: strings may hold templates; parse checks shape,
-/// not values.
+/// and every LITERAL value (fix round 1, M4): an expression is checked once
+/// it renders.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NamespaceFilesSpec {
     /// A template or `"true"`/`"false"`; absent = true when the block is present.
     pub enabled: Option<String>,
-    pub include: Vec<String>,
-    pub exclude: Vec<String>,
+    pub include: ListProp,
+    pub exclude: ListProp,
     /// `None` = the flow's namespace (Kestra's `["{{flow.namespace}}"]`).
-    pub namespaces: Option<Vec<String>>,
-    pub if_exists: IfExists,
+    pub namespaces: Option<ListProp>,
+    pub if_exists: IfExistsProp,
     /// A template or `"true"`/`"false"`; absent = false.
     pub folder_per_namespace: Option<String>,
 }
@@ -100,7 +133,7 @@ pub const PROPERTIES: [&str; 6] = [
 impl NamespaceFilesSpec {
     /// The ONE parse, at publish (script tasks AND `WorkingDirectory`) and at
     /// run. `Err` = (property path relative to the block, message), e.g.
-    /// `("namespaces", "must be a list of strings")`; an unknown key is
+    /// `("namespaces", "must be a list of strings …")`; an unknown key is
     /// refused by name. An explicit `null` is absent, as everywhere in Kestra.
     pub fn parse(v: &Value) -> Result<Self, (String, String)> {
         let Value::Object(map) = v else {
@@ -113,10 +146,10 @@ impl NamespaceFilesSpec {
         };
         let mut out = Self {
             enabled: None,
-            include: Vec::new(),
-            exclude: Vec::new(),
+            include: ListProp::empty(),
+            exclude: ListProp::empty(),
             namespaces: None,
-            if_exists: IfExists::Overwrite,
+            if_exists: IfExistsProp::Value(IfExists::Overwrite),
             folder_per_namespace: None,
         };
         for (key, value) in map {
@@ -129,14 +162,7 @@ impl NamespaceFilesSpec {
                 "include" => out.include = list(key, value)?,
                 "exclude" => out.exclude = list(key, value)?,
                 "namespaces" => out.namespaces = Some(list(key, value)?),
-                "ifExists" => {
-                    out.if_exists = value.as_str().and_then(IfExists::parse).ok_or_else(|| {
-                        (
-                            key.clone(),
-                            format!("must be one of OVERWRITE, FAIL, WARN or IGNORE, not {value}"),
-                        )
-                    })?;
-                }
+                "ifExists" => out.if_exists = if_exists(key, value)?,
                 other => {
                     return Err((
                         other.to_string(),
@@ -154,11 +180,13 @@ impl NamespaceFilesSpec {
     /// Render the block with `render` (the task's render context; `what` is
     /// the property, for the caller's message). `enabled` first: a disabled
     /// block renders nothing else, as Kestra's `CommandsWrapper` reads
-    /// `enabled` before it loads anything. `namespaces` absent is
-    /// `default_namespace` (the running flow's, from the execution).
+    /// `enabled` before it loads anything. Each expression is then checked
+    /// for its type (fix round 1, M4). `namespaces` absent stays `None`:
+    /// [`stage`] reads it as the running flow's own namespace, so a run with
+    /// no storage is refused naming `[storage]`, not a missing namespace
+    /// (fix round 1, M5).
     pub fn render(
         &self,
-        default_namespace: Option<&str>,
         mut render: impl FnMut(&str, &str) -> Result<String, String>,
     ) -> Result<RenderedNamespaceFiles, String> {
         if !render_flag(&mut render, "enabled", &self.enabled, true)? {
@@ -173,20 +201,28 @@ impl NamespaceFilesSpec {
         let include = render_list(&mut render, "include", &self.include)?;
         let exclude = render_list(&mut render, "exclude", &self.exclude)?;
         let namespaces = match &self.namespaces {
-            Some(list) => render_list(&mut render, "namespaces", list)?,
-            None => vec![default_namespace
-                .ok_or_else(|| {
-                    "namespaceFiles: this run has no flow namespace to read namespace files from"
-                        .to_string()
+            Some(list) => Some(render_list(&mut render, "namespaces", list)?),
+            None => None,
+        };
+        let if_exists = match &self.if_exists {
+            IfExistsProp::Value(v) => *v,
+            IfExistsProp::Expression(e) => {
+                let shown = "namespaceFiles.ifExists";
+                let out = render(shown, e)?;
+                IfExists::parse(out.trim()).ok_or_else(|| {
+                    format!(
+                        "`{shown}` must render to one of OVERWRITE, FAIL, WARN or IGNORE, and \
+                         it rendered to {out:?}"
+                    )
                 })?
-                .to_string()],
+            }
         };
         Ok(RenderedNamespaceFiles {
             enabled: true,
             include,
             exclude,
             namespaces,
-            if_exists: self.if_exists,
+            if_exists,
             folder_per_namespace,
         })
     }
@@ -212,12 +248,25 @@ fn render_flag(
 fn render_list(
     render: &mut impl FnMut(&str, &str) -> Result<String, String>,
     what: &str,
-    v: &[String],
+    v: &ListProp,
 ) -> Result<Vec<String>, String> {
-    v.iter()
-        .enumerate()
-        .map(|(i, s)| render(&format!("namespaceFiles.{what}[{i}]"), s))
-        .collect()
+    match v {
+        ListProp::Items(items) => items
+            .iter()
+            .enumerate()
+            .map(|(i, s)| render(&format!("namespaceFiles.{what}[{i}]"), s))
+            .collect(),
+        ListProp::Expression(e) => {
+            let shown = format!("namespaceFiles.{what}");
+            let out = render(&shown, e)?;
+            serde_json::from_str::<Vec<String>>(&out).map_err(|_| {
+                format!(
+                    "`{shown}` must render to a list of strings (a JSON list such as \
+                     [\"a\", \"b\"]), and it rendered to {out:?}"
+                )
+            })
+        }
+    }
 }
 
 /// `enabled`/`folderPerNamespace`: a boolean, or a string (a template, or
@@ -233,9 +282,32 @@ fn boolean(key: &str, v: &Value) -> Result<String, (String, String)> {
     }
 }
 
-fn list(key: &str, v: &Value) -> Result<Vec<String>, (String, String)> {
-    let Value::Array(items) = v else {
-        return Err((key.to_string(), "must be a list of strings".to_string()));
+/// Kestra's `Property.asList`, at publish: a string starting with `{{`/`{%`
+/// and ending with `}}`/`%}` is an expression, checked once rendered; any
+/// other string must hold a JSON list of strings; a list's items must be
+/// strings (each may hold a template).
+fn list(key: &str, v: &Value) -> Result<ListProp, (String, String)> {
+    let must = || {
+        (
+            key.to_string(),
+            "must be a list of strings, or an expression that renders to one".to_string(),
+        )
+    };
+    let items = match v {
+        Value::String(s) => {
+            let t = s.trim();
+            if (t.starts_with("{{") || t.starts_with("{%"))
+                && (t.ends_with("}}") || t.ends_with("%}"))
+            {
+                return Ok(ListProp::Expression(s.clone()));
+            }
+            match serde_json::from_str::<Value>(t) {
+                Ok(Value::Array(items)) => items,
+                _ => return Err(must()),
+            }
+        }
+        Value::Array(items) => items.clone(),
+        _ => return Err(must()),
     };
     items
         .iter()
@@ -248,7 +320,26 @@ fn list(key: &str, v: &Value) -> Result<Vec<String>, (String, String)> {
                 )
             })
         })
-        .collect()
+        .collect::<Result<_, _>>()
+        .map(ListProp::Items)
+}
+
+/// Kestra's `Property<FileExistComportment>`, at publish: one of the four
+/// values, upper-case as Kestra's enum; or an expression, checked once
+/// rendered.
+fn if_exists(key: &str, v: &Value) -> Result<IfExistsProp, (String, String)> {
+    if let Some(s) = v.as_str() {
+        if let Some(value) = IfExists::parse(s) {
+            return Ok(IfExistsProp::Value(value));
+        }
+        if crate::scripts::gate::is_unrendered(s) {
+            return Ok(IfExistsProp::Expression(s.to_string()));
+        }
+    }
+    Err((
+        key.to_string(),
+        format!("must be one of OVERWRITE, FAIL, WARN or IGNORE, or an expression, not {v}"),
+    ))
 }
 
 /// The block after rendering.
@@ -257,7 +348,8 @@ pub struct RenderedNamespaceFiles {
     pub enabled: bool,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
-    pub namespaces: Vec<String>,
+    /// `None`: the running flow's own namespace, which [`stage`] is given.
+    pub namespaces: Option<Vec<String>>,
     pub if_exists: IfExists,
     pub folder_per_namespace: bool,
 }
@@ -268,7 +360,7 @@ impl RenderedNamespaceFiles {
             enabled: false,
             include: Vec::new(),
             exclude: Vec::new(),
-            namespaces: Vec::new(),
+            namespaces: Some(Vec::new()),
             if_exists: IfExists::Overwrite,
             folder_per_namespace: false,
         }
@@ -279,6 +371,8 @@ impl RenderedNamespaceFiles {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Staged {
     pub files: BTreeMap<String, StoredInput>,
+    /// The namespace each of `files` came from, by the same path.
+    pub sources: BTreeMap<String, String>,
     /// One line per `WARN` collision, naming the path; the handler logs them.
     pub warnings: Vec<String>,
 }
@@ -313,15 +407,23 @@ pub async fn stage(
     if !spec.enabled {
         return Ok(Ok(staged));
     }
-    let matcher = match PathMatcher::new(&spec.include, &spec.exclude) {
+    // Compiling the patterns is CPU work an author sizes (bounded by
+    // `glob`'s count and budget): off the async runtime (fix round 1, I1).
+    let (include, exclude) = (spec.include.clone(), spec.exclude.clone());
+    let compiled = tokio::task::spawn_blocking(move || PathMatcher::new(&include, &exclude))
+        .await
+        .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()));
+    let matcher = match compiled {
         Ok(m) => m,
         Err(why) => return Ok(Err(format!("namespaceFiles: {why}"))),
     };
+    let own = [flow_namespace.to_string()];
+    let namespaces = spec.namespaces.as_deref().unwrap_or(&own);
     let cap = fs.caps.max_namespace_files;
     let mut listed: u64 = 0;
     // Which namespace each staged path came from, for FAIL's message.
     let mut source: BTreeMap<String, &str> = BTreeMap::new();
-    for (i, ns) in spec.namespaces.iter().enumerate() {
+    for (i, ns) in namespaces.iter().enumerate() {
         let grant = match authorize(
             workspace,
             Actor::Flow {
@@ -340,7 +442,7 @@ pub async fn stage(
                 return Ok(Err(format!(
                     "namespaceFiles: namespaces {} hold more than {cap} namespace files \
                      together, the most one task stages (workflow.storage.max_namespace_files)",
-                    spec.namespaces[..=i]
+                    namespaces[..=i]
                         .iter()
                         .map(|n| format!("'{n}'"))
                         .collect::<Vec<_>>()
@@ -392,15 +494,28 @@ pub async fn stage(
             }
         }
     }
-    let bytes: u64 = staged.files.values().map(|f| f.size).sum();
-    if bytes > fs.caps.max_task_bytes {
-        return Ok(Err(format!(
-            "namespaceFiles: the matching namespace files hold {bytes} bytes, more than the \
-             {} one task may stage (workflow.storage.max_task_bytes)",
-            fs.caps.max_task_bytes
-        )));
-    }
+    staged.sources = source
+        .into_iter()
+        .map(|(rel, ns)| (rel, ns.to_string()))
+        .collect();
     Ok(Ok(staged))
+}
+
+/// Spec §7, "staged bytes count against `max_task_bytes`" (fix round 1, M1):
+/// summed over what the runner will stream -- the stored inputs AFTER
+/// [`merge`], so a namespace file an `inputFiles` name replaced does not
+/// count, and an `inputFiles` namespace-file URI does. Each size is its
+/// row's; the transfer refuses an object of any other size.
+pub fn check_task_bytes(stored: &BTreeMap<String, StoredInput>, max: u64) -> Result<(), String> {
+    let bytes: u64 = stored.values().map(|f| f.size).sum();
+    if bytes > max {
+        return Err(format!(
+            "the input files staged from storage (namespace files and inputFiles) hold \
+             {bytes} bytes, more than the {max} one task may stage \
+             (workflow.storage.max_task_bytes)"
+        ));
+    }
+    Ok(())
 }
 
 /// One `inputFiles` value that names a namespace file (`nsfile:///…`,
@@ -606,7 +721,7 @@ pub(crate) mod tests {
             enabled: true,
             include: Vec::new(),
             exclude: Vec::new(),
-            namespaces: namespaces.iter().map(|s| s.to_string()).collect(),
+            namespaces: Some(namespaces.iter().map(|s| s.to_string()).collect()),
             if_exists,
             folder_per_namespace: false,
         }
@@ -757,7 +872,7 @@ pub(crate) mod tests {
                 .collect()
         };
         let mut spec = rendered(&[], IfExists::Overwrite);
-        spec.namespaces = strings(&ie["namespaces"]);
+        spec.namespaces = Some(strings(&ie["namespaces"]));
         spec.include = strings(&ie["include"]);
         spec.exclude = strings(&ie["exclude"]);
         let staged = run_stage(&pool, &fs, ws, &spec).await.unwrap();
@@ -766,7 +881,7 @@ pub(crate) mod tests {
         // No `namespaces`: the flow's own (`render`'s default).
         let spec = NamespaceFilesSpec::parse(&json!({}))
             .unwrap()
-            .render(Some(OWN), |_, s| Ok(s.to_string()))
+            .render(|_, s| Ok(s.to_string()))
             .unwrap();
         let staged = run_stage(&pool, &fs, ws, &spec).await.unwrap();
         assert_eq!(
@@ -776,7 +891,7 @@ pub(crate) mod tests {
 
         let spec = NamespaceFilesSpec::parse(&json!({"enabled": false}))
             .unwrap()
-            .render(Some(OWN), |_, s| Ok(s.to_string()))
+            .render(|_, s| Ok(s.to_string()))
             .unwrap();
         let staged = run_stage(&pool, &fs, ws, &spec).await.unwrap();
         assert_eq!(
@@ -787,7 +902,8 @@ pub(crate) mod tests {
 
     /// The cap is ACROSS the block's namespaces: 2 + 2 files under a cap of
     /// 3 is refused naming it, though each namespace alone is under it; at a
-    /// cap of 4 the same block stages. The staged bytes are capped too.
+    /// cap of 4 the same block stages. (The staged bytes are capped after the
+    /// merge: `check_task_bytes`, tested below and in `handlers::script`.)
     #[tokio::test]
     async fn one_file_past_max_namespace_files_across_namespaces_is_refused_naming_the_cap() {
         let Some(pool) = testing::pool().await else {
@@ -830,28 +946,6 @@ pub(crate) mod tests {
         };
         let staged = run_stage(&pool, &at, ws, &spec).await.unwrap();
         assert_eq!(staged.files.len(), 4);
-        // 4 x 5 bytes: 19 is refused naming the cap, 20 stages.
-        let tight = FileStore {
-            caps: caps(4, 19),
-            ..(*fs).clone()
-        };
-        let err = run_stage(&pool, &tight, ws, &spec).await.unwrap_err();
-        assert!(
-            err.contains("20 bytes") && err.contains("workflow.storage.max_task_bytes"),
-            "{err}"
-        );
-        let exact = FileStore {
-            caps: caps(4, 20),
-            ..(*fs).clone()
-        };
-        assert_eq!(
-            run_stage(&pool, &exact, ws, &spec)
-                .await
-                .unwrap()
-                .files
-                .len(),
-            4
-        );
     }
 
     /// A `_files` segment, or an empty one, in `namespaces` is refused by
@@ -886,6 +980,54 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(ok.files.len(), 2);
+    }
+
+    /// Fix round 1, M2: the RUNNING flow's own namespace is checked too, on
+    /// both read paths. A flow in `a._files` or `w9b.bad.` (published before
+    /// the rule; publish still accepts an empty segment) stages nothing from
+    /// a good namespace, and the refusal names the running flow's namespace.
+    #[tokio::test]
+    async fn a_running_flow_whose_own_namespace_is_refused_stages_nothing() {
+        let Some(pool) = testing::pool().await else {
+            return;
+        };
+        let fs = mem_files(Caps::default());
+        let ws = testing::workspace(&pool).await;
+        testing::setup(&pool, &fs, ws).await;
+        let mut conn = pool.acquire().await.expect("a connection");
+        for (own, rule) in [("a._files", "'_files'"), ("w9b.bad.", "empty segment")] {
+            let spec = rendered(&["w9b.s1"], IfExists::Overwrite);
+            let err = stage(&mut conn, &fs, ws, own, &spec)
+                .await
+                .expect("no infrastructure failure")
+                .unwrap_err();
+            assert!(
+                err.contains("the running flow's")
+                    && err.contains(&format!("'{own}'"))
+                    && err.contains(rule),
+                "stage, {own}: {err}"
+            );
+            let err = resolve_input_uri(&mut conn, &fs, ws, own, "nsfile://w9b.s1/x.txt")
+                .await
+                .expect("no infrastructure failure")
+                .unwrap_err();
+            assert!(
+                err.contains("the running flow's") && err.contains(&format!("'{own}'")),
+                "resolve_input_uri, {own}: {err}"
+            );
+        }
+        // The control: a good running namespace reads the same file.
+        let spec = rendered(&["w9b.s1"], IfExists::Overwrite);
+        let ok = stage(&mut conn, &fs, ws, OWN, &spec)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ok.files.len(), 2);
+        let input = resolve_input_uri(&mut conn, &fs, ws, OWN, "nsfile://w9b.s1/x.txt")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(contents(&fs, &input.object_uri).await, "from-s1");
     }
 
     /// The workspace is the run's: another workspace's identical namespace
@@ -969,8 +1111,11 @@ pub(crate) mod tests {
             assert!(block.is_object(), "{name}: {block}");
             let parsed = NamespaceFilesSpec::parse(block).expect(name);
             assert_eq!(parsed.enabled.as_deref(), Some("true"));
-            assert_eq!(parsed.exclude, vec!["/ignore/**".to_string()]);
-            assert_eq!(parsed.if_exists, IfExists::Overwrite);
+            assert_eq!(
+                parsed.exclude,
+                ListProp::Items(vec!["/ignore/**".to_string()])
+            );
+            assert_eq!(parsed.if_exists, IfExistsProp::Value(IfExists::Overwrite));
             seen += 1;
         }
         assert_eq!(seen, 2);
@@ -979,14 +1124,12 @@ pub(crate) mod tests {
             "enabled": true, "folderPerNamespace": true, "exclude": ["/ignore/**"],
         }));
         assert_eq!(
-            with.namespaces.as_deref(),
-            Some(
-                &[
-                    "io.test.first".to_string(),
-                    "io.test.second".into(),
-                    "io.test.third".into()
-                ][..]
-            )
+            with.namespaces,
+            Some(ListProp::Items(vec![
+                "io.test.first".to_string(),
+                "io.test.second".into(),
+                "io.test.third".into()
+            ]))
         );
         assert_eq!(with.folder_per_namespace.as_deref(), Some("true"));
 
@@ -999,8 +1142,8 @@ pub(crate) mod tests {
             "exclude": null,
         }));
         assert_eq!(t.enabled.as_deref(), Some("{{ inputs.on }}"));
-        assert_eq!(t.if_exists, IfExists::Warn);
-        assert!(t.exclude.is_empty());
+        assert_eq!(t.if_exists, IfExistsProp::Value(IfExists::Warn));
+        assert_eq!(t.exclude, ListProp::empty());
         // An empty block: everything of the flow's own namespace.
         let empty = spec(json!({}));
         assert_eq!((empty.enabled, empty.namespaces), (None, None));
@@ -1012,8 +1155,22 @@ pub(crate) mod tests {
         let (p, m) = refused(json!({"namespaces": "x"}));
         assert_eq!(
             (p.as_str(), m.as_str()),
-            ("namespaces", "must be a list of strings")
+            (
+                "namespaces",
+                "must be a list of strings, or an expression that renders to one"
+            )
         );
+        // Not an expression by `asList`'s test (it must start AND end with a
+        // delimiter), and not a JSON list: refused at publish, as a literal.
+        for (key, v) in [
+            ("include", "prefix {{ x }}"),
+            ("exclude", "{{ x }} suffix"),
+            ("namespaces", "[\"a\", 1]"),
+            ("namespaces", "{\"a\": 1}"),
+        ] {
+            let (p, _) = refused(json!({ key: v }));
+            assert!(p.starts_with(key), "{key}: {v} -> {p}");
+        }
         let (p, m) = refused(json!({"ifExists": "NOPE"}));
         assert_eq!(p, "ifExists");
         assert!(
@@ -1038,19 +1195,129 @@ pub(crate) mod tests {
         // Lower-case is not Kestra's enum spelling.
         let (p, _) = refused(json!({"ifExists": "overwrite"}));
         assert_eq!(p, "ifExists");
+        let (p, _) = refused(json!({"ifExists": ["WARN"]}));
+        assert_eq!(p, "ifExists");
+    }
+
+    /// Fix round 1, M4 (the user's ruling of 2026-10-06): `ifExists`,
+    /// `include`, `exclude` and `namespaces` take expressions, as Kestra's
+    /// `Property` does; a literal is still checked at publish.
+    #[test]
+    fn parse_accepts_an_expression_in_each_property_kestra_types_as_a_property() {
+        let t = spec(json!({
+            "ifExists": "{{ inputs.mode }}",
+            "include": "{{ inputs.globs }}",
+            "exclude": " {% if true %}[]{% endif %} ",
+            "namespaces": "{{ inputs.nss }}",
+        }));
+        assert_eq!(
+            t.if_exists,
+            IfExistsProp::Expression("{{ inputs.mode }}".into())
+        );
+        assert_eq!(t.include, ListProp::Expression("{{ inputs.globs }}".into()));
+        assert_eq!(
+            t.exclude,
+            ListProp::Expression(" {% if true %}[]{% endif %} ".into())
+        );
+        assert_eq!(
+            t.namespaces,
+            Some(ListProp::Expression("{{ inputs.nss }}".into()))
+        );
+        // `ifExists` is rendered whole (`Property.as`): a template anywhere.
+        assert_eq!(
+            spec(json!({"ifExists": "{{ x }}RITE"})).if_exists,
+            IfExistsProp::Expression("{{ x }}RITE".into())
+        );
+        // A string holding a JSON list is a literal list (`asList`).
+        assert_eq!(
+            spec(json!({"namespaces": "[\"a.b\", \"{{ y }}\"]"})).namespaces,
+            Some(ListProp::Items(vec!["a.b".into(), "{{ y }}".into()]))
+        );
+    }
+
+    /// Fix round 1, M4: each expression is rendered with the task's render
+    /// (here a fake one), then type-checked; a bad `ifExists` names the field
+    /// and the value, and so does a list expression that is not a list.
+    #[test]
+    fn rendered_expressions_are_type_checked_naming_the_field_and_the_value() {
+        let render = |_: &str, s: &str| -> Result<String, String> {
+            Ok(match s {
+                "{{ mode }}" => "WARN".into(),
+                "{{ bad }}" => "SOMETIMES".into(),
+                "{{ globs }}" => r#"["/a/**", "regex:/b"]"#.into(),
+                "{{ ex }}" => r#"["/a/x"]"#.into(),
+                "{{ nss }}" => r#"["w9b.s1","w9b.s2"]"#.into(),
+                "{{ one }}" => "w9b.s1".into(),
+                other => other.to_string(),
+            })
+        };
+        let r = spec(json!({
+            "ifExists": "{{ mode }}", "include": "{{ globs }}",
+            "exclude": "{{ ex }}", "namespaces": "{{ nss }}",
+        }))
+        .render(render)
+        .unwrap();
+        assert_eq!(r.if_exists, IfExists::Warn);
+        assert_eq!(r.include, vec!["/a/**".to_string(), "regex:/b".into()]);
+        assert_eq!(r.exclude, vec!["/a/x".to_string()]);
+        assert_eq!(
+            r.namespaces,
+            Some(vec!["w9b.s1".to_string(), "w9b.s2".into()])
+        );
+
+        let err = spec(json!({"ifExists": "{{ bad }}"}))
+            .render(render)
+            .unwrap_err();
+        assert!(
+            err.contains("namespaceFiles.ifExists") && err.contains("\"SOMETIMES\""),
+            "{err}"
+        );
+        for key in ["include", "exclude", "namespaces"] {
+            let err = spec(json!({ key: "{{ one }}" }))
+                .render(render)
+                .unwrap_err();
+            assert!(
+                err.contains(&format!("`namespaceFiles.{key}`"))
+                    && err.contains("\"w9b.s1\"")
+                    && err.contains("list of strings"),
+                "{key}: {err}"
+            );
+        }
+        // A disabled block renders none of them.
+        let r = spec(json!({"enabled": false, "ifExists": "{{ bad }}"}))
+            .render(render)
+            .unwrap();
+        assert!(!r.enabled);
+    }
+
+    /// Fix round 1, M1: the byte cap is over the merged stored inputs.
+    #[test]
+    fn check_task_bytes_sums_what_the_runner_streams() {
+        let stored = BTreeMap::from([
+            ("a".to_string(), input("a", 15)),
+            ("b".to_string(), input("b", 5)),
+        ]);
+        assert_eq!(check_task_bytes(&stored, 20), Ok(()));
+        let err = check_task_bytes(&stored, 19).unwrap_err();
+        assert!(
+            err.contains("20 bytes")
+                && err.contains("more than the 19")
+                && err.contains("workflow.storage.max_task_bytes"),
+            "{err}"
+        );
+        assert_eq!(check_task_bytes(&BTreeMap::new(), 0), Ok(()));
     }
 
     #[test]
     fn render_reads_enabled_first_and_defaults_the_namespace() {
         let echo = |_: &str, s: &str| Ok::<_, String>(s.replace("{{ x }}", "true"));
-        let r = spec(json!({"include": ["*.txt"]}))
-            .render(Some("own.ns"), echo)
-            .unwrap();
-        assert_eq!(r.namespaces, vec!["own.ns".to_string()]);
+        let r = spec(json!({"include": ["*.txt"]})).render(echo).unwrap();
+        // Absent: `stage` reads the running flow's own namespace (M5).
+        assert_eq!(r.namespaces, None);
         assert!(r.enabled && !r.folder_per_namespace);
         // Disabled: nothing else is rendered (a failing render is not reached).
         let r = spec(json!({"enabled": false, "include": ["{{ boom }}"]}))
-            .render(None, |_, s| {
+            .render(|_, s| {
                 if s.contains("boom") {
                     Err("rendered".to_string())
                 } else {
@@ -1060,18 +1327,14 @@ pub(crate) mod tests {
             .unwrap();
         assert!(!r.enabled);
         let r = spec(json!({"folderPerNamespace": "{{ x }}", "namespaces": ["a"]}))
-            .render(None, echo)
+            .render(echo)
             .unwrap();
         assert!(r.folder_per_namespace);
-        let err = spec(json!({"enabled": "maybe"}))
-            .render(Some("a"), echo)
-            .unwrap_err();
+        let err = spec(json!({"enabled": "maybe"})).render(echo).unwrap_err();
         assert!(
             err.contains("namespaceFiles.enabled") && err.contains("maybe"),
             "{err}"
         );
-        let err = spec(json!({})).render(None, echo).unwrap_err();
-        assert!(err.contains("no flow namespace"), "{err}");
     }
 
     fn input(uri: &str, size: u64) -> StoredInput {

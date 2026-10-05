@@ -149,6 +149,12 @@ minijinja.workspace = true
 # `runners::env::RAW_PATTERN`. Already in this workspace's tree, so this adds
 # no new transitive crates.
 regex.workspace = true
+# W9b Task 5 fix round 1 (I1): `storage::nsfiles::glob` checks each pattern
+# with the parser `regex` itself runs, so a syntax error names its pattern
+# while the whole list compiles as ONE `RegexSet` under one size budget. The
+# workspace pins it beside `regex` (one parser; see the root manifest), so
+# this adds a direct edge and no new crate.
+regex-syntax.workspace = true
 
 # W2 Task 4: the `md5`/`sha1`/`sha512` filters are Kestra's `ShaBaseFilter`,
 # i.e. `MessageDigest.getInstance(...)` over the input's UTF-8 bytes, rendered

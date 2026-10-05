@@ -57,7 +57,7 @@ use super::nsfiles::NsError;
 use super::{decode_utf8, readable_executions, resolve_readable_many, uri};
 use super::{FileStore, IndexedFile, Unreadable};
 use crate::runners::files::{
-    FileMeta, FileScope, FileUnavailable, NsFileArgs, NsFileMeta, RenderFiles,
+    FileMeta, FileScope, FileUnavailable, NsFileArgs, NsFileMeta, RenderFiles, NSFILE_SCHEME,
 };
 
 /// A `kestra:///` URI in text: the scheme, then the whole run of characters
@@ -526,9 +526,6 @@ pub(crate) fn ns_ref(
         uri_revision: None,
     })
 }
-
-/// `nsfile://`, Kestra's `Namespace.NAMESPACE_FILE_SCHEME` and its `://`.
-const NSFILE_SCHEME: &str = "nsfile://";
 
 /// What a namespace function names, parsed and authorized ([`Snapshot::ns_target`]).
 struct NsTarget {

@@ -658,6 +658,14 @@ pub async fn scope_for(conn: &mut PgConnection, store: Option<Arc<FileStore>>, w
 
 ## Task 5: Globs and `namespaceFiles` staging; `WorkingDirectory` validated
 
+> *Amended 2026-10-06 (Task 5 fix round 1; decided with the user 2026-10-06 on I2, M4 and M6, spec header and §7).* The interfaces below changed as follows:
+> - **`PathMatcher`** holds one `regex::RegexSet` per list (`includes: Option<RegexSet>`, `None` = everything; `excludes: RegexSet`), not `Vec<Regex>`. A list holds at most `glob::MAX_PATTERNS` (256) patterns, each is checked alone by `regex_syntax`'s parser (a refusal names it), and the whole list is compiled under ONE `REGEX_SIZE_LIMIT` (1 MiB, `size_limit` and `dfa_size_limit`). `stage` builds it in `spawn_blocking`. A `regex:` body's `\w \W \d \D \s \S \b \B` are spelled as Java's ASCII classes (M3).
+> - **`NamespaceFilesSpec`**: `include`/`exclude: ListProp`, `namespaces: Option<ListProp>` (`ListProp::{Items(Vec<String>), Expression(String)}`, read as `Property.asList`), `if_exists: IfExistsProp` (`Value(IfExists)` or `Expression(String)`). `render(render)` no longer takes the default namespace; `RenderedNamespaceFiles.namespaces` is `Option<Vec<String>>`, `None` = the running flow's own, which `stage` is given (so a run with no `[storage]` names `[storage]`, M5).
+> - **`Staged`** gains `sources` (path -> namespace). `stage` no longer checks bytes: `check_task_bytes(&cmds.stored_inputs, max_task_bytes)` runs after `merge` in the handler (M1).
+> - **Staged names**: `worker::commands::staged_name_problem` is `relative_problem` without its glob clause; `transfer::plan` and both runners use it (I2). `relative_problem` is unchanged for every other caller, and the handler still refuses a glob-looking `inputFiles` key at render.
+> - **`python.Script`**: a namespace file at the script file (`main.py`) is skipped with one WARN line naming it (M6).
+> - **`nsfile://`** is spelled once, `runners::files::NSFILE_SCHEME`, and `runners::files::is_namespace_file_uri` is the one classification of an `inputFiles` value (M8).
+
 > *Amended 2026-10-05 (Task 2 fix round 1).* An `inputFiles` value is a namespace-file URI only when `parse_any` answers `NamespaceFile`: the `_files` marker counts only before the first `executions/{uuid}` pair (I1). An execution URI with a `_files` segment in its tail is staged as W9a's. Paths staged from namespace files are at most 512 bytes (I2). A namespace with an empty segment in `namespaces` is refused by `check_namespace` (M3).
 
 **Files:**
@@ -801,6 +809,8 @@ pub struct WorkingDirectory { pub tasks: Vec<Task>,
 
 ## Task 6: `UploadFiles` and `DownloadFiles`
 
+> *Amended 2026-10-06 (Task 5 fix round 1, I1).* `PathMatcher::new` is CPU work bounded by `glob::MAX_PATTERNS` and one compile budget per list; build it with `tokio::task::spawn_blocking`, as `stage` does. A list property here that Kestra types as a `Property` takes an expression as Task 5's `ListProp` does.
+
 **Files:**
 - Create `src/worker/handlers/namespace.rs`, `tests/nsfiles_tasks.rs`.
 - Modify `src/worker/handlers/mod.rs` (`pub mod namespace;`), `src/spec/registry.rs` (two `TaskTypeSpec` rows after the W9a block `:195-250`), `src/runtime.rs` (`handlers_for` `:704`: `crate::worker::handlers::namespace::register(&mut handlers, pool.clone(), crate::storage::current())` beside `storage::register` `:724`), `oracle-exec/driver.rs` (`registry()` `:137`, with `install_db_for_tests`), `oracle-exec/handler-surface.txt` (run `handler_surface.py` and commit its diff if it lists implemented types).
@@ -883,6 +893,8 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 ---
 
 ## Task 7: `DeleteFiles` and `PurgeFiles`
+
+> *Amended 2026-10-06 (Task 5 fix round 1, I1).* `PathMatcher::new` is built with `tokio::task::spawn_blocking`, as `stage` does; its lists are bounded by `glob::MAX_PATTERNS` and one compile budget per list.
 
 **Files:** `src/worker/handlers/namespace.rs`, `src/spec/registry.rs`, the same lists as Task 6, `tests/nsfiles_tasks.rs`.
 

@@ -485,10 +485,9 @@ async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name
             .expect_err("a malformed namespaceFiles must not publish");
         match err {
             egret_core::Error::InvalidInput(m) => {
-                assert!(
-                    m.contains(&format!("tasks.wd.{property}")) || m.contains(property),
-                    "{m}"
-                )
+                // Fix round 1, M7: the finding's whole path, task prefix
+                // included, as the report closes with it.
+                assert!(m.contains(&format!("(tasks.wd.{property})")), "{m}")
             }
             other => panic!("{id}: {other:?}"),
         }
@@ -502,6 +501,12 @@ async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name
         (
             "templated",
             "      enabled: \"{{ true }}\"\n      ifExists: WARN\n      include: [\"{{ flow.id }}/**\"]\n",
+        ),
+        // Fix round 1, M4: the four properties Kestra types as `Property`
+        // take an expression, checked once it renders.
+        (
+            "expressions",
+            "      ifExists: \"{{ inputs.mode }}\"\n      namespaces: \"{{ inputs.nss }}\"\n      include: \"{{ inputs.inc }}\"\n      exclude: \"{% if true %}[]{% endif %}\"\n",
         ),
     ] {
         let good = common::draft(&repo, ws, user, &working_directory(id, block)).await;
@@ -536,7 +541,9 @@ async fn a_working_directory_namespace_files_round_trips_through_the_model() {
     let spec = egret_workflow::storage::nsfiles::stage::NamespaceFilesSpec::parse(&kept).unwrap();
     assert_eq!(
         spec.if_exists,
-        egret_workflow::storage::nsfiles::stage::IfExists::Fail
+        egret_workflow::storage::nsfiles::stage::IfExistsProp::Value(
+            egret_workflow::storage::nsfiles::stage::IfExists::Fail
+        )
     );
     // Absent stays absent, and is not serialized.
     let bare: Task = serde_norway::from_str(

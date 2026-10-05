@@ -51,6 +51,13 @@
 //! positional argument filters by substring, which is what `cargo test -p
 //! egret-workflow --test container_docker_live <name>` needs.
 //!
+//! # The namespace-file case needs the test database
+//!
+//! `namespace_files_are_staged_into_the_container_as_the_artifact_does` (W9b
+//! Task 5) lists namespace files from Postgres, so it needs `DATABASE_URL`
+//! (the dedicated test database) and fails naming it when it is unset; it is
+//! not skipped, as the daemon is not.
+//!
 //! # Two axes, and the image axis is one of them
 //!
 //! Fix round 1's Important 3: the opt-out used to cover the daemon and not the
@@ -1914,6 +1921,8 @@ async fn namespace_files_setup() -> sqlx::PgPool {
         ("w9b.s1", "/only1.txt", "only1"),
         ("w9b.s2", "/x.txt", "from-s2"),
         ("w9b.s2", "/sub/y.txt", "y2"),
+        // W9b Task 5 fix round 1, I2: glob characters in a stored name.
+        ("w9b.s3", "/reports/q[1].csv", "q,1"),
     ] {
         let grant = authorize(suite_workspace(), Actor::Api, ns, Access::Write).unwrap();
         let path = NsPath::parse_file(path).unwrap();
@@ -2091,6 +2100,23 @@ async fn namespace_files_are_staged_into_the_container_as_the_artifact_does() {
             ]),
             "{mode}"
         );
+    }
+
+    // Fix round 1, I2 (the user's ruling of 2026-10-06): a namespace file
+    // named with glob characters stages as in Kestra, with no include and
+    // with an include that matches it, and `cat` prints its bytes.
+    for block in [
+        serde_json::json!({"namespaces": ["w9b.s3"]}),
+        serde_json::json!({"namespaces": ["w9b.s3"], "include": ["reports/*.csv"]}),
+    ] {
+        let (out, lines) =
+            run_with_namespace_files(&pool, block.clone(), serde_json::json!({})).await;
+        assert_eq!(
+            out.state,
+            egret_workflow::executor::RunState::Success,
+            "{block}: {out:?}"
+        );
+        assert_eq!(lines, file_lines(&[("reports/q[1].csv", "q,1")]), "{block}");
     }
 }
 

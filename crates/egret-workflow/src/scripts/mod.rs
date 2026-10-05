@@ -1088,7 +1088,12 @@ mod tests {
             )
             .unwrap_or_else(|e| panic!("{}: {e:?}", kind.fqcn()));
             let nf = parsed.namespace_files.expect("kept");
-            assert_eq!(nf.if_exists, crate::storage::nsfiles::stage::IfExists::Warn);
+            assert_eq!(
+                nf.if_exists,
+                crate::storage::nsfiles::stage::IfExistsProp::Value(
+                    crate::storage::nsfiles::stage::IfExists::Warn
+                )
+            );
             let errs = parse(kind.fqcn(), &body(json!({"namespaces": "a.b"}))).unwrap_err();
             assert_eq!(errs.len(), 1, "{errs:?}");
             assert_eq!(

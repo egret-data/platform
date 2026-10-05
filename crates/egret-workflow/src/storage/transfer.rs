@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::FileStore;
-use crate::worker::commands::{relative_problem, StoredInput};
+use crate::worker::commands::{staged_name_problem, StoredInput};
 
 pub(crate) const BLOCK: usize = 512;
 
@@ -228,7 +228,7 @@ async fn pad(out: &mut (dyn AsyncWrite + Send + Unpin), len: u64) -> Result<(), 
 fn plan(files: &BTreeMap<String, TarSource<'_>>) -> Result<BTreeSet<String>, String> {
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     for (name, source) in files {
-        if let Some(problem) = relative_problem(name) {
+        if let Some(problem) = staged_name_problem(name) {
             return Err(problem);
         }
         split_name(name)?;

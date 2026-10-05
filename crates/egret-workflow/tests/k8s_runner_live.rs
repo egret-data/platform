@@ -2022,6 +2022,8 @@ async fn namespace_files_setup(
         ("w9b.s1", "/only1.txt", "only1"),
         ("w9b.s2", "/x.txt", "from-s2"),
         ("w9b.s2", "/sub/y.txt", "y2"),
+        // W9b Task 5 fix round 1, I2: glob characters in a stored name.
+        ("w9b.s3", "/reports/q[1].csv", "q,1"),
     ] {
         let grant = authorize(ws, Actor::Api, ns, Access::Write).unwrap();
         put(
@@ -2193,6 +2195,22 @@ async fn namespace_files_are_staged_into_the_pod_as_the_artifact_does() {
             ]),
             "{mode}"
         );
+    }
+
+    // Fix round 1, I2 (the user's ruling of 2026-10-06): a namespace file
+    // named with glob characters stages into the pod as in Kestra, with no
+    // include and with an include that matches it; `cat` prints its bytes.
+    for block in [
+        serde_json::json!({"namespaces": ["w9b.s3"]}),
+        serde_json::json!({"namespaces": ["w9b.s3"], "include": ["reports/*.csv"]}),
+    ] {
+        let (out, lines) = run(block.clone(), serde_json::json!({})).await;
+        assert_eq!(
+            out.state,
+            egret_workflow::executor::RunState::Success,
+            "{block}: {out:?}"
+        );
+        assert_eq!(lines, file_lines(&[("reports/q[1].csv", "q,1")]), "{block}");
     }
 }
 
