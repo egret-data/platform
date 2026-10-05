@@ -19,9 +19,9 @@ use sqlx::{PgConnection, PgPool, Postgres};
 /// failed unlock, a panic or a dropped future, the connection never goes back
 /// to the pool still holding a lock.
 pub(crate) struct LockedSession {
-    pub(super) conn: Option<PoolConnection<Postgres>>,
+    conn: Option<PoolConnection<Postgres>>,
     /// Every lock was released: the connection may go back to the pool.
-    pub(super) unlocked: bool,
+    unlocked: bool,
     /// The keys [`LockedSession::acquire`] took, in the order taken.
     keys: Vec<i64>,
 }
@@ -53,6 +53,13 @@ impl LockedSession {
             session.keys.push(key);
         }
         Ok(session)
+    }
+
+    /// The pruner's own bookkeeping: its `pg_try_advisory_lock` answered
+    /// `false` (nothing to release), or its `pg_advisory_unlock` answered
+    /// `true`. The connection may go back to the pool.
+    pub(super) fn mark_released(&mut self) {
+        self.unlocked = true;
     }
 
     pub(crate) fn conn(&mut self) -> &mut PgConnection {

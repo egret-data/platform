@@ -433,6 +433,7 @@ pub async fn open(fs: &FileStore, grant: &Grant, e: &NsEntry)
 **Files:**
 - Create `src/storage/lock.rs`. Modify `src/storage/prune.rs` (`LockedSession` `:275-294` moves to `lock.rs`; `prune_pass_with` `:242` uses it unchanged in behaviour), `src/storage/nsfiles/store.rs`, `tests/nsfiles_store.rs`, `tests/storage_prune.rs`; create `tests/nsfiles_s3_live.rs`.
 - *(Added 2026-10-05, finding R3 of Task 2's review.)* Modify `crates/egret-config/src/lib.rs`: `WorkflowStorageConfig::validate` refuses a `workflow.storage.prefix` over 200 bytes, naming the setting (a test at 200 accepted, 201 refused); spec §3 (EN and VI) records the budget.
+- *(Added 2026-10-05, Task 3 fix round 1.)* The user's ruling on the review's I2: `move_path` refuses a target with ANY history (live or soft-deleted, at `to`, under it, of the other kind, or a file where a parent goes) with a Conflict naming it, and purges nothing; `to`'s parents are created only after the copies succeed (M5). `soft_delete`, `purge_revisions` and the stale-file purge lock the path's whole chain (I1). `move_path` and `purge_revisions` run on a detached task and run to completion once started (I3). `LockedSession`'s fields are private (`mark_released` for the pruner, M6).
 
 **Interfaces:**
 - Consumes: Task 2's `Grant`, `NsPath`, `NsEntry`, `NsError`, `CreatedBy`, `resolve`, `FileStore::namespace_object_uri`; W9a's `ObjectStore::{put_stream, head, get_stream, delete}` (`crates/egret-storage/src/lib.rs:46-91`).
@@ -472,7 +473,7 @@ pub async fn create_directory(pool: &PgPool, grant: &Grant, path: &NsPath, by: C
 /// §4.3: the latest row of `path` and of every child marked deleted, in ONE statement; objects kept.
 /// NotFound when nothing live is there. Returns what it marked.
 pub async fn soft_delete(pool: &PgPool, grant: &Grant, path: &NsPath) -> Result<Vec<NsEntry>, NsError>;
-/// §4.4: refuses a live target; copies every revision of `from` and of each child to `to` keeping revision
+/// §4.4: refuses a target with any history, live or soft-deleted (I2, 2026-10-05); copies every revision of `from` and of each child to `to` keeping revision
 /// numbers (get_stream -> put_stream, never ObjectStore::copy: its copy source is not URL-encoded,
 /// crates/egret-storage/src/s3.rs:237-252, and is capped at 5 GiB per S3 op), inserting rows as it goes;
 /// on any failure purges every copy made, in reverse order, and reports both paths; then purges the source.

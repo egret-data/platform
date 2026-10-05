@@ -9344,7 +9344,7 @@
      "kestra": "POST path=/_flows/<name>.yml imports a flow (namespace rewritten to the route's); other /_flows paths -> 422 'Forbidden path: …'"
     },
     "move": {
-     "value": "file: every revision moved, numbers kept; directory: every revision of every child (§4.4); onto a live target -> 409 naming it; a missing source -> 404 naming it (store::move_path finds no live row)",
+     "value": "file: every revision moved, numbers kept; directory: every revision of every child (§4.4); onto a target with ANY history, live or soft-deleted (at it, under it, of the other kind, or a file where a parent goes) -> 409 naming it, nothing purged (user ruling 2026-10-05 on Task 3 review I2); a missing source -> 404 naming it (store::move_path finds no live row)",
      "basis": "chosen",
      "why": "spec §2/§9 and the header's approved choices; a missing source -> 404: application of R3 (2026-10-05)",
      "kestra": "file: every revision moved (1,2,3 kept); directory: each child's latest only, as revision 1; onto an existing target -> 500; missing source -> 200 no-op"

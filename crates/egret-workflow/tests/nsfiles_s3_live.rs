@@ -107,11 +107,12 @@ impl ObjectStore for Fence {
 }
 
 /// Runs `case` with a fenced `FileStore` under a fresh throwaway prefix and
-/// a fresh workspace, then deletes exactly that prefix.
+/// a fresh workspace, then deletes exactly that prefix -- also when the case
+/// panics.
 fn fenced<F, Fut>(cfg: StorageConfig, case: F) -> Result<(), String>
 where
     F: FnOnce(egret_metastore::Db, Arc<FileStore>, Grant) -> Fut,
-    Fut: std::future::Future<Output = Result<(), String>>,
+    Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
 {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -138,7 +139,12 @@ where
         });
         let (ws, _) = common::seed_workspace(&db).await;
         let g = authorize(ws, Actor::Api, NS, Access::Write).map_err(|e| e.to_string())?;
-        let result = case(db, fs, g).await;
+        // On its own task: a panic in the case is a JoinError here, and the
+        // cleanup below still runs (fix round 1, M8).
+        let result = match tokio::spawn(case(db, fs, g)).await {
+            Ok(r) => r,
+            Err(e) => Err(format!("the case panicked: {e}")),
+        };
         let removed = fence
             .delete_prefix(&fence.allowed)
             .await

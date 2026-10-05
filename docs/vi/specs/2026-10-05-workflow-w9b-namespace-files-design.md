@@ -21,6 +21,7 @@
 - **(Thêm ngày 2026-10-05, phán quyết R3 của người dùng.) `fileURI` của một thư mục là lỗi nêu path; search như Kestra (chuỗi con không phân biệt hoa thường, chỉ file); `GET …/files/directory` trên path của một file là 400; route GET không bao giờ tạo gì (stats không có path trả một thư mục gốc ảo và không tạo gì)** (§2, §6, §9).
 - **(Thêm ngày 2026-10-05, phán quyết của người dùng về phát hiện I1 trong review Task 2.) Dấu `_files` chỉ có hiệu lực khi đứng trước cặp `executions/{uuid}` đầu tiên.** Sau cặp đó, `_files` là một phần path của execution file, như ở W9a: output của task nằm dưới thư mục `_files/` và input FILE tên `_files` vẫn là execution file. Flow id `_files` bị từ chối lúc publish; pattern id của Kestra vốn đã từ chối `_` đứng đầu, và slug của flow không chứa `_` (§1, §3).
 - **(Thêm ngày 2026-10-05, phán quyết của người dùng về phát hiện I2 trong review Task 2.) Path của namespace file dài tối đa 512 byte UTF-8 ở dạng lưu trữ**, tính cả `/` đầu và `/` cuối của thư mục. Path dài hơn là lỗi của tác giả, nêu path và quy tắc, nên path dài không bao giờ thành lỗi hạ tầng lúc ghi (§2, §3).
+- **(Thêm ngày 2026-10-05, phán quyết của người dùng về phát hiện I2 trong review Task 3.) Move lên một đích có BẤT KỲ lịch sử nào đều bị từ chối**: một dòng còn sống hay các revision đã xoá mềm ở đích, dưới đích (mọi path mà một lần move thư mục sẽ ghi), khác loại ở đích, hay một file ở chỗ một thư mục cha của đích là xung đột loại 409 nêu tên đích; không gì bị purge. Lịch sử ở lại cho tới `PurgeFiles` (R1), nên move không bao giờ ngầm purge nó (§2, §4.4).
 
 **Bàn giao:** một PR (tài liệu + mã), mười task ở §12, thực hiện theo một plan viết sau spec này.
 
@@ -79,6 +80,7 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 | `GET files/directory` trên path của một file trả 200 `[]` (Task 1 đo) | 400 nêu path (§9) | phán quyết R3 của người dùng (2026-10-05) |
 | `GET files/stats` không có path tạo thư mục gốc của namespace ngay lúc đó (Task 1 đo) | trả một thư mục gốc ảo và không tạo gì; không route GET nào tạo gì (§9) | phán quyết R3 của người dùng (2026-10-05): đọc thì không ghi |
 | `PUT files` (move) với nguồn không tồn tại trả 200 và không làm gì (Task 1 đo) | 404 nêu nguồn (§9) | áp dụng R3 (2026-10-05): move nêu một nguồn phải tồn tại. `DELETE` một path không tồn tại vẫn là 200, như Kestra: xoá là idempotent (áp dụng R3 (2026-10-05)) |
+| `PUT files` (move) lên một đích đã tồn tại trả 500 (Task 1 đo) | xung đột 409 nêu tên đích khi đích có bất kỳ lịch sử nào, còn sống hay đã xoá mềm; không gì bị purge (§4.4) | phán quyết của người dùng về I2 trong review Task 3 (2026-10-05): lịch sử ở lại cho tới `PurgeFiles` (R1) |
 | `GET files?path=<một thư mục>` (download) trả 404 "is a directory … no content to read" (Task 1 đo) | 400 nêu path (§9) | áp dụng R3 (2026-10-05): yêu cầu sai loại, như `revisions` của một thư mục |
 | `POST files/directory` chỉ tạo thư mục: các cha không có dòng (`directory?path=/d1` và `stats?path=/d1` là 404 sau khi tạo `/d1/d2`; Task 1 đo) | tạo thư mục **và** một dòng cho mỗi cha còn thiếu (`/d1` trả 200) (§4.2, §9) | "tạo thư mục và các cha" của §9; một listing không bao giờ giấu thư mục đang chứa một thư mục khác (fixture `layout.create_directory`) |
 | `GET files/revisions` của một thư mục trả 404 (Task 1 đo) | 400 nêu path (§9) | áp dụng R3 (2026-10-05): yêu cầu sai loại, như `directory` trên một file |
@@ -119,7 +121,9 @@ Trần: `workflow.storage.max_file_bytes` cho mỗi file, như W9a.
 
 ### 4.4 Move
 
-`move(from, to)` từ chối đích còn sống đã tồn tại; chép mọi revision của `from` (và của mọi con) sang `to` giữ nguyên số revision, chèn dòng dần; rồi purge nguồn (dòng trước, object sau). Lỗi trong lúc chép thì purge mọi bản chép đã làm, theo thứ tự ngược, và báo lỗi nêu cả hai path; không gì của nguồn bị đụng tới trước khi mọi bản chép thành công.
+`move(from, to)` từ chối đích còn sống đã tồn tại *(sửa ngày 2026-10-05, phán quyết của người dùng về I2 trong review Task 3: và một đích có lịch sử đã xoá mềm — ở `to`, dưới nó, khác loại ở nó, hay một file ở chỗ một cha của nó — bằng một xung đột nêu tên nó; không gì bị purge)*; chép mọi revision của `from` (và của mọi con) sang `to` giữ nguyên số revision, chèn dòng dần; rồi purge nguồn (dòng trước, object sau). Lỗi trong lúc chép thì purge mọi bản chép đã làm, theo thứ tự ngược, và báo lỗi nêu cả hai path; không gì của nguồn bị đụng tới trước khi mọi bản chép thành công.
+
+*(Thêm ngày 2026-10-05, Task 3 fix round 1.)* Các thư mục cha còn thiếu của `to` chỉ được tạo sau khi mọi bản chép thành công, nên move thất bại không để lại gì. **Một lần move đã bắt đầu thì chạy đến hết:** nó chạy trên một task tách rời, nên caller bỏ đi (client ngắt kết nối, task hết giờ) không dừng nó giữa các bản chép; chỉ câu trả lời bị mất. Purge cứng chạy theo cùng cách. Xoá mềm và purge khoá cả chuỗi của path (các cha và chính nó), như một writer, nên không cái nào chạy trong lúc move của một tổ tiên đang chép.
 
 ### 4.5 Đọc
 

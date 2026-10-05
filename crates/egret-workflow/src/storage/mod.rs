@@ -83,7 +83,9 @@ impl Default for Caps {
     }
 }
 
-/// The object store an execution's files live in, and where in it.
+/// The object store an execution's files live in, and where in it. `Clone`
+/// shares the store (an `Arc`): W9b's detached moves and purges own a copy.
+#[derive(Clone)]
 pub struct FileStore {
     pub store: Arc<dyn egret_storage::ObjectStore>,
     pub bucket: String,

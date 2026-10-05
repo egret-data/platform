@@ -19,6 +19,7 @@
 - **(Added 2026-10-05, the user's ruling R3.) `fileURI` of a directory is an error naming the path; search is as Kestra's (case-insensitive substring, files only); `GET …/files/directory` on a file's path is 400; GET routes never create anything (stats with no path answers a virtual root directory and creates nothing)** (§2, §6, §9).
 - **(Added 2026-10-05, the user's ruling on Task 2's review, finding I1.) The `_files` marker counts only before the first `executions/{uuid}` pair.** After that pair, `_files` is part of an execution file's path, as in W9a: a task output under a `_files/` directory and a FILE input named `_files` stay execution files. A flow id `_files` is refused at publish; Kestra's id pattern already refuses a leading `_`, and a flow's slug holds no `_` (§1, §3).
 - **(Added 2026-10-05, the user's ruling on Task 2's review, finding I2.) A namespace file path is at most 512 bytes of UTF-8 in its stored form**, counting the leading `/` and a directory's trailing `/`. A longer path is an author error naming the path and the rule, so a long path never becomes an infrastructure error at write time (§2, §3).
+- **(Added 2026-10-05, the user's ruling on Task 3's review, finding I2.) A move onto a target with ANY history is refused**: a live row or soft-deleted revisions at the target, under it (every path a directory move would write), of the other kind at it, or a file where one of its parent directories goes, is a 409-class conflict naming the target; nothing is purged. History stays until `PurgeFiles` (R1), so a move never purges it implicitly (§2, §4.4).
 
 **Delivery:** one PR (docs and code), ten tasks in §12, implemented by a plan written after this spec.
 
@@ -77,6 +78,7 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 | `GET files/directory` on a file's path answers 200 `[]` (Task 1 measured) | 400 naming the path (§9) | the user's ruling R3 (2026-10-05) |
 | `GET files/stats` with no path creates the namespace's root directory on the fly (Task 1 measured) | answers a virtual root directory and creates nothing; no GET route creates anything (§9) | the user's ruling R3 (2026-10-05): a read does not write |
 | `PUT files` (move) of a missing source answers 200 and does nothing (Task 1 measured) | 404 naming the source (§9) | application of R3 (2026-10-05): a move names a source that must exist. A `DELETE` of a missing path stays 200, as Kestra's: a delete is idempotent (application of R3 (2026-10-05)) |
+| `PUT files` (move) onto an existing target answers 500 (Task 1 measured) | a 409 conflict naming the target when it has any history, live or soft-deleted; nothing is purged (§4.4) | the user's ruling on Task 3's review I2 (2026-10-05): history stays until `PurgeFiles` (R1) |
 | `GET files?path=<a directory>` (download) answers 404 "is a directory … no content to read" (Task 1 measured) | 400 naming the path (§9) | application of R3 (2026-10-05): a wrong-kind request, as `revisions` of a directory |
 | `POST files/directory` creates the directory only: its parents get no row (`directory?path=/d1` and `stats?path=/d1` are 404 after creating `/d1/d2`; Task 1 measured) | creates the directory **and** a row for each missing parent (`/d1` answers 200) (§4.2, §9) | §9's "creates the directory and its parents"; a listing never hides a directory that holds one (fixture `layout.create_directory`) |
 | `GET files/revisions` of a directory answers 404 (Task 1 measured) | 400 naming the path (§9) | application of R3 (2026-10-05): a wrong-kind request, as `directory` on a file |
@@ -117,7 +119,9 @@ Caps: `workflow.storage.max_file_bytes` per file, as W9a.
 
 ### 4.4 Move
 
-`move(from, to)` refuses an existing live target; copies every revision of `from` (and of every child) to `to` keeping revision numbers, inserting rows as it goes; then purges the source (rows first, then objects). A failure during the copy purges every copy already made, in reverse order, and reports the failure naming both paths; nothing of the source is touched before every copy has succeeded.
+`move(from, to)` refuses an existing live target *(amended 2026-10-05, the user's ruling on Task 3's review I2: and a target with any soft-deleted history — at `to`, under it, of the other kind at it, or a file where one of its parents goes — with a conflict naming it; nothing is purged)*; copies every revision of `from` (and of every child) to `to` keeping revision numbers, inserting rows as it goes; then purges the source (rows first, then objects). A failure during the copy purges every copy already made, in reverse order, and reports the failure naming both paths; nothing of the source is touched before every copy has succeeded.
+
+*(Added 2026-10-05, Task 3 fix round 1.)* `to`'s missing parent directories are created only after every copy succeeded, so a failed move leaves nothing behind. **A move runs to completion once it has started:** it runs on a detached task, so a caller that goes away (a client that disconnects, a task timeout) does not stop it between copies; the answer alone is lost. A hard purge runs the same way. A soft delete and a purge lock the path's whole chain (its parents and itself), as a writer does, so neither runs while a move of an ancestor is copying.
 
 ### 4.5 Reading
 

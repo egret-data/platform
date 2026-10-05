@@ -255,7 +255,7 @@ pub async fn prune_pass_with(
         .await
         .map_err(db_err)?;
     if !locked {
-        session.unlocked = true; // nothing to release
+        session.mark_released(); // nothing to release
         tracing::debug!("workflow storage prune pass skipped: another pruner holds the lock");
         return Ok(PruneReport::default());
     }
@@ -265,7 +265,9 @@ pub async fn prune_pass_with(
             .bind(PRUNE_LOCK_KEY)
             .fetch_one(session.conn())
             .await;
-    session.unlocked = matches!(unlocked, Ok(true));
+    if matches!(unlocked, Ok(true)) {
+        session.mark_released();
+    }
     result
 }
 

@@ -653,6 +653,9 @@ struct Hooked {
     fail_deletes: AtomicBool,
     /// The next `delete` says it started and waits to be released.
     gate_delete: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    /// The next `put_stream` says it started and waits to be released
+    /// (fix round 1: a move paused mid-copy).
+    gate_put_stream: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
 
 impl Hooked {
@@ -680,6 +683,14 @@ impl Hooked {
                 (k[prefix.len()..].to_string(), b)
             })
             .collect()
+    }
+
+    /// Arms the `put_stream` gate: answers (started, release).
+    fn arm_put_stream_gate(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *self.gate_put_stream.lock().unwrap() = Some((started_tx, release_rx));
+        (started_rx, release_tx)
     }
 
     /// Arms the delete gate: answers (started, release).
@@ -738,6 +749,11 @@ impl ObjectStore for Hooked {
         size_hint: Option<u64>,
     ) -> Result<u64, StorageError> {
         let n = self.put_streams.fetch_add(1, Ordering::SeqCst) + 1;
+        let gate = self.gate_put_stream.lock().unwrap().take();
+        if let Some((started, release)) = gate {
+            let _ = started.send(());
+            let _ = release.await;
+        }
         if n == self.fail_put_stream_at.load(Ordering::SeqCst) {
             return Err(StorageError::S3(format!("{uri}: put number {n} failed")));
         }
@@ -1569,14 +1585,13 @@ async fn move_refuses_a_live_target() {
         (all_rows(&db, ws).await, store.objects(&fs, ws)),
         (rows, before.1)
     );
-    // The control: a soft-deleted target is history, purged, and the move goes.
-    soft_delete(&db.pool, &g, &file("/m/b")).await.unwrap();
-    let moved = move_path(&db.pool, &fs, &g, &file("/m/a"), &file("/m/b"), by())
+    // The control: a fresh target, the move goes.
+    let moved = move_path(&db.pool, &fs, &g, &file("/m/a"), &file("/m/fresh"), by())
         .await
         .unwrap();
     assert_eq!(moved.len(), 1);
-    assert_eq!(rows_of(&db, ws, "/m/b").await, [(1, false)]);
-    assert_eq!(read_rev(&fs, &db, &g, "/m/b", Want::Latest).await, "a");
+    assert_eq!(rows_of(&db, ws, "/m/fresh").await, [(1, false)]);
+    assert_eq!(read_rev(&fs, &db, &g, "/m/fresh", Want::Latest).await, "a");
 }
 
 #[tokio::test]
@@ -1688,13 +1703,13 @@ async fn move_that_fails_mid_copy_purges_its_copies_in_reverse_and_leaves_the_so
     assert_eq!(store.put_streams.load(Ordering::SeqCst), 3);
     store.fail_put_stream_at.store(6, Ordering::SeqCst);
     store.deletes.lock().unwrap().clear();
-    let err = move_path(&db.pool, &fs, &g, &dir("/s"), &dir("/t"), by())
+    let err = move_path(&db.pool, &fs, &g, &dir("/s"), &dir("/n/t"), by())
         .await
         .unwrap_err();
     match &err {
         NsError::Store(m) => {
             assert!(
-                m.contains("'/s/'") && m.contains("'/t/'") && m.contains("nothing was moved"),
+                m.contains("'/s/'") && m.contains("'/n/t/'") && m.contains("nothing was moved"),
                 "{m}"
             );
             assert!(!m.contains("s3://"), "{m}");
@@ -1706,11 +1721,17 @@ async fn move_that_fails_mid_copy_purges_its_copies_in_reverse_and_leaves_the_so
         before,
         "the source is untouched and no copy is left"
     );
-    // The copies made (`/t/a` revisions 1 and 2) were removed last first.
+    // The copies made (`/n/t/a` revisions 1 and 2) were removed last first.
     let prefix = format!("s3://egret-test/workflow/{ws}/w9b/t3/_files");
     assert_eq!(
         *store.deletes.lock().unwrap(),
-        [format!("{prefix}/t/a.v2"), format!("{prefix}/t/a")]
+        [format!("{prefix}/n/t/a.v2"), format!("{prefix}/n/t/a")]
+    );
+    // M5: the parent `/n/` is created only after every copy succeeded.
+    assert_eq!(
+        rows_of(&db, ws, "/n/").await,
+        [],
+        "no parent row is left behind"
     );
 }
 
@@ -1923,4 +1944,254 @@ async fn a_write_with_a_read_grant_is_an_internal_error() {
             .unwrap(),
         1
     );
+}
+
+// ─── Fix round 1 ────────────────────────────────────────────────────────────
+
+/// Spawns `work` and answers its handle and a signal that fires when it
+/// returns (the "nothing stopped it" event of [`blocked_or_started`]).
+fn spawn_signalled<T: Send + 'static>(
+    work: impl std::future::Future<Output = T> + Send + 'static,
+) -> (tokio::task::JoinHandle<T>, oneshot::Receiver<()>) {
+    let (done_tx, done_rx) = oneshot::channel();
+    let h = tokio::spawn(async move {
+        let r = work.await;
+        let _ = done_tx.send(());
+        r
+    });
+    (h, done_rx)
+}
+
+type Moved = Result<Vec<(NsEntry, NsEntry)>, NsError>;
+
+fn spawn_move(
+    db: &Db,
+    fs: &Arc<storage::FileStore>,
+    g: &Grant,
+    from: NsPath,
+    to: NsPath,
+) -> tokio::task::JoinHandle<Moved> {
+    let (pool, fs, g) = (db.pool.clone(), fs.clone(), g.clone());
+    tokio::spawn(async move { move_path(&pool, &fs, &g, &from, &to, by()).await })
+}
+
+/// I1: a move of `/m/` holds `/m`'s key; a soft delete of `/m/x` locks its
+/// chain (`/m`, `/m/x`), so it waits for the move and then finds nothing at
+/// `/m/x` -- the serial order "move, then delete". Before the fix it
+/// answered at once that `/m/x` was deleted while the move made `/t/x` live.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_soft_delete_of_a_child_waits_for_a_move_of_its_parent() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let fs = Arc::new(fs);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/m/x", "x").await;
+    let (copying, release_copy) = store.arm_put_stream_gate();
+    let mover = spawn_move(&db, &fs, &g, dir("/m"), dir("/t"));
+    copying.await.unwrap();
+    let (pool, g2) = (db.pool.clone(), g.clone());
+    let (deleter, mut returned) =
+        spawn_signalled(async move { soft_delete(&pool, &g2, &file("/m/x")).await });
+    let seen = blocked_or_started(&db, ws, "/m", &mut returned).await;
+    release_copy.send(()).unwrap();
+    let moved = mover.await.unwrap().unwrap();
+    let deleted = deleter.await.unwrap().unwrap();
+    assert_eq!(moved.len(), 2);
+    assert!(
+        deleted.is_empty(),
+        "move, then delete: nothing at /m/x: {deleted:?}"
+    );
+    assert_eq!(
+        all_rows(&db, ws).await,
+        [("/t/".into(), 1, false, 0), ("/t/x".into(), 1, false, 1)]
+    );
+    assert_eq!(seen, Seen::Blocked);
+}
+
+/// I1, the purge variant: a purge of `/m/x` waits for the move of `/m/`, then
+/// finds no row (0 purged); the moved revision and its object are intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_purge_of_a_child_waits_for_a_move_of_its_parent() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let fs = Arc::new(fs);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/m/x", "x").await;
+    let (copying, release_copy) = store.arm_put_stream_gate();
+    let mover = spawn_move(&db, &fs, &g, dir("/m"), dir("/t"));
+    copying.await.unwrap();
+    let (pool, fs2, p) = (db.pool.clone(), fs.clone(), grant(ws, Access::Purge));
+    let (purger, mut returned) =
+        spawn_signalled(async move { purge_revisions(&pool, &fs2, &p, &file("/m/x"), &[1]).await });
+    let seen = blocked_or_started(&db, ws, "/m", &mut returned).await;
+    release_copy.send(()).unwrap();
+    assert_eq!(mover.await.unwrap().unwrap().len(), 2);
+    assert_eq!(
+        purger.await.unwrap().unwrap(),
+        0,
+        "move, then purge: no row at /m/x"
+    );
+    assert_eq!(rows_of(&db, ws, "/t/x").await, [(1, false)]);
+    assert_eq!(read_rev(&fs, &db, &g, "/t/x", Want::Latest).await, "x");
+    assert_eq!(seen, Seen::Blocked);
+}
+
+/// I2 (the user's ruling, 2026-10-05): a target with soft-deleted history is
+/// refused, naming it; nothing moves and the history is intact.
+#[tokio::test]
+async fn a_move_onto_a_soft_deleted_file_is_refused_and_keeps_its_history() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/a", "a").await;
+    for body in ["b1", "b2", "b3"] {
+        written(&db, &fs, &g, "/b", body).await;
+    }
+    soft_delete(&db.pool, &g, &file("/b")).await.unwrap();
+    let before = (all_rows(&db, ws).await, store.objects(&fs, ws));
+    let err = move_path(&db.pool, &fs, &g, &file("/a"), &file("/b"), by())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Conflict(m) if m.contains("'/b'") && m.contains("history")),
+        "{err:?}"
+    );
+    assert_eq!((all_rows(&db, ws).await, store.objects(&fs, ws)), before);
+    for (n, body) in [(1, "b1"), (2, "b2"), (3, "b3")] {
+        assert_eq!(read_rev(&fs, &db, &g, "/b", Want::Revision(n)).await, body);
+    }
+}
+
+/// I2 for a directory: one child target (`/t/a`) holds history and nothing
+/// else does -- not even `/t/` (a lone row inserted by SQL) -- and the move
+/// of `/s/` to `/t/` is refused naming it.
+#[tokio::test]
+async fn a_directory_move_onto_a_child_with_history_is_refused() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/s/a", "new").await;
+    written(&db, &fs, &g, "/s/b", "b").await;
+    let old = fs.namespace_object_uri(&g, &file("/t/a"), 1);
+    store.mem.put(&old, b"old".to_vec()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO workflow.namespace_files \
+           (workspace_id, namespace, path, revision, is_directory, size, deleted) \
+         VALUES ($1, $2, '/t/a', 1, false, 3, true)",
+    )
+    .bind(ws)
+    .bind(W)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let before = (all_rows(&db, ws).await, store.objects(&fs, ws));
+    let err = move_path(&db.pool, &fs, &g, &dir("/s"), &dir("/t"), by())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Conflict(m)
+            if m.contains("'/t/a'") && m.contains("'/t/'") && m.contains("nothing was moved")),
+        "{err:?}"
+    );
+    assert_eq!((all_rows(&db, ws).await, store.objects(&fs, ws)), before);
+    assert_eq!(
+        read_rev(&fs, &db, &g, "/t/a", Want::Revision(1)).await,
+        "old"
+    );
+}
+
+/// I3: the caller's future is dropped while the move is paused mid-copy; the
+/// move still runs to completion once released.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_whose_caller_goes_away_still_runs_to_completion() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let fs = Arc::new(fs);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/c/a", "a1").await;
+    written(&db, &fs, &g, "/c/a", "a2").await;
+    written(&db, &fs, &g, "/c/b", "b1").await;
+    let (copying, release_copy) = store.arm_put_stream_gate();
+    let caller = spawn_move(&db, &fs, &g, dir("/c"), dir("/d"));
+    copying.await.unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    let _ = release_copy.send(());
+    // The move releases its session lock on `/c` when it is done: take the
+    // same key as a transaction lock to wait for exactly that.
+    let mut tx = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("w9b:{ws}:{W}:/c"))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        all_rows(&db, ws).await,
+        [
+            ("/d/".into(), 1, false, 0),
+            ("/d/a".into(), 1, false, 2),
+            ("/d/a".into(), 2, false, 2),
+            ("/d/b".into(), 1, false, 2),
+        ]
+    );
+    let keys: Vec<String> = store.objects(&fs, ws).into_iter().map(|(k, _)| k).collect();
+    assert_eq!(
+        keys,
+        [
+            "w9b/t3/_files/d/a",
+            "w9b/t3/_files/d/a.v2",
+            "w9b/t3/_files/d/b"
+        ]
+    );
+}
+
+/// M1: the conflict rule reads the LATEST row. Two revisions, the second
+/// soft-deleted: revision 1 is still `deleted = false`, so a rule reading the
+/// oldest row would answer Conflict.
+#[tokio::test]
+async fn the_conflict_rule_reads_the_latest_row_not_the_oldest() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (_store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/p", "1").await;
+    written(&db, &fs, &g, "/p", "2").await;
+    soft_delete(&db.pool, &g, &file("/p")).await.unwrap();
+    assert_eq!(rows_of(&db, ws, "/p").await, [(1, false), (2, true)]);
+    match write(&db, &fs, &g, "/p", "3", Conflict::Error).await {
+        Ok(Written::Written(e)) => assert_eq!(e.revision, 3),
+        other => panic!("{other:?}"),
+    }
+    soft_delete(&db.pool, &g, &file("/p")).await.unwrap();
+    match write(&db, &fs, &g, "/p", "4", Conflict::Skip).await {
+        Ok(Written::Written(e)) => assert_eq!(e.revision, 4),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// M4: a file over a soft-deleted directory whose children keep history is
+/// refused naming the path; nothing is purged.
+#[tokio::test]
+async fn a_file_over_a_deleted_directory_with_history_under_it_is_refused() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/q/x", "x").await;
+    soft_delete(&db.pool, &g, &dir("/q")).await.unwrap();
+    let before = (all_rows(&db, ws).await, store.objects(&fs, ws));
+    let err = write(&db, &fs, &g, "/q", "file", Conflict::Overwrite)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Conflict(m) if m.contains("'/q'") && m.contains("history")),
+        "{err:?}"
+    );
+    assert_eq!((all_rows(&db, ws).await, store.objects(&fs, ws)), before);
 }
