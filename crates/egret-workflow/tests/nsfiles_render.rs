@@ -1189,7 +1189,24 @@ async fn a_query_failure_is_an_outage_and_its_connection_is_not_kept() {
         failure.contains("permission denied"),
         "a query, not a connect: {failure}"
     );
-    assert!(!snap.holds_a_namespace_connection());
+    // The render's end closes whatever it held, so ask the scope directly,
+    // from a plain thread and with no render end: the connection the query
+    // failed on was let go by the lookup itself.
+    let s = snap.clone();
+    let kept = std::thread::spawn(move || {
+        let args = NsFileArgs {
+            path: "a.txt",
+            namespace: None,
+            revision: None,
+        };
+        let failed = s.namespace_file(&args).is_err();
+        let kept = s.holds_a_namespace_connection();
+        s.end_render();
+        (failed, kept)
+    })
+    .join()
+    .unwrap();
+    assert_eq!(kept, (true, false), "the lookup failed and kept nothing");
 }
 
 /// M6: the stream guard. An object larger than its row says (the row says
