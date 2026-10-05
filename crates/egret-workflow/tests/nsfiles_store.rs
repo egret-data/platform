@@ -2336,17 +2336,6 @@ async fn a_move_whose_parent_insert_fails_after_the_copies_purges_them() {
         .execute(&db.pool)
         .await
         .unwrap();
-    let err = moved.unwrap_err();
-    match &err {
-        NsError::Db(egret_core::Error::Internal(m)) => {
-            let m = m.to_string();
-            assert!(
-                m.contains("'/s/'") && m.contains("'/n/t/'") && m.contains("nothing was moved"),
-                "{m}"
-            )
-        }
-        other => panic!("{other:?}"),
-    }
     assert_eq!(
         (all_rows(&db, ws).await, store.objects(&fs, ws)),
         before,
@@ -2358,4 +2347,15 @@ async fn a_move_whose_parent_insert_fails_after_the_copies_purges_them() {
         [format!("{prefix}/n/t/a.v2"), format!("{prefix}/n/t/a")],
         "the copies were removed last first"
     );
+    let err = moved.unwrap_err();
+    match &err {
+        NsError::Db(egret_core::Error::Internal(m)) => {
+            let m = m.to_string();
+            assert!(
+                m.contains("'/s/'") && m.contains("'/n/t/'") && m.contains("nothing was moved"),
+                "{m}"
+            )
+        }
+        other => panic!("{other:?}"),
+    }
 }
