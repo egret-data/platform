@@ -368,12 +368,16 @@ impl AppStore {
         Ok(())
     }
 
-    /// Called only after the handler resolved the app in the workspace. The
-    /// content (`source`, `layout_json`) now lives in the object store, not
-    /// Postgres; only the revision counter and audit timestamp are read here.
+    /// Called only after the handler resolved the app in the workspace. Prefers
+    /// the object store for `source`/`layout_json`, falling back to the row's own
+    /// columns on `StorageError::NotFound` -- a row from before this code shipped
+    /// has real content in Postgres and nothing in the object store yet, and this
+    /// plan is only safe to ship with that fallback in place (Task 9/S3-1 removes
+    /// it once Task 8/S2's backfill is confirmed to have run everywhere). The
+    /// columns are therefore still selected here, not dead weight.
     pub async fn draft(&self, ws: WorkspaceId, id: Uuid) -> Result<Option<Draft>> {
         let Some(row) = sqlx::query(
-            "SELECT revision, updated_at FROM analytics.app_drafts WHERE app_id = $1",
+            "SELECT source, layout_json, revision, updated_at FROM analytics.app_drafts WHERE app_id = $1",
         )
         .bind(id)
         .fetch_optional(&self.db.pool)
@@ -382,28 +386,29 @@ impl AppStore {
         else {
             return Ok(None);
         };
+        let pg_source: String = row.get("source");
+        let pg_layout_json: Option<String> = row.get("layout_json");
         let revision: i64 = row.get("revision");
         let updated_at: DateTime<Utc> = row.get("updated_at");
 
-        // The draft row exists, so its source key must too; a missing key here is
-        // a real inconsistency, not "empty draft".
         let source = match self.store.get(&self.draft_key(ws, id)).await {
             Ok(bytes) => String::from_utf8(bytes)
                 .map_err(|e| Error::Internal(anyhow::anyhow!("draft {id} source is not UTF-8: {e}")))?,
-            Err(StorageError::NotFound(key)) => {
-                return Err(Error::Internal(anyhow::anyhow!(
-                    "draft {id} has a row but its object-store key {key} is missing"
-                )));
-            }
+            // Pre-S1 row: fall back to the column, which the dual-write keeps
+            // populated for every row, old and new.
+            Err(StorageError::NotFound(_)) => pg_source,
             Err(e) => return Err(store_err(e)),
         };
-        // A missing layout key, in contrast, IS the normal "no layout" state
-        // (matching today's `Option<String>` semantics).
+        // A layout-key miss is ambiguous between "no layout saved" (post-S1) and
+        // "backfill hasn't run yet" (pre-S1) -- both fall back to the column,
+        // which already carries the right answer either way (`None` or the
+        // legacy value), so the two cases collapse correctly without having to
+        // tell them apart.
         let layout_json = match self.store.get(&self.draft_layout_key(ws, id)).await {
             Ok(bytes) => Some(String::from_utf8(bytes).map_err(|e| {
                 Error::Internal(anyhow::anyhow!("draft {id} layout is not UTF-8: {e}"))
             })?),
-            Err(StorageError::NotFound(_)) => None,
+            Err(StorageError::NotFound(_)) => pg_layout_json,
             Err(e) => return Err(store_err(e)),
         };
 
@@ -420,19 +425,19 @@ impl AppStore {
     /// `layout` is the complete new state (`None` clears it) -- the pod patch always
     /// sends marimo's current layout, so there is no "leave unchanged" case to track.
     ///
-    /// Checks `expected` against the current revision BEFORE writing to the object
-    /// store: the object store has no row-level CAS of its own, so a stale caller
-    /// that skipped this check could overwrite a newer save's content in S3 even
-    /// though its own `UPDATE` below loses the Postgres compare-and-swap (this is
-    /// exactly what `save_draft_bumps_revision_and_refuses_stale` caught). Then
-    /// writes to the object store (source, then layout), so a PUT failure fails
-    /// fast with nothing written to Postgres. `source`/`layout_json` are still
-    /// bound into the `UPDATE` below too -- kept as a rollback safety net (a
-    /// revert to the pre-S1 binary reads them from Postgres again). The `UPDATE`'s
-    /// own CAS remains the authority for a genuinely concurrent pair of callers
-    /// that both pass this pre-check at once; it still refuses the loser's revision
-    /// bump, though the loser's content may have landed in S3 after the winner's --
-    /// a narrower window than the sequential case this check closes.
+    /// Locks the draft row (`FOR UPDATE`, same pattern as `publish`'s lock on this
+    /// same table) across the object-store writes, rather than an unlocked
+    /// check-then-write: an unlocked pre-check narrows a stale-write race but does
+    /// not close it -- two ordinary concurrent saves can both pass a pre-check,
+    /// both write to S3, and leave the CAS loser's content visible under the
+    /// winner's revision (caught by `a_losing_concurrent_save_never_becomes_the_visible_draft`).
+    /// With the row locked, a second saver blocks for the first's full duration,
+    /// including its S3 round-trip, and wakes to see the new revision -- so it
+    /// returns `Stale` without ever touching the object store. The trailing
+    /// `UPDATE` is therefore a formality under the lock, not a second
+    /// compare-and-swap; it still binds `source`/`layout_json` into Postgres as
+    /// the rollback safety net (a revert to the pre-S1 binary reads them from
+    /// Postgres again).
     pub async fn save_draft(
         &self,
         ws: WorkspaceId,
@@ -443,19 +448,23 @@ impl AppStore {
         layout: Option<&str>,
     ) -> Result<SaveOutcome> {
         check_len(source)?;
-        let current: Option<i64> =
-            sqlx::query_scalar("SELECT revision FROM analytics.app_drafts WHERE app_id = $1")
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        let revision: i64 =
+            sqlx::query_scalar("SELECT revision FROM analytics.app_drafts WHERE app_id = $1 FOR UPDATE")
                 .bind(id)
-                .fetch_optional(&self.db.pool)
+                .fetch_optional(&mut *tx)
                 .await
-                .map_err(db_err)?;
-        match current {
-            None => return Err(Error::NotFound(format!("draft of app {id}"))),
-            Some(current_revision) if current_revision != expected => {
-                return Ok(SaveOutcome::Stale { current_revision });
-            }
-            Some(_) => {}
+                .map_err(db_err)?
+                .ok_or_else(|| Error::NotFound(format!("draft of app {id}")))?;
+        if revision != expected {
+            // Dropping `tx` here rolls back (a no-op: nothing was changed) and
+            // releases the row lock.
+            return Ok(SaveOutcome::Stale {
+                current_revision: revision,
+            });
         }
+        // Still holding the lock: no other saver can observe or change this row
+        // until this transaction commits or rolls back.
         self.store
             .put(&self.draft_key(ws, id), source.as_bytes().to_vec())
             .await
@@ -473,7 +482,7 @@ impl AppStore {
                 .await
                 .map_err(store_err)?,
         }
-        let saved: Option<i64> = sqlx::query_scalar(
+        let new_revision: i64 = sqlx::query_scalar(
             "UPDATE analytics.app_drafts SET source = $3, layout_json = $5, revision = revision + 1, updated_by = $2, updated_at = now() \
               WHERE app_id = $1 AND revision = $4 RETURNING revision",
         )
@@ -482,22 +491,20 @@ impl AppStore {
         .bind(source)
         .bind(expected)
         .bind(layout)
-        .fetch_optional(&self.db.pool)
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(db_err)?;
-        if let Some(revision) = saved {
-            return Ok(SaveOutcome::Saved { revision });
-        }
-        let current: Option<i64> =
-            sqlx::query_scalar("SELECT revision FROM analytics.app_drafts WHERE app_id = $1")
-                .bind(id)
-                .fetch_optional(&self.db.pool)
-                .await
-                .map_err(db_err)?;
-        match current {
-            Some(current_revision) => Ok(SaveOutcome::Stale { current_revision }),
-            None => Err(Error::NotFound(format!("draft of app {id}"))),
-        }
+        .map_err(db_err)?
+        .ok_or_else(|| {
+            // Unreachable under the row lock: the revision cannot have moved
+            // since the check above. An error, not a silent `Stale`, if it ever is.
+            Error::Internal(anyhow::anyhow!(
+                "draft {id} revision changed under its own row lock"
+            ))
+        })?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(SaveOutcome::Saved {
+            revision: new_revision,
+        })
     }
 
     /// Called only after the handler resolved the app in the workspace. Locking the

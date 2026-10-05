@@ -413,8 +413,9 @@ async fn draft_content_round_trips_through_the_object_store_not_postgres() {
         .await
         .unwrap();
 
-    // The content is NOT in the row's source column (it's unused going forward) --
-    // prove it came from the object store by reading the key directly.
+    // Postgres's source column is still written too (the Task 9 rollback/fallback
+    // safety net), but the object store is preferred when present -- prove this
+    // content came from there by reading the key directly.
     let key = format!(
         "s3://{}/apps/{}/{}/draft.py",
         fx.bucket(),
@@ -426,6 +427,67 @@ async fn draft_content_round_trips_through_the_object_store_not_postgres() {
 
     let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
     assert_eq!(d.source, "x = 2");
+}
+
+/// Part S1 must stay safe to ship on its own, with existing Postgres-only rows
+/// still readable, until Part S2's backfill runs -- so `draft()` falls back to
+/// the row's own column on an object-store miss. Inserted directly via SQL
+/// (NOT through `store_app`/`create`, which writes the object store too as of
+/// this task) to simulate data that genuinely predates this code.
+#[tokio::test]
+async fn a_pre_s1_row_with_no_object_store_content_falls_back_to_postgres() {
+    let fx = Fixture::new().await;
+    let app_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO analytics.apps (workspace_id, name, description) VALUES ($1, 'legacy', '') RETURNING id",
+    )
+    .bind(fx.ws().0)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO analytics.app_drafts (app_id, source) VALUES ($1, 'legacy')")
+        .bind(app_id)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+
+    let d = fx.store().draft(fx.ws(), app_id).await.unwrap().unwrap();
+    assert_eq!(d.source, "legacy");
+}
+
+/// Regression test for a race a task review caught: an unlocked "check revision,
+/// then write S3, then UPDATE" lets two ordinary concurrent saves both pass the
+/// check, both write to S3, and leave the CAS loser's content visible under the
+/// winner's revision. The fix locks the draft row (`SELECT ... FOR UPDATE`, the
+/// same pattern `publish` already uses on this table) across the object-store
+/// writes, so a second saver blocks for the first's full duration and emerges
+/// to see the new revision -- this is real Postgres row-level locking, not a
+/// timing-dependent race, so it does not need an artificial delay in the object
+/// store to prove: both transactions' `FOR UPDATE` requests reach a REAL
+/// Postgres instance over real connections, and Postgres itself serializes
+/// them regardless of how fast `MemStore`'s `put` returns. Repeated (as the
+/// existing `concurrent_publishes_get_distinct_numbers` is) to build confidence
+/// the lock is actually taking effect, not accidentally not-racing.
+#[tokio::test]
+async fn a_losing_concurrent_save_never_becomes_the_visible_draft() {
+    let fx = Fixture::new().await;
+    let st = fx.store();
+    for i in 0..20 {
+        let app = fx.store_app("v1").await;
+        let (a, b) = tokio::join!(
+            st.save_draft(fx.ws(), app, fx.uid(), 1, "a", None),
+            st.save_draft(fx.ws(), app, fx.uid(), 1, "b", None),
+        );
+        let winner = match (a, b) {
+            (Ok(SaveOutcome::Saved { .. }), Ok(SaveOutcome::Stale { .. })) => "a",
+            (Ok(SaveOutcome::Stale { .. }), Ok(SaveOutcome::Saved { .. })) => "b",
+            other => panic!("iteration {i}: expected exactly one Saved and one Stale, got {other:?}"),
+        };
+        let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+        assert_eq!(
+            d.source, winner,
+            "iteration {i}: the CAS loser's content must never become the visible draft"
+        );
+    }
 }
 
 #[tokio::test]
