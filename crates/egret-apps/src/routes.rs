@@ -1025,7 +1025,12 @@ async fn publish(
     refuse_if_trashed(&row)?;
     match st
         .store
-        .publish(ctx.workspace_id, id, ctx.principal.user_id, b.expected_revision)
+        .publish(
+            ctx.workspace_id,
+            id,
+            ctx.principal.user_id,
+            b.expected_revision,
+        )
         .await?
     {
         PublishOutcome::Published(v) => {

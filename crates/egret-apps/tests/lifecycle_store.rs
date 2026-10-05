@@ -480,7 +480,9 @@ async fn a_losing_concurrent_save_never_becomes_the_visible_draft() {
         let winner = match (a, b) {
             (Ok(SaveOutcome::Saved { .. }), Ok(SaveOutcome::Stale { .. })) => "a",
             (Ok(SaveOutcome::Stale { .. }), Ok(SaveOutcome::Saved { .. })) => "b",
-            other => panic!("iteration {i}: expected exactly one Saved and one Stale, got {other:?}"),
+            other => {
+                panic!("iteration {i}: expected exactly one Saved and one Stale, got {other:?}")
+            }
         };
         let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
         assert_eq!(
@@ -621,7 +623,11 @@ async fn restore_republishes_old_source_as_a_new_version() {
     assert_eq!(v3.restored_from, Some(v1.id));
     assert_eq!(v3.from_revision, None);
     assert_eq!(
-        st.version(fx.ws(), app, v3.id).await.unwrap().unwrap().source,
+        st.version(fx.ws(), app, v3.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .source,
         "a"
     );
     // The draft is untouched by a restore.
@@ -816,7 +822,11 @@ async fn deleting_a_publisher_keeps_their_versions_with_publisher_null() {
     .expect("insert publisher");
     let app = fx.store_app("by the publisher").await;
     let st = fx.store();
-    let v = published(st.publish(fx.ws(), app, UserId(publisher), None).await.unwrap());
+    let v = published(
+        st.publish(fx.ws(), app, UserId(publisher), None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(v.published_by, Some(publisher));
 
     let deleted = egret_auth::users::UserRepo::new(fx.db.clone())

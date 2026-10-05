@@ -390,8 +390,9 @@ impl AppStore {
         let updated_at: DateTime<Utc> = row.get("updated_at");
 
         let source = match self.store.get(&self.draft_key(ws, id)).await {
-            Ok(bytes) => String::from_utf8(bytes)
-                .map_err(|e| Error::Internal(anyhow::anyhow!("draft {id} source is not UTF-8: {e}")))?,
+            Ok(bytes) => String::from_utf8(bytes).map_err(|e| {
+                Error::Internal(anyhow::anyhow!("draft {id} source is not UTF-8: {e}"))
+            })?,
             // Pre-S1 row: fall back to the column, which the dual-write keeps
             // populated for every row, old and new.
             Err(StorageError::NotFound(_)) => pg_source,
@@ -447,13 +448,14 @@ impl AppStore {
     ) -> Result<SaveOutcome> {
         check_len(source)?;
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
-        let revision: i64 =
-            sqlx::query_scalar("SELECT revision FROM analytics.app_drafts WHERE app_id = $1 FOR UPDATE")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_err)?
-                .ok_or_else(|| Error::NotFound(format!("draft of app {id}")))?;
+        let revision: i64 = sqlx::query_scalar(
+            "SELECT revision FROM analytics.app_drafts WHERE app_id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| Error::NotFound(format!("draft of app {id}")))?;
         if revision != expected {
             // Dropping `tx` here rolls back (a no-op: nothing was changed) and
             // releases the row lock.
@@ -600,7 +602,11 @@ impl AppStore {
         let pg_source: String = row.get("source");
         let pg_layout_json: Option<String> = row.get("layout_json");
 
-        let source = match self.store.get(&self.version_key(ws, id, summary.version_no)).await {
+        let source = match self
+            .store
+            .get(&self.version_key(ws, id, summary.version_no))
+            .await
+        {
             Ok(bytes) => String::from_utf8(bytes).map_err(|e| {
                 Error::Internal(anyhow::anyhow!(
                     "version {version_id} source is not UTF-8: {e}"
@@ -695,7 +701,10 @@ impl AppStore {
             Ok(()) => {}
             Err(StorageError::NotFound(_)) => {
                 self.store
-                    .put(&self.version_key(ws, id, new_no), source.as_bytes().to_vec())
+                    .put(
+                        &self.version_key(ws, id, new_no),
+                        source.as_bytes().to_vec(),
+                    )
                     .await
                     .map_err(store_err)?;
             }
