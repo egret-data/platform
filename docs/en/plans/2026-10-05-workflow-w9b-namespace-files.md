@@ -834,6 +834,7 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 }
 #[tokio::test(flavor = "multi_thread")] async fn upload_files_glob_past_the_cap_is_refused_naming_it() {}
 #[tokio::test(flavor = "multi_thread")] async fn download_files_copies_into_the_task_prefix_and_indexes_at_commit() {
+    // seeds w9b.tasks with store::put as w9b tasks.DownloadFiles.premise says (/up/*, /globbed/*), then runs dl, dl_dest, dl_string
     // outputs.files: path -> kestra:// URI; rows in execution_files only after apply_outcome commits
 }
 #[tokio::test(flavor = "multi_thread")] async fn download_files_reads_another_namespace_of_the_workspace() {}
@@ -945,7 +946,9 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 #[tokio::test] async fn delete_removes_the_path_and_its_children_and_not_an_emptied_parent() {}
 #[tokio::test] async fn move_onto_a_live_target_is_409() {}
 #[tokio::test] async fn move_of_a_missing_source_is_404_and_delete_of_a_missing_path_is_200() { /* application of R3 (2026-10-05); w9b api.routes.move_missing_source, delete_missing; nothing written */ }
+#[tokio::test] async fn a_download_of_a_directory_is_400_naming_it() { /* application of R3 (2026-10-05); w9b api.routes.get_file_directory */ }
 #[tokio::test] async fn revisions_of_a_directory_is_400_naming_it() { /* application of R3 (2026-10-05); w9b api.routes.revisions_dir */ }
+#[tokio::test] async fn a_zip_upload_leaves_one_file_in_the_listing_and_the_search() { /* w9b api.routes.directory_root, search q='.txt' (chosen, fix round 2): /top.zip, no /inner.txt, no /zdir */ }
 #[tokio::test] async fn stats_revisions_search_and_directory_match_the_fixtures_summary_cells() { /* w9b api.summary: egret's DTOs; search as Kestra's (R3) */ }
 #[tokio::test] async fn a_soft_deleted_paths_revisions_are_listed_flagged_and_a_given_revision_is_served() {
     // R1; w9b api.routes.revisions_after_delete (200, [1] deleted) and get_after_delete_rev1 (200 "gee"); get_after_delete stays 404
@@ -965,7 +968,7 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 
 - [ ] **Step 2: Run them to watch them fail.**
 - [ ] **Step 3: Implement.**
-  - Each handler: `WsContext`, `egret_core::authz::require(&*st.pdp, &ctx, WF_READ | WF_MANAGE)`, then `authorize(ctx.workspace_id.0, Actor::Api, &ns, access)` (the `_files` and pattern refusal → 400), `NsPath::parse_*` (→ 400 naming the rule), then the store function. `NsError` → status: `Author` 400, `NotFound` 404, `Conflict` 409, `TooLarge` 413, `Store`/`Db` 503 (`Db` also logged) — spec §9's error table (application of R3 (2026-10-05)). Exceptions, each pinned by the fixture: `DELETE` of a missing path answers 200 and does nothing (`soft_delete`'s `NotFound` is mapped to 200 on that route only; idempotent, as Kestra's, `api.routes.delete_missing`); `PUT` with a missing source is 404 naming it (`api.routes.move_missing_source`); `revisions` on a directory is 400 naming it (`api.routes.revisions_dir`).
+  - Each handler: `WsContext`, `egret_core::authz::require(&*st.pdp, &ctx, WF_READ | WF_MANAGE)`, then `authorize(ctx.workspace_id.0, Actor::Api, &ns, access)` (the `_files` and pattern refusal → 400), `NsPath::parse_*` (→ 400 naming the rule), then the store function. `NsError` → status: `Author` 400, `NotFound` 404, `Conflict` 409, `TooLarge` 413, `Store`/`Db` 503 (`Db` also logged) — spec §9's error table (application of R3 (2026-10-05)). Exceptions, each pinned by the fixture: `DELETE` of a missing path answers 200 and does nothing (`soft_delete`'s `NotFound` is mapped to 200 on that route only; idempotent, as Kestra's, `api.routes.delete_missing`); `PUT` with a missing source is 404 naming it (`api.routes.move_missing_source`); `revisions` on a directory is 400 naming it (`api.routes.revisions_dir`); a download (`GET …/files`) of a directory is 400 naming it (`api.routes.get_file_directory`, application of R3 (2026-10-05), fix round 2).
   - Upload: the multipart body through `storage::multipart`'s `HeaderBudget` + `http_body_util::Limited` exactly as `start_multipart` (`routes.rs:2112-2150`) builds it; the route gets `DefaultBodyLimit::disable()` as the start route does (`routes.rs:2587`). The file part's name per Task 1 (`api`); its body streams into `put` (`CreatedBy::User(ctx.principal.user_id.0)`).
   - Audit: `workflow_namespace_file:{upload,create_directory,move,delete}`, resource type `workflow_namespace_file`, detail `{namespace, path}` (+ `to` for move).
   - utoipa: every response documented, as W9a's `download_execution_file` (`storage/routes.rs:256-269`).

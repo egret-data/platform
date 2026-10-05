@@ -7175,7 +7175,8 @@
         "/up/m.txt": "kestra:///w9b/tasks/download/executions/5V5Q8dPtgnvRU6Px3gfrrk/tasks/dl/11BQXVXuQS4uUojNiAPZ8e/up/m.txt",
         "/up/sub/n.txt": "kestra:///w9b/tasks/download/executions/5V5Q8dPtgnvRU6Px3gfrrk/tasks/dl/11BQXVXuQS4uUojNiAPZ8e/up/sub/n.txt"
        }
-      }
+      },
+      "premise": "/up/m.txt and /up/sub/n.txt are seeded with store::put: egret's own upload flow fails up_map on its missing-URI entry (tasks.UploadFiles.runs.up_map) and would not write /up/sub/n.txt"
      },
      "dl_dest": {
       "state": "SUCCESS",
@@ -7184,7 +7185,8 @@
         "/globbed/top.txt": "kestra:///w9b/tasks/download/executions/5V5Q8dPtgnvRU6Px3gfrrk/tasks/dl-dest/2jPPgKYfWDIulxLr2UvCuf/dl/globbed/top.txt",
         "/globbed/g/one.txt": "kestra:///w9b/tasks/download/executions/5V5Q8dPtgnvRU6Px3gfrrk/tasks/dl-dest/2jPPgKYfWDIulxLr2UvCuf/dl/globbed/g/one.txt"
        }
-      }
+      },
+      "premise": "/globbed/top.txt and /globbed/g/one.txt come from UploadFiles inside a WorkingDirectory, which egret does not run: the Task 6 test seeds both with store::put (contents 'top', 'g1') before DownloadFiles runs; then the URIs below compare one for one"
      },
      "dl_string": {
       "state": "SUCCESS",
@@ -7222,7 +7224,8 @@
      "files may be a single string; a pattern matching nothing gives files: {}",
      "another namespace (w9b.s1) is readable"
     ],
-    "basis": "measured"
+    "basis": "measured",
+    "premise": "the namespace w9b.tasks holds, before the run, the rows Kestra's held after the upload flow (raw_records.tasks_after.upload): /up/m.txt, /up/sub/n.txt, /rootm.txt, /up2m.txt, /globbed/top.txt, /globbed/g/one.txt, each revision 1. egret's upload flow would not produce them all (UploadFiles' missing-URI refusal, its destination join, and the WorkingDirectory egret does not run), so a Task 6/7 test SEEDS them with store::put (CreatedBy::User) before running the task; the cells then compare one for one"
    },
    "DeleteFiles": {
     "schema": {
@@ -7363,7 +7366,8 @@
      "another namespace (w9b.elsewhere) was deleted from"
     ],
     "basis": "measured, except runs.del_other_ns and rows_after (chosen)",
-    "objects_note": "objects_after is the artifact's filesystem listing: `d` entries are directories, not objects; egret keeps the same file objects (a soft delete removes none)"
+    "objects_note": "objects_after is the artifact's filesystem listing: `d` entries are directories, not objects; egret keeps the same file objects (a soft delete removes none)",
+    "premise": "the namespace w9b.tasks holds, before the run, the rows Kestra's held after the upload flow (raw_records.tasks_after.upload): /up/m.txt, /up/sub/n.txt, /rootm.txt, /up2m.txt, /globbed/top.txt, /globbed/g/one.txt, each revision 1. egret's upload flow would not produce them all (UploadFiles' missing-URI refusal, its destination join, and the WorkingDirectory egret does not run), so a Task 6/7 test SEEDS them with store::put (CreatedBy::User) before running the task; the cells then compare one for one (objects_after is the artifact's listing; under this premise egret keeps the same file objects)"
    },
    "PurgeFiles": {
     "schema": {
@@ -7857,15 +7861,21 @@
     },
     "get_file_directory": {
      "request": "GET /main/namespaces/w9b.api/files?path=/dir1",
-     "status": 404,
-     "headers": {
-      "content-type": "application/problem+json",
-      "x-content-type-options": "nosniff",
-      "content-length": "244"
-     },
-     "body": {
-      "problem_detail": "'/dir1' is a directory in namespace 'w9b.api', it has no content to read.",
-      "problem_title": "Resource not found"
+     "status": 400,
+     "error_names": "/dir1",
+     "basis": "chosen",
+     "why": "application of R3 (2026-10-05): a download of a directory is a wrong-kind request, 400 as revisions on a directory and directory on a file; Kestra answers 404",
+     "kestra": {
+      "status": 404,
+      "headers": {
+       "content-type": "application/problem+json",
+       "x-content-type-options": "nosniff",
+       "content-length": "244"
+      },
+      "body": {
+       "problem_detail": "'/dir1' is a directory in namespace 'w9b.api', it has no content to read.",
+       "problem_title": "Resource not found"
+      }
      }
     },
     "get_file_flows": {
@@ -7951,7 +7961,9 @@
      "body": {
       "path": "/",
       "type": "Directory",
-      "size": 0
+      "size": 0,
+      "revision": 1,
+      "created": null
      },
      "creates": false,
      "basis": "chosen",
@@ -7995,7 +8007,9 @@
      "body": {
       "path": "/",
       "type": "Directory",
-      "size": 0
+      "size": 0,
+      "revision": 1,
+      "created": null
      },
      "creates": false,
      "basis": "chosen",
@@ -8254,21 +8268,34 @@
     "search q='.txt'": {
      "request": "GET /main/namespaces/w9b.api/files/search?q=.txt",
      "status": 200,
-     "headers": {
-      "x-content-type-options": "nosniff",
-      "content-type": "application/json",
-      "content-length": "124"
-     },
-     "body": {
-      "json": [
-       "/del2/a/b/only.txt",
-       "/del/a/b/only.txt",
-       "/dir1/g.txt",
-       "/dir1/sub/f.txt",
-       "/inner.txt",
-       "/Other/CASE.TXT",
-       "/zdir/inner2.txt"
-      ]
+     "set": [
+      "/del/a/b/only.txt",
+      "/del2/a/b/only.txt",
+      "/dir1/g.txt",
+      "/dir1/sub/f.txt",
+      "/Other/CASE.TXT"
+     ],
+     "note": "a set: the order is not part of the contract; the search rule is Kestra's (R3), only the namespace's content differs",
+     "basis": "chosen",
+     "why": "spec §2/§9 and the header's approved choices: a .zip upload is stored as one file, not expanded; this cell was captured on Kestra after /top.zip was expanded (api.routes.post_zip), so Kestra's answer holds /inner.txt and /zdir/inner2.txt, which egret never creates (fix round 2, I-1)",
+     "kestra": {
+      "status": 200,
+      "headers": {
+       "x-content-type-options": "nosniff",
+       "content-type": "application/json",
+       "content-length": "124"
+      },
+      "body": {
+       "json": [
+        "/del2/a/b/only.txt",
+        "/del/a/b/only.txt",
+        "/dir1/g.txt",
+        "/dir1/sub/f.txt",
+        "/inner.txt",
+        "/Other/CASE.TXT",
+        "/zdir/inner2.txt"
+       ]
+      }
      }
     },
     "search_no_q": {
@@ -8287,62 +8314,100 @@
     "directory_root": {
      "request": "GET /main/namespaces/w9b.api/files/directory",
      "status": 200,
-     "headers": {
-      "x-content-type-options": "nosniff",
-      "content-type": "application/json",
-      "content-length": "745"
-     },
-     "body": {
-      "json": [
-       {
-        "type": "Directory",
-        "size": 0,
-        "fileName": "del",
-        "lastModifiedTime": 1791168833191,
-        "creationTime": 1791168833191,
-        "metadata": {}
-       },
-       {
-        "type": "Directory",
-        "size": 0,
-        "fileName": "del2",
-        "lastModifiedTime": 1791168833342,
-        "creationTime": 1791168833342,
-        "metadata": {}
-       },
-       {
-        "type": "Directory",
-        "size": 0,
-        "fileName": "dir1",
-        "lastModifiedTime": 1791168833009,
-        "creationTime": 1791168833009,
-        "metadata": {}
-       },
-       {
-        "type": "File",
-        "size": 5,
-        "fileName": "inner.txt",
-        "lastModifiedTime": 1791168833383,
-        "creationTime": 1791168833383,
-        "metadata": {}
-       },
-       {
-        "type": "Directory",
-        "size": 0,
-        "fileName": "Other",
-        "lastModifiedTime": 1791168833126,
-        "creationTime": 1791168833126,
-        "metadata": {}
-       },
-       {
-        "type": "Directory",
-        "size": 0,
-        "fileName": "zdir",
-        "lastModifiedTime": 1791168833400,
-        "creationTime": 1791168833400,
-        "metadata": {}
-       }
-      ]
+     "entries": [
+      {
+       "path": "/del/",
+       "type": "Directory",
+       "size": 0,
+       "revision": 1
+      },
+      {
+       "path": "/del2/",
+       "type": "Directory",
+       "size": 0,
+       "revision": 1
+      },
+      {
+       "path": "/dir1/",
+       "type": "Directory",
+       "size": 0,
+       "revision": 1
+      },
+      {
+       "path": "/Other/",
+       "type": "Directory",
+       "size": 0,
+       "revision": 1
+      },
+      {
+       "path": "/top.zip",
+       "type": "File",
+       "size": 233,
+       "revision": 1
+      }
+     ],
+     "note": "a set: the order is not part of the contract; each entry is an NsFileStatsDto whose `created` (a timestamp) is not compared; /top.zip's size 233 is the archive the measuring script built (python zipfile, inner.txt + zdir/inner2.txt)",
+     "basis": "chosen",
+     "why": "spec §2/§9 and the header's approved choices: a .zip upload is stored as one file, not expanded; this cell was captured on Kestra after /top.zip was expanded (api.routes.post_zip), so Kestra's answer holds /inner.txt and /zdir/inner2.txt, which egret never creates (fix round 2, I-1)",
+     "kestra": {
+      "status": 200,
+      "headers": {
+       "x-content-type-options": "nosniff",
+       "content-type": "application/json",
+       "content-length": "745"
+      },
+      "body": {
+       "json": [
+        {
+         "type": "Directory",
+         "size": 0,
+         "fileName": "del",
+         "lastModifiedTime": 1791168833191,
+         "creationTime": 1791168833191,
+         "metadata": {}
+        },
+        {
+         "type": "Directory",
+         "size": 0,
+         "fileName": "del2",
+         "lastModifiedTime": 1791168833342,
+         "creationTime": 1791168833342,
+         "metadata": {}
+        },
+        {
+         "type": "Directory",
+         "size": 0,
+         "fileName": "dir1",
+         "lastModifiedTime": 1791168833009,
+         "creationTime": 1791168833009,
+         "metadata": {}
+        },
+        {
+         "type": "File",
+         "size": 5,
+         "fileName": "inner.txt",
+         "lastModifiedTime": 1791168833383,
+         "creationTime": 1791168833383,
+         "metadata": {}
+        },
+        {
+         "type": "Directory",
+         "size": 0,
+         "fileName": "Other",
+         "lastModifiedTime": 1791168833126,
+         "creationTime": 1791168833126,
+         "metadata": {}
+        },
+        {
+         "type": "Directory",
+         "size": 0,
+         "fileName": "zdir",
+         "lastModifiedTime": 1791168833400,
+         "creationTime": 1791168833400,
+         "metadata": {}
+        }
+       ]
+      }
      }
     },
     "directory_dir1": {
@@ -9229,7 +9294,7 @@
      "kestra": "[{\"revision\": N}, …] ascending; 404 'File not found: <path>' when the path's latest row is deleted or the path is a directory"
     },
     "stats_body": {
-     "value": "NsFileStatsDto {path, type: File|Directory, size, revision, created}; no path -> a virtual root directory {path '/', type Directory, size 0}, nothing created; a missing path -> 404",
+     "value": "NsFileStatsDto {path, type: File|Directory, size, revision, created}; no path -> the virtual root {path: \"/\", type: \"Directory\", size: 0, revision: 1, created: null}, nothing created; a missing path -> 404",
      "basis": "chosen",
      "why": "user ruling 2026-10-05 (R3, spec §2/§9): GET routes never create anything; stats with no path answers a virtual root directory and creates nothing; the DTO is plan Task 8's; the virtual root's `created` is None: application of R3 (2026-10-05)",
      "kestra": "{type: File|Directory, size, fileName, lastModifiedTime, creationTime, metadata: {}}; no path -> the namespace root ('_files'), created on the fly"
@@ -9276,7 +9341,7 @@
      "kestra": "soft; walks up and deletes parents left empty, with a parent check that counts rows of OTHER namespaces (a sibling in w9b.api2 stopped the walk-up); a missing path -> 200"
     },
     "error_statuses": {
-     "value": "NsError -> status: Author 400 (a path rule, a refused namespace), NotFound 404, Conflict 409 (a file over a directory, a directory over a file, a move onto a live target, conflict ERROR), TooLarge 413, Store/Db 503; no message names a storage key (plan Task 8)",
+     "value": "spec §9's table: 400 -- a path rule, a refused namespace (a `_files` segment, an invalid one), `/_flows`, a wrong-kind request (a download of a directory, `revisions` of a directory, `directory` of a file); 404 -- no live row (an unknown path, another workspace's namespace, a latest read of a soft-deleted path, a move's missing source); 409 -- a conflict (a file over a directory, a directory over a file, a move onto a live target, conflict ERROR); 413 -- a cap crossed (max_file_bytes, max_namespace_files, the multipart body limit); 503 -- the store or the database unreachable; a DELETE of a missing path is not an error: 200, nothing done; no message names a storage key or another workspace (plan Task 8)",
      "basis": "chosen",
      "why": "application of R3 (2026-10-05); the table is spec §9's",
      "kestra": "IllegalArgumentException -> 422, FileNotFound -> 404, ConflictException -> 409, a file over a directory -> 404 leaking '/app/storage/…' path; ENAMETOOLONG on two 255-char segments -> 500"
@@ -9776,9 +9841,9 @@
   "read": "measured, except kestra_other and binary (chosen); _extra.kestra_own_soft_deleted is measured: egret agrees under R1 (see its note)",
   "four_functions_ns": "measured; *.kestra_own_soft_deleted agree with Kestra under R1 (see their notes)",
   "staging": "measured, except staging.egret (chosen, agrees with 5/5 measured)",
-  "tasks": "schema + measured, except the cells marked chosen (UploadFiles: runs.up_map, runs.up_map_dest_no_slash, runs.wd/mk/up_glob, runs.up_other_ns, rows_after, semantics; DeleteFiles: runs.del_other_ns, rows_after); UploadFiles/DeleteFiles schema.properties.namespace and UploadFiles.publish_without_namespace chosen (ruling D)",
+  "tasks": "schema + measured, except the cells marked chosen (UploadFiles: runs.up_map, runs.up_map_dest_no_slash, runs.wd/mk/up_glob, runs.up_other_ns, rows_after, semantics; DeleteFiles: runs.del_other_ns, rows_after); UploadFiles/DeleteFiles schema.properties.namespace and UploadFiles.publish_without_namespace chosen (ruling D); DownloadFiles and DeleteFiles state a premise (seeded rows)",
   "purge": "measured (before); keepAmount_1_on_soft_deleted, namespacePattern (R2), includeChildNamespaces_a.b_vs_a.bc, default_behavior chosen",
-  "api": "measured, except the api.summary and api.routes cells marked chosen (move_missing_source, revisions_dir: application of R3); read api.routes_basis",
+  "api": "measured, except the api.summary and api.routes cells marked chosen (move_missing_source, revisions_dir, get_file_directory: application of R3; directory_root, search q='.txt': the zip is stored, not expanded); read api.routes_basis",
   "plugin_namespace_use": "code (javap over the jars sha256-checked against plugins.lock; quoted lines per class)",
   "files_segment_namespaces": "measured",
   "rule": "a cell whose egret answer is the spec's choice and not Kestra's carries basis: chosen, egret's answer at the TOP LEVEL of the cell, the reason under why, and Kestra's measured answer under kestra; every chosen cell is listed in chosen_cells (path: dot-joined keys; pointer: RFC 6901, unambiguous where a key holds a dot)",
@@ -9984,6 +10049,11 @@
     "why": "header (approved): PurgeFiles defaults to the flow's own namespace"
    },
    {
+    "path": "api.routes.get_file_directory",
+    "pointer": "/api/routes/get_file_directory",
+    "why": "application of R3 (2026-10-05): a download of a directory is a wrong-kind request, 400 as revisions on a directory and directory on a file; Kestra answers 404"
+   },
+   {
     "path": "api.routes.stats_root_no_path",
     "pointer": "/api/routes/stats_root_no_path",
     "why": "user ruling 2026-10-05 (R3, spec §2/§9): GET routes never create anything; stats with no path answers a virtual root directory and creates nothing"
@@ -9997,6 +10067,16 @@
     "path": "api.routes.revisions_dir",
     "pointer": "/api/routes/revisions_dir",
     "why": "application of R3 (2026-10-05): revisions of a directory is a wrong-kind request, 400 as directory-on-a-file; Kestra answers 404"
+   },
+   {
+    "path": "api.routes.search q='.txt'",
+    "pointer": "/api/routes/search q='.txt'",
+    "why": "spec §2/§9 and the header's approved choices: a .zip upload is stored as one file, not expanded; this cell was captured on Kestra after /top.zip was expanded (api.routes.post_zip), so Kestra's answer holds /inner.txt and /zdir/inner2.txt, which egret never creates (fix round 2, I-1)"
+   },
+   {
+    "path": "api.routes.directory_root",
+    "pointer": "/api/routes/directory_root",
+    "why": "spec §2/§9 and the header's approved choices: a .zip upload is stored as one file, not expanded; this cell was captured on Kestra after /top.zip was expanded (api.routes.post_zip), so Kestra's answer holds /inner.txt and /zdir/inner2.txt, which egret never creates (fix round 2, I-1)"
    },
    {
     "path": "api.routes.directory_of_a_file",
