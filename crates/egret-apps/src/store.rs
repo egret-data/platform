@@ -830,4 +830,75 @@ impl AppStore {
         .await
         .map_err(db_err)
     }
+
+    /// S2-1 backfill only: write a pre-S1 draft row's known-good Postgres
+    /// content to its object-store key(s). Pure S3 writes -- no Postgres
+    /// statement, no transaction/lock -- because the row's Postgres state is
+    /// already correct and this is only catching the object store up. Mirrors
+    /// [`Self::save_draft`]'s S3-write shape (`Some` layout => put, `None` =>
+    /// delete, so a rerun never leaves a stale layout object behind).
+    pub async fn backfill_draft(
+        &self,
+        ws: WorkspaceId,
+        app: Uuid,
+        source: &str,
+        layout: Option<&str>,
+    ) -> Result<()> {
+        self.store
+            .put(&self.draft_key(ws, app), source.as_bytes().to_vec())
+            .await
+            .map_err(store_err)?;
+        match layout {
+            Some(l) => self
+                .store
+                .put(&self.draft_layout_key(ws, app), l.as_bytes().to_vec())
+                .await
+                .map_err(store_err)?,
+            None => self
+                .store
+                .delete(&self.draft_layout_key(ws, app))
+                .await
+                .map_err(store_err)?,
+        }
+        Ok(())
+    }
+
+    /// S2-1 backfill only: write a pre-S1 published version's known-good
+    /// Postgres content to its object-store key(s). Pure S3 writes -- no
+    /// Postgres statement, no transaction/lock -- because the row's Postgres
+    /// state is already correct and this is only catching the object store up.
+    /// Mirrors [`Self::insert_version`]'s S3-write shape (`Some` layout => put,
+    /// `None` => delete, so a rerun never leaves a stale layout object behind).
+    pub async fn backfill_version(
+        &self,
+        ws: WorkspaceId,
+        app: Uuid,
+        version_no: i32,
+        source: &str,
+        layout: Option<&str>,
+    ) -> Result<()> {
+        self.store
+            .put(
+                &self.version_key(ws, app, version_no),
+                source.as_bytes().to_vec(),
+            )
+            .await
+            .map_err(store_err)?;
+        match layout {
+            Some(l) => self
+                .store
+                .put(
+                    &self.version_layout_key(ws, app, version_no),
+                    l.as_bytes().to_vec(),
+                )
+                .await
+                .map_err(store_err)?,
+            None => self
+                .store
+                .delete(&self.version_layout_key(ws, app, version_no))
+                .await
+                .map_err(store_err)?,
+        }
+        Ok(())
+    }
 }

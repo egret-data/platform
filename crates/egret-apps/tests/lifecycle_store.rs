@@ -1016,3 +1016,97 @@ async fn a_pre_s1_drafts_layout_also_falls_back_to_postgres() {
     assert_eq!(d.source, "legacy");
     assert_eq!(d.layout_json.as_deref(), Some("legacy layout"));
 }
+
+// ---------------------------------------------------------------------------
+// Task 8 (S2-1): the one-off backfill of pre-S1 rows into the object store.
+// ---------------------------------------------------------------------------
+
+/// Simulates data from before Part S1 shipped: a draft row and a published
+/// version row inserted directly via SQL (bypassing `AppStore` entirely, so
+/// nothing has ever touched the object store for this app), each with real
+/// `source`/`layout_json` content. `backfill_draft`/`backfill_version` are
+/// pure S3 writes driven by values already read from Postgres -- exactly the
+/// shape `backfill_apps_storage` (the CLI command) uses, minus its own SELECT.
+#[tokio::test]
+async fn backfill_writes_pre_s2_rows_content_to_the_object_store() {
+    let fx = Fixture::new().await;
+    // `fx.app` was inserted raw by the fixture and has no draft/version/object
+    // store content of any kind yet.
+    sqlx::query(
+        "INSERT INTO analytics.app_drafts (app_id, source, layout_json) \
+         VALUES ($1, 'pre-s2 draft source', 'pre-s2 draft layout')",
+    )
+    .bind(fx.app)
+    .execute(&fx.db.pool)
+    .await
+    .expect("insert pre-S2 draft");
+    sqlx::query(
+        "INSERT INTO analytics.app_versions (app_id, version_no, source, layout_json) \
+         VALUES ($1, 1, 'pre-s2 version source', 'pre-s2 version layout')",
+    )
+    .bind(fx.app)
+    .execute(&fx.db.pool)
+    .await
+    .expect("insert pre-S2 version");
+
+    let st = fx.store();
+    st.backfill_draft(
+        fx.ws(),
+        fx.app,
+        "pre-s2 draft source",
+        Some("pre-s2 draft layout"),
+    )
+    .await
+    .expect("backfill_draft");
+    st.backfill_version(
+        fx.ws(),
+        fx.app,
+        1,
+        "pre-s2 version source",
+        Some("pre-s2 version layout"),
+    )
+    .await
+    .expect("backfill_version");
+
+    let draft_source_key = format!(
+        "s3://{}/apps/{}/{}/draft.py",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        fx.app.hyphenated()
+    );
+    let draft_layout_key = format!(
+        "s3://{}/apps/{}/{}/draft.layout.json",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        fx.app.hyphenated()
+    );
+    let version_source_key = format!(
+        "s3://{}/apps/{}/{}/versions/1/source.py",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        fx.app.hyphenated()
+    );
+    let version_layout_key = format!(
+        "s3://{}/apps/{}/{}/versions/1/layout.json",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        fx.app.hyphenated()
+    );
+
+    assert_eq!(
+        fx.mem_store().get(&draft_source_key).await.unwrap(),
+        b"pre-s2 draft source"
+    );
+    assert_eq!(
+        fx.mem_store().get(&draft_layout_key).await.unwrap(),
+        b"pre-s2 draft layout"
+    );
+    assert_eq!(
+        fx.mem_store().get(&version_source_key).await.unwrap(),
+        b"pre-s2 version source"
+    );
+    assert_eq!(
+        fx.mem_store().get(&version_layout_key).await.unwrap(),
+        b"pre-s2 version layout"
+    );
+}

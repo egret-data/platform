@@ -64,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
         // Handled above, before config load.
         Command::Openapi => unreachable!("openapi handled before config load"),
         Command::Migrate => migrate(config).await,
+        Command::BackfillAppsStorage => backfill_apps_storage(config).await,
         Command::Init { force } => init(config, force).await,
         Command::Workspace { action } => workspace_cmd(config, action).await,
     }
@@ -85,6 +86,82 @@ async fn migrate(config: Config) -> anyhow::Result<()> {
         .context("connecting to database")?;
     db.migrate().await.context("running migrations")?;
     tracing::info!("migrations applied");
+    Ok(())
+}
+
+/// One-off backfill (S2-1): copy every existing `app_drafts`/`app_versions`
+/// row's Postgres content into the object store, so Part S3 can later stop
+/// reading/writing those columns. Pure S3 writes per row -- the Postgres state
+/// is already correct, only the object store is catching up. Idempotent: safe
+/// to run more than once (each write is an overwrite, not an append).
+async fn backfill_apps_storage(config: Config) -> anyhow::Result<()> {
+    let db = Db::connect(&config.database.url, config.database.max_connections)
+        .await
+        .context("connecting to database")?;
+    let storage_cfg = egret_storage::StorageConfig {
+        endpoint: config.storage.endpoint.clone(),
+        region: config.storage.region.clone(),
+        bucket: config.storage.bucket.clone(),
+        access_key: config.storage.access_key.clone(),
+        secret_key: config.storage.secret_key.clone(),
+        path_style: config.storage.path_style,
+    };
+    let store: std::sync::Arc<dyn egret_storage::ObjectStore> = std::sync::Arc::new(
+        egret_storage::S3Store::new(&storage_cfg)
+            .await
+            .context("connecting to object storage")?,
+    );
+    let app_store = egret_apps::store::AppStore::new(
+        db.clone(),
+        store,
+        config.storage.bucket.clone(),
+        config.apps.storage.prefix.clone(),
+    );
+
+    let drafts = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, String, Option<String>)>(
+        "SELECT a.workspace_id, d.app_id, d.source, d.layout_json \
+           FROM analytics.app_drafts d JOIN analytics.apps a ON a.id = d.app_id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .context("fetching drafts to backfill")?;
+    let mut n = 0u64;
+    for (ws, app_id, source, layout) in drafts {
+        app_store
+            .backfill_draft(
+                egret_core::WorkspaceId(ws),
+                app_id,
+                &source,
+                layout.as_deref(),
+            )
+            .await
+            .with_context(|| format!("backfilling draft for app {app_id}"))?;
+        n += 1;
+    }
+    tracing::info!(count = n, "drafts backfilled");
+
+    let versions = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, i32, String, Option<String>)>(
+        "SELECT a.workspace_id, v.app_id, v.version_no, v.source, v.layout_json \
+           FROM analytics.app_versions v JOIN analytics.apps a ON a.id = v.app_id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .context("fetching versions to backfill")?;
+    let mut m = 0u64;
+    for (ws, app_id, version_no, source, layout) in versions {
+        app_store
+            .backfill_version(
+                egret_core::WorkspaceId(ws),
+                app_id,
+                version_no,
+                &source,
+                layout.as_deref(),
+            )
+            .await
+            .with_context(|| format!("backfilling version {version_no} for app {app_id}"))?;
+        m += 1;
+    }
+    tracing::info!(count = m, "versions backfilled");
     Ok(())
 }
 
