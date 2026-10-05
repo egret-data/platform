@@ -96,7 +96,7 @@ fn entry(row: Row) -> Result<NsEntry, NsError> {
             "workflow.namespace_files holds {path:?}, which egret would not have written: {why}"
         )))
     };
-    let parsed = parsed.map_err(&bad)?;
+    let parsed = parsed.map_err(bad)?;
     if parsed.as_str() != path {
         return Err(bad("it is not in its stored form".into()));
     }
