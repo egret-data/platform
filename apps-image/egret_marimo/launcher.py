@@ -43,7 +43,7 @@ from pathlib import Path
 from .client import GatewayError
 from .patches import install_config_lock, install_run_mode_ipc_patch
 from .podapi import PodApi
-from .storage import install_storage_patch
+from .storage import install_storage_patch, write_layout_file
 
 EX_USAGE = 64
 EX_DATAERR = 65
@@ -187,11 +187,15 @@ def build(mode: str, secrets: dict[str, str]) -> list[str]:
         shim = _venv_shim()
         app_id = env["EGRET_APP_ID"].lower()
         try:
-            source = api.get_version(app_id, env["EGRET_VERSION_ID"])
+            version = api.get_version(app_id, env["EGRET_VERSION_ID"])
         except GatewayError as e:
             raise LaunchError(EX_UNAVAILABLE, f"cannot fetch version {env['EGRET_VERSION_ID']}: {e}") from e
         app_file = workdir / f"{app_id}.py"
-        app_file.write_text(source, encoding="utf-8")
+        app_file.write_text(version.source, encoding="utf-8")
+        # The run pod never ran the save that produced the layout file the source
+        # references (`layout_file=...` in its header); restore it before marimo
+        # parses that header, or `read_layout_config` finds nothing.
+        write_layout_file(workdir, app_id, version.layout)
         if _run_kernel_mode() == "forced_ipc":
             install_run_mode_ipc_patch(shim)
         target = str(app_file)

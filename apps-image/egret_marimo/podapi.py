@@ -11,6 +11,13 @@ from .client import GatewayError, error_for, transport_error
 class Draft:
     source: str
     revision: int
+    layout: dict | None = None
+
+
+@dataclass
+class Version:
+    source: str
+    layout: dict | None = None
 
 
 class DraftConflict(Exception):
@@ -47,16 +54,19 @@ class PodApi:
 
     def get_draft(self, app_id: str) -> Draft:
         d = self._send("GET", self._url(app_id, "draft")).json()
-        return Draft(source=d["source"], revision=int(d["revision"]))
+        return Draft(source=d["source"], revision=int(d["revision"]), layout=d.get("layout"))
 
-    def put_draft(self, app_id: str, expected_revision: int, source: str) -> int:
+    def put_draft(
+        self, app_id: str, expected_revision: int, source: str, layout: dict | None = None
+    ) -> int:
         r = self._send(
             "PUT",
             self._url(app_id, "draft"),
-            json={"source": source},
+            json={"source": source, "layout": layout},
             headers={"if-match": f'"{expected_revision}"'},
         )
         return int(r.json()["revision"])
 
-    def get_version(self, app_id: str, version_id: str) -> str:
-        return self._send("GET", self._url(app_id, f"versions/{version_id}")).json()["source"]
+    def get_version(self, app_id: str, version_id: str) -> Version:
+        d = self._send("GET", self._url(app_id, f"versions/{version_id}")).json()
+        return Version(source=d["source"], layout=d.get("layout"))

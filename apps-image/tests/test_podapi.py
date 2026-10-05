@@ -39,7 +39,7 @@ def test_wrong_pod_token(egret):
 
 
 def test_get_version_returns_source(api):
-    assert api.get_version("a1", "v1") == "y = 2"
+    assert api.get_version("a1", "v1").source == "y = 2"
 
 
 def test_put_body_is_json_source(api, egret):

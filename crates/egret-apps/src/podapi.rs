@@ -68,6 +68,8 @@ pub fn pod_router() -> Router<PodApiState> {
 #[derive(Debug, Serialize)]
 struct PodVersion {
     source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layout: Option<serde_json::Value>,
     version_no: i32,
 }
 
@@ -156,6 +158,7 @@ async fn draft_get(
         [(ETAG, etag(d.revision))],
         Json(AppDraft {
             source: d.source,
+            layout: d.layout_json.and_then(|s| serde_json::from_str(&s).ok()),
             revision: d.revision,
         }),
     )
@@ -177,9 +180,16 @@ async fn draft_put(
     if b.source.len() > MAX_SOURCE_BYTES {
         return Err(domain(AppsHttpError::SourceTooLarge));
     }
+    let layout_json = b.layout.as_ref().map(|v| v.to_string());
     match st
         .store
-        .save_draft(app_id, target.user, expected, &b.source)
+        .save_draft(
+            app_id,
+            target.user,
+            expected,
+            &b.source,
+            layout_json.as_deref(),
+        )
         .await?
     {
         SaveOutcome::Saved { revision } => {
@@ -213,6 +223,7 @@ async fn version_get(
         .ok_or_else(|| Error::NotFound("version".into()))?;
     Ok(Json(PodVersion {
         source: v.source,
+        layout: v.layout_json.and_then(|s| serde_json::from_str(&s).ok()),
         version_no: v.summary.version_no,
     }))
 }
