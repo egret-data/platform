@@ -806,9 +806,18 @@ async fn a_pruned_uri_is_an_error_naming_it_and_the_window() {
     );
 
     // `fileExists` fails on it (Refused), where a Missing file answers false.
-    let snap = Snapshot::take(&mut conn, w.fs.clone(), w.ws, e, &[a.as_str()], &[], None)
-        .await
-        .unwrap();
+    let snap = Snapshot::take(
+        &mut conn,
+        w.fs.clone(),
+        w.ws,
+        e,
+        &[a.as_str()],
+        &[],
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     match snap.lookup(&a) {
         Err(FileUnavailable::Refused(m)) => assert!(m.contains("17 days"), "{m}"),
         other => panic!("{other:?}"),

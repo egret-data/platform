@@ -1067,6 +1067,7 @@ async fn frozen_input(
         &texts,
         &[],
         None,
+        None,
     )
     .await
     .unwrap();

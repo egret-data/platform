@@ -14,6 +14,17 @@
 //! just-finished task's files). So every `kestra:///…` string the render can
 //! reach without assembling it is resolved first, and an assembled URI that is
 //! not among them is an error naming it (user ruling, 2026-10-01).
+//!
+//! **Updated 2026-10-05 (W9b Task 4): namespace files are looked up at
+//! render.** Execution files stay snapshot-only, for the reason above. A
+//! namespace file is committed outside any execution's transaction (W9b spec
+//! §6), so every connection sees the same rows and nothing is lost by looking
+//! it up late: [`classify`] sends a bare path, an `nsfile://` URI and a
+//! `kestra:///…/_files/…` URI to [`RenderFiles::namespace_file`] and
+//! [`RenderFiles::read_namespace_file`], which `storage::scope::Snapshot`
+//! answers on a connection of its own, opened the first time a template
+//! calls one of them -- so a path assembled at render (`read('a/' ~ x)`) is
+//! read, where an assembled execution URI is not.
 
 use std::fmt;
 use std::sync::Arc;
@@ -64,6 +75,81 @@ pub trait RenderFiles: Send + Sync {
     fn max_read_bytes(&self) -> Option<u64> {
         None
     }
+    /// W9b: a namespace file's metadata (a directory's included, R3).
+    /// `Missing`: well-formed, readable, no live row (`fileExists` answers
+    /// false). `Refused`: everything else.
+    fn namespace_file(&self, args: &NsFileArgs<'_>) -> Result<NsFileMeta, FileUnavailable> {
+        Err(FileUnavailable::Refused(needs_storage(args.path)))
+    }
+    /// W9b: UTF-8 contents, capped at max_read_bytes; non-UTF-8 is an error
+    /// naming the path.
+    fn read_namespace_file(&self, args: &NsFileArgs<'_>) -> Result<String, String> {
+        Err(needs_storage(args.path))
+    }
+    /// The running flow's namespace (from the execution's flow, never a URI);
+    /// `None` outside an execution. W9b Tasks 5, 6, 7 and 10 read it here
+    /// and nowhere else.
+    fn flow_namespace(&self) -> Option<&str> {
+        None
+    }
+}
+
+/// The refusal of a scope that cannot reach namespace files.
+fn needs_storage(path: &str) -> String {
+    format!(
+        "namespace file '{path}' cannot be read: reading a namespace file needs a running \
+         execution with egret's internal storage configured"
+    )
+}
+
+/// W9b: which kind of file a function's `path` names (spec §3, §6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileTarget {
+    Execution,
+    Namespace,
+}
+
+/// A string with no `://`, or starting `nsfile://` -> [`FileTarget::Namespace`];
+/// a `kestra:///` URI whose path has the marker ([`namespace_marker`]: a
+/// `_files` segment at index >= 1, before the first `executions/{uuid}`
+/// pair) -> `Namespace`; anything else -> [`FileTarget::Execution`], where
+/// W9a's rules apply unchanged (and refuse `s3://`, `file://`, …).
+pub fn classify(path: &str) -> FileTarget {
+    if !path.contains("://") || path.starts_with("nsfile://") {
+        return FileTarget::Namespace;
+    }
+    match path.strip_prefix(crate::storage::uri::SCHEME_PREFIX) {
+        Some(rest) => {
+            let segments: Vec<&str> = rest.split('/').collect();
+            if namespace_marker(&segments).is_some() {
+                FileTarget::Namespace
+            } else {
+                FileTarget::Execution
+            }
+        }
+        None => FileTarget::Execution,
+    }
+}
+
+/// What a function was asked for, unparsed: storage parses it (the path
+/// rule, the `nsfile://` authority, the revision).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NsFileArgs<'a> {
+    pub path: &'a str,
+    /// The `namespace` argument.
+    pub namespace: Option<&'a str>,
+    /// The `revision` argument as the template gave it (`2`, `'2'`, `'x'`).
+    pub revision: Option<String>,
+}
+
+/// One namespace file, or a directory (R3), as the functions see it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NsFileMeta {
+    /// A directory's is 0.
+    pub size: u64,
+    pub is_directory: bool,
+    /// `kestra:///…/_files/…[.vN]` of the resolved revision; `""` for a directory.
+    pub uri: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,5 +207,39 @@ pub fn namespace_marker(segments: &[&str]) -> Option<usize> {
     match crate::storage::uri::execution_pair(segments) {
         Some((pair, _)) if pair < marker => None,
         _ => Some(marker),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// W9b spec §3, §6, and the marker rule of Task 2's fix round 1 (I1):
+    /// `_files` counts only before the first `executions/{uuid}` pair.
+    #[test]
+    fn classify_routes_namespace_files_and_leaves_everything_else_to_w9a() {
+        let exec = "kestra:///a/f/executions/0191e1a1-2b3c-7d4e-8f90-0123456789ab";
+        for path in [
+            "data/x.csv",
+            "/data/x.csv",
+            "",
+            "nsfile:///x",
+            "nsfile://other.ns/x",
+            "kestra:///w9b/fn/_files/fu/one.txt",
+            "kestra:///w9b/fn/_files/fu/three.txt.v3",
+            "kestra:///a/_files/x/executions/0191e1a1-2b3c-7d4e-8f90-0123456789ab/f",
+        ] {
+            assert_eq!(classify(path), FileTarget::Namespace, "{path}");
+        }
+        for path in [
+            format!("{exec}/tasks/t/r/out.txt"),
+            format!("{exec}/tasks/t/r/_files/report.csv"),
+            format!("{exec}/inputs/_files/a.txt"),
+            "kestra:///_files/x".to_string(),
+            "s3://bucket/x".to_string(),
+            "file:///etc/passwd".to_string(),
+        ] {
+            assert_eq!(classify(&path), FileTarget::Execution, "{path}");
+        }
     }
 }

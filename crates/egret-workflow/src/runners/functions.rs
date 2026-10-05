@@ -184,8 +184,12 @@ pub(super) fn register(env: &mut Environment<'static>) {
     env.add_function("isFileEmpty", |state: &State, rest: Rest<MjValue>| {
         file_function(FileFunction::IsEmpty, state, rest)
     });
+    // W9b Task 4: `fileURI`, beside the four, over the same scope.
+    env.add_function("fileURI", |state: &State, rest: Rest<MjValue>| {
+        file_function(FileFunction::Uri, state, rest)
+    });
 
-    // W2 Task 8's refusals, eight since W9a Task 4. See [`not_implemented`]
+    // W2 Task 8's refusals, seven since W9b Task 4. See [`not_implemented`]
     // for the message shape and why the oracle cannot check it.
     for (name, refusal) in REFUSED {
         env.add_function(
@@ -227,7 +231,7 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
      fields of the pod spec, readable by anyone with `get pods` in the task namespace, and \
      no other render (inputs, runIf, Log, triggers) resolves secrets.";
 
-/// The eight names egret registers only to refuse, with what each is waiting
+/// The seven names egret registers only to refuse, with what each is waiting
 /// for and who owns it.
 ///
 /// **Two different kinds of absence, deliberately treated the same.** The
@@ -262,11 +266,14 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
 /// the render's file scope; W9 split, so `fileURI` names W9b (namespace
 /// files) and `kv` W9c (the KV store). `http` is left naming W9: it is still
 /// in no package's contents (the programme spec's §9 note).
+///
+/// **Updated 2026-10-05 (W9b Task 4): seven names now.** `fileURI` is
+/// implemented ([`file_function`]) over namespace files, beside the four,
+/// which reach namespace files too; `kv` still names W9c.
 const REFUSED: &[(&str, Refusal)] = &[
     // Registered with a null backing on the built engine.
     ("secret", Refusal::Confined(SECRET_REFUSAL)),
     ("kv", not_yet("the namespace KV store", "W9c")),
-    ("fileURI", not_yet("namespace files", "W9b")),
     ("http", not_yet("an outbound HTTP client", "W9")),
     // Not registered at all on the built engine: `@Inject @Nullable`, guarded.
     (
@@ -295,6 +302,9 @@ enum FileFunction {
     Size,
     Exists,
     IsEmpty,
+    /// W9b Task 4: `fileURI`, namespace files only (an execution's
+    /// `kestra://` URI is returned as given, once readable).
+    Uri,
 }
 
 impl FileFunction {
@@ -304,20 +314,30 @@ impl FileFunction {
             Self::Size => "fileSize",
             Self::Exists => "fileExists",
             Self::IsEmpty => "isFileEmpty",
+            Self::Uri => "fileURI",
         }
+    }
+
+    /// `read` and `fileURI` declare `revision` (`ReadFileFunction.java`,
+    /// `FileURIFunction.java`: `path, namespace, revision`); the other three
+    /// declare `path, namespace` only.
+    fn takes_revision(self) -> bool {
+        matches!(self, Self::Read | Self::Uri)
     }
 }
 
-/// `ReadFileFunction`, `FileSizeFunction`, `FileExistsFunction` and
-/// `IsFileEmptyFunction` over a `kestra://` URI (W9a spec §7.2).
+/// `ReadFileFunction`, `FileSizeFunction`, `FileExistsFunction`,
+/// `IsFileEmptyFunction` and (W9b) `FileURIFunction`.
 ///
 /// They answer from the render's [`FileScope`](super::files::FileScope),
 /// bound as the [`FILE_SCOPE`](super::files::FILE_SCOPE) global -- the pattern
 /// [`fetch_context`] uses for `CONTEXT_SCOPE_NAMES`. No scope means no running
 /// execution (a Flow trigger's `conditions`, a render outside a task run), and
-/// the four refuse by name.
+/// all five refuse by name.
 ///
-/// The answers, `w9a-storage.json` `file_functions` cell by cell:
+/// [`classify`](super::files::classify) picks the route.
+///
+/// **An execution file** (`kestra:///…/executions/…`, W9a spec §7.2):
 ///
 /// | the URI | `read` | `fileSize` | `fileExists` | `isFileEmpty` |
 /// |---|---|---|---|---|
@@ -325,12 +345,25 @@ impl FileFunction {
 /// | readable execution, no such file | error | error | **`false`** | error |
 /// | anything else | error | error | error | error |
 ///
-/// A path with no scheme is a namespace file in Kestra, which W9b provides.
+/// `fileURI` returns it as given when it is readable. A `namespace` or
+/// `revision` argument is ignored there, as Kestra's `kestra` branch ignores
+/// both (`AbstractFileFunction.java:84-87`, `ReadFileFunction.java:50-55`, by
+/// the code; Task 1 did not measure it).
+///
+/// **A namespace file** (W9b spec §6): a bare path, `nsfile:///p`,
+/// `nsfile://other.ns/p` or `kestra:///…/_files/p[.vN]`, plus the `namespace`
+/// argument (with an authority, an error) and, on `read` and `fileURI`,
+/// `revision`. A missing path is `fileExists` `false` and an error naming it
+/// for the other four; a live directory answers `fileSize` 0, `fileExists`
+/// true, `isFileEmpty` true, and `read` and `fileURI` of it are errors naming
+/// the path (R3).
 fn file_function(
     which: FileFunction,
     state: &State,
     rest: Rest<MjValue>,
 ) -> Result<MjValue, MjError> {
+    use super::files::{classify, FileTarget, FileUnavailable, NsFileArgs};
+
     let name = which.name();
     let args = Args::new(rest);
     let Some(path) = args.get("path", 0) else {
@@ -354,25 +387,89 @@ fn file_function(
              for one, do not)."
         )));
     };
-    if !path.contains("://") || path.starts_with("nsfile://") {
-        return Err(pebble_error(format!(
-            "The '{name}' function cannot read '{path}': a path with no scheme, or an \
-             nsfile:// URI, names a namespace file, which egret's W9b package provides."
+    let failed = |message: &str| pebble_error(format!("The '{name}' function failed: {message}"));
+
+    if classify(path) == FileTarget::Execution {
+        let meta = match scope.0.lookup(path) {
+            Ok(meta) => meta,
+            Err(FileUnavailable::Missing(_)) if matches!(which, FileFunction::Exists) => {
+                return Ok(MjValue::from(false));
+            }
+            Err(why) => return Err(failed(why.message())),
+        };
+        return Ok(match which {
+            FileFunction::Read => MjValue::from(scope.0.read_utf8(path).map_err(|m| failed(&m))?),
+            FileFunction::Size => MjValue::from(meta.size),
+            FileFunction::Exists => MjValue::from(true),
+            FileFunction::IsEmpty => MjValue::from(meta.size == 0),
+            FileFunction::Uri => MjValue::from(path),
+        });
+    }
+
+    // A namespace file. `none` is Kestra's absent argument.
+    let namespace = match args.get("namespace", 1).filter(|v| !is_java_null(v)) {
+        None => None,
+        Some(v) => match v.as_str() {
+            Some(s) => Some(s.to_string()),
+            None => {
+                return Err(pebble_error(format!(
+                    "The '{name}' function expects the 'namespace' argument to be a string."
+                )))
+            }
+        },
+    };
+    let revision = if which.takes_revision() {
+        args.get("revision", 2)
+            .filter(|v| !is_java_null(v))
+            .map(|v| v.to_string())
+    } else {
+        None
+    };
+    // `AbstractFileFunction.java:181-191`: Kestra's sentence, before anything
+    // is parsed. Storage takes the authority when there is one.
+    let authority = path
+        .strip_prefix("nsfile://")
+        .is_some_and(|rest| !rest.starts_with('/'));
+    if authority && namespace.is_some() {
+        return Err(failed(&format!(
+            "You cannot set a namespace both as the function argument and inside the URI \
+             ({path})"
         )));
     }
-    let failed = |message: &str| pebble_error(format!("The '{name}' function failed: {message}"));
-    let meta = match scope.0.lookup(path) {
+    let ns_args = NsFileArgs {
+        path,
+        namespace: namespace.as_deref(),
+        revision,
+    };
+    if matches!(which, FileFunction::Read) {
+        return scope
+            .0
+            .read_namespace_file(&ns_args)
+            .map(MjValue::from)
+            .map_err(|m| failed(&m));
+    }
+    let meta = match scope.0.namespace_file(&ns_args) {
         Ok(meta) => meta,
-        Err(super::files::FileUnavailable::Missing(_)) if matches!(which, FileFunction::Exists) => {
+        Err(FileUnavailable::Missing(_)) if matches!(which, FileFunction::Exists) => {
             return Ok(MjValue::from(false));
         }
         Err(why) => return Err(failed(why.message())),
     };
     Ok(match which {
-        FileFunction::Read => MjValue::from(scope.0.read_utf8(path).map_err(|m| failed(&m))?),
         FileFunction::Size => MjValue::from(meta.size),
         FileFunction::Exists => MjValue::from(true),
         FileFunction::IsEmpty => MjValue::from(meta.size == 0),
+        // R3 (the user's ruling, 2026-10-05): a directory has no file URI.
+        FileFunction::Uri if meta.is_directory => {
+            return Err(failed(&format!(
+                "'{path}' is a directory: it has no file URI"
+            )))
+        }
+        // §6: a `kestra://` argument is returned as given, once it parsed
+        // and resolved.
+        FileFunction::Uri if path.starts_with("kestra://") => MjValue::from(path),
+        FileFunction::Uri => MjValue::from(meta.uri),
+        FileFunction::Read => unreachable!("answered above"),
     })
 }
 
@@ -3248,10 +3345,15 @@ mod tests {
     /// forwards to minijinja's unknown-name error while still being
     /// registered — and it costs one line.
     #[test]
-    fn the_eight_refusals_name_themselves_and_their_owner() {
+    fn kv_still_names_w9c_and_the_refused_list_shrinks_to_seven() {
+        // W9b Task 4: `fileURI` left the list; it is a function now.
+        assert!(
+            !REFUSED.iter().any(|(name, _)| *name == "fileURI"),
+            "fileURI is implemented, not refused"
+        );
+        assert_eq!(REFUSED.len(), 7);
         let expected = [
             ("kv", "the namespace KV store", "W9c"),
-            ("fileURI", "namespace files", "W9b"),
             ("http", "an outbound HTTP client", "W9"),
             ("render", "an execution context to render against", "W3"),
             ("renderOnce", "an execution context to render against", "W3"),
@@ -3821,15 +3923,22 @@ mod tests {
         use std::sync::Arc;
 
         use crate::runners::env::{render_bound, render_str, RenderContext};
+        use std::sync::Mutex;
+
         use crate::runners::files::{
-            FileMeta, FileScope, FileUnavailable, RenderFiles, FILE_SCOPE,
+            FileMeta, FileScope, FileUnavailable, NsFileArgs, NsFileMeta, RenderFiles, FILE_SCOPE,
         };
 
         /// A `RenderFiles` over a map: what each URI resolves to, and its text.
+        /// W9b: namespace files by their `path` argument as given, and a spy
+        /// of which route each call took.
         #[derive(Default)]
         struct Fake {
             meta: BTreeMap<String, Result<FileMeta, FileUnavailable>>,
             text: BTreeMap<String, String>,
+            ns: BTreeMap<String, Result<NsFileMeta, FileUnavailable>>,
+            ns_text: BTreeMap<String, String>,
+            calls: Arc<Mutex<Vec<String>>>,
         }
 
         impl Fake {
@@ -3850,6 +3959,40 @@ mod tests {
             fn cx(self) -> RenderContext {
                 RenderContext::new().with_files(FileScope(Arc::new(self)))
             }
+            /// A namespace file at `path` (as the template passes it).
+            fn ns_file(mut self, path: &str, uri: &str, text: &str) -> Self {
+                self.ns.insert(
+                    path.into(),
+                    Ok(NsFileMeta {
+                        size: text.len() as u64,
+                        is_directory: false,
+                        uri: uri.into(),
+                    }),
+                );
+                self.ns_text.insert(path.into(), text.into());
+                self
+            }
+            fn ns_dir(mut self, path: &str) -> Self {
+                self.ns.insert(
+                    path.into(),
+                    Ok(NsFileMeta {
+                        size: 0,
+                        is_directory: true,
+                        uri: String::new(),
+                    }),
+                );
+                self
+            }
+            fn ns_gone(mut self, path: &str, why: FileUnavailable) -> Self {
+                self.ns.insert(path.into(), Err(why));
+                self
+            }
+            fn spy(&self) -> Arc<Mutex<Vec<String>>> {
+                self.calls.clone()
+            }
+            fn record(&self, call: String) {
+                self.calls.lock().unwrap().push(call);
+            }
         }
 
         impl RenderFiles for Fake {
@@ -3868,6 +4011,49 @@ mod tests {
             fn task_prefix(&self) -> Option<&str> {
                 None
             }
+            fn namespace_file(&self, args: &NsFileArgs<'_>) -> Result<NsFileMeta, FileUnavailable> {
+                self.record(format!(
+                    "namespace_file {} ns={:?} rev={:?}",
+                    args.path, args.namespace, args.revision
+                ));
+                self.ns.get(args.path).cloned().unwrap_or_else(|| {
+                    Err(FileUnavailable::Refused(format!(
+                        "{} not in the fake",
+                        args.path
+                    )))
+                })
+            }
+            fn read_namespace_file(&self, args: &NsFileArgs<'_>) -> Result<String, String> {
+                self.record(format!(
+                    "read_namespace_file {} ns={:?} rev={:?}",
+                    args.path, args.namespace, args.revision
+                ));
+                match self.ns.get(args.path) {
+                    Some(Ok(_)) => Ok(self.ns_text[args.path].clone()),
+                    Some(Err(why)) => Err(why.message().to_string()),
+                    None => Err(format!("{} not in the fake", args.path)),
+                }
+            }
+        }
+
+        /// A `RenderFiles` that records which route a call took and
+        /// answers every one: the spy of the routing test.
+        fn spied() -> (RenderContext, Arc<Mutex<Vec<String>>>) {
+            let fake = Fake::default()
+                .file(OWN, "own content")
+                .ns_file("data/x.csv", "kestra:///w9b/fn/_files/data/x.csv", "x")
+                .ns_file(
+                    "nsfile:///data/x.csv",
+                    "kestra:///w9b/fn/_files/data/x.csv",
+                    "x",
+                )
+                .ns_file(
+                    "kestra:///w9b/fn/_files/data/x.csv",
+                    "kestra:///w9b/fn/_files/data/x.csv",
+                    "x",
+                );
+            let spy = fake.spy();
+            (fake.cx(), spy)
         }
 
         const OWN: &str = "kestra:///w9a/storage/ff-main/executions/2G1i2hGvCOdQ5cwWChXwwu/tasks/w/6fG4Jp3jvbNakpAsBdWyGO/own.txt";
@@ -3973,7 +4159,7 @@ mod tests {
 
         #[test]
         fn without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution() {
-            for name in FOUR {
+            for name in FOUR.into_iter().chain(["fileURI"]) {
                 let err = call(name, OWN, &RenderContext::new()).unwrap_err();
                 assert!(
                     err.contains(&format!("The '{name}' function needs a running execution")),
@@ -3983,47 +4169,209 @@ mod tests {
             }
         }
 
+        /// W9b `file_uri.present_rev3`: the URI of the revision storage resolved.
         #[test]
-        fn file_uri_names_w9b_and_kv_names_w9c() {
-            let cx = Fake::default().file(OWN, "own content").cx();
-            let err = render_str("{{ fileURI('a.txt') }}", &cx)
-                .unwrap_err()
-                .to_string();
-            assert!(
-                err.contains("namespace files") && err.contains("W9b"),
-                "{err}"
-            );
-            let err = render_str("{{ kv('k') }}", &cx).unwrap_err().to_string();
-            assert!(
-                err.contains("the namespace KV store") && err.contains("W9c"),
-                "{err}"
+        fn file_uri_returns_the_resolved_revisions_uri() {
+            let cx = Fake::default()
+                .ns_file(
+                    "/fu/three.txt",
+                    "kestra:///w9b/fn/_files/fu/three.txt.v3",
+                    "r3",
+                )
+                .cx();
+            assert_eq!(
+                render_str("{{ fileURI('/fu/three.txt') }}", &cx).unwrap(),
+                "kestra:///w9b/fn/_files/fu/three.txt.v3"
             );
         }
 
-        /// A path with no scheme is a namespace file in Kestra: W9b's, not
-        /// internal storage's.
+        /// §6: a `kestra://` argument comes back as given once it parses --
+        /// storage answers its metadata, and the function returns the
+        /// ARGUMENT, not the metadata's URI (the fake makes them differ).
+        /// An execution URI is returned too, once readable; one storage
+        /// refuses is an error naming it.
         #[test]
-        fn a_path_with_no_scheme_names_namespace_files_and_w9b() {
-            let cx = Fake::default().cx();
-            for name in FOUR {
-                let err = call(name, "data/x.csv", &cx).unwrap_err();
+        fn file_uri_of_a_kestra_uri_returns_it_unchanged_after_it_parses() {
+            let ns_uri = "kestra:///w9b/fn/_files/fu/one.txt";
+            let bad = "kestra:///w9b/fn/_files/a/../b";
+            let cx = Fake::default()
+                .ns_file(ns_uri, "kestra:///somewhere/else", "one")
+                .ns_gone(
+                    bad,
+                    FileUnavailable::Refused(format!(
+                        "{bad} is not a storage URI egret can read: '..'"
+                    )),
+                )
+                .file(OWN, "own content")
+                .cx();
+            assert_eq!(
+                render_str(&format!("{{{{ fileURI('{ns_uri}') }}}}"), &cx).unwrap(),
+                ns_uri
+            );
+            assert_eq!(
+                render_str(&format!("{{{{ fileURI('{OWN}') }}}}"), &cx).unwrap(),
+                OWN
+            );
+            let err = render_str(&format!("{{{{ fileURI('{bad}') }}}}"), &cx)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(bad) && err.contains("'fileURI'"), "{err}");
+        }
+
+        /// `file_uri._extra.authority_and_namespace_arg`,
+        /// `read.nsfile_other_with_namespace_arg` (measured): Kestra's
+        /// sentence, for all five, and storage is never asked. The control:
+        /// the same namespace argument beside `nsfile:///` (no authority) is
+        /// passed on (`read._extra.nsfile_own_with_namespace_arg`).
+        #[test]
+        fn a_namespace_argument_together_with_an_authority_is_an_error() {
+            for name in ["read", "fileSize", "fileExists", "isFileEmpty", "fileURI"] {
+                let fake = Fake::default()
+                    .ns_file(
+                        "nsfile://w9b.other/o.txt",
+                        "kestra:///w9b/other/_files/o.txt",
+                        "o",
+                    )
+                    .ns_file("nsfile:///o.txt", "kestra:///w9b/other/_files/o.txt", "o");
+                let spy = fake.spy();
+                let cx = fake.cx();
+                let err = render_str(
+                    &format!("{{{{ {name}('nsfile://w9b.other/o.txt', namespace='w9b.other') }}}}"),
+                    &cx,
+                )
+                .unwrap_err()
+                .to_string();
                 assert!(
-                    err.contains("data/x.csv") && err.contains("W9b"),
+                    err.contains(
+                        "You cannot set a namespace both as the function argument and inside the URI"
+                    ) && err.contains("nsfile://w9b.other/o.txt"),
                     "{name}: {err}"
+                );
+                assert!(spy.lock().unwrap().is_empty(), "{name}: storage was asked");
+                render_str(
+                    &format!("{{{{ {name}('nsfile:///o.txt', namespace='w9b.other') }}}}"),
+                    &cx,
+                )
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+                let calls = spy.lock().unwrap();
+                assert_eq!(calls.len(), 1, "{name}: {calls:?}");
+                assert!(
+                    calls[0].contains("ns=Some(\"w9b.other\")"),
+                    "{name}: {calls:?}"
                 );
             }
         }
 
-        /// M8: `nsfile://` names a namespace file in Kestra, W9b's like a bare path.
+        /// The route: a bare path, `nsfile://` and a `kestra:///…/_files/…`
+        /// URI reach the namespace methods, with `namespace` and (for read
+        /// and fileURI) `revision` handed on; an execution URI reaches W9a's.
         #[test]
-        fn an_nsfile_uri_names_namespace_files_and_w9b() {
-            let cx = Fake::default().cx();
-            for name in FOUR {
-                let err = call(name, "nsfile:///data/x.csv", &cx).unwrap_err();
+        fn a_bare_path_and_nsfile_reach_the_namespace_route_and_an_execution_uri_does_not() {
+            for (name, method) in [
+                ("read", "read_namespace_file"),
+                ("fileSize", "namespace_file"),
+                ("fileExists", "namespace_file"),
+                ("isFileEmpty", "namespace_file"),
+                ("fileURI", "namespace_file"),
+            ] {
+                for path in [
+                    "data/x.csv",
+                    "nsfile:///data/x.csv",
+                    "kestra:///w9b/fn/_files/data/x.csv",
+                ] {
+                    let (cx, spy) = spied();
+                    render_str(&format!("{{{{ {name}('{path}') }}}}"), &cx)
+                        .unwrap_or_else(|e| panic!("{name}({path}): {e}"));
+                    assert_eq!(
+                        *spy.lock().unwrap(),
+                        vec![format!("{method} {path} ns=None rev=None")],
+                        "{name}({path})"
+                    );
+                }
+                let (cx, spy) = spied();
+                render_str(&format!("{{{{ {name}('{OWN}') }}}}"), &cx)
+                    .unwrap_or_else(|e| panic!("{name}(OWN): {e}"));
+                assert!(spy.lock().unwrap().is_empty(), "{name}: an execution URI");
+            }
+            // `namespace` for all five, positional or named; `revision` on
+            // read and fileURI only (Kestra's declared names).
+            let (cx, spy) = spied();
+            render_str("{{ read('data/x.csv', 'w9b.fn', 2) }}", &cx).unwrap();
+            render_str("{{ fileURI('data/x.csv', revision='x') }}", &cx).unwrap();
+            render_str(
+                "{{ fileSize('data/x.csv', namespace='w9b.fn', revision=2) }}",
+                &cx,
+            )
+            .unwrap();
+            assert_eq!(
+                *spy.lock().unwrap(),
+                vec![
+                    "read_namespace_file data/x.csv ns=Some(\"w9b.fn\") rev=Some(\"2\")"
+                        .to_string(),
+                    "namespace_file data/x.csv ns=None rev=Some(\"x\")".to_string(),
+                    "namespace_file data/x.csv ns=Some(\"w9b.fn\") rev=None".to_string(),
+                ]
+            );
+        }
+
+        /// `four_functions_ns.*.missing`: `fileExists` is `false`; the other
+        /// four fail naming the path.
+        #[test]
+        fn file_exists_of_a_missing_namespace_file_is_false() {
+            let cx = Fake::default()
+                .ns_gone(
+                    "/fu/nope.txt",
+                    FileUnavailable::Missing(
+                        "namespace file '/fu/nope.txt' does not exist in namespace 'w9b.fn'".into(),
+                    ),
+                )
+                .cx();
+            assert_eq!(
+                call("fileExists", "/fu/nope.txt", &cx).as_deref(),
+                Ok("false")
+            );
+            for name in ["read", "fileSize", "isFileEmpty", "fileURI"] {
+                let err = call(name, "/fu/nope.txt", &cx).unwrap_err();
                 assert!(
-                    err.contains("nsfile:///data/x.csv") && err.contains("W9b"),
+                    err.contains("'/fu/nope.txt' does not exist")
+                        && err.contains(&format!("'{name}'")),
                     "{name}: {err}"
                 );
+            }
+            // A refusal is not a missing file: fileExists fails too.
+            let cx = Fake::default()
+                .ns_gone(
+                    "nsfile://w9b._files/x",
+                    FileUnavailable::Refused(
+                        "namespace 'w9b._files' has a segment '_files'".into(),
+                    ),
+                )
+                .cx();
+            let err = call("fileExists", "nsfile://w9b._files/x", &cx).unwrap_err();
+            assert!(err.contains("w9b._files"), "{err}");
+        }
+
+        /// R3: `fileURI` of a directory is an error naming the path; the
+        /// other three answer from the directory's row
+        /// (`four_functions_ns.*.directory`, `file_uri._extra.directory`,
+        /// `uri.directory`).
+        #[test]
+        fn file_uri_of_a_directory_is_an_error_naming_the_path() {
+            let cx = Fake::default().ns_dir("/fu").ns_dir("/d/").cx();
+            for path in ["/fu", "/d/"] {
+                let err = call("fileURI", path, &cx).unwrap_err();
+                assert!(
+                    err.contains(&format!("'{path}' is a directory"))
+                        && err.contains("no file URI"),
+                    "{path}: {err}"
+                );
+            }
+            for (name, want) in [
+                ("fileSize", "0"),
+                ("fileExists", "true"),
+                ("isFileEmpty", "true"),
+            ] {
+                assert_eq!(call(name, "/fu", &cx).as_deref(), Ok(want), "{name}");
             }
         }
 
