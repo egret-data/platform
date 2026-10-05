@@ -62,8 +62,13 @@ use super::path::NsPath;
 
 /// The most memory ONE LIST of patterns may take once compiled
 /// (`RegexSetBuilder::size_limit` and `dfa_size_limit`), shared by every
-/// pattern of the list. Real globs compile to a few KiB each.
-pub const REGEX_SIZE_LIMIT: usize = 1 << 20;
+/// pattern of the list. Real globs compile to 1-10 KiB each; 50 realistic
+/// ones to about 221 KiB. *(The user's ruling, 2026-10-06, Task 5 fix round 2
+/// addendum: 256 KiB, down from 1 MiB.)* Matching costs about linear in this
+/// size × path bytes × paths: the measured worst case at 256 KiB is about
+/// 70-77 s of CPU per list per 10 000 paths of 512 bytes (spec §15), on the
+/// blocking pool.
+pub const REGEX_SIZE_LIMIT: usize = 256 << 10;
 
 /// The most patterns one list (`include`, or `exclude`) may hold. egret's
 /// bound (Kestra has none); a refusal names it.
@@ -579,11 +584,11 @@ mod tests {
         assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
         let err = PathMatcher::new(&[], &list).unwrap_err();
         assert!(err.contains("1000 exclude patterns"), "{err}");
-        // The control: MAX_PATTERNS of them compile, and match.
-        let at_cap = &list[..MAX_PATTERNS];
-        let m = PathMatcher::new(at_cap, &[]).expect("a list at the cap");
-        assert!(m.matches_str(&format!("{}7", "a".repeat(20))));
-        assert!(!m.matches_str(&format!("{}x", "a".repeat(20))));
+        // The control: MAX_PATTERNS small patterns compile (about 94 KiB
+        // together), and match.
+        let at_cap: Vec<String> = (0..MAX_PATTERNS).map(|i| format!("/f{i}.txt")).collect();
+        let m = PathMatcher::new(&at_cap, &[]).expect("a list at the cap");
+        assert!(m.matches_str("/f255.txt") && !m.matches_str("/f256.txt"));
     }
 
     /// Fix round 1, I1: ONE budget per list, not one per pattern. Two
@@ -592,7 +597,8 @@ mod tests {
     #[test]
     fn patterns_each_under_the_limit_are_refused_together_by_one_budget() {
         let one = |s: &str| vec![s.to_string()];
-        let (a, b) = (r"regex:/\pL{20}a", r"regex:/\pL{20}b");
+        // About 168 KiB each alone, about 336 KiB together.
+        let (a, b) = (r"regex:/\pL{4}a", r"regex:/\pL{4}b");
         PathMatcher::new(&one(a), &[]).expect("a alone is under the limit");
         PathMatcher::new(&one(b), &[]).expect("b alone is under the limit");
         let both = vec![a.to_string(), b.to_string()];
@@ -608,6 +614,48 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
         // An include list and an exclude list each have their own budget.
         PathMatcher::new(&one(a), &one(b)).expect("one per list");
+    }
+
+    /// Fix round 2 addendum (the user's ruling of 2026-10-06): the 256 KiB
+    /// budget still takes 50 realistic globs (about 221 KiB together, measured)
+    /// as one list, and every pattern of the fixture as one list.
+    #[test]
+    fn fifty_realistic_globs_compile_under_the_budget() {
+        let mut list = Vec::new();
+        for (i, e) in [
+            "csv", "parquet", "json", "txt", "sql", "py", "yaml", "md", "xlsx", "log",
+        ]
+        .iter()
+        .enumerate()
+        {
+            list.push(format!("**/*.{e}"));
+            list.push(format!("/data/{e}/**"));
+            list.push(format!("reports/2024-??/*.{e}"));
+            list.push(format!("/sub{i}/**/x-?.{e}"));
+            list.push(format!(r"regex:/data/[\w-]{{1,64}}\.{e}"));
+        }
+        assert_eq!(list.len(), 50);
+        let m =
+            PathMatcher::new(&list, &list).expect("50 realistic globs, as includes and excludes");
+        assert!(m.includes.as_ref().unwrap().is_match("/a/b.parquet"));
+        assert!(m
+            .includes
+            .as_ref()
+            .unwrap()
+            .is_match("/reports/2024-07/x.md"));
+        // Every fixture pattern together, as one list.
+        let doc = fixture();
+        let globs = &doc["egret_expected"]["globs"];
+        let mut all = std::collections::BTreeSet::new();
+        for section in ["rows", "rows_without_leading_slash_for_contrast", "runs"] {
+            for row in globs[section].as_array().unwrap() {
+                all.extend(strings(&row["include"]));
+                all.extend(strings(&row["exclude"]));
+            }
+        }
+        let all: Vec<String> = all.into_iter().collect();
+        assert!(all.len() >= 30, "{}", all.len());
+        PathMatcher::new(&all, &[]).expect("every fixture pattern as one list");
     }
 
     /// Fix round 1, M3: `regex:` Perl classes are Java's, ASCII; `.` and

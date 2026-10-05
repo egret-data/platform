@@ -397,7 +397,7 @@ fn split(e: NsError) -> Result<String, NsError> {
 /// `Ok(Err(_))` is the author's failure; `Err` is `NsError::{Store, Db}`,
 /// infrastructure.
 pub async fn stage(
-    conn: &mut PgConnection,
+    pool: &sqlx::PgPool,
     fs: &FileStore,
     workspace: Uuid,
     flow_namespace: &str,
@@ -433,35 +433,51 @@ pub async fn stage(
     let mut listed: u64 = 0;
     // Which namespace each staged path came from, for FAIL's message.
     let mut source: BTreeMap<String, &str> = BTreeMap::new();
-    for (i, ns) in namespaces.iter().enumerate() {
-        let grant = match authorize(
-            workspace,
-            Actor::Flow {
-                namespace: flow_namespace,
-            },
-            ns,
-            Access::Read,
-        ) {
-            Ok(g) => g,
-            Err(why) => return Ok(Err(format!("namespaceFiles.namespaces[{i}]: {why}"))),
-        };
-        let remaining = cap.saturating_sub(listed);
-        let entries = match list_live(conn, &grant, None, true, remaining).await {
-            Ok(entries) => entries,
-            Err(NsError::TooLarge(_)) => {
-                return Ok(Err(format!(
-                    "namespaceFiles: namespaces {} hold more than {cap} namespace files \
-                     together, the most one task stages (workflow.storage.max_namespace_files)",
-                    namespaces[..=i]
-                        .iter()
-                        .map(|n| format!("'{n}'"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )))
-            }
-            Err(e) => return split(e).map(Err),
-        };
-        listed += entries.len() as u64;
+    // Fix round 2 addendum (the user's ruling of 2026-10-06): list every
+    // namespace first, on one connection, and RETURN it before any matching:
+    // matching runs on the blocking pool for as long as the patterns cost
+    // (spec §15) and holds no database connection meanwhile.
+    let mut listings = Vec::with_capacity(namespaces.len());
+    {
+        let mut conn = pool.acquire().await.map_err(|e| {
+            NsError::Db(egret_core::Error::Internal(anyhow::anyhow!(
+                "the database is unavailable: {e}"
+            )))
+        })?;
+        for (i, ns) in namespaces.iter().enumerate() {
+            let grant = match authorize(
+                workspace,
+                Actor::Flow {
+                    namespace: flow_namespace,
+                },
+                ns,
+                Access::Read,
+            ) {
+                Ok(g) => g,
+                Err(why) => return Ok(Err(format!("namespaceFiles.namespaces[{i}]: {why}"))),
+            };
+            let remaining = cap.saturating_sub(listed);
+            let entries = match list_live(&mut conn, &grant, None, true, remaining).await {
+                Ok(entries) => entries,
+                Err(NsError::TooLarge(_)) => {
+                    return Ok(Err(format!(
+                        "namespaceFiles: namespaces {} hold more than {cap} namespace files \
+                         together, the most one task stages (workflow.storage.max_namespace_files)",
+                        namespaces[..=i]
+                            .iter()
+                            .map(|n| format!("'{n}'"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )))
+                }
+                Err(e) => return split(e).map(Err),
+            };
+            listed += entries.len() as u64;
+            listings.push((ns, grant, entries));
+        }
+        drop(conn);
+    }
+    for (ns, grant, entries) in listings {
         for e in matching(&matcher, entries).await {
             let rel_path = e.path.as_str().trim_start_matches('/');
             let rel = if spec.folder_per_namespace {
@@ -787,8 +803,7 @@ pub(crate) mod tests {
         ws: Uuid,
         spec: &RenderedNamespaceFiles,
     ) -> Result<Staged, String> {
-        let mut conn = pool.acquire().await.expect("a connection");
-        stage(&mut conn, fs, ws, OWN, spec)
+        stage(pool, fs, ws, OWN, spec)
             .await
             .expect("no infrastructure failure")
     }
@@ -1028,7 +1043,7 @@ pub(crate) mod tests {
         let mut conn = pool.acquire().await.expect("a connection");
         for (own, rule) in [("a._files", "'_files'"), ("w9b.bad.", "empty segment")] {
             let spec = rendered(&["w9b.s1"], IfExists::Overwrite);
-            let err = stage(&mut conn, &fs, ws, own, &spec)
+            let err = stage(&pool, &fs, ws, own, &spec)
                 .await
                 .expect("no infrastructure failure")
                 .unwrap_err();
@@ -1049,10 +1064,7 @@ pub(crate) mod tests {
         }
         // The control: a good running namespace reads the same file.
         let spec = rendered(&["w9b.s1"], IfExists::Overwrite);
-        let ok = stage(&mut conn, &fs, ws, OWN, &spec)
-            .await
-            .unwrap()
-            .unwrap();
+        let ok = stage(&pool, &fs, ws, OWN, &spec).await.unwrap().unwrap();
         assert_eq!(ok.files.len(), 2);
         let input = resolve_input_uri(&mut conn, &fs, ws, OWN, "nsfile://w9b.s1/x.txt")
             .await
@@ -1099,22 +1111,36 @@ pub(crate) mod tests {
             .map(|i| format!("regex:.*[ab]a[ab]{{{}}}c{i}", i % 40))
             .collect();
 
+        // A pool of ONE connection: while `stage` matches, the ticker can
+        // take it only if `stage` returned it after the listing (fix round 2
+        // addendum).
+        let one = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .expect("a one-connection pool");
         let ticks = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let free = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let ticker = {
-            let ticks = ticks.clone();
+            let (ticks, free, one) = (ticks.clone(), free.clone(), one.clone());
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                     ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if one.try_acquire().is_some() {
+                        free.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
             })
         };
         tokio::task::yield_now().await;
         let started = std::time::Instant::now();
         let before = ticks.load(std::sync::atomic::Ordering::Relaxed);
-        let staged = run_stage(&pool, &fs, ws, &spec).await.unwrap();
+        let free_before = free.load(std::sync::atomic::Ordering::Relaxed);
+        let staged = run_stage(&one, &fs, ws, &spec).await.unwrap();
         let took = started.elapsed();
         let ticked = ticks.load(std::sync::atomic::Ordering::Relaxed) - before;
+        let freed = free.load(std::sync::atomic::Ordering::Relaxed) - free_before;
         ticker.abort();
         assert!(staged.files.is_empty());
         // The match must dominate, or the test proves nothing.
@@ -1128,6 +1154,13 @@ pub(crate) mod tests {
             ticked >= floor,
             "{ticked} ticks in {took:?} (at least {floor} expected): the match ran on \
              the async worker"
+        );
+        // The connection was back in the pool for most of the match.
+        assert!(
+            freed >= floor / 2,
+            "the one connection was free on {freed} of {ticked} ticks in {took:?} (at \
+             least {} expected): stage held it while matching",
+            floor / 2
         );
     }
     const FILES: usize = 40;

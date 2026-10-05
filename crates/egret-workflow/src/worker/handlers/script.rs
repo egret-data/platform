@@ -397,26 +397,30 @@ impl Script {
         let outage = |e: NsError| {
             Error::Internal(anyhow::anyhow!("{type_id}: staging namespace files: {e}"))
         };
-        let mut conn = pool.acquire().await.map_err(|e| {
-            Error::Internal(anyhow::anyhow!(
-                "{type_id}: staging namespace files: the database is unavailable: {e}"
-            ))
-        })?;
         let mut resolved = BTreeMap::new();
-        for (name, uri) in ns_inputs {
-            match resolve_input_uri(&mut conn, files, task.workspace_id, own, &uri)
-                .await
-                .map_err(outage)?
-            {
-                Ok(input) => {
-                    resolved.insert(name, input);
+        if !ns_inputs.is_empty() {
+            let mut conn = pool.acquire().await.map_err(|e| {
+                Error::Internal(anyhow::anyhow!(
+                    "{type_id}: staging namespace files: the database is unavailable: {e}"
+                ))
+            })?;
+            for (name, uri) in ns_inputs {
+                match resolve_input_uri(&mut conn, files, task.workspace_id, own, &uri)
+                    .await
+                    .map_err(outage)?
+                {
+                    Ok(input) => {
+                        resolved.insert(name, input);
+                    }
+                    Err(why) => return Ok(Err(fail(format!("`inputFiles` {name:?}: {why}")))),
                 }
-                Err(why) => return Ok(Err(fail(format!("`inputFiles` {name:?}: {why}")))),
             }
         }
+        // `stage` takes its own connection for the listing and returns it
+        // before matching (fix round 2 addendum).
         let staged = match block {
             None => Staged::default(),
-            Some(b) => match stage(&mut conn, files, task.workspace_id, own, &b)
+            Some(b) => match stage(pool, files, task.workspace_id, own, &b)
                 .await
                 .map_err(outage)?
             {
@@ -424,7 +428,6 @@ impl Script {
                 Err(why) => return Ok(Err(fail(why))),
             },
         };
-        drop(conn);
         for line in &staged.warnings {
             task.log.line(LogLevel::Warn, line).await;
         }
