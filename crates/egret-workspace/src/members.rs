@@ -187,13 +187,12 @@ impl MemberRepo {
         ws: WorkspaceId,
         roles: &[String],
     ) -> Result<Vec<i64>> {
-        let mut services =
-            egret_perm_compile::affected_services_for_workspace_members(&mut **tx, ws.0)
-                .await
-                .map_err(compile_err)?;
+        let mut services = egret_perm_compile::affected_services_for_workspace_members(tx, ws.0)
+            .await
+            .map_err(compile_err)?;
         for role in roles {
             services.extend(
-                egret_perm_compile::affected_services_for_role_membership(&mut **tx, role)
+                egret_perm_compile::affected_services_for_role_membership(tx, role)
                     .await
                     .map_err(compile_err)?,
             );

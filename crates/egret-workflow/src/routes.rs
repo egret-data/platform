@@ -1996,6 +1996,7 @@ fn core_refusal(e: Error) -> axum::response::Response {
         (status = 503, description = "Internal storage failed while an uploaded file was being stored. Nothing is created; the request can be retried.", body = egret_core::http::ErrorBody),
     ),
 )]
+#[allow(clippy::result_large_err)]
 async fn start_flow_execution(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
@@ -2109,6 +2110,7 @@ async fn start_flow_execution(
 /// has no execution for the pruner to find. (A client that disconnects drops
 /// this future: the in-flight upload is aborted by `put_stream`'s guard and
 /// any finished one is left for the orphan sweep.)
+#[allow(clippy::result_large_err)]
 async fn start_multipart(
     st: &WorkflowState,
     workspace: Uuid,
@@ -2171,7 +2173,7 @@ async fn start_multipart(
     started
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
 async fn read_parts_and_start(
     st: &WorkflowState,
     fs: &crate::storage::FileStore,
@@ -2273,6 +2275,7 @@ async fn read_parts_and_start(
 }
 
 /// A text part, whole, at most [`MAX_TEXT_PART_BYTES`], as UTF-8.
+#[allow(clippy::result_large_err)]
 async fn read_text_part(
     mut field: axum::extract::multipart::Field<'_>,
     name: &str,

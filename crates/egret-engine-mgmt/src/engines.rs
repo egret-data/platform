@@ -6961,9 +6961,9 @@ mod tests {
     /// other field, and an engine created before the surface existed stores
     /// `null` for both — which the provisioner reads as "default StorageClass
     /// + default size". That says nothing about whether such an engine gets a
-    /// PVC: it does NOT, because it carries no `feMetaPersistent` marker (see
-    /// `build_starrocks_spec_marks_only_engines_it_creates`). These two fields
-    /// only choose the class and size of a volume the marker decides to render.
+    ///   PVC: it does NOT, because it carries no `feMetaPersistent` marker (see
+    ///   `build_starrocks_spec_marks_only_engines_it_creates`). These two fields
+    ///   only choose the class and size of a volume the marker decides to render.
     #[test]
     fn build_starrocks_spec_carries_fe_meta_storage_knobs() {
         let created = build_starrocks_spec(&StarRocksConfigBody::default(), None);

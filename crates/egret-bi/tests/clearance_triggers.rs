@@ -242,7 +242,7 @@ async fn setting_a_clearance_compiles_the_deny_with_no_second_write() {
         "nothing may be compiled before the gate is set, or this test proves nothing"
     );
 
-    pol.set_policy(tag.id, &[role_name.clone()], &[], None)
+    pol.set_policy(tag.id, std::slice::from_ref(&role_name), &[], None)
         .await
         .expect("set the gate");
 

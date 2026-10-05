@@ -5346,6 +5346,7 @@ fn the_golden_populations_are_derived_recursed_and_unrecursed() {
     fn count(entries: &[GoldenEntry], recurse: bool) -> (usize, usize, usize, usize, usize) {
         let (mut execs, mut runs, mut atts) = (0usize, 0usize, 0usize);
         let (mut paused_atts, mut restarted_runs) = (0usize, 0usize);
+        #[allow(clippy::too_many_arguments)]
         fn sub(
             execution: &[String],
             runs_in: &[GoldenRun],

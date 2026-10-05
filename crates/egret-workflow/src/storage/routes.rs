@@ -153,6 +153,7 @@ fn no_store() -> Response {
 /// The object's stream. A missing object behind an index row is a 404 (the
 /// file is gone, e.g. pruned); any other store failure is a 503 naming the
 /// `kestra://` URI and never the bucket, key or the store's own message.
+#[allow(clippy::result_large_err)]
 async fn open(
     fs: &FileStore,
     workspace: Uuid,
@@ -267,6 +268,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for NamedErrors<R> {
         (status = 503, description = "Internal storage is unavailable or not configured; the request can be retried.", body = egret_core::http::ErrorBody),
     ),
 )]
+#[allow(clippy::result_large_err)]
 pub(crate) async fn download_execution_file(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
@@ -348,6 +350,7 @@ pub(crate) async fn execution_file_metas(
         (status = 503, description = "Internal storage is unavailable or not configured; the request can be retried.", body = egret_core::http::ErrorBody),
     ),
 )]
+#[allow(clippy::result_large_err)]
 pub(crate) async fn preview_execution_file(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
