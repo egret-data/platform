@@ -136,7 +136,9 @@ pub fn classify(path: &str) -> FileTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NsFileArgs<'a> {
     pub path: &'a str,
-    /// The `namespace` argument.
+    /// The `namespace` argument. Beside an `nsfile://` authority it is the
+    /// caller's to refuse (Kestra's sentence, in `functions::file_function`);
+    /// storage takes the authority.
     pub namespace: Option<&'a str>,
     /// The `revision` argument as the template gave it (`2`, `'2'`, `'x'`).
     pub revision: Option<String>,

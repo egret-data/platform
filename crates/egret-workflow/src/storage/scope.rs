@@ -272,14 +272,11 @@ impl Snapshot {
                      namespace) or nsfile://<namespace>/<path>"
                 )));
             }
+            // An authority wins. A `namespace` argument beside one is refused
+            // by the caller, before this is asked (`runners::functions`'s
+            // `file_function`, `AbstractFileFunction.java:181-191`).
             let namespace = if authority.is_empty() {
                 or_own(args.namespace)
-            } else if args.namespace.is_some() {
-                // `AbstractFileFunction.java:181-191`, Kestra's sentence.
-                return Err(refused(format!(
-                    "You cannot set a namespace both as the function argument and inside the \
-                     URI ({raw})"
-                )));
             } else {
                 authority.to_string()
             };
