@@ -56,6 +56,9 @@ static DB_OPTIONS: OnceLock<Arc<PgConnectOptions>> = OnceLock::new();
 /// Connect options for render-time lookups (Task 4). Set once by egret-bin
 /// from its pool. A second call returns the options it was given back, and
 /// the first stays.
+// The interface hands the refused options back, as `storage::install` hands
+// back its store; a boot error, never a hot path.
+#[allow(clippy::result_large_err)]
 pub fn install_db(opts: PgConnectOptions) -> Result<(), PgConnectOptions> {
     let mut given = Some(opts);
     DB_OPTIONS.get_or_init(|| Arc::new(given.take().expect("taken once")));
