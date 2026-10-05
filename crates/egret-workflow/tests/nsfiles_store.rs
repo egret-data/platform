@@ -1197,20 +1197,19 @@ async fn rewriting_a_soft_deleted_path_creates_the_next_revision_live() {
     );
 }
 
-/// §4.2 step 4, both ways and at a parent: a live row of the other kind is a
-/// conflict naming the path; a soft-deleted one is purged first (a file's
-/// objects with its rows).
+/// §4.2 step 4: a live directory where a file is written is a conflict
+/// naming the path; a soft-deleted directory with nothing under it has no
+/// history (no object, no revisions), so its row is removed and the file is
+/// written.
 #[tokio::test]
-async fn a_live_directory_where_a_file_is_written_is_a_conflict_and_a_deleted_one_is_purged_first()
+async fn a_live_directory_where_a_file_is_written_is_a_conflict_and_a_lone_deleted_one_is_removed()
 {
     let Some(db) = common::db().await else { return };
     let (ws, _) = common::seed_workspace(&db).await;
-    let (store, fs) = hooked_fs(None);
+    let (_store, fs) = hooked_fs(None);
     let g = grant(ws, Access::Write);
-    let mut c = conn(&db).await;
 
-    // A file where a live directory is.
-    create_directory(&db.pool, &fs, &g, &dir("/d"), by())
+    create_directory(&db.pool, &g, &dir("/d"), by())
         .await
         .unwrap();
     let err = write(&db, &fs, &g, "/d", "x", Conflict::Overwrite)
@@ -1221,46 +1220,82 @@ async fn a_live_directory_where_a_file_is_written_is_a_conflict_and_a_deleted_on
         "{err:?}"
     );
     assert_eq!(rows_of(&db, ws, "/d").await, []);
-    // ... deleted: the directory's row goes, the file is written.
     soft_delete(&db.pool, &g, &dir("/d")).await.unwrap();
     assert_eq!(written(&db, &fs, &g, "/d", "file").await.revision, 1);
     assert_eq!(
         rows_of(&db, ws, "/d/").await,
         [],
-        "the deleted directory was purged"
+        "the lone deleted directory row was removed"
     );
+}
 
-    // A directory where a live file is.
+/// The user's ruling (2026-10-05), a directory over a file: a live file is a
+/// conflict; a soft-deleted file still has its revisions, so creating the
+/// directory is refused naming it, and nothing is purged. `PurgeFiles`
+/// (`purge_revisions`) first, then the directory can be created.
+#[tokio::test]
+async fn a_directory_over_a_soft_deleted_file_is_refused_until_it_is_purged() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
     written(&db, &fs, &g, "/f", "f1").await;
     written(&db, &fs, &g, "/f", "f2").await;
-    let err = create_directory(&db.pool, &fs, &g, &dir("/f"), by())
+    let err = create_directory(&db.pool, &g, &dir("/f"), by())
         .await
         .unwrap_err();
     assert!(
         matches!(&err, NsError::Conflict(m) if m.contains("'/f'") && m.contains("a file already exists")),
         "{err:?}"
     );
-    // ... deleted: every revision's row and object goes first.
+
     soft_delete(&db.pool, &g, &file("/f")).await.unwrap();
-    let d = create_directory(&db.pool, &fs, &g, &dir("/f"), by())
+    let before = (all_rows(&db, ws).await, store.objects(&fs, ws));
+    let err = create_directory(&db.pool, &g, &dir("/f"), by())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Conflict(m)
+            if m.contains("'/f'") && m.contains("deleted file") && m.contains("purge it first")),
+        "{err:?}"
+    );
+    assert_eq!(
+        (all_rows(&db, ws).await, store.objects(&fs, ws)),
+        before,
+        "nothing was purged"
+    );
+    for (n, body) in [(1, "f1"), (2, "f2")] {
+        assert_eq!(read_rev(&fs, &db, &g, "/f", Want::Revision(n)).await, body);
+    }
+
+    // To reuse the path, the author purges first.
+    let p = grant(ws, Access::Purge);
+    assert_eq!(
+        purge_revisions(&db.pool, &fs, &p, &file("/f"), &[1, 2])
+            .await
+            .unwrap(),
+        2
+    );
+    let d = create_directory(&db.pool, &g, &dir("/f"), by())
         .await
         .unwrap();
     assert_eq!(
         (d.path.as_str(), d.is_directory, d.deleted),
         ("/f/", true, false)
     );
-    assert!(matches!(
-        revisions(&mut c, &g, &file("/f")).await,
-        Err(NsError::NotFound(_))
-    ));
-    let keys: Vec<String> = store.objects(&fs, ws).into_iter().map(|(k, _)| k).collect();
-    assert_eq!(
-        keys,
-        ["w9b/t3/_files/d"],
-        "the deleted file's two objects are gone"
-    );
+}
 
-    // A live file where a parent directory goes, then deleted.
+/// The user's ruling (2026-10-05), a parent directory over a file: a file
+/// under `/p`, or a directory under it, needs the directory `/p/`. A live
+/// file `/p` is a conflict; a soft-deleted one keeps its history, so both
+/// writes are refused naming it and nothing is purged. After `PurgeFiles`
+/// the write goes through and makes `/p/`.
+#[tokio::test]
+async fn a_write_under_a_soft_deleted_file_is_refused_until_it_is_purged() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
     written(&db, &fs, &g, "/p", "p").await;
     let err = write(&db, &fs, &g, "/p/x", "x", Conflict::Overwrite)
         .await
@@ -1269,14 +1304,43 @@ async fn a_live_directory_where_a_file_is_written_is_a_conflict_and_a_deleted_on
         matches!(&err, NsError::Conflict(m) if m.contains("'/p/x'") && m.contains("its parent '/p' is a file")),
         "{err:?}"
     );
+
     soft_delete(&db.pool, &g, &file("/p")).await.unwrap();
+    let before = (all_rows(&db, ws).await, store.objects(&fs, ws));
+    let err = write(&db, &fs, &g, "/p/x", "x", Conflict::Overwrite)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Conflict(m)
+            if m.contains("'/p/x'") && m.contains("its parent '/p' is a deleted file")
+                && m.contains("purge it first")),
+        "{err:?}"
+    );
+    let err = create_directory(&db.pool, &g, &dir("/p/g"), by())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Conflict(m)
+            if m.contains("'/p/g'") && m.contains("its parent '/p' is a deleted file")),
+        "{err:?}"
+    );
+    assert_eq!(
+        (all_rows(&db, ws).await, store.objects(&fs, ws)),
+        before,
+        "nothing was purged"
+    );
+    assert_eq!(read_rev(&fs, &db, &g, "/p", Want::Revision(1)).await, "p");
+
+    let p = grant(ws, Access::Purge);
+    assert_eq!(
+        purge_revisions(&db.pool, &fs, &p, &file("/p"), &[1])
+            .await
+            .unwrap(),
+        1
+    );
     written(&db, &fs, &g, "/p/x", "x").await;
     assert_eq!(rows_of(&db, ws, "/p").await, []);
     assert_eq!(rows_of(&db, ws, "/p/").await, [(1, false)]);
-    assert!(store
-        .objects(&fs, ws)
-        .iter()
-        .all(|(k, _)| k != "w9b/t3/_files/p"));
 }
 
 #[tokio::test]
@@ -1312,7 +1376,7 @@ async fn parents_are_created_and_an_existing_parent_is_left_alone() {
         }
     };
     // `layout.create_directory`: `/d1/d2` makes both rows, no object.
-    let d2 = create_directory(&db.pool, &fs, &g, &dir("d1/d2"), u)
+    let d2 = create_directory(&db.pool, &g, &dir("d1/d2"), u)
         .await
         .unwrap();
     assert_eq!(d2.path.as_str(), "/d1/d2/");
@@ -1325,7 +1389,7 @@ async fn parents_are_created_and_an_existing_parent_is_left_alone() {
     );
     assert!(store.objects(&fs, ws).is_empty());
     // Idempotent.
-    let again = create_directory(&db.pool, &fs, &g, &dir("/d1/d2/"), by())
+    let again = create_directory(&db.pool, &g, &dir("/d1/d2/"), by())
         .await
         .unwrap();
     assert_eq!(again, d2);
@@ -1538,7 +1602,7 @@ async fn move_refuses_a_live_target() {
     );
     // A live directory of the other kind at the target, and a live file
     // where the target's parent goes.
-    create_directory(&db.pool, &fs, &g, &dir("/m/c"), by())
+    create_directory(&db.pool, &g, &dir("/m/c"), by())
         .await
         .unwrap();
     let err = move_path(&db.pool, &fs, &g, &file("/m/a"), &file("/m/c"), by())
@@ -1905,7 +1969,7 @@ async fn a_write_with_a_read_grant_is_an_internal_error() {
             .unwrap_err()
     ));
     assert!(internal(
-        create_directory(&db.pool, &fs, &r, &dir("/n"), by())
+        create_directory(&db.pool, &r, &dir("/n"), by())
             .await
             .unwrap_err()
     ));
@@ -2038,8 +2102,9 @@ async fn a_purge_of_a_child_waits_for_a_move_of_its_parent() {
     assert_eq!(seen, Seen::Blocked);
 }
 
-/// I2 (the user's ruling, 2026-10-05): a target with soft-deleted history is
-/// refused, naming it; nothing moves and the history is intact.
+/// I2 (the user's ruling, 2026-10-05): a target with soft-deleted history --
+/// at it, or a deleted file where its parent goes -- is refused, naming it;
+/// nothing moves and the history is intact.
 #[tokio::test]
 async fn a_move_onto_a_soft_deleted_file_is_refused_and_keeps_its_history() {
     let Some(db) = common::db().await else { return };
@@ -2051,7 +2116,20 @@ async fn a_move_onto_a_soft_deleted_file_is_refused_and_keeps_its_history() {
         written(&db, &fs, &g, "/b", body).await;
     }
     soft_delete(&db.pool, &g, &file("/b")).await.unwrap();
+    written(&db, &fs, &g, "/f", "f").await;
+    soft_delete(&db.pool, &g, &file("/f")).await.unwrap();
     let before = (all_rows(&db, ws).await, store.objects(&fs, ws));
+    // Fix round 2, M-R1: a soft-deleted FILE where a parent of the target
+    // goes; the move would otherwise make `/f/` beside `/f`'s history.
+    let err = move_path(&db.pool, &fs, &g, &file("/a"), &file("/f/x"), by())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::Conflict(m)
+            if m.contains("its parent '/f' is a deleted file") && m.contains("nothing was moved")),
+        "{err:?}"
+    );
+    assert_eq!((all_rows(&db, ws).await, store.objects(&fs, ws)), before);
     let err = move_path(&db.pool, &fs, &g, &file("/a"), &file("/b"), by())
         .await
         .unwrap_err();
@@ -2175,8 +2253,10 @@ async fn the_conflict_rule_reads_the_latest_row_not_the_oldest() {
     }
 }
 
-/// M4: a file over a soft-deleted directory whose children keep history is
-/// refused naming the path; nothing is purged.
+/// M4, and the user's ruling (2026-10-05), a file over a directory: a file
+/// over a soft-deleted directory whose children keep history is refused
+/// naming the path; nothing is purged. Once `PurgeFiles` removed the
+/// children's revisions, the directory is alone and the file is written.
 #[tokio::test]
 async fn a_file_over_a_deleted_directory_with_history_under_it_is_refused() {
     let Some(db) = common::db().await else { return };
@@ -2190,8 +2270,92 @@ async fn a_file_over_a_deleted_directory_with_history_under_it_is_refused() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&err, NsError::Conflict(m) if m.contains("'/q'") && m.contains("history")),
+        matches!(&err, NsError::Conflict(m)
+            if m.contains("'/q'") && m.contains("'/q/' is a deleted directory")
+                && m.contains("history")),
         "{err:?}"
     );
     assert_eq!((all_rows(&db, ws).await, store.objects(&fs, ws)), before);
+    assert_eq!(read_rev(&fs, &db, &g, "/q/x", Want::Revision(1)).await, "x");
+
+    let p = grant(ws, Access::Purge);
+    assert_eq!(
+        purge_revisions(&db.pool, &fs, &p, &file("/q/x"), &[1])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(written(&db, &fs, &g, "/q", "file").await.revision, 1);
+    assert_eq!(rows_of(&db, ws, "/q/").await, []);
+}
+
+// ─── Fix round 2 ────────────────────────────────────────────────────────────
+
+/// M-R2: every copy has succeeded and then the insert of `to`'s missing
+/// parent (`/n/`) fails at the database. The copies are purged, last first,
+/// exactly as for a failed copy; the source is untouched.
+///
+/// The failure is injected by a `BEFORE INSERT` trigger whose `WHEN` matches
+/// only this test's workspace and the path `/n/`, so no other test's insert
+/// can reach it; it is dropped right after the move, before any assertion.
+#[tokio::test]
+async fn a_move_whose_parent_insert_fails_after_the_copies_purges_them() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/s/a", "a1").await;
+    written(&db, &fs, &g, "/s/a", "a2").await;
+    let before = (all_rows(&db, ws).await, store.objects(&fs, ws));
+
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION public.w9b_t3_refuse_insert() RETURNS trigger \
+         LANGUAGE plpgsql AS $$ BEGIN \
+           RAISE EXCEPTION 'injected by a W9b Task 3 test'; \
+         END $$",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let trigger = format!("w9b_t3_refuse_{}", ws.simple());
+    // The only interpolations are a `Uuid`'s hex and hyphenated forms.
+    let create = format!(
+        "CREATE TRIGGER {trigger} BEFORE INSERT ON workflow.namespace_files FOR EACH ROW \
+         WHEN (NEW.workspace_id = '{ws}' AND NEW.path = '/n/') \
+         EXECUTE FUNCTION public.w9b_t3_refuse_insert()"
+    );
+    sqlx::query(sqlx::AssertSqlSafe(create))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    store.deletes.lock().unwrap().clear();
+    let moved = move_path(&db.pool, &fs, &g, &dir("/s"), &dir("/n/t"), by()).await;
+    // Dropped before any assertion can panic.
+    let drop = format!("DROP TRIGGER {trigger} ON workflow.namespace_files");
+    sqlx::query(sqlx::AssertSqlSafe(drop))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let err = moved.unwrap_err();
+    match &err {
+        NsError::Db(egret_core::Error::Internal(m)) => {
+            let m = m.to_string();
+            assert!(
+                m.contains("'/s/'") && m.contains("'/n/t/'") && m.contains("nothing was moved"),
+                "{m}"
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        (all_rows(&db, ws).await, store.objects(&fs, ws)),
+        before,
+        "the source is untouched and no copy is left"
+    );
+    let prefix = format!("s3://egret-test/workflow/{ws}/w9b/t3/_files");
+    assert_eq!(
+        *store.deletes.lock().unwrap(),
+        [format!("{prefix}/n/t/a.v2"), format!("{prefix}/n/t/a")],
+        "the copies were removed last first"
+    );
 }

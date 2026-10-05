@@ -434,6 +434,7 @@ pub async fn open(fs: &FileStore, grant: &Grant, e: &NsEntry)
 - Create `src/storage/lock.rs`. Modify `src/storage/prune.rs` (`LockedSession` `:275-294` moves to `lock.rs`; `prune_pass_with` `:242` uses it unchanged in behaviour), `src/storage/nsfiles/store.rs`, `tests/nsfiles_store.rs`, `tests/storage_prune.rs`; create `tests/nsfiles_s3_live.rs`.
 - *(Added 2026-10-05, finding R3 of Task 2's review.)* Modify `crates/egret-config/src/lib.rs`: `WorkflowStorageConfig::validate` refuses a `workflow.storage.prefix` over 200 bytes, naming the setting (a test at 200 accepted, 201 refused); spec §3 (EN and VI) records the budget.
 - *(Added 2026-10-05, Task 3 fix round 1.)* The user's ruling on the review's I2: `move_path` refuses a target with ANY history (live or soft-deleted, at `to`, under it, of the other kind, or a file where a parent goes) with a Conflict naming it, and purges nothing; `to`'s parents are created only after the copies succeed (M5). `soft_delete`, `purge_revisions` and the stale-file purge lock the path's whole chain (I1). `move_path` and `purge_revisions` run on a detached task and run to completion once started (I3). `LockedSession`'s fields are private (`mark_released` for the pruner, M6).
+- *(Added 2026-10-05, Task 3 fix round 2.)* Decided with the user on the re-review's I-R1: **a write never purges history implicitly, in either direction.** `put` and `create_directory` refuse, with a Conflict naming the path, a soft-deleted entry of the other kind that holds history (a file; a directory with files under it that keep revisions) and a soft-deleted file where a parent directory goes; the author runs `PurgeFiles` first. A lone soft-deleted directory row (no history) is still removed in the write's transaction. The stale-file purge, its retry and its detached run are gone, and `create_directory` takes no `FileStore`. A failure inserting `to`'s parents after a move's copies purges the copies like any other failure (M-R2).
 
 **Interfaces:**
 - Consumes: Task 2's `Grant`, `NsPath`, `NsEntry`, `NsError`, `CreatedBy`, `resolve`, `FileStore::namespace_object_uri`; W9a's `ObjectStore::{put_stream, head, get_stream, delete}` (`crates/egret-storage/src/lib.rs:46-91`).
@@ -463,8 +464,9 @@ pub enum Written { Written(NsEntry), Skipped(NsPath) }
 /// §4.2: lock -> read latest -> conflict rule -> revision = max + 1 (1 when none) -> put_stream to the
 /// revision's key under max_file_bytes -> head -> insert row -> insert missing parent directory rows
 /// (ON CONFLICT DO NOTHING) -> commit. A live row of the other kind is Conflict; a deleted one is purged
-/// first (rows and objects, inside the same lock). Commits immediately: namespace files are not in any
-/// execution's transaction (§6).
+/// first (rows and objects, inside the same lock). [Amended 2026-10-05, fix round 2, decided with the user:
+/// a deleted one that holds history, or a deleted file where a parent goes, is Conflict too; nothing is purged.]
+/// Commits immediately: namespace files are not in any execution's transaction (§6).
 pub async fn put(pool: &PgPool, fs: &FileStore, grant: &Grant, path: &NsPath,
                  body: &mut (dyn tokio::io::AsyncRead + Send + Unpin), conflict: Conflict, by: CreatedBy)
     -> Result<Written, NsError>;
@@ -510,6 +512,11 @@ async fn a_writer_of_a_child_and_a_writer_of_a_file_named_like_its_parent_never_
     // w9b layout: revision 4; revisions [1, 2, 3, 4] with 3 flagged deleted; revision 3 still readable by number (R1)
 }
 #[tokio::test] async fn a_live_directory_where_a_file_is_written_is_a_conflict_and_a_deleted_one_is_purged_first() {}
+// [Amended 2026-10-05, fix round 2: no implicit purge. Now
+//  a_live_directory_where_a_file_is_written_is_a_conflict_and_a_lone_deleted_one_is_removed,
+//  a_directory_over_a_soft_deleted_file_is_refused_until_it_is_purged,
+//  a_write_under_a_soft_deleted_file_is_refused_until_it_is_purged and
+//  a_file_over_a_deleted_directory_with_history_under_it_is_refused.]
 #[tokio::test] async fn parents_are_created_and_an_existing_parent_is_left_alone() {}
 #[tokio::test] async fn a_failed_upload_rolls_back_and_the_next_write_reuses_the_revision() {
     // body errors after 3 bytes: no row; the next put gets the same revision and overwrites the orphan key

@@ -414,10 +414,6 @@ pub enum Written {
     Skipped(NsPath),
 }
 
-/// No cap on a read of rows the write side must see whole (a target's
-/// history, a stale file's revisions): `limit` makes it `i64::MAX`.
-const UNCAPPED: u64 = u64::MAX;
-
 /// The lock key's text of one `lock_path`, bound as a value.
 fn lock_text(grant: &Grant, lock_path: &str) -> String {
     format!(
@@ -569,23 +565,26 @@ fn other_kind(path: &NsPath) -> String {
 }
 
 /// The file/directory rules of a write of `path` (§4.2 step 4), under its
-/// locks. A live row of the other kind at `path`, or a live FILE where one of
-/// its parent directories goes, is `Conflict`; a soft-deleted directory of
-/// the other kind is purged here when it is alone (a directory has no object,
-/// so its row is all there is) and is `Conflict` when paths under it still
-/// hold history (fix round 1, M4: history is never purged implicitly, as the
-/// user's ruling on I2 for a move); a soft-deleted FILE in either place is returned, to be
-/// purged before the write is retried (its objects must go after a commit,
-/// [`purge_stale`]). `subject` opens each message ("namespace file '/a'
-/// cannot be written").
+/// locks. A write never purges history implicitly, in either direction (the
+/// user's ruling, 2026-10-05, which extends the I2 ruling on a move to every
+/// write):
+/// - a live row of the other kind at `path` is `Conflict`;
+/// - a soft-deleted FILE of the other kind at `path` (it always has
+///   revisions) is `Conflict` naming it: `PurgeFiles` it first;
+/// - a soft-deleted DIRECTORY of the other kind is `Conflict` when paths
+///   under it still hold history, and is removed here when it is alone (a
+///   directory has no object and no revisions, so its row is all there is);
+/// - a FILE where one of its parent directories goes, live or soft-deleted,
+///   is `Conflict` naming it.
+///
+/// `subject` opens each message ("namespace file '/a' cannot be written").
 async fn check_kinds(
     conn: &mut PgConnection,
     grant: &Grant,
     path: &NsPath,
     subject: &str,
-) -> Result<Vec<NsPath>, NsError> {
+) -> Result<(), NsError> {
     let ns = grant.namespace();
-    let mut stale = Vec::new();
     if let Some(other) = latest(conn, grant, &other_kind(path)).await? {
         if !other.deleted {
             let what = if other.is_directory {
@@ -597,40 +596,46 @@ async fn check_kinds(
                 "{subject} in namespace '{ns}': {what} already exists at this path"
             )));
         }
-        if other.is_directory {
-            let under = rows_at_or_under(conn, grant, other.path.as_str(), 1).await?;
-            if under.len() > 1 {
-                return Err(NsError::Conflict(format!(
-                    "{subject} in namespace '{ns}': a deleted directory at this path still \
-                     holds the history of the files under it; purge them first"
-                )));
-            }
-            sqlx::query(
-                "DELETE FROM workflow.namespace_files \
-                  WHERE workspace_id = $1 AND namespace = $2 AND path = $3",
-            )
-            .bind(grant.workspace())
-            .bind(ns)
-            .bind(other.path.as_str())
-            .execute(&mut *conn)
-            .await
-            .map_err(db_err)?;
-        } else {
-            stale.push(other.path);
+        if !other.is_directory {
+            return Err(NsError::Conflict(format!(
+                "{subject} in namespace '{ns}': '{}' is a deleted file whose history is kept; \
+                 purge it first",
+                other.path
+            )));
         }
+        let under = rows_at_or_under(conn, grant, other.path.as_str(), 1).await?;
+        if under.len() > 1 {
+            return Err(NsError::Conflict(format!(
+                "{subject} in namespace '{ns}': '{}' is a deleted directory whose files' history \
+                 is kept; purge them first",
+                other.path
+            )));
+        }
+        sqlx::query(
+            "DELETE FROM workflow.namespace_files \
+              WHERE workspace_id = $1 AND namespace = $2 AND path = $3",
+        )
+        .bind(grant.workspace())
+        .bind(ns)
+        .bind(other.path.as_str())
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
     }
     for parent in path.parents() {
         if let Some(file) = latest(conn, grant, parent.lock_path()).await? {
-            if !file.deleted {
-                return Err(NsError::Conflict(format!(
-                    "{subject} in namespace '{ns}': its parent '{}' is a file",
-                    file.path
-                )));
-            }
-            stale.push(file.path);
+            let what = if file.deleted {
+                "a deleted file whose history is kept; purge it first"
+            } else {
+                "a file"
+            };
+            return Err(NsError::Conflict(format!(
+                "{subject} in namespace '{ns}': its parent '{}' is {what}",
+                file.path
+            )));
         }
     }
-    Ok(stale)
+    Ok(())
 }
 
 /// The rows of `path`'s missing parent directories -- and, with `itself`,
@@ -783,50 +788,14 @@ async fn purge_locked(
     Ok(gone.len() as u64)
 }
 
-/// Purges every revision of each soft-deleted FILE in `stale` (found by
-/// [`check_kinds`] where a directory is to go), each under the session locks
-/// of its chain (its parents and itself, as every writer: fix round 1, I1),
-/// after the write's transaction was rolled back (it held the same keys as
-/// transaction locks). A file that is live again by then is left alone: the
-/// retried write finds it and answers `Conflict`. Callers run it
-/// [`detached`].
-async fn purge_stale(
-    pool: PgPool,
-    fs: FileStore,
-    grant: Grant,
-    stale: Vec<NsPath>,
-) -> Result<(), NsError> {
-    let (pool, fs, grant) = (&pool, &fs, &grant);
-    for file in &stale {
-        let keys = session_keys(pool, &lock_chain(grant, &[file])).await?;
-        let mut session = LockedSession::acquire(pool, &keys)
-            .await
-            .map_err(NsError::Db)?;
-        let result = async {
-            let conn = session.conn();
-            match latest(conn, grant, file.as_str()).await? {
-                Some(l) if l.deleted => {
-                    let rows = rows_at_or_under(conn, grant, file.as_str(), UNCAPPED).await?;
-                    let targets: Vec<(NsPath, u32)> =
-                        rows.into_iter().map(|e| (e.path, e.revision)).collect();
-                    purge_locked(conn, fs, grant, &targets).await.map(|_| ())
-                }
-                _ => Ok(()),
-            }
-        }
-        .await;
-        release(session, "purge a soft-deleted file in a directory's way").await;
-        result?;
-    }
-    Ok(())
-}
-
 /// §4.2: lock -> read latest -> conflict rule -> revision = max + 1 (1 when
 /// none) -> `put_stream` to the revision's key under `max_file_bytes` ->
 /// `head` -> insert the row -> insert missing parent directory rows ->
-/// commit. A live row of the other kind is `Conflict`; a soft-deleted one is
-/// purged first. Commits immediately: namespace files are not in any
-/// execution's transaction (§6).
+/// commit. A row of the other kind, or a file where a parent goes, is
+/// `Conflict` when it is live or still holds history: a write never purges
+/// history implicitly ([`check_kinds`]; the user's ruling, 2026-10-05).
+/// Commits immediately: namespace files are not in any execution's
+/// transaction (§6).
 ///
 /// A failed upload rolls the transaction back and leaves at most an
 /// unindexed object at the revision's key, which the next write of that
@@ -850,98 +819,75 @@ pub async fn put(
     }
     let ns = grant.namespace();
     let subject = format!("namespace file '{path}' cannot be written");
-    let texts = lock_chain(grant, &[path]);
-    // At most one retry: after purging a soft-deleted file in a parent
-    // directory's way (see `check_kinds`).
-    for attempt in 0..2 {
-        let mut tx = pool.begin().await.map_err(db_err)?;
-        xact_lock(&mut tx, &texts).await?;
-        let stale = check_kinds(&mut tx, grant, path, &subject).await?;
-        if !stale.is_empty() {
-            // Rolled back, and awaited: its locks are gone before the purge
-            // asks for the same key (fix round 1, M2).
-            tx.rollback().await.map_err(db_err)?;
-            if attempt > 0 {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    xact_lock(&mut tx, &lock_chain(grant, &[path])).await?;
+    check_kinds(&mut tx, grant, path, &subject).await?;
+    let current = latest(&mut tx, grant, path.as_str()).await?;
+    if current.as_ref().is_some_and(|l| !l.deleted) {
+        match conflict {
+            Conflict::Overwrite => {}
+            Conflict::Error => {
                 return Err(NsError::Conflict(format!(
-                    "{subject} in namespace '{ns}': the paths around it changed while it was \
-                     being written; retry"
-                )));
+                    "namespace file '{path}' already exists in namespace '{ns}' and \
+                     conflict is set to ERROR"
+                )))
             }
-            detached(
-                "purge",
-                purge_stale(pool.clone(), fs.clone(), grant.clone(), stale),
-            )
-            .await?;
-            continue;
+            Conflict::Skip => return Ok(Written::Skipped(path.clone())),
         }
-        let current = latest(&mut tx, grant, path.as_str()).await?;
-        if current.as_ref().is_some_and(|l| !l.deleted) {
-            match conflict {
-                Conflict::Overwrite => {}
-                Conflict::Error => {
-                    return Err(NsError::Conflict(format!(
-                        "namespace file '{path}' already exists in namespace '{ns}' and \
-                         conflict is set to ERROR"
-                    )))
-                }
-                Conflict::Skip => return Ok(Written::Skipped(path.clone())),
-            }
-        }
-        let revision = current.map_or(1, |l| l.revision + 1);
-        let key = fs.namespace_object_uri(grant, path, revision);
-        let cap = fs.caps.max_file_bytes;
-        let mut guarded = Guarded {
-            inner: body,
-            cap,
-            read: 0,
-            over: false,
-            failed: None,
-        };
-        let put = fs.store.put_stream(&key, &mut guarded, None).await;
-        if guarded.over {
-            return Err(NsError::TooLarge(format!(
-                "namespace file '{path}' in namespace '{ns}' is over the {cap} bytes one file \
-                 may be (workflow.storage.max_file_bytes)"
-            )));
-        }
-        if let Some(e) = guarded.failed {
+    }
+    let revision = current.map_or(1, |l| l.revision + 1);
+    let key = fs.namespace_object_uri(grant, path, revision);
+    let cap = fs.caps.max_file_bytes;
+    let mut guarded = Guarded {
+        inner: body,
+        cap,
+        read: 0,
+        over: false,
+        failed: None,
+    };
+    let put = fs.store.put_stream(&key, &mut guarded, None).await;
+    if guarded.over {
+        return Err(NsError::TooLarge(format!(
+            "namespace file '{path}' in namespace '{ns}' is over the {cap} bytes one file \
+             may be (workflow.storage.max_file_bytes)"
+        )));
+    }
+    if let Some(e) = guarded.failed {
+        return Err(store_failed(
+            grant,
+            path,
+            "read while it was being stored",
+            &key,
+            &e,
+        ));
+    }
+    put.map_err(|e| store_failed(grant, path, "stored", &key, &e))?;
+    let size = match fs.store.head(&key).await {
+        Ok(Some(size)) => size,
+        Ok(None) => {
             return Err(store_failed(
                 grant,
                 path,
-                "read while it was being stored",
+                "stored",
                 &key,
-                &e,
-            ));
+                &"written, but head finds no object",
+            ))
         }
-        put.map_err(|e| store_failed(grant, path, "stored", &key, &e))?;
-        let size = match fs.store.head(&key).await {
-            Ok(Some(size)) => size,
-            Ok(None) => {
-                return Err(store_failed(
-                    grant,
-                    path,
-                    "stored",
-                    &key,
-                    &"written, but head finds no object",
-                ))
-            }
-            Err(e) => return Err(store_failed(grant, path, "stored", &key, &e)),
-        };
-        let e = insert_row(&mut tx, grant, path, revision, size, false, by).await?;
-        ensure_directories(&mut tx, grant, path, false, by).await?;
-        tx.commit().await.map_err(db_err)?;
-        return Ok(Written::Written(e));
-    }
-    unreachable!("the loop returns on its second attempt")
+        Err(e) => return Err(store_failed(grant, path, "stored", &key, &e)),
+    };
+    let e = insert_row(&mut tx, grant, path, revision, size, false, by).await?;
+    ensure_directories(&mut tx, grant, path, false, by).await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(Written::Written(e))
 }
 
 /// The directory and its missing parents; an existing live directory is Ok
-/// (idempotent); a live file there (or where a parent goes) is `Conflict`.
-/// Unlike Kestra, which makes no row for a parent, every missing parent gets
-/// a row (w9b `layout.create_directory`, chosen).
+/// (idempotent); a file there or where a parent goes, live or soft-deleted
+/// with its history, is `Conflict` ([`check_kinds`]). Unlike Kestra, which
+/// makes no row for a parent, every missing parent gets a row (w9b
+/// `layout.create_directory`, chosen).
 pub async fn create_directory(
     pool: &PgPool,
-    fs: &FileStore,
     grant: &Grant,
     path: &NsPath,
     by: CreatedBy,
@@ -952,35 +898,16 @@ pub async fn create_directory(
             "egret created '{path}' as a directory, which is a file path"
         )));
     }
-    let ns = grant.namespace();
     let subject = format!("cannot create directory '{}'", path.lock_path());
-    let texts = lock_chain(grant, &[path]);
-    for attempt in 0..2 {
-        let mut tx = pool.begin().await.map_err(db_err)?;
-        xact_lock(&mut tx, &texts).await?;
-        let stale = check_kinds(&mut tx, grant, path, &subject).await?;
-        if !stale.is_empty() {
-            tx.rollback().await.map_err(db_err)?;
-            if attempt > 0 {
-                return Err(NsError::Conflict(format!(
-                    "{subject} in namespace '{ns}': the paths around it changed meanwhile; retry"
-                )));
-            }
-            detached(
-                "purge",
-                purge_stale(pool.clone(), fs.clone(), grant.clone(), stale),
-            )
-            .await?;
-            continue;
-        }
-        ensure_directories(&mut tx, grant, path, true, by).await?;
-        let e = latest(&mut tx, grant, path.as_str())
-            .await?
-            .ok_or_else(|| internal(format!("directory '{path}' has no row once created")))?;
-        tx.commit().await.map_err(db_err)?;
-        return Ok(e);
-    }
-    unreachable!("the loop returns on its second attempt")
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    xact_lock(&mut tx, &lock_chain(grant, &[path])).await?;
+    check_kinds(&mut tx, grant, path, &subject).await?;
+    ensure_directories(&mut tx, grant, path, true, by).await?;
+    let e = latest(&mut tx, grant, path.as_str())
+        .await?
+        .ok_or_else(|| internal(format!("directory '{path}' has no row once created")))?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(e)
 }
 
 /// §4.3: the latest row of `path` and, when `path` is a directory, of every
@@ -1151,25 +1078,27 @@ async fn move_locked(
         }
     }
 
+    // The copies, then `to`'s missing parents -- only then, so a failed move
+    // leaves no parent row behind (fix round 1, M5). A failure anywhere in
+    // this block, the parents' insert included (fix round 2, M-R2), takes
+    // the same way out: every copy made is purged.
     let mut copies: Vec<(NsEntry, NsEntry)> = Vec::with_capacity(plan.len());
-    let mut failure = None;
-    for (src, dst) in plan {
-        match copy_one(conn, fs, grant, &src, &dst, by).await {
-            Ok(copy) => copies.push((src, copy)),
-            Err(e) => {
-                failure = Some(e);
-                break;
-            }
+    let made = async {
+        for (src, dst) in plan {
+            let copy = copy_one(conn, fs, grant, &src, &dst, by).await?;
+            copies.push((src, copy));
         }
+        ensure_directories(conn, grant, to, false, by).await
     }
-    if let Some(e) = failure {
+    .await;
+    if let Err(e) = made {
         // Every copy made, the last first; rows then objects (§8.4).
-        let made: Vec<(NsPath, u32)> = copies
+        let undo: Vec<(NsPath, u32)> = copies
             .iter()
             .rev()
             .map(|(_, c)| (c.path.clone(), c.revision))
             .collect();
-        if let Err(undo) = purge_locked(conn, fs, grant, &made).await {
+        if let Err(undo) = purge_locked(conn, fs, grant, &undo).await {
             tracing::error!(error = %undo, from = %from, to = %to, "a failed namespace file move could not remove its copies");
         }
         let why = format!("{subject} in namespace '{ns}'; nothing was moved");
@@ -1182,8 +1111,6 @@ async fn move_locked(
             NsError::Db(d) => internal(format!("{why}: {d}")),
         });
     }
-    // Only now, so a failed move leaves no parent row behind (fix round 1, M5).
-    ensure_directories(conn, grant, to, false, by).await?;
     let sources: Vec<(NsPath, u32)> = copies
         .iter()
         .map(|(s, _)| (s.path.clone(), s.revision))
