@@ -52,7 +52,6 @@ pub const FEATURE_KEYS: &[&str] = &[
     "datasets",
     "charts",
     "dashboards",
-    "notebooks",
     "apps",
     "alerts",
     "data_api",
@@ -233,18 +232,6 @@ pub const FEATURES: &[Feature] = &[
         default_enabled: true,
     },
     Feature {
-        key: "notebooks",
-        label: "Notebooks",
-        description: "Python and SQL notebooks backed by a per-user kernel.",
-        rules: &[
-            prefix("notebooks"),
-            prefix("kernel"),
-            prefix("notebook-runtime"),
-            prefix("notebook-settings"),
-        ],
-        default_enabled: true,
-    },
-    Feature {
         key: "apps",
         label: "Data Apps",
         description: "Custom Python dashboards built with marimo, run with each viewer's permissions.",
@@ -283,7 +270,7 @@ pub const FEATURES: &[Feature] = &[
     Feature {
         key: "workflows",
         label: "Workflows",
-        description: "Author, schedule, and run multi-step workflows across engines, notebooks, and containers.",
+        description: "Author, schedule, and run multi-step workflows across engines and containers.",
         // Declared in W0, before any route exists, for the reason `alerts` and
         // `data_api` record above: an unmatched prefix rule is inert, but a
         // route that lands before its rule fails OPEN. W1's management routes
@@ -357,7 +344,7 @@ pub const FEATURES: &[Feature] = &[
 /// Workspace-scoped first path segments that are deliberately never gated.
 ///
 /// `folders` and `objects` are content-type-neutral (a folder holds charts *and*
-/// notebooks; `objects` is the sharing surface) and are already authorized
+/// dashboards; `objects` is the sharing surface) and are already authorized
 /// per-object by the PDP. The rest are core workspace-management surfaces that
 /// belong to no single module, and so must not be held hostage to any module's
 /// on/off state.
@@ -583,27 +570,16 @@ mod tests {
     fn suffix_is_extracted_with_and_without_the_api_prefix() {
         // axum's `nest("/api", …)` strips the prefix from the inner router's
         // view of the URI, so the gate must accept both spellings.
-        assert_eq!(ws_path_suffix("/api/ws/sales/notebooks"), Some("notebooks"));
-        assert_eq!(
-            ws_path_suffix("/ws/sales/notebooks/abc"),
-            Some("notebooks/abc")
-        );
+        assert_eq!(ws_path_suffix("/api/ws/sales/charts"), Some("charts"));
+        assert_eq!(ws_path_suffix("/ws/sales/charts/abc"), Some("charts/abc"));
         assert_eq!(ws_path_suffix("/api/auth/login"), None);
         assert_eq!(ws_path_suffix("/ws/sales"), None);
     }
 
     #[test]
     fn module_prefixes_map_to_their_feature() {
-        assert_eq!(gated_feature("notebooks", "GET"), Some("notebooks"));
-        assert_eq!(
-            gated_feature("notebooks/abc/cells", "POST"),
-            Some("notebooks")
-        );
-        assert_eq!(gated_feature("kernel", "POST"), Some("notebooks"));
-        assert_eq!(
-            gated_feature("notebook-runtime/token", "POST"),
-            Some("notebooks")
-        );
+        assert_eq!(gated_feature("sqllab", "GET"), Some("sql_lab"));
+        assert_eq!(gated_feature("queries", "POST"), Some("sql_lab"));
         assert_eq!(gated_feature("charts/abc/data", "POST"), Some("charts"));
         assert_eq!(gated_feature("dashboards", "GET"), Some("dashboards"));
         assert_eq!(
@@ -826,7 +802,7 @@ mod tests {
     #[test]
     fn is_classified_segment_covers_module_and_ungated_segments_but_not_the_unknown() {
         // Claimed by a Feature (via its rules' first path segment).
-        for seg in ["queries", "sqllab", "notebooks", "kernel"] {
+        for seg in ["queries", "sqllab", "charts", "dashboards"] {
             assert!(is_classified_segment(seg), "{seg} should be classified");
         }
         // Explicitly listed as ungated.
