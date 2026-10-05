@@ -71,3 +71,7 @@ egret-dataapi-api.workspace = true
 # both) and self-skips without `DATABASE_URL` the same way every other
 # DB-gated suite in the tree does.
 egret-test-db.workspace = true
+# S1-2: `apps_pod_mounted.rs` and `apps_api_mounted.rs` build an `AppStore` by
+# hand (with a `MemStore` test-only fixture), mirroring `egret-apps`'s own HTTP
+# tests. The `test-util` feature enables `egret_storage::MemStore`.
+egret-storage = { workspace = true, features = ["test-util"] }

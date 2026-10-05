@@ -9684,7 +9684,7 @@
         "tags": [
           "control-plane-access"
         ],
-        "summary": "`DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,\nnot the last active platform admin (`guard_not_last_admin`, shared with the\ndisable branch of `update_user`). Cleans up the user's sessions, group\nmemberships, and platform role/permission grants, reassigns the target's\nnotebooks to the deleting admin (`p.user_id`, since `owner_user_id` is NOT\nNULL), then removes the row itself, in one transaction\n(`UserRepo::hard_delete`).",
+        "summary": "`DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,\nnot the last active platform admin (`guard_not_last_admin`, shared with the\ndisable branch of `update_user`). Cleans up the user's sessions, group\nmemberships, and platform role/permission grants, then removes the row\nitself, in one transaction (`UserRepo::hard_delete`).",
         "operationId": "delete_user",
         "parameters": [
           {
@@ -30182,6 +30182,9 @@
           "source": {
             "type": "string"
           },
+          "layout": {
+            "description": "marimo's grid-layout companion file, verbatim JSON; omitted for the default\nvertical arrangement."
+          },
           "revision": {
             "type": "integer",
             "format": "int64"
@@ -30222,6 +30225,9 @@
           "source": {
             "type": "string",
             "description": "marimo source, at most 1 MiB (1 048 576 bytes)."
+          },
+          "layout": {
+            "description": "The complete new layout state; omit or send `null` to clear it."
           }
         }
       },

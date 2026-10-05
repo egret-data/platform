@@ -237,6 +237,9 @@ pub struct AppsConfig {
     /// its checks are live and every pod is unavailable.
     #[serde(default)]
     pub pod: AppPodConfig,
+    /// Data Apps' draft/version source and grid-layout JSON.
+    #[serde(default)]
+    pub storage: AppsStorageConfig,
 }
 
 /// `[apps.pod]` — the edit-pod launcher (spec §6.3). Env: `EGRET_APPS__POD__<KEY>`.
@@ -325,6 +328,7 @@ impl Default for AppsConfig {
             cookie_ttl_secs: 28_800,
             listen: "0.0.0.0:8081".into(),
             pod: AppPodConfig::default(),
+            storage: AppsStorageConfig::default(),
         }
     }
 }
@@ -875,6 +879,47 @@ fn default_max_task_bytes() -> u64 {
 /// 10 MiB -- see [`WorkflowStorageConfig::max_read_bytes`].
 fn default_max_read_bytes() -> u64 {
     10 << 20
+}
+
+/// `[apps.storage]`: Data Apps' draft/version source and grid-layout JSON. The
+/// bucket and its credentials are `[storage]`'s; this is the key prefix inside
+/// it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppsStorageConfig {
+    /// The key prefix: a draft's key is `{prefix}{workspace_id}/{app_id}/draft.py`
+    /// (and `draft.layout.json`); a version's is
+    /// `{prefix}{workspace_id}/{app_id}/versions/{version_no}/source.py`.
+    /// Default `apps/`.
+    #[serde(default = "default_apps_storage_prefix")]
+    pub prefix: String,
+}
+
+fn default_apps_storage_prefix() -> String {
+    "apps/".to_string()
+}
+
+impl Default for AppsStorageConfig {
+    fn default() -> Self {
+        Self {
+            prefix: default_apps_storage_prefix(),
+        }
+    }
+}
+
+impl AppsStorageConfig {
+    /// Same two rules as `WorkflowStorageConfig::validate`: `prefix` is a
+    /// non-empty key prefix ending with `/` and not starting with one.
+    pub fn validate(&self) -> Result<(), String> {
+        let p = &self.prefix;
+        if p.is_empty() || !p.ends_with('/') || p.starts_with('/') {
+            return Err(format!(
+                "apps.storage.prefix {p:?} must be non-empty, end with '/' and not start \
+                 with '/' (e.g. \"apps/\"; EGRET_APPS__STORAGE__PREFIX)"
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// `30` -- see [`WorkflowConfig::storage_retention_days`].
@@ -1714,6 +1759,15 @@ impl Config {
                 ))
             }
         }
+        if self.storage.bucket.is_empty()
+            || self.storage.access_key.is_empty()
+            || self.storage.secret_key.is_empty()
+        {
+            return Err(
+                "the apps API requires [storage] bucket, access_key, secret_key (it stores draft/version content there regardless of apps.pod.launcher)".into(),
+            );
+        }
+        self.apps.storage.validate()?;
         Ok(())
     }
 }
@@ -1742,6 +1796,7 @@ mod tests {
                     cookie_ttl_secs: 28_800,
                     listen: "0.0.0.0:8081".into(),
                     pod: AppPodConfig::default(),
+                    storage: AppsStorageConfig::default(),
                 }
             );
             Ok(())
@@ -1944,10 +1999,18 @@ values = { allowed-images = [] }
 
     /// W9a fix round 1 M4: `[workflow.storage]` is checked at boot, each
     /// refusal naming its key; the default passes (the control).
+    ///
+    /// Final review I4: `[storage]` (the bucket/access_key/secret_key, not
+    /// `[workflow.storage]`'s prefix/size limits) is now required
+    /// unconditionally, so the control config needs one set to isolate what
+    /// this test is actually about.
     #[test]
     fn workflow_storage_is_validated_at_boot() {
         let check = |f: &dyn Fn(&mut WorkflowStorageConfig)| {
             let mut cfg = Config::default();
+            cfg.storage.bucket = "b".into();
+            cfg.storage.access_key = "a".into();
+            cfg.storage.secret_key = "s".into();
             f(&mut cfg.workflow.storage);
             cfg.validate()
         };
@@ -1967,8 +2030,15 @@ values = { allowed-images = [] }
     }
 
     /// W9a spec §15: a container runner needs `[storage]` at boot; `none`
-    /// does not. Each missing key is refused on its own, and the control
-    /// (all three set) passes.
+    /// adds no requirement of its own. Each missing key is refused on its
+    /// own, and the control (all three set) passes.
+    ///
+    /// Final review I4: `[storage]` is now ALSO required unconditionally for
+    /// the always-mounted apps API, independent of `container_runner`. So
+    /// `none` no longer validates with empty storage either -- but for that
+    /// separate reason, not because `container_runner` itself started
+    /// requiring it. The two Docker/Kubernetes refusal loops below still
+    /// isolate the container-runner-specific message.
     #[test]
     fn a_container_runner_requires_storage_at_boot() {
         let with = |runner: ContainerRunner, bucket: &str, ak: &str, sk: &str| {
@@ -1990,7 +2060,16 @@ values = { allowed-images = [] }
                 assert!(err.contains("[storage]"), "{err}");
             }
         }
-        assert_eq!(with(ContainerRunner::None, "", "", ""), Ok(()));
+        assert_eq!(
+            with(ContainerRunner::None, "b", "a", "s"),
+            Ok(()),
+            "none adds no requirement of its own, given storage is set for the apps API"
+        );
+        let err = with(ContainerRunner::None, "", "", "").unwrap_err();
+        assert!(
+            err.contains("[storage]"),
+            "now refused by the apps API's unconditional check, not container_runner: {err}"
+        );
     }
 
     /// W5a Task 5: `container_runner` is `none` unless a deployment says
@@ -2505,6 +2584,12 @@ values = { allowed-images = [] }
         // `app_sessions` has CHECK (idle_expires_at <= absolute_expires_at): the
         // reverse would pass boot and then fail every mint with a 500.
         let mut cfg = Config::default();
+        // [storage] is required unconditionally (final review I4); set it so
+        // the final assertion below reaches the session-window check's Ok arm
+        // rather than the storage one.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         cfg.apps.session_idle_secs = cfg.apps.session_absolute_secs + 1;
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("apps.session_idle_secs"), "{err}");
@@ -2515,6 +2600,11 @@ values = { allowed-images = [] }
     #[test]
     fn validate_requires_distinct_origins_without_paths_when_the_apps_origin_is_set() {
         let mut cfg = Config::default();
+        // [storage] is required unconditionally (final review I4), independent
+        // of apps.origin, so set it up front to isolate the origin checks.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(
             cfg.validate().is_ok(),
             "unset origin: apps iframe is simply off"
@@ -2538,7 +2628,16 @@ values = { allowed-images = [] }
     #[test]
     fn validate_checks_the_pod_launcher_choice_and_what_each_needs() {
         let mut cfg = Config::default();
-        assert!(cfg.validate().is_ok(), "launcher none is the default");
+        // The apps API requires [storage] unconditionally (it is mounted
+        // regardless of apps.pod.launcher), so it must be set before any of
+        // the launcher-specific assertions below.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
+        assert!(
+            cfg.validate().is_ok(),
+            "launcher none is valid, given storage is configured"
+        );
         cfg.apps.pod.launcher = "docker".into();
         assert!(cfg
             .validate()
@@ -2574,6 +2673,10 @@ values = { allowed-images = [] }
         cfg.apps.pod.command = vec!["egret-apps".into()];
         cfg.apps.pod.config_dir = "apps-image/config".into();
         cfg.apps.pod.callback_url = "http://egret:8080".into();
+        // Set storage to allow validation to proceed
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok(), "defaults (thread, cap 8) are valid");
 
         cfg.apps.pod.run_kernel_mode = "pool".into();
@@ -2591,7 +2694,12 @@ values = { allowed-images = [] }
 
     #[test]
     fn validate_ok_when_oidc_disabled() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        // [storage] is required unconditionally (final review I4), independent
+        // of oidc.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
     }
 
@@ -2617,13 +2725,23 @@ values = { allowed-images = [] }
         cfg.security.secret_key =
             "Vi2XPRkbfyTLbSzhWv0VBYeOozGGoUnVSL3pIx2Oy1kbBphJyL0CXpomCNKdrYndzYnOX8MH0oaxhcY6Bt/x8g=="
                 .into();
+        // [storage] is required unconditionally (final review I4), independent
+        // of oidc.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn catalog_disabled_by_default_validates() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
         assert!(!cfg.catalog.enabled);
+        // [storage] is required unconditionally (final review I4), independent
+        // of catalog.enabled.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
     }
 
@@ -2635,13 +2753,22 @@ values = { allowed-images = [] }
         cfg.catalog.auth_token = "t".into();
         cfg.storage.access_key = "a".into();
         cfg.storage.secret_key = "s".into();
+        // Final review I4: [storage] is also required unconditionally, and
+        // that check also needs `bucket`, which catalog.enabled's own check
+        // does not look at.
+        cfg.storage.bucket = "b".into();
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn ranger_disabled_by_default_validates() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
         assert!(!cfg.ranger.enabled);
+        // [storage] is required unconditionally (final review I4), independent
+        // of ranger.enabled.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
     }
 
@@ -2649,6 +2776,11 @@ values = { allowed-images = [] }
     fn ranger_enabled_validates_with_or_without_token() {
         let mut cfg = Config::default();
         cfg.ranger.enabled = true;
+        // [storage] is required unconditionally (final review I4), independent
+        // of ranger.enabled.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         // Empty token = anonymous /service (for stock Ranger plugins). Valid.
         assert!(cfg.validate().is_ok());
         // A configured token is also valid (requires bearer).
@@ -2658,8 +2790,13 @@ values = { allowed-images = [] }
 
     #[test]
     fn secrets_master_key_defaults_empty_and_validates() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
         assert!(cfg.secrets.master_key.is_empty());
+        // [storage] is required unconditionally (final review I4), independent
+        // of secrets.master_key.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
     }
 
@@ -2670,15 +2807,25 @@ values = { allowed-images = [] }
         assert!(cfg.validate().is_err());
         use base64::Engine;
         cfg.secrets.master_key = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+        // [storage] is required unconditionally (final review I4), independent
+        // of secrets.master_key.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn engine_defaults_present_and_validate() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
         assert_eq!(cfg.engine.max_rows, 100_000);
         assert_eq!(cfg.engine.query_timeout_secs, 60);
         assert_eq!(cfg.engine.preview_rows, 100);
+        // [storage] is required unconditionally (final review I4), independent
+        // of engine settings.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
     }
 
@@ -3031,5 +3178,41 @@ values = { allowed-images = [] }
             );
             Ok(())
         });
+    }
+
+    /// Final review I4: the Data Apps HTTP API (create/save/publish/draft/
+    /// version routes) is mounted unconditionally in `egret-bin`, regardless
+    /// of `apps.pod.launcher` -- that setting only gates whether interactive
+    /// notebook PODS can launch. So `[storage]` must be required at boot even
+    /// with the documented default `launcher = "none"`, instead of failing
+    /// every CRUD request with a 500 at request time.
+    #[test]
+    fn apps_api_always_requires_storage_regardless_of_launcher() {
+        let cfg = Config::default();
+        assert_eq!(cfg.apps.pod.launcher, "none");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("[storage]"), "{err}");
+    }
+
+    #[test]
+    fn apps_pod_launcher_other_than_none_requires_storage() {
+        let mut cfg = Config::default();
+        // Set up required fields so we reach the storage requirement check
+        cfg.apps.origin = "https://apps.egret.example".into();
+        cfg.apps.egret_origin = "https://egret.example".into();
+        cfg.apps.pod.launcher = "subprocess".into();
+        cfg.apps.pod.callback_url = "http://egret:8080".into();
+        cfg.apps.pod.command = vec!["egret-apps".into()];
+        cfg.apps.pod.config_dir = "apps-image/config".into();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("[storage]"), "{err}");
+    }
+
+    #[test]
+    fn apps_storage_prefix_must_end_with_a_slash() {
+        let cfg = AppsStorageConfig {
+            prefix: "apps".into(),
+        };
+        assert!(cfg.validate().is_err());
     }
 }

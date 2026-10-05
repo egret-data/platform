@@ -1130,18 +1130,36 @@ async fn real_marimo_behind_the_real_proxy_and_the_real_pod_api() {
     let fx = Fixture::with_resolver(switch.clone(), PodLog::default(), NO_PRACTICAL_CAP).await;
 
     // the draft the pod will fetch through the real pod API
+    let draft_source =
+        "import marimo\n\napp = marimo.App()\n\n\n@app.cell\ndef _():\n    x = 1\n    return\n\n\n\
+         if __name__ == \"__main__\":\n    app.run()\n";
     sqlx::query(
         "INSERT INTO analytics.app_drafts (app_id, source, revision, updated_by) VALUES ($1, $2, 1, $3)",
     )
     .bind(fx.app)
-    .bind(
-        "import marimo\n\napp = marimo.App()\n\n\n@app.cell\ndef _():\n    x = 1\n    return\n\n\n\
-         if __name__ == \"__main__\":\n    app.run()\n",
-    )
+    .bind(draft_source)
     .bind(fx.editor.id.0)
     .execute(&fx.db.pool)
     .await
     .unwrap();
+
+    // `draft()` reads the source from the object store first, falling back to
+    // the row above only on a miss -- seed the matching key so the real pod
+    // (an external process) gets the same content from the object store.
+    let bucket = "test-bucket".to_string();
+    let prefix = "apps/".to_string();
+    let store: Arc<dyn egret_storage::ObjectStore> = Arc::new(egret_storage::MemStore::new());
+    store
+        .put(
+            &format!(
+                "s3://{bucket}/{prefix}{}/{}/draft.py",
+                fx.ws.0.hyphenated(),
+                fx.app.hyphenated()
+            ),
+            draft_source.as_bytes().to_vec(),
+        )
+        .await
+        .unwrap();
 
     // the real pod API on its own port, and a pod token for the editor
     let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
@@ -1156,7 +1174,7 @@ async fn real_marimo_behind_the_real_proxy_and_the_real_pod_api() {
             db: fx.db.clone(),
             pdp,
             pods: pods.clone(),
-            store: egret_apps::store::AppStore::new(fx.db.clone()),
+            store: egret_apps::store::AppStore::new(fx.db.clone(), store, bucket, prefix),
         });
     let api_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_addr = api_listener.local_addr().unwrap();

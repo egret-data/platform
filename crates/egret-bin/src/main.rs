@@ -2146,6 +2146,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // other token this deployment signs; `consumer_base_url` is the address a
     // caller outside the cluster uses, so the `token_endpoint` handed back with
     // a new client points somewhere they can actually reach.
+    // Data Apps and Workflow Management share the SAME object store
+    // (this `S3Store`, the `[storage]` bucket -- one client, not a second one).
+    let apps_storage = engine_state.storage.clone();
     // ONE `Arc` around the query engine, cloned into every seam that reaches it
     // as a `QueryExecPort` (the Data API and the Data Apps gateway), so there is
     // exactly one `EngineState` behind both.
@@ -2284,7 +2287,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // service, workspace repo, authorizer, PDP, audit sink and Db every other
     // feature seam shares.
     let apps_api = Some(egret_apps::AppsApiState {
-        store: egret_apps::store::AppStore::new(db.clone()),
+        store: egret_apps::store::AppStore::new(
+            db.clone(),
+            apps_storage.clone(),
+            config.storage.bucket.clone(),
+            config.apps.storage.prefix.clone(),
+        ),
         db: db.clone(),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
@@ -2301,7 +2309,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         db: db.clone(),
         pdp: pdp.clone(),
         pods: egret_apps::podtoken::PodTokenRepo::new(db.clone()),
-        store: egret_apps::store::AppStore::new(db.clone()),
+        store: egret_apps::store::AppStore::new(
+            db.clone(),
+            apps_storage.clone(),
+            config.storage.bucket.clone(),
+            config.apps.storage.prefix.clone(),
+        ),
     });
 
     // The apps host (spec §6.2, D17): the ticket route and the proxy, on a listener of their

@@ -11,6 +11,7 @@ use egret_apps::store::AppStore;
 use egret_apps::PodApiState;
 use egret_core::{UserId, WorkspaceId};
 use egret_metastore::Db;
+use egret_storage::{MemStore, ObjectStore};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -68,7 +69,13 @@ async fn grant_role(db: &Db, user: Uuid, role: &str, ws: Uuid) {
     .expect("grant role");
 }
 
-async fn build_router(db: &Db) -> axum::Router {
+const TEST_BUCKET: &str = "test-bucket";
+const TEST_PREFIX: &str = "apps/";
+
+/// S1-2: `AppStore` needs an object store now; `store` is the same `MemStore`
+/// handle the caller seeded draft content into (or a fresh one, when the test
+/// never reaches that content, e.g. an authorization check that 403s first).
+async fn build_router(db: &Db, store: Arc<MemStore>) -> axum::Router {
     let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
         egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
             .await
@@ -78,11 +85,25 @@ async fn build_router(db: &Db) -> axum::Router {
         db: db.clone(),
         pdp,
         pods: PodTokenRepo::new(db.clone()),
-        store: AppStore::new(db.clone()),
+        store: AppStore::new(
+            db.clone(),
+            store,
+            TEST_BUCKET.to_string(),
+            TEST_PREFIX.to_string(),
+        ),
     };
     axum::Router::new()
         .nest("/api", egret_apps::pod_router())
         .with_state(st)
+}
+
+/// Mirrors `AppStore::draft_key`'s private format (S1-2): `s3://{bucket}/{prefix}{ws}/{app}/draft.py`.
+fn draft_object_key(ws: Uuid, app: Uuid) -> String {
+    format!(
+        "s3://{TEST_BUCKET}/{TEST_PREFIX}{}/{}/draft.py",
+        ws.hyphenated(),
+        app.hyphenated()
+    )
 }
 
 impl Fixture {
@@ -118,7 +139,16 @@ impl Fixture {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-        let router = build_router(&db).await;
+        // `draft()` reads the source from the object store first, falling back
+        // to this row's `source` column only on a miss -- seed the matching key
+        // so the object store is what actually answers here (the column is a
+        // legitimate fallback source, not dead weight).
+        let store = Arc::new(MemStore::new());
+        store
+            .put(&draft_object_key(ws, app), b"draft v1".to_vec())
+            .await
+            .unwrap();
+        let router = build_router(&db, store).await;
         let pods = PodTokenRepo::new(db.clone());
         Self {
             db,
@@ -223,7 +253,9 @@ async fn the_app_write_check_is_repeated_on_every_call() {
         .execute(&fx.db.pool)
         .await
         .unwrap();
-    let router = build_router(&fx.db).await; // a fresh PDP snapshot, as after a grant change
+    // A fresh PDP snapshot, as after a grant change. A fresh, empty `MemStore` is fine:
+    // this call is expected to 403 on the authz check, never reaching the draft content.
+    let router = build_router(&fx.db, Arc::new(MemStore::new())).await;
     let resp = router
         .oneshot(
             Request::builder()

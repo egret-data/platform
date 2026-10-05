@@ -808,7 +808,7 @@ async fn draft_get(
     require_object(&*st.pdp, &ctx, APP_WRITE, obj).await?;
     let d = st
         .store
-        .draft(id)
+        .draft(ctx.workspace_id, id)
         .await?
         .ok_or_else(|| Error::NotFound("draft".into()))?;
     Ok((
@@ -864,6 +864,7 @@ async fn draft_put(
     match st
         .store
         .save_draft(
+            ctx.workspace_id,
             id,
             ctx.principal.user_id,
             expected,
@@ -929,7 +930,7 @@ async fn ticket(
                 // another app is simply absent.
                 Some(v) => {
                     st.store
-                        .version(id, v)
+                        .version(ctx.workspace_id, id, v)
                         .await?
                         .ok_or_else(|| Error::NotFound("version".into()))?
                         .summary
@@ -1024,7 +1025,12 @@ async fn publish(
     refuse_if_trashed(&row)?;
     match st
         .store
-        .publish(id, ctx.principal.user_id, b.expected_revision)
+        .publish(
+            ctx.workspace_id,
+            id,
+            ctx.principal.user_id,
+            b.expected_revision,
+        )
         .await?
     {
         PublishOutcome::Published(v) => {
@@ -1093,7 +1099,7 @@ async fn version_get(
     require_object(&*st.pdp, &ctx, APP_WRITE, obj).await?;
     let v = st
         .store
-        .version(id, version_id)
+        .version(ctx.workspace_id, id, version_id)
         .await?
         .ok_or_else(|| Error::NotFound("version".into()))?;
     Ok(Json(AppVersion {
@@ -1130,7 +1136,7 @@ async fn version_restore(
     refuse_if_trashed(&row)?;
     let v = st
         .store
-        .restore_version(id, version_id, ctx.principal.user_id)
+        .restore_version(ctx.workspace_id, id, version_id, ctx.principal.user_id)
         .await?
         .ok_or_else(|| Error::NotFound("version".into()))?;
     emit(

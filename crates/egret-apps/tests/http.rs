@@ -27,6 +27,16 @@ use uuid::Uuid;
 
 const TRASHED: &str = "app is in the trash; restore it first";
 const APPS_ORIGIN: &str = "https://apps.egret.test";
+const TEST_BUCKET: &str = "test-bucket";
+const TEST_PREFIX: &str = "apps/";
+
+/// S1-2: `AppStore` needs an object store too now. Every app this suite exercises
+/// is made through the store's own `create` (via `Fixture::create_app`'s HTTP call)
+/// or `publish`/`save_draft`, all against this one router's one `MemStore` -- so a
+/// fresh, empty one here is enough; nothing needs pre-seeding.
+fn test_object_store() -> Arc<dyn egret_storage::ObjectStore> {
+    Arc::new(egret_storage::MemStore::new())
+}
 
 /// `(method, path template with {id}, body, extra headers)`.
 type Route = (
@@ -67,7 +77,12 @@ async fn build_router(db: &Db) -> (axum::Router, Receiver<AuditEvent>) {
     );
     let (audit, audit_rx) = egret_audit::AuditSink::new(256);
     let st = AppsApiState {
-        store: AppStore::new(db.clone()),
+        store: AppStore::new(
+            db.clone(),
+            test_object_store(),
+            TEST_BUCKET.to_string(),
+            TEST_PREFIX.to_string(),
+        ),
         db: db.clone(),
         sessions: sessions(db),
         workspaces: WorkspaceRepo::new(db.clone()),
@@ -445,13 +460,21 @@ async fn an_app_of_another_workspace_is_404_on_every_route_like_a_random_id() {
     let fx = Fixture::new().await;
     // An app (with a published version) in workspace B, which the editor of A
     // cannot see. Made through the store: nobody here is a member of B.
-    let store = AppStore::new(fx.db.clone());
+    // Its own, separate `MemStore`: every route this test drives against `b_app`
+    // 404s on the workspace check before reaching draft/version content, so there
+    // is nothing for this store to share with `fx.router`'s own.
+    let store = AppStore::new(
+        fx.db.clone(),
+        test_object_store(),
+        TEST_BUCKET.to_string(),
+        TEST_PREFIX.to_string(),
+    );
     let b_app = store
         .create(fx.ws_b, fx.owner, "b", "", None, "import marimo")
         .await
         .unwrap()
         .id;
-    let b_ver = match store.publish(b_app, fx.owner, None).await.unwrap() {
+    let b_ver = match store.publish(fx.ws_b, b_app, fx.owner, None).await.unwrap() {
         egret_apps::store::PublishOutcome::Published(v) => v.id,
         other => panic!("{other:?}"),
     };
@@ -1373,7 +1396,14 @@ async fn with_no_apps_origin_configured_the_iframe_cannot_be_opened() {
     );
     let (audit, _rx) = egret_audit::AuditSink::new(8);
     let st = AppsApiState {
-        store: AppStore::new(fx.db.clone()),
+        // Its own `MemStore`: this test only checks the ticket route's response
+        // to a missing `apps_origin`, never draft/version content.
+        store: AppStore::new(
+            fx.db.clone(),
+            test_object_store(),
+            TEST_BUCKET.to_string(),
+            TEST_PREFIX.to_string(),
+        ),
         db: fx.db.clone(),
         sessions: sessions(&fx.db),
         workspaces: WorkspaceRepo::new(fx.db.clone()),

@@ -151,7 +151,7 @@ async fn draft_get(
     edit_target(&st, &p, app_id).await?;
     let d = st
         .store
-        .draft(app_id)
+        .draft(p.workspace_id, app_id)
         .await?
         .ok_or_else(|| Error::NotFound("draft".into()))?;
     Ok((
@@ -184,6 +184,7 @@ async fn draft_put(
     match st
         .store
         .save_draft(
+            p.workspace_id,
             app_id,
             target.user,
             expected,
@@ -218,7 +219,7 @@ async fn version_get(
     }
     let v = st
         .store
-        .version(app_id, version_id)
+        .version(p.workspace_id, app_id, version_id)
         .await?
         .ok_or_else(|| Error::NotFound("version".into()))?;
     Ok(Json(PodVersion {
