@@ -43,6 +43,8 @@
 //! a `&str` regex refuses and which would match half of `é`. Still Unicode, as
 //! the record: `(?i)` folds case beyond ASCII and `\p{Alpha}` is Unicode's
 //! `Alphabetic`, where Java's are ASCII.
+//! Java's `\Q…\E` quoting is not in the crate's grammar: refused, naming the
+//! pattern (fix round 2, M-R2).
 //!
 //! # Bounds (W9b Task 5 fix round 1, I1, 2026-10-06)
 //!

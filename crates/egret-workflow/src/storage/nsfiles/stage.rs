@@ -407,6 +407,18 @@ pub async fn stage(
     if !spec.enabled {
         return Ok(Ok(staged));
     }
+    let own = [flow_namespace.to_string()];
+    let namespaces = spec.namespaces.as_deref().unwrap_or(&own);
+    // Fix round 2, M-R3: one `authorize` + one listing per namespace, and an
+    // expression can now produce the list, so its length is bounded too --
+    // after render, before any query.
+    if namespaces.len() > MAX_NAMESPACES {
+        return Ok(Err(format!(
+            "namespaceFiles.namespaces: {} namespaces, more than the {MAX_NAMESPACES} one \
+             task may stage from",
+            namespaces.len()
+        )));
+    }
     // Compiling the patterns is CPU work an author sizes (bounded by
     // `glob`'s count and budget): off the async runtime (fix round 1, I1).
     let (include, exclude) = (spec.include.clone(), spec.exclude.clone());
@@ -414,11 +426,9 @@ pub async fn stage(
         .await
         .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()));
     let matcher = match compiled {
-        Ok(m) => m,
+        Ok(m) => std::sync::Arc::new(m),
         Err(why) => return Ok(Err(format!("namespaceFiles: {why}"))),
     };
-    let own = [flow_namespace.to_string()];
-    let namespaces = spec.namespaces.as_deref().unwrap_or(&own);
     let cap = fs.caps.max_namespace_files;
     let mut listed: u64 = 0;
     // Which namespace each staged path came from, for FAIL's message.
@@ -452,12 +462,7 @@ pub async fn stage(
             Err(e) => return split(e).map(Err),
         };
         listed += entries.len() as u64;
-        for e in entries {
-            // Directories are never offered to the predicate (w9b
-            // `globs.directories`), and have no object to stage.
-            if e.is_directory || !matcher.matches(&e.path) {
-                continue;
-            }
+        for e in matching(&matcher, entries).await {
             let rel_path = e.path.as_str().trim_start_matches('/');
             let rel = if spec.folder_per_namespace {
                 format!("{ns}/{rel_path}")
@@ -499,6 +504,32 @@ pub async fn stage(
         .map(|(rel, ns)| (rel, ns.to_string()))
         .collect();
     Ok(Ok(staged))
+}
+
+/// The most namespaces one rendered `namespaces` may name (fix round 2,
+/// M-R3; egret's bound, Kestra has none). A refusal names it and the count.
+pub const MAX_NAMESPACES: usize = 64;
+
+/// The listed files the predicate accepts, in listing order. Directories are
+/// never offered to it (w9b `globs.directories`) and have no object to stage.
+///
+/// Fix round 2, I1-R: matching is linear but its constant is the compiled
+/// size an author chose (spec §15 records the measured worst case), so it
+/// runs on the blocking pool, never on an async worker that also drives the
+/// lease heartbeats and other runs.
+async fn matching(
+    matcher: &std::sync::Arc<PathMatcher>,
+    entries: Vec<super::store::NsEntry>,
+) -> Vec<super::store::NsEntry> {
+    let matcher = matcher.clone();
+    tokio::task::spawn_blocking(move || {
+        entries
+            .into_iter()
+            .filter(|e| !e.is_directory && matcher.matches(&e.path))
+            .collect()
+    })
+    .await
+    .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
 }
 
 /// Spec §7, "staged bytes count against `max_task_bytes`" (fix round 1, M1):
@@ -1028,6 +1059,104 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(contents(&fs, &input.object_uri).await, "from-s1");
+    }
+
+    /// Fix round 2, I1-R: the predicate runs on the blocking pool, not on
+    /// the async worker. On a CURRENT-THREAD runtime (one worker for every
+    /// task), a ticker spawned beside `stage` keeps ticking while a costly
+    /// match runs; were the match inline, the ticker could only run during
+    /// the listing's own awaits.
+    #[tokio::test(flavor = "current_thread")]
+    async fn matching_runs_off_the_async_runtime_and_a_ticker_keeps_ticking() {
+        let Some(pool) = testing::pool().await else {
+            return;
+        };
+        let fs = mem_files(Caps::default());
+        let ws = testing::workspace(&pool).await;
+        // Long paths over {a, b}, none of which matches.
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut segment = || {
+            (0..200)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    if x.is_multiple_of(2) {
+                        'a'
+                    } else {
+                        'b'
+                    }
+                })
+                .collect::<String>()
+        };
+        for _ in 0..FILES {
+            let path = format!("/{}/{}", segment(), segment());
+            write(&pool, &fs, ws, "w9b.heavy", &path, "x").await;
+        }
+        // The review's family: each pattern makes the lazy DFA give up.
+        let mut spec = rendered(&["w9b.heavy"], IfExists::Overwrite);
+        spec.include = (0..PATTERNS)
+            .map(|i| format!("regex:.*[ab]a[ab]{{{}}}c{i}", i % 40))
+            .collect();
+
+        let ticks = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let ticker = {
+            let ticks = ticks.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                    ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+        };
+        tokio::task::yield_now().await;
+        let started = std::time::Instant::now();
+        let before = ticks.load(std::sync::atomic::Ordering::Relaxed);
+        let staged = run_stage(&pool, &fs, ws, &spec).await.unwrap();
+        let took = started.elapsed();
+        let ticked = ticks.load(std::sync::atomic::Ordering::Relaxed) - before;
+        ticker.abort();
+        assert!(staged.files.is_empty());
+        // The match must dominate, or the test proves nothing.
+        assert!(
+            took >= std::time::Duration::from_millis(400),
+            "the match took only {took:?}: raise FILES or PATTERNS"
+        );
+        // A 2 ms ticker on a free runtime ticks at least once per 10 ms.
+        let floor = took.as_millis() as u64 / 10;
+        assert!(
+            ticked >= floor,
+            "{ticked} ticks in {took:?} (at least {floor} expected): the match ran on \
+             the async worker"
+        );
+    }
+    const FILES: usize = 40;
+    const PATTERNS: usize = 64;
+
+    /// Fix round 2, M-R3: at most [`MAX_NAMESPACES`] namespaces, checked
+    /// after render and before any query (a refused namespace past the cap
+    /// is not reached: the cap answers first).
+    #[tokio::test]
+    async fn sixty_four_namespaces_stage_and_sixty_five_are_refused_naming_the_cap() {
+        let Some(pool) = testing::pool().await else {
+            return;
+        };
+        let fs = mem_files(Caps::default());
+        let ws = testing::workspace(&pool).await;
+        let names: Vec<String> = (0..MAX_NAMESPACES).map(|i| format!("w9b.n{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let ok = run_stage(&pool, &fs, ws, &rendered(&refs, IfExists::Overwrite)).await;
+        assert_eq!(ok, Ok(Staged::default()));
+        let mut over = refs.clone();
+        over.push("a._files");
+        let err = run_stage(&pool, &fs, ws, &rendered(&over, IfExists::Overwrite))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("65 namespaces") && err.contains("more than the 64"),
+            "{err}"
+        );
+        assert!(!err.contains("_files"), "the cap answers first: {err}");
     }
 
     /// The workspace is the run's: another workspace's identical namespace
