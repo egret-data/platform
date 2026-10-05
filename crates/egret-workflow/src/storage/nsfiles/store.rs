@@ -31,6 +31,10 @@ use crate::storage::FileStore;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NsEntry {
+    /// The row's workspace and namespace: [`open`] refuses an entry whose
+    /// pair is not its grant's (fix round 1 M2).
+    pub workspace: Uuid,
+    pub namespace: String,
     pub path: NsPath,
     pub revision: u32,
     pub is_directory: bool,
@@ -48,7 +52,7 @@ pub enum Want {
 /// The columns of one [`NsEntry`], in [`Row`]'s order.
 macro_rules! entry_cols {
     () => {
-        "path, revision, is_directory, size, deleted, created_at"
+        "workspace_id, namespace, path, revision, is_directory, size, deleted, created_at"
     };
 }
 
@@ -69,14 +73,19 @@ macro_rules! latest_under {
     };
 }
 
-type Row = (String, i32, bool, i64, bool, DateTime<Utc>);
+type Row = (Uuid, String, String, i32, bool, i64, bool, DateTime<Utc>);
+
+/// egret's bug, not the author's and not an outage: a 500.
+fn internal(message: String) -> NsError {
+    NsError::Db(egret_core::Error::Internal(anyhow::anyhow!(message)))
+}
 
 fn db_err(e: sqlx::Error) -> NsError {
     NsError::Db(egret_core::Error::Internal(anyhow::Error::new(e)))
 }
 
 fn entry(row: Row) -> Result<NsEntry, NsError> {
-    let (path, revision, is_directory, size, deleted, created_at) = row;
+    let (workspace, namespace, path, revision, is_directory, size, deleted, created_at) = row;
     let parsed = if is_directory {
         NsPath::parse_dir(&path)
     } else {
@@ -92,6 +101,8 @@ fn entry(row: Row) -> Result<NsEntry, NsError> {
         return Err(bad("it is not in its stored form".into()));
     }
     Ok(NsEntry {
+        workspace,
+        namespace,
         path: parsed,
         revision: u32::try_from(revision).map_err(|_| bad(format!("revision {revision}")))?,
         is_directory,
@@ -202,8 +213,14 @@ pub async fn list_live(
     recursive: bool,
     cap: u64,
 ) -> Result<Vec<NsEntry>, NsError> {
+    // A file prefix (`/a`) would match its siblings (`/ab/x`): egret's bug,
+    // refused in every build, not only under `debug_assert!` (fix round 1 M1).
+    if let Some(file) = dir.filter(|d| !d.is_dir()) {
+        return Err(internal(format!(
+            "egret listed namespace files under '{file}', which is a file, not a directory"
+        )));
+    }
     let prefix = dir.map_or("/", NsPath::as_str);
-    debug_assert!(prefix.ends_with('/'), "list_live under a file {prefix}");
     // One level: nothing after the prefix holds a '/', but a directory's own
     // trailing one (`left(rest, -1)` drops the last character).
     let rows: Vec<Row> = sqlx::query_as(concat!(
@@ -321,6 +338,17 @@ pub async fn open(
         e.path,
         grant.namespace()
     );
+    // An entry another grant resolved names another namespace's object at
+    // this path: egret's bug, refused before the store is asked (M2).
+    if e.workspace != grant.workspace() || e.namespace != grant.namespace() {
+        return Err(internal(format!(
+            "egret opened namespace file '{}' of namespace '{}' holding a grant for \
+             namespace '{}' (or another workspace)",
+            e.path,
+            e.namespace,
+            grant.namespace()
+        )));
+    }
     if e.is_directory {
         return Err(NsError::Author(format!(
             "{what} is a directory: it has no contents"

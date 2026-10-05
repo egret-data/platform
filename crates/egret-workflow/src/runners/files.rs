@@ -108,12 +108,18 @@ impl minijinja::value::Object for FileScopeObject {}
 pub const NAMESPACE_FILES_SEGMENT: &str = "_files";
 
 /// The index of the FIRST segment equal to [`NAMESPACE_FILES_SEGMENT`] at
-/// index 1 or later -- the namespace-file marker (W9b spec §3). Index 0 is
-/// never the marker: a namespace file needs a namespace before it.
+/// index 1 or later, when it comes BEFORE the first `executions/{uuid}` pair
+/// -- the namespace-file marker (W9b spec §3, the user's ruling 2026-10-05).
+/// Index 0 is never the marker: a namespace file needs a namespace before
+/// it. A `_files` after the pair is part of an execution file's path.
 pub fn namespace_marker(segments: &[&str]) -> Option<usize> {
-    segments
+    let marker = segments
         .iter()
         .skip(1)
         .position(|s| *s == NAMESPACE_FILES_SEGMENT)
-        .map(|i| i + 1)
+        .map(|i| i + 1)?;
+    match crate::storage::uri::execution_pair(segments) {
+        Some((pair, _)) if pair < marker => None,
+        _ => Some(marker),
+    }
 }

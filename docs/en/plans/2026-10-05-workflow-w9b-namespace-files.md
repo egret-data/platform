@@ -6,7 +6,7 @@
 
 **Architecture:**
 - `egret-workflow`'s `storage` module gains `nsfiles`: path rules, **one** access function (`nsfiles::access::authorize`, returning a `Grant` that every store operation requires), the metadata store (read side, then the locked write side), globs, staging, the routes and a streamed zip writer.
-- `storage::uri::parse_any` recognises the `_files` marker **before** the `executions/{uuid}` search and answers `StorageUri::{Execution, NamespaceFile}`; W9a's `parse` keeps answering execution URIs only.
+- `storage::uri::parse_any` recognises the `_files` marker and answers `StorageUri::{Execution, NamespaceFile}`; W9a's `parse` keeps answering execution URIs only. *(Amended 2026-10-05, Task 2 fix round 1, the user's ruling on I1: the marker counts only when it comes **before the first `executions/{uuid}` pair**. After the pair, `_files` is part of an execution file's path.)*
 - Namespace files are **not** in W9a's pre-render snapshot. A render looks them up at render time on a connection the `Snapshot` opens lazily from the connect options `egret-bin` installs; handlers and routes use their pool. Every lookup goes through `authorize` + `nsfiles::store::resolve`.
 - Every write takes a per-`(workspace, namespace, path)` Postgres advisory lock (transaction-scoped for writes and soft deletes, session-scoped for hard purges and moves, so that the "rows first, then objects" order holds without letting a writer reuse a purged key).
 
@@ -36,7 +36,7 @@
 - **Layout (§3):** object key `{workflow.storage.prefix}{workspace_id}/{ns-as-path}/_files{path}` for revision 1 and `…{path}.v{N}` for N ≥ 2 (`path` always starts with `/`); a directory has a row and **no object**. URI a flow sees: `kestra:///{ns-as-path}/_files{path}[.vN]`, no workspace in it.
 - **Defaults:** `workflow.storage.max_namespace_files` **10 000** (new, §7); `max_file_bytes` 1 GiB, `max_task_bytes` 5 GiB, `max_read_bytes` 10 MiB (W9a's, unchanged). Search and listing answers are capped by the same count.
 - **One access function, one readability path.** `storage::nsfiles::access::authorize` is the only code that decides whether a namespace may be read, written or purged; every store function takes the `Grant` it returns, so an unauthorised call does not type-check. Functions, staging, the four tasks, the API and the plugin bridge all reach `authorize` and then `nsfiles::store::resolve`/`list_live`. A second predicate anywhere is a review failure. **The workspace is always the execution's (or the API route's `{ws}` after the permission check), never parsed out of a URI or a property.**
-- **One path rule function** (`nsfiles::path::NsPath::parse_file`/`parse_dir`) for every entry point, and **one namespace rule** (`nsfiles::access::check_namespace`: `is_valid_namespace` + the `_files` segment) used by publish and by `authorize` — the save-time refusal and its run-time twin are the same function, and each task's report says which test pins which.
+- **One path rule function** (`nsfiles::path::NsPath::parse_file`/`parse_dir`) for every entry point, and **one namespace rule** (`nsfiles::access::check_namespace`: `is_valid_namespace` + the `_files` segment) used by publish and by `authorize` *(amended 2026-10-05, Task 2 fix round 1. Publish calls `check_files_segment`, the `_files` rule alone, so the twin is still one function. `check_namespace` adds the empty-segment refusal (`a..b`, `a.`), which applies to namespace files only (M3). `NsPath` adds a 512-byte limit on the stored form (I2))* — the save-time refusal and its run-time twin are the same function, and each task's report says which test pins which.
 - **Every refusal has a test that fails when the check is removed**; the task names the mutant that kills it. A refusal never says whether a file exists in a namespace the caller may not read.
 - **Revisions are taken under a lock.** A write holds `pg_advisory_xact_lock` on the path (and on each parent directory path, in ascending path order) across the upload and the row insert; a hard purge or move holds the same keys with `pg_advisory_lock` (session) across "delete rows, commit, delete objects". A concurrency test fails without the lock (Task 3).
 - **Bounds are structural:** counts are counted on what egret actually fetched (`LIMIT cap + 1` rows, the `+1` is the refusal), bytes as they stream. Nothing bounds by inspecting a glob or a path's grammar.
@@ -424,6 +424,12 @@ pub async fn open(fs: &FileStore, grant: &Grant, e: &NsEntry)
 
 ## Task 3: Writes — the lock, revisions, conflicts, soft delete, move and purge
 
+> *Amended 2026-10-05 (Task 2 fix round 1).* Several Task 2 changes affect this task:
+> - `NsPath` already refuses a path over 512 bytes of UTF-8 in its stored form (I2). `put` therefore needs no mapping of a key-too-long or index-row-size error to `Author`: those errors cannot arise from an author's path.
+> - `NsEntry` now carries `workspace` and `namespace`, and `open` refuses an entry whose pair is not its grant's (M2). A row built by the write side must come from `store`'s `entry`.
+> - `list_live` returns `NsError::Db(Internal)` when given a file as its directory (M1).
+> - `FileStore::namespace_object_uri`'s `.vN` key is asserted by `a_later_revision_is_read_from_its_v_suffixed_key` (M7).
+
 **Files:**
 - Create `src/storage/lock.rs`. Modify `src/storage/prune.rs` (`LockedSession` `:275-294` moves to `lock.rs`; `prune_pass_with` `:242` uses it unchanged in behaviour), `src/storage/nsfiles/store.rs`, `tests/nsfiles_store.rs`, `tests/storage_prune.rs`; create `tests/nsfiles_s3_live.rs`.
 
@@ -543,6 +549,8 @@ async fn a_writer_of_a_child_and_a_writer_of_a_file_named_like_its_parent_never_
 
 ## Task 4: The expression functions
 
+> *Amended 2026-10-05 (Task 2 fix round 1, the user's ruling on I1).* "Has the marker" means `runners::files::namespace_marker`: the first `_files` segment at index ≥ 1, counted **only before the first `executions/{uuid}` pair**. `kestra:///ns/flow/executions/<uuid>/tasks/…/_files/x` is an execution file and keeps W9a's rules. `classify` must call `namespace_marker` rather than search for `_files` itself. A namespace with an empty segment (`a..b`) is now refused by `check_namespace` (M3), so a function naming it fails by name.
+
 **Files:**
 - Modify `src/runners/files.rs`, `src/runners/functions.rs` (`REFUSED` `:265-282`, `file_function` `:316-377`, the tests `the_eight_refusals_name_themselves_and_their_owner` `:3251`, `file_uri_names_w9b_and_kv_names_w9c` `:3987`, `a_path_with_no_scheme_names_namespace_files_and_w9b` `:4006`, `an_nsfile_uri_names_namespace_files_and_w9b` `:4019`), `src/storage/scope.rs` (`Snapshot` `:47`, `scope_for` `:296`, the `Unconfigured` scope `:270`), `src/worker/claim.rs` (`input_for` `:1500`, `settle` `:1723`: both `scope_for` calls, `:1522` and `:1740`).
 - Create `tests/nsfiles_render.rs`.
@@ -556,7 +564,8 @@ async fn a_writer_of_a_child_and_a_writer_of_a_file_named_like_its_parent_never_
 // (Task 2 already added NAMESPACE_FILES_SEGMENT and namespace_marker here.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileTarget { Execution, Namespace }
-/// A string with no "://" or starting "nsfile://" -> Namespace; "kestra:///" whose path has the marker ->
+/// A string with no "://" or starting "nsfile://" -> Namespace; "kestra:///" whose path has the marker
+/// (`namespace_marker`: before the first executions/{uuid} pair; Task 2 fix round 1) ->
 /// Namespace; anything else -> Execution (W9a's rules then apply, unchanged).
 pub fn classify(path: &str) -> FileTarget;
 /// What a function was asked for, unparsed: storage parses it (path rule, nsfile authority, revision).
@@ -639,6 +648,8 @@ pub async fn scope_for(conn: &mut PgConnection, store: Option<Arc<FileStore>>, w
 ---
 
 ## Task 5: Globs and `namespaceFiles` staging; `WorkingDirectory` validated
+
+> *Amended 2026-10-05 (Task 2 fix round 1).* An `inputFiles` value is a namespace-file URI only when `parse_any` answers `NamespaceFile`: the `_files` marker counts only before the first `executions/{uuid}` pair (I1). An execution URI with a `_files` segment in its tail is staged as W9a's. Paths staged from namespace files are at most 512 bytes (I2). A namespace with an empty segment in `namespaces` is refused by `check_namespace` (M3).
 
 **Files:**
 - Create `src/storage/nsfiles/{glob.rs,stage.rs}`.

@@ -622,7 +622,7 @@ fn validate_plugin_tasks(flow: &Flow, report: &mut ValidationReport) {
 /// `namespace` against Kestra's own pattern (`AbstractFlow.java`):
 /// `^[a-z0-9][a-z0-9._-]*`, `@Size(min = 1, max = 150)`. A hand-written
 /// character check, not a `regex` dependency for one pattern. W9b: then no
-/// `_files` segment (`nsfiles::access::check_namespace`), a second finding
+/// `_files` segment (`nsfiles::access::check_files_segment`), a second finding
 /// only when the pattern passes, so no message is doubled.
 fn validate_namespace(flow: &Flow, report: &mut ValidationReport) {
     if !is_valid_namespace(&flow.namespace) {
@@ -634,10 +634,14 @@ fn validate_namespace(flow: &Flow, report: &mut ValidationReport) {
             ),
             path: "namespace".to_string(),
         });
-    } else if let Err(message) = crate::storage::nsfiles::access::check_namespace(&flow.namespace) {
+    } else if let Err(message) =
+        crate::storage::nsfiles::access::check_files_segment(&flow.namespace)
+    {
         // W9b: a `_files` segment would put this namespace's execution files
         // under another namespace's files (W9b spec §3). The same function
-        // refuses it at run time (`nsfiles::access::authorize`).
+        // refuses it at run time (`nsfiles::access::check_namespace`, which
+        // `authorize` calls). Only this rule: an empty segment (`a..b`) still
+        // publishes, and is refused by namespace files alone (fix round 1 M3).
         report.errors.push(Finding {
             code: "namespace_files_segment",
             message,
@@ -2321,6 +2325,53 @@ mod tests {
                 !validate(&f).errors.iter().any(|e| e.path == "namespace"),
                 "{ns}"
             );
+        }
+    }
+
+    /// W9b fix round 1 M3: the global namespace rule is unchanged -- an
+    /// empty segment publishes; only namespace files refuse it
+    /// (`nsfiles::access`'s `an_empty_namespace_segment_is_refused_by_namespace_files_only`).
+    #[test]
+    fn an_empty_namespace_segment_still_publishes() {
+        for ns in ["a..b", "a.", "a.b..c"] {
+            let f = parse(&format!(
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            assert!(
+                !validate(&f).errors.iter().any(|e| e.path == "namespace"),
+                "{ns}"
+            );
+        }
+    }
+
+    /// W9b fix round 1 I1: a flow id `_files` is refused at publish (by
+    /// Kestra's own id pattern: no leading `_`), so `{ns}/_files/executions/…`
+    /// is never a flow's execution URI. Its slug could not be `_files` either
+    /// (`storage::uri`'s `no_flow_slug_is_the_files_marker`).
+    #[test]
+    fn a_flow_id_of_files_is_refused() {
+        for id in ["_files", "_Files", "_files.x"] {
+            let f = parse(&format!(
+                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            let found: Vec<_> = validate(&f)
+                .errors
+                .into_iter()
+                .filter(|e| e.path == "id")
+                .collect();
+            assert_eq!(found.len(), 1, "{id}: {found:?}");
+            assert_eq!(found[0].code, "invalid_flow_id");
+            assert!(found[0].message.contains(&format!("'{id}'")), "{found:?}");
+        }
+        // The control: `files` and `x_files` are legal ids.
+        for id in ["files", "x_files"] {
+            let f = parse(&format!(
+                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            assert!(!validate(&f).errors.iter().any(|e| e.path == "id"), "{id}");
         }
     }
 

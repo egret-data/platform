@@ -13,6 +13,14 @@ pub struct NsPath(String);
 /// "A file or folder name exceeds the maximum length of 255 characters.").
 const MAX_SEGMENT_CHARS: usize = 255;
 
+/// The longest a path may be, in UTF-8 bytes of its STORED form (the leading
+/// '/' and, for a directory, the trailing '/' included): the user's ruling,
+/// 2026-10-05 (W9b Task 2 fix round 1, I2). It keeps the object key
+/// `{prefix}{ws}/{ns-as-path}/_files{path}.v{N}` under the 1024-byte S3 key
+/// limit, and the index row under Postgres's btree limit, so a long path is
+/// the author's error naming it -- never an infrastructure error at write.
+pub const MAX_PATH_BYTES: usize = 512;
+
 /// The folder Kestra keeps its flow sources in; no namespace file lives there.
 const FLOWS_FOLDER: &str = "_flows";
 
@@ -28,6 +36,7 @@ impl NsPath {
             None => (&full[1..], false),
         };
         check_segments(raw, body)?;
+        check_length(raw, &full)?;
         let last = body.rsplit('/').next().unwrap_or(body);
         if ends_in_revision_suffix(last) {
             return Err(refusal(
@@ -59,7 +68,9 @@ impl NsPath {
             ));
         }
         check_segments(raw, body)?;
-        Ok(Self(format!("/{body}/")))
+        let stored = format!("/{body}/");
+        check_length(raw, &stored)?;
+        Ok(Self(stored))
     }
 
     pub fn as_str(&self) -> &str {
@@ -144,6 +155,21 @@ fn check_segments(raw: &str, body: &str) -> Result<(), String> {
         return Err(refusal(
             raw,
             &format!("it holds the character {c:?}, which no namespace file path may"),
+        ));
+    }
+    Ok(())
+}
+
+/// [`MAX_PATH_BYTES`], over the stored form, in bytes (not characters).
+fn check_length(raw: &str, stored: &str) -> Result<(), String> {
+    if stored.len() > MAX_PATH_BYTES {
+        return Err(refusal(
+            raw,
+            &format!(
+                "it is {} bytes long; a namespace file path may be at most {MAX_PATH_BYTES} \
+                 bytes of UTF-8, its leading '/' (and a directory's trailing '/') included",
+                stored.len()
+            ),
         ));
     }
     Ok(())
@@ -253,12 +279,50 @@ mod tests {
     #[test]
     fn a_segment_of_256_characters_is_refused_and_255_is_not() {
         let (ok, long) = ("é".repeat(255), "é".repeat(256));
-        assert!(NsPath::parse_file(&format!("/d/{ok}")).is_ok());
+        // 255 two-byte characters (510 bytes) fit only at the top level: under
+        // `/d/` the same name is 513 bytes and the 512-byte rule (I2) refuses it.
+        assert!(NsPath::parse_file(&format!("/{ok}")).is_ok());
+        assert!(file_err(&format!("/d/{ok}")).contains("513 bytes"));
+        assert!(NsPath::parse_file(&format!("/d/{}", "a".repeat(255))).is_ok());
+        // The segment rule is checked first, so a 256-character name names it.
         assert!(file_err(&format!("/d/{long}")).contains("longer than 255"));
         assert!(NsPath::parse_dir(&format!("/{long}/"))
             .unwrap_err()
             .contains("longer than 255"));
         assert!(NsPath::parse_dir(&format!("/{ok}/")).is_ok());
+    }
+
+    /// I2: 512 bytes of the stored form, counted in bytes -- `é` is 2 bytes,
+    /// so each path below is about half as many characters, and a rule that
+    /// counted characters would accept the 513-byte ones.
+    #[test]
+    fn a_path_of_512_bytes_is_accepted_and_513_is_refused() {
+        let e200 = "é".repeat(200); // 400 bytes, one segment under 255 chars
+                                    // A file: '/' + 400 + '/' + 110 = 512 bytes, 257 characters.
+        let file512 = format!("/{e200}/{}", "é".repeat(55));
+        assert_eq!((file512.len(), file512.chars().count()), (512, 257));
+        assert_eq!(NsPath::parse_file(&file512).unwrap().as_str(), file512);
+        // Without its leading '/', the stored form is still 512.
+        assert!(NsPath::parse_file(&file512[1..]).is_ok());
+        let file513 = format!("{file512}a");
+        let err = file_err(&file513);
+        assert!(
+            err.contains("513 bytes") && err.contains("at most 512"),
+            "{err}"
+        );
+        assert!(
+            err.contains(&format!("{file513:?}")),
+            "names the path: {err}"
+        );
+        // A directory: its stored form's trailing '/' counts.
+        let body511 = format!("{e200}/{}a", "é".repeat(54)); // 400+1+108+1 = 510
+        let dir_raw = format!("/{body511}"); // 511 bytes; stored "/…/" is 512
+        assert_eq!(dir_raw.len(), 511);
+        assert_eq!(NsPath::parse_dir(&dir_raw).unwrap().as_str().len(), 512);
+        let err = NsPath::parse_dir(&format!("{dir_raw}b")).unwrap_err();
+        assert!(err.contains("513 bytes"), "{err}");
+        // Typed with its trailing '/', the same 512 bytes pass.
+        assert!(NsPath::parse_dir(&format!("{dir_raw}/")).is_ok());
     }
 
     #[test]

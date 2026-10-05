@@ -187,9 +187,15 @@ fn segments(uri: &str) -> Result<Vec<&str>, String> {
 /// A `kestra:///` URI of either kind (W9b spec §3).
 ///
 /// The FIRST segment equal to `_files` at index >= 1 marks a namespace file
-/// (§3), and this check runs before the `executions/{uuid}` search:
-/// `kestra:///a/_files/x/executions/<uuid>/f` is namespace `a`'s file
-/// `/x/executions/<uuid>/f`. The segments before the marker are the
+/// (§3) **only when it comes before the first `executions/{uuid}` pair**
+/// (the user's ruling, 2026-10-05, W9b Task 2 fix round 1 I1): after that
+/// pair `_files` is part of an execution file's path, so W9a's
+/// `…/executions/<uuid>/tasks/<slug>/<run>/_files/report.csv` and a FILE
+/// input named `_files` stay execution files. Before it the reading is
+/// unambiguous: publish refuses a namespace with a `_files` segment, and no
+/// flow segment can be `_files` (a flow id may not start with `_`, and its
+/// slug holds no `_`). So `kestra:///a/_files/x/executions/<uuid>/f` is
+/// namespace `a`'s file `/x/executions/<uuid>/f`. The segments before the marker are the
 /// namespace (checked by `nsfiles::access::check_namespace`), the ones after
 /// it the path (checked by `NsPath::parse_file`); a trailing `.v{N}` with N >= 2,
 /// digits only and no leading zero, is the revision, and no suffix is
@@ -247,21 +253,29 @@ fn split_revision(last: &str) -> (&str, u32) {
     (last, 1)
 }
 
+/// The FIRST `executions/{canonical uuid}` pair at index 2 or later: the
+/// index of its `executions` segment and the execution. W9a's execution
+/// search, and (W9b fix round 1, I1) the boundary after which a `_files`
+/// segment is part of an execution file's path, never the namespace-file
+/// marker (`runners::files::namespace_marker`).
+pub(crate) fn execution_pair(segments: &[&str]) -> Option<(usize, Uuid)> {
+    segments
+        .iter()
+        .enumerate()
+        .skip(2)
+        .filter(|(_, seg)| **seg == EXECUTIONS)
+        .find_map(|(i, _)| {
+            segments
+                .get(i + 1)
+                .and_then(|s| canonical_uuid(s))
+                .map(|exec| (i, exec))
+        })
+}
+
 /// W9a's `executions/{uuid}` search, over [`segments`]' answer.
 fn execution_file(segments: &[&str]) -> Result<ExecUri, String> {
-    let mut saw_executions = false;
-    let mut found = None;
-    for (i, seg) in segments.iter().enumerate().skip(2) {
-        if *seg != EXECUTIONS {
-            continue;
-        }
-        saw_executions = true;
-        if let Some(exec) = segments.get(i + 1).and_then(|s| canonical_uuid(s)) {
-            found = Some((i, exec));
-            break;
-        }
-    }
-    let Some((i, execution)) = found else {
+    let Some((i, execution)) = execution_pair(segments) else {
+        let saw_executions = segments.iter().skip(2).any(|s| *s == EXECUTIONS);
         return Err(if saw_executions {
             "the segment after 'executions' is not an execution id (a canonical UUID)".to_string()
         } else {
@@ -1009,5 +1023,100 @@ mod tests {
         ] {
             assert_eq!(ns_file(u).to_uri(), u);
         }
+    }
+
+    // -- W9b Task 2 fix round 1, I1: `_files` after `executions/{uuid}` is a path.
+
+    /// A W9a task output under a `_files` directory is an execution file, and
+    /// round-trips; so is the `verbatim_file_uri` W9a builds for it.
+    #[test]
+    fn a_files_segment_after_the_execution_pair_is_an_execution_files_path() {
+        let exec = Uuid::parse_str("0e9a7b4c-3f53-4f0b-9b3e-8d1f2a6c7e10").unwrap();
+        let run = Uuid::parse_str("5b1e2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d").unwrap();
+        let u = format!("kestra:///ns/flow/executions/{exec}/tasks/build/{run}/_files/report.csv");
+        match parse_any(&u).unwrap_or_else(|e| panic!("{u}: {e}")) {
+            StorageUri::Execution(e) => {
+                assert_eq!(e.execution, exec);
+                assert_eq!(e.to_uri(), u);
+                assert_eq!(
+                    e.tail,
+                    Tail::Task {
+                        task_slug: "build".into(),
+                        task_run: run.hyphenated().to_string(),
+                        file: "_files/report.csv".into(),
+                    }
+                );
+            }
+            other => panic!("{u}: {other:?}"),
+        }
+        assert_eq!(parse(&u).unwrap().to_uri(), u);
+        let prefix = task_prefix("ns", "flow", exec, "build", run).unwrap();
+        assert_eq!(verbatim_file_uri(&prefix, "_files/report.csv").unwrap(), u);
+        // Deeper, and `_files` twice: still the execution's.
+        let deep = verbatim_file_uri(&prefix, "a/_files/_files/x").unwrap();
+        assert!(
+            matches!(parse_any(&deep), Ok(StorageUri::Execution(_))),
+            "{deep}"
+        );
+        // A trigger's and an execution's own file named `_files`.
+        for tail in ["trigger/t/_files", "_files"] {
+            let t = format!("kestra:///ns/flow/executions/{exec}/{tail}");
+            assert!(matches!(parse_any(&t), Ok(StorageUri::Execution(_))), "{t}");
+            assert_eq!(parse(&t).unwrap().to_uri(), t);
+        }
+    }
+
+    /// An uploaded FILE input literally named `_files` (and an input whose id
+    /// is `_files`) is an execution file.
+    #[test]
+    fn a_file_input_named_files_is_an_execution_file() {
+        let exec = Uuid::parse_str("0e9a7b4c-3f53-4f0b-9b3e-8d1f2a6c7e10").unwrap();
+        for (input, file) in [("f", "_files"), ("_files", "x.txt"), ("_files", "_files")] {
+            let u = input_uri("a.b", "flow", exec, input, file)
+                .unwrap_or_else(|e| panic!("{input}/{file}: {e}"));
+            assert_eq!(
+                u,
+                format!("kestra:///a/b/flow/executions/{exec}/inputs/{input}/{file}")
+            );
+            let got = parse(&u).unwrap();
+            assert_eq!(
+                got.tail,
+                Tail::Input {
+                    input: input.into(),
+                    file: file.into()
+                }
+            );
+            assert_eq!(got.to_uri(), u);
+        }
+        // The spec's example is still a namespace file: its marker is before the pair.
+        assert_eq!(
+            ns_file(&format!("kestra:///a/_files/x/executions/{exec}/f")),
+            nf("a", &format!("/x/executions/{exec}/f"), 1)
+        );
+    }
+
+    /// No flow segment can be the marker: a flow id may not start with `_`
+    /// (publish's `invalid_flow_id`), and its slug holds no `_` at all.
+    #[test]
+    fn no_flow_slug_is_the_files_marker() {
+        for id in [
+            "_files",
+            "x_files",
+            "__files__",
+            "_Files",
+            "a._files",
+            "files_",
+        ] {
+            let slug = slugify_str(id);
+            assert!(!slug.contains('_'), "{id} -> {slug}");
+            assert_ne!(slug, NAMESPACE_FILES_SEGMENT);
+        }
+        // A namespace holding `executions.<uuid>` before `_files`: the pair
+        // comes first, so its URI would read as an execution URI -- refused
+        // at build, naming the namespace (W9a's documented non-totality).
+        let ns = "a.b.executions.0e9a7b4c-3f53-4f0b-9b3e-8d1f2a6c7e10";
+        let p = crate::storage::nsfiles::path::NsPath::parse_file("/x").unwrap();
+        let err = namespace_file_uri(ns, &p, 1).unwrap_err();
+        assert!(err.contains(&format!("namespace {ns:?}")), "{err}");
     }
 }

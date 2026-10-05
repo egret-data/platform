@@ -404,3 +404,203 @@ async fn deleting_a_workspace_cascades_its_namespace_files() {
     assert_eq!(count(ws).await.unwrap(), 0);
     assert_eq!(count(other).await.unwrap(), 1);
 }
+
+// -- Fix round 1: M1, M2, M7.
+
+/// M1: a FILE as `list_live`'s directory is egret's bug, refused in every
+/// build -- before, `/a` matched the sibling `/ab/x` under `left()`.
+#[tokio::test]
+async fn list_live_refuses_a_file_as_its_directory() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    for p in ["/a/", "/a/x", "/ab/", "/ab/x"] {
+        row(&db, ws, NS, p, 1, 0, false).await;
+    }
+    let mut c = conn(&db).await;
+    let g = read_grant(ws);
+    for recursive in [true, false] {
+        let err = list_live(&mut c, &g, Some(&file("/a")), recursive, 10)
+            .await
+            .unwrap_err();
+        match &err {
+            NsError::Db(egret_core::Error::Internal(e)) => {
+                assert!(e.to_string().contains("'/a', which is a file"), "{e}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    // The control: the directory `/a/` lists its own child only.
+    assert_eq!(
+        paths(
+            &list_live(&mut c, &g, Some(&dir("/a")), true, 10)
+                .await
+                .unwrap()
+        ),
+        ["/a/x"]
+    );
+}
+
+/// M2: an entry resolved under one grant cannot be opened under another
+/// namespace's or another workspace's grant -- which would otherwise stream
+/// THAT namespace's object at the same path and revision.
+#[tokio::test]
+async fn open_refuses_an_entry_of_another_grant() {
+    let Some(db) = common::db().await else { return };
+    let fs = storage::install_mem_for_tests();
+    let (a, _) = common::seed_workspace(&db).await;
+    let (b, _) = common::seed_workspace(&db).await;
+    row(&db, a, NS, "/s.txt", 1, 1, false).await;
+    let mut c = conn(&db).await;
+    let ga = read_grant(a);
+    let p = file("/s.txt");
+    let e = resolve(&mut c, &ga, &p, Want::Latest).await.unwrap();
+    assert_eq!((e.workspace, e.namespace.as_str()), (a, NS));
+    let other_ns = authorize(a, Actor::Api, "w9b.other", Access::Read).unwrap();
+    let other_ws = read_grant(b);
+    // Each wrong grant's object exists, so only the check can refuse it.
+    for (g, body) in [
+        (&ga, "mine"),
+        (&other_ns, "other-ns"),
+        (&other_ws, "other-ws"),
+    ] {
+        fs.store
+            .put(&fs.namespace_object_uri(g, &p, 1), body.as_bytes().to_vec())
+            .await
+            .unwrap();
+    }
+    for g in [&other_ns, &other_ws] {
+        match open(&fs, g, &e).await {
+            Ok(_) => panic!("{:?} opened another grant's entry", g.namespace()),
+            Err(NsError::Db(egret_core::Error::Internal(m))) => {
+                assert!(m.to_string().contains("/s.txt"), "{m}")
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+    // The control: its own grant streams its own object.
+    let mut got = String::new();
+    open(&fs, &ga, &e)
+        .await
+        .unwrap()
+        .read_to_string(&mut got)
+        .await
+        .unwrap();
+    assert_eq!(got, "mine");
+}
+
+/// M7: revision N >= 2 lives at `….v{N}`, and `open` reads it there.
+#[tokio::test]
+async fn a_later_revision_is_read_from_its_v_suffixed_key() {
+    let Some(db) = common::db().await else { return };
+    let fs = storage::install_mem_for_tests();
+    let (ws, _) = common::seed_workspace(&db).await;
+    for rev in [1, 2, 10] {
+        row(&db, ws, NS, "/r/x.txt", rev, 3, false).await;
+    }
+    let mut c = conn(&db).await;
+    let (g, p) = (read_grant(ws), file("/r/x.txt"));
+    let base = format!("s3://{}/{}{ws}/w9b/t2/_files/r/x.txt", fs.bucket, fs.prefix);
+    assert_eq!(fs.namespace_object_uri(&g, &p, 1), base);
+    assert_eq!(fs.namespace_object_uri(&g, &p, 2), format!("{base}.v2"));
+    assert_eq!(fs.namespace_object_uri(&g, &p, 10), format!("{base}.v10"));
+    for (rev, body) in [(1, "one"), (2, "two"), (10, "ten")] {
+        let key = if rev == 1 {
+            base.clone()
+        } else {
+            format!("{base}.v{rev}")
+        };
+        fs.store.put(&key, body.as_bytes().to_vec()).await.unwrap();
+    }
+    for (want, body) in [
+        (Want::Revision(1), "one"),
+        (Want::Revision(2), "two"),
+        (Want::Latest, "ten"),
+    ] {
+        let e = resolve(&mut c, &g, &p, want).await.unwrap();
+        let mut got = String::new();
+        open(&fs, &g, &e)
+            .await
+            .unwrap()
+            .read_to_string(&mut got)
+            .await
+            .unwrap();
+        assert_eq!(got, body, "{want:?}");
+    }
+}
+
+/// A MemStore whose streamed read fails with something other than NotFound.
+struct FailingReads(egret_storage::MemStore);
+
+#[async_trait::async_trait]
+impl egret_storage::ObjectStore for FailingReads {
+    async fn put(&self, uri: &str, bytes: Vec<u8>) -> Result<(), egret_storage::StorageError> {
+        self.0.put(uri, bytes).await
+    }
+    async fn get(&self, uri: &str) -> Result<Vec<u8>, egret_storage::StorageError> {
+        self.0.get(uri).await
+    }
+    async fn delete(&self, uri: &str) -> Result<(), egret_storage::StorageError> {
+        self.0.delete(uri).await
+    }
+    async fn copy(&self, src: &str, dst: &str) -> Result<(), egret_storage::StorageError> {
+        self.0.copy(src, dst).await
+    }
+    async fn list(
+        &self,
+        prefix: &str,
+        delimiter: Option<&str>,
+    ) -> Result<egret_storage::Listing, egret_storage::StorageError> {
+        self.0.list(prefix, delimiter).await
+    }
+    async fn get_stream(
+        &self,
+        uri: &str,
+    ) -> Result<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>, egret_storage::StorageError> {
+        Err(egret_storage::StorageError::S3(format!(
+            "connection reset reading {uri} (secret-detail)"
+        )))
+    }
+}
+
+/// M7: a store error other than NotFound is `NsError::Store` -- an outage,
+/// not the author's -- and its message names neither the key nor the
+/// store's own words.
+#[tokio::test]
+async fn a_store_outage_on_open_is_a_store_error_that_names_no_key() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    row(&db, ws, NS, "/o.txt", 1, 1, false).await;
+    row(&db, ws, NS, "/o.txt", 2, 1, false).await;
+    let mem = egret_storage::MemStore::new();
+    let fs = storage::FileStore {
+        store: std::sync::Arc::new(FailingReads(mem)),
+        bucket: "b".into(),
+        prefix: "workflow/".into(),
+        caps: storage::Caps::default(),
+        retention_days: 30,
+    };
+    let mut c = conn(&db).await;
+    let (g, p) = (read_grant(ws), file("/o.txt"));
+    // The object is there: only the read fails.
+    let key = fs.namespace_object_uri(&g, &p, 2);
+    fs.store.put(&key, b"x".to_vec()).await.unwrap();
+    let e = resolve(&mut c, &g, &p, Want::Latest).await.unwrap();
+    let err = match open(&fs, &g, &e).await {
+        Ok(_) => panic!("the store fails every streamed read"),
+        Err(err) => err,
+    };
+    match &err {
+        NsError::Store(m) => {
+            assert!(m.contains("/o.txt") && m.contains("revision 2"), "{m}");
+            for leak in [
+                "s3://",
+                "secret-detail",
+                "connection reset",
+                &ws.to_string(),
+            ] {
+                assert!(!m.contains(leak), "{m:?} leaks {leak:?}");
+            }
+        }
+        other => panic!("{other:?}"),
+    }
+}

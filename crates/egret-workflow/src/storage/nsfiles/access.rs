@@ -2,11 +2,15 @@
 //!
 //! [`authorize`] is the only code that decides whether a namespace may be
 //! read, written or purged. Every store function takes the [`Grant`] it
-//! returns, so an unauthorised call does not type-check. [`check_namespace`]
-//! is the one namespace rule: publish (`spec::validate`) refuses a flow whose
-//! namespace breaks it, and `authorize` refuses a target or a running flow's
+//! returns, so an unauthorised call does not type-check.
+//!
+//! [`check_files_segment`] is the `_files` rule: publish (`spec::validate`)
+//! refuses a flow whose namespace breaks it, and [`check_namespace`] (which
+//! `authorize` and the URI parse call) refuses a target or a running flow's
 //! namespace that does -- the save-time refusal and its run-time twin are the
-//! same function.
+//! same function. [`check_namespace`] also refuses an empty segment (`a..b`,
+//! `a.`), which publish still accepts: that rule is namespace files' own (the
+//! user's ruling, 2026-10-05, W9b Task 2 fix round 1 M3).
 
 use uuid::Uuid;
 
@@ -54,14 +58,30 @@ impl Grant {
     }
 }
 
-/// `is_valid_namespace` + no `_files` segment. Publish (validate.rs) and
-/// [`authorize`] both call it.
+/// The namespace rule of every namespace-file operation: `is_valid_namespace`,
+/// then no empty segment (`a..b`, `a.`: its key would hold `//` and no URI
+/// could name its files), then [`check_files_segment`]. [`authorize`] and
+/// `storage::uri::parse_any` call it; publish calls only
+/// [`check_files_segment`], so a namespace with an empty segment still
+/// publishes (as before W9b) but can hold no namespace file.
 pub fn check_namespace(namespace: &str) -> Result<(), String> {
     if !is_valid_namespace(namespace) {
         return Err(format!(
             "namespace '{namespace}' must match ^[a-z0-9][a-z0-9._-]* and be 1-150 characters long"
         ));
     }
+    if namespace.split('.').any(str::is_empty) {
+        return Err(format!(
+            "namespace '{namespace}' has an empty segment ('..', or a '.' at its start or \
+             end); a namespace that holds namespace files names every segment"
+        ));
+    }
+    check_files_segment(namespace)
+}
+
+/// No `_files` segment: publish (validate.rs) and, through
+/// [`check_namespace`], every namespace-file operation call it.
+pub fn check_files_segment(namespace: &str) -> Result<(), String> {
     if namespace.split('.').any(|s| s == NAMESPACE_FILES_SEGMENT) {
         return Err(format!(
             "namespace '{namespace}' has a segment '{NAMESPACE_FILES_SEGMENT}', which marks \
@@ -213,6 +233,46 @@ mod tests {
         for ok in ["a.files", "a.x_files", "a._filesx", "a.b_files.c"] {
             assert!(check_namespace(ok).is_ok(), "{ok}");
         }
+    }
+
+    /// M3: an empty segment is refused by every namespace-file operation,
+    /// as a target and as the running flow's own namespace; `a.` is no
+    /// longer a child for Purge. Publish is unchanged (validate.rs's
+    /// `an_empty_namespace_segment_still_publishes`).
+    #[test]
+    fn an_empty_namespace_segment_is_refused_by_namespace_files_only() {
+        let ws = Uuid::new_v4();
+        for bad in ["a..b", "a.", "a.b..c", "a.b."] {
+            assert!(is_valid_namespace(bad), "{bad}: the pattern accepts it");
+            assert!(check_files_segment(bad).is_ok(), "{bad}: publish's rule");
+            for access in ALL {
+                for actor in [Actor::Api, flow("a")] {
+                    let err = authorize(ws, actor, bad, access).unwrap_err();
+                    assert!(
+                        err.contains(&format!("namespace '{bad}'"))
+                            && err.contains("empty segment"),
+                        "{bad}: {err}"
+                    );
+                }
+                let err = authorize(ws, flow(bad), "a", access).unwrap_err();
+                assert!(
+                    err.contains("running flow") && err.contains("empty segment"),
+                    "{err}"
+                );
+            }
+        }
+        // `.a` is refused by the pattern, named once.
+        let err = check_namespace(".a").unwrap_err();
+        assert!(
+            err.contains("must match") && !err.contains("empty segment"),
+            "{err}"
+        );
+        // Before M3 `a.` was a child of `a` for Purge.
+        assert!(authorize(ws, flow("a"), "a.", Access::Purge).is_err());
+        assert!(
+            authorize(ws, flow("a"), "a.b", Access::Purge).is_ok(),
+            "the control"
+        );
     }
 
     #[test]
