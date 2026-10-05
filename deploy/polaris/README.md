@@ -71,16 +71,16 @@ that workspace's catalog-role; auto-pushing it into the connector is the future
 engines-centralization / K8s-provisioning epic — here it is manual (dev uses `root:s3cr3t`).
 
 Trino enforces JWT auth over TLS (`:8453`); a `SHOW SCHEMAS FROM iceberg` query needs a
-per-user Keycloak JWT (egret mints one via `/api/kernel/engine-token`). Governed **writes**
+per-user Keycloak JWT (egret mints one via its own machine-IdP token broker). Governed **writes**
 also need a Trino JWT→group mapping (dev's `rules.json`); without a group provider, relax the
 ACL for the test (see `deploy/trino/etc/README.md`).
 
 ## 5. End-to-end (the full loop)
 
-With the stack up (postgres, minio, keycloak, **polaris**, trino wired) + egret `serve` + a
-python kernel: in a notebook cell, `write_table(df, "lakehouse.eda.summary", engine="trino")`
-then `trino("SELECT ... FROM lakehouse.eda.summary")` — the engine performs the governed
-write into the Polaris catalog on MinIO and reads it back. See `frontend/tests/e2e/README.md`.
+With the stack up (postgres, minio, keycloak, **polaris**, trino wired) + egret `serve`: via
+SQL Lab, `CREATE TABLE lakehouse.eda.summary AS SELECT ...` then `SELECT * FROM
+lakehouse.eda.summary` — the engine performs the governed write into the Polaris catalog on
+MinIO and reads it back. See `frontend/tests/e2e/README.md`.
 
 ## What is live-validated (this repo)
 
@@ -89,5 +89,5 @@ confirmed (HTTP 201/200): `client_credentials` token; `list_catalogs`/`list_prin
 shapes match `egret-polaris`); `create_catalog` on S3/MinIO; and the full assignment sequence
 (`create_principal` + credentials, principal-role, `assign_principal_role`, catalog-role,
 `assign_catalog_role`, `add_grant CATALOG_MANAGE_CONTENT`). Trino loads the Polaris Iceberg REST
-connector cleanly. The full notebook `write_table`-through-Trino roundtrip is the operator-run
+connector cleanly. The full SQL-Lab-through-Trino write/read roundtrip is the operator-run
 validation above (needs the whole stack + the Trino group-mapping, which is environment-specific).

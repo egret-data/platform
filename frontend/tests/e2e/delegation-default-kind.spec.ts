@@ -1,4 +1,4 @@
-import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
+import { test, expect, type APIRequestContext } from "@playwright/test";
 import {
   loginLocalAdmin,
   csrf,
@@ -46,52 +46,6 @@ import {
  */
 const ENABLED = process.env.EGRET_E2E_KIND === "1";
 const RUN_ID = process.env.EGRET_E2E_RUN_ID ?? `${Date.now()}`;
-
-/** Set the Nth mounted Monaco editor's value (typing into Monaco is flaky). Mirrors
- *  sts-broker-kind.spec.ts / notebook-write-isolation-kind.spec.ts. */
-async function setCellSource(page: Page, index: number, code: string) {
-  await page.waitForFunction(
-    (i) => (window as any).monaco?.editor?.getEditors?.().length > i,
-    index,
-    { timeout: 20_000 },
-  );
-  await page.evaluate(
-    ({ i, src }) => (window as any).monaco.editor.getEditors()[i].setValue(src),
-    { i: index, src: code },
-  );
-}
-
-async function newNotebook(page: Page, name: string) {
-  await page.getByRole("link", { name: "Notebooks" }).click();
-  await page.getByRole("button", { name: "+ Notebook" }).click();
-  await page.getByRole("textbox", { name: "Name" }).fill(name);
-  await page.getByRole("button", { name: "Create", exact: true }).click();
-  await page.waitForURL(/\/notebooks\/[0-9a-f-]{36}$/, { timeout: 20_000 });
-}
-
-/**
- * Enable a notebook DB-connection of the given `engineKind` ("trino" | "starrocks")
- * for the workspace — assigning an engine creates its notebook connection DISABLED
- * by default. Returns the connection NAME, which is the `engine=` target notebook
- * cells (`trino()`/`starrocks()`) resolve by. Mirrors sts-broker-kind.spec.ts.
- */
-async function enableNotebookEngine(
-  request: APIRequestContext,
-  h: Record<string, string>,
-  wsSlug: string,
-  engineKind: string,
-): Promise<string> {
-  const settings = await (await request.get(`/api/ws/${wsSlug}/notebook-settings`)).json();
-  const conns: Array<{ id: string; name: string; engine: string }> = settings.engines ?? [];
-  const conn = conns.find((c) => c.engine === engineKind);
-  expect(conn, `a ${engineKind} notebook connection exists after assignment`).toBeTruthy();
-  const put = await request.put(`/api/ws/${wsSlug}/notebook-settings`, {
-    headers: h,
-    data: { engine_ids: [conn!.id] },
-  });
-  expect(put.ok(), `enable notebook engine → ${put.status()} ${await put.text()}`).toBeTruthy();
-  return conn!.name;
-}
 
 /**
  * Provision a small (1 FE, 1 CN) StarRocks engine wired to the warehouse with NO
@@ -159,8 +113,8 @@ async function waitForResolvedDelegationMode(
 
 test.describe("default-on jwt delegation on kind", () => {
   test.skip(!ENABLED, "opt-in: set EGRET_E2E_KIND=1 against a ranger-on kind deploy");
-  // Full engine-provisioning lifecycle (StarRocks FE cold-start is slow) + kernel
-  // cold-start for the notebook query. Keep serial — a single kind node runs hot.
+  // Full engine-provisioning lifecycle — StarRocks FE cold-start is slow. Keep
+  // serial — a single kind node runs hot.
   test.describe.configure({ mode: "serial" });
   test.setTimeout(900_000);
 
@@ -234,48 +188,33 @@ test.describe("default-on jwt delegation on kind", () => {
 
       await waitForEngineReady(request, engineId);
       await assignEngineToWorkspace(request, h, engineId, ws.id);
-      const engineName = await enableNotebookEngine(request, h, ws.slug, "starrocks");
+      const eng = `e2e-sr-def-${runId}`;
 
-      // Create the notebook AFTER enabling the engine so the kernel's runtime
-      // manifest (loaded at kernel start) includes it → starrocks() resolves it.
-      await newNotebook(page, `delegation-default-sr ${runId}`);
-      await setCellSource(
-        page,
-        0,
-        [
-          "import daft",
-          `df = starrocks("SELECT 1 AS one", engine="${engineName}")`,
-          "display(df)",
-          "d = df.to_pydict()",
-          "print('EGRET_DELEGDEFAULT_ROWS=' + str(len(d.get('one', []))))",
-          "print('EGRET_DELEGDEFAULT_VALUE=' + str(d.get('one', [None])[0]))",
-        ].join("\n"),
-      );
+      // Basic per-user proof, via SQL Lab (same mechanism the Trino case above
+      // uses): the admin's own SELECT succeeds solely off the egret-auto-seeded
+      // admin Ranger policy (no hand-created access policy) and the
+      // jwt-delegated coordinator — proving the DEFAULT-resolved jwt path is
+      // live end-to-end, not just persisted in the stored spec.
+      //
       // The StarRocks JWT security integration (CREATE SECURITY INTEGRATION +
       // authentication_chain="native,egret_oidc") is bootstrapped ASYNCHRONOUSLY
       // after the FE pod reports "running" (waitForEngineReady only gates on the
       // pod phase). Until it lands, the FE's chain is just "native", so the
       // per-user JWT login for `preferred_username` falls to native auth and is
-      // rejected ("Access denied ... using password: NO"). A single-shot cell run
-      // races that window, so RE-RUN the query until the integration is live (the
-      // marker appears) or the budget is spent. Each re-run mints a fresh JWT and
-      // opens a fresh connection, so it succeeds as soon as the chain is active.
-      const marker = page.getByText("EGRET_DELEGDEFAULT_ROWS=1");
-      const deadline = Date.now() + 240_000;
-      await page.getByRole("button", { name: "Run all" }).click();
-      while (Date.now() < deadline) {
-        try {
-          await expect(marker).toBeVisible({ timeout: 30_000 });
-          break;
-        } catch {
-          if (Date.now() >= deadline) throw new Error("StarRocks jwt query never succeeded");
-          // Not yet — the security integration is likely still bootstrapping. Re-run.
-          await page.getByRole("button", { name: "Run all" }).click();
-        }
-      }
-      await expect(marker).toBeVisible();
-      await expect(page.getByText("EGRET_DELEGDEFAULT_VALUE=1")).toBeVisible();
-      await expect(page.getByText("1 row", { exact: false })).toBeVisible();
+      // rejected ("Access denied ... using password: NO"). `runQuery`'s own
+      // `toPass` retry (300s budget) already re-submits on exactly this kind of
+      // transient failure, so no extra retry loop is needed here.
+      const table = `egret.delegdefault_sr.probe_${runId.replace(/[^a-zA-Z0-9_]/g, "_")}`;
+      await runQuery(request, h, ws.slug, eng, "CREATE SCHEMA IF NOT EXISTS egret.delegdefault_sr");
+      await runQuery(request, h, ws.slug, eng, `CREATE TABLE IF NOT EXISTS ${table} (id bigint, item varchar)`);
+      await runQuery(request, h, ws.slug, eng, `INSERT INTO ${table} VALUES (1,'apple'),(2,'banana')`);
+
+      const out = await runQuery(request, h, ws.slug, eng, `SELECT id, item FROM ${table} ORDER BY id`);
+      const idIdx = out.columns.findIndex((c) => c.name === "id");
+      const itemIdx = out.columns.findIndex((c) => c.name === "item");
+      expect(out.rows.length, "admin query returns both seeded rows via the jwt-delegated coordinator").toBe(2);
+      expect(out.rows.map((r) => String(r[idIdx]))).toEqual(["1", "2"]);
+      expect(out.rows.map((r) => r[itemIdx])).toEqual(["apple", "banana"]);
     } finally {
       if (engineId) await deleteEngine(request, h, engineId);
     }

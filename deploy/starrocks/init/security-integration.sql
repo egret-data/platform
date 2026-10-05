@@ -1,4 +1,4 @@
--- F2-P4 / P4b: authenticate notebook users to StarRocks with the OIDC engine JWT.
+-- F2-P4 / P4b: authenticate per-user sessions to StarRocks with the OIDC engine JWT.
 -- VERIFIED LIVE 2026-07-01 against starrocks/allin1-ubuntu (StarRocks 4.1.1) with the
 -- patched vendored mysql_async (third_party/) driver.
 --
@@ -25,7 +25,7 @@ ADMIN SET FRONTEND CONFIG ("authentication_chain" = "native,egret_oidc");
 -- 3) Per-user binding (verified working). A user must be IDENTIFIED WITH authentication_jwt
 --    for StarRocks to request the `authentication_openid_connect_client` plugin AND carry
 --    the JWT validation config. `principal_field=preferred_username` maps the token to this
---    StarRocks user (the Keycloak username). Provision one per notebook user; grant as needed.
+--    StarRocks user (the Keycloak username). Provision one per user; grant as needed.
 CREATE USER 'tester'@'%' IDENTIFIED WITH authentication_jwt AS '{
     "jwks_url": "http://keycloak:8080/realms/egret/protocol/openid-connect/certs",
     "principal_field": "preferred_username",

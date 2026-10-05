@@ -69,21 +69,6 @@ spec:
             - { name: EGRET_APPS__POD__CALLBACK_URL, value: "http://egret.{{ .Release.Namespace }}.svc.cluster.local:8080" }
             {{- end }}
             {{- end }}
-            {{- if eq .Values.kernel.launcher "kubernetes" }}
-            - { name: EGRET_KERNEL__LAUNCHER, value: "kubernetes" }
-            - { name: EGRET_KERNEL__NAMESPACE, value: "{{ .Values.kernel.namespace }}" }
-            - { name: EGRET_KERNEL__IMAGE, value: "{{ .Values.kernel.image }}" }
-            - { name: EGRET_KERNEL__IMAGE_PULL_POLICY, value: "{{ .Values.kernel.imagePullPolicy }}" }
-            - { name: EGRET_KERNEL__CPU_REQUEST, value: "{{ .Values.kernel.resources.cpuRequest }}" }
-            - { name: EGRET_KERNEL__MEM_REQUEST, value: "{{ .Values.kernel.resources.memRequest }}" }
-            - { name: EGRET_KERNEL__CPU_LIMIT, value: "{{ .Values.kernel.resources.cpuLimit }}" }
-            - { name: EGRET_KERNEL__MEM_LIMIT, value: "{{ .Values.kernel.resources.memLimit }}" }
-            - { name: EGRET_KERNEL__CALLBACK_URL, value: "http://egret.{{ .Release.Namespace }}.svc.cluster.local:8080" }
-            - { name: EGRET_KERNEL__ENGINE_TLS_INSECURE, value: {{ .Values.kernel.engineTlsInsecure | quote }} }
-            {{- if .Values.kernel.pullSecret }}
-            - { name: EGRET_KERNEL__PULL_SECRET, value: "{{ .Values.kernel.pullSecret }}" }
-            {{- end }}
-            {{- end }}
           # BOTH probes were `tcpSocket`, which is why `/readyz` — a handler that
           # pings the database — had never once been called in this deployment: a
           # pod whose metastore was gone still accepted the listening socket and

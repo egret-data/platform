@@ -205,24 +205,6 @@ deps:
 storage:
   region: us-east-1
   pathStyle: true
-kernel:
-  launcher: subprocess        # "kubernetes" enables per-user kernel pods
-  namespace: egret-notebooks
-  image: egret-kernel:dev
-  imagePullPolicy: IfNotPresent
-  pullSecret: ""
-  # Break-glass ONLY: disable engine-TLS verification in the kernel entirely
-  # (accepts any cert — MITM-unsafe). Leave false: the kernel securely PINS the
-  # engine's self-signed cert (delivered via the engine-token endpoint), so
-  # self-signed engines work without disabling verification.
-  engineTlsInsecure: false
-  resources:
-    cpuRequest: "250m"
-    memRequest: "512Mi"
-    cpuLimit: "1000m"
-    memLimit: "2Gi"
-  networkPolicy:
-    enabled: true
 # master/secret keys: generated-and-persisted by the chart (see secret.yaml); do
 # NOT put real secrets here.
 

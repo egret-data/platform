@@ -29,8 +29,8 @@ Ingress: none (task pods serve nothing; exec and logs go through the kubelet,
 not the pod network).
 
 NOTE: kind's default CNI (kindnet) does NOT enforce NetworkPolicy -- as for
-the kernels' policy, this is the production posture and has no runtime effect
-on a plain kind cluster. Enforcement needs Calico, Cilium, ...
+`networkpolicy-apps.yaml`'s policy, this is the production posture and has no
+runtime effect on a plain kind cluster. Enforcement needs Calico, Cilium, ...
 */ -}}
 {{- if and (eq .Values.workflow.containerRunner "kubernetes") .Values.workflow.tasks.networkPolicy.enabled }}
 {{- $np := .Values.workflow.tasks.networkPolicy }}

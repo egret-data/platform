@@ -1,5 +1,5 @@
 {{- /*
-The namespace the edit pods (marimo) run in, chart-managed like `namespace-kernels.yaml`: it
+The namespace the edit pods (marimo) run in, chart-managed like `namespace-tasks.yaml`: it
 holds only Pods this chart's backend creates. Pod Security `restricted` is ENFORCED, so the
 admission controller itself refuses a pod that is not hardened (the launcher builds every pod
 with runAsNonRoot, all capabilities dropped, seccomp RuntimeDefault, no privilege escalation and no

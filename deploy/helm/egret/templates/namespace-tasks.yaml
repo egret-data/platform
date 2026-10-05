@@ -1,6 +1,6 @@
 {{- /*
 W5a: the namespace workflow script tasks run in, one pod per task-run attempt
-(`egret_workflow::worker::k8s`). Chart-managed like `namespace-kernels.yaml`,
+(`egret_workflow::worker::k8s`). Chart-managed like `namespace-apps.yaml`,
 and for the same reason: it holds only pods this chart's backend creates.
 Pod Security `restricted` is ENFORCED, so the admission controller itself
 refuses a task pod that is not hardened (the runner builds every pod with
