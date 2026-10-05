@@ -810,7 +810,11 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 - [ ] **Step 1: Write the failing tests** (`tests/nsfiles_tasks.rs`, Postgres + MemStore, `flavor = "multi_thread"`):
 
 ```rust
-#[tokio::test] async fn declared_properties_and_outputs_match_the_artifact() { /* UploadFiles, DownloadFiles */ }
+#[tokio::test] async fn declared_properties_and_outputs_match_the_artifact() {
+    // UploadFiles, DownloadFiles: DECLARED equals each fixture schema cell's TOP-LEVEL required/default. UploadFiles.namespace
+    // is (false, "the flow's namespace"), a chosen cell (the coordinator's ruling D, 2026-10-05; Kestra's required: true is under
+    // `kestra`), so publish accepts an UploadFiles without `namespace` (w9b tasks.UploadFiles.publish_without_namespace)
+}
 #[tokio::test(flavor = "multi_thread")] async fn upload_files_from_a_write_uri_and_a_glob_lands_as_the_artifact_lays_it_out() {
     // Write -> UploadFiles files: ["{{ outputs.w.uri }}", "**.txt"], destination "/in/" -> rows, revisions, bytes;
     // output is empty (Kestra's run returns an empty Output)
@@ -862,7 +866,7 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 - [ ] **Step 1: Write the failing tests:**
 
 ```rust
-#[tokio::test] async fn declared_properties_and_outputs_match_the_artifact() { /* DeleteFiles, PurgeFiles */ }
+#[tokio::test] async fn declared_properties_and_outputs_match_the_artifact() { /* DeleteFiles, PurgeFiles; DeleteFiles.namespace optional, default the flow's (ruling D, chosen cell) */ }
 #[tokio::test(flavor = "multi_thread")] async fn delete_files_soft_deletes_matches_and_keeps_objects() {}
 #[tokio::test(flavor = "multi_thread")] async fn delete_parent_folder_removes_parents_left_empty_deepest_first() {}
 #[tokio::test(flavor = "multi_thread")] async fn delete_files_in_another_namespace_is_refused_and_deletes_nothing() { /* w9b tasks.DeleteFiles.runs.del_other_ns */ }
@@ -887,7 +891,7 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 - [ ] **Step 2: Run them to watch them fail.**
 - [ ] **Step 3: Implement.**
   - `DeleteFiles`: `namespace` default the flow's, `authorize(Write)`; matches by `PathMatcher` over `list_live`; each `soft_delete`; `deleteParentFolder`: after the deletes, for each distinct parent of a deleted path, deepest first, `soft_delete` it only if `list_live(dir, recursive=false)` is empty. Output per Task 1.
-  - `PurgeFiles`: resolve the namespace set — `namespaces` (rendered list) or `namespacePattern` (R2: Kestra's wildcard, `glob::wildcard_match` over the namespace string — `*`, `?`, case-sensitive — matched against `namespaces_with_files` restricted to `own` and `own + "."`-prefixed entries; never a regex), default `[own]`; with `includeChildNamespaces` add every `namespaces_with_files` entry that is `ns + "."`-prefixed; **every** resolved namespace through `authorize(Purge)`, the first refusal fails the task naming it before anything is purged. Per namespace, per path (`revisions`): the set to purge by `behavior` — `keepAmount` keeps the N highest; `before` takes revisions with `created_at < before` except the highest; a path whose highest revision is deleted: every revision. Then `purge_revisions`. Output `size` = revisions purged.
+  - `PurgeFiles`: resolve the namespace set — `namespaces` (rendered list) or `namespacePattern` (R2: Kestra's wildcard, `glob::wildcard_match` over the namespace string — `*`, `?`, case-sensitive — matched against `namespaces_with_files` restricted to `own` and `own + "."`-prefixed entries; never a regex). The restriction is a **filter** (the coordinator's ruling B, 2026-10-05): a pattern selects only among own and its children, so it never refuses and never reaches another namespace; only a listed `namespaces` entry outside the rule is refused. Default `[own]`; with `includeChildNamespaces` add every `namespaces_with_files` entry that is `ns + "."`-prefixed; **every** resolved namespace through `authorize(Purge)`, the first refusal fails the task naming it before anything is purged. Per namespace, per path (`revisions`): the set to purge by `behavior` — `keepAmount` keeps the N highest; `before` takes revisions with `created_at < before` except the highest; a path whose highest revision is deleted: every revision. Then `purge_revisions`. Output `size` = revisions purged.
   - Properties `behavior.type` per Kestra's `FilesPurgeBehavior`/`Version` (read `Version.java` in the checkout for the type discriminator spelling; the fixture decides).
 - [ ] **Step 4: Run the tests to see them pass**, the ratchet, the per-task gate.
 - [ ] **Step 5: Mutations:** (a) child match without the dot (`a.bc` dies); (b) the namespace check per-namespace after purging earlier ones (the refusal test asserts nothing was purged: it dies); (c) `before` purging the latest; (d) soft-deleted latest kept by `keepAmount` (Kestra's behaviour; the chosen test dies); (e) `DeleteFiles` with `Access::Read`; (f) `namespacePattern` compiled as a regex (`.` then matches any character). The fixture's `w9b.ppx.c` cannot kill it, because the candidate restriction already excludes it; the pattern test therefore also holds two **children** of own, `w9b.pp.a.b` and `w9b.pp.a-b`, and the pattern `w9b.pp.a.b`: the wildcard purges only the first, the regex both; (g) the pattern's candidates not restricted to own and children (a pattern `*` from `w9b.pp` purges `w9b.ppx.c`).
@@ -940,6 +944,8 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 #[tokio::test] async fn an_upload_over_the_body_limit_is_413_and_an_unterminated_header_is_400() { /* W9a's multipart bounds, reused */ }
 #[tokio::test] async fn delete_removes_the_path_and_its_children_and_not_an_emptied_parent() {}
 #[tokio::test] async fn move_onto_a_live_target_is_409() {}
+#[tokio::test] async fn move_of_a_missing_source_is_404_and_delete_of_a_missing_path_is_200() { /* application of R3 (2026-10-05); w9b api.routes.move_missing_source, delete_missing; nothing written */ }
+#[tokio::test] async fn revisions_of_a_directory_is_400_naming_it() { /* application of R3 (2026-10-05); w9b api.routes.revisions_dir */ }
 #[tokio::test] async fn stats_revisions_search_and_directory_match_the_fixtures_summary_cells() { /* w9b api.summary: egret's DTOs; search as Kestra's (R3) */ }
 #[tokio::test] async fn a_soft_deleted_paths_revisions_are_listed_flagged_and_a_given_revision_is_served() {
     // R1; w9b api.routes.revisions_after_delete (200, [1] deleted) and get_after_delete_rev1 (200 "gee"); get_after_delete stays 404
@@ -959,7 +965,7 @@ pub(crate) const DECLARED: &[(&str, &[(&str, bool /*required*/, Option<&str> /*d
 
 - [ ] **Step 2: Run them to watch them fail.**
 - [ ] **Step 3: Implement.**
-  - Each handler: `WsContext`, `egret_core::authz::require(&*st.pdp, &ctx, WF_READ | WF_MANAGE)`, then `authorize(ctx.workspace_id.0, Actor::Api, &ns, access)` (the `_files` and pattern refusal → 400), `NsPath::parse_*` (→ 400 naming the rule), then the store function. `NsError` → status: `Author` 400, `NotFound` 404, `Conflict` 409, `TooLarge` 413, `Store`/`Db` 503 (`Db` also logged).
+  - Each handler: `WsContext`, `egret_core::authz::require(&*st.pdp, &ctx, WF_READ | WF_MANAGE)`, then `authorize(ctx.workspace_id.0, Actor::Api, &ns, access)` (the `_files` and pattern refusal → 400), `NsPath::parse_*` (→ 400 naming the rule), then the store function. `NsError` → status: `Author` 400, `NotFound` 404, `Conflict` 409, `TooLarge` 413, `Store`/`Db` 503 (`Db` also logged) — spec §9's error table (application of R3 (2026-10-05)). Exceptions, each pinned by the fixture: `DELETE` of a missing path answers 200 and does nothing (`soft_delete`'s `NotFound` is mapped to 200 on that route only; idempotent, as Kestra's, `api.routes.delete_missing`); `PUT` with a missing source is 404 naming it (`api.routes.move_missing_source`); `revisions` on a directory is 400 naming it (`api.routes.revisions_dir`).
   - Upload: the multipart body through `storage::multipart`'s `HeaderBudget` + `http_body_util::Limited` exactly as `start_multipart` (`routes.rs:2112-2150`) builds it; the route gets `DefaultBodyLimit::disable()` as the start route does (`routes.rs:2587`). The file part's name per Task 1 (`api`); its body streams into `put` (`CreatedBy::User(ctx.principal.user_id.0)`).
   - Audit: `workflow_namespace_file:{upload,create_directory,move,delete}`, resource type `workflow_namespace_file`, detail `{namespace, path}` (+ `to` for move).
   - utoipa: every response documented, as W9a's `download_execution_file` (`storage/routes.rs:256-269`).

@@ -69,11 +69,14 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 | `GET files/export` dựng zip trong bộ nhớ (code của checkout thêm flow của namespace; artifact mà Task 1 đo không thêm flow nào, sửa ngày 2026-10-05) | zip streamed chỉ gồm file (§9) | bộ nhớ có giới hạn; flow được export qua API flow |
 | `DELETE files` còn xoá các thư mục cha bị rỗng, với phép kiểm cha không giới hạn theo namespace (`NamespaceFileController.java:352-363`, theo mã) | chỉ xoá path được nêu và con của nó (§9) | việc leo lên là tác dụng phụ người gọi không nêu |
 | namespace có segment `_files` (`a._files`) được nhận, nên key của flow của nó chung tiền tố với namespace file của `a` | bị từ chối lúc publish và bởi mọi thao tác namespace file (§3) | hai không gian key không được chồng nhau |
-| path đã xoá mềm trả 404 cho `revisions` và cho mọi lần đọc theo revision, và sau khi ghi lại thì revision đã xoá vẫn không đọc được (`?revision=3` trong `[1, 2, 3, 4]` là 404) (Task 1 đo) | `revisions` liệt kê mọi revision, đánh dấu cái đã xoá; đọc theo revision chỉ định thành công; chỉ đọc bản mới nhất là không tìm thấy (§4.3, §4.5, §6, §9) | phán quyết R1 của người dùng (2026-10-05): lịch sử vẫn thấy được tới khi `PurgeFiles` xoá nó |
-| `PurgeFiles.namespacePattern` là wildcard khớp với các namespace có **flow**, namespace bất kỳ (Task 1 đo: `w9b.pp.*` bỏ qua `w9b.pp.noflow`, namespace có file mà không có flow) | cùng ngữ pháp wildcard, khớp với các namespace có **file** và là namespace của chính flow hoặc con của nó (§8.4) | phán quyết R2 của người dùng (2026-10-05); quy tắc purge (§5) |
+| path đã xoá mềm trả 404 cho `revisions` và cho mọi lần đọc theo revision, và sau khi ghi lại thì revision đã xoá vẫn không đọc được (`?revision=3` trong `[1, 2, 3, 4]` là 404) (Task 1 đo) | `revisions` liệt kê mọi revision, đánh dấu cái đã xoá; đọc theo revision chỉ định thành công; chỉ đọc bản mới nhất là không tìm thấy (§4.3, §4.5, §6, §9) | phán quyết R1 của người dùng (2026-10-05): lịch sử vẫn thấy được tới khi `PurgeFiles` xoá nó. URI `kestra:///…/_files/p[.vN]` chỉ đúng một revision (revision 1 khi không có hậu tố), nên đọc nó là đọc theo revision chỉ định và thành công với path đã xoá mềm, như của Kestra (phán quyết A của coordinator, 2026-10-05) |
+| `PurgeFiles.namespacePattern` là wildcard khớp với các namespace có **flow**, namespace bất kỳ (Task 1 đo: `w9b.pp.*` bỏ qua `w9b.pp.noflow`, namespace có file mà không có flow) | cùng ngữ pháp wildcard, khớp với các namespace có **file** và là namespace của chính flow hoặc con của nó (§8.4) | phán quyết R2 của người dùng (2026-10-05); quy tắc purge (§5). Giới hạn là một **bộ lọc**: ứng viên chỉ là namespace của chính flow và các con của nó, nên pattern không bao giờ từ chối và không bao giờ với tới namespace khác (phán quyết B của coordinator, 2026-10-05) |
 | `fileURI` của một thư mục trả một URI không có object phía sau (Task 1 đo) | lỗi nêu path (§6) | phán quyết R3 của người dùng (2026-10-05): một URI không chỉ tới file nào sẽ hỏng về sau, xa nguyên nhân |
 | `GET files/directory` trên path của một file trả 200 `[]` (Task 1 đo) | 400 nêu path (§9) | phán quyết R3 của người dùng (2026-10-05) |
 | `GET files/stats` không có path tạo thư mục gốc của namespace ngay lúc đó (Task 1 đo) | trả một thư mục gốc ảo và không tạo gì; không route GET nào tạo gì (§9) | phán quyết R3 của người dùng (2026-10-05): đọc thì không ghi |
+| `PUT files` (move) với nguồn không tồn tại trả 200 và không làm gì (Task 1 đo) | 404 nêu nguồn (§9) | áp dụng R3 (2026-10-05): move nêu một nguồn phải tồn tại. `DELETE` một path không tồn tại vẫn là 200, như Kestra: xoá là idempotent (áp dụng R3 (2026-10-05)) |
+| `GET files/revisions` của một thư mục trả 404 (Task 1 đo) | 400 nêu path (§9) | áp dụng R3 (2026-10-05): yêu cầu sai loại, như `directory` trên một file |
+| `UploadFiles` và `DeleteFiles` bắt buộc `namespace` lúc publish (422 `must not be null`; Task 1 đo) | tuỳ chọn, mặc định là namespace của chính flow; giá trị khác bị quy tắc ghi từ chối (§5, §8.1, §8.3) | phán quyết D của coordinator (2026-10-05): spec quyết định |
 | `UploadFiles` lặng lẽ bỏ qua một URI của `filesMap` không tồn tại, và nối `destination` với mỗi key (`up2` + `m.txt` → `/up2m.txt`) (Task 1 đo) | URI không phân giải được làm task fail nêu nó, trước khi ghi gì; `destination` là một thư mục, nối với đúng một `/` (`/up2/m.txt`) (§8.1) | vòng sửa 1 của Task 1 (2026-10-05): phép kiểm đọc của §8.1, và một path tác giả đoán trước được |
 
 ## 3. Bố cục storage và URI
@@ -133,7 +136,7 @@ Một lần đọc phân giải `(namespace, path, revision?)` thành một dòn
 |---|---|
 | `fileURI(path, revision?)` | `kestra:///{ns}/_files/{path}` cho revision còn sống mới nhất (`…{path}.vN` khi N > 1), hoặc cho revision được chỉ định, phải tồn tại. Tham số `kestra://` được trả nguyên sau khi parse được. `../`, `revision` không nguyên, path thiếu hay đã xoá mềm là lỗi nêu path. *(Sửa ngày 2026-10-05: "đã xoá mềm" áp dụng khi không có `revision`; có `revision` thì revision của path đã xoá mềm được trả về (R1). Thư mục là lỗi nêu path (R3).)* |
 | `read(path, revision?)` | nội dung UTF-8; không phải UTF-8 là lỗi nêu path (§2); bị chặn bởi `max_read_bytes` |
-| `fileSize`, `fileExists`, `isFileEmpty` | từ dòng metadata; `fileExists` của một path đúng dạng không có dòng còn sống là `false`, như *missing* của W9a |
+| `fileSize`, `fileExists`, `isFileEmpty` | từ dòng metadata; `fileExists` của một path đúng dạng không có dòng còn sống là `false`, như *missing* của W9a. *(Thêm ngày 2026-10-05, phán quyết E của coordinator, như Task 1 đo trên Kestra:)* path không có dòng file mà chỉ một **thư mục** còn sống thì trả lời từ dòng của thư mục — `fileSize` 0, `fileExists` true, `isFileEmpty` true; `read` và `fileURI` của một thư mục là lỗi nêu path |
 
 - Cả năm nhận path trần (→ `nsfile:///path`), `nsfile:///path`, `nsfile://other.ns/path`, và URI `kestra:///…/_files/…`; cộng tham số `namespace`, mà đi cùng authority là lỗi (`AbstractFileFunction.java:181-191`). URI `kestra://` của một execution giữ quy tắc snapshot của W9a.
 - **Không snapshot cho namespace file.** Namespace file commit ngay, ngoài transaction của `settle`, nên pool thấy mọi dòng đã commit: render tra chúng thẳng qua pool, và một path ghép lúc render vẫn chạy. Lần tra và lần đọc chạy qua đường đọc có giới hạn không làm kẹt runtime của W9a Task 4 (`off_the_runtime`, `runners/env.rs:2094-2100`); store hay database mất kết nối thì bật cờ `infrastructure_failure` của file scope (§11), nên run được re-claim mà không tốn attempt.
@@ -157,7 +160,7 @@ Handler native trong worker, như các task `core.storage` của W9a. Mỗi cái
 
 ### 8.1 `UploadFiles`
 
-- `namespace`: mặc định của flow; khác thì bị từ chối (§5).
+- `namespace`: tuỳ chọn, mặc định của flow; khác thì bị từ chối (§5). *(Phán quyết D của coordinator, 2026-10-05: spec quyết định; Kestra bắt buộc nó lúc publish.)*
 - `files`: danh sách mà mỗi phần tử là nguyên một URI `kestra://` hoặc glob trên **các file đọc được của execution** (tập đọc được của W9a §4.4, khớp trên path file của URI); Kestra glob trên working directory của chính nó (§2).
 - `filesMap`: tên → URI `kestra://` (được kiểm quyền đọc) hoặc nội dung literal. *(Sửa ngày 2026-10-05, vòng sửa 1 của Task 1: mọi URI của `files` và `filesMap` được phân giải trước lần ghi đầu tiên; URI không phân giải được làm task fail nêu nó, và không gì được ghi. Kestra lặng lẽ bỏ qua nó.)*
 - `destination` mặc định `/`; `conflict` mặc định `OVERWRITE` (`ERROR`, `SKIP`). *(Sửa ngày 2026-10-05, vòng sửa 1 của Task 1: `destination` là một thư mục; thiếu `/` đầu thì được thêm, và tên mỗi file được nối vào bằng đúng một `/` — `destination: up2` với key `m.txt` ghi `/up2/m.txt`, trong khi Kestra ghi `/up2m.txt`.)*
@@ -169,7 +172,7 @@ Handler native trong worker, như các task `core.storage` của W9a. Mỗi cái
 
 ### 8.3 `DeleteFiles`
 
-`namespace` (chỉ của chính nó), `files` glob, `deleteParentFolder` mặc định false (xoá thư mục cha bị rỗng, sâu nhất trước). Xoá mềm (§4.3).
+`namespace` (tuỳ chọn, mặc định của chính flow; giá trị khác bị từ chối, §5 — phán quyết D của coordinator, 2026-10-05: Kestra bắt buộc nó lúc publish), `files` glob, `deleteParentFolder` mặc định false (xoá thư mục cha bị rỗng, sâu nhất trước). Xoá mềm (§4.3).
 
 ### 8.4 `PurgeFiles`
 
@@ -186,17 +189,28 @@ Dưới `/api/ws/{ws}/workflows/namespaces/{ns}/files`, phản chiếu `Namespac
 |---|---|---|
 | `GET …/files?path&revision` | `workflow:read` | các byte, streamed, với header download của W9a (`application/octet-stream`, `Content-Disposition: attachment` đã làm sạch, `X-Content-Type-Options: nosniff`, `storage/routes.rs:262`); `revision` chỉ định của path đã xoá mềm được phục vụ, đọc bản mới nhất của nó là 404 (R1, 2026-10-05) |
 | `GET …/files/stats?path` | `workflow:read` | kích thước, loại, revision, thời điểm tạo; không có `path` thì trả một thư mục gốc ảo và không tạo gì (R3, 2026-10-05) |
-| `GET …/files/revisions?path` | `workflow:read` | mọi revision, đánh dấu cái đã xoá, kể cả của path đã xoá mềm (R1, 2026-10-05) |
+| `GET …/files/revisions?path` | `workflow:read` | mọi revision, đánh dấu cái đã xoá, kể cả của path đã xoá mềm (R1, 2026-10-05); path của một thư mục là 400 (áp dụng R3 (2026-10-05)) |
 | `GET …/files/search?q` | `workflow:read` | các path còn sống chứa `q`, chặn theo số lượng; như Kestra: chuỗi con của path không phân biệt hoa thường, chỉ file (R3, 2026-10-05) |
 | `GET …/files/directory?path` | `workflow:read` | các con còn sống của thư mục; path của một file là 400 nêu nó (R3, 2026-10-05) |
 | `GET …/files/export` | `workflow:read` | zip streamed của các file còn sống mới nhất (không có flow) |
 | `POST …/files?path` (multipart) | `workflow:manage` | §4.2 với `OVERWRITE`; dùng lại parser multipart có giới hạn của W9a; `.zip` được lưu như file, không bung |
 | `POST …/files/directory?path` | `workflow:manage` | tạo thư mục và các cha |
-| `PUT …/files?from&to` | `workflow:manage` | §4.4 |
-| `DELETE …/files?path` | `workflow:manage` | §4.3, chỉ path được nêu và con của nó |
+| `PUT …/files?from&to` | `workflow:manage` | §4.4; nguồn không tồn tại là 404 (áp dụng R3 (2026-10-05)) |
+| `DELETE …/files?path` | `workflow:manage` | §4.3, chỉ path được nêu và con của nó; path không tồn tại là 200 và không làm gì, như Kestra (idempotent, áp dụng R3 (2026-10-05)) |
 
 - `{ns}` được kiểm bằng `is_valid_namespace` và quy tắc segment `_files` (§3); namespace không có flow vẫn chứa được file. Path không biết → 404; namespace của workspace khác không với tới được theo cấu trúc (`{ws}` giới hạn mọi truy vấn).
 - `/_flows` bị từ chối (400) trên mọi route; egret không import flow nào từ đây (§2).
+- **Lỗi → status** (một ánh xạ duy nhất cho mọi route; áp dụng R3 (2026-10-05)):
+
+| lỗi | status |
+|---|---|
+| quy tắc path, namespace bị từ chối (segment `_files`, không hợp lệ), `/_flows`, yêu cầu sai loại (`directory` trên file, `revisions` trên thư mục) | 400 |
+| không có dòng còn sống (path không biết, namespace của workspace khác, đọc bản mới nhất của path đã xoá mềm, nguồn của move không tồn tại) | 404 |
+| xung đột: file đè thư mục, thư mục đè file, move lên đích còn sống, `conflict: ERROR` | 409 |
+| vượt trần (`max_file_bytes`, `max_namespace_files`, giới hạn body multipart) | 413 |
+| store hay database không với tới được | 503 |
+
+Không thông báo nào nêu key storage hay workspace khác. `DELETE` một path không tồn tại không phải lỗi (200).
 - **Không route GET nào tạo gì** (phán quyết R3 của người dùng, 2026-10-05), trong khi `stats` của Kestra tạo thư mục gốc của namespace (§2).
 - Có tài liệu utoipa; client frontend được sinh lại bằng `npm run gen:api`. UI là của W7.
 

@@ -6883,9 +6883,16 @@
        ]
       },
       "namespace": {
-       "required": true,
-       "default": null,
-       "type": "string"
+       "required": false,
+       "default": "the flow's namespace",
+       "type": "string",
+       "basis": "chosen",
+       "why": "coordinator ruling D (2026-10-05): the spec governs (§8.1, §8.3): `namespace` is optional and defaults to the flow's; any other value is refused by the write rule (§5)",
+       "kestra": {
+        "required": true,
+        "default": null,
+        "type": "string"
+       }
       }
      },
      "outputs": {
@@ -6899,8 +6906,14 @@
      }
     },
     "publish_without_namespace": {
-     "status": 422,
-     "detail": "tasks[up].namespace: must not be null"
+     "accepted": true,
+     "namespace": "the flow's",
+     "basis": "chosen",
+     "why": "coordinator ruling D (2026-10-05): spec §8.1, namespace defaults to the flow's",
+     "kestra": {
+      "status": 422,
+      "detail": "tasks[up].namespace: must not be null"
+     }
     },
     "runs": {
      "w": {
@@ -7104,7 +7117,7 @@
      "a missing `namespace` is refused at publish (422 'tasks[up].namespace: must not be null'): the run-time fallback to the flow's namespace is unreachable"
     ],
     "semantics": {
-     "namespace": "default the flow's; any other refused (§5, §8.1)",
+     "namespace": "optional, default the flow's (ruling D); any other refused (§5, §8.1)",
      "files": "globs over the execution's readable files or whole kestra:// URIs (§8.1)",
      "filesMap": "name -> kestra:// URI (read-checked: a URI that does not resolve fails the task naming it, nothing written) or literal contents",
      "destination": "a directory: a missing leading '/' is added and the key is joined with exactly one '/' ('up2' + 'm.txt' -> '/up2/m.txt')",
@@ -7233,9 +7246,16 @@
        ]
       },
       "namespace": {
-       "required": true,
-       "default": null,
-       "type": "string"
+       "required": false,
+       "default": "the flow's namespace",
+       "type": "string",
+       "basis": "chosen",
+       "why": "coordinator ruling D (2026-10-05): the spec governs (§8.1, §8.3): `namespace` is optional and defaults to the flow's; any other value is refused by the write rule (§5)",
+       "kestra": {
+        "required": true,
+        "default": null,
+        "type": "string"
+       }
       }
      },
      "outputs": {
@@ -8033,15 +8053,21 @@
     },
     "revisions_dir": {
      "request": "GET /main/namespaces/w9b.api/files/revisions?path=/dir1",
-     "status": 404,
-     "headers": {
-      "content-type": "application/problem+json",
-      "x-content-type-options": "nosniff",
-      "content-length": "202"
-     },
-     "body": {
-      "problem_detail": "File not found: /dir1",
-      "problem_title": "Resource not found"
+     "status": 400,
+     "error_names": "/dir1",
+     "basis": "chosen",
+     "why": "application of R3 (2026-10-05): revisions of a directory is a wrong-kind request, 400 as directory-on-a-file; Kestra answers 404",
+     "kestra": {
+      "status": 404,
+      "headers": {
+       "content-type": "application/problem+json",
+       "x-content-type-options": "nosniff",
+       "content-length": "202"
+      },
+      "body": {
+       "problem_detail": "File not found: /dir1",
+       "problem_title": "Resource not found"
+      }
      }
     },
     "revisions_missing": {
@@ -8594,13 +8620,20 @@
     },
     "move_missing_source": {
      "request": "PUT /main/namespaces/w9b.api/files?from=/nope.txt&to=/nope2.txt",
-     "status": 200,
-     "headers": {
-      "x-content-type-options": "nosniff",
-      "content-length": "0"
-     },
-     "body": {
-      "text": ""
+     "status": 404,
+     "error_names": "/nope.txt",
+     "writes": false,
+     "basis": "chosen",
+     "why": "application of R3 (2026-10-05): a move names a source that must exist; Kestra answers 200 and does nothing",
+     "kestra": {
+      "status": 200,
+      "headers": {
+       "x-content-type-options": "nosniff",
+       "content-length": "0"
+      },
+      "body": {
+       "text": ""
+      }
      }
     },
     "move_dir": {
@@ -8871,7 +8904,9 @@
      },
      "body": {
       "text": ""
-     }
+     },
+     "basis": "measured",
+     "note": "egret agrees: a DELETE of a missing path is 200 and does nothing (idempotent; application of R3 (2026-10-05))"
     },
     "delete_no_leading_slash": {
      "request": "DELETE /main/namespaces/w9b.api/files?path=moved/g.txt",
@@ -9188,15 +9223,15 @@
      "kestra": "200 application/octet-stream, cache-control: no-cache, transfer-encoding: chunked, NO content-disposition"
     },
     "revisions_body": {
-     "value": "[{revision, deleted, size, created}] ascending (NsFileRevisionDto): every revision of the path, a soft-deleted path's included, deleted ones flagged; a path with no row -> 404 naming it",
+     "value": "[{revision, deleted, size, created}] ascending (NsFileRevisionDto): every revision of the path, a soft-deleted path's included, deleted ones flagged; a path with no row -> 404 naming it; a directory's path -> 400 naming it",
      "basis": "chosen",
-     "why": "user ruling 2026-10-05 (R1, spec header): soft-deleted history stays VISIBLE -- `revisions` lists every revision of a soft-deleted path, deleted ones flagged; an explicit-revision read (API `?revision=N`, `read(path, revision)`, `fileURI(path, revision)`) of it succeeds; only a LATEST read is not-found",
+     "why": "user ruling 2026-10-05 (R1, spec header): soft-deleted history stays VISIBLE -- `revisions` lists every revision of a soft-deleted path, deleted ones flagged; an explicit-revision read (API `?revision=N`, `read(path, revision)`, `fileURI(path, revision)`) of it succeeds; only a LATEST read is not-found; a directory -> 400: application of R3 (2026-10-05) (as directory-on-a-file -> 400)",
      "kestra": "[{\"revision\": N}, …] ascending; 404 'File not found: <path>' when the path's latest row is deleted or the path is a directory"
     },
     "stats_body": {
      "value": "NsFileStatsDto {path, type: File|Directory, size, revision, created}; no path -> a virtual root directory {path '/', type Directory, size 0}, nothing created; a missing path -> 404",
      "basis": "chosen",
-     "why": "user ruling 2026-10-05 (R3, spec §2/§9): GET routes never create anything; stats with no path answers a virtual root directory and creates nothing; the DTO is plan Task 8's",
+     "why": "user ruling 2026-10-05 (R3, spec §2/§9): GET routes never create anything; stats with no path answers a virtual root directory and creates nothing; the DTO is plan Task 8's; the virtual root's `created` is None: application of R3 (2026-10-05)",
      "kestra": "{type: File|Directory, size, fileName, lastModifiedTime, creationTime, metadata: {}}; no path -> the namespace root ('_files'), created on the fly"
     },
     "search_rule": {
@@ -9231,19 +9266,19 @@
     "move": {
      "value": "file: every revision moved, numbers kept; directory: every revision of every child (§4.4); onto a live target -> 409 naming it; a missing source -> 404 naming it (store::move_path finds no live row)",
      "basis": "chosen",
-     "why": "spec §2/§9 and the header's approved choices",
+     "why": "spec §2/§9 and the header's approved choices; a missing source -> 404: application of R3 (2026-10-05)",
      "kestra": "file: every revision moved (1,2,3 kept); directory: each child's latest only, as revision 1; onto an existing target -> 500; missing source -> 200 no-op"
     },
     "delete": {
-     "value": "soft; the named path and its children only, no walk-up to parents left empty; a missing path -> 404 (store::soft_delete answers NotFound)",
+     "value": "soft; the named path and its children only, no walk-up to parents left empty; a missing path -> 200, nothing done (idempotent, as Kestra: measured, application of R3 (2026-10-05))",
      "basis": "chosen",
-     "why": "spec §2/§9 and the header's approved choices",
+     "why": "spec §2/§9 and the header's approved choices; the missing-path answer agrees with Kestra (application of R3 (2026-10-05))",
      "kestra": "soft; walks up and deletes parents left empty, with a parent check that counts rows of OTHER namespaces (a sibling in w9b.api2 stopped the walk-up); a missing path -> 200"
     },
     "error_statuses": {
      "value": "NsError -> status: Author 400 (a path rule, a refused namespace), NotFound 404, Conflict 409 (a file over a directory, a directory over a file, a move onto a live target, conflict ERROR), TooLarge 413, Store/Db 503; no message names a storage key (plan Task 8)",
      "basis": "chosen",
-     "why": "spec §2/§9 and the header's approved choices",
+     "why": "application of R3 (2026-10-05); the table is spec §9's",
      "kestra": "IllegalArgumentException -> 422, FileNotFound -> 404, ConflictException -> 409, a file over a directory -> 404 leaking '/app/storage/…' path; ENAMETOOLONG on two 255-char segments -> 500"
     },
     "namespace_validation": {
@@ -9278,7 +9313,6 @@
     ],
     "move": [
      "move_onto_existing",
-     "move_missing_source",
      "move_dir",
      "move_dir_after_listing",
      "move_dir_revisions"
@@ -9290,8 +9324,7 @@
      "after_delete_directory_del_a_b",
      "delete_file_walkup_alone",
      "after_delete2_directory_root",
-     "after_delete2_directory_del2",
-     "delete_missing"
+     "after_delete2_directory_del2"
     ],
     "error_statuses": [
      "post_file_over_directory"
@@ -9743,9 +9776,9 @@
   "read": "measured, except kestra_other and binary (chosen); _extra.kestra_own_soft_deleted is measured: egret agrees under R1 (see its note)",
   "four_functions_ns": "measured; *.kestra_own_soft_deleted agree with Kestra under R1 (see their notes)",
   "staging": "measured, except staging.egret (chosen, agrees with 5/5 measured)",
-  "tasks": "schema + measured, except the cells marked chosen (UploadFiles: runs.up_map, runs.up_map_dest_no_slash, runs.wd/mk/up_glob, runs.up_other_ns, rows_after, semantics; DeleteFiles: runs.del_other_ns, rows_after)",
+  "tasks": "schema + measured, except the cells marked chosen (UploadFiles: runs.up_map, runs.up_map_dest_no_slash, runs.wd/mk/up_glob, runs.up_other_ns, rows_after, semantics; DeleteFiles: runs.del_other_ns, rows_after); UploadFiles/DeleteFiles schema.properties.namespace and UploadFiles.publish_without_namespace chosen (ruling D)",
   "purge": "measured (before); keepAmount_1_on_soft_deleted, namespacePattern (R2), includeChildNamespaces_a.b_vs_a.bc, default_behavior chosen",
-  "api": "measured, except the api.summary and api.routes cells marked chosen; read api.routes_basis",
+  "api": "measured, except the api.summary and api.routes cells marked chosen (move_missing_source, revisions_dir: application of R3); read api.routes_basis",
   "plugin_namespace_use": "code (javap over the jars sha256-checked against plugins.lock; quoted lines per class)",
   "files_segment_namespaces": "measured",
   "rule": "a cell whose egret answer is the spec's choice and not Kestra's carries basis: chosen, egret's answer at the TOP LEVEL of the cell, the reason under why, and Kestra's measured answer under kestra; every chosen cell is listed in chosen_cells (path: dot-joined keys; pointer: RFC 6901, unambiguous where a key holds a dot)",
@@ -9866,6 +9899,16 @@
     "why": "spec §2/§7: deterministic order, a later namespace in `namespaces` wins under OVERWRITE"
    },
    {
+    "path": "tasks.UploadFiles.schema.properties.namespace",
+    "pointer": "/tasks/UploadFiles/schema/properties/namespace",
+    "why": "coordinator ruling D (2026-10-05): the spec governs (§8.1, §8.3): `namespace` is optional and defaults to the flow's; any other value is refused by the write rule (§5)"
+   },
+   {
+    "path": "tasks.UploadFiles.publish_without_namespace",
+    "pointer": "/tasks/UploadFiles/publish_without_namespace",
+    "why": "coordinator ruling D (2026-10-05): spec §8.1, namespace defaults to the flow's"
+   },
+   {
     "path": "tasks.UploadFiles.runs.up_map",
     "pointer": "/tasks/UploadFiles/runs/up_map",
     "why": "spec §8.1: every filesMap/files URI is read-checked before the first write; a URI that does not resolve fails the task naming it and nothing is written (fix round 1, 2026-10-05)"
@@ -9904,6 +9947,11 @@
     "path": "tasks.UploadFiles.semantics",
     "pointer": "/tasks/UploadFiles/semantics",
     "why": "spec §2/§8.1 (egret runs UploadFiles in the worker, writes only its own namespace); filesMap and destination: fix round 1, 2026-10-05"
+   },
+   {
+    "path": "tasks.DeleteFiles.schema.properties.namespace",
+    "pointer": "/tasks/DeleteFiles/schema/properties/namespace",
+    "why": "coordinator ruling D (2026-10-05): the spec governs (§8.1, §8.3): `namespace` is optional and defaults to the flow's; any other value is refused by the write rule (§5)"
    },
    {
     "path": "tasks.DeleteFiles.runs.del_other_ns",
@@ -9946,9 +9994,19 @@
     "why": "user ruling 2026-10-05 (R3, spec §2/§9): GET routes never create anything; stats with no path answers a virtual root directory and creates nothing"
    },
    {
+    "path": "api.routes.revisions_dir",
+    "pointer": "/api/routes/revisions_dir",
+    "why": "application of R3 (2026-10-05): revisions of a directory is a wrong-kind request, 400 as directory-on-a-file; Kestra answers 404"
+   },
+   {
     "path": "api.routes.directory_of_a_file",
     "pointer": "/api/routes/directory_of_a_file",
     "why": "user ruling 2026-10-05 (R3, spec §2/§9): GET files/directory on a FILE path is 400 naming it"
+   },
+   {
+    "path": "api.routes.move_missing_source",
+    "pointer": "/api/routes/move_missing_source",
+    "why": "application of R3 (2026-10-05): a move names a source that must exist; Kestra answers 200 and does nothing"
    },
    {
     "path": "api.routes.revisions_after_delete",
@@ -9968,12 +10026,12 @@
    {
     "path": "api.summary.revisions_body",
     "pointer": "/api/summary/revisions_body",
-    "why": "user ruling 2026-10-05 (R1, spec header): soft-deleted history stays VISIBLE -- `revisions` lists every revision of a soft-deleted path, deleted ones flagged; an explicit-revision read (API `?revision=N`, `read(path, revision)`, `fileURI(path, revision)`) of it succeeds; only a LATEST read is not-found"
+    "why": "user ruling 2026-10-05 (R1, spec header): soft-deleted history stays VISIBLE -- `revisions` lists every revision of a soft-deleted path, deleted ones flagged; an explicit-revision read (API `?revision=N`, `read(path, revision)`, `fileURI(path, revision)`) of it succeeds; only a LATEST read is not-found; a directory -> 400: application of R3 (2026-10-05) (as directory-on-a-file -> 400)"
    },
    {
     "path": "api.summary.stats_body",
     "pointer": "/api/summary/stats_body",
-    "why": "user ruling 2026-10-05 (R3, spec §2/§9): GET routes never create anything; stats with no path answers a virtual root directory and creates nothing; the DTO is plan Task 8's"
+    "why": "user ruling 2026-10-05 (R3, spec §2/§9): GET routes never create anything; stats with no path answers a virtual root directory and creates nothing; the DTO is plan Task 8's; the virtual root's `created` is None: application of R3 (2026-10-05)"
    },
    {
     "path": "api.summary.directory_listing",
@@ -9998,17 +10056,17 @@
    {
     "path": "api.summary.move",
     "pointer": "/api/summary/move",
-    "why": "spec §2/§9 and the header's approved choices"
+    "why": "spec §2/§9 and the header's approved choices; a missing source -> 404: application of R3 (2026-10-05)"
    },
    {
     "path": "api.summary.delete",
     "pointer": "/api/summary/delete",
-    "why": "spec §2/§9 and the header's approved choices"
+    "why": "spec §2/§9 and the header's approved choices; the missing-path answer agrees with Kestra (application of R3 (2026-10-05))"
    },
    {
     "path": "api.summary.error_statuses",
     "pointer": "/api/summary/error_statuses",
-    "why": "spec §2/§9 and the header's approved choices"
+    "why": "application of R3 (2026-10-05); the table is spec §9's"
    },
    {
     "path": "api.summary.namespace_validation",
