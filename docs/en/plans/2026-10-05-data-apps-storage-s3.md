@@ -25,7 +25,7 @@
 
 Branch `feat/data-apps-storage-s1-wiring` off `main`. Nothing user-visible changes: `AppStore` gains the ability to read and write S3, but every existing code path still reads and writes the `source`/`layout_json` Postgres columns exactly as today. This part is pure plumbing, safe to ship on its own.
 
-### Task S1-1: `[apps.storage]` config
+### Task 1 (S1-1): `[apps.storage]` config
 
 **Files:**
 - Modify: `crates/egret-config/src/lib.rs`
@@ -125,7 +125,7 @@ fn apps_storage_prefix_must_end_with_a_slash() {
 - [ ] **Step 5:** Run: `cargo test -p egret-config apps_storage -- --nocapture` and `cargo test -p egret-config apps_pod_launcher`. Expected: both pass.
 - [ ] **Step 6:** Commit `feat(config): add [apps.storage] prefix and its boot-time [storage] requirement`.
 
-### Task S1-2: `AppStore` gains the object store and key helpers
+### Task 2 (S1-2): `AppStore` gains the object store and key helpers
 
 **Files:**
 - Modify: `crates/egret-apps/src/store.rs`
@@ -180,7 +180,7 @@ impl AppStore {
 
 - [ ] **Step 2:** Commit nothing yet — this task has no behavior change on its own and is easiest reviewed together with S1-3. Leave uncommitted (or commit as `wip` and squash later); proceed directly to S1-3.
 
-### Task S1-3: `draft()`/`save_draft()` read and write S3, additively
+### Task 3 (S1-3): `draft()`/`save_draft()` read and write S3, additively
 
 Postgres's `source`/`layout_json` columns are written too, in the same transaction, so a rollback mid-rollout (reverting to the pre-S1 binary) still works. They stop being *read* here, which is the real behavior change this task makes, done carefully: tests must prove the content now actually round-trips through S3, not through Postgres.
 
@@ -220,7 +220,7 @@ async fn draft_content_round_trips_through_the_object_store_not_postgres() {
 - [ ] **Step 6:** Run the full existing suite to confirm nothing else broke: `EGRET_ALLOW_DB_SKIP=1 cargo test -p egret-apps --lib` and (against a real database per this session's established recipe) `cargo test -p egret-apps`.
 - [ ] **Step 7:** Commit `feat(apps): read/write draft source and layout through the object store`.
 
-### Task S1-4: `publish()`/`restore_version()`/`version()` do the same for `app_versions`
+### Task 4 (S1-4): `publish()`/`restore_version()`/`version()` do the same for `app_versions`
 
 **Files:**
 - Modify: `crates/egret-apps/src/store.rs`
@@ -288,7 +288,7 @@ async fn restoring_a_version_copies_its_object_server_side_without_reading_it_in
 - [ ] **Step 5:** Run the Step 1 test (passes) and the full suite again.
 - [ ] **Step 6:** Commit `feat(apps): publish/restore_version read and write the object store too`.
 
-### Task S1-5: Wire `egret-bin`
+### Task 5 (S1-5): Wire `egret-bin`
 
 **Files:**
 - Modify: `crates/egret-bin/src/main.rs` (the two `AppStore::new` call sites, ~line 2287 and ~2304)
@@ -300,7 +300,7 @@ async fn restoring_a_version_copies_its_object_server_side_without_reading_it_in
 - [ ] **Step 2:** `cargo check -p egret-bin`. Expected: compiles (this task is the one that makes S1-2 through S1-4's signature changes finally compile end to end).
 - [ ] **Step 3:** Commit `feat(apps): wire AppStore to the shared object store in egret-bin`.
 
-### Task S1-6: Test fixtures move to `MemStore`
+### Task 6 (S1-6): Test fixtures move to `MemStore`
 
 **Files:**
 - Modify: `crates/egret-apps/tests/{lifecycle_store,http,podapi,proxy}.rs` (every `Fixture` that constructs `AppStore::new`, per the grep done during this plan's research: `lifecycle_store.rs:318`, `proxy.rs:1159`, `podapi.rs:81`, `http.rs:70,448,1376`)
@@ -320,7 +320,7 @@ egret-storage = { workspace = true, features = ["test-util"] }
 - [ ] **Step 4:** Run the full suite (`EGRET_ALLOW_DB_SKIP=1 cargo test -p egret-apps --lib` plus the DB-backed suite per this session's established recipe). Expected: all green, including S1-3/S1-4's new tests.
 - [ ] **Step 5:** Commit `test(apps): point every AppStore fixture at MemStore instead of a real object store`.
 
-### Task S1-7: One live verification against the dev stack's real MinIO
+### Task 7 (S1-7): One live verification against the dev stack's real MinIO
 
 Not a code change — a manual check before the PR, same discipline as every other "verify against the real thing" step this session has used.
 
@@ -342,7 +342,7 @@ Not a code change — a manual check before the PR, same discipline as every oth
 
 Branch `feat/data-apps-storage-s2-backfill` off `main` after S1 merges. A new one-off `egret` subcommand, following the existing `Command::{Serve,Migrate,Init,Workspace}` pattern in `egret-bin`. Idempotent (safe to run more than once) — it always overwrites the S3 key with the row's current Postgres content rather than skip-if-exists, so a rerun after an interrupted first run cannot leave a stale object behind.
 
-### Task S2-1: `egret backfill-apps-storage`
+### Task 8 (S2-1): `egret backfill-apps-storage`
 
 **Files:**
 - Modify: `crates/egret-bin/src/main.rs` (add `Command::BackfillAppsStorage` and its handler, next to `Command::Migrate`'s handler)
@@ -408,7 +408,7 @@ async fn backfill_apps_storage(config: Config) -> anyhow::Result<()> {
 
 Branch `feat/data-apps-storage-s3-cutover` off `main` after S2 has actually been run against every environment that has real Data Apps content (there is currently believed to be none in production — confirm this is still true before merging, the same diligence this session already applied before P6e). This part removes the "write both" safety net Task S1-3 deliberately kept: `save_draft`/`publish`/`restore_version` now write ONLY to S3.
 
-### Task S3-1: Stop writing `source`/`layout_json`
+### Task 9 (S3-1): Stop writing `source`/`layout_json`
 
 **Files:**
 - Modify: `crates/egret-apps/src/store.rs` (`save_draft`, `insert_version`)
@@ -427,7 +427,7 @@ Branch `feat/data-apps-storage-s3-cutover` off `main` after S2 has actually been
 
 Branch `feat/data-apps-storage-s4-drop-columns` off `main`, **separately, after a confidence period following S3** (this session has no fixed number of days to recommend — that is a product/ops call, not an engineering one; note it as an open question in the PR rather than guessing).
 
-### Task S4-1: The migration
+### Task 10 (S4-1): The migration
 
 **Files:**
 - Create: `migrations/0171_drop_app_draft_source_columns.sql` (confirm 0171 is still free — `ls migrations/ | tail -3` — before writing; this plan was written when 0170 was the latest)
@@ -455,7 +455,7 @@ ALTER TABLE analytics.app_versions
 - [ ] **Step 3:** Verify against a disposable test database — same recipe this session used for `migrations/0169` and `migrations/0170`: create a scratch DB, run every migration including this one, confirm the columns are gone and every other `egret-apps` test still passes against it.
 - [ ] **Step 4:** Commit `feat(db): drop the now-unused app_drafts/app_versions source columns`.
 
-### Task S4-2: PR
+### Task 11 (S4-2): PR
 
 - [ ] State plainly in the PR description: this is the irreversible step; confirm (again, at merge time, not just at write time) that every real environment has been backfilled.
 
