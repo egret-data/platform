@@ -54,7 +54,7 @@ impl egret_catalog_registry::CatalogAssignmentCompiler for RealCompiler {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         catalog_id: Uuid,
     ) -> Result<(), egret_perm::CompileError> {
-        let mut ids = egret_policy::services_for_catalog_via(&mut **tx, catalog_id)
+        let mut ids = egret_policy::services_for_catalog_via(tx, catalog_id)
             .await
             .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
         ids.sort_unstable();

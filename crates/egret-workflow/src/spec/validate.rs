@@ -157,7 +157,7 @@ const NOT_YET_ENFORCED: &[(&str, &str)] = &[
 /// `RunnableTask` that just runs and produces an output, like `Sleep` or
 /// `PurgeFlows`, which live in the same Java package but are *not* listed
 /// here) has a `TaskKind` variant in this crate.
-
+///
 /// Every canonical name this crate treats as Kestra control flow — the
 /// SPECIFICATION half of a two-table equality guard, and **not a production
 /// lookup any more**. W8 Task 3 fix round 1.

@@ -110,7 +110,7 @@ impl egret_engine_mgmt::ProfileCompilerPort for RealProfileCompiler {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         catalog_id: Uuid,
     ) -> Result<(), egret_perm::CompileError> {
-        let mut ids = egret_policy::services_for_catalog_via(&mut **tx, catalog_id)
+        let mut ids = egret_policy::services_for_catalog_via(tx, catalog_id)
             .await
             .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
         ids.sort_unstable();
@@ -165,6 +165,7 @@ impl egret_core::authz::Pdp for AllowAllPdp {
 /// `attach_real_pdp`, and the Ranger-toggle rebuild further down), and a
 /// caller that wants to inspect what its app's fake recorded needs the SAME
 /// fake threaded through every rebuild, not a new one each time.
+#[allow(clippy::too_many_arguments)]
 fn build_app(
     db: &Db,
     sessions: &SessionService,
