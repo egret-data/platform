@@ -182,7 +182,11 @@ impl AppStore {
 
 ### Task 3 (S1-3): `draft()`/`save_draft()` read and write S3, additively
 
-Postgres's `source`/`layout_json` columns are written too, in the same transaction, so a rollback mid-rollout (reverting to the pre-S1 binary) still works. They stop being *read* here, which is the real behavior change this task makes, done carefully: tests must prove the content now actually round-trips through S3, not through Postgres.
+Postgres's `source`/`layout_json` columns are written too, in the same transaction, so a rollback mid-rollout (reverting to the pre-S1 binary) still works.
+
+**Reads prefer S3, with a Postgres fallback — not S3-only.** (Correction after Task 2+3's task review caught a self-contradiction in an earlier draft of this plan: a literal "reads exclusively from S3" would 500 on every app created before this part ships, until Part 8/S2's backfill runs — directly violating this Part's own opening claim, two paragraphs up, that it is "safe to ship on its own." The human ruling, recorded in this plan's SDD ledger, is: add the fallback.) `draft()` tries the object store first; on `StorageError::NotFound` for the *source* key specifically, fall back to the row's `source` column (which Task 3's dual-write keeps populated for every row, old and new, so it is always a valid answer). The *layout* key is allowed to be `NotFound` on its own merits already (it means "no layout saved") — for a PRE-S1 row this is indistinguishable from "backfill hasn't run yet," so fall back to the row's `layout_json` column whenever the row itself predates this code (in practice: just always read the Postgres `layout_json` as the fallback value for a layout-key miss, the same as the source fallback, rather than trying to distinguish the two cases). This fallback is temporary scaffolding, deliberately: Task 9 (S3-1) removes it once Task 8 (S2)'s backfill is confirmed to have run everywhere, at which point `NotFound` for either key is restored to meaning exactly what it already means for versions — a real error for source, "no layout" for layout.
+
+Tests must prove the content now actually round-trips through S3 for an app this code created (not through Postgres), AND that a Postgres-only row (simulating pre-S1 data) still reads correctly through the fallback.
 
 **Files:**
 - Modify: `crates/egret-apps/src/store.rs`
@@ -211,14 +215,65 @@ async fn draft_content_round_trips_through_the_object_store_not_postgres() {
     let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
     assert_eq!(d.source, "x = 2");
 }
+
+#[tokio::test]
+async fn a_pre_s1_row_with_no_object_store_content_falls_back_to_postgres() {
+    let fx = Fixture::new().await;
+    // Simulate data from before this code shipped: insert directly via SQL
+    // (NOT through `AppStore::create`, which writes the object store too as
+    // of this task) so the row has real Postgres content and nothing in the
+    // object store for it at all.
+    let app_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO analytics.apps (workspace_id, name, description) VALUES ($1, 'legacy', '') RETURNING id",
+    )
+    .bind(fx.ws().0)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO analytics.app_drafts (app_id, source) VALUES ($1, 'legacy')")
+        .bind(app_id)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+
+    let d = fx.store().draft(fx.ws(), app_id).await.unwrap().unwrap();
+    assert_eq!(d.source, "legacy");
+}
+
+#[tokio::test]
+async fn a_losing_concurrent_save_never_becomes_the_visible_draft() {
+    // Regression test for the race the task review caught: two savers both
+    // read revision 1, both attempt to save: whichever loses the Postgres
+    // compare-and-swap must NOT have its content end up in the object store
+    // under the winner's revision. Use a store wrapper that delays `put` so
+    // the race window is wide enough to hit reliably (an instant MemStore
+    // will not reproduce it) -- see the task brief/report for the wrapper
+    // shape chosen.
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+    let (a, b) = tokio::join!(
+        st.save_draft(fx.ws(), app, fx.uid(), 1, "a", None),
+        st.save_draft(fx.ws(), app, fx.uid(), 1, "b", None),
+    );
+    let winner = match (a, b) {
+        (Ok(SaveOutcome::Saved { .. }), Err(_)) | (Ok(SaveOutcome::Saved { .. }), Ok(SaveOutcome::Stale { .. })) => "a",
+        (Err(_), Ok(SaveOutcome::Saved { .. })) | (Ok(SaveOutcome::Stale { .. }), Ok(SaveOutcome::Saved { .. })) => "b",
+        other => panic!("expected exactly one Saved and one Stale, got {other:?}"),
+    };
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!(d.source, winner, "the CAS loser's content must never become the visible draft");
+}
 ```
 
-- [ ] **Step 2:** Run it: `EGRET_ALLOW_DB_SKIP=1 cargo test -p egret-apps --test lifecycle_store draft_content_round_trips -- --nocapture` (fails: `Fixture`/`AppStore` do not have the new signature/helpers yet).
-- [ ] **Step 3:** Implement. `draft()` becomes: one `SELECT revision, updated_at FROM analytics.app_drafts WHERE app_id = $1` (no `source`/`layout_json` in the select list), then `self.store.get(&self.draft_key(ws, id))` for the source and `self.store.get(&self.draft_layout_key(ws, id))` for the layout (treat `StorageError::NotFound`-shaped errors, or whatever `S3Store`/`MemStore` return for a missing key — check `egret_storage::StorageError`'s variants — as "no layout", matching today's `Option<String>` semantics; a missing *draft* key with an existing `app_drafts` row is a genuine error, not "no draft", and should propagate). `save_draft()` becomes: write `source` to S3 first (fail fast, nothing written to Postgres, if the PUT fails), write `layout` to S3 (or skip/delete the key if `layout` is `None` — reuse `ObjectStore::delete`, treating "key already absent" as success), *then* run the existing `UPDATE ... SET revision = revision + 1 ... RETURNING revision` (now with `source`/`layout_json` still bound too, kept for the rollback safety net this task's intro describes).
+- [ ] **Step 2:** Run the three tests: `EGRET_ALLOW_DB_SKIP=1 cargo test -p egret-apps --test lifecycle_store draft_content_round_trips -- --nocapture`, `... a_pre_s1_row_with_no_object_store_content_falls_back_to_postgres ...`, `... a_losing_concurrent_save_never_becomes_the_visible_draft ...` (all three fail: `Fixture`/`AppStore` do not have the new signature/helpers/fallback/locking yet).
+- [ ] **Step 3:** Implement `draft()`: one `SELECT source, layout_json, revision, updated_at FROM analytics.app_drafts WHERE app_id = $1` (the Postgres columns are STILL selected — they are the fallback, not dead weight, until Task 9 removes this), then try `self.store.get(&self.draft_key(ws, id))` for the source — on `Ok`, use it; on `Err(StorageError::NotFound(_))`, use the row's `source` column instead (the fallback); any other `Err` propagates. Same shape for the layout: try `self.store.get(&self.draft_layout_key(ws, id))` — `Ok` wins, `NotFound` falls back to the row's `layout_json` column (which is already `Option<String>`, so "fell back and it's `None`" and "no layout, full stop" collapse into the same value, correctly), any other `Err` propagates.
+
+  Implement `save_draft()` **inside one transaction, holding the draft row locked across the object-store writes** — mirror `publish()`'s existing `SELECT ... FOR UPDATE` on `analytics.app_drafts` (same table, read the current code before writing this) rather than the brief's originally-described "check, then write S3, then separately UPDATE": `SELECT revision FROM analytics.app_drafts WHERE app_id = $1 FOR UPDATE`, compare to `expected` and return `SaveOutcome::Stale` (after releasing the transaction) if it doesn't match, otherwise — still holding the lock — write `source` to S3, write-or-delete the layout key (`None` deletes it; `ObjectStore::delete` on an absent key is already a no-op success in both `MemStore` and `S3Store`, confirmed during this plan's task review), then run the `UPDATE ... SET revision = revision + 1, source = $3, layout_json = $5, ... RETURNING revision` against the SAME row (it cannot have changed underneath the lock, so this UPDATE is now a formality, not a second compare-and-swap) and commit. A second saver blocks on the row lock for the lock-holder's full duration (including its S3 round-trip), then sees the new revision and returns `Stale` without ever touching the object store — this is what closes the race, not a pre-check read outside a lock.
 - [ ] **Step 4:** Update `routes.rs`'s `draft_get`/`draft_put` and `podapi.rs`'s `draft_get`/`draft_put` to pass `ctx.workspace_id` (routes.rs) / the pod principal's `p.workspace_id` (podapi.rs) as the new `ws` argument.
-- [ ] **Step 5:** Run the test from Step 1 again. Expected: passes.
+- [ ] **Step 5:** Run all three tests from Step 1 again. Expected: all pass.
 - [ ] **Step 6:** Run the full existing suite to confirm nothing else broke: `EGRET_ALLOW_DB_SKIP=1 cargo test -p egret-apps --lib` and (against a real database per this session's established recipe) `cargo test -p egret-apps`.
-- [ ] **Step 7:** Commit `feat(apps): read/write draft source and layout through the object store`.
+- [ ] **Step 7:** Commit `feat(apps): read/write draft source and layout through the object store, with a Postgres fallback and a locked compare-and-swap`.
 
 ### Task 4 (S1-4): `publish()`/`restore_version()`/`version()` do the same for `app_versions`
 
@@ -276,17 +331,37 @@ async fn restoring_a_version_copies_its_object_server_side_without_reading_it_in
     // make. Confirm the `copy()` call site by reading the diff in review
     // instead of asserting it here.
 }
+
+#[tokio::test]
+async fn a_pre_s1_version_with_no_object_store_content_falls_back_to_postgres() {
+    // Same fallback as Task 3's draft() -- a version published before this
+    // code shipped has real content in `analytics.app_versions.source` and
+    // nothing in the object store.
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let (version_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO analytics.app_versions (app_id, version_no, source) \
+         VALUES ($1, 1, 'legacy v1') RETURNING id",
+    )
+    .bind(app)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+
+    let v = fx.store().version(fx.ws(), app, version_id).await.unwrap().unwrap();
+    assert_eq!(v.source, "legacy v1");
+}
 ```
 
-- [ ] **Step 2:** Run it (fails — same reason as S1-3).
-- [ ] **Step 3:** Implement: `publish()` reads the draft's *current* S3 content (not a Postgres `source` column — by this point in the rollout `draft()`'s S3 read is already the source of truth from S1-3) and writes it to the version's key before `insert_version`'s `INSERT`.
+- [ ] **Step 2:** Run it (fails — same reason as Task 3).
+- [ ] **Step 3:** Implement: `publish()` reads the draft's *current* content via `draft()` (which already does S3-with-Postgres-fallback as of Task 3 — `publish()` does not need its own fallback logic for the SOURCE it is publishing, only `version()`'s own read of an EXISTING version needs one, see below) and writes it to the version's key before `insert_version`'s `INSERT`.
 
-  `restore_version()` does **not** read the old version's bytes into the application and write them back out — that would pull potentially-large content through `egret-bin` for no reason. Versions are immutable and each already has its own key, so "restoring" is a pure copy: use `ObjectStore::copy(&self, src, dst)` (already on the trait, already used by the catalog's own file-manager move/rename per its doc comment) to copy `versions/{old_version_no}/source.py` → `versions/{new_version_no}/source.py` server-side, and the same for `layout.json` *only if the old version has one* (check with `head()` first, or let a missing-source `copy` error be treated as "no layout to copy" the same way a missing layout key is treated elsewhere in this plan — pick whichever `MemStore`/`S3Store` actually do for a `copy` of a nonexistent source and match it, confirmed in Task S1-4's own test).
+  `restore_version()` does **not** read the old version's bytes into the application and write them back out — that would pull potentially-large content through `egret-bin` for no reason. Versions are immutable and each already has its own key, so "restoring" is a pure copy: use `ObjectStore::copy(&self, src, dst)` (already on the trait, already used by the catalog's own file-manager move/rename per its doc comment) to copy `versions/{old_version_no}/source.py` → `versions/{new_version_no}/source.py` server-side, and the same for `layout.json` *only if the old version has one* (check with `head()` first, or let a missing-source `copy` error be treated as "no layout to copy" the same way a missing layout key is treated elsewhere in this plan — pick whichever `MemStore`/`S3Store` actually do for a `copy` of a nonexistent source and match it, confirmed in Task 4's own test). **If the OLD version predates this code (no object-store key at all — see the fallback test above), `copy()` will fail with `NotFound`: in that one case, fall back to reading the old version's `source`/`layout_json` straight from its Postgres row and `put()`-ing them to the new version's key instead of copying** (this is the one place a GET+PUT through the app is unavoidable, and only for the one-time migration of a version that predates this rollout).
 
-  `version()`'s `SELECT` drops `source`/`layout_json` from the column list and reads both from S3 after.
+  `version()`'s `SELECT` keeps `source`/`layout_json` in the column list (same reasoning as Task 3's `draft()`: they are the fallback, not dead weight, until Task 9 removes this) and tries the object store first; `StorageError::NotFound` on either key falls back to the row's column, exactly mirroring Task 3's `draft()`.
 - [ ] **Step 4:** Update `podapi.rs`'s `version_get` to pass `p.workspace_id`.
-- [ ] **Step 5:** Run the Step 1 test (passes) and the full suite again.
-- [ ] **Step 6:** Commit `feat(apps): publish/restore_version read and write the object store too`.
+- [ ] **Step 5:** Run all tests from Step 1 again (passes) and the full suite.
+- [ ] **Step 6:** Commit `feat(apps): publish/restore_version read and write the object store too, with the same Postgres fallback as drafts`.
 
 ### Task 5 (S1-5): Wire `egret-bin`
 
@@ -408,14 +483,16 @@ async fn backfill_apps_storage(config: Config) -> anyhow::Result<()> {
 
 Branch `feat/data-apps-storage-s3-cutover` off `main` after S2 has actually been run against every environment that has real Data Apps content (there is currently believed to be none in production — confirm this is still true before merging, the same diligence this session already applied before P6e). This part removes the "write both" safety net Task S1-3 deliberately kept: `save_draft`/`publish`/`restore_version` now write ONLY to S3.
 
-### Task 9 (S3-1): Stop writing `source`/`layout_json`
+### Task 9 (S3-1): Stop writing `source`/`layout_json`, and remove the Task 3/4 fallback reads
 
 **Files:**
-- Modify: `crates/egret-apps/src/store.rs` (`save_draft`, `insert_version`)
+- Modify: `crates/egret-apps/src/store.rs` (`draft`, `save_draft`, `version`, `insert_version`, `restore_version`)
 
 - [ ] **Step 1:** Remove `source`/`layout_json` from the `UPDATE`/`INSERT` statements in `save_draft` and `insert_version` (they still exist as columns — Part S4 drops them — but nothing writes to them from here on).
-- [ ] **Step 2:** Run the full suite (unit + DB-backed). Expected: unaffected — nothing was reading these columns since Part S1.
-- [ ] **Step 3:** Commit `feat(apps): stop writing the now-unused source/layout_json columns`.
+- [ ] **Step 2:** Remove the Postgres-fallback branches Tasks 3 and 4 added: `draft()`'s and `version()`'s `SELECT`s drop `source`/`layout_json` from the column list entirely (there is nothing left to fall back to that could be trusted — Task 8/S2's backfill is why this is now safe), and a `StorageError::NotFound` on the source key becomes a real, propagated error again (not a fallback) for both. `restore_version()`'s `copy()`-then-fallback-to-GET+PUT also loses its fallback branch: every version from here on is guaranteed to have an object-store key.
+- [ ] **Step 3:** Delete the two fallback tests Tasks 3 and 4 added (`a_pre_s1_row_with_no_object_store_content_falls_back_to_postgres`, `a_pre_s1_version_with_no_object_store_content_falls_back_to_postgres`) — they assert behavior this step deliberately removes. Add one test proving the opposite: a row with NO object-store key now surfaces as an error from `draft()`/`version()`, not a silent fallback.
+- [ ] **Step 4:** Run the full suite (unit + DB-backed). Expected: green, with the fallback tests gone and the new error-surfaces test passing.
+- [ ] **Step 5:** Commit `feat(apps): stop writing the now-unused source/layout_json columns and remove the backfill-era Postgres fallback`.
 
 ### Self-review for Part S3
 
