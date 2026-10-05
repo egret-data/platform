@@ -2833,34 +2833,20 @@ async fn cannot_delete_the_last_platform_admin() {
     );
 }
 
-/// `DELETE /users/{id}` (Task 4, then UDR Task 2): a user who OWNS content —
-/// a dashboard via `analytics.dashboards.created_by` (nullable, `ON DELETE
-/// SET NULL` FK per mig 0093) AND a notebook via `analytics.notebooks.
-/// owner_user_id` (NOT NULL, no `ON DELETE` action) — can now be hard-deleted:
-/// the dashboard's attribution is nulled out by its FK, and the notebook is
-/// reassigned to the deleting admin by `UserRepo::hard_delete` before the row
-/// delete, so nothing trips `foreign_key_violation` (23503) and the content
-/// survives.
+/// `DELETE /users/{id}` (Task 4, then UDR Task 2): a user who OWNS content — a
+/// dashboard via `analytics.dashboards.created_by` (nullable, `ON DELETE SET
+/// NULL` FK per mig 0093) — can now be hard-deleted: the dashboard's
+/// attribution is nulled out by its FK, so nothing trips
+/// `foreign_key_violation` (23503) and the content survives.
 #[tokio::test]
-async fn deleting_a_content_owner_reassigns_and_succeeds() {
+async fn deleting_a_content_owner_nulls_attribution_and_succeeds() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
     let admin_token = session_for(&f, "delete_owner_admin", true).await;
-    let (admin_id,): (Uuid,) = sqlx::query_as(
-        "SELECT pra.principal_id FROM access_grants pra \
-         JOIN roles r ON r.id = pra.role_id \
-         JOIN sessions s ON s.token_hash = $1 \
-         WHERE r.name = 'platform_admin' AND pra.scope_type = 'platform' \
-           AND pra.principal_id = s.user_id",
-    )
-    .bind(egret_auth::token::hash_token(&admin_token))
-    .fetch_one(&f.db.pool)
-    .await
-    .expect("the admin's own platform_admin grant");
 
-    // A normal target user who will own a dashboard AND a notebook.
+    // A normal target user who will own a dashboard.
     let email = format!("content_owner_{}@egret.local", Uuid::new_v4().simple());
     let user_id = f
         .users
@@ -2886,18 +2872,6 @@ async fn deleting_a_content_owner_reassigns_and_succeeds() {
     .fetch_one(&f.db.pool)
     .await
     .expect("insert dashboard owned by the target");
-
-    // A notebook owned by the target (`analytics.notebooks.owner_user_id` is
-    // NOT NULL with a plain FK — the one column `hard_delete` must reassign).
-    let (notebook_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO analytics.notebooks (workspace_id, owner_user_id, name) \
-         VALUES ($1, $2, 'Owned Notebook') RETURNING id",
-    )
-    .bind(ws_id)
-    .bind(user_id.0)
-    .fetch_one(&f.db.pool)
-    .await
-    .expect("insert notebook owned by the target");
 
     let resp = f
         .app
@@ -2933,17 +2907,5 @@ async fn deleting_a_content_owner_reassigns_and_succeeds() {
     assert_eq!(
         dashboard_created_by, None,
         "dashboard.created_by must be nulled out by its ON DELETE SET NULL FK"
-    );
-
-    // The notebook survives, reassigned to the deleting admin.
-    let notebook_owner: Uuid =
-        sqlx::query_scalar("SELECT owner_user_id FROM analytics.notebooks WHERE id = $1")
-            .bind(notebook_id)
-            .fetch_one(&f.db.pool)
-            .await
-            .expect("notebook must still exist");
-    assert_eq!(
-        notebook_owner, admin_id,
-        "notebook.owner_user_id must be reassigned to the deleting admin"
     );
 }

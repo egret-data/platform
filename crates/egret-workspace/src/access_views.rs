@@ -145,7 +145,7 @@ impl AccessViewsRepo {
     ///
     /// Object → workspace resolution reuses the same object tables the object-scope
     /// admission path uses (`Authorizer::has_object_grant_in_workspace`): a
-    /// `UNION ALL` over the seven object tables (each carries `workspace_id` + a
+    /// `UNION ALL` over the six object tables (each carries `workspace_id` + a
     /// `name` column), filtered to this workspace, then joined back to
     /// `access_grants` on `(object_type, scope_id)`. Restricting the object set to
     /// this workspace in SQL is the cross-workspace IDOR guard — a grant on an
@@ -157,9 +157,9 @@ impl AccessViewsRepo {
     ) -> Result<Vec<ObjectGrantRollup>> {
         // Object tables — all in the `analytics` schema, each with `workspace_id`
         // and a `name` display column (confirmed against migrations 0012/0014/0015/
-        // 0021/0037 + 0010 saved_queries, moved to `analytics` in 0067):
+        // 0021 + 0010 saved_queries, moved to `analytics` in 0067):
         //   analytics.charts, analytics.dashboards, analytics.datasets,
-        //   analytics.folders, analytics.notebooks, analytics.saved_queries,
+        //   analytics.folders, analytics.saved_queries,
         //   analytics.apps (0161; trashed apps included, as their shares still exist).
         let rows = sqlx::query_as::<_, ObjectGrantRow>(
             "WITH ws_objects (kind, id, name) AS ( \
@@ -167,7 +167,6 @@ impl AccessViewsRepo {
                  UNION ALL SELECT 'dashboard',   id, name FROM analytics.dashboards    WHERE workspace_id = $1 \
                  UNION ALL SELECT 'dataset',     id, name FROM analytics.datasets      WHERE workspace_id = $1 \
                  UNION ALL SELECT 'folder',      id, name FROM analytics.folders       WHERE workspace_id = $1 \
-                 UNION ALL SELECT 'notebook',    id, name FROM analytics.notebooks     WHERE workspace_id = $1 \
                  UNION ALL SELECT 'saved_query', id, name FROM analytics.saved_queries WHERE workspace_id = $1 \
                  UNION ALL SELECT 'app',         id, name FROM analytics.apps          WHERE workspace_id = $1 \
              ) \

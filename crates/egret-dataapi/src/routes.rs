@@ -658,16 +658,7 @@ async fn delete_service_account(
     // principal type that is nearly always granted before it is deleted.
     // `hard_delete` sweeps grants, sessions and group memberships in one
     // transaction and maps a 23503 to a 409.
-    //
-    // `reassign_notebooks_to` is the deleting admin, which is what the parameter
-    // means. For a service account the reassignment matches zero rows —
-    // `notebooks.owner_user_id` is only ever set by an interactive session and a
-    // service account can never log in (`users_service_has_no_password`, 0119) —
-    // so this is a no-op that stays correct if that ever changes.
-    let deleted = st
-        .users
-        .hard_delete(UserId(sa), ctx.principal.user_id)
-        .await?;
+    let deleted = st.users.hard_delete(UserId(sa)).await?;
     // Deleting the `users` row cascades through `dataapi.service_accounts` into
     // `dataapi.clients` (migration 0119), so no client outlives its account.
     //
