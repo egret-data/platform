@@ -1016,3 +1016,208 @@ async fn a_pre_s1_drafts_layout_also_falls_back_to_postgres() {
     assert_eq!(d.source, "legacy");
     assert_eq!(d.layout_json.as_deref(), Some("legacy layout"));
 }
+
+// ---------------------------------------------------------------------------
+// Task 8 (S2-1): the one-off backfill of pre-S1 rows into the object store.
+// ---------------------------------------------------------------------------
+
+/// Simulates data from before Part S1 shipped: a draft row and a published
+/// version row inserted directly via SQL (bypassing `AppStore` entirely, so
+/// nothing has ever touched the object store for this app), each with real
+/// `source`/`layout_json` content. `backfill_draft`/`backfill_version` are
+/// pure S3 writes driven by values already read from Postgres -- exactly the
+/// shape `backfill_apps_storage` (the CLI command) uses, minus its own SELECT.
+#[tokio::test]
+async fn backfill_writes_pre_s2_rows_content_to_the_object_store() {
+    let fx = Fixture::new().await;
+    // `fx.app` was inserted raw by the fixture and has no draft/version/object
+    // store content of any kind yet.
+    sqlx::query(
+        "INSERT INTO analytics.app_drafts (app_id, source, layout_json) \
+         VALUES ($1, 'pre-s2 draft source', 'pre-s2 draft layout')",
+    )
+    .bind(fx.app)
+    .execute(&fx.db.pool)
+    .await
+    .expect("insert pre-S2 draft");
+    sqlx::query(
+        "INSERT INTO analytics.app_versions (app_id, version_no, source, layout_json) \
+         VALUES ($1, 1, 'pre-s2 version source', 'pre-s2 version layout')",
+    )
+    .bind(fx.app)
+    .execute(&fx.db.pool)
+    .await
+    .expect("insert pre-S2 version");
+
+    let st = fx.store();
+    st.backfill_draft(
+        fx.ws(),
+        fx.app,
+        "pre-s2 draft source",
+        Some("pre-s2 draft layout"),
+    )
+    .await
+    .expect("backfill_draft");
+    st.backfill_version(
+        fx.ws(),
+        fx.app,
+        1,
+        "pre-s2 version source",
+        Some("pre-s2 version layout"),
+    )
+    .await
+    .expect("backfill_version");
+
+    let draft_source_key = format!(
+        "s3://{}/apps/{}/{}/draft.py",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        fx.app.hyphenated()
+    );
+    let draft_layout_key = format!(
+        "s3://{}/apps/{}/{}/draft.layout.json",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        fx.app.hyphenated()
+    );
+    let version_source_key = format!(
+        "s3://{}/apps/{}/{}/versions/1/source.py",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        fx.app.hyphenated()
+    );
+    let version_layout_key = format!(
+        "s3://{}/apps/{}/{}/versions/1/layout.json",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        fx.app.hyphenated()
+    );
+
+    assert_eq!(
+        fx.mem_store().get(&draft_source_key).await.unwrap(),
+        b"pre-s2 draft source"
+    );
+    assert_eq!(
+        fx.mem_store().get(&draft_layout_key).await.unwrap(),
+        b"pre-s2 draft layout"
+    );
+    assert_eq!(
+        fx.mem_store().get(&version_source_key).await.unwrap(),
+        b"pre-s2 version source"
+    );
+    assert_eq!(
+        fx.mem_store().get(&version_layout_key).await.unwrap(),
+        b"pre-s2 version layout"
+    );
+}
+
+/// I5 (final whole-branch review): `backfill_draft` alone takes an unlocked
+/// caller-supplied snapshot, so a backfill run racing a concurrent
+/// `save_draft` can overwrite the live save's S3 content with the stale
+/// snapshot it read before the save landed. `backfill_draft_locked` closes
+/// this by taking the same `FOR UPDATE` row lock `save_draft` does and
+/// re-reading the row itself from inside that lock, rather than trusting a
+/// snapshot: here the "concurrent save" has already committed by the time
+/// `backfill_draft_locked` runs, so it must see and write the save's content,
+/// not the draft's original "v1" source.
+#[tokio::test]
+async fn backfill_draft_locked_never_overwrites_a_concurrent_live_save() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+
+    // The "concurrent save that already landed" the finding describes.
+    let outcome = st
+        .save_draft(
+            fx.ws(),
+            app,
+            fx.uid(),
+            1,
+            "v2 (live edit)",
+            Some("live layout"),
+        )
+        .await
+        .unwrap();
+    let SaveOutcome::Saved { revision } = outcome else {
+        panic!("expected Saved, got {outcome:?}");
+    };
+    assert_eq!(revision, 2);
+
+    // No earlier caller-passed snapshot to go stale: this must re-read the
+    // CURRENT row content, not "v1".
+    st.backfill_draft_locked(fx.ws(), app)
+        .await
+        .expect("backfill_draft_locked");
+
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!(d.source, "v2 (live edit)");
+    assert_eq!(d.layout_json.as_deref(), Some("live layout"));
+
+    // Direct against the object store too, not just through `draft()`'s
+    // reader (which a broken S3 write could mask via Postgres fallback).
+    let draft_source_key = format!(
+        "s3://{}/apps/{}/{}/draft.py",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        app.hyphenated()
+    );
+    let draft_layout_key = format!(
+        "s3://{}/apps/{}/{}/draft.layout.json",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        app.hyphenated()
+    );
+    assert_eq!(
+        fx.mem_store().get(&draft_source_key).await.unwrap(),
+        b"v2 (live edit)"
+    );
+    assert_eq!(
+        fx.mem_store().get(&draft_layout_key).await.unwrap(),
+        b"live layout"
+    );
+}
+
+/// Bundled with the I5 fix per the final reviewer's recommendation (same code
+/// path): `backfill_draft_locked` must clear a stale layout object it finds
+/// at the draft's layout key when the CURRENT row has `layout_json = NULL` --
+/// mirroring `publishing_with_no_layout_clears_any_stale_layout_object`'s
+/// orphan-object shape, but for the locked backfill path.
+#[tokio::test]
+async fn backfill_draft_locked_clears_a_stale_layout_when_the_current_row_has_none() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+
+    // Give the draft a layout, then clear it via a normal save -- the
+    // current row now has `layout_json = NULL`.
+    st.save_draft(fx.ws(), app, fx.uid(), 1, "v1", Some("old layout"))
+        .await
+        .unwrap();
+    st.save_draft(fx.ws(), app, fx.uid(), 2, "v1", None)
+        .await
+        .unwrap();
+
+    let draft_layout_key = format!(
+        "s3://{}/apps/{}/{}/draft.layout.json",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        app.hyphenated()
+    );
+    // Pre-seed an orphaned layout object at that same key, as if a prior
+    // crashed/partial write left one behind.
+    fx.mem_store()
+        .put(&draft_layout_key, b"orphaned layout".to_vec())
+        .await
+        .unwrap();
+
+    st.backfill_draft_locked(fx.ws(), app)
+        .await
+        .expect("backfill_draft_locked");
+
+    assert!(matches!(
+        fx.mem_store().get(&draft_layout_key).await,
+        Err(StorageError::NotFound(_))
+    ));
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!(d.layout_json, None);
+}

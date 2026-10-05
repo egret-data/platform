@@ -830,4 +830,100 @@ impl AppStore {
         .await
         .map_err(db_err)
     }
+
+    /// S2-1 backfill only: write a pre-S1 draft row's known-good Postgres
+    /// content to its object-store key(s). Pure S3 writes -- no Postgres
+    /// statement, no transaction/lock -- because the row's Postgres state is
+    /// already correct and this is only catching the object store up. Mirrors
+    /// [`Self::save_draft`]'s S3-write shape (`Some` layout => put, `None` =>
+    /// delete, so a rerun never leaves a stale layout object behind).
+    pub async fn backfill_draft(
+        &self,
+        ws: WorkspaceId,
+        app: Uuid,
+        source: &str,
+        layout: Option<&str>,
+    ) -> Result<()> {
+        self.store
+            .put(&self.draft_key(ws, app), source.as_bytes().to_vec())
+            .await
+            .map_err(store_err)?;
+        match layout {
+            Some(l) => self
+                .store
+                .put(&self.draft_layout_key(ws, app), l.as_bytes().to_vec())
+                .await
+                .map_err(store_err)?,
+            None => self
+                .store
+                .delete(&self.draft_layout_key(ws, app))
+                .await
+                .map_err(store_err)?,
+        }
+        Ok(())
+    }
+
+    /// Backfills one draft's CURRENT content into the object store, taking the
+    /// same `FOR UPDATE` row lock `save_draft`/`publish` do. Unlike
+    /// `backfill_draft`, this re-reads the row itself rather than trusting a
+    /// caller-supplied snapshot: a concurrent `save_draft` either commits first
+    /// (and this sees its result) or blocks until this transaction commits (and
+    /// then proceeds against the now-current row) -- so a live backfill run can
+    /// never overwrite a draft with stale content a concurrent save just
+    /// replaced. (Versions don't need this: `app_versions` rows are append-only
+    /// and immutable, so re-reading and rewriting their already-committed
+    /// content is always safe with no lock.)
+    pub async fn backfill_draft_locked(&self, ws: WorkspaceId, app: Uuid) -> Result<()> {
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        let (source, layout_json): (String, Option<String>) = sqlx::query_as(
+            "SELECT source, layout_json FROM analytics.app_drafts WHERE app_id = $1 FOR UPDATE",
+        )
+        .bind(app)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        self.backfill_draft(ws, app, &source, layout_json.as_deref())
+            .await?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    /// S2-1 backfill only: write a pre-S1 published version's known-good
+    /// Postgres content to its object-store key(s). Pure S3 writes -- no
+    /// Postgres statement, no transaction/lock -- because the row's Postgres
+    /// state is already correct and this is only catching the object store up.
+    /// Mirrors [`Self::insert_version`]'s S3-write shape (`Some` layout => put,
+    /// `None` => delete, so a rerun never leaves a stale layout object behind).
+    pub async fn backfill_version(
+        &self,
+        ws: WorkspaceId,
+        app: Uuid,
+        version_no: i32,
+        source: &str,
+        layout: Option<&str>,
+    ) -> Result<()> {
+        self.store
+            .put(
+                &self.version_key(ws, app, version_no),
+                source.as_bytes().to_vec(),
+            )
+            .await
+            .map_err(store_err)?;
+        match layout {
+            Some(l) => self
+                .store
+                .put(
+                    &self.version_layout_key(ws, app, version_no),
+                    l.as_bytes().to_vec(),
+                )
+                .await
+                .map_err(store_err)?,
+            None => self
+                .store
+                .delete(&self.version_layout_key(ws, app, version_no))
+                .await
+                .map_err(store_err)?,
+        }
+        Ok(())
+    }
 }
