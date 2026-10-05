@@ -3688,6 +3688,14 @@ that were `unported:task-8` in `error-class-pairs.txt` are now
 `test:the_twelve_refusals_name_themselves_and_their_owner`, and
 `UNPORTED_ERROR_CLASS` in `tests/oracle.rs` is empty.
 
+**W9a Task 4 (2026-10-01):** `read`, `fileSize`, `fileExists` and `isFileEmpty`
+are implemented over a render's file scope, and a corpus render has none (no
+running execution), so their four entries still fail -- by a sentence asserted in
+`without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution`,
+which is now their pairing. The test above is
+`the_eight_refusals_name_themselves_and_their_owner`; `fileURI` names W9b and
+`kv` W9c.
+
 ### `fetchContext`'s key order is `HashMap`'s, and that is a recorded divergence
 
 Measured: `{"b":1,"a":2}` comes back `{"a":2,"b":1}` and

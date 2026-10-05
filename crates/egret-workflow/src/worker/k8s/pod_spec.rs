@@ -54,7 +54,8 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use crate::scripts::{PullPolicy, ResourceAmounts, Resources, RunnerSpec};
 use crate::worker::commands::{
-    TaskCommands, ENV_WORKING_DIR, RUN_NAME_PREFIX, TASKRUN_LABEL, WORKING_DIR,
+    TaskCommands, ENV_OUTPUT_DIR, ENV_WORKING_DIR, OUTPUT_DIR, RUN_NAME_PREFIX, TASKRUN_LABEL,
+    WORKING_DIR,
 };
 use crate::worker::TaskInput;
 
@@ -127,7 +128,9 @@ pub struct PodConfig {
     /// first, with a message that names the setting.
     pub run_as_user: i64,
     /// egret's helper image (`deploy/docker/task-helper.Dockerfile`): needs
-    /// `sh`, `sleep`, `tar`, `touch` and `wc`.
+    /// `sh`, `sleep`, `tail`, `tar`, `touch`, `wc` and `cat` -- `cat` drains
+    /// the rest of an upload when `tar -x` dies part-way (W9a Task 5 fix
+    /// round 1), so its exit status arrives.
     pub helper_image: String,
     /// Filled in where the author's `taskRunner.resources` says nothing.
     pub default_resources: Resources,
@@ -309,13 +312,20 @@ pub fn build(
 ) -> Result<Pod, String> {
     cfg.validate()?;
     let resources = effective_resources(spec.resources.as_ref(), cfg)?;
-    let has_inputs = !cmds.input_files.is_empty();
+    let has_inputs = cmds.has_inputs();
 
     let mut env = vec![EnvVar {
         name: ENV_WORKING_DIR.to_string(),
         value: Some(WORKING_DIR.to_string()),
         value_from: None,
     }];
+    if cmds.output_directory {
+        env.push(EnvVar {
+            name: ENV_OUTPUT_DIR.to_string(),
+            value: Some(OUTPUT_DIR.to_string()),
+            value_from: None,
+        });
+    }
     env.extend(cmds.env.iter().map(|(k, v)| EnvVar {
         name: k.clone(),
         value: Some(v.clone()),
@@ -669,6 +679,7 @@ mod tests {
             render: crate::runners::RenderContext::new(),
             timeout: None,
             principal: None,
+            claimed_at: chrono::DateTime::UNIX_EPOCH,
             log: crate::logs::RunLog::discard(),
         }
     }
@@ -714,7 +725,10 @@ mod tests {
             commands: vec!["echo a".into(), "echo b".into()],
             env: BTreeMap::from([("B".into(), "2".into()), ("A".into(), "1".into())]),
             input_files: BTreeMap::new(),
+            stored_inputs: BTreeMap::new(),
             output_files: vec![],
+            output_directory: false,
+            collect_to: None,
             host_protocol: false,
         }
     }

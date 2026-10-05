@@ -1,0 +1,50 @@
+[
+  {
+    "namespace": "w9a.plugins",
+    "flowId": "pg-storage",
+    "executionId": "00000000-0000-0000-0000-000000000001",
+    "taskId": "copy_out",
+    "taskRunId": "00000000-0000-0000-0000-000000000002",
+    "baseUri": "kestra:///w9a/plugins/pg-storage/executions/00000000-0000-0000-0000-000000000001/tasks/copy-out/00000000-0000-0000-0000-000000000002/"
+  },
+  {
+    "namespace": "company.team.sub",
+    "flowId": "My_Flow.v2",
+    "executionId": "00000000-0000-0000-0000-000000000003",
+    "taskId": "Task.With-Dots_1",
+    "taskRunId": "00000000-0000-0000-0000-000000000004",
+    "baseUri": "kestra:///company/team/sub/my-flowv2/executions/00000000-0000-0000-0000-000000000003/tasks/taskwith-dots-1/00000000-0000-0000-0000-000000000004/"
+  },
+  {
+    "namespace": "a",
+    "flowId": "UPPER",
+    "executionId": "00000000-0000-0000-0000-000000000005",
+    "taskId": "UPPER_task",
+    "taskRunId": "00000000-0000-0000-0000-000000000006",
+    "baseUri": "kestra:///a/upper/executions/00000000-0000-0000-0000-000000000005/tasks/upper-task/00000000-0000-0000-0000-000000000006/"
+  },
+  {
+    "namespace": "w5b",
+    "flowId": "f",
+    "executionId": "00000000-0000-0000-0000-000000000007",
+    "taskId": "q",
+    "taskRunId": "00000000-0000-0000-0000-000000000008",
+    "baseUri": "kestra:///w5b/f/executions/00000000-0000-0000-0000-000000000007/tasks/q/00000000-0000-0000-0000-000000000008/"
+  },
+  {
+    "namespace": "x",
+    "flowId": "a__b--c..d",
+    "executionId": "00000000-0000-0000-0000-000000000009",
+    "taskId": "t-_-.x",
+    "taskRunId": "00000000-0000-0000-0000-00000000000a",
+    "baseUri": "kestra:///x/a-b-cd/executions/00000000-0000-0000-0000-000000000009/tasks/t-x/00000000-0000-0000-0000-00000000000a/"
+  },
+  {
+    "namespace": "io.kestra.tests",
+    "flowId": "loop-iteration",
+    "executionId": "00000000-0000-0000-0000-00000000000b",
+    "taskId": "store",
+    "taskRunId": "00000000-0000-0000-0000-00000000000c",
+    "baseUri": "kestra:///io/kestra/tests/loop-iteration/executions/00000000-0000-0000-0000-00000000000b/tasks/store/00000000-0000-0000-0000-00000000000c/"
+  }
+]

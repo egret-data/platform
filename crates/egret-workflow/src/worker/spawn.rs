@@ -67,8 +67,8 @@ use uuid::Uuid;
 
 use super::{claim, WorkerError};
 use crate::executor::{
-    apply, build_plan, iteration_values, Command, ExecutionState, RunIx, RunState, TaskIx,
-    TaskKind, Tick,
+    apply, build_plan, resolve_loop_values, Command, ExecutionState, LoopValues, RunIx, RunState,
+    TaskIx, TaskKind, Tick,
 };
 use crate::models::{Flow, Task, TaskKind as ModelTaskKind};
 
@@ -121,7 +121,24 @@ impl Requested {
 /// emitted something other than a prefix of the remaining values or the stored
 /// `rendered` has changed under a running loop, and both are corruption rather
 /// than a case to tolerate.
-pub(super) async fn spawn_all(
+///
+/// # A sync fn returning a boxed future
+///
+/// `settle` awaits this, and `settle` re-enters itself through a `Subflow`
+/// chain: awaited inline, this future's size is part of every level's poll
+/// frame, and W9a Task 11 fix round 1's file-values arm grew it past what the
+/// worker suite's `a_chain_of_subflows_deeper_than_the_bound…` fits in its
+/// stack (measured: it overflowed). Boxed here, `settle` holds a pointer.
+pub(super) fn spawn_all<'a>(
+    conn: &'a mut PgConnection,
+    ctx: &'a claim::ExecutionCtx,
+    state: &'a ExecutionState,
+    requested: &'a [Requested],
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Uuid>>> + Send + 'a>> {
+    Box::pin(spawn_all_now(conn, ctx, state, requested))
+}
+
+async fn spawn_all_now(
     conn: &mut PgConnection,
     ctx: &claim::ExecutionCtx,
     state: &ExecutionState,
@@ -143,15 +160,47 @@ pub(super) async fn spawn_all(
             .collect();
         let values = values_of(ctx, state, parent_run)?;
         let base = spawned_count(conn, ctx.id, parent_run).await?;
-        let asked: Vec<&str> = batch.iter().map(|r| r.value.as_str()).collect();
-        let indices = iteration_indices(&values, base, &asked).map_err(|e| {
+        let corrupt = |e: String| {
             worker_err(WorkerError::Corrupt(
                 ctx.id,
                 format!("loop run {parent_run}: {e}"),
             ))
-        })?;
-        for (r, index) in batch.iter().zip(indices) {
-            out.push(spawn_one(conn, ctx, parent_run, r.task, index, &r.value).await?);
+        };
+        // `(index, value)` of each spawn of the batch.
+        let picked: Vec<(usize, String)> = match &values {
+            LoopValues::Listed(values) => {
+                let asked: Vec<&str> = batch.iter().map(|r| r.value.as_str()).collect();
+                let indices = iteration_indices(values, base, &asked).map_err(corrupt)?;
+                indices
+                    .into_iter()
+                    .zip(batch.iter().map(|r| r.value.clone()))
+                    .collect()
+            }
+            // A file's values are not in the state: `advance()` asked for
+            // `batch.len()` more iterations (each carrying an empty value),
+            // and the values are the next ones of the file, by index.
+            LoopValues::FromFile { count } => {
+                if base + batch.len() > *count {
+                    return Err(corrupt(format!(
+                        "asked to spawn iterations {base}..{} but the file holds {count}",
+                        base + batch.len()
+                    )));
+                }
+                file_values(conn, ctx.id, parent_run, base, batch.len())
+                    .await?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(k, v)| (base + k, v))
+                    .collect()
+            }
+        };
+        for (r, (index, value)) in batch.iter().zip(picked) {
+            match spawn_one(conn, ctx, parent_run, r.task, index, &value).await? {
+                Some(id) => out.push(id),
+                // The loop run was failed (a copied FILE input no longer
+                // readable): no further iteration of it is started.
+                None => break,
+            }
         }
     }
     Ok(out)
@@ -261,7 +310,7 @@ async fn spawn_one(
     task: TaskIx,
     index: usize,
     value: &str,
-) -> Result<Uuid> {
+) -> Result<Option<Uuid>> {
     let loop_id = parent
         .plan
         .tasks
@@ -305,7 +354,10 @@ async fn spawn_one(
     // `executionDepth` is the parent's, and with `ExecutionKind.LOOP` -- the
     // kind `flow_trigger` reads off `loop_index` to refuse an iteration as a
     // Flow-trigger source. Read from the row for the same reason as `inputs`.
-    let id: Uuid = sqlx::query_scalar(
+    // In a savepoint, for `subflow::spawn_one`'s reason: the FILE-input check
+    // below needs the row and may refuse it.
+    let mut sp = sqlx::Connection::begin(&mut *conn).await.map_err(db_err)?;
+    let (id, inputs): (Uuid, serde_json::Value) = sqlx::query_as(
         "INSERT INTO workflow.executions \
            (workspace_id, flow_id, namespace, flow_key, source, state, history, \
             parent_execution_id, parent_run_ix, loop_index, loop_value, inputs, \
@@ -313,7 +365,7 @@ async fn spawn_one(
          VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9, \
                  COALESCE((SELECT inputs FROM workflow.executions WHERE id = $6), '{}'::jsonb), \
                  (SELECT execution_depth FROM workflow.executions WHERE id = $6)) \
-         RETURNING id",
+         RETURNING id, inputs",
     )
     .bind(parent.workspace_id)
     .bind(parent.flow_id)
@@ -324,9 +376,41 @@ async fn spawn_one(
     .bind(parent_run as i32)
     .bind(index as i32)
     .bind(value)
-    .fetch_one(&mut *conn)
+    .fetch_one(&mut *sp)
     .await
     .map_err(db_err)?;
+
+    // W9a spec §7.1: every execution-creating INSERT checks its FILE inputs.
+    // An iteration's are its parent's, already checked when the parent was
+    // created, and the parent is in the iteration's loop family -- so this
+    // passes unless a copied value is no longer readable (its index row
+    // pruned by retention, spec §10). That **fails the loop run naming the
+    // input** (fix round 1, M4) -- the iteration's row rolled back -- rather
+    // than erring the worker, which would re-claim the run for ever.
+    let checked = crate::storage::inputs::check_file_inputs(
+        &mut sp,
+        parent.workspace_id,
+        id,
+        &flow,
+        &inputs,
+        &[],
+    )
+    .await?;
+    if let Err(why) = checked {
+        sp.rollback().await.map_err(db_err)?;
+        Box::pin(super::subflow::complete(
+            conn,
+            parent.id,
+            parent_run,
+            &[RunState::Failed],
+            None,
+            Some(&format!("loop iteration {index}: {why}")),
+            claim::Stack::Nested(parent.depth),
+        ))
+        .await?;
+        return Ok(None);
+    }
+    sp.commit().await.map_err(db_err)?;
 
     let ctx = claim::ExecutionCtx {
         id,
@@ -359,7 +443,7 @@ async fn spawn_one(
     // graph. It is not a cycle in the data — a sub-flow is strictly smaller
     // than the flow it came from, since it is one `Loop`'s `tasks:` list.
     Box::pin(claim::settle(conn, &ctx, &empty, &mut state, Tick(0), None)).await?;
-    Ok(id)
+    Ok(Some(id))
 }
 
 /// One sub-execution has reached a terminal state: tell the loop that spawned
@@ -496,7 +580,12 @@ async fn on_execution_terminal_inner(
     ) {
         Next::Terminate(s) => s,
         Next::Start(index) => {
-            let value = values[index].clone();
+            let value = match &values {
+                LoopValues::Listed(values) => values[index].clone(),
+                LoopValues::FromFile { .. } => {
+                    file_values(conn, parent_id, run, index, 1).await?.remove(0)
+                }
+            };
             spawn_one(conn, &ctx, run, task, index, &value).await?;
             return Ok(());
         }
@@ -518,15 +607,51 @@ async fn on_execution_terminal_inner(
 /// Read from the loop run's `rendered` — the caller's answer, which is where
 /// `advance()` reads it too — so this list and the one `flowable::loop_::open`
 /// took the first batch from are the same list.
-fn values_of(ctx: &claim::ExecutionCtx, state: &ExecutionState, run: RunIx) -> Result<Vec<String>> {
+fn values_of(ctx: &claim::ExecutionCtx, state: &ExecutionState, run: RunIx) -> Result<LoopValues> {
     let rendered = state.runs[run].rendered.as_deref().ok_or_else(|| {
         worker_err(WorkerError::Corrupt(
             ctx.id,
             format!("loop run {run} has spawned an iteration but has no rendered values"),
         ))
     })?;
-    iteration_values(rendered)
+    resolve_loop_values(rendered)
         .map_err(|e| worker_err(WorkerError::Corrupt(ctx.id, format!("loop run {run}: {e}"))))
+}
+
+/// Values `from..from + n` of a file `Loop` run, in index order, read from
+/// `workflow.loop_file_values` (migration 0167) by their index: one indexed
+/// range per spawn, never the whole file (W9a Task 11, fix round 1). Fewer
+/// rows than asked for is corruption -- the run's `rendered` counted them.
+async fn file_values(
+    conn: &mut PgConnection,
+    execution: Uuid,
+    run: RunIx,
+    from: usize,
+    n: usize,
+) -> Result<Vec<String>> {
+    let values: Vec<String> = sqlx::query_scalar(
+        "SELECT value FROM workflow.loop_file_values \
+          WHERE execution_id = $1 AND run_ix = $2 AND idx >= $3 AND idx < $4 \
+          ORDER BY idx",
+    )
+    .bind(execution)
+    .bind(run as i32)
+    .bind(from as i32)
+    .bind((from + n) as i32)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    if values.len() != n {
+        return Err(worker_err(WorkerError::Corrupt(
+            execution,
+            format!(
+                "loop run {run}: values {from}..{} of its file hold {} rows",
+                from + n,
+                values.len()
+            ),
+        )));
+    }
+    Ok(values)
 }
 
 /// `Loop.transmitFailed`, from the execution's frozen source.

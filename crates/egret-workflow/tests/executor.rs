@@ -779,12 +779,13 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
     let matching: BTreeSet<String> = ids.difference(&baselined).cloned().collect();
     assert_eq!(
         (golden.len(), matching.len(), baselined.len()),
-        (294, 185, 109),
+        (294, 186, 108),
         "294 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
-         `allowFailure:`/`allowWarning:` entries and W8 Task 6 banked the two \
-         `sla:` `EXECUTION_ASSERTION`s"
+         `allowFailure:`/`allowWarning:` entries, W8 Task 6 banked the two \
+         `sla:` `EXECUTION_ASSERTION`s and W9a Task 11 banked \
+         `valids/loop-values-from-uri`"
     );
 
     // ---- the sixteen, by name and by derivation ----------------------------
@@ -1399,6 +1400,14 @@ fn the_truncate_is_confined_to_this_process_own_clone() {
     }
 }
 
+/// **Every test that calls this runs on the MULTI-THREAD runtime** (W9a
+/// Task 11), because whichever of them gets here first drives the whole
+/// corpus on its own runtime: a `Loop` whose `values:` is a `kestra:///` file
+/// reads it on a render thread that blocks on the runtime handle, which only
+/// the multi-thread runtime -- production's -- serves
+/// (`storage::scope::Snapshot::read_bytes` refuses a current-thread one).
+/// `valids/loop-values-from-uri` and `valids/loop-outputs-auto` are those
+/// two entries.
 async fn egret_side() -> &'static Side {
     static SIDE: tokio::sync::OnceCell<Side> = tokio::sync::OnceCell::const_new();
     SIDE.get_or_init(|| async {
@@ -1438,7 +1447,7 @@ async fn egret_side() -> &'static Side {
             // 293 with it. `catch_unwind` cannot wrap a future that holds a
             // `&PgPool` across an await; a join handle can.
             let joined = tokio::spawn(async move {
-                let reg = driver::registry();
+                let reg = driver::registry(&pool);
                 driver::run(&pool, ws, &reg, &source, inputs).await
             })
             .await;
@@ -1936,7 +1945,7 @@ fn baseline() -> BTreeSet<String> {
 // --------------------------------------------------------------------------
 
 /// The ratchet. See this module's doc for the two directions it fails in.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn executor_matches_golden() {
     let side = egret_side().await;
     let golden = golden();
@@ -2212,7 +2221,7 @@ fn the_golden_has_no_relation_for_exactly_these_pairs() {
 /// split cannot move and is still asserted, and beside it is how many entries
 /// egret now produces a sub-execution trace for — which is what brings those
 /// pairs into scope.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn the_ordered_pairs_inside_spawned_are_reachable_now() {
     let side = egret_side().await;
     fn count(node: &Trace, depth: usize, top: &mut usize, nested: &mut usize) {
@@ -2272,7 +2281,9 @@ async fn the_ordered_pairs_inside_spawned_are_reachable_now() {
     );
 }
 
-const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 39;
+/// 39 through W9a Task 10; **41 since W9a Task 11** -- every entry with a
+/// `spawned`: the two whose `Loop` iterates an ION file were the last two.
+const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 41;
 // +15 at W6 Task 3: the `Subflow` entries that used to stall at their first
 // `Subflow` run now finish, so the runs after it exist and have endpoints.
 // The nested figure does not move -- a `Subflow` child is linked by
@@ -2283,7 +2294,12 @@ const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 39;
 /// at their loop run, and a run that never terminates has no right endpoint and
 /// so contributes no pair. Their bodies run now, banked or not. Neither task
 /// moves the nested figure -- no `LoopUntil` entry carries a `spawned`.
-const EGRET_TOP_LEVEL_PAIRS: usize = 621;
+///
+/// **625 since W9a Task 11**: `valids/loop-values-from-uri`'s one pair and
+/// `valids/loop-outputs-auto`'s three, whose `Loop` used to fail at `CREATED`
+/// and now runs (the second still fails at `end`, on the `Loop`'s own
+/// `outputs:`, which egret does not produce).
+const EGRET_TOP_LEVEL_PAIRS: usize = 625;
 const EGRET_NESTED_PAIRS: usize = 126;
 
 /// **KEPT is not ASSERTED, and the line between them is the baseline rather
@@ -2368,19 +2384,21 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
     );
     assert_eq!(
         (m_top, m_nested, m_top + m_nested),
-        (297, 102, 399),
+        (298, 102, 400),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
-         entries it banked carry 3 ordered pairs between them"
+         entries it banked carry 3 ordered pairs between them. W9a Task 11 moved \
+         1 more: `valids/loop-values-from-uri`'s `write` before `loop`"
     );
     assert_eq!(
         (b_top, b_nested, b_top + b_nested),
-        (580, 125, 705),
+        (579, 125, 704),
         "and the pairs a change to which it does not: they live on baselined \
-         entries, which mismatch whatever the pair says. Flipping all 705 leaves \
+         entries, which mismatch whatever the pair says. Flipping all 704 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
-         127 since Task 4's four banks, and at 109 since W8 banked eighteen; the \
+         127 since Task 4's four banks, at 109 since W8 banked eighteen, and at \
+         108 since W9a Task 11 banked `valids/loop-values-from-uri`; the \
          claim is `unmoved`, and the number beside it is a moment. **This message \
          said 744 while the tuple three lines above it said 705** -- the exact \
          shape this test's own doc warns about, found by W8 Task 7's sweep"
@@ -2773,22 +2791,34 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 /// []`, so they carried no run terminal to move. A task whose banks are
 /// invisible here is worth a sentence, because the next reader will otherwise
 /// read the unmoved figure as a stale one.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 396;
-const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 43;
+///
+/// **W9a Task 11 moved all five**, by banking `valids/loop-values-from-uri`
+/// (its `Loop` iterates an ION file now): 5 run terminals (`write`, `loop` and
+/// the three iterations' `item`), 3 sub-executions, 4 executions, 19
+/// run-history tokens and 12 execution-history tokens.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 391;
+/// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
+/// iterations of `valids/loop-values-from-uri`.
+const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 40;
 /// **165 through W8 Task 2, 157 after W8 Task 3, 156 after W8 Task 4, 149 after
 /// W8 Task 5, 147 now** -- the eight `Pause` entries W8 Task 3 banked, the one
 /// `LoopUntil` entry W8 Task 4 banked, W8 Task 5's seven and W8 Task 6's two.
 /// None of the eighteen carries a sub-execution --
 /// `SUB_EXECUTIONS_ON_BASELINED_ENTRIES` has not moved since W6 Task 4 -- so
 /// each fall is exactly the entry count.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 147;
+///
+/// **143 since W9a Task 11**: `valids/loop-values-from-uri` and its three
+/// iterations -- the first bank since W6 Task 4 to carry sub-executions.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 143;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
 /// `CREATED RUNNING PAUSED RUNNING PAUSED RUNNING SUCCESS`), and **82** on W8
 /// Task 5's seven, which is high per entry because three of them retry: a
 /// `task-allow-*-runnable` run history is thirteen tokens long.
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1528;
+///
+/// **1509 since W9a Task 11**: 19 on `valids/loop-values-from-uri`.
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1509;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -2797,7 +2827,10 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1528;
 /// **4** on W8 Task 6's two -- two apiece, because `["CREATED","CANCELLED"]` is
 /// the shortest execution history in the golden: the violation fires before the
 /// execution ever reaches `RUNNING`.
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 522;
+///
+/// **510 since W9a Task 11**: three apiece on `valids/loop-values-from-uri`
+/// and its three iterations.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 510;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -2810,7 +2843,7 @@ const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 522;
 /// two statements coincide. It holds only while `after` is unreachable, which
 /// is a property of a run's left endpoint being its creation step and creation
 /// being monotonic in run order.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_after() {
     let side = egret_side().await;
     let mut removed: BTreeMap<String, usize> = BTreeMap::new();
@@ -2915,7 +2948,9 @@ const RESTRICTION_REMOVES_ENTRIES: usize = 9;
 /// than after. It was 791 because 12 `Subflow` entries that
 /// stalled at their first run now finish and the runs after them have
 /// endpoints.
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 832;
+///
+/// **836 since W9a Task 11**: the four `EGRET_TOP_LEVEL_PAIRS` gained.
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 836;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -3607,7 +3642,7 @@ fn step_relation_is_strict_on_both_sides() {
 ///    NEGATIVE control, showing an entry for which the experiment is vacuous —
 ///    it mismatches before and after, so its answer never depended on the
 ///    corruption.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_corrupted_golden_terminal_now_breaks_the_entry_it_used_to_be_fed_to() {
     let side = egret_side().await;
     let corrupt = |entry: &GoldenEntry| {
@@ -3778,7 +3813,7 @@ async fn a_corrupted_golden_terminal_now_breaks_the_entry_it_used_to_be_fed_to()
 ///
 /// Four buckets, and an entry is in as many as it differs on. The totals are
 /// asserted beside the parts.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
     let side = egret_side().await;
     let (mut execution, mut runs, mut order, mut spawned, mut refused, mut broken) =
@@ -3871,7 +3906,7 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
     // handler for. `Runnable` and not any kind, or the claim would be vacuous
     // -- every flow with a `Sequential` holds a type the registry does not
     // serve, and flowables are `advance()`'s work, not a handler's.
-    let handled: BTreeSet<String> = driver::registry()
+    let handled: BTreeSet<String> = driver::registry(&driver::unconnected_pool())
         .type_ids()
         .into_iter()
         .map(str::to_string)
@@ -3905,14 +3940,24 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
     // not empty and the four it was wrong about would have failed the check
     // above -- which is measured rather than reasoned, see the comment above.
     assert_eq!(
-        driver::registry().type_ids(),
+        driver::registry(&driver::unconnected_pool()).type_ids(),
         [
             "io.kestra.plugin.core.debug.Return",
             "io.kestra.plugin.core.execution.Fail",
             "io.kestra.plugin.core.flow.Sleep",
             "io.kestra.plugin.core.log.Log",
+            "io.kestra.plugin.core.storage.Concat",
+            "io.kestra.plugin.core.storage.DeduplicateItems",
+            "io.kestra.plugin.core.storage.Delete",
+            "io.kestra.plugin.core.storage.FilterItems",
+            "io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles",
+            "io.kestra.plugin.core.storage.Reverse",
+            "io.kestra.plugin.core.storage.Size",
+            "io.kestra.plugin.core.storage.Split",
+            "io.kestra.plugin.core.storage.Write",
         ],
-        "the four handlers the driver runs. If this list ever grew to cover \
+        "the thirteen handlers the driver runs (the four core storage tasks since \
+         W9a Task 11, the five whole-file ones since Task 12). If this list ever grew to cover \
          everything the corpus declares, the derivation above would pass \
          because nothing stalls rather than because the reason holds"
     );
@@ -4022,22 +4067,33 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 /// this count -- and so did W8 Task 6's two, whose golden execution history
 /// `["CREATED","CANCELLED"]` egret could not spell at all until
 /// `RunState::Cancelled` existed.
-const MISMATCH_ON_EXECUTION: usize = 72;
+///
+/// **71 since W9a Task 11**: `valids/loop-values-from-uri` banked.
+const MISMATCH_ON_EXECUTION: usize = 71;
 /// **112 through W8 Task 2, 104 after W8 Task 3, 103 after W8 Task 4, 96 after
 /// W8 Task 5, 94 now** -- the same eight, then `valids/waitfor-nested`, then
 /// the seven `allow*` entries, then W8 Task 6's two. The last pair differ on
 /// `runs` for an unusual reason: their golden `runs` is **empty**, and egret
 /// used to run the flow's one task, so the field differed by a whole run
 /// rather than by a state.
-const MISMATCH_ON_RUNS: usize = 94;
+///
+/// **93 since W9a Task 11**: `valids/loop-values-from-uri` banked.
+const MISMATCH_ON_RUNS: usize = 93;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
 /// `loop_2_return`/`loop_3` and `loop_3_return`/`loop_3_log`, every one of them
 /// a pair between siblings that a bulk reset made `overlapping`. See
 /// `Command::RecreateRun`.
-const MISMATCH_ON_ORDER: usize = 57;
-const MISMATCH_ON_SPAWNED: usize = 15;
+///
+/// **55 since W9a Task 11**, and so `MISMATCH_ON_SPAWNED` 15 -> 13, by the same
+/// two entries: `valids/loop-values-from-uri` banked, and
+/// `valids/loop-outputs-auto` -- still baselined, its `end` FAILS on the
+/// `Loop`'s own `outputs:`, which egret does not produce -- now agrees on
+/// `order` and `spawned`, because its `Loop` iterates the ION file instead of
+/// failing at `CREATED`.
+const MISMATCH_ON_ORDER: usize = 55;
+const MISMATCH_ON_SPAWNED: usize = 13;
 /// **122 through W8 Task 2, 114 after W8 Task 3, 113 now** -- the eight `Pause`
 /// entries Task 3 banked and the one `LoopUntil` entry Task 4 did. The
 /// `refused` half of the golden is untouched by either: no `Pause` or
@@ -4047,7 +4103,8 @@ const MISMATCH_ON_SPAWNED: usize = 15;
 /// as, since W8 Task 4, is `models::TaskKind::LoopUntil` for BOTH its
 /// spellings). **104 since W8 Task 6**, whose two entries are `runs` entries
 /// and whose flows are not refusals either.
-const MISMATCHING_RUNS_ENTRIES: usize = 104;
+/// **103 since W9a Task 11** (`valids/loop-values-from-uri`).
+const MISMATCHING_RUNS_ENTRIES: usize = 103;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -4113,7 +4170,12 @@ const MISMATCHING_RUNS_ENTRIES: usize = 104;
 /// further than it was, and what it stalls on is a missing handler that was
 /// always going to be its blocker — `handler_surface.py` carries that blocker
 /// row, and the paragraph above is the reasoning it falsifies.
-const ENTRIES_LEFT_UNFINISHED: usize = 47;
+///
+/// **45 since W9a Task 11**: `valids/loop-values-from-uri` and
+/// `valids/loop-outputs-auto` stalled at `write`, a
+/// `io.kestra.plugin.core.storage.Write` the driver had no handler for; both
+/// finish now.
+const ENTRIES_LEFT_UNFINISHED: usize = 45;
 
 /// **The guard W3a deleted did NOT come back, and this is why — measured, not
 /// assumed.**
@@ -4144,7 +4206,7 @@ const ENTRIES_LEFT_UNFINISHED: usize = 47;
 /// control: it drives the decision point directly, asserts the counter
 /// increments, and asserts on the same state that a child of a *different*
 /// parent does not move it.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction() {
     let side = egret_side().await;
     println!("create-beside-a-CREATED-sibling: {:?}", side.guard);
@@ -4188,7 +4250,7 @@ async fn the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transacti
 /// question changes: of the 41, how many now agree, and what holds the rest?
 /// Both halves are asserted — the golden-side population, which cannot move,
 /// and the per-entry outcome, which is the measurement this task reports.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
     let side = egret_side().await;
     let baseline = baseline();
@@ -4287,7 +4349,8 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
         (
             SPAWNED_ENTRIES_THAT_MATCH,
             SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED,
-            15,
+            // 15 through W9a Task 10; `valids/loop-values-from-uri` left it.
+            14,
             41
         ),
         "the 41 partitioned: how many MATCH, how many agree on everything the \
@@ -4299,7 +4362,7 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
 
 /// The count above, as a named constant so the report and the test cannot
 /// disagree about it.
-const SPAWNED_ENTRIES_THAT_MATCH: usize = 22;
+const SPAWNED_ENTRIES_THAT_MATCH: usize = 23;
 
 /// And the names, which is what `baseline.txt`'s header attributes one by one.
 /// Sixteen banked at W3b Task 5, `valids/replay-loop` at the whole-branch
@@ -4322,6 +4385,9 @@ const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
     "valids/loop-serial",
     "valids/loop-serial-multiple-tasks",
     "valids/loop-switch",
+    // W9a Task 11: a `Loop` whose `values:` is the ION file a
+    // `core.storage.Write` wrote -- read by the worker before `advance()`.
+    "valids/loop-values-from-uri",
     // W6 Task 3's only bank that carries a sub-execution: its `Loop` body is a
     // `Subflow`, so the body ran but its `Subflow` run stalled -- the whole
     // entry hung on the one construct this task shipped.
@@ -4373,7 +4439,7 @@ const SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED: usize = 4;
 /// which must find the same thing. If Kestra ever DID put a loop body task in a
 /// parent's `taskRunList`, `advance()` refusing to create one would be the
 /// defect and this test would be asserting it.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn no_run_is_ever_created_for_a_task_inside_a_loop() {
     let side = egret_side().await;
     let mut loop_bodies = 0usize;
@@ -4460,7 +4526,7 @@ async fn no_run_is_ever_created_for_a_task_inside_a_loop() {
 /// satisfy "every one egret ran is one Kestra ran". So the assertion is on the
 /// per-entry `(parent_run, value)` sequence, side by side, and the entries
 /// where the two lists differ are named rather than summed.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn every_sub_execution_egret_runs_is_one_kestra_ran() {
     let side = egret_side().await;
     fn keys(t: &Trace) -> Vec<(Option<usize>, Option<String>)> {
@@ -4529,7 +4595,7 @@ async fn every_sub_execution_egret_runs_is_one_kestra_ran() {
 /// A **stalled** execution is deliberately not one of these: egret doing LESS
 /// than Kestra is under-acceptance, which the ratchet already reports as a
 /// mismatch and `ENTRIES_LEFT_UNFINISHED` already counts.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn runtime_over_acceptance_is_registered_and_owned() {
     let side = egret_side().await;
     let mut found: BTreeMap<String, String> = BTreeMap::new();
@@ -4762,8 +4828,11 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
 // `retry-new-execution-*` entries. Their key is `(None, None)` -- a replay
 // carries neither a parent run nor a loop index -- and egret produced an EMPTY
 // key list for each until `worker::replay` created the execution.
-const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 32;
-const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 9;
+// W9a Task 11: +2 identical / -2 differing, `valids/loop-values-from-uri` and
+// `valids/loop-outputs-auto`: their `Loop` iterates its ION file now, where it
+// failed at `CREATED` and spawned nothing.
+const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 34;
+const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 7;
 
 /// **`concurrencyLimit` defaults to 1, and the corpus can tell** — the one
 /// measurement that separates it from `Parallel::concurrent`'s default of 0.
@@ -6164,7 +6233,9 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // `inputs`.
         (
             "Loop — a sub-execution egret runs and gets wrong",
-            19,
+            // 19 through W9a Task 10; `valids/loop-values-from-uri` banked at
+            // W9a Task 11 (a `Loop` over an ION file).
+            18,
             &["io.kestra.plugin.core.flow.Loop\n", "core.loop\n"],
         ),
         // **`Subflow` was a row here with 22 through W5, and W6 Task 3 removed
@@ -6746,7 +6817,7 @@ async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_no
     //
     // Read from the driver's own registry, which is what the oracle runs, so a
     // fifth handler added there is covered without this list being touched.
-    let registry = driver::registry();
+    let registry = driver::registry(&driver::unconnected_pool());
     let types: Vec<String> = registry
         .type_ids()
         .into_iter()
@@ -6769,6 +6840,7 @@ async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_no
             render: egret_workflow::runners::RenderContext::new(),
             timeout: None,
             principal: None,
+            claimed_at: chrono::DateTime::UNIX_EPOCH,
             log: egret_workflow::logs::RunLog::discard(),
         };
         egret_workflow::worker::Registry::cancel(&registry, &task)
@@ -6870,7 +6942,7 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     );
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (2, 107, 109),
+        (2, 106, 108),
         "the baselined population that declares a `timeout:`, and the rest. It \
          was (4, 139, 143) through W5 and (4, 123, 127) through W8 Task 2: W6 \
          Task 3 banked 12 and W6 Task 4 banked 4, and not one of the 16 \
@@ -6920,7 +6992,8 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     // The runnable one, and the budget it asks for. `Handlers` is the registry
     // the shipping worker dispatches on, so "a type this worker can run" is
     // read from it rather than asserted as a list.
-    let registry = egret_workflow::worker::Handlers::with_core_tasks();
+    let registry =
+        egret_workflow::worker::Handlers::with_core_tasks(egret_workflow::storage::current());
     let runnable: Vec<(String, String, std::time::Duration)> = declaring
         .iter()
         .flat_map(|(id, tasks)| tasks.iter().map(move |t| (id.clone(), t)))
@@ -7871,7 +7944,7 @@ fn iso_millis(iso: &str) -> Option<i64> {
 /// **control derived from the same query on the same rows**: the driven corpus
 /// contains flows that DO register a deadline, they are named, and the count is
 /// positive. A query that found nothing would fail on that half.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn the_max_duration_window_does_not_exist_in_this_harness() {
     // The corpus has already been driven, and every row it wrote is still
     // there: `egret_side` TRUNCATEs once, inside its `OnceCell`, before the
@@ -8017,7 +8090,7 @@ async fn the_max_duration_window_does_not_exist_in_this_harness() {
 /// resolve` selects any non-deleted, non-disabled row, draft or live), a child
 /// execution exists, it ran its `Sleep`, and it ended **SUCCESS** — which is
 /// the capped `Sleep` again, one level down.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded() {
     let _ = egret_side().await;
     let db = common::db().await.expect("the oracle needs DATABASE_URL");
@@ -8179,7 +8252,7 @@ async fn the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded() {
 /// `egret_side()` is awaited first and its result discarded, purely to
 /// serialise behind its one-time `TRUNCATE workflow.executions CASCADE`; this
 /// test then seeds its own workspace and drives its own executions.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn the_execution_assertion_banks_discriminate_on_the_inputs_the_harvest_did_not_drive() {
     let _ = egret_side().await;
 
@@ -8188,7 +8261,7 @@ async fn the_execution_assertion_banks_discriminate_on_the_inputs_the_harvest_di
         .expect("this drives a REAL executor and needs DATABASE_URL");
     let (ws, _user) = common::seed_workspace(&db).await;
     let source = corpus_source("valids/sla-execution-condition");
-    let reg = driver::registry();
+    let reg = driver::registry(&db.pool);
 
     // (label, inputs, must the execution end CANCELLED?, how many runs)
     let cases: [(&str, serde_json::Value, bool, usize); 3] = [

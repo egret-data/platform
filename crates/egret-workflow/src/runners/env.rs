@@ -117,6 +117,7 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
+use super::files::{FileScope, FileScopeObject, FILE_SCOPE};
 use super::filters;
 use super::functions;
 use super::rewrite::{rewrite, RewriteError};
@@ -324,8 +325,15 @@ pub enum RenderError {
 ///
 /// W2 does not build an execution context — that is W3's job (see the crate
 /// doc). This type is the shape W3 will fill.
+///
+/// **W9a Task 4: and the files it may read.** [`RenderContext::with_files`]
+/// attaches a [`FileScope`]; both render threads then bind it as the
+/// [`FILE_SCOPE`] global, and without one the four file functions refuse.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RenderContext(Vec<(String, MjValue)>);
+pub struct RenderContext {
+    bindings: Vec<(String, MjValue)>,
+    files: Option<FileScope>,
+}
 
 impl RenderContext {
     /// An empty context. A template that references any variable will fail
@@ -341,16 +349,27 @@ impl RenderContext {
     pub fn insert(&mut self, key: impl Into<String>, value: JsonValue) -> &mut Self {
         let key = key.into();
         let value = json_to_minijinja(&value);
-        match self.0.iter_mut().find(|(name, _)| *name == key) {
+        match self.bindings.iter_mut().find(|(name, _)| *name == key) {
             Some(slot) => slot.1 = value,
-            None => self.0.push((key, value)),
+            None => self.bindings.push((key, value)),
         }
         self
     }
 
     /// The bindings, in order, for callers that need to inspect them.
     pub fn bindings(&self) -> &[(String, MjValue)] {
-        &self.0
+        &self.bindings
+    }
+
+    /// The same bindings, with the files the four file functions read.
+    pub fn with_files(mut self, files: FileScope) -> Self {
+        self.files = Some(files);
+        self
+    }
+
+    /// The attached file scope, `None` where the four file functions refuse.
+    pub fn files(&self) -> Option<&FileScope> {
+        self.files.as_ref()
     }
 
     /// Builds a context from a JSON object.
@@ -386,7 +405,7 @@ impl RenderContext {
     /// than falling back to [`RenderContext::new`].
     pub fn from_json_object(value: &JsonValue) -> Option<Self> {
         let object = value.as_object()?;
-        Some(Self(
+        Some(Self::from_bindings(
             object
                 .iter()
                 .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
@@ -404,9 +423,27 @@ impl RenderContext {
         serde_json::from_str(json)
     }
 
+    fn from_bindings(bindings: Vec<(String, MjValue)>) -> Self {
+        Self {
+            bindings,
+            files: None,
+        }
+    }
+
     /// The context as one minijinja value: an order-preserving map object.
     fn to_minijinja(&self) -> MjValue {
-        MjValue::from_object(OrderedMap::new(self.0.clone()))
+        MjValue::from_object(OrderedMap::new(self.bindings.clone()))
+    }
+
+    /// Binds [`FILE_SCOPE`] when a scope is attached. Called by BOTH render
+    /// threads, after anything that could unbind it.
+    fn bind_files(&self, env: &mut Environment<'static>) {
+        if let Some(files) = &self.files {
+            env.add_global(
+                FILE_SCOPE,
+                MjValue::from_object(FileScopeObject(files.clone())),
+            );
+        }
     }
 }
 
@@ -856,7 +893,7 @@ impl<'de> Deserialize<'de> for RenderContext {
                 // is the one map in the crate that does not go through
                 // `OrderedMap`. `RenderContext::insert` has always collapsed a
                 // rebinding in place; the deserialiser did not.
-                Ok(RenderContext(last_value_wins(entries)))
+                Ok(RenderContext::from_bindings(last_value_wins(entries)))
             }
         }
 
@@ -866,7 +903,7 @@ impl<'de> Deserialize<'de> for RenderContext {
 
 impl From<BTreeMap<String, JsonValue>> for RenderContext {
     fn from(map: BTreeMap<String, JsonValue>) -> Self {
-        Self(
+        Self::from_bindings(
             map.iter()
                 .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
                 .collect(),
@@ -1287,7 +1324,7 @@ pub(super) fn write_json(out: &mut String, value: &MjValue, omit_nulls: bool) {
 /// `\b \t \n \f \r` have named escapes — which is why no existing golden
 /// moved when this was fixed and why only W2 Task 6's `toJson` sweep found
 /// it. Verified: the mismatch count is unchanged either side of this fix.
-fn write_json_string(out: &mut String, s: &str) {
+pub(crate) fn write_json_string(out: &mut String, s: &str) {
     match serde_json::to_string(s) {
         Ok(quoted) => out.push_str(&uppercase_unicode_escapes(&quoted)),
         // `to_string` on a `&str` cannot fail; this arm keeps the writer
@@ -1358,7 +1395,7 @@ fn uppercase_unicode_escapes(quoted: &str) -> String {
 /// break the tie differently down there. No corpus entry reaches it and no
 /// plausible flow does; recorded so the claim above is not read as
 /// unconditional.
-pub(super) fn write_java_double(out: &mut String, x: f64) {
+pub(crate) fn write_java_double(out: &mut String, x: f64) {
     if x.is_nan() {
         out.push_str("NaN");
         return;
@@ -1995,21 +2032,71 @@ fn render_guarded_with(
     // scoped borrow and not a copy -- `render_context_crosses_a_thread`
     // pins that, because the day it stops being true this has to become a
     // serialise-and-rebuild and nothing else would say so.
-    std::thread::scope(|scope| {
-        let worker = std::thread::Builder::new()
-            .name("egret-render".to_string())
-            .stack_size(RENDER_STACK_BYTES)
-            .spawn_scoped(scope, || {
-                render_on_this_thread(template, cx, forbidden, extend, passes)
-            })
-            .map_err(|e| RenderError::Template(format!("could not start a render thread: {e}")))?;
-        match worker.join() {
-            Ok(result) => result,
-            // A panic below is still a panic -- it is resumed on this thread
-            // when the scope ends, so `tests/oracle.rs`'s guard still sees it.
-            Err(_) => Err(RenderError::Template("the render panicked".to_string())),
-        }
+    off_the_runtime(|| {
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("egret-render".to_string())
+                .stack_size(RENDER_STACK_BYTES)
+                .spawn_scoped(scope, || {
+                    render_on_this_thread(template, cx, forbidden, extend, passes)
+                })
+                .map_err(|e| {
+                    RenderError::Template(format!("could not start a render thread: {e}"))
+                })?;
+            match worker.join() {
+                Ok(result) => result,
+                // A panic below is still a panic -- it is resumed on this thread
+                // when the scope ends, so `tests/oracle.rs`'s guard still sees it.
+                Err(_) => Err(RenderError::Template("the render panicked".to_string())),
+            }
+        })
     })
+}
+
+/// Run `f` on a thread of its own and wait for it, the way a render runs --
+/// for a caller that reads a file through a `FileScope` outside a template.
+///
+/// W9a Task 11: `worker::render` reads a `Loop`'s `values:` file in `settle`,
+/// on a tokio worker, and `Snapshot::read_bytes` refuses a runtime thread
+/// (`block_on` would panic there). This is the render's own arrangement --
+/// [`off_the_runtime`] around a scoped thread -- so the runtime keeps running
+/// while the read blocks. `Err` when the thread cannot start or panics.
+pub(crate) fn on_a_render_thread<T: Send>(f: impl FnOnce() -> T + Send) -> Result<T, String> {
+    off_the_runtime(|| {
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("egret-render".to_string())
+                .stack_size(RENDER_STACK_BYTES)
+                .spawn_scoped(scope, f)
+                .map_err(|e| format!("could not start a render thread: {e}"))?;
+            worker
+                .join()
+                .map_err(|_| "the render thread panicked".to_string())
+        })
+    })
+}
+
+/// Run `join`-on-a-render-thread `f` so the runtime keeps running under it.
+///
+/// **W9a Task 4 fix round 1, C1.** A render can block its own thread on the
+/// runtime (`read()`, `storage::scope::Snapshot::read_utf8`), and the thread
+/// that spawned the render waits in `join`. On a tokio WORKER that join used
+/// to park the worker with its core, so with every worker parked nothing
+/// drove the IO and timer drivers and the runtime wedged for good -- measured
+/// with one worker and one render, and with 2/2 and 4/4.
+/// `block_in_place` hands this worker's core to another thread first.
+///
+/// Only on the multi-thread runtime: `block_in_place` panics on a
+/// current-thread one, which has no other thread to hand anything to --
+/// `read()` refuses there instead (`Snapshot::read_utf8`). Off any runtime
+/// this is just `f()`.
+fn off_the_runtime<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
 }
 
 /// The top-level names a template refers to, as the PARSER sees them.
@@ -2104,6 +2191,8 @@ fn render_on_this_thread(
             cx.bindings().iter().map(|(name, _)| name.clone()).collect(),
         )),
     );
+    // W9a Task 4: after `extend`, for the same reason as the scope above.
+    cx.bind_files(&mut env);
     let env = env;
 
     // W2 Task 8 fix round 1: one budget for the whole render, shared by every
@@ -2272,16 +2361,20 @@ pub(crate) fn render_bound(
     // out anyway: the value of this function is that ONE code path produces
     // both halves of the answer, and a second path that produces `(text, [])`
     // is a second place for the two to disagree about what "no values" means.
-    std::thread::scope(|scope| {
-        let worker = std::thread::Builder::new()
-            .name("egret-render-bound".to_string())
-            .stack_size(RENDER_STACK_BYTES)
-            .spawn_scoped(scope, || bind_on_this_thread(template, cx))
-            .map_err(|e| RenderError::Template(format!("could not start a render thread: {e}")))?;
-        match worker.join() {
-            Ok(result) => result,
-            Err(_) => Err(RenderError::Template("the render panicked".to_string())),
-        }
+    off_the_runtime(|| {
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("egret-render-bound".to_string())
+                .stack_size(RENDER_STACK_BYTES)
+                .spawn_scoped(scope, || bind_on_this_thread(template, cx))
+                .map_err(|e| {
+                    RenderError::Template(format!("could not start a render thread: {e}"))
+                })?;
+            match worker.join() {
+                Ok(result) => result,
+                Err(_) => Err(RenderError::Template("the render panicked".to_string())),
+            }
+        })
     })
 }
 
@@ -2298,6 +2391,10 @@ fn bind_on_this_thread(
             cx.bindings().iter().map(|(name, _)| name.clone()).collect(),
         )),
     );
+    // W9a Task 4: `egret.sql`'s `sql:` reads files too -- this thread is the
+    // second of the two, and a scope bound on only one of them is the defect
+    // `the_file_functions_render_inside_an_egret_sql_statement` exists for.
+    cx.bind_files(&mut env);
     // AFTER `environment()`, which sets `json_writer_formatter`. Order is the
     // whole of it: the other way round, Kestra's formatter would win and every
     // value would be written into the SQL.

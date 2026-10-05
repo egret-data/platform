@@ -6234,7 +6234,9 @@ exactly as `loop-switch` does. Both are corrected in `baseline.txt`.
 
 ### The residual baseline, by construct and owner
 
-**109 entries** — it read `111` until W8 Task 7, two banks behind.
+**108 entries** — it read `111` until W8 Task 7, two banks behind, and `109`
+until W9a Task 11 banked `valids/loop-values-from-uri` (a `Loop` over the ION
+file a `core.storage.Write` wrote; the `Loop` row below fell 19 → 18 with it).
 `the_residual_baseline_is_attributed_to_a_construct_or_named` derives the rows
 from the baselined flows' own YAML on every run and fails if one moves; **the
 rows overlap and this is not a partition**, but the remainder is exhaustive and
@@ -6245,7 +6247,7 @@ found.
 
 | baselined entries declaring it | construct | owner |
 |---|---|---|
-| 19 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
+| 18 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
 | 16 | `finally:` | **unclaimed** |
 | 16 | `ExecutionUpdatableTask` (`Labels`, `SetVariables`, `UnsetVariables`, `Exit`) | **unclaimed** |
 | 5 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8 Task 5 banked seven of its twelve**; the five that remain are held by the FLOWABLE and not by the flag — see the paragraph below |
@@ -7956,7 +7958,9 @@ and the attempt stays open, and `claim`'s own predicate
 counts the cycles — `attempts.push` is in one file and neither site is on this
 path — so one `warn` per cycle is the entire signal, and **9 of 13 publishable
 types** are in this condition on the shipped registry. *(W5a Task 6,
-2026-09-28: **7 of 15** now; see item 19 (a).)*
+2026-09-28: **7 of 15** now; see item 19 (a). W9a Tasks 11-12 added nine
+core storage rows, all with handlers: **7 of 24** since; Data Apps P6a (#629)
+removed `egret.python`: **6 of 23** since.)*
 
 **The second cause was not recorded anywhere in this statement**: a handler that
 **outruns** `working_timeout`. `Sleep::new()` is uncapped and is one of the four
@@ -9225,7 +9229,7 @@ reports IGNORED or fails, never passes empty):
 | `tests/plugin_host_live.rs` `a_timed_out_query_is_cancelled_on_postgres` | `EGRET_PLUGIN_HOST_LIVE=1` | `pg_sleep(600)`, `timeout: PT30S`: query sent, then cancelled (`canceling statement due to user request`) |
 | `tests/container_docker_live.rs` `docker_cancel_with_grace_lets_a_sigterm_trap_run`, `docker_cancel_returns_only_after_the_container_stopped` | Docker daemon present; `EGRET_ALLOW_DOCKER_SKIP=1` opts out | the Docker runner's graceful cancel |
 | `tests/k8s_runner_live.rs` `k8s_cancel_with_grace_waits_for_termination_then_release_deletes` | `EGRET_TEST_KIND=1`, context `kind-egret` | the Kubernetes runner's graceful cancel, as the chart's Role |
-| `plugin-host` `EgretPluginHostTest` (15 tests) | none: `mvn -f plugin-host/pom.xml verify`, Java 25 | the shim's W9 traps, exit codes, the kill switch |
+| `plugin-host` `EgretPluginHostTest` (19 tests) | none: `mvn -f plugin-host/pom.xml verify`, Java 25 | the shim's W9 traps, exit codes, the kill switch |
 
 **Not measured, and stated so nobody infers it:**
 
@@ -9243,6 +9247,280 @@ reports IGNORED or fails, never passes empty):
    on Calico.
 5. **The ratchet cannot judge any of this in either direction**, for the
    reasons above.
+
+### W9a — internal storage, and the one entry it banked
+
+**109 before W9a and 108 after, both measured.** Before: the
+`executor_matches_golden` line printed with `--nocapture` at the package base
+(W9a Task 1, `baseline-ratchet.txt`, code = `5e43eb58`): **294 golden
+entries, 109 mismatching, 109 baselined, 0 broken**. After: the same line in
+Task 14's full gate, on the branch rebased onto `origin/main`:
+**294 golden entries, 108 mismatching, 108 baselined, 0 broken** (`executor_matches_golden -- --nocapture`, HEAD `58d92e7e`). `golden.json` and `corpus/` are byte-identical to
+`origin/main`'s (`git diff --quiet origin/main HEAD -- …golden.json …corpus`
+exits 0); `baseline.txt` lost exactly one line, `valids/loop-values-from-uri`.
+
+| | ratchet (measured) | what the task shipped |
+|---|---|---|
+| package base `5e43eb58` | 109 (Task 1) | -- |
+| Task 1 | 109 | the artifact measured (`oracle-exec/w9a-storage.json`): URIs, the file functions, FILE inputs, STORE files (binary Ion), the plugin bridge's reach, the core storage tasks, `Loop` over Ion |
+| Tasks 2-5 | 109 (each task's report) | streaming in `egret-storage`; URIs, the index (migration 0166) and `resolve_readable_many`; the render snapshot and the file functions; staging `inputFiles` URIs into a pod |
+| Task 6 | 109 | `outputFiles`/`outputDirectory` collected into URIs (**breaking**, below) |
+| Task 7 | 109 | FILE inputs: the multipart start, JSON URIs, replay and loop copies |
+| Task 8 | 109 | the execution file API (download, metas, preview of CSV/JSONL/Ion) |
+| Task 9 | 109 | the plugin storage bridge (`EgretStorage`), the four storage-needing plugin classes in the catalog |
+| Task 10 | 109 | `egret.sql` `fetch: STORE` |
+| Task 11 | **108** | `Write`, `Size`, `Delete`, `PurgeCurrentExecutionFiles`; `Loop` over a file (migration 0167): **`valids/loop-values-from-uri` banked** |
+| Task 12 | 108 | `Concat`, `Split`, `Reverse`, `DeduplicateItems`, `FilterItems` |
+| Task 13 | 108 | the retention pruner and the orphan sweep (migration 0168) |
+| Task 14 | **108** (measured, above) | the end to end on a temporary kind cluster, this section, the specs' corrections, the full local gate |
+
+**The corpus's flows that touch W9a, and which moved** (`/usr/bin/grep -rl`
+over `oracle-exec/corpus/`; each classified against `harvest-run.txt`,
+`golden.json` and `baseline.txt`):
+
+| population | flow | in the golden | baselined before → after | why |
+|---|---|---|---|---|
+| FILE input (5) | `valids/inputs`, `valids/inputs-small-files`, `valids/restart_with_inputs`, `valids/pause_on_resume` | no | -- | not-standalone at harvest: Kestra's own test supplies the file from the JVM classpath (or stays PAUSED), so there is no golden trace to compare |
+| | `invalids/inputs-validation` | yes (refused) | no → no | Kestra refuses it at publish for a `multiselect` input, not for its FILE input; it matched before W9a and still does |
+| `outputFiles` (1) | `valids/working-directory-outputs` | no | -- | rejected at harvest: `WorkingDirectoryTest$LocalFiles` is a test-only task type |
+| STORE (2) | `valids/loop-outputs-store` | yes | yes → yes | a `Loop`'s own `outputs:` in STORE mode, which W9a does not produce (the user's ruling of 2026-10-03; W9a spec §15) |
+| | `valids/webhook-store-body` | yes (FAILED) | no → no | a webhook trigger's STORE body; W9a does not implement it, and egret already matched Kestra's FAILED |
+| `core.storage` (2) | `valids/loop-values-from-uri` | yes | **yes → no** | `Write` an Ion file, `Loop` over its URI: banked at Task 11, measured |
+| | `valids/loop-outputs-auto` | yes | yes → yes | `fetchType: AUTO` over a file writes the `Loop`'s outputs as STORE files: same ruling as `loop-outputs-store` |
+
+What the ratchet can see of W9a: the driver registers the nine core storage
+tasks over the test `MemStore` (`oracle-exec/driver.rs:131-159`; `storage::`
+occurs 5 times there, against `worker::` 30). It cannot see a pod, S3, the
+plugin bridge, the file API or the pruner: no corpus flow declares a script
+task, a plugin task or a FILE input that runs standalone.
+
+#### The breaking change, and its release note
+
+**`outputs.<task>.outputFiles` changed from contents to URIs.** W5a stored each
+declared output file's contents (UTF-8, at most 1 MiB) in the task's outputs.
+W9a stores `{relative path → kestra:// URI}`, as Kestra does. A flow that read
+`{{ outputs.t.outputFiles['out.txt'] }}` as text reads
+`{{ read(outputs.t.outputFiles['out.txt']) }}` now (up to
+`workflow.storage.max_read_bytes`, 10 MiB), or passes the URI to a later
+task's `inputFiles`, which egret stages. It reaches only script tasks, which
+run behind the workspace feature `workflow_containers`, **off by default**.
+The other changes a deployment sees:
+
+- `workflow.container_runner` `docker` or `kubernetes` needs a `[storage]`
+  section: the server refuses to start with one and not the other.
+- The task-pod helper image needs `cat` (it already needed `sh`, `tar`,
+  `touch`, `wc`, `sleep`, `tail`); Alpine's base image has it and the
+  Dockerfile checks.
+- W5a: the 1 MiB-per-file and UTF-8 output rules are gone (`max_file_bytes`
+  1 GiB, `max_task_bytes` 5 GiB instead); a symlink, hard link or directory in
+  the collected outputs fails the task by name; `outputDirectory: true` works;
+  staged files carry the upload's time (W5a's were dated 1970) and uid 0 in
+  the archive.
+- W5b: `storage()` works instead of exiting 4; the catalog holds nine classes
+  (`postgresql.Batch`, `CopyIn`, `CopyOut` and `mysql.Batch` join), and
+  `fetchType: STORE` publishes; namespace files exit 4 naming W9b and
+  `namespaceKv()` W9c.
+
+- **Retention (new).** `workflow.storage_retention_days` (env
+  `EGRET_WORKFLOW__STORAGE_RETENTION_DAYS`) defaults to **30**; `0` keeps files
+  for ever. An hourly pruner deletes the files of an execution that ended more
+  than that many days ago (a loop family together, counted from its loop root's
+  end; never one that has not ended, nor a source a running dependent can
+  still read). Afterwards the file API answers **404**, and `read()`,
+  `fileSize`, `fileExists` and `isFileEmpty`, staging and the plugin bridge
+  fail naming the URI and the window ("files are kept 30 days after their
+  execution ends"). It runs only where the worker is on and `[storage]` is
+  configured.
+- **File API (new)**, under `/api/ws/{workspace}/workflows/executions/{id}/`:
+  `file?path=` (download), `file/metas?path=` and
+  `file/preview?path=&maxRows=` (CSV, JSONL or Ion; at most 5000 rows). All
+  three need **`workflow:read`**, the same permission as reading the execution;
+  no new permission was added. `path` must be a file of the execution's loop
+  family, else 404.
+- **Config keys (new)**, besides retention: `[workflow.storage]` `prefix`
+  (default `workflow/`; non-empty, ends with `/`), `max_file_bytes` (1 GiB),
+  `max_task_bytes` (5 GiB) and `max_read_bytes` (10 MiB, also the cap of a
+  `Loop` over a file); each must be at least 1, and the server refuses to start
+  otherwise. A multipart start carries at most `max_file_bytes` + 1 MiB.
+- **Manual replay.** A replay copies the source's `FILE` inputs by URI; once
+  one of those files was pruned the replay is refused with **400** naming the
+  input, instead of starting an execution that cannot read it.
+- **A permanent store error is retried, not failed** (W9a final review I2).
+  `AccessDenied`, `NoSuchBucket` or a refused key is handled as an outage: the
+  run is re-claimed every `working_timeout`, no attempt is spent, and it never
+  fails on its own. It can only be egret's own `[storage]` credentials or
+  bucket; the server log names the error, and fixing the configuration lets
+  the waiting runs finish. Follow-up: classify permanent S3 errors.
+- **Memory per reader** (spec §15). An Ion value read by an item task, a
+  `Loop` or the preview can cost about 8 × `max_read_bytes`, per concurrent
+  reader, and each concurrent `read()` up to `max_read_bytes` more; raising
+  `max_read_bytes` raises both. A `Loop` over a file has no record-count cap
+  (as Kestra): a 10 MiB file of two-byte records spawns ~5 million
+  iterations.
+- **Plugin pod memory.** The JVM runs with `-Xmx384m` (`pluginHost.jvmMaxHeap`)
+  under the default task-pod memory limit of **512Mi**. A limit of 128Mi is
+  OOM-killed (measured: `usage 131072kB, limit 131072kB`); keep the limit well
+  above the heap if you lower `default_resources`.
+- **Database: recovery for a dev/kind DB (the one place the recipe lives).**
+  Migrations 0166-0168 were written as 0161/0169/0170 and renumbered. Two
+  cases are affected, both on databases that are not production (the branch
+  has not merged):
+  1. **It applied the OLD numbers** (161 "workflow execution files", 169
+     "workflow loop file values", 170 "workflow execution files pruned").
+  2. **It applied the NEW 166-168 before the Task 14 fix-round-1 commit
+     (40455dc4)**, which added comments to the three headers: sqlx hashes the
+     whole file, comments included, so these answer `VersionMismatch`.
+
+  Either reset it (`just reset-testdata`), or undo by hand and let the server
+  re-apply:
+
+  ```sql
+  DROP TABLE IF EXISTS workflow.loop_file_values;
+  ALTER TABLE workflow.executions
+    DROP COLUMN IF EXISTS files_pruned_at,   -- takes workflow_executions_unswept_idx with it
+    DROP COLUMN IF EXISTS files_swept_at;
+  DROP TABLE IF EXISTS workflow.execution_files;
+  ALTER TABLE workflow.executions
+    DROP COLUMN IF EXISTS replayed_from_execution_id;  -- takes its FK, CHECKs and index
+  -- case 1:
+  DELETE FROM public._sqlx_migrations WHERE (version, description) IN
+    ((161, 'workflow execution files'), (169, 'workflow loop file values'),
+     (170, 'workflow execution files pruned'));
+  -- case 2:
+  DELETE FROM public._sqlx_migrations WHERE (version, description) IN
+    ((166, 'workflow execution files'), (167, 'workflow loop file values'),
+     (168, 'workflow execution files pruned'));
+  ```
+
+  Match on description as well as version (main's own 0161-0165 are Data Apps).
+  Also drop `egret_test_template` on any Postgres a checkout runs tests
+  against, so test templates rebuild. **No migration file is touched after
+  merge**: the three files change their checksum only once more, here, before
+  it. The local branch feat/sp4d-debt-and-guardrails also holds 0166-0168;
+  whichever merges second renumbers.
+
+The programme spec's W9a correction (§9) carries the same note.
+
+#### What is covered live, and by which gate
+
+**Live on a real cluster, through egret's API** (Task 14, a temporary kind
+cluster `egret-w9a-e2e`, kind v0.29 / Kubernetes v1.33.1, kindnet; created
+with its own kubeconfig so the shared `kind-egret` context was never
+switched; the chart installed from this branch with
+`workflow.containerRunner=kubernetes`, `workflow.workerEnabled=true`,
+`workflow.pluginHost.image=egret-plugin-host:dev`, the backend image built
+from the rebased branch; a Postgres 16 in `e2e-data`; transcripts
+`w9a-t14-e2e-*.txt` in the package's working notes, every figure below copied
+from them):
+
+1. **A FILE input through a pod and back.** A multipart start uploaded a
+   31-byte `in.csv` (`kestra:///e2e/w9a/files/executions/{id}/inputs/f/in.csv`);
+   a `shell.Commands` task staged it as `inputFiles: {in.csv: "{{ inputs.f }}"}`,
+   upper-cased it and declared `outputFiles: ["*.csv"]` (which collected the
+   staged `in.csv` too, as a glob over the working directory does); a `Log`
+   rendered `READ=ID,NAME\n1,ALPHA\n2,BETA\n3,GAMMA\n` through `read()`; and
+   **a later task staged the earlier task's `outputFiles` URI through the real
+   snapshot path** (Task 5's open check): `LATER 31 653fb20d…caff5`, the
+   expected file's sha256. The file API downloaded the same 31 bytes (`cmp`
+   equal, `attachment` disposition), the input file's bytes equal the upload,
+   `metas` answered `{"size":31}`, and `preview` with `maxRows=2` answered
+   `["ID,NAME","1,ALPHA"]`, `truncated: true`. Objects lie under
+   `workflow/{workspace id}/e2e/w9a/files/executions/{id}/…` in the bucket.
+2. **A plugin STORE file through `Batch`, `CopyOut` and `CopyIn`.**
+   `postgresql.Query` `fetchType: STORE` (500 rows, `size: 500`, a `.ion` URI)
+   → `postgresql.Batch` from that URI (`rowCount: 500`) → `CopyOut` (CSV)
+   → `CopyIn` from the CopyOut URI (`rowCount: 500`). In Postgres: `src`,
+   `dst` and `dst2` each 500 rows with `sum(n)` 125250, and `src EXCEPT dst2`
+   empty. **The plan's `Query STORE → CopyIn` is not possible as written**:
+   the STORE file is binary Ion and `CopyIn` reads CSV/text (Task 9's live
+   test measured the same), so the chain goes through `Batch` and `CopyOut`.
+3. **`core.storage.Write` → `Loop` over its URI → `Size`.** Three iterations,
+   each its own execution with `loop_value` `{"n":1,…}`, `{"n":2,…}`,
+   `{"n":3,…}` and the `Return` outputs `0 - …`, `1 - …`, `2 - …`; the loop
+   run's `rendered` is the URI and `3`, not the records; `Size` 55, the
+   content's byte count.
+4. **The pod holds no storage credential.** `kubectl get pods -n egret-tasks
+   -o yaml` taken while scenario 1's task slept (pod `Running`, 2/2): 8091
+   bytes, **0** occurrences of the secret key `egretsecret`, of `minio`, of
+   `9000`, of `STORAGE`, `ACCESS_KEY`, `SECRET_KEY`, `s3://` and the bucket
+   name `warehouse`; no value equal to the access key `egret` (the pod's only
+   env is `WORKING_DIR=/egret/working-dir`). Controls in the same dump:
+   `alpine:3.20` **2**, `egret-task-helper:dev` **4**.
+5. **Another workspace cannot read the URI.** Workspace `w9a2`, with the same
+   namespace and flow id, ran `{{ read('<w9a1's out.csv URI>') }}`: FAILED,
+   *"… belongs to an execution this flow may not read …"*, naming the URI.
+   The file API from `w9a2` answered **404** for `w9a1`'s execution
+   (`not found: execution`) and **404** for that URI under its own execution
+   (`no such file of execution …`); the same request in `w9a1`: **200**.
+6. **Retention.** With `EGRET_WORKFLOW__STORAGE_RETENTION_DAYS=1` and
+   scenario 1's execution's `updated_at` set back two days, the restarted
+   server's first pass logged `workflow storage pruned executions=1 orphans=0
+   failed=0`: its 3 index rows went to 0, `files_pruned_at` was set, its 3
+   objects left the bucket (6 → 3; the other two executions' 3 stayed), the
+   file API answered **404** *"… was deleted: files are kept 1 days after their
+   execution ends"* (an unpruned file: **200**), and a manual replay of it was
+   refused **400** naming its pruned FILE input.
+
+**Found live, not by any test:** nothing that fails. Two wordings: the
+readable-set refusal lists *"its own execution's files, its loop family's …,
+its trigger execution's and, for a replay, its source's"* and omits the
+trigger's loop family the 2026-10-01 ruling added; the pruned message says
+*"1 days"*. Both were fixed in Task 14 fix round 1 (the message now says *"1 day"* and names the trigger's loop family). The chart's MinIO images (`quay.io/minio/…`) answered **401** again,
+as in W5b; the e2e loaded a local `minio/minio` (RELEASE.2025-09-07, the same
+release, `mc` RELEASE.2025-08-13 inside) as `deps.minio.image` and `mcImage`.
+
+**Found by a live suite on the same cluster, and fixed in the test:**
+`k8s_runner_live`'s `a_plugin_stores_and_reads_storage_in_a_pod` failed in
+the suite (21/22) and in 2 of 3 runs alone: the plugin host's JVM, run with
+`-Xmx384m` (sized below egret's default 512Mi), was OOM-killed by its memory
+cgroup under the suite's own 128Mi pod limit (`memory: usage 131072kB, limit
+131072kB`, java anon-rss 129 MB). The plugin cases now use egret's default
+limit: 5 of 5 alone, then the whole suite **22 passed, 0 failed**. The chart's
+defaults never had the mismatch, and every plugin pod of the e2e succeeded.
+
+**Live, driven by tests, each gated** (without the gate a case reports
+IGNORED or fails, except where the table says it prints a skip):
+
+| test | gate | what it runs |
+|---|---|---|
+| `egret-storage` `tests/s3_stream.rs` (11) | `EGRET_TEST_S3_ENDPOINT` + `_KEY`/`_SECRET`/`_BUCKET` (prints a loud skip line without them) | single PUT and multipart, `get_stream`, `head`, `delete_prefix`, abort, against MinIO |
+| `tests/storage_render_s3_live.rs` | `EGRET_TEST_S3_*` | `read()` on a real `S3Store` under concurrent renders (the multi-thread rule); FILE upload |
+| `tests/storage_files_api_s3_live.rs` | `EGRET_TEST_S3_*` | a 64 MiB download streamed, a sliver pulled when the first chunk arrives |
+| `tests/storage_prune_s3_live.rs` | `EGRET_TEST_S3_*` | `delete_prefix` of an ended execution, the sweep reading S3's `last_modified`, under a throwaway prefix |
+| `tests/container_docker_live.rs` | Docker daemon; `EGRET_ALLOW_DOCKER_SKIP=1` opts out | staging and collecting through `docker cp`, mtimes, Python zipping a staged file |
+| `tests/k8s_runner_live.rs` | `EGRET_TEST_KIND=1` (`EGRET_TEST_KIND_CONTEXT` for a temporary cluster) | streamed staging in and out of a pod, `tar -x` dying in the pod, as the chart's Role |
+| `tests/plugin_host_live.rs` `plugins_read_and_write_storage_through_egret` | `EGRET_PLUGIN_HOST_LIVE=1` + `EGRET_TEST_S3_*` | Query STORE → Batch → CopyOut → CopyIn → `read()`, on Docker |
+| `tests/sql_starrocks_live.rs` | `EGRET_TEST_STARROCKS_URL` (`EGRET_ALLOW_ENGINE_SKIP=1` opts out) | `egret.sql` STORE against StarRocks, 50k rows |
+| `plugin-host` `EgretStorageTest` (21) | none: `mvn -f plugin-host/pom.xml verify`, Java 25 | the bridge's reads, writes, caps, refusals |
+
+**Not measured, and stated so nobody infers it:**
+
+1. **NetworkPolicy was not enforced** (kindnet), as in W5b: the task pods'
+   reach is judged by the pod spec here, not by a CNI.
+2. **No S3 outage was induced live**; the infrastructure-error split (a store
+   outage re-claims the run, spends no attempt) rests on unit and MemStore
+   tests.
+3. **`egret.sql` STORE on Trino**, and `mysql.Query` `inputFile` (StarRocks
+   refuses `LOAD DATA`, Task 1).
+4. **A large file through a pod on kind**: the e2e moved bytes and kilobytes;
+   the 12 MiB and 64 MiB cases are the gated tests above.
+5. **The ratchet cannot judge any of the e2e**, for the reasons above.
+
+#### The sweep: messages and docs that described W9's absence
+
+Counted with `/usr/bin/grep` with file arguments at the rebased tip before
+this task edited anything.
+
+| # | population | examined | corrected |
+|---|---|---:|---:|
+| 1 | `\bW9\b` in `crates/egret-workflow/src`, `plugin-host/src` and both programme specs | **20** lines (src 8: `runners/functions.rs` 6, `worker/commands.rs` 2; `plugin-host/src` 0; spec EN 6, VI 6) | **2** messages in `commands.rs` (an `outputFiles` directory and the 1,000-name cap blamed "no internal storage … W9"); per spec **4** lines (§3 finding 4, the W5 row, the W9 row split, §11 question 1) plus the W5b correction's *"waits for W9"* annotated and a new W9a correction; **left**: `functions.rs`' 6 (they assign `http` to W9 deliberately, and name W9b/W9c for `fileURI`/`kv`), the W4/W5b-era history lines |
+| 2 | *"1 MiB"* or *contents* about `outputFiles`, in workflow docs and doc comments | **49** `1 MiB` lines (`crates/egret-workflow/src`, `plugin-host/src`, the workflow specs EN+VI, this README) and **13** `outputFiles` lines naming contents; **15** of them state what `outputFiles` holds | **4**: the W5a spec's divergence row and properties line, EN and VI (dated notes). **Left 11**: the W5a spec's §1 table, EN and VI (headed as the state on `8f35f85a`); the W9a spec's header, §1 table (the state at the base), §6.2 and §15, EN and VI where they match (they describe the change itself); `handlers/container.rs:53` (already says URIs); the plan's two Task 14 lines |
+| 3 | *"no internal storage"* | **21** (code 14, `plugin-host` 5, the plan 2) | **1** (`commands.rs`, counted in population 1 too); the other 20 are conditional (*"egret has no internal storage configured (the `[storage]` section …)"*, the plan's history) and true |
+
+The W5b spec's storage refusals (§1 table, §3 shim, exit code 4, publish
+refusals, the catalog note, the test table, §14, §15), EN and VI, each gain a
+dated *Superseded 2026-10-04, W9a* note rather than a rewrite.
+
 
 ### What this ratchet does **not** prove
 

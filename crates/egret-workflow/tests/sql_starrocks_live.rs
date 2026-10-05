@@ -323,9 +323,16 @@ fn input(f: &Live, spec: serde_json::Value, cx: serde_json::Value) -> TaskInput 
         // to its own `DEFAULT_TIMEOUT` exactly as it did before W4 Task 2.
         timeout: None,
         principal: Some(f.owner),
+        claimed_at: chrono::DateTime::UNIX_EPOCH,
         log: egret_workflow::logs::RunLog::discard(),
     }
 }
+
+/// The three tests that tick take turns (W9a Task 11): a claim is global, so
+/// one test's `tick` with a registry whose `egret.sql` has no store claimed
+/// the STORE test's run and failed it with "needs internal storage" -- seen
+/// once in the W9a Task 11 gate, 0 of 3 alone.
+static TICKING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Tick until **this** execution is terminal, and return its state.
 ///
@@ -337,8 +344,8 @@ fn input(f: &Live, spec: serde_json::Value, cx: serde_json::Value) -> TaskInput 
 /// `tick(..) == 0` and one of them read back `"RUNNING"` because its budget had
 /// been spent finishing the other's execution.
 ///
-/// Ticking on behalf of another test is harmless — both register the same
-/// handler — so the fix is to stop when the execution under test has finished
+/// Ticking on behalf of another test is harmless while both register the same
+/// handlers (where they do not, [`TICKING`] makes them take turns), so the fix is to stop when the execution under test has finished
 /// rather than when this thread happens to find nothing to do. That is also the
 /// difference between asserting about the run you started and asserting about
 /// whichever run went first.
@@ -639,6 +646,7 @@ async fn a_connection_from_another_workspace_is_refused() {
 /// `egret.sql` from having the same gap.
 #[tokio::test]
 async fn the_output_reaches_postgres_through_the_real_worker() {
+    let _turn = TICKING.lock().await;
     let f = fixture!();
     let source = format!(
         "id: sql-live\nnamespace: egret.test\ninputs:\n  - id: r\n    type: STRING\n\
@@ -686,6 +694,7 @@ async fn the_output_reaches_postgres_through_the_real_worker() {
 /// The control is the test above, which is the same flow with a `flow_id`.
 #[tokio::test]
 async fn an_execution_with_no_flow_has_no_owner_and_the_task_fails() {
+    let _turn = TICKING.lock().await;
     let f = fixture!();
     let source = format!(
         "id: sql-noowner\nnamespace: egret.test\ntasks:\n  - id: q\n    type: {TYPE_ID}\n    \
@@ -731,6 +740,8 @@ fn the_fetch_spellings_are_the_ones_a_flow_writes() {
         ("NONE", Fetch::None),
         ("FETCH_ONE", Fetch::One),
         ("FETCH", Fetch::All),
+        // W9a Task 10: STORE writes the rows to internal storage (spec §9.2).
+        ("STORE", Fetch::Store),
     ] {
         assert_eq!(
             serde_json::from_value::<Fetch>(serde_json::json!(text)).unwrap(),
@@ -738,10 +749,150 @@ fn the_fetch_spellings_are_the_ones_a_flow_writes() {
         );
     }
     assert!(
-        serde_json::from_value::<Fetch>(serde_json::json!("STORE")).is_err(),
-        "`STORE` writes a result set to internal storage, which W9 owns; it must \
-         be refused rather than silently treated as `NONE`"
+        serde_json::from_value::<Fetch>(serde_json::json!("FETCH_ALL")).is_err(),
+        "an unknown spelling is refused rather than silently treated as `NONE`"
     );
+}
+
+/// **`fetch: STORE` on a real engine, through the shipping worker** (W9a
+/// Task 10, spec §9.2): 50 000 rows StarRocks generated are written to
+/// internal storage as Ion, the file is indexed in the outcome's commit, and
+/// the next task's `read()` of it -- the render-time file function, resolved
+/// through the index -- returns the first line.
+///
+/// `Sql::with_limits(.., 60_000, ..)`: the shipping cap is 10 000
+/// (`MAX_FETCH_ROWS`), because the port returns a whole `TabularResult` and
+/// STORE is bounded exactly as FETCH is; the control at the end runs the same
+/// statement under the shipping cap and fails as FETCH does.
+///
+/// The store is `storage::install_mem_for_tests`'s `MemStore` (nothing here
+/// touches MinIO); `multi_thread` because `read()` blocks the render thread
+/// on the runtime handle.
+#[tokio::test(flavor = "multi_thread")]
+async fn store_of_50_000_rows_is_indexed_and_read_returns_its_first_line() {
+    let _turn = TICKING.lock().await;
+    let f = fixture!();
+    let fs = egret_workflow::storage::install_mem_for_tests();
+    const ROWS: i64 = 50_000;
+    let statement =
+        format!("SELECT generate_series AS n FROM TABLE(generate_series(1, {ROWS})) ORDER BY n");
+    let source = format!(
+        "id: sql-store-live\nnamespace: egret.test\ntasks:\n\
+         \x20 - id: q\n    type: {TYPE_ID}\n    database: {db}\n    fetch: STORE\n    \
+         sql: \"{statement}\"\n\
+         \x20 - id: r\n    type: io.kestra.plugin.core.debug.Return\n    \
+         format: \"{{{{ read(outputs.q.uri) | split('\\\\n') | first }}}}\"\n",
+        db = f.database_id
+    );
+    let ex = worker::start_execution(
+        &f.db.pool,
+        f.ws,
+        Some(f.flow_id),
+        &source,
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the execution");
+
+    let mut reg = Handlers::with_core_tasks(egret_workflow::storage::current());
+    reg.add(Arc::new(
+        Sql::with_limits(f.port.clone(), 60_000, std::time::Duration::from_secs(120))
+            .with_files(Some(fs.clone())),
+    ));
+    let state = drive(&f, &reg, ex).await;
+
+    let runs: Vec<(String, Uuid, Option<serde_json::Value>, Option<String>)> = sqlx::query_as(
+        "SELECT task_id, id, outputs, message FROM workflow.task_runs \
+          WHERE execution_id = $1 ORDER BY task_id",
+    )
+    .bind(ex)
+    .fetch_all(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "SUCCESS", "{runs:?}");
+    let (_, q_run, q_out, _) = &runs[0];
+    let q_out = q_out.as_ref().expect("q has outputs");
+    assert_eq!(
+        q_out["size"],
+        serde_json::json!(ROWS),
+        "size is the ROW count: {q_out}"
+    );
+    let file = q_out["uri"].as_str().expect("a uri").to_string();
+    assert_eq!(
+        file,
+        format!(
+            "kestra:///egret/test/sql-store-live/executions/{}/tasks/q/{}/result.ion",
+            ex.hyphenated(),
+            q_run.hyphenated()
+        )
+    );
+
+    // The bytes, and the index row the outcome's commit wrote for them.
+    let bytes = fs
+        .store
+        .get(&fs.object_uri(f.ws, &file).unwrap())
+        .await
+        .expect("the file is in the store");
+    let (indexed_size, indexed_run): (i64, Option<Uuid>) = sqlx::query_as(
+        "SELECT size, task_run_id FROM workflow.execution_files \
+          WHERE workspace_id = $1 AND uri = $2",
+    )
+    .bind(f.ws)
+    .bind(&file)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the file is indexed");
+    assert_eq!(
+        indexed_size as usize,
+        bytes.len(),
+        "the index holds the BYTE size"
+    );
+    assert_eq!(indexed_run, Some(*q_run));
+    let (rows, more) =
+        egret_workflow::storage::ion::values_to_json(std::io::Cursor::new(bytes), 60_000).unwrap();
+    assert!(!more);
+    assert_eq!(rows.len() as i64, ROWS);
+    assert_eq!(rows[ROWS as usize - 1], serde_json::json!({"n": ROWS}));
+
+    // `read()` in the next task, through the snapshot.
+    let (_, _, r_out, _) = &runs[1];
+    let first = r_out.as_ref().expect("r has outputs")["value"]
+        .as_str()
+        .expect("a string")
+        .to_string();
+    assert_eq!(first, "{n:1}");
+    let (decoded, _) =
+        egret_workflow::storage::ion::values_to_json(std::io::Cursor::new(first.into_bytes()), 2)
+            .unwrap();
+    assert_eq!(decoded, vec![serde_json::json!({"n": 1})]);
+
+    // The control: the shipping cap fails the same statement as FETCH would.
+    let mut capped = input(
+        &f,
+        serde_json::json!({
+            "database": f.database_id.to_string(),
+            "sql": statement,
+            "fetch": "STORE",
+        }),
+        serde_json::json!({"flow": {"namespace": "egret.test", "id": "sql-store-capped"}}),
+    );
+    capped.execution_id = Uuid::new_v4();
+    capped.run_id = Uuid::new_v4();
+    let out = Sql::new(f.port.clone())
+        .with_files(Some(fs))
+        .run(&capped)
+        .await
+        .unwrap();
+    assert_eq!(out.state, egret_workflow::executor::RunState::Failed);
+    assert!(
+        out.message
+            .as_deref()
+            .unwrap_or("")
+            .contains("more than the 10000 rows `fetch: STORE`"),
+        "{:?}",
+        out.message
+    );
+    assert!(out.files.is_empty());
 }
 
 /// **The gate itself, driven in both directions** — and it is the only

@@ -139,6 +139,178 @@ pub(super) fn write_ion(out: &mut String, value: &MjValue) {
     }
 }
 
+/// One row of `egret.sql`'s `fetch: STORE` as an Ion struct,
+/// `{column:value,…}` in column order, with no newline (W9a spec §9.2).
+///
+/// The value is the JSON a `TabularResult` carries, so the Ion type follows
+/// the JSON type: an integer is written verbatim at any size, any other
+/// number as an Ion float (what `ofIon` does with a `Double`), a string as a
+/// string, an array as a list, an object as a struct. A DECIMAL, a date or a
+/// timestamp that the connector carries as a string stays a string: Kestra's
+/// file holds a decimal, an Ion timestamp or an annotated string there
+/// (`w9a-storage.json` `ion_rows`), and the handler's test records each
+/// divergence by type. A `null` is written, not dropped (`ofIon`'s inclusion
+/// is `ALWAYS`, this module's doc).
+pub(crate) fn write_ion_row(out: &mut String, columns: &[String], row: &[serde_json::Value]) {
+    out.push('{');
+    for (i, (name, cell)) in columns.iter().zip(row).enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        write_symbol(out, name);
+        out.push(':');
+        write_ion_json(out, cell);
+    }
+    out.push('}');
+}
+
+/// One value an Ion READER yielded (`storage::ion`), written back as Ion
+/// text, compact, with no newline -- what W9a Task 12's item tasks
+/// (`FilterItems`, `DeduplicateItems`, `Split` of a binary Ion file) write
+/// for each record they keep (spec §2, §9.3).
+///
+/// **Kestra writes those files as BINARY Ion** (`FileSerde.write`,
+/// `w9a-storage.json` finding `store_binary_ion`); this writes text, so the
+/// bytes never match and the VALUES do: every Ion type is written as itself
+/// (a decimal keeps its scale, a timestamp its precision and offset, a blob
+/// its bytes, a symbol stays a symbol, a typed null its type), with the
+/// value's annotations in front of it, the layout this module's other
+/// writers use (`{k:"a",v:1}`). Kestra's round trip through `FileSerde`
+/// turns a symbol into a string and a timestamp into a `java.time` value
+/// before writing; this keeps the value the file held (not measured beyond
+/// the fixture's strings and ints). A struct field whose value is `null` is
+/// written, as `ofIon`'s inclusion is `ALWAYS` (this module's doc).
+///
+/// The depth is the reader's: `storage::ion` never yields a value nested
+/// deeper than its `MAX_DEPTH`, so this recursion is bounded by it.
+pub(crate) fn write_ion_element(out: &mut String, element: &ion_rs::Element) {
+    use base64::Engine as _;
+    use ion_rs::Value as V;
+    for annotation in element.annotations().iter() {
+        write_symbol(out, annotation.text().unwrap_or(""));
+        out.push_str("::");
+    }
+    match element.value() {
+        V::Null(ion_rs::IonType::Null) => out.push_str("null"),
+        V::Null(t) => {
+            out.push_str("null.");
+            out.push_str(&t.to_string());
+        }
+        V::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        V::Int(i) => out.push_str(&i.to_string()),
+        V::Float(f) => write_ion_float(out, *f),
+        // `ion-rs`'s Display of a decimal and of a timestamp is Ion text
+        // (`12.340`, `1d3`, `12.`; `2026-01-02T03:04:05.123Z`).
+        V::Decimal(d) => out.push_str(&d.to_string()),
+        V::Timestamp(t) => out.push_str(&t.to_string()),
+        V::Symbol(sym) => match sym.text() {
+            Some(text) => write_symbol(out, text),
+            // A symbol with unknown text: Ion's symbol zero.
+            None => out.push_str("$0"),
+        },
+        V::String(text) => write_ion_string(out, text.text()),
+        V::Clob(bytes) => {
+            out.push_str("{{\"");
+            for &b in bytes.as_ref() {
+                match b {
+                    b'"' => out.push_str("\\\""),
+                    b'\\' => out.push_str("\\\\"),
+                    0x20..=0x7e => out.push(b as char),
+                    _ => out.push_str(&format!("\\x{b:02x}")),
+                }
+            }
+            out.push_str("\"}}");
+        }
+        V::Blob(bytes) => {
+            out.push_str("{{");
+            out.push_str(&base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()));
+            out.push_str("}}");
+        }
+        V::List(seq) => {
+            out.push('[');
+            for (i, item) in seq.elements().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_ion_element(out, item);
+            }
+            out.push(']');
+        }
+        V::SExp(seq) => {
+            out.push('(');
+            for (i, item) in seq.elements().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                write_ion_element(out, item);
+            }
+            out.push(')');
+        }
+        V::Struct(st) => {
+            out.push('{');
+            for (i, (name, value)) in st.fields().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_symbol(out, name.text().unwrap_or(""));
+                out.push(':');
+                write_ion_element(out, value);
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// One JSON value as Ion text, for [`write_ion_row`]. Recursion is bounded by
+/// the JSON's own depth, which `serde_json` caps when it parses.
+fn write_ion_json(out: &mut String, value: &serde_json::Value) {
+    use serde_json::Value as J;
+    match value {
+        J::Null => out.push_str("null"),
+        J::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        J::Number(n) => {
+            // `arbitrary_precision` is on in this crate, so the text is the
+            // number as the connector spelled it: an integer of any size
+            // stays exact, as an Ion int can be.
+            let text = n.to_string();
+            let digits = text.strip_prefix('-').unwrap_or(&text);
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                out.push_str(&text);
+            } else {
+                match n.as_f64() {
+                    Some(x) if x.is_finite() => write_ion_float(out, x),
+                    // Out of a double's range: still a float, in Ion's
+                    // spelling of the exponent.
+                    _ => out.push_str(&text.replace('E', "e")),
+                }
+            }
+        }
+        J::String(s) => write_ion_string(out, s),
+        J::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_ion_json(out, item);
+            }
+            out.push(']');
+        }
+        J::Object(map) => {
+            out.push('{');
+            for (i, (key, item)) in map.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_symbol(out, key);
+                out.push(':');
+                write_ion_json(out, item);
+            }
+            out.push('}');
+        }
+    }
+}
+
 /// Ion's float text, which is **not** `Double.toString` even though it starts
 /// from it.
 ///
@@ -1046,5 +1218,52 @@ mod tests {
         let mut symbol = String::new();
         write_symbol(&mut symbol, "a'b");
         assert_eq!(symbol, "'a\\'b'");
+    }
+
+    fn row(columns: &[&str], cells: Vec<serde_json::Value>) -> String {
+        let columns: Vec<String> = columns.iter().map(|c| c.to_string()).collect();
+        let mut out = String::new();
+        write_ion_row(&mut out, &columns, &cells);
+        out
+    }
+
+    /// `egret.sql` STORE's row writer: a struct per row in column order,
+    /// field names quoted as `write_symbol` does, an integer verbatim at any
+    /// size, any other number as an Ion FLOAT (Kestra writes a `Double` that
+    /// way), nested JSON as Ion containers, and `null` written, not dropped.
+    #[test]
+    fn a_row_is_one_struct_in_column_order() {
+        use serde_json::json;
+        assert_eq!(
+            row(&["b", "a"], vec![json!(1), json!("x")]),
+            "{b:1,a:\"x\"}",
+            "column order, not key order"
+        );
+        assert_eq!(
+            row(
+                &["null", "a b", "$1"],
+                vec![json!(true), json!(false), json!(null)]
+            ),
+            "{'null':true,'a b':false,'$1':null}"
+        );
+        let big: serde_json::Value =
+            serde_json::from_str("123456789012345678901234567890").unwrap();
+        let neg: serde_json::Value = serde_json::from_str("-9007199254740993").unwrap();
+        assert_eq!(
+            row(
+                &["i", "j", "f", "g"],
+                vec![big, neg, json!(1.5), json!(1e100)]
+            ),
+            "{i:123456789012345678901234567890,j:-9007199254740993,f:1.5e0,g:1.0e100}"
+        );
+        assert_eq!(
+            row(
+                &["l", "m"],
+                vec![json!([1, null, "a"]), json!({"k": {"true": 2}})]
+            ),
+            "{l:[1,null,\"a\"],m:{k:{'true':2}}}"
+        );
+        assert_eq!(row(&["s"], vec![json!("a\nb\"c")]), "{s:\"a\\nb\\\"c\"}");
+        assert_eq!(row(&[], vec![]), "{}");
     }
 }

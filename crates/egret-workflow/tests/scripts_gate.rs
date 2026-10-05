@@ -92,17 +92,22 @@ fn the_three_property_sets_partition_what_kestra_accepts() {
         let implemented = owned(&kind.implemented_properties());
         let handled = owned(scripts::HANDLED_BY_TASK_MODEL);
         let refused = owned(&kind.refused_properties());
-        assert_eq!(
-            implemented,
-            set(&t["implemented_in_w5a"]),
-            "{fqcn} implemented"
+        // W9a Task 6 moved `outputDirectory` from refused to implemented; the
+        // fixture records W5a's partition, so the move is applied here.
+        let mut implemented_now = set(&t["implemented_in_w5a"]);
+        implemented_now.insert("outputDirectory".to_string());
+        let mut refused_now = set(&t["refused_in_w5a"]);
+        assert!(
+            refused_now.remove("outputDirectory"),
+            "{fqcn}: W5a refused it"
         );
+        assert_eq!(implemented, implemented_now, "{fqcn} implemented");
         assert_eq!(
             handled,
             set(&t["handled_by_egret_task_model"]),
             "{fqcn} handled"
         );
-        assert_eq!(refused, set(&t["refused_in_w5a"]), "{fqcn} refused");
+        assert_eq!(refused, refused_now, "{fqcn} refused");
         assert!(implemented.is_disjoint(&handled), "{fqcn}");
         assert!(implemented.is_disjoint(&refused), "{fqcn}");
         assert!(handled.is_disjoint(&refused), "{fqcn}");
@@ -129,6 +134,9 @@ fn every_refused_property_is_refused_by_name() {
     let mut checked = 0;
     for (fqcn, kind, t) in types() {
         for prop in set(&t["refused_in_w5a"]) {
+            if prop == "outputDirectory" {
+                continue; // implemented since W9a Task 6
+            }
             let errs = refusals(&fqcn, &with(kind, &prop, json!("x")));
             assert!(
                 errs.iter().any(|r| r.code == scripts::CODE_NOT_IMPLEMENTED
@@ -139,8 +147,8 @@ fn every_refused_property_is_refused_by_name() {
             checked += 1;
         }
     }
-    // 11 + 11 + 18 + 18.
-    assert_eq!(checked, 58, "the loop saw every refused property");
+    // 10 + 10 + 17 + 17 (W5a's 11 + 11 + 18 + 18, less `outputDirectory`).
+    assert_eq!(checked, 54, "the loop saw every refused property");
 }
 
 /// The seven base-task properties, named one by one: these are the ones that
@@ -1156,7 +1164,8 @@ fn worker_registry(
     images: &[&str],
 ) -> egret_workflow::worker::Handlers {
     use egret_workflow::worker::handlers::script::{register, PgFeatureState, ScriptRuntime};
-    let mut reg = egret_workflow::worker::Handlers::with_core_tasks();
+    let mut reg =
+        egret_workflow::worker::Handlers::with_core_tasks(egret_workflow::storage::current());
     register(
         &mut reg,
         std::sync::Arc::new(ScriptRuntime {
@@ -1164,6 +1173,7 @@ fn worker_registry(
             runner: spy,
             plugin_configurations: configs(&[(scripts::DOCKER_RUNNER, images)]),
             features: std::sync::Arc::new(PgFeatureState::new(pool.clone())),
+            files: None,
         }),
     );
     reg
@@ -1454,7 +1464,8 @@ fn daemon_registry(
     daemon: std::sync::Arc<FakeDaemon>,
 ) -> egret_workflow::worker::Handlers {
     use egret_workflow::worker::handlers::script::{register, PgFeatureState, ScriptRuntime};
-    let mut reg = egret_workflow::worker::Handlers::with_core_tasks();
+    let mut reg =
+        egret_workflow::worker::Handlers::with_core_tasks(egret_workflow::storage::current());
     register(
         &mut reg,
         std::sync::Arc::new(ScriptRuntime {
@@ -1462,6 +1473,7 @@ fn daemon_registry(
             runner: daemon,
             plugin_configurations: configs(&[(scripts::DOCKER_RUNNER, &["ubuntu:*"])]),
             features: std::sync::Arc::new(PgFeatureState::new(pool.clone())),
+            files: None,
         }),
     );
     reg

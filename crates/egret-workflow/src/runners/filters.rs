@@ -2243,8 +2243,13 @@ fn slugify(value: MjValue) -> Result<MjValue, MjError> {
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
-    let input = kestra_to_string(&value);
+    Ok(MjValue::from(slugify_str(&kestra_to_string(&value))))
+}
 
+/// [`slugify`]'s body over a string: `Slugify.of` without the filter's Java-null
+/// arm. Also the slug Kestra puts into a storage URI for a flow, task or
+/// trigger id (`StorageContext`), which is why `storage::uri` calls it (W9a).
+pub(crate) fn slugify_str(input: &str) -> String {
     let no_whitespace: String = input
         .chars()
         .map(|c| {
@@ -2272,7 +2277,7 @@ fn slugify(value: MjValue) -> Result<MjValue, MjError> {
         slug = rest.to_string();
     }
 
-    Ok(MjValue::from(slug.to_ascii_lowercase()))
+    slug.to_ascii_lowercase()
 }
 
 /// `UrlDecoderFilter` — `URLDecoder.decode(input, UTF_8)`.

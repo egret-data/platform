@@ -168,6 +168,7 @@ const COMMON_IMPLEMENTED: &[&str] = &[
     "failFast",
     "inputFiles",
     "interpreter",
+    "outputDirectory",
     "outputFiles",
     "taskRunner",
     "timeout",
@@ -191,14 +192,14 @@ pub const HANDLED_BY_TASK_MODEL: &[&str] = &[
 /// Refused on all four types. Seven of these are base-`Task` properties
 /// (`assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`,
 /// `workerSelector`) that egret's `Task` model would otherwise drop without
-/// effect; the other four (`namespaceFiles`, `outputDirectory`, `runner`,
-/// `targetOS`) are the script tasks' own.
+/// effect; the other three (`namespaceFiles`, `runner`, `targetOS`) are the
+/// script tasks' own. `outputDirectory` left this list in W9a Task 6: it is
+/// implemented over internal storage.
 const COMMON_REFUSED: &[&str] = &[
     "assets",
     "logLevel",
     "logToFile",
     "namespaceFiles",
-    "outputDirectory",
     "policyRefs",
     "runner",
     "targetOS",
@@ -352,6 +353,9 @@ pub struct ScriptTask {
     /// Inline contents only; a storage URI (a string) is refused.
     pub input_files: BTreeMap<String, String>,
     pub output_files: Vec<String>,
+    /// `outputDirectory`, default `false` (W9a Task 6): every file the
+    /// command writes under `{{ outputDir }}` / `$OUTPUT_DIR` is collected.
+    pub output_directory: bool,
     /// Default `true`: `set -e` is prepended iff this is true (Task 1).
     pub fail_fast: bool,
     /// Accepted; **no effect** (see the module doc).
@@ -410,7 +414,8 @@ pub const CODE_NOT_IMPLEMENTED: &str = "script_property_not_implemented";
 pub const CODE_UNKNOWN: &str = "script_property_unknown";
 pub const CODE_REQUIRED: &str = "script_property_required";
 pub const CODE_INVALID: &str = "script_property_invalid";
-/// `inputFiles` given as a storage URI (W9 owns internal storage).
+/// `inputFiles` given as ONE string (a storage URI or an expression) rather
+/// than a map. A map VALUE that is a `kestra://` URI is accepted (W9a spec §5).
 pub const CODE_INPUT_FILES_URI: &str = "script_input_files_uri_not_implemented";
 /// Both `image` (the alias's legacy spelling) and `containerImage`.
 pub const CODE_IMAGE_CONFLICT: &str = "script_image_conflict";
@@ -468,6 +473,7 @@ pub fn parse(type_id: &str, spec: &Value) -> Result<ScriptTask, Vec<ScriptRefusa
         env: BTreeMap::new(),
         input_files: BTreeMap::new(),
         output_files: Vec::new(),
+        output_directory: false,
         fail_fast: true,
         warning_on_std_err: true,
         task_runner: None,
@@ -527,8 +533,9 @@ pub fn parse(type_id: &str, spec: &Value) -> Result<ScriptTask, Vec<ScriptRefusa
                     errs.push(refusal(
                         CODE_INPUT_FILES_URI,
                         key,
-                        "'inputFiles' given as a storage URI or expression is not implemented \
-                         by egret (W5a); give a map of file name to inline contents",
+                        "'inputFiles' given as one storage URI or expression is not \
+                         implemented by egret; give a map of file name to inline contents or to \
+                         a kestra:// URI",
                     ));
                 } else {
                     out.input_files = string_map(value, key, &mut errs);
@@ -566,6 +573,9 @@ pub fn parse(type_id: &str, spec: &Value) -> Result<ScriptTask, Vec<ScriptRefusa
                         ));
                     }
                 }
+            }
+            "outputDirectory" => {
+                out.output_directory = boolean(value, key, &mut errs).unwrap_or(false)
             }
             "failFast" => out.fail_fast = boolean(value, key, &mut errs).unwrap_or(true),
             "warningOnStdErr" => {
@@ -978,6 +988,55 @@ mod tests {
         );
     }
 
+    /// W9a spec §5: a map VALUE that is a `kestra://` URI (or a template that
+    /// renders to one) is saved; whether it is READABLE is decided at run,
+    /// through the render snapshot (`handlers::script`'s
+    /// `an_unreadable_uri_fails_the_task_at_render_and_calls_no_runner`) --
+    /// publish cannot know which execution's files exist.
+    #[test]
+    fn an_input_files_value_that_is_a_uri_is_accepted_at_publish_and_a_string_map_still_is() {
+        let uri = "kestra:///w9a/storage/in-files/executions/x/tasks/w/y/a.txt";
+        let t = parse(
+            SHELL_COMMANDS,
+            &json!({
+                "commands": ["cat staged.txt"],
+                "inputFiles": {
+                    "staged.txt": uri,
+                    "d/nested.txt": "{{ outputs.w.uri }}",
+                    "literal.txt": "just contents",
+                },
+            }),
+        )
+        .expect("a map of URIs, templates and contents saves");
+        assert_eq!(t.input_files["staged.txt"], uri);
+        assert_eq!(t.input_files["d/nested.txt"], "{{ outputs.w.uri }}");
+        assert_eq!(t.input_files["literal.txt"], "just contents");
+    }
+
+    #[test]
+    fn input_files_as_a_whole_string_is_still_refused_with_the_code() {
+        for whole in ["kestra:///ns/file.txt", "{{ outputs.w.uri }}"] {
+            let errs = parse(
+                SHELL_COMMANDS,
+                &json!({"commands": ["x"], "inputFiles": whole}),
+            )
+            .expect_err("one string is not a map");
+            assert_eq!(errs.len(), 1, "{errs:?}");
+            assert_eq!(errs[0].code, CODE_INPUT_FILES_URI);
+            assert_eq!(errs[0].path, "inputFiles");
+            assert!(
+                !errs[0].message.contains("W5a"),
+                "W9a implements URI values; the message must not say W5a: {}",
+                errs[0].message
+            );
+            assert!(
+                errs[0].message.contains("kestra://"),
+                "it says a map value may be a URI: {}",
+                errs[0].message
+            );
+        }
+    }
+
     #[test]
     fn a_script_task_nested_in_an_errors_branch_is_found() {
         let flow = crate::spec::parse(
@@ -986,5 +1045,28 @@ mod tests {
         .unwrap();
         let found: Vec<String> = script_tasks(&flow).into_iter().map(|(p, ..)| p).collect();
         assert_eq!(found, vec!["tasks.s.e"]);
+    }
+
+    /// W9a Task 6: `outputDirectory` is implemented on all four types, read
+    /// as a boolean, and no longer refused -- at publish, through `parse`.
+    #[test]
+    fn output_directory_is_implemented_and_no_longer_refused() {
+        for kind in ScriptKind::ALL {
+            assert!(kind.implemented_properties().contains(&"outputDirectory"));
+            assert!(!kind.refused_properties().contains(&"outputDirectory"));
+            let body = match kind.body_property() {
+                "commands" => json!({"commands": ["x"], "outputDirectory": true}),
+                _ => json!({"script": "x", "outputDirectory": true}),
+            };
+            let parsed = parse(kind.fqcn(), &body)
+                .unwrap_or_else(|e| panic!("{} saves with outputDirectory: {e:?}", kind.fqcn()));
+            assert!(parsed.output_directory);
+            let mut not_bool = body.clone();
+            not_bool["outputDirectory"] = json!("{{ inputs.x }}");
+            let errs = parse(kind.fqcn(), &not_bool).expect_err("a boolean, as Kestra's");
+            assert!(errs.iter().any(|r| r.path == "outputDirectory"), "{errs:?}");
+        }
+        let parsed = parse(SHELL_COMMANDS, &json!({"commands": ["x"]})).unwrap();
+        assert!(!parsed.output_directory, "default false");
     }
 }

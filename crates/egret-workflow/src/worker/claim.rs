@@ -212,6 +212,7 @@ impl Claimed {
                 render,
                 timeout: budget.duration(),
                 principal: self.principal_id.map(egret_core::UserId),
+                claimed_at: self.claimed_at,
                 log: crate::logs::RunLog::new(
                     crate::logs::RunIdentity {
                         workspace_id: self.workspace_id,
@@ -791,16 +792,22 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// does is make the run finish, or make anything *notice* that it has not.
 ///
 /// **3. A publishable type with no handler is claimed and never completed.**
-/// `Handlers::with_core_tasks` registers **4** handlers (`log`, `ret`, `fail`,
-/// `sleep`); `spec::registry::TASK_TYPES` holds **14** rows. With
-/// `workflow.container_runner` set, `runtime::handlers_for` adds the **4**
+/// `Handlers::with_core_tasks` registers **11** handlers (`log`, `ret`, `fail`,
+/// `sleep` and seven core storage tasks) and `runtime::handlers_for` **2**
+/// more (`storage::Delete`, `PurgeCurrentExecutionFiles`);
+/// `spec::registry::TASK_TYPES` holds **23** rows. With
+/// `workflow.container_runner` set, `handlers_for` adds the **4**
 /// script rows (W5a); with `none` it does not, and `publish` refuses those four
-/// instead. Either way **6 of 14 publishable types** (`egret.sql`,
+/// instead. Either way **6 of 23 publishable types** (`egret.sql`,
 /// `egret.dataapi.call`, `egret.dataset.refresh`,
 /// `egret.report.send`, `core.http`, `core.slack`) produce a run that
 /// `claim` leases, finds no handler for, and leaves `RUNNING` -- as does a
 /// script task reached without publish (a draft run) under `none`. *(This
-/// read "13 rows ... 9 of 13" until W5a Task 6: W5a folded
+/// read "11 + 2 handlers ... 24 rows ... 7 of 24" until the W9a rebase onto
+/// Data Apps P6a (#629), which removed `egret.python`; "4 handlers ... 15
+/// rows ... 7 of 15" until W9a Task 12 fix round 1,
+/// whose W9a Tasks 11-12 added nine core storage rows and handlers; and
+/// "13 rows ... 9 of 13" until W5a Task 6: W5a folded
 /// `egret.container`/`egret.script.python` into aliases and added the four
 /// script FQCNs; it read "15 rows ... 7 of 15" until Data Apps P6 removed
 /// `egret.python`, the notebook-kernel task.)* [`reap`] then
@@ -1240,6 +1247,23 @@ async fn run_one(
             return Ok(Committed::LeaseLost);
         }
     };
+    // Spec §11 (fix round 1, I2): a read this handler's render made met a
+    // store OUTAGE. The outcome it produced (a failed render, as a rule) is not
+    // the task's: return `Err` and record nothing, as for a handler `Err` --
+    // the lease lapses, the run is re-claimed, no attempt is spent. No
+    // failed-attempt line either, for the same reason.
+    if let Some(outage) = input
+        .render
+        .files()
+        .and_then(|f| f.0.infrastructure_failure())
+    {
+        input.log.finish().await;
+        return Err(Error::Internal(anyhow::anyhow!(
+            "run {} of execution {}: {outage}",
+            c.id,
+            c.execution_id
+        )));
+    }
     if let Ok(Outcome {
         state: RunState::Failed,
         message: Some(message),
@@ -1481,7 +1505,31 @@ async fn input_for(
 ) -> Result<(TaskInput, Budget)> {
     let mut conn = pool.acquire().await.map_err(db_err)?;
     let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No, Stack::Fresh).await?;
-    let surface = Surface::load(&mut conn, &ctx).await?;
+    let mut surface = Surface::load(&mut conn, &ctx).await?;
+    // W9a Task 4: the claimed run's OWN execution -- an iteration's id inside
+    // a `Loop` (spec §3), never the loop root -- reads through a snapshot of
+    // every URI in its source and render context. `task_prefix` is this run's
+    // baseUri; a builder error (a namespace or id no URI can carry) leaves it
+    // `None` here, and fails the task where a file is written (Task 6).
+    let task_prefix = surface.flow().and_then(|f| {
+        crate::storage::uri::task_prefix(&f.namespace, &f.id, c.execution_id, &c.task_id, c.id).ok()
+    });
+    // `taskrun.value` (fix round 1, M5): a loop iteration's value, which a
+    // rendered `values:` can make a URI no source text holds.
+    let texts: Vec<&str> = std::iter::once(c.source.as_str())
+        .chain(c.value.as_deref())
+        .collect();
+    let files = crate::storage::scope::scope_for(
+        &mut conn,
+        crate::storage::current(),
+        c.workspace_id,
+        c.execution_id,
+        &texts,
+        &surface.snapshot_values(),
+        task_prefix,
+    )
+    .await?;
+    surface.attach_files(files);
     let run = usize::try_from(c.run_ix).map_err(|_| {
         worker_err(WorkerError::Corrupt(
             c.id,
@@ -1553,6 +1601,22 @@ pub async fn apply_outcome(
     if hit.rows_affected() == 0 {
         return Err(worker_err(WorkerError::LeaseLost(claimed.id)));
     }
+    // **W9a Task 6 (spec §4.3): the run's files are indexed HERE** -- after
+    // the fence, so a worker whose lease was taken returns above and indexes
+    // nothing (its uploads stay orphans for the pruner, §10), and before
+    // `settle`, so a successor rendered in this same transaction can read
+    // them. A file exists for a flow only once its row does (§4.2), so a run
+    // that never commits leaves none. A re-claim writes the same deterministic
+    // URIs, and the insert updates its own rows.
+    //
+    // The fence guards the INDEX, not the objects (fix round 1, M6): uploads
+    // happen before this point, so a fenced zombie worker -- one still
+    // collecting after its lease was taken -- can overwrite an object that a
+    // successor already committed under the same deterministic name. Both
+    // read the same container or pod for the same attempt, so the bytes are
+    // normally identical; nothing here can make them so.
+    crate::storage::index_task_files(conn, claimed.workspace_id, claimed.id, &outcome.files)
+        .await?;
 
     let run = usize::try_from(claimed.run_ix).map_err(|_| {
         worker_err(WorkerError::Corrupt(
@@ -1664,7 +1728,26 @@ pub(super) async fn settle(
     now: Tick,
     release: Option<Lease>,
 ) -> Result<()> {
-    let surface = Surface::load(conn, ctx).await?;
+    let mut surface = Surface::load(conn, ctx).await?;
+    // W9a Task 4: the snapshot every render of this settle reads files
+    // through -- `runIf`, the five tier-B expressions, the SLA, a subflow's
+    // inputs -- taken on `conn`, i.e. INSIDE the caller's transaction, which
+    // is the only connection that sees the index rows of the task this
+    // transaction has just finished.
+    let texts: Vec<&str> = std::iter::once(ctx.source.as_str())
+        .chain(state.runs.iter().filter_map(|r| r.value.as_deref()))
+        .collect();
+    let files = crate::storage::scope::scope_for(
+        conn,
+        crate::storage::current(),
+        ctx.workspace_id,
+        ctx.id,
+        &texts,
+        &surface.snapshot_values(),
+        None,
+    )
+    .await?;
+    surface.attach_files(files);
     let mut marks = Marks::default();
     // The caller's own command -- a handler's terminal, or the `SetRunState` a
     // loop's completion applies -- is step `ctx.seq + 1`, and every round below
@@ -1688,8 +1771,20 @@ pub(super) async fn settle(
         apply(state, &Command::SetExecutionState { state: terminal });
         marks.observe(&snapshot, state, seq);
     }
-    let (spawns, subflows) = drive(ctx, &surface, state, now, &mut marks, &mut seq)?;
+    // W9a Task 11: what a render produced beside the state -- the runs it
+    // failed WITH a message, and a file `Loop`'s values -- written after the
+    // state `persist` writes and BEFORE `spawn_all`, which reads the values.
+    let mut side = render::RenderSide::default();
+    let (spawns, subflows) = drive(ctx, &surface, state, now, &mut marks, &mut seq, &mut side)?;
     persist(conn, ctx, before, state, release, &marks, seq).await?;
+    if !side.failures.is_empty() || !side.file_values.is_empty() {
+        // Built and boxed in a SYNC callee: `settle` re-enters itself through
+        // a `Subflow` chain, and a statement future built inline (even one
+        // boxed here) grows every level's poll frame in a debug build -- the
+        // worker suite's `a_chain_of_subflows_deeper_than_the_bound…`
+        // overflowed with either.
+        write_render_side(conn, ctx.id, side).await?;
+    }
     spawn::spawn_all(conn, ctx, state, &spawns).await?;
     // **After `persist`, exactly like the loop spawner, and for the same
     // reason**: the child's row names `(execution, run_ix)` and that run has to
@@ -1792,6 +1887,17 @@ pub(super) async fn settle(
             subflow::on_child_terminal(conn, ctx.id, terminal, ctx.depth).await?;
         }
     }
+    // Spec §11 (fix round 1, I2): a render this settle ran met a store OUTAGE.
+    // It failed a run above, and that failure is not the author's: an `Err`
+    // here rolls the caller's whole transaction back -- `apply_outcome`'s
+    // write included -- so the lease lapses and the run is re-claimed with no
+    // attempt spent, exactly as a handler `Err` is.
+    if let Some(outage) = surface.files_outage() {
+        return Err(Error::Internal(anyhow::anyhow!(
+            "execution {}: {outage}",
+            ctx.id
+        )));
+    }
     Ok(())
 }
 
@@ -1888,6 +1994,12 @@ pub async fn start_execution_with_trigger(
             execution_depth: 0,
             flow_trigger_event_id: None,
             born_failed: false,
+            // A manual replay calls `start_execution_in` itself with the link.
+            replayed_from_execution_id: None,
+            // Only the start route uploads FILE inputs, and it calls
+            // `start_execution_in` itself with the id it uploaded under.
+            id: None,
+            input_files: Vec::new(),
         },
     )
     .await?;
@@ -1932,6 +2044,20 @@ pub struct NewExecution<'a> {
     /// execution-level message column, so there is nowhere to keep it. The
     /// processor logs the render error at `warn` instead.
     pub born_failed: bool,
+    /// The manual replay's link (W9a spec §4.4 item 3): the execution
+    /// `POST .../executions/{id}/replay` replays, written to
+    /// `workflow.executions.replayed_from_execution_id` (migration 0166).
+    /// `None` for every other start. A replay reads its source chain's files.
+    pub replayed_from_execution_id: Option<Uuid>,
+    /// The execution's id, when the caller had to know it before the row
+    /// existed (W9a Task 7: the start route streams uploaded FILE inputs to
+    /// `inputs/{input}/{file}` of this id first). `None` is the database's
+    /// `gen_random_uuid()`, as for every other start.
+    pub id: Option<Uuid>,
+    /// The FILE inputs uploaded for THIS execution (spec §7.1), indexed here
+    /// in the transaction that inserts the row. Empty for every start that
+    /// uploads nothing.
+    pub input_files: Vec<crate::storage::StoredFile>,
 }
 
 /// [`start_execution_with_trigger`]'s body, taking the caller's own `conn`
@@ -1953,6 +2079,9 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
         execution_depth,
         flow_trigger_event_id,
         born_failed,
+        replayed_from_execution_id,
+        id,
+        input_files,
     } = new;
 
     let flow = crate::spec::parse(source)
@@ -1960,32 +2089,53 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
     let plan = build_plan(source)
         .map_err(|e| Error::InvalidInput(format!("the flow does not plan: {e}")))?;
 
+    let inputs = if inputs.is_object() {
+        inputs
+    } else {
+        serde_json::json!({})
+    };
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
-           (workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
+           (id, workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
             execution_trigger, scheduled_date, trigger_execution_id, execution_depth, \
-            flow_trigger_event_id) \
-         VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, \
-                 $11) RETURNING id",
+            flow_trigger_event_id, replayed_from_execution_id) \
+         VALUES (COALESCE($13, gen_random_uuid()), $1, $2, $3, $4, $5, 'CREATED', \
+                 '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
     )
     .bind(workspace_id)
     .bind(flow_id)
     .bind(&flow.namespace)
     .bind(&flow.id)
     .bind(source)
-    .bind(if inputs.is_object() {
-        inputs
-    } else {
-        serde_json::json!({})
-    })
+    .bind(&inputs)
     .bind(trigger)
     .bind(scheduled_date)
     .bind(trigger_execution_id)
     .bind(execution_depth)
     .bind(flow_trigger_event_id)
+    .bind(replayed_from_execution_id)
+    .bind(id)
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;
+
+    // W9a spec §7.1: a FILE input is a URI readable from THIS execution --
+    // checked now that the row exists (the readable set walks from it), in
+    // its transaction. A refusal is the caller's: the start route answers it,
+    // and a trigger's start is `scheduler::start::classify`'s `Refused`.
+    if let Err(why) = crate::storage::inputs::check_file_inputs(
+        conn,
+        workspace_id,
+        id,
+        &flow,
+        &inputs,
+        &input_files,
+    )
+    .await?
+    {
+        return Err(Error::InvalidInput(why));
+    }
+    crate::storage::index_input_files(conn, workspace_id, id, &input_files).await?;
 
     let ctx = ExecutionCtx {
         id,
@@ -2555,6 +2705,54 @@ fn sla_terminal(surface: &Surface, ctx: &ExecutionCtx, state: &ExecutionState) -
     crate::sla::state_for(violation.behavior)
 }
 
+/// W9a Task 11: what a render produced beside the state (see `settle`): the
+/// message of each run a render failed with one, and each file `Loop`'s
+/// values, one row per record in file order (migration 0167) -- replacing
+/// any rows a previous rendering of the same run left, so a run's values
+/// are the ones its current `rendered` counts.
+fn write_render_side(
+    conn: &mut PgConnection,
+    execution: Uuid,
+    side: render::RenderSide,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    Box::pin(async move {
+        for (run, message) in side.failures {
+            sqlx::query(
+                "UPDATE workflow.task_runs SET message = $3 \
+                  WHERE execution_id = $1 AND run_ix = $2",
+            )
+            .bind(execution)
+            .bind(run as i32)
+            .bind(message)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        }
+        for (run, values) in side.file_values {
+            sqlx::query(
+                "DELETE FROM workflow.loop_file_values WHERE execution_id = $1 AND run_ix = $2",
+            )
+            .bind(execution)
+            .bind(run as i32)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+            sqlx::query(
+                "INSERT INTO workflow.loop_file_values (execution_id, run_ix, idx, value) \
+                 SELECT $1, $2, v.ord::int - 1, v.value \
+                   FROM unnest($3::text[]) WITH ORDINALITY AS v(value, ord)",
+            )
+            .bind(execution)
+            .bind(run as i32)
+            .bind(&values)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        }
+        Ok(())
+    })
+}
+
 fn drive(
     ctx: &ExecutionCtx,
     surface: &Surface,
@@ -2562,6 +2760,7 @@ fn drive(
     now: Tick,
     marks: &mut Marks,
     seq: &mut i64,
+    side: &mut render::RenderSide,
 ) -> Result<(Vec<Requested>, Vec<subflow::Requested>)> {
     let plan = &ctx.plan;
     let mut spawns = Vec::new();
@@ -2589,7 +2788,7 @@ fn drive(
         }
 
         let snapshot = state.clone();
-        if render::render_expressions(surface, plan, state, now) == Pass::Rendered {
+        if render::render_expressions(surface, plan, state, now, side) == Pass::Rendered {
             *seq += 1;
             marks.observe(&snapshot, state, *seq);
             continue;

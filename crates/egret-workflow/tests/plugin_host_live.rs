@@ -33,6 +33,7 @@ use egret_workflow::logs::LogLimits;
 use egret_workflow::runners::secrets::{SecretError, SecretSource};
 use egret_workflow::runtime::{spawn_with_logs, RuntimeConfig};
 use egret_workflow::scripts::RunnerKind;
+use egret_workflow::storage::FileStore;
 use egret_workflow::worker::commands::DockerRunner;
 use egret_workflow::worker::handlers::kestra::{register, KestraRuntime};
 use egret_workflow::worker::handlers::script::PgFeatureState;
@@ -244,6 +245,9 @@ struct Fx {
     ws: Uuid,
     user: egret_core::UserId,
     store: WorkspaceSecretStore,
+    /// Internal storage for the runner and the plugin bridge (W9a Task 9);
+    /// `None` is W5b's shape.
+    files: Option<Arc<FileStore>>,
 }
 
 async fn fx(pool: &sqlx::PgPool) -> Fx {
@@ -259,6 +263,7 @@ async fn fx(pool: &sqlx::PgPool) -> Fx {
         ws,
         user,
         store,
+        files: None,
     }
 }
 
@@ -279,14 +284,18 @@ impl Fx {
     /// (no `kestra` entry allows the whole catalog; no `allowed-images`
     /// anywhere, which would refuse every script image).
     fn handlers(&self, kill_grace_s: u64) -> Handlers {
-        let mut h = Handlers::with_core_tasks();
+        let mut h = Handlers::with_core_tasks(egret_workflow::storage::current());
         register(
             &mut h,
             Arc::new(KestraRuntime {
-                runner: Arc::new(
-                    DockerRunner::new()
-                        .with_logs(egret_workflow::logs::LogRepo::new(self.db.pool.clone())),
-                ),
+                runner: Arc::new({
+                    let r = DockerRunner::new()
+                        .with_logs(egret_workflow::logs::LogRepo::new(self.db.pool.clone()));
+                    match &self.files {
+                        Some(files) => r.with_files(files.clone()),
+                        None => r,
+                    }
+                }),
                 runner_kind: RunnerKind::Docker,
                 features: Arc::new(PgFeatureState::new(self.db.pool.clone())),
                 plugin_configurations: Default::default(),
@@ -296,6 +305,7 @@ impl Fx {
                     ..Default::default()
                 },
                 secrets: Arc::new(StoreSource(self.store.clone())),
+                files: self.files.clone(),
             }),
         );
         h
@@ -786,4 +796,340 @@ async fn a_timed_out_query_is_cancelled_on_postgres(pool: sqlx::PgPool) {
 
     assert_no_secret_stored(&pool, PG_PASSWORD).await;
     drop(pg);
+}
+
+// ---------------------------------------------------------------------------
+// W9a Task 9: plugins read and write internal storage through egret
+// ---------------------------------------------------------------------------
+
+/// MinIO under a throwaway prefix `w9a-t9-test/<uuid>/`, from the four
+/// `EGRET_TEST_S3_*` (the gate: this test is MinIO-gated and FAILS without
+/// them, as it does without [`GATE`]).
+async fn minio_files() -> Arc<FileStore> {
+    let need = |k: &str| {
+        std::env::var(k).unwrap_or_else(|_| {
+            panic!("set {k} (and the other EGRET_TEST_S3_*) to run the plugin storage live test")
+        })
+    };
+    let cfg = egret_storage::StorageConfig {
+        endpoint: Some(need("EGRET_TEST_S3_ENDPOINT")),
+        region: "us-east-1".into(),
+        bucket: need("EGRET_TEST_S3_BUCKET"),
+        access_key: need("EGRET_TEST_S3_KEY"),
+        secret_key: need("EGRET_TEST_S3_SECRET"),
+        path_style: true,
+    };
+    let store = egret_storage::S3Store::new(&cfg)
+        .await
+        .expect("an S3 store");
+    Arc::new(FileStore {
+        store: Arc::new(store),
+        bucket: cfg.bucket,
+        prefix: format!("w9a-t9-test/{}/", Uuid::new_v4()),
+        caps: egret_workflow::storage::Caps::default(),
+        retention_days: 30,
+    })
+}
+
+/// Delete, by exact key, every object under `files`' throwaway prefix --
+/// never a prefix delete, never outside `w9a-t9-test/`. Returns the count.
+async fn forget(files: &FileStore) -> usize {
+    assert!(files.prefix.starts_with("w9a-t9-test/"), "{}", files.prefix);
+    let listed = files.store.list(&files.prefix, None).await.expect("list");
+    for o in &listed.objects {
+        assert!(o.key.starts_with(&files.prefix), "{}", o.key);
+        files
+            .store
+            .delete(&format!("s3://{}/{}", files.bucket, o.key))
+            .await
+            .expect("delete by exact key");
+    }
+    listed.objects.len()
+}
+
+/// The three connection lines of a Postgres plugin task at `port`.
+fn pg_conn(port: u16) -> String {
+    format!(
+        "    url: jdbc:postgresql://host.docker.internal:{port}/w5b\n    \
+         username: \"{{{{ secret('pg', subkey='username') }}}}\"\n    \
+         password: \"{{{{ secret('pg', subkey='password') }}}}\"\n"
+    )
+}
+
+/// `docker exec … mysql -e` against a throwaway StarRocks.
+async fn sr_sql(sr: &Engine, sql: &str) -> (bool, String) {
+    docker(&[
+        "exec",
+        &sr.name,
+        "mysql",
+        "-h127.0.0.1",
+        "-P9030",
+        "-uroot",
+        "-N",
+        "-e",
+        sql,
+    ])
+    .await
+}
+
+/// **Kestra plugins read and write internal storage through egret** (W9a
+/// spec §9.1), end to end through the real worker, `DockerRunner`, the real
+/// host image, a throwaway Postgres and MinIO:
+///
+/// `postgresql.Query` `fetchType: STORE` -> `postgresql.Batch` from that
+/// (binary Ion) URI -> `postgresql.CopyOut` (CSV) -> `postgresql.CopyIn` from
+/// the CopyOut URI -> a `Log` with `read()` of the CopyOut URI. Then
+/// `mysql.Query` STORE -> `mysql.Batch` on a THROWAWAY StarRocks (skipped,
+/// printed, without `EGRET_TEST_STARROCKS_URL` or the pinned image). A file
+/// written by a STORE that selects the secret holds its value: files a plugin
+/// writes are NOT masked (W5b §12, W9a §9.1) -- recorded and printed here,
+/// not asserted away.
+///
+/// `multi_thread` with `common::db()`: `read()` blocks the render thread on
+/// the runtime handle (global constraints); `#[sqlx::test]` is
+/// current-thread.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs EGRET_PLUGIN_HOST_LIVE=1, Docker, egret-plugin-host:dev and MinIO (EGRET_TEST_S3_*)"]
+async fn plugins_read_and_write_storage_through_egret() {
+    gate();
+    let files = minio_files().await;
+    if let Err(other) = egret_workflow::storage::install(files.clone()) {
+        panic!("another store is installed in this process: {other:?}");
+    }
+    let db = common::db().await.expect("DATABASE_URL");
+    let pool = db.pool.clone();
+    let pg = start_postgres().await;
+    psql(
+        &pg,
+        "CREATE TABLE src (i int, t text); INSERT INTO src VALUES (20, 'p'), (21, 'q'), (22, 'r'); \
+         CREATE TABLE dst (i int, t text); CREATE TABLE dst2 (i int, t text)",
+    )
+    .await;
+    let mut fx = fx(&pool).await;
+    fx.files = Some(files.clone());
+    fx.secret("pg", &[("username", "w5b"), ("password", PG_PASSWORD)])
+        .await;
+    let conn = pg_conn(pg.port);
+    let src = format!(
+        "id: pg_storage\nnamespace: w9a.plugins\ntasks:\n\
+         \x20 - id: store\n    type: kestra.io.kestra.plugin.jdbc.postgresql.Query\n{conn}    \
+         sql: \"SELECT i, t FROM src ORDER BY i\"\n    fetchType: STORE\n\
+         \x20 - id: batch\n    type: kestra.io.kestra.plugin.jdbc.postgresql.Batch\n{conn}    \
+         from: \"{{{{ outputs.store.uri }}}}\"\n    sql: \"INSERT INTO dst (i, t) VALUES (?, ?)\"\n\
+         \x20 - id: copyout\n    type: kestra.io.kestra.plugin.jdbc.postgresql.CopyOut\n{conn}    \
+         sql: \"SELECT i, t FROM dst ORDER BY i\"\n    format: CSV\n    header: true\n\
+         \x20 - id: copyin\n    type: kestra.io.kestra.plugin.jdbc.postgresql.CopyIn\n{conn}    \
+         table: dst2\n    from: \"{{{{ outputs.copyout.uri }}}}\"\n    format: CSV\n    header: true\n\
+         \x20 - id: show\n    type: io.kestra.plugin.core.log.Log\n    \
+         message: \"{{{{ read(outputs.copyout.uri) }}}}\"\n\
+         \x20 - id: leak\n    type: kestra.io.kestra.plugin.jdbc.postgresql.Query\n{conn}    \
+         sql: \"SELECT '{{{{ secret('pg', subkey='password') }}}}' AS pw\"\n    fetchType: STORE\n"
+    );
+    let exec = fx.run(&src, 15, Duration::from_secs(300)).await;
+    let mut uris = BTreeMap::new();
+    for task in ["store", "batch", "copyout", "copyin", "show", "leak"] {
+        let (state, outputs, message) = fx.task_run(exec, task).await;
+        println!("PG {task}: {state} {outputs:?} {message:?}");
+        assert_eq!(state, "SUCCESS", "{task}: {message:?}");
+        if let Some(uri) = outputs.as_ref().and_then(|o| o["uri"].as_str()) {
+            uris.insert(task, uri.to_string());
+        }
+    }
+    // The STORE file and the CopyOut file are this run's, under each task
+    // run's own prefix, and indexed.
+    let (_, store_out, _) = fx.task_run(exec, "store").await;
+    assert_eq!(store_out.as_ref().unwrap()["size"], 3, "three rows stored");
+    let (_, batch_out, _) = fx.task_run(exec, "batch").await;
+    assert_eq!(batch_out.as_ref().unwrap()["rowCount"], 3);
+    let (_, copyin_out, _) = fx.task_run(exec, "copyin").await;
+    assert_eq!(copyin_out.as_ref().unwrap()["rowCount"], 3);
+    for (task, uri) in &uris {
+        assert!(
+            uri.starts_with(&format!(
+                "kestra:///w9a/plugins/pg-storage/executions/{exec}/tasks/{task}/"
+            )),
+            "{task}: {uri}"
+        );
+        let indexed: Option<i64> = sqlx::query_scalar(
+            "SELECT size FROM workflow.execution_files WHERE workspace_id = $1 AND uri = $2",
+        )
+        .bind(fx.ws)
+        .bind(uri)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        println!("INDEXED {task}: {uri} ({indexed:?} bytes)");
+        assert!(indexed.is_some_and(|n| n > 0), "{uri} is indexed");
+    }
+    assert!(uris["copyout"].ends_with("/copy-out"), "Kestra's own name");
+    assert_eq!(psql(&pg, "SELECT count(*) FROM dst").await.trim(), "3");
+    assert_eq!(
+        psql(
+            &pg,
+            "SELECT string_agg(i || ':' || t, ',' ORDER BY i) FROM dst2"
+        )
+        .await
+        .trim(),
+        "20:p,21:q,22:r",
+        "Query STORE -> Batch -> CopyOut -> CopyIn carried every row"
+    );
+    let lines = fx.api_lines(exec).await;
+    assert!(
+        lines
+            .iter()
+            .any(|(_, m)| m.contains("i,t\n20,p\n21,q\n22,r")),
+        "the Log read the CopyOut file: {lines:?}"
+    );
+
+    // Files a plugin writes are NOT masked (W5b §12, W9a §9.1): recorded.
+    let leak = &uris["leak"];
+    let bytes = files
+        .store
+        .get(&files.object_uri(fx.ws, leak).unwrap())
+        .await
+        .expect("the leak file is in the store");
+    let held = bytes
+        .windows(PG_PASSWORD.len())
+        .filter(|w| *w == PG_PASSWORD.as_bytes())
+        .count();
+    println!(
+        "UNMASKED FILE (by design, W5b §12 / W9a §9.1): {leak} ({} bytes) holds the secret's \
+         value {held} time(s)",
+        bytes.len()
+    );
+    assert_eq!(
+        held, 1,
+        "recorded: the STORE file holds the selected secret"
+    );
+    assert_no_secret_stored(&pool, PG_PASSWORD).await;
+    drop(pg);
+
+    let mut skipped = 0;
+    // ---- Trino (skippable): `trino.Query fetchType: STORE` ---------------------
+    match start_engine(TRINO_IMAGE, 8080, &["--memory", "3g"]).await {
+        Err(why) => {
+            println!("SKIPPED: Trino STORE: {why}");
+            skipped += 1;
+        }
+        Ok(trino) => {
+            let deadline = Instant::now() + Duration::from_secs(180);
+            let mut ready = false;
+            while Instant::now() < deadline {
+                let (ok, out) =
+                    docker(&["exec", &trino.name, "trino", "--execute", "SELECT 1"]).await;
+                if ok && out.contains('1') {
+                    ready = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            if !ready {
+                println!("SKIPPED: Trino STORE: Trino did not answer within 180 s");
+                skipped += 1;
+            } else {
+                let src = format!(
+                    "id: trino_storage\nnamespace: w9a.plugins\ntasks:\n  - id: q\n    \
+                     type: kestra.io.kestra.plugin.jdbc.trino.Query\n    \
+                     url: jdbc:trino://host.docker.internal:{}/tpch/tiny\n    \
+                     username: w9a\n    \
+                     sql: \"SELECT nationkey, name FROM nation ORDER BY nationkey\"\n    \
+                     fetchType: STORE\n",
+                    trino.port
+                );
+                let exec = fx.run(&src, 15, Duration::from_secs(180)).await;
+                let (state, outputs, message) = fx.task_run(exec, "q").await;
+                println!("TRINO STORE: {state} {outputs:?} {message:?}");
+                assert_eq!(state, "SUCCESS", "{message:?}");
+                let outputs = outputs.expect("outputs");
+                assert_eq!(outputs["size"], 25, "tpch tiny has 25 nations");
+                let uri = outputs["uri"].as_str().expect("a uri");
+                let indexed: Option<i64> = sqlx::query_scalar(
+                    "SELECT size FROM workflow.execution_files WHERE workspace_id = $1 AND uri = $2",
+                )
+                .bind(fx.ws)
+                .bind(uri)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+                println!("INDEXED trino: {uri} ({indexed:?} bytes)");
+                assert!(indexed.is_some_and(|n| n > 0), "{uri} is indexed");
+            }
+        }
+    }
+
+    // ---- StarRocks (skippable), a THROWAWAY container ------------------------
+    let sr_image_ok = docker(&["image", "inspect", STARROCKS_IMAGE]).await.0;
+    if std::env::var("EGRET_TEST_STARROCKS_URL").is_err() {
+        println!("SKIPPED: StarRocks mysql.Batch: EGRET_TEST_STARROCKS_URL is not set");
+        skipped += 1;
+    } else if !sr_image_ok {
+        println!(
+            "SKIPPED: StarRocks mysql.Batch: the pinned image {STARROCKS_IMAGE} is not present"
+        );
+        skipped += 1;
+    } else {
+        let sr = start_engine(STARROCKS_IMAGE, 9030, &[])
+            .await
+            .expect("a throwaway StarRocks starts");
+        let deadline = Instant::now() + Duration::from_secs(300);
+        loop {
+            let (ok, out) = sr_sql(&sr, "SHOW BACKENDS").await;
+            if ok && out.contains("true") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "StarRocks did not come up: {out}"
+            );
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+        let (ok, out) = sr_sql(
+            &sr,
+            "CREATE DATABASE w9a; CREATE TABLE w9a.t (i INT, t VARCHAR(8)) \
+             DISTRIBUTED BY HASH(i) BUCKETS 1 PROPERTIES (\"replication_num\" = \"1\")",
+        )
+        .await;
+        assert!(ok, "{out}");
+        let url = format!("jdbc:mysql://host.docker.internal:{}/", sr.port);
+        let src = format!(
+            "id: sr_storage\nnamespace: w9a.plugins\ntasks:\n\
+             \x20 - id: q\n    type: kestra.io.kestra.plugin.jdbc.mysql.Query\n    url: {url}\n    \
+             username: root\n    \
+             sql: \"SELECT 20 AS i, 'p' AS t UNION ALL SELECT 21, 'q' UNION ALL SELECT 22, 'r'\"\n    \
+             fetchType: STORE\n\
+             \x20 - id: b\n    type: kestra.io.kestra.plugin.jdbc.mysql.Batch\n    url: {url}\n    \
+             username: root\n    from: \"{{{{ outputs.q.uri }}}}\"\n    \
+             sql: \"INSERT INTO w9a.t (i, t) VALUES (?, ?)\"\n"
+        );
+        let exec = fx.run(&src, 15, Duration::from_secs(300)).await;
+        for task in ["q", "b"] {
+            let (state, outputs, message) = fx.task_run(exec, task).await;
+            println!("STARROCKS {task}: {state} {outputs:?} {message:?}");
+            assert_eq!(state, "SUCCESS", "{task}: {message:?}");
+        }
+        let (ok, rows) = sr_sql(&sr, "SELECT i, t FROM w9a.t ORDER BY i").await;
+        println!("STARROCKS rows: {rows:?}");
+        assert!(ok, "{rows}");
+        assert_eq!(
+            rows.lines().map(str::trim).collect::<Vec<_>>(),
+            vec!["20\tp", "21\tq", "22\tr"]
+        );
+        drop(sr);
+    }
+    println!("ENGINES SKIPPED: {skipped} of 2 (Trino STORE, StarRocks mysql.Batch)");
+
+    let removed = forget(&files).await;
+    let left = files
+        .store
+        .list(&files.prefix, None)
+        .await
+        .unwrap()
+        .objects
+        .len();
+    println!(
+        "MINIO: {removed} objects deleted by exact key under {}; {left} left",
+        files.prefix
+    );
+    assert!(removed >= 4, "the run wrote files to MinIO: {removed}");
+    assert_eq!(left, 0);
 }

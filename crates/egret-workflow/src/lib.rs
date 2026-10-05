@@ -32,6 +32,7 @@
 //!   half, run from the scheduler ticker)
 //! - `plugins`   — W5 (handler registry)
 //! - `logs`      — W11 (`workflow.task_logs` and `LogRepo`)
+//! - `storage`   — W9a (execution files: URIs, the index, the readable set)
 //!
 //! `models`, `runners`, and `executor` must never touch the database or the
 //! network. That boundary holds all the semantic difficulty and is what makes
@@ -77,6 +78,11 @@ pub mod scripts;
 /// test) can drive the predicate, the same reason `executor` and `worker` are.
 pub mod sla;
 pub mod spec;
+/// W9a: internal storage -- `kestra://` URIs, the file index, the ONE
+/// readability decision (`storage::resolve_readable_many`) and the
+/// process-wide `FileStore`. `pub` because `egret-bin` installs the store and
+/// `tests/storage_index.rs` drives the index.
+pub mod storage;
 // W6 Tasks 5 and 6: the schedule trigger, its backfill, and the flow
 // trigger's window-free arm. `pub` because the routes
 // that create a backfill and the loop that drives the clock both live outside

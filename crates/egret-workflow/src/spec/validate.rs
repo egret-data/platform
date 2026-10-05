@@ -866,6 +866,37 @@ fn validate_inputs(inputs: &[Input], report: &mut ValidationReport) {
         }
     }
 
+    // W9a Task 7 fix round 1 (M5): `FileInput.allowedFileExtensions`, whose
+    // own doc requires "Each extension must start with a dot". An entry
+    // without one can never match (the file's extension is taken WITH its
+    // dot, `storage::inputs::extension_allowed`), so it would refuse every
+    // upload; refused here instead, naming the input. Gated on the input's
+    // own type for `itemType`'s reason above.
+    for input in inputs {
+        if input.r#type != InputType::File {
+            continue;
+        }
+        let bad: Vec<String> = input
+            .allowed_file_extensions
+            .iter()
+            .flatten()
+            .filter(|e| !e.starts_with('.'))
+            .map(|e| format!("{e:?}"))
+            .collect();
+        if !bad.is_empty() {
+            report.errors.push(Finding {
+                code: "input_file_extension_invalid",
+                message: format!(
+                    "input '{}': each `allowedFileExtensions` entry must start with a dot \
+                     (\".csv\"), and {} does not",
+                    input.id,
+                    bad.join(", ")
+                ),
+                path: format!("inputs.{}.allowedFileExtensions", input.id),
+            });
+        }
+    }
+
     let mut seen: HashMap<&str, usize> = HashMap::new();
     for input in inputs {
         *seen.entry(input.id.as_str()).or_insert(0) += 1;
@@ -2050,6 +2081,42 @@ mod tests {
                     f0.message
                 );
             }
+        }
+    }
+
+    /// W9a Task 7 fix round 1 (M5): each `allowedFileExtensions` entry of a
+    /// FILE input must start with `.` (`FileInput.java`'s own doc: "Each
+    /// extension must start with a dot"), refused naming the input; an entry
+    /// with its dot, and the property on no FILE input, are silent.
+    #[test]
+    fn an_allowed_file_extension_without_its_dot_is_an_error_naming_the_input() {
+        let src = |ty: &str, list: &str| {
+            parse(&format!(
+                "id: f\nnamespace: a.b\ninputs:\n  - id: up\n    type: {ty}\n    \
+                 allowedFileExtensions: {list}\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap()
+        };
+        let r = validate(&src("FILE", "[\".csv\", \"txt\"]"));
+        let e = r
+            .errors
+            .iter()
+            .find(|e| e.code == "input_file_extension_invalid")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert!(
+            e.message.contains("input 'up'") && e.message.contains("\"txt\""),
+            "{}",
+            e.message
+        );
+        assert_eq!(e.path, "inputs.up.allowedFileExtensions");
+        for (ty, list) in [("FILE", "[\".csv\", \".TXT\"]"), ("FILE", "[]")] {
+            let r = validate(&src(ty, list));
+            assert!(
+                !r.errors
+                    .iter()
+                    .any(|e| e.code == "input_file_extension_invalid"),
+                "{ty} {list}: {r:?}"
+            );
         }
     }
 

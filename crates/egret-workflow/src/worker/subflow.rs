@@ -502,6 +502,14 @@ async fn spawn_one(
         }
     };
 
+    // **In a savepoint, because the FILE-input check needs the row and may
+    // refuse it** (W9a spec §7.1). The readable set is walked FROM the child
+    // -- its `trigger_execution_id` is this execution, which is what makes the
+    // parent's files readable to it -- so the check runs after the INSERT; a
+    // refusal rolls the row back and fails this run naming the input, the way
+    // a target that does not resolve fails it above. The parent's run is the
+    // author's to fix, never the worker's.
+    let mut sp = sqlx::Connection::begin(&mut *conn).await.map_err(db_err)?;
     let child_id: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
            (workspace_id, flow_id, namespace, flow_key, source, state, history, \
@@ -518,9 +526,29 @@ async fn spawn_one(
     .bind(r.run as i32)
     .bind(&inputs)
     .bind(child_depth)
-    .fetch_one(&mut *conn)
+    .fetch_one(&mut *sp)
     .await
     .map_err(db_err)?;
+    let checked = crate::storage::inputs::check_file_inputs(
+        &mut sp,
+        ctx.workspace_id,
+        child_id,
+        &child,
+        &inputs,
+        &[],
+    )
+    .await?;
+    if let Err(why) = checked {
+        sp.rollback().await.map_err(db_err)?;
+        return fail_run(
+            conn,
+            ctx,
+            r.run,
+            &format!("subflow '{namespace}'.'{flow_id}': {why}"),
+        )
+        .await;
+    }
+    sp.commit().await.map_err(db_err)?;
 
     let child_ctx = claim::ExecutionCtx {
         id: child_id,
@@ -871,7 +899,7 @@ fn guess_state(
 /// `type_id` for a `TaskKind::Executable`, so `claim`'s `type_id IS NOT NULL`
 /// predicate cannot take it and there is no token to check. The serialisation
 /// is the execution's own `FOR NO KEY UPDATE`, which `claim::load` takes here.
-async fn complete(
+pub(super) async fn complete(
     conn: &mut PgConnection,
     execution_id: Uuid,
     run: RunIx,

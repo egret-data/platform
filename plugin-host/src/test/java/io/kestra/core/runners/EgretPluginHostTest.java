@@ -102,17 +102,28 @@ class EgretPluginHostTest {
 
     // --- the shim -----------------------------------------------------------------------
 
+    /**
+     * W9a Task 9 flips W5b's {@code storage_on_the_shim_is_exit_4_naming_w9}: storage() is Kestra's
+     * InternalStorage over EgretStorage. The replacement proving it runs is
+     * {@code EgretStorageTest.a_plugin_reads_and_writes_through_kestras_internal_storage}; with no
+     * internal storage a write names [storage]
+     * ({@code without_internal_storage_a_plugin_write_fails_naming_storage}).
+     */
     @Test
-    void storage_on_the_shim_is_exit_4_naming_w9() {
+    void storage_without_a_context_is_exit_4_naming_it() {
+        // Fix round 1, I1: egret sends `context` with every task run of a flow; a task.json without
+        // one (not a task run of a flow) cannot have a storage context: exit 4, saying why.
         var shim = new ShimRunContext(tmp);
         var e = assertThrows(EgretUnsupported.class, shim::storage);
-        assertTrue(e.getMessage().contains("W9"), e.getMessage());
+        assertTrue(e.getMessage().contains("context"), e.getMessage());
+        assertEquals(4, EgretPluginHost.exitCodeFor(e));
     }
 
     @Test
-    void every_w9_collaborator_throws_egret_unsupported() {
+    void every_unprovided_collaborator_throws_egret_unsupported() {
         var shim = new ShimRunContext(tmp);
-        assertThrows(EgretUnsupported.class, () -> shim.namespaceKv("ns"));
+        var kv = assertThrows(EgretUnsupported.class, () -> shim.namespaceKv("ns"));
+        assertTrue(kv.getMessage().contains("W9c"), kv.getMessage());
         assertThrows(EgretUnsupported.class, shim::logFileURI);
         assertThrows(EgretUnsupported.class, () -> shim.decrypt("x"));
         assertThrows(EgretUnsupported.class, () -> shim.encrypt("x"));
@@ -366,9 +377,14 @@ class EgretPluginHostTest {
         assertEquals(64, ((String) catalog.get("lockSha256")).length());
         var classes = (Map<String, Map<String, Object>>) catalog.get("classes");
         assertEquals(
+            // W9a Task 9: the four W5b excluded as needing storage are back.
             List.of(
+                "io.kestra.plugin.jdbc.mysql.Batch",
                 "io.kestra.plugin.jdbc.mysql.Queries",
                 "io.kestra.plugin.jdbc.mysql.Query",
+                "io.kestra.plugin.jdbc.postgresql.Batch",
+                "io.kestra.plugin.jdbc.postgresql.CopyIn",
+                "io.kestra.plugin.jdbc.postgresql.CopyOut",
                 "io.kestra.plugin.jdbc.postgresql.Queries",
                 "io.kestra.plugin.jdbc.postgresql.Query",
                 "io.kestra.plugin.jdbc.trino.Query"

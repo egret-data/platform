@@ -20,6 +20,13 @@
 //! EGRET_TEST_KIND=1 DATABASE_URL=… cargo test -p egret-workflow --test k8s_runner_live
 //! ```
 //!
+//! `EGRET_TEST_KIND_CONTEXT=kind-<name>` runs it against another cluster
+//! (a temporary one) instead of `kind-egret`; load the two images there.
+//! `a_tar_x_that_dies_in_the_pod_fails_the_task` also needs
+//! `egret-w9a-t5-badtar:dev`: `egret-task-helper:dev` plus a
+//! `/usr/local/bin/tar` that, for `-x`, reads 4 KiB, prints
+//! `tar: write error: No space left on device` and exits 1.
+//!
 //! # It touches ONE namespace, and deletes it
 //!
 //! The kind cluster `egret` is shared with the dev stack. Every object this
@@ -50,7 +57,7 @@ use std::time::Duration;
 use egret_workflow::logs::{LogLevel, LogLimits, LogLine, LogRepo, RunIdentity, RunLog};
 use egret_workflow::scripts::{ResourceAmounts, Resources, RunnerKind, RunnerSpec};
 use egret_workflow::worker::commands::{
-    CommandsResult, DockerRunner, NoObserver, OrphanSweep, TaskCommands, TaskRunner,
+    CommandsResult, DockerRunner, NoObserver, OrphanSweep, StoredInput, TaskCommands, TaskRunner,
 };
 use egret_workflow::worker::handlers::LogSink;
 use egret_workflow::worker::k8s::{pod_spec, sweep_orphans, KubernetesRunner, PodConfig};
@@ -67,7 +74,14 @@ mod common;
 const NS: &str = "egret-w5a-tasks-test";
 /// The gate.
 const GATE: &str = "EGRET_TEST_KIND";
+/// The kubeconfig context, `kind-egret` unless [`CONTEXT_VAR`] names another
+/// -- a temporary cluster, so a run need not touch the shared one.
 const CONTEXT: &str = "kind-egret";
+const CONTEXT_VAR: &str = "EGRET_TEST_KIND_CONTEXT";
+
+fn context() -> String {
+    std::env::var(CONTEXT_VAR).unwrap_or_else(|_| CONTEXT.to_string())
+}
 const HELPER_IMAGE: &str = "egret-task-helper:dev";
 /// `alpine:3.20`, retagged so `kind load` has a single-platform image.
 const SHELL_IMAGE: &str = "egret-w5a-test-shell:dev";
@@ -80,12 +94,12 @@ const RUNNER_SA: &str = "egret-task-runner-test";
 
 async fn client() -> kube::Client {
     let opts = kube::config::KubeConfigOptions {
-        context: Some(CONTEXT.to_string()),
+        context: Some(context()),
         ..Default::default()
     };
     let cfg = kube::Config::from_kubeconfig(&opts)
         .await
-        .unwrap_or_else(|e| panic!("no kubeconfig context {CONTEXT}: {e}"));
+        .unwrap_or_else(|e| panic!("no kubeconfig context {}: {e}", context()));
     kube::Client::try_from(cfg).expect("a kube client")
 }
 
@@ -93,12 +107,12 @@ async fn client() -> kube::Client {
 /// request is authorised as that account, so as the chart's Role.
 async fn runner_client() -> kube::Client {
     let opts = kube::config::KubeConfigOptions {
-        context: Some(CONTEXT.to_string()),
+        context: Some(context()),
         ..Default::default()
     };
     let mut cfg = kube::Config::from_kubeconfig(&opts)
         .await
-        .unwrap_or_else(|e| panic!("no kubeconfig context {CONTEXT}: {e}"));
+        .unwrap_or_else(|e| panic!("no kubeconfig context {}: {e}", context()));
     cfg.auth_info.impersonate = Some(format!("system:serviceaccount:{NS}:{RUNNER_SA}"));
     kube::Client::try_from(cfg).expect("an impersonating kube client")
 }
@@ -160,6 +174,22 @@ fn pod_config() -> PodConfig {
     }
 }
 
+/// The runner the plugin cases use: [`runner`] with egret's DEFAULT memory
+/// limit (512Mi, max 2Gi) instead of the suite's 128Mi. The plugin host's JVM
+/// runs with `-Xmx` [`egret_config::PluginHostConfig`]'s default `384m`,
+/// sized "below the pod's default memory limit (512Mi)"; under the suite's
+/// 128Mi the JVM was OOM-killed by its memory cgroup in 2 of 3 runs of
+/// `a_plugin_stores_and_reads_storage_in_a_pod` (W9a Task 14, measured on a
+/// temporary kind cluster: `memory: usage 131072kB, limit 131072kB`, java
+/// anon-rss 129 MB). The chart's defaults never had that mismatch.
+async fn plugin_runner() -> KubernetesRunner {
+    let mut cfg = pod_config();
+    cfg.default_resources.limit.memory = Some("512Mi".into());
+    cfg.max_resources.limit.memory = Some("2Gi".into());
+    KubernetesRunner::new(runner_client().await, cfg, LogRepo::new(pool().await))
+        .with_files(suite_files())
+}
+
 async fn pool() -> sqlx::PgPool {
     common::db()
         .await
@@ -173,6 +203,60 @@ async fn runner() -> KubernetesRunner {
         pod_config(),
         LogRepo::new(pool().await),
     )
+    .with_files(suite_files())
+}
+
+/// This process's internal storage (W9a Task 6): a `MemStore`; the transfer
+/// is what is judged here.
+fn suite_files() -> Arc<egret_workflow::storage::FileStore> {
+    static FILES: std::sync::OnceLock<Arc<egret_workflow::storage::FileStore>> =
+        std::sync::OnceLock::new();
+    FILES
+        .get_or_init(|| {
+            Arc::new(egret_workflow::storage::FileStore {
+                store: Arc::new(egret_storage::MemStore::new()),
+                bucket: "egret-test".into(),
+                prefix: "workflow/".into(),
+                caps: egret_workflow::storage::Caps::default(),
+                retention_days: 30,
+            })
+        })
+        .clone()
+}
+
+/// `cmds` collecting into `t`'s own task prefix.
+fn collecting(t: &TaskInput, mut cmds: TaskCommands) -> TaskCommands {
+    cmds.collect_to = Some(egret_workflow::worker::commands::CollectTo {
+        workspace: t.workspace_id,
+        task_prefix: egret_workflow::storage::uri::task_prefix(
+            "w9a.t6.k8s",
+            "live",
+            t.execution_id,
+            &t.task_id,
+            t.run_id,
+        )
+        .unwrap(),
+        naming: egret_workflow::worker::commands::Naming::KestraOutputName,
+    });
+    cmds
+}
+
+/// What the store holds for each collected file, by its relative path.
+async fn contents(
+    files: &egret_workflow::storage::FileStore,
+    t: &TaskInput,
+    out: &CommandsResult,
+) -> BTreeMap<String, String> {
+    let mut got = BTreeMap::new();
+    for (rel, f) in &out.output_files {
+        let bytes = files
+            .store
+            .get(&files.object_uri(t.workspace_id, &f.uri).unwrap())
+            .await
+            .unwrap_or_else(|e| panic!("{} is in the store: {e}", f.uri));
+        got.insert(rel.clone(), String::from_utf8(bytes).unwrap());
+    }
+    got
 }
 
 fn pods(c: &kube::Client) -> Api<Pod> {
@@ -223,6 +307,7 @@ fn task_for(ws: Uuid, execution: Uuid, run: Uuid) -> (TaskInput, Arc<Recorder>) 
         render: egret_workflow::runners::RenderContext::new(),
         timeout: None,
         principal: None,
+        claimed_at: chrono::DateTime::UNIX_EPOCH,
         log: RunLog::new(
             RunIdentity {
                 workspace_id: ws,
@@ -473,6 +558,7 @@ async fn input_and_output_files_round_trip() {
         ("b.txt".to_string(), "x".repeat(700)),
     ]);
     cmds.output_files = vec!["out.txt".into(), "wd.txt".into(), "n.txt".into()];
+    let cmds = collecting(&t, cmds);
     let out = r
         .run(&t, &cmds, &k8s_spec(), &NoObserver)
         .await
@@ -480,7 +566,7 @@ async fn input_and_output_files_round_trip() {
     assert_eq!(out.exit_code, 0, "{out:?}");
     assert_eq!(out.failure, None, "{out:?}");
     assert_eq!(
-        out.output_files,
+        contents(&suite_files(), &t, &out).await,
         BTreeMap::from([
             ("out.txt".to_string(), "abc\nline two\n".to_string()),
             ("wd.txt".to_string(), "/egret/working-dir".to_string()),
@@ -503,13 +589,14 @@ async fn input_and_output_files_round_trip() {
         "mkdir -p sub d.csv && echo c > sub/c.csv",
     ]);
     cmds.output_files = vec!["there.txt".into(), "missing.txt".into(), "*.csv".into()];
+    let cmds = collecting(&t, cmds);
     let out = r
         .run(&t, &cmds, &k8s_spec(), &NoObserver)
         .await
         .expect("no worker failure");
     assert_eq!(out.failure, None, "a missing output is ignored: {out:?}");
     assert_eq!(
-        out.output_files,
+        contents(&suite_files(), &t, &out).await,
         BTreeMap::from([
             ("a.csv".to_string(), "a\n".to_string()),
             ("b.csv".to_string(), "b\n".to_string()),
@@ -520,6 +607,204 @@ async fn input_and_output_files_round_trip() {
     // Final review I3: `run` deletes nothing; `release` (after the commit) does.
     r.release(&t, &k8s_spec()).await.expect("release");
     assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
+}
+
+/// **W9a Task 5: a 12 MiB file in internal storage streams into the pod**
+/// through the exec's `tar -x`, fed by `write_tar` as it reads the store, and
+/// passes Kestra's `wc -c` verification; the command counts it in `main`.
+async fn a_stored_input_file_streams_into_the_pod() {
+    const SIZE: usize = 12 << 20;
+    let c = client().await;
+    let files = Arc::new(egret_workflow::storage::FileStore {
+        store: Arc::new(egret_storage::MemStore::new()),
+        bucket: "egret-test".into(),
+        prefix: "workflow/".into(),
+        caps: egret_workflow::storage::Caps::default(),
+        retention_days: 30,
+    });
+    let r = runner().await.with_files(files.clone());
+    let (t, _rec) = task();
+    let uri = format!(
+        "kestra:///w9a/t5/in-files/executions/{}/tasks/w/{}/big.bin",
+        Uuid::new_v4(),
+        Uuid::new_v4()
+    );
+    let object_uri = files.object_uri(t.workspace_id, &uri).unwrap();
+    files
+        .store
+        .put(
+            &object_uri,
+            "0123456789abcdef".repeat(SIZE / 16).into_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut cmds = shell(&[
+        "wc -c < d/big.bin | tr -d ' ' > n.txt",
+        "tr -d '0-9a-f' < d/big.bin | wc -c | tr -d ' ' > foreign.txt",
+        "head -c 16 d/big.bin > head.txt",
+        "cp literal.txt lit.txt",
+        // Fix round 1, I1: real mtimes (W5a's pack wrote 0 here too).
+        "stat -c %Y d/big.bin > mtime.txt",
+    ]);
+    cmds.input_files = BTreeMap::from([("literal.txt".to_string(), "just contents".to_string())]);
+    cmds.stored_inputs = BTreeMap::from([(
+        "d/big.bin".to_string(),
+        StoredInput {
+            uri,
+            object_uri,
+            size: SIZE as u64,
+        },
+    )]);
+    cmds.output_files = vec![
+        "n.txt".into(),
+        "foreign.txt".into(),
+        "head.txt".into(),
+        "lit.txt".into(),
+        "mtime.txt".into(),
+    ];
+    let cmds = collecting(&t, cmds);
+    let out = r
+        .run(&t, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("no worker failure");
+    assert_eq!(out.exit_code, 0, "{out:?}");
+    assert_eq!(out.failure, None, "{out:?}");
+    let mut files_out = contents(&files, &t, &out).await;
+    let mtime: u64 = files_out
+        .get("mtime.txt")
+        .and_then(|m| m.trim().parse().ok())
+        .unwrap_or_else(|| panic!("{out:?}"));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(
+        mtime >= 315_532_800 && mtime <= now + 60 && mtime + 3600 >= now,
+        "the staged file carries the upload's time, not 1970: {mtime}"
+    );
+    files_out.remove("mtime.txt");
+    assert_eq!(
+        files_out,
+        BTreeMap::from([
+            ("n.txt".to_string(), "12582912\n".to_string()),
+            ("foreign.txt".to_string(), "0\n".to_string()),
+            ("head.txt".to_string(), "0123456789abcdef".to_string()),
+            ("lit.txt".to_string(), "just contents".to_string()),
+        ])
+    );
+    r.release(&t, &k8s_spec()).await.expect("release");
+    assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
+}
+
+/// The helper image whose `tar -x` reads 4 KiB and dies saying the disk is
+/// full (fix round 1, I2): `FROM egret-task-helper:dev` plus a
+/// `/usr/local/bin/tar` shim, built and loaded by hand (see the report).
+const BAD_TAR_HELPER: &str = "egret-w9a-t5-badtar:dev";
+
+/// **Fix round 1, I2: a `tar -x` that dies in the pod is the TASK's
+/// failure**, naming tar's words -- not an outage that re-uploads the same
+/// archive for ever with no attempt spent.
+async fn a_tar_x_that_dies_in_the_pod_fails_the_task() {
+    const SIZE: usize = 12 << 20;
+    let c = client().await;
+    let files = Arc::new(egret_workflow::storage::FileStore {
+        store: Arc::new(egret_storage::MemStore::new()),
+        bucket: "egret-test".into(),
+        prefix: "workflow/".into(),
+        caps: egret_workflow::storage::Caps::default(),
+        retention_days: 30,
+    });
+    let mut cfg = pod_config();
+    cfg.helper_image = BAD_TAR_HELPER.to_string();
+    let r = KubernetesRunner::new(runner_client().await, cfg, LogRepo::new(pool().await))
+        .with_files(files.clone());
+    let (t, _rec) = task();
+    let uri = format!(
+        "kestra:///w9a/t5/in-files/executions/{}/tasks/w/{}/big.bin",
+        Uuid::new_v4(),
+        Uuid::new_v4()
+    );
+    let object_uri = files.object_uri(t.workspace_id, &uri).unwrap();
+    files
+        .store
+        .put(&object_uri, vec![b'x'; SIZE])
+        .await
+        .unwrap();
+    let mut cmds = shell(&["echo never"]);
+    cmds.stored_inputs = BTreeMap::from([(
+        "big.bin".to_string(),
+        StoredInput {
+            uri,
+            object_uri,
+            size: SIZE as u64,
+        },
+    )]);
+    let started = std::time::Instant::now();
+    let got = tokio::time::timeout(
+        Duration::from_secs(120),
+        r.run(&t, &cmds, &k8s_spec(), &NoObserver),
+    )
+    .await
+    .expect("a dead tar ends the run promptly");
+    match &got {
+        Err(egret_core::Error::InvalidInput(m)) => assert!(
+            m.contains("No space left on device") && m.contains("tar -x"),
+            "{m}"
+        ),
+        other => panic!("the task's failure expected, not {other:?}"),
+    }
+    eprintln!("extract failure in {:?}: {got:?}", started.elapsed());
+    remove_pod(&c, &name_of(&t)).await;
+}
+
+/// **Fix round 1, M2: when OUR side stops part-way the exec is aborted**: an
+/// object shorter than its index row is the author's failure, at once --
+/// without the abort, `tar -x` waits for the rest of the archive until the
+/// idle limit and the run becomes an outage.
+async fn a_short_stored_object_aborts_the_upload_and_fails_the_task() {
+    let c = client().await;
+    let files = Arc::new(egret_workflow::storage::FileStore {
+        store: Arc::new(egret_storage::MemStore::new()),
+        bucket: "egret-test".into(),
+        prefix: "workflow/".into(),
+        caps: egret_workflow::storage::Caps::default(),
+        retention_days: 30,
+    });
+    let r = runner().await.with_files(files.clone());
+    let (t, _rec) = task();
+    let uri = format!(
+        "kestra:///w9a/t5/in-files/executions/{}/tasks/w/{}/short.bin",
+        Uuid::new_v4(),
+        Uuid::new_v4()
+    );
+    let object_uri = files.object_uri(t.workspace_id, &uri).unwrap();
+    files
+        .store
+        .put(&object_uri, vec![b'x'; 1000])
+        .await
+        .unwrap();
+    let mut cmds = shell(&["echo never"]);
+    cmds.stored_inputs = BTreeMap::from([(
+        "short.bin".to_string(),
+        StoredInput {
+            uri: uri.clone(),
+            object_uri,
+            size: 5000,
+        },
+    )]);
+    let started = std::time::Instant::now();
+    let got = tokio::time::timeout(
+        Duration::from_secs(60),
+        r.run(&t, &cmds, &k8s_spec(), &NoObserver),
+    )
+    .await
+    .expect("the aborted upload ends well inside the 120 s idle limit");
+    match &got {
+        Err(egret_core::Error::InvalidInput(m)) => assert!(m.contains(&uri), "{m}"),
+        other => panic!("the author's failure expected, not {other:?}"),
+    }
+    eprintln!("short object failed in {:?}", started.elapsed());
+    remove_pod(&c, &name_of(&t)).await;
 }
 
 /// A non-zero exit is the exit code, with the vars and the files it left.
@@ -533,6 +818,7 @@ async fn a_nonzero_exit_fails_and_keeps_outputs() {
         "exit 3",
     ]);
     cmds.output_files = vec!["o.txt".into()];
+    let cmds = collecting(&t, cmds);
     let out: CommandsResult = r
         .run(&t, &cmds, &k8s_spec(), &NoObserver)
         .await
@@ -540,7 +826,10 @@ async fn a_nonzero_exit_fails_and_keeps_outputs() {
     assert_eq!(out.exit_code, 3);
     assert_eq!(out.vars.get("k"), Some(&serde_json::json!("v")));
     assert_eq!(
-        out.output_files.get("o.txt").map(String::as_str),
+        contents(&suite_files(), &t, &out)
+            .await
+            .get("o.txt")
+            .map(String::as_str),
         Some("partial\n")
     );
     assert_eq!(out.failure, None);
@@ -764,6 +1053,303 @@ async fn a_second_run_call_for_the_same_attempt_reattaches_not_recreates() {
     assert!(wait_gone(&c, &name, Duration::from_secs(20)).await);
 }
 
+/// **W9a Task 6, in a pod**: `outputFiles` are streamed out of `files-out`
+/// by `tar -c` straight into the store -- a `*.csv` glob, `sub/x.csv`, a
+/// 12 MiB file (byte-identical by a SHA-256 computed in `main`) and
+/// `outputDirectory: true` (`$OUTPUT_DIR`, keyed by relative path, stored
+/// verbatim). A declared symlink is refused by name and never followed.
+async fn output_files_are_streamed_out_of_the_pod_byte_identical() {
+    use sha2::Digest;
+    let c = client().await;
+    let r = runner().await;
+    let (t, rec) = task();
+    let mut cmds = shell(&[
+        "echo a > a.csv",
+        "echo b > b.csv",
+        "mkdir -p sub && printf 'x,y\\n1,2\\n' > sub/x.csv",
+        "head -c 12582912 /dev/urandom > big.bin",
+        "echo \"SHA=$(sha256sum big.bin | cut -d' ' -f1)\"",
+        "echo \"OUTPUT_DIR=$OUTPUT_DIR\"",
+        "printf 'in outdir' > \"$OUTPUT_DIR/od.txt\"",
+        "mkdir -p \"$OUTPUT_DIR/deep\" && printf deep > \"$OUTPUT_DIR/deep/d.txt\"",
+    ]);
+    cmds.output_files = vec!["*.csv".into(), "sub/x.csv".into(), "big.bin".into()];
+    cmds.output_directory = true;
+    let cmds = collecting(&t, cmds);
+    let prefix = cmds.collect_to.clone().unwrap().task_prefix;
+    let out = r
+        .run(&t, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("no worker failure");
+    assert_eq!((out.exit_code, out.failure.clone()), (0, None), "{out:?}");
+    let texts = rec.texts();
+    assert!(
+        texts.contains(&"OUTPUT_DIR=/egret/working-dir/.egret/out".to_string()),
+        "{texts:?}"
+    );
+    let sha = texts
+        .iter()
+        .find_map(|l| l.strip_prefix("SHA="))
+        .expect("main printed the SHA")
+        .to_string();
+    let uris: BTreeMap<&str, &str> = out
+        .output_files
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.uri.as_str()))
+        .collect();
+    assert_eq!(
+        uris.keys().copied().collect::<Vec<_>>(),
+        [
+            "a.csv",
+            "b.csv",
+            "big.bin",
+            "deep/d.txt",
+            "od.txt",
+            "sub/x.csv"
+        ]
+    );
+    assert_eq!(
+        uris["sub/x.csv"],
+        format!("{prefix}10ehIGUrkxwg9tBZYZJQ9K-x.csv")
+    );
+    assert_eq!(uris["deep/d.txt"], format!("{prefix}deep/d.txt"));
+    let files = suite_files();
+    let big = files
+        .store
+        .get(&files.object_uri(t.workspace_id, uris["big.bin"]).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(big.len(), 12 << 20);
+    let got: String = sha2::Sha256::digest(&big)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(got, sha, "byte-identical to what main wrote");
+    // big.bin is random bytes, judged by its SHA above; `contents` reads text.
+    let mut text_only = out.clone();
+    text_only.output_files.remove("big.bin");
+    let small = contents(&suite_files(), &t, &text_only).await;
+    assert_eq!(
+        small,
+        BTreeMap::from([
+            ("a.csv".to_string(), "a\n".to_string()),
+            ("b.csv".to_string(), "b\n".to_string()),
+            ("deep/d.txt".to_string(), "deep".to_string()),
+            ("od.txt".to_string(), "in outdir".to_string()),
+            ("sub/x.csv".to_string(), "x,y\n1,2\n".to_string()),
+        ])
+    );
+    r.release(&t, &k8s_spec()).await.expect("release");
+    assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
+
+    // A declared symlink: refused by name, the target never read.
+    let (t, _rec) = task();
+    let mut cmds = shell(&["ln -s /etc/passwd leaked.txt"]);
+    cmds.output_files = vec!["leaked.txt".into()];
+    let cmds = collecting(&t, cmds);
+    let out = r
+        .run(&t, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("a link is the author's flow");
+    let why = out.failure.clone().expect("refused");
+    assert!(
+        why.contains("SYMLINK") && why.contains("leaked.txt"),
+        "{why}"
+    );
+    assert!(out.output_files.is_empty());
+    r.release(&t, &k8s_spec()).await.expect("release");
+    assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
+}
+
+/// An object store that answers nothing (W9a Task 6 fix round 1, I3).
+struct Down;
+
+#[async_trait::async_trait]
+impl egret_storage::ObjectStore for Down {
+    async fn put(&self, _: &str, _: Vec<u8>) -> Result<(), egret_storage::StorageError> {
+        Err(egret_storage::StorageError::S3("connection refused".into()))
+    }
+    async fn get(&self, _: &str) -> Result<Vec<u8>, egret_storage::StorageError> {
+        Err(egret_storage::StorageError::S3("connection refused".into()))
+    }
+    async fn delete(&self, _: &str) -> Result<(), egret_storage::StorageError> {
+        Err(egret_storage::StorageError::S3("connection refused".into()))
+    }
+    async fn copy(&self, _: &str, _: &str) -> Result<(), egret_storage::StorageError> {
+        Err(egret_storage::StorageError::S3("connection refused".into()))
+    }
+    async fn list(
+        &self,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<egret_storage::Listing, egret_storage::StorageError> {
+        Err(egret_storage::StorageError::S3("connection refused".into()))
+    }
+    async fn put_stream(
+        &self,
+        uri: &str,
+        _: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+        _: Option<u64>,
+    ) -> Result<u64, egret_storage::StorageError> {
+        Err(egret_storage::StorageError::S3(format!(
+            "{uri}: connection refused"
+        )))
+    }
+}
+
+/// **Fix round 1, I3: the store unreachable while the pod's files are
+/// collected is egret's outage** (spec §11) -- both `download` arms, a
+/// declared file and the output directory, answer `Error::Internal` naming
+/// the URI, never `result.failure` (which would spend an attempt).
+async fn an_unreachable_store_while_collecting_is_a_worker_error() {
+    let c = client().await;
+    let down = Arc::new(egret_workflow::storage::FileStore {
+        store: Arc::new(Down),
+        bucket: "egret-test".into(),
+        prefix: "workflow/".into(),
+        caps: egret_workflow::storage::Caps::default(),
+        retention_days: 30,
+    });
+    let r = KubernetesRunner::new(
+        runner_client().await,
+        pod_config(),
+        LogRepo::new(pool().await),
+    )
+    .with_files(down);
+    for (declared, want) in [(true, "a.txt"), (false, "od.txt")] {
+        let (t, _rec) = task();
+        let mut cmds = shell(&["echo a > a.txt", "printf od > \"$OUTPUT_DIR/od.txt\""]);
+        if declared {
+            cmds.output_files = vec!["a.txt".into()];
+        } else {
+            cmds.output_directory = true;
+        }
+        let cmds = collecting(&t, cmds);
+        let err = r
+            .run(&t, &cmds, &k8s_spec(), &NoObserver)
+            .await
+            .expect_err("the store is egret's outage, not the task's failure");
+        assert!(
+            matches!(err, egret_core::Error::Internal(_)),
+            "{declared}: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("kestra:///") && msg.contains(want), "{msg}");
+        r.release(&t, &k8s_spec()).await.expect("release");
+        assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
+    }
+}
+
+/// **A re-attached pod is collected under the same URIs** (spec §5
+/// "Re-attach"): the first holder is dropped while `main` runs, the second
+/// re-attaches and collects, a third re-attaches to the finished pod and
+/// collects again -- the same names and sizes, the same object count.
+async fn a_reattached_pod_is_collected_under_the_same_uris() {
+    let c = client().await;
+    let r = runner().await;
+    let (t, rec) = task();
+    let mut cmds = shell(&[
+        "echo started",
+        "sleep 6",
+        "echo one > one.txt",
+        "printf two > \"$OUTPUT_DIR/two.txt\"",
+    ]);
+    cmds.output_files = vec!["one.txt".into()];
+    cmds.output_directory = true;
+    let cmds = collecting(&t, cmds);
+    {
+        let spec = k8s_spec();
+        let first = r.run(&t, &cmds, &spec, &NoObserver);
+        tokio::pin!(first);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            tokio::select! {
+                res = &mut first => panic!("the first call finished early: {res:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            }
+            if rec.texts().iter().any(|l| l == "started") {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "never saw `started`"
+            );
+        }
+    } // <- dropped
+    let b = r
+        .run(&t, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("the second holder re-attaches");
+    let c2 = r
+        .run(&t, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("the third re-attaches to the finished pod");
+    assert_eq!((b.failure.clone(), c2.failure.clone()), (None, None));
+    assert_eq!(b.output_files, c2.output_files);
+    assert_eq!(
+        b.output_files
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["one.txt", "two.txt"]
+    );
+    let prefix = &cmds.collect_to.as_ref().unwrap().task_prefix;
+    let files = suite_files();
+    let under = files
+        .object_uri(t.workspace_id, &format!("{prefix}x"))
+        .unwrap();
+    let key_prefix = under
+        .strip_prefix("s3://egret-test/")
+        .unwrap()
+        .strip_suffix('x')
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        files
+            .store
+            .list(&key_prefix, None)
+            .await
+            .unwrap()
+            .objects
+            .len(),
+        2,
+        "the third holder overwrote the second's objects"
+    );
+    r.release(&t, &k8s_spec()).await.expect("release");
+    assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
+}
+
+/// Deletes the pod it names when dropped DURING A PANIC, so a failed
+/// assertion does not leak it into [`NS`] (W9a final review; on success the
+/// test deletes it through `release` and asserts it gone). On its own thread
+/// and runtime with its own client: a `Drop` cannot await, and the test's
+/// runtime is the one unwinding. Best effort: a delete that fails is ignored.
+struct PodGuard(String);
+
+impl Drop for PodGuard {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        let name = self.0.clone();
+        let _ = std::thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(async move {
+                let c = client().await;
+                let _ = pods(&c)
+                    .delete(&name, &DeleteParams::default().grace_period(0))
+                    .await;
+            });
+        })
+        .join();
+    }
+}
+
 /// A line written on the node just before the reclaim, and never stored, is
 /// not lost — even when the previous holder's stored `ts` (egret's clock) is
 /// past the next second boundary. The overlap that WAS stored is not repeated.
@@ -777,6 +1363,7 @@ async fn a_line_written_just_before_the_reclaim_is_not_lost() {
     let cmds = shell(&["echo one", "sleep 3", "echo almost", "sleep 5", "echo two"]);
     let (t1, rec1) = task_for(ws, execution, run);
     let name = name_of(&t1);
+    let _pod = PodGuard(name.clone());
     {
         let spec = k8s_spec();
         let first = r.run(&t1, &cmds, &spec, &NoObserver);
@@ -1059,7 +1646,8 @@ async fn create_namespace() {
             }
             Some(_) => panic!(
                 "namespace {NS} already exists and is not terminating: a previous run did not \
-                 clean up. Inspect it, then `kubectl --context {CONTEXT} delete ns {NS}`"
+                 clean up. Inspect it, then `kubectl --context {} delete ns {NS}`",
+                context()
             ),
         }
     }
@@ -1230,12 +1818,12 @@ async fn client_with_role(sa: &str, rules: Vec<PolicyRule>) -> kube::Client {
         .await
         .expect("bind the Role");
     let opts = kube::config::KubeConfigOptions {
-        context: Some(CONTEXT.to_string()),
+        context: Some(context()),
         ..Default::default()
     };
     let mut cfg = kube::Config::from_kubeconfig(&opts)
         .await
-        .unwrap_or_else(|e| panic!("no kubeconfig context {CONTEXT}: {e}"));
+        .unwrap_or_else(|e| panic!("no kubeconfig context {}: {e}", context()));
     cfg.auth_info.impersonate = Some(format!("system:serviceaccount:{NS}:{sa}"));
     let rc = kube::Client::try_from(cfg).expect("an impersonating kube client");
     for _ in 0..40 {
@@ -1298,6 +1886,18 @@ async fn an_exec_the_role_refuses_fails_the_task_naming_the_missing_verb() {
     let mut with_files = shell(&["cat in.txt > out.txt"]);
     with_files.input_files = BTreeMap::from([("in.txt".to_string(), "x".to_string())]);
     with_files.output_files = vec!["out.txt".into()];
+    with_files.collect_to = Some(egret_workflow::worker::commands::CollectTo {
+        workspace: Uuid::nil(),
+        task_prefix: egret_workflow::storage::uri::task_prefix(
+            "w9a.t6.k8s",
+            "live",
+            Uuid::nil(),
+            "t",
+            Uuid::nil(),
+        )
+        .unwrap(),
+        naming: egret_workflow::worker::commands::Naming::KestraOutputName,
+    });
     for (what, cmds) in [
         ("no files", no_files),
         ("input and output files", with_files),
@@ -1413,10 +2013,331 @@ macro_rules! case {
     };
 }
 
+// ---------------------------------------------------------------------------
+// W9a Task 9 fix round 1: the plugin storage bridge in a pod
+// ---------------------------------------------------------------------------
+
+/// The plugin host image (W5b), loaded into the cluster like the helper.
+const PLUGIN_HOST_IMAGE: &str = "egret-plugin-host:dev";
+const PG_IMAGE: &str =
+    "postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
+
+fn docker_out(args: &[&str]) -> (bool, String) {
+    let o = std::process::Command::new("docker")
+        .args(args)
+        .output()
+        .expect("docker on PATH");
+    let mut text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    if !o.status.success() {
+        text.push_str(&String::from_utf8_lossy(&o.stderr));
+    }
+    (o.status.success(), text)
+}
+
+/// A throwaway Postgres on the kind clusters' Docker network, removed on drop.
+struct KindPg {
+    name: String,
+    ip: String,
+}
+
+impl Drop for KindPg {
+    fn drop(&mut self) {
+        let _ = docker_out(&["rm", "--force", &self.name]);
+    }
+}
+
+impl KindPg {
+    async fn start() -> Self {
+        let name = format!("egret-w9a-t9-k8s-pg-{}", Uuid::new_v4().simple());
+        let (ok, out) = docker_out(&[
+            "run",
+            "-d",
+            "--network",
+            "kind",
+            "--name",
+            &name,
+            "-e",
+            "POSTGRES_USER=w9a",
+            "-e",
+            "POSTGRES_DB=w9a",
+            "-e",
+            "POSTGRES_PASSWORD=w9a-k8s",
+            PG_IMAGE,
+        ]);
+        assert!(ok, "docker run postgres: {out}");
+        let (ok, ip) = docker_out(&[
+            "inspect",
+            "-f",
+            "{{.NetworkSettings.Networks.kind.IPAddress}}",
+            &name,
+        ]);
+        assert!(ok && !ip.is_empty(), "the container's kind IP: {ip}");
+        let pg = KindPg { name, ip };
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let mut ready = 0;
+        while ready < 2 {
+            if pg.psql_try("SELECT 1").0 {
+                ready += 1;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            } else {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Postgres did not come up"
+                );
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+        pg
+    }
+
+    fn psql_try(&self, sql: &str) -> (bool, String) {
+        docker_out(&[
+            "exec", &self.name, "psql", "-U", "w9a", "-d", "w9a", "-tAc", sql,
+        ])
+    }
+
+    fn psql(&self, sql: &str) -> String {
+        let (ok, out) = self.psql_try(sql);
+        assert!(ok, "psql {sql}: {out}");
+        out
+    }
+
+    fn url(&self) -> String {
+        format!("jdbc:postgresql://{}:5432/w9a", self.ip)
+    }
+}
+
+struct NoSecrets;
+
+#[async_trait::async_trait]
+impl egret_workflow::runners::secrets::SecretSource for NoSecrets {
+    async fn get(
+        &self,
+        _: Uuid,
+        name: &str,
+    ) -> Result<BTreeMap<String, String>, egret_workflow::runners::secrets::SecretError> {
+        Err(egret_workflow::runners::secrets::SecretError::NotFound { name: name.into() })
+    }
+}
+
+/// The production registry's plugin handlers over the cluster's runner, with
+/// the suite's internal storage.
+async fn plugin_handlers() -> egret_workflow::worker::Handlers {
+    let mut h = egret_workflow::worker::Handlers::new();
+    egret_workflow::worker::handlers::kestra::register(
+        &mut h,
+        Arc::new(egret_workflow::worker::handlers::kestra::KestraRuntime {
+            runner: Arc::new(plugin_runner().await),
+            runner_kind: RunnerKind::Kubernetes,
+            features: Arc::new(egret_workflow::worker::handlers::script::FixedFeatureState(
+                true,
+            )),
+            plugin_configurations: Default::default(),
+            host: egret_config::PluginHostConfig {
+                image: Some(PLUGIN_HOST_IMAGE.into()),
+                ..Default::default()
+            },
+            secrets: Arc::new(NoSecrets),
+            files: Some(suite_files()),
+        }),
+    );
+    h
+}
+
+/// A plugin task run of `type_id`, in flow `w9a.t9.k8s`/`live`, whose snapshot
+/// resolves `readable`.
+fn plugin_task(
+    ws: Uuid,
+    execution: Uuid,
+    type_id: &str,
+    spec: serde_json::Value,
+    readable: Vec<egret_workflow::storage::IndexedFile>,
+) -> TaskInput {
+    let run = Uuid::new_v4();
+    let (mut t, _) = task_for(ws, execution, run);
+    t.type_id = type_id.to_string();
+    t.task_id = "load".into();
+    t.spec = spec;
+    let prefix =
+        egret_workflow::storage::uri::task_prefix("w9a.t9.k8s", "live", execution, "load", run)
+            .unwrap();
+    let snapshot = egret_workflow::storage::scope::Snapshot::from_parts(
+        readable
+            .into_iter()
+            .map(|f| (f.uri.clone(), Ok(f)))
+            .collect(),
+        suite_files(),
+        ws,
+        Some(prefix),
+    );
+    let mut cx = egret_workflow::runners::RenderContext::new().with_files(snapshot.into_scope());
+    cx.insert(
+        "flow",
+        serde_json::json!({"namespace": "w9a.t9.k8s", "id": "live"}),
+    );
+    t.render = cx;
+    t
+}
+
+/// **In a pod, as `run_as_user` (1000), not the image's `USER 65532`**: the
+/// plugin host's `.egret/tmp` and `.egret/out` -- extracted by `files-in`'s
+/// `tar -x` as a non-root user -- are directories that user can write.
+async fn the_plugin_host_scratch_and_output_dirs_are_writable_as_run_as_user() {
+    let (t, rec) = task();
+    let mut cmds = shell(&[
+        "id -u",
+        "stat -c '%a %u %n' .egret/tmp .egret/out",
+        "touch .egret/tmp/probe && echo tmp-writable",
+        "touch .egret/out/probe && echo out-writable",
+    ]);
+    cmds.host_protocol = true;
+    cmds.output_directory = true;
+    let cmds = egret_workflow::worker::commands::TaskCommands {
+        collect_to: Some(egret_workflow::worker::commands::CollectTo {
+            workspace: t.workspace_id,
+            task_prefix: egret_workflow::storage::uri::task_prefix(
+                "w9a.t9.k8s",
+                "live",
+                t.execution_id,
+                &t.task_id,
+                t.run_id,
+            )
+            .unwrap(),
+            naming: egret_workflow::worker::commands::Naming::UnderPrefixVerbatim,
+        }),
+        ..cmds
+    };
+    let r = runner().await;
+    let out = r
+        .run(&t, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("ran");
+    let texts = rec.texts();
+    println!("    PROBE: exit {} {texts:?}", out.exit_code);
+    assert_eq!(out.exit_code, 0, "{texts:?}");
+    assert!(
+        texts.contains(&"1000".to_string()),
+        "run as run_as_user: {texts:?}"
+    );
+    assert!(texts.contains(&"tmp-writable".to_string()), "{texts:?}");
+    assert!(texts.contains(&"out-writable".to_string()), "{texts:?}");
+    assert!(
+        out.output_files.contains_key("probe"),
+        "the probe was collected"
+    );
+    r.release(&t, &k8s_spec()).await.expect("released");
+}
+
+/// **The plugin storage chain in a pod**: `postgresql.Query fetchType:
+/// STORE` writes through the host's `EgretStorage` (scratch in
+/// `.egret/tmp`, the file in `.egret/out`), the runner collects it; then
+/// `postgresql.Batch` reads that URI, staged into the pod, into a table.
+async fn a_plugin_stores_and_reads_storage_in_a_pod() {
+    let pg = KindPg::start().await;
+    pg.psql(
+        "CREATE TABLE src (i int, t text); INSERT INTO src VALUES (20, 'p'), (21, 'q'), (22, 'r'); \
+         CREATE TABLE dst (i int, t text)",
+    );
+    let h = plugin_handlers().await;
+    let (ws, exec) = (Uuid::new_v4(), Uuid::new_v4());
+    let conn = serde_json::json!({"url": pg.url(), "username": "w9a", "password": "w9a-k8s"});
+    let with = |extra: serde_json::Value| {
+        let mut m = conn.as_object().unwrap().clone();
+        m.extend(extra.as_object().unwrap().clone());
+        serde_json::Value::Object(m)
+    };
+
+    let query = "kestra.io.kestra.plugin.jdbc.postgresql.Query";
+    let store = plugin_task(
+        ws,
+        exec,
+        query,
+        with(serde_json::json!({"sql": "SELECT i, t FROM src ORDER BY i", "fetchType": "STORE"})),
+        vec![],
+    );
+    let out = h
+        .get(query)
+        .expect("served")
+        .run(&store)
+        .await
+        .expect("no worker error");
+    println!(
+        "    STORE: {:?} {:?} {:?} files {:?}",
+        out.state, out.outputs, out.message, out.files
+    );
+    assert_eq!(
+        out.state,
+        egret_workflow::executor::RunState::Success,
+        "{:?}",
+        out.message
+    );
+    let uri = out.outputs.as_ref().unwrap()["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(out.files.len(), 1);
+    assert_eq!(
+        out.files[0].uri, uri,
+        "the URI the plugin returned is the file collected"
+    );
+    h.get(query)
+        .unwrap()
+        .release(&store)
+        .await
+        .expect("released");
+
+    let batch = "kestra.io.kestra.plugin.jdbc.postgresql.Batch";
+    let load = plugin_task(
+        ws,
+        exec,
+        batch,
+        with(serde_json::json!({"from": uri, "sql": "INSERT INTO dst (i, t) VALUES (?, ?)"})),
+        vec![egret_workflow::storage::IndexedFile {
+            uri: uri.clone(),
+            execution_id: exec,
+            task_run_id: Some(store.run_id),
+            size: out.files[0].size,
+        }],
+    );
+    let out = h
+        .get(batch)
+        .expect("served")
+        .run(&load)
+        .await
+        .expect("no worker error");
+    println!(
+        "    BATCH: {:?} {:?} {:?}",
+        out.state, out.outputs, out.message
+    );
+    assert_eq!(
+        out.state,
+        egret_workflow::executor::RunState::Success,
+        "{:?}",
+        out.message
+    );
+    assert_eq!(out.outputs.as_ref().unwrap()["rowCount"], 3);
+    h.get(batch)
+        .unwrap()
+        .release(&load)
+        .await
+        .expect("released");
+    assert_eq!(
+        pg.psql("SELECT string_agg(i || ':' || t, ',' ORDER BY i) FROM dst")
+            .trim(),
+        "20:p,21:q,22:r"
+    );
+}
+
 fn cases() -> Vec<(&'static str, Case)> {
     vec![
         case!(a_shell_command_runs_in_a_pod_and_the_pod_is_deleted),
         case!(input_and_output_files_round_trip),
+        case!(output_files_are_streamed_out_of_the_pod_byte_identical),
+        case!(a_reattached_pod_is_collected_under_the_same_uris),
+        case!(an_unreachable_store_while_collecting_is_a_worker_error),
+        case!(a_stored_input_file_streams_into_the_pod),
+        case!(a_tar_x_that_dies_in_the_pod_fails_the_task),
+        case!(a_short_stored_object_aborts_the_upload_and_fails_the_task),
         case!(a_nonzero_exit_fails_and_keeps_outputs),
         case!(cancel_deletes_the_pod),
         case!(k8s_cancel_with_grace_waits_for_termination_then_release_deletes),
@@ -1429,6 +2350,8 @@ fn cases() -> Vec<(&'static str, Case)> {
         case!(an_exec_the_role_refuses_fails_the_task_naming_the_missing_verb),
         case!(an_unpullable_helper_image_fails_the_task_naming_the_setting),
         case!(a_task_that_fills_its_disk_is_evicted_and_fails_saying_so),
+        case!(the_plugin_host_scratch_and_output_dirs_are_writable_as_run_as_user),
+        case!(a_plugin_stores_and_reads_storage_in_a_pod),
     ]
 }
 

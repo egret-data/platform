@@ -269,6 +269,9 @@ async fn start(conn: &mut PgConnection, c: &Claimed, e: &ScheduledExecution) -> 
             execution_depth: 0,
             flow_trigger_event_id: None,
             born_failed: false,
+            replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
         },
     )
     .await;

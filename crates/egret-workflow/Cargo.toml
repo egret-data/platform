@@ -81,7 +81,17 @@ egret-config.workspace = true
 # `{workspace}`, membership, and the feature-entitlement gate); `egret-auth`
 # for `SessionService`, which `WsContext` authenticates against; `egret-audit`
 # for the mutation trail every other management seam writes to.
-axum.workspace = true
+#
+# W9a Task 7: the `multipart` feature, for FILE inputs uploaded to
+# `POST .../flows/{id}/executions` (`routes::start_flow_execution`). It adds
+# ONE crate to the build, `multer` (axum's multipart parser), and nothing else
+# new: its own dependencies were already in the lock file.
+axum = { workspace = true, features = ["multipart"] }
+# W9a Task 7: `Limited`, the body limit the start route applies per content
+# type -- 2 MiB for JSON (axum's default, unchanged) and `max_file_bytes` plus
+# 1 MiB for multipart. Already in the tree under axum and a direct dependency
+# of a dozen sibling crates, so no new crate.
+http-body-util = "0.1"
 utoipa.workspace = true
 egret-workspace.workspace = true
 egret-auth.workspace = true
@@ -178,6 +188,29 @@ unicode-normalization = "0.1"
 # control characters -- and its `Writer`/`ValueWriter` are `pub(crate)`, so
 # none of that is configurable. `runners::ionfmt` writes the format directly
 # instead; its module doc carries the table.
+#
+# W9a Task 8: the READER of `ion-rs` 1.0.1 is now used (`storage::ion`), for
+# the file API's preview: Kestra's STORE files are BINARY Ion with a version
+# marker per row and no lines, and `ionfmt::read_ion` refuses the timestamps
+# and blobs they hold. Nothing above changes: egret still writes Ion itself.
+# W9a Task 12 fix rounds 3-4: `experimental-reader-writer` makes `SymbolTable`
+# public, and `experimental-tooling-apis` makes `SystemReader` and
+# `SystemStreamItem` public, so `storage::ion` sees EVERY item the reader
+# consumes -- a version marker, a local symbol table, a value -- and charges
+# the symbol table after each one, not only after a value (the elements of a
+# value are counted by the depth scan before the reader sees them, so no
+# lazy walk is needed). Pinned `=1.0.1`, the features' API cannot move.
+# PIN NOTE (fix round 5): `storage::ion` also relies on
+# `SystemReader::pending_context_changes()` returning a type `ion-rs` does
+# NOT export (`pub(crate) struct PendingContextChanges`, reachable only
+# through that `pub fn`) and calls its `local_symbols()` and
+# `imported_symbols()` on it. A later `ion-rs` may hide or rename it: on
+# ANY bump, re-check `lazy/system_reader.rs` and `tests/ion_memory.rs`'s
+# back-to-back symbol-table test before trusting the symbol charge.
+ion-rs = { version = "=1.0.1", features = [
+    "experimental-reader-writer",
+    "experimental-tooling-apis",
+] }
 jaq-core = "3.1"
 jaq-std = "3.0"
 jaq-json = "2.0"
@@ -220,7 +253,12 @@ tracing.workspace = true
 # take from `egret-bin` -- one token cancelled on SIGINT stops every background
 # loop the binary started. Already a workspace dependency (egret-automation and
 # egret-kernel both take it), so this is a direct edge and no new crate.
-tokio-util.workspace = true
+#
+# W9a Task 7: the `io` feature, for `io::StreamReader` -- an uploaded part (a
+# stream of `Bytes`) read as the `AsyncRead` `storage::inputs::upload_input`
+# streams into the store. `egret-provisioner` already turns it on
+# (`crates/egret-provisioner/Cargo.toml`), so no new crate.
+tokio-util = { workspace = true, features = ["io", "io-util"] }
 
 # W5a Task 4: `worker::k8s` is the Kubernetes task runner
 # (`io.kestra.plugin.ee.kubernetes.runner.Kubernetes`). Both crates are the
@@ -232,6 +270,16 @@ tokio-util.workspace = true
 kube.workspace = true
 k8s-openapi.workspace = true
 futures-util.workspace = true
+
+# W9a Task 3: `storage::FileStore` holds the object store an execution's files
+# live in (the `S3Store` `egret-bin` already builds for query results). Was a
+# dev-dependency (the StarRocks live test's `EngineState`); the library now
+# uses it.
+egret-storage.workspace = true
+
+[features]
+# `storage::install_mem_for_tests` and `egret_storage::MemStore`.
+test-util = ["egret-storage/test-util"]
 
 [dev-dependencies]
 # minijinja moved to [dependencies] in W2 Task 3 (`runners::env` builds the
@@ -267,8 +315,13 @@ egret-query.workspace = true
 # path never materialises a result set), the secret stores a `DatabaseRepo`
 # opens a connection's credentials through, and the engine-token minter the
 # delegation branch would resolve through (refused, so the branch being taken is
-# a failure rather than a silent mint).
-egret-storage.workspace = true
+# a failure rather than a silent mint). (`egret-storage` itself moved to
+# [dependencies] in W9a Task 3.)
+#
+# W9a Task 3: this crate's own `test-util` feature (`storage::install_mem_for_tests`,
+# `egret_storage::MemStore`) for its unit and integration tests, the pattern
+# `egret-storage`'s own Cargo.toml uses.
+egret-workflow = { path = ".", features = ["test-util"] }
 egret-secrets.workspace = true
 egret-analytics-api.workspace = true
 # `EGRET_TEST_STARROCKS_URL` is a URL, parsed the same way `egret-dataapi`'s live
@@ -322,4 +375,24 @@ harness = false
 # same hand-rolled main as `container_docker_live`, for the same reason.
 [[test]]
 name = "k8s_runner_live"
+harness = false
+
+# W9a Task 4 fix round 1: `read()` against MinIO (a real S3Store) on one, two
+# and four tokio workers with as many or more concurrent renders, under a
+# watchdog so a wedged runtime FAILS. Gated on EGRET_TEST_S3_ENDPOINT and
+# reported IGNORED (never passed) without it -- the same hand-rolled main.
+[[test]]
+name = "storage_render_s3_live"
+harness = false
+
+# W9a Task 8: a 64 MiB download through the execution file API, from MinIO,
+# gated on EGRET_TEST_S3_ENDPOINT and reported IGNORED without it.
+[[test]]
+name = "storage_files_api_s3_live"
+harness = false
+
+# W9a Task 13: the pruner and the orphan sweep on MinIO, under a throwaway
+# prefix and a fence refusing any delete outside it; IGNORED without the gate.
+[[test]]
+name = "storage_prune_s3_live"
 harness = false

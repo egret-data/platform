@@ -127,9 +127,36 @@ pub const STEP_BOUND: usize = 4 * 765;
 const BATCH: usize = 1;
 
 /// The registry the ratchet judges: the four handlers W3b ships, with `Sleep`
-/// capped — see the module doc, item 3.
-pub fn registry() -> Handlers {
+/// capped — see the module doc, item 3 — and, since W9a Tasks 11 and 12, the
+/// nine core storage tasks over the test `MemStore` (`storage::install_mem_for_tests`,
+/// installed here, so the render snapshot of every `settle` in this process
+/// reads the same store the handlers write). `pool` is the database `run`
+/// drives: `Delete` and `PurgeCurrentExecutionFiles` delete index rows in it.
+/// A caller that only reads the registry's types passes
+/// [`unconnected_pool`].
+pub fn registry(pool: &PgPool) -> Handlers {
+    let files = egret_workflow::storage::install_mem_for_tests();
     let mut r = Handlers::new();
+    r.add(std::sync::Arc::new(
+        egret_workflow::worker::handlers::storage::Write::new(Some(files.clone())),
+    ));
+    r.add(std::sync::Arc::new(
+        egret_workflow::worker::handlers::storage::Size,
+    ));
+    // W9a Task 12: the five whole-file storage tasks, over the same store.
+    {
+        use egret_workflow::worker::handlers::storage as st;
+        r.add(std::sync::Arc::new(st::Concat::new(Some(files.clone()))));
+        r.add(std::sync::Arc::new(st::Split::new(Some(files.clone()))));
+        r.add(std::sync::Arc::new(st::Reverse::new(Some(files.clone()))));
+        r.add(std::sync::Arc::new(st::DeduplicateItems::new(Some(
+            files.clone(),
+        ))));
+        r.add(std::sync::Arc::new(st::FilterItems::new(Some(
+            files.clone(),
+        ))));
+    }
+    egret_workflow::worker::handlers::storage::register(&mut r, pool.clone(), Some(files));
     r.add(std::sync::Arc::new(
         egret_workflow::worker::handlers::log::Log::new(),
     ));
@@ -143,6 +170,14 @@ pub fn registry() -> Handlers {
         egret_workflow::worker::handlers::sleep::Sleep::capped(Duration::ZERO),
     ));
     r
+}
+
+/// A pool that never connects, for a caller of [`registry`] that reads only
+/// its types.
+pub fn unconnected_pool() -> PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+        .expect("a lazy pool parses")
 }
 
 // ---------------------------------------------------------------------------
@@ -706,7 +741,15 @@ const CREATE_REFUSED: usize = 4;
 /// refused the call at run before W5b and still does (the render's
 /// `SECRET_REFUSAL`), so publishing them only postponed the same refusal to
 /// run time. They moved to [`VALIDATE_REFUSED`].
-const LIVE: usize = 245;
+///
+/// # 245 → **247** at W9a Task 11
+///
+/// `valids/loop-values-from-uri` and `valids/loop-outputs-auto`, the corpus's
+/// two `io.kestra.plugin.core.storage.Write` flows: `TASK_TYPES` gained the
+/// four core storage FQCNs W9a Task 11 implements, and `Write` was the only
+/// type either flow lacked. An over-refusal closing, as at W10 Task 6: the
+/// pinned artifact published both. [`UNKNOWN_TYPE_REFUSED`] fell by the same 2.
+const LIVE: usize = 247;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -723,7 +766,7 @@ const LIVE: usize = 245;
 /// sweeping for "16" is looking for. **The figure is gone entirely now** —
 /// there is no numeral in this sentence to go stale.)
 ///
-/// `registry::known_type` is an allow-list of fifteen rows — **five**
+/// `registry::known_type` is an allow-list of twenty-four rows — **five**
 /// `egret.*` types (this sentence said "eight" from W6 until W10 Task 6 fix
 /// round 2, and "seven" until W5a Task 2 turned `egret.container` and
 /// `egret.script.python` into aliases; counted, not quoted, at `TASK_TYPES`),
@@ -733,30 +776,39 @@ const LIVE: usize = 245;
 /// `…core.flow.Sleep`) plus the `core.log` alias, and — **since W5a Task 2**
 /// — the four `io.kestra.plugin.scripts.{shell,python}.{Commands,Script}`
 /// FQCNs with the two `egret.*` aliases. The corpus writes none of the script
-/// types, so the last addition moves no count in this file.
+/// types, so that addition moves no count in this file. **Since W9a Task 11**
+/// it also holds the four `io.kestra.plugin.core.storage.*` FQCNs that task
+/// implements, which DO move two (see [`LIVE`]), and **since W9a Task 12**
+/// the five whole-file ones (`Concat`, `Split`, `Reverse`,
+/// `DeduplicateItems`, `FilterItems`), which the corpus writes in no flow, so
+/// they move no count here.
 ///
-/// **That last clause is what makes [`LIVE`] 248.** This paragraph used to end
+/// **The FQCN rows are what make most of [`LIVE`].** (This sentence said
+/// "makes `LIVE` 248" and "false for 227 of the 248" after `LIVE` had moved
+/// to 247, 245 and 247 again; W9a Task 11 fix round 1 took the figures out,
+/// for the reason the parenthesis above gives.) This paragraph used to end
 /// *"the flows that DO reach a version are exactly the corpus flows whose every
 /// task is control flow, a `core.subflow` or a `core.pause` … so none meets the
 /// allow-list at all"*, which was true when only 21 flows published and is
-/// **false for 227 of the 248 now**: the overwhelming majority of live corpus
+/// **false for every live flow but those now**: the overwhelming majority of live corpus
 /// flows are live precisely *because* their leaves meet the allow-list. The old
 /// sentence survives here only as the description of the **21**, which is the
 /// population it was written for.
 ///
-/// **This is not a hole in the product** *for the 68 that remain*: egret's
+/// **This is not a hole in the product** *for the 66 that remain*: egret's
 /// publish refusing a genuinely unported Kestra plugin —
 /// `core.output.OutputValues`, `core.execution.Labels`, the `io.kestra.core.*`
 /// test-only classes — is exactly the behaviour W1 built the table for.
 ///
-/// **301 through W8 Task 2, 296 through W10 Task 6, 68 now.** The 228 that left
+/// **301 through W8 Task 2, 296 through W10 Task 6, 68 through W9a Task 10,
+/// 66 now** (W9a Task 11: the two `core.storage.Write` flows, see [`LIVE`]). The 228 that left
 /// were NOT unported: `worker::handlers` has implemented all four of their types
 /// since W3b, and only `TASK_TYPES` did not say so. See [`LIVE`] for the
 /// mechanism and for why the figure was hiding behind a table rather than
 /// behind a missing handler; that is the difference between "egret has not
 /// ported this plugin" and "egret refuses a plugin it runs", and only the first
 /// is a statement about the oracle rather than a defect.
-const UNKNOWN_TYPE_REFUSED: usize = 68;
+const UNKNOWN_TYPE_REFUSED: usize = 66;
 
 /// How many corpus flows have a draft row that `publish` refused for a reason
 /// of **egret's own validate** — a real disagreement about the flow, not an

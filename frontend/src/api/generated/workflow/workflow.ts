@@ -30,18 +30,24 @@ import type {
   ErrorBody,
   ExecutionDto,
   ExecutionPageDto,
+  FileMetasDto,
+  FilePreviewDto,
   FlowDto,
   FlowListItemDto,
   FlowVersionDto,
   LogPageDto,
   PublishFlowRequest,
+  StartExecutionMultipart,
   StartExecutionRequest,
   UpdateFlowRequest,
   ValidateFlowRequest,
   ValidationReportDto,
+  WorkflowDownloadExecutionFileParams,
+  WorkflowExecutionFileMetasParams,
   WorkflowGetExecutionLogsParams,
   WorkflowListExecutionsParams,
-  WorkflowListFlowsParams
+  WorkflowListFlowsParams,
+  WorkflowPreviewExecutionFileParams
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -355,6 +361,469 @@ export function useWorkflowGetExecution<TData = Awaited<ReturnType<typeof workfl
 
 
 
+export type workflowDownloadExecutionFileResponse200 = {
+  data: Blob
+  status: 200
+}
+
+export type workflowDownloadExecutionFileResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowDownloadExecutionFileResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowDownloadExecutionFileResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowDownloadExecutionFileResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowDownloadExecutionFileResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowDownloadExecutionFileResponseSuccess = (workflowDownloadExecutionFileResponse200) & {
+  headers: Headers;
+};
+export type workflowDownloadExecutionFileResponseError = (workflowDownloadExecutionFileResponse401 | workflowDownloadExecutionFileResponse403 | workflowDownloadExecutionFileResponse404 | workflowDownloadExecutionFileResponse500 | workflowDownloadExecutionFileResponse503) & {
+  headers: Headers;
+};
+
+export type workflowDownloadExecutionFileResponse = (workflowDownloadExecutionFileResponseSuccess | workflowDownloadExecutionFileResponseError)
+
+export const getWorkflowDownloadExecutionFileUrl = (workspace: string,
+    id: string,
+    params: WorkflowDownloadExecutionFileParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file`
+}
+
+export const workflowDownloadExecutionFile = async (workspace: string,
+    id: string,
+    params: WorkflowDownloadExecutionFileParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowDownloadExecutionFileResponse> => {
+
+  return customInstance<workflowDownloadExecutionFileResponse>(getWorkflowDownloadExecutionFileUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowDownloadExecutionFileQueryKey = (workspace: string,
+    id: string,
+    params?: WorkflowDownloadExecutionFileParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowDownloadExecutionFileQueryOptions = <TData = Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError = ErrorBody>(workspace: string,
+    id: string,
+    params: WorkflowDownloadExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowDownloadExecutionFileQueryKey(workspace,id,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>> = ({ signal }) => workflowDownloadExecutionFile(workspace,id,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowDownloadExecutionFileQueryResult = NonNullable<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>>
+export type WorkflowDownloadExecutionFileQueryError = ErrorBody
+
+
+export function useWorkflowDownloadExecutionFile<TData = Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowDownloadExecutionFileParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowDownloadExecutionFile>>,
+          TError,
+          Awaited<ReturnType<typeof workflowDownloadExecutionFile>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowDownloadExecutionFile<TData = Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowDownloadExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowDownloadExecutionFile>>,
+          TError,
+          Awaited<ReturnType<typeof workflowDownloadExecutionFile>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowDownloadExecutionFile<TData = Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowDownloadExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowDownloadExecutionFile<TData = Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowDownloadExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowDownloadExecutionFileQueryOptions(workspace,id,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowExecutionFileMetasResponse200 = {
+  data: FileMetasDto
+  status: 200
+}
+
+export type workflowExecutionFileMetasResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowExecutionFileMetasResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowExecutionFileMetasResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowExecutionFileMetasResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowExecutionFileMetasResponseSuccess = (workflowExecutionFileMetasResponse200) & {
+  headers: Headers;
+};
+export type workflowExecutionFileMetasResponseError = (workflowExecutionFileMetasResponse401 | workflowExecutionFileMetasResponse403 | workflowExecutionFileMetasResponse404 | workflowExecutionFileMetasResponse500) & {
+  headers: Headers;
+};
+
+export type workflowExecutionFileMetasResponse = (workflowExecutionFileMetasResponseSuccess | workflowExecutionFileMetasResponseError)
+
+export const getWorkflowExecutionFileMetasUrl = (workspace: string,
+    id: string,
+    params: WorkflowExecutionFileMetasParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file/metas?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file/metas`
+}
+
+export const workflowExecutionFileMetas = async (workspace: string,
+    id: string,
+    params: WorkflowExecutionFileMetasParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowExecutionFileMetasResponse> => {
+
+  return customInstance<workflowExecutionFileMetasResponse>(getWorkflowExecutionFileMetasUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowExecutionFileMetasQueryKey = (workspace: string,
+    id: string,
+    params?: WorkflowExecutionFileMetasParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file/metas`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowExecutionFileMetasQueryOptions = <TData = Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError = ErrorBody>(workspace: string,
+    id: string,
+    params: WorkflowExecutionFileMetasParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowExecutionFileMetasQueryKey(workspace,id,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowExecutionFileMetas>>> = ({ signal }) => workflowExecutionFileMetas(workspace,id,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowExecutionFileMetasQueryResult = NonNullable<Awaited<ReturnType<typeof workflowExecutionFileMetas>>>
+export type WorkflowExecutionFileMetasQueryError = ErrorBody
+
+
+export function useWorkflowExecutionFileMetas<TData = Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowExecutionFileMetasParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowExecutionFileMetas>>,
+          TError,
+          Awaited<ReturnType<typeof workflowExecutionFileMetas>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowExecutionFileMetas<TData = Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowExecutionFileMetasParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowExecutionFileMetas>>,
+          TError,
+          Awaited<ReturnType<typeof workflowExecutionFileMetas>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowExecutionFileMetas<TData = Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowExecutionFileMetasParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowExecutionFileMetas<TData = Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowExecutionFileMetasParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowExecutionFileMetasQueryOptions(workspace,id,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowPreviewExecutionFileResponse200 = {
+  data: FilePreviewDto
+  status: 200
+}
+
+export type workflowPreviewExecutionFileResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowPreviewExecutionFileResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowPreviewExecutionFileResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowPreviewExecutionFileResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowPreviewExecutionFileResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowPreviewExecutionFileResponseSuccess = (workflowPreviewExecutionFileResponse200) & {
+  headers: Headers;
+};
+export type workflowPreviewExecutionFileResponseError = (workflowPreviewExecutionFileResponse401 | workflowPreviewExecutionFileResponse403 | workflowPreviewExecutionFileResponse404 | workflowPreviewExecutionFileResponse500 | workflowPreviewExecutionFileResponse503) & {
+  headers: Headers;
+};
+
+export type workflowPreviewExecutionFileResponse = (workflowPreviewExecutionFileResponseSuccess | workflowPreviewExecutionFileResponseError)
+
+export const getWorkflowPreviewExecutionFileUrl = (workspace: string,
+    id: string,
+    params: WorkflowPreviewExecutionFileParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file/preview?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file/preview`
+}
+
+export const workflowPreviewExecutionFile = async (workspace: string,
+    id: string,
+    params: WorkflowPreviewExecutionFileParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowPreviewExecutionFileResponse> => {
+
+  return customInstance<workflowPreviewExecutionFileResponse>(getWorkflowPreviewExecutionFileUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowPreviewExecutionFileQueryKey = (workspace: string,
+    id: string,
+    params?: WorkflowPreviewExecutionFileParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file/preview`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowPreviewExecutionFileQueryOptions = <TData = Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError = ErrorBody>(workspace: string,
+    id: string,
+    params: WorkflowPreviewExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowPreviewExecutionFileQueryKey(workspace,id,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>> = ({ signal }) => workflowPreviewExecutionFile(workspace,id,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowPreviewExecutionFileQueryResult = NonNullable<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>>
+export type WorkflowPreviewExecutionFileQueryError = ErrorBody
+
+
+export function useWorkflowPreviewExecutionFile<TData = Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowPreviewExecutionFileParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowPreviewExecutionFile>>,
+          TError,
+          Awaited<ReturnType<typeof workflowPreviewExecutionFile>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowPreviewExecutionFile<TData = Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowPreviewExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowPreviewExecutionFile>>,
+          TError,
+          Awaited<ReturnType<typeof workflowPreviewExecutionFile>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowPreviewExecutionFile<TData = Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowPreviewExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowPreviewExecutionFile<TData = Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowPreviewExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowPreviewExecutionFileQueryOptions(workspace,id,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 export type workflowGetExecutionLogsResponse200 = {
   data: LogPageDto
   status: 200
@@ -608,7 +1077,7 @@ export const getWorkflowReplayExecutionUrl = (workspace: string,
  * trace."* Starting from the draft is what `POST .../flows/{id}/executions`
  * is for, and the two routes exist to be different.
  *
- * # Why the replacement names no parent, which is NOT a choice
+ * # The link is `replayed_from_execution_id`, not a parent
  *
  * `replay::spawn_due` links its replacement with `parent_execution_id` set and
  * `parent_run_ix` NULL. That slot is **one per execution and already spoken
@@ -619,19 +1088,25 @@ export const getWorkflowReplayExecutionUrl = (workspace: string,
  * replay that took the slot would make a later retry-replay of the same
  * execution fail a unique constraint, and a second manual replay fail one too.
  *
- * `start_execution` has no parent parameter and this task does not add one, so
- * the replacement is unlinked: **the relationship between a manual replay and
- * what it replays is in the audit trail and nowhere in the data.** Stated
- * rather than discovered. What it would take is a link that is not that index's
- * — a nullable `replayed_from` column of its own — which is a migration and a
- * schema decision, not a route.
+ * So the replacement has no parent, and the link has a column of its own:
+ * `replayed_from_execution_id` (migration 0166, W9a spec §4.4 item 3), written
+ * here through `start_execution_in` in one transaction with the row. It is
+ * what lets a replay read its source's files (a replay copies its source's
+ * inputs verbatim, and those may be `kestra://` URIs of the source). The audit
+ * record still carries both ids.
+ *
+ * # Not a loop iteration
+ *
+ * An iteration (`parent_execution_id` with a `loop_index`) is refused (400)
+ * naming its loop root: it is a part of the root's run, `replay::spawn_due`
+ * never replays one, and a replay of it would be a top-level run of the
+ * loop's body alone.
  *
  * # Terminal only
  *
- * A non-terminal execution is refused (409) rather than replayed. With no link
- * column there is nothing to tell an operator that two RUNNING executions of
- * one flow are a replay and its original, and the narrow door cannot
- * over-accept. `RunState::is_terminal` is the predicate — read through
+ * A non-terminal execution is refused (409) rather than replayed: two RUNNING
+ * executions of one flow, a replay and its original, would be in flight at
+ * once, and the narrow door cannot over-accept. `RunState::is_terminal` is the predicate — read through
  * `worker::from_wire`, which is derived from `RunState::ALL`, so a state added
  * to the enum is classified here without anyone remembering to come back.
  * @summary Run a finished execution again.
@@ -1450,15 +1925,30 @@ export type workflowStartFlowExecutionResponse409 = {
   status: 409
 }
 
+export type workflowStartFlowExecutionResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowStartFlowExecutionResponse415 = {
+  data: ErrorBody
+  status: 415
+}
+
 export type workflowStartFlowExecutionResponse500 = {
   data: ErrorBody
   status: 500
 }
 
+export type workflowStartFlowExecutionResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
 export type workflowStartFlowExecutionResponseSuccess = (workflowStartFlowExecutionResponse201) & {
   headers: Headers;
 };
-export type workflowStartFlowExecutionResponseError = (workflowStartFlowExecutionResponse400 | workflowStartFlowExecutionResponse401 | workflowStartFlowExecutionResponse403 | workflowStartFlowExecutionResponse404 | workflowStartFlowExecutionResponse409 | workflowStartFlowExecutionResponse500) & {
+export type workflowStartFlowExecutionResponseError = (workflowStartFlowExecutionResponse400 | workflowStartFlowExecutionResponse401 | workflowStartFlowExecutionResponse403 | workflowStartFlowExecutionResponse404 | workflowStartFlowExecutionResponse409 | workflowStartFlowExecutionResponse413 | workflowStartFlowExecutionResponse415 | workflowStartFlowExecutionResponse500 | workflowStartFlowExecutionResponse503) & {
   headers: Headers;
 };
 
@@ -1475,14 +1965,14 @@ export const getWorkflowStartFlowExecutionUrl = (workspace: string,
 
 export const workflowStartFlowExecution = async (workspace: string,
     id: string,
-    startExecutionRequest: StartExecutionRequest, options?: Parameters<typeof customInstance>[1]): Promise<workflowStartFlowExecutionResponse> => {
+    workflowStartFlowExecutionBody: StartExecutionRequest | StartExecutionMultipart, options?: Parameters<typeof customInstance>[1]): Promise<workflowStartFlowExecutionResponse> => {
 
   return customInstance<workflowStartFlowExecutionResponse>(getWorkflowStartFlowExecutionUrl(workspace,id),
   {
     ...options,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    body: JSON.stringify(startExecutionRequest)
+    method: 'POST'
+    ,
+    body: JSON.stringify(workflowStartFlowExecutionBody)
   }
 );}
 
@@ -1491,8 +1981,8 @@ export const workflowStartFlowExecution = async (workspace: string,
 
 
 export const getWorkflowStartFlowExecutionMutationOptions = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext> => {
 
 const mutationKey = ['workflowStartFlowExecution'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
@@ -1504,7 +1994,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowStartFlowExecution>>, {workspace: string;id: string;data: StartExecutionRequest}> = (props) => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowStartFlowExecution>>, {workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}> = (props) => {
           const {workspace,id,data} = props ?? {};
 
           return  workflowStartFlowExecution(workspace,id,data,requestOptions)
@@ -1518,15 +2008,15 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
   return  { mutationFn, ...mutationOptions }}
 
     export type WorkflowStartFlowExecutionMutationResult = NonNullable<Awaited<ReturnType<typeof workflowStartFlowExecution>>>
-    export type WorkflowStartFlowExecutionMutationBody = StartExecutionRequest
+    export type WorkflowStartFlowExecutionMutationBody = StartExecutionRequest | StartExecutionMultipart
     export type WorkflowStartFlowExecutionMutationError = ErrorBody
 
     export const useWorkflowStartFlowExecution = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof workflowStartFlowExecution>>,
         TError,
-        {workspace: string;id: string;data: StartExecutionRequest},
+        {workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart},
         TContext
       > => {
       return useMutation(getWorkflowStartFlowExecutionMutationOptions(options), queryClient);

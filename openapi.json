@@ -26955,6 +26955,336 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/executions/{id}/file": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "download_execution_file",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id: any id of the file's loop family (its loop root or any iteration under it)",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "The file's `kestra:///…` URI, as the execution's outputs or inputs name it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file's bytes, streamed. `Content-Type: application/octet-stream`, `Content-Disposition: attachment` with the file's name (sanitised, and percent-encoded in `filename*`), `X-Content-Type-Options: nosniff`.",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace, or `path` is not a file of its loop family: malformed, another execution's (a trigger's or a replay source's too -- ask that execution by its own id), never stored, or its contents are gone. **One answer for all of them**, and never a redirect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Internal storage is unavailable or not configured; the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/executions/{id}/file/metas": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "execution_file_metas",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id: any id of the file's loop family",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "The file's `kestra:///…` URI, as the execution's outputs or inputs name it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file's size, from the index (the store is not asked).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileMetasDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace, or `path` is not a file of its loop family (one answer, never a redirect).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/executions/{id}/file/preview": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "preview_execution_file",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id: any id of the file's loop family",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "The file's `kestra:///…` URI, as the execution's outputs or inputs name it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "maxRows",
+            "in": "query",
+            "description": "At most this many rows (default 100; anything above 5000 is 5000, below 1 is 1).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Up to `maxRows` rows (default 100, at most 5000), read from the start of the file and never more than `workflow.storage.max_read_bytes` of it. A `.ion` file (text or binary Ion) gives one JSON value per top-level value; any other file whose bytes read are UTF-8 text gives one string per line; anything else, or Ion that does not parse, is `previewable: false` with no rows.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FilePreviewDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace, or `path` is not a file of its loop family, or its contents are gone (one answer, never a redirect).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Internal storage is unavailable or not configured; the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/executions/{id}/logs": {
       "get": {
         "tags": [
@@ -27129,7 +27459,7 @@
           "workflow"
         ],
         "summary": "Run a finished execution again.",
-        "description": "# It is a start, deliberately, and from the FROZEN source\n\n`worker::start_execution` with `workflow.executions.source` and\n`workflow.executions.inputs` — the row's own copies, not a re-read of the\ndraft. `worker::replay::spawn_due` takes the same decision for the\n`CREATE_NEW_EXECUTION` replacement and states the reason: *\"a replay that\npicked up an edit made since would be a different flow with the same\ntrace.\"* Starting from the draft is what `POST .../flows/{id}/executions`\nis for, and the two routes exist to be different.\n\n# Why the replacement names no parent, which is NOT a choice\n\n`replay::spawn_due` links its replacement with `parent_execution_id` set and\n`parent_run_ix` NULL. That slot is **one per execution and already spoken\nfor**: migration 0138's `workflow_executions_loop_run_idx` is\n`UNIQUE (parent_execution_id, parent_run_ix, loop_index) NULLS NOT DISTINCT\nWHERE parent_execution_id IS NOT NULL`, so `(X, NULL, NULL)` can exist once,\nand `spawn_due` reads exactly that to answer \"it already exists\". A manual\nreplay that took the slot would make a later retry-replay of the same\nexecution fail a unique constraint, and a second manual replay fail one too.\n\n`start_execution` has no parent parameter and this task does not add one, so\nthe replacement is unlinked: **the relationship between a manual replay and\nwhat it replays is in the audit trail and nowhere in the data.** Stated\nrather than discovered. What it would take is a link that is not that index's\n— a nullable `replayed_from` column of its own — which is a migration and a\nschema decision, not a route.\n\n# Terminal only\n\nA non-terminal execution is refused (409) rather than replayed. With no link\ncolumn there is nothing to tell an operator that two RUNNING executions of\none flow are a replay and its original, and the narrow door cannot\nover-accept. `RunState::is_terminal` is the predicate — read through\n`worker::from_wire`, which is derived from `RunState::ALL`, so a state added\nto the enum is classified here without anyone remembering to come back.",
+        "description": "# It is a start, deliberately, and from the FROZEN source\n\n`worker::start_execution` with `workflow.executions.source` and\n`workflow.executions.inputs` — the row's own copies, not a re-read of the\ndraft. `worker::replay::spawn_due` takes the same decision for the\n`CREATE_NEW_EXECUTION` replacement and states the reason: *\"a replay that\npicked up an edit made since would be a different flow with the same\ntrace.\"* Starting from the draft is what `POST .../flows/{id}/executions`\nis for, and the two routes exist to be different.\n\n# The link is `replayed_from_execution_id`, not a parent\n\n`replay::spawn_due` links its replacement with `parent_execution_id` set and\n`parent_run_ix` NULL. That slot is **one per execution and already spoken\nfor**: migration 0138's `workflow_executions_loop_run_idx` is\n`UNIQUE (parent_execution_id, parent_run_ix, loop_index) NULLS NOT DISTINCT\nWHERE parent_execution_id IS NOT NULL`, so `(X, NULL, NULL)` can exist once,\nand `spawn_due` reads exactly that to answer \"it already exists\". A manual\nreplay that took the slot would make a later retry-replay of the same\nexecution fail a unique constraint, and a second manual replay fail one too.\n\nSo the replacement has no parent, and the link has a column of its own:\n`replayed_from_execution_id` (migration 0166, W9a spec §4.4 item 3), written\nhere through `start_execution_in` in one transaction with the row. It is\nwhat lets a replay read its source's files (a replay copies its source's\ninputs verbatim, and those may be `kestra://` URIs of the source). The audit\nrecord still carries both ids.\n\n# Not a loop iteration\n\nAn iteration (`parent_execution_id` with a `loop_index`) is refused (400)\nnaming its loop root: it is a part of the root's run, `replay::spawn_due`\nnever replays one, and a replay of it would be a top-level run of the\nloop's body alone.\n\n# Terminal only\n\nA non-terminal execution is refused (409) rather than replayed: two RUNNING\nexecutions of one flow, a replay and its original, would be in flight at\nonce, and the narrow door cannot over-accept. `RunState::is_terminal` is the predicate — read through\n`worker::from_wire`, which is derived from `RunState::ALL`, so a state added\nto the enum is classified here without anyone remembering to come back.",
         "operationId": "replay_execution",
         "parameters": [
           {
@@ -27172,7 +27502,7 @@
             }
           },
           "400": {
-            "description": "The **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans",
+            "description": "The execution is a **loop iteration** (replay its loop root instead); or the **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans",
             "content": {
               "application/json": {
                 "schema": {
@@ -27212,7 +27542,7 @@
             }
           },
           "409": {
-            "description": "The execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`). A replay of something still running would put two copies of one flow in flight with nothing recording that they are related — see the handler's doc for why no link column is available.",
+            "description": "The execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`). A replay of something still running would put two copies of one flow in flight at once.",
             "content": {
               "application/json": {
                 "schema": {
@@ -27845,10 +28175,16 @@
           }
         ],
         "requestBody": {
+          "description": "The flow's `inputs`. **JSON** (`StartExecutionRequest`, at most 2 MiB): a `FILE` input's value must be a `kestra://` URI readable from the execution being created -- in practice one a `Subflow`, a `Flow` trigger or a replay passes on; any other string is refused naming the input. **`multipart/form-data`** (`StartExecutionMultipart`; one start carries at most `workflow.storage.max_file_bytes` + 1 MiB in total, and each part's headers at most 64 KiB): each part is named by an input id; a part with a file name is that `FILE` input's file (its `allowedFileExtensions` enforced, at most `max_file_bytes`), stored as `inputs/{input}/{file name}` of the new execution; any other part is a text value (at most 1 MiB). **A multipart caller must build the body itself** as a `FormData` (one entry per input id, a `File`/`Blob` for each `FILE` input) and send it with the browser's own `multipart/form-data; boundary=…` header: the generated client serialises this operation's `data` with `JSON.stringify` and sets no `Content-Type`, which reaches the JSON branch.",
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/StartExecutionRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/StartExecutionMultipart"
               }
             }
           },
@@ -27856,7 +28192,7 @@
         },
         "responses": {
           "201": {
-            "description": "The execution was created and driven as far as it goes without a worker; the body is its detail, read back after the start committed",
+            "description": "The execution was created and driven as far as it goes without a worker; the body is its detail, read back after the start committed. Its uploaded files and its row were committed in one transaction.",
             "content": {
               "application/json": {
                 "schema": {
@@ -27866,7 +28202,7 @@
             }
           },
           "400": {
-            "description": "`inputs` is not a JSON object, or the flow's stored source does not parse or plan",
+            "description": "`inputs` is not a JSON object; the flow's stored source does not parse or plan; a `FILE` input's value is not a readable `kestra://` URI or its extension is not allowed; a multipart part names no declared input, names one twice, carries a file for a non-`FILE` input, or has a file name no storage URI can hold; or egret has no internal storage (`[storage]`) for an upload. The message names the input.",
             "content": {
               "application/json": {
                 "schema": {
@@ -27915,8 +28251,38 @@
               }
             }
           },
+          "413": {
+            "description": "An uploaded file is over `workflow.storage.max_file_bytes` (the message names the input and the cap), a text part is over 1 MiB, or the JSON body is over 2 MiB. Nothing is created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "A `Content-Type` that is neither `application/json` nor `multipart/form-data`. A request with no `Content-Type` is read as JSON (an empty body is `{}`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Internal storage failed while an uploaded file was being stored. Nothing is created; the request can be retried.",
             "content": {
               "application/json": {
                 "schema": {
@@ -34459,6 +34825,43 @@
           }
         }
       },
+      "FileMetasDto": {
+        "type": "object",
+        "required": [
+          "size"
+        ],
+        "properties": {
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The file's size in bytes, as indexed when it was stored.",
+            "minimum": 0
+          }
+        }
+      },
+      "FilePreviewDto": {
+        "type": "object",
+        "required": [
+          "previewable",
+          "rows",
+          "truncated"
+        ],
+        "properties": {
+          "previewable": {
+            "type": "boolean",
+            "description": "`false` (with no rows) for a file that is neither Ion nor UTF-8 text,\nIon that does not parse, or Ion nested deeper than 100 levels."
+          },
+          "rows": {
+            "type": "array",
+            "items": {},
+            "description": "`.ion`: one JSON value per top-level Ion value (a struct's null fields\nomitted, a timestamp as its Ion text, a decimal as a number). Anything\nelse: one string per line."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "More rows follow than `maxRows`, or the preview's byte budget\n(`workflow.storage.max_read_bytes`) ended the read."
+          }
+        }
+      },
       "Filter": {
         "type": "object",
         "required": [
@@ -38968,6 +39371,14 @@
           }
         }
       },
+      "StartExecutionMultipart": {
+        "type": "object",
+        "description": "`POST .../flows/{id}/executions` as `multipart/form-data`. **Each part is named by an input id.** A part with a file name is that `FILE` input's file: it is streamed to `kestra:///{namespace}/{flow}/executions/{execution}/inputs/{input}/{file name}` and the input's value is that URI. Any other part is a text value. A part naming no declared input, or one named twice, is refused naming it. One start carries at most `workflow.storage.max_file_bytes` + 1 MiB in total.",
+        "additionalProperties": {
+          "type": "string",
+          "format": "binary"
+        }
+      },
       "StartExecutionRequest": {
         "type": "object",
         "description": "`POST .../flows/{id}/executions`'s body. Optional in whole: a flow with no\n`inputs:` is started with `{}` and a caller should not have to send a body\nto say so.",
@@ -39524,7 +39935,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "The run's rendered expression (an `If`'s condition, a `Switch`'s\nvalue, a `Loop`'s `values:`, ...), `NULL` until it is rendered. For a\n`Loop` whose `values:` named a file it is `\"<kestra:/// URI>\\n<count>\"`\n-- the file and how many records it holds -- and **never the records**\n(W9a Task 11 fix round 1): they are the file's, read through the\nexecution file API, and stay out of every task-run response."
           },
           "rendered_run_if": {
             "type": [

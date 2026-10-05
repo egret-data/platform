@@ -401,11 +401,26 @@ def refresh_kinds():
 
 # The four handlers this package writes.  `core.flow.Sleep` is here because it
 # is a `RunnableTask` (Sleep.java:47), not because of its package.
+#
+# **And, since W9a Task 11, the four core storage tasks** (`worker::handlers::
+# storage`), which the ratchet's own registry (`driver::registry`) runs, and
+# since W9a Task 12 the five whole-file ones. The
+# name is kept for the reason given for `W3A_FLOWABLES` below; what it means
+# is "the handlers the oracle's driver runs".
 W3B_HANDLERS = {
     "io.kestra.plugin.core.log.Log",
     "io.kestra.plugin.core.debug.Return",
     "io.kestra.plugin.core.execution.Fail",
     "io.kestra.plugin.core.flow.Sleep",
+    "io.kestra.plugin.core.storage.Write",
+    "io.kestra.plugin.core.storage.Size",
+    "io.kestra.plugin.core.storage.Delete",
+    "io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles",
+    "io.kestra.plugin.core.storage.Concat",
+    "io.kestra.plugin.core.storage.Split",
+    "io.kestra.plugin.core.storage.Reverse",
+    "io.kestra.plugin.core.storage.DeduplicateItems",
+    "io.kestra.plugin.core.storage.FilterItems",
 }
 
 # The flowables `advance()` already drives and decides for (W3a Tasks 3-6).
@@ -609,6 +624,7 @@ def declared_blockers(entry, flows, kinds):
         out.add(("construct", "allowFailure:"))
     pause_gaps(doc, out)
     loop_until_gaps(doc, raw, out)
+    loop_store_output_gaps(doc, out)
     return out
 
 
@@ -661,6 +677,37 @@ def loop_until_gaps(node, raw, out):
                     out.add(("clock", "checkFrequency.maxDuration; the golden's "
                                       "iteration count carries the artifact's "
                                       "delay-poller latency"))
+            for v in n.values():
+                walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                walk(v)
+
+    walk(node)
+    return out
+
+
+LOOP_TYPES = {"io.kestra.plugin.core.flow.Loop", "core.loop"}
+# A `values:` read from a FILE: the rendered text of an `outputs.<task>.uri`.
+URI_VALUES = re.compile(r"\.uri\b")
+
+
+def loop_store_output_gaps(node, out):
+    """A `Loop` over a FILE that declares its own `outputs:` (W9a Task 11).
+
+    Kestra's `fetchType` AUTO is STORE for values read from a URI, and STORE
+    writes one Ion file per iteration at `executions/{iteration}/{n}.ion`;
+    egret does not produce them (out of W9a by the user's ruling of
+    2026-10-03, spec SS15).  W9a Task 11 made such a `values:` resolve, so
+    this, not the render surface, is what blocks `valids/loop-outputs-auto`.
+    """
+    def walk(n):
+        if isinstance(n, dict):
+            values = n.get("values")
+            if (n.get("type") in LOOP_TYPES and n.get("outputs")
+                    and isinstance(values, str) and URI_VALUES.search(values)):
+                out.add(("construct", "Loop outputs: over a file (STORE mode, "
+                                      "executions/{iteration}/{n}.ion)"))
             for v in n.values():
                 walk(v)
         elif isinstance(n, list):
@@ -871,9 +918,10 @@ def check_inputs(flows, kinds, golden, baseline):
     # and `valids/pause-timeout-allow-failure`; 109 since W8 Task 6 banked the
     # two `sla:` entries whose `EXECUTION_ASSERTION` cancels the execution,
     # `valids/flow-concurrency-sla-assert-cancel` and
-    # `valids/sla-execution-condition`.
-    if len(baseline) != 109:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 109; the split "
+    # `valids/sla-execution-condition`; 108 since W9a Task 11 banked
+    # `valids/loop-values-from-uri` (a `Loop` over an ION file).
+    if len(baseline) != 108:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 108; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1257,12 +1305,13 @@ def render(d, checkout):
     w("")
     w(f"    {len(d['foreign_only']):5}  read another task's result (`outputs.` or `tasksWithState()`)")
     w("")
-    w("  This is what W3c's `runIf:` fix banks nothing against and what")
-    w("  `loop-outputs-auto` cannot resolve its `values:` for: W3a's harness")
+    w("  This is what W3c's `runIf:` fix banks nothing against: W3a's harness")
     w("  render context reaches `inputs` and `vars` and stops. The real driver")
     w("  has outputs, so these entries become live -- and spec SS4.4 is right that")
     w("  every one of them must be attributed to the render surface rather than")
-    w("  to durability.")
+    w("  to durability. (`loop-outputs-auto` was named here until W9a Task 11:")
+    w("  its `values:` resolves now, and what blocks it is the Loop's STORE")
+    w("  `outputs:`, which W9a leaves out -- section 3's construct list.)")
     w("")
 
     # ---- 4. the handler shapes --------------------------------------------
@@ -1507,8 +1556,8 @@ def self_test():
          "not 266",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 109",
-         "not 109",
+    case("baseline.txt is no longer 108",
+         "not 108",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a
