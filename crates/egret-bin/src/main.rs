@@ -1594,6 +1594,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     {
         anyhow::bail!("the workflow file store was installed twice");
     }
+    // W9b: namespace-file lookups at render time (`fileURI`, `read` of a
+    // namespace file) run on their own connection, made from this pool's
+    // options, for the reason above: a render's entry points hold no pool.
+    if egret_workflow::storage::nsfiles::install_db((*db.pool.connect_options()).clone()).is_err() {
+        anyhow::bail!("the namespace file database options were installed twice");
+    }
 
     let bi = Some(egret_bi::BiState {
         db: db.clone(),

@@ -826,6 +826,11 @@ pub struct WorkflowStorageConfig {
     /// The most bytes `read()` returns into a render. Default 10 MiB.
     #[serde(default = "default_max_read_bytes")]
     pub max_read_bytes: u64,
+    /// W9b: the most namespace files one listing, search or namespace-file
+    /// operation may see; crossing it fails naming the cap (W9b spec §7).
+    /// Default 10 000. `EGRET_WORKFLOW__STORAGE__MAX_NAMESPACE_FILES`.
+    #[serde(default = "default_max_namespace_files")]
+    pub max_namespace_files: u64,
 }
 
 impl WorkflowStorageConfig {
@@ -846,6 +851,7 @@ impl WorkflowStorageConfig {
             ("max_file_bytes", self.max_file_bytes),
             ("max_task_bytes", self.max_task_bytes),
             ("max_read_bytes", self.max_read_bytes),
+            ("max_namespace_files", self.max_namespace_files),
         ] {
             if value == 0 {
                 return Err(format!("workflow.storage.{key} must be at least 1"));
@@ -862,6 +868,7 @@ impl Default for WorkflowStorageConfig {
             max_file_bytes: default_max_file_bytes(),
             max_task_bytes: default_max_task_bytes(),
             max_read_bytes: default_max_read_bytes(),
+            max_namespace_files: default_max_namespace_files(),
         }
     }
 }
@@ -925,6 +932,11 @@ impl AppsStorageConfig {
         }
         Ok(())
     }
+}
+
+/// 10 000 -- see [`WorkflowStorageConfig::max_namespace_files`].
+fn default_max_namespace_files() -> u64 {
+    10_000
 }
 
 /// `30` -- see [`WorkflowConfig::storage_retention_days`].
@@ -1978,6 +1990,7 @@ values = { allowed-images = [] }
                 max_file_bytes: 1_073_741_824,
                 max_task_bytes: 5_368_709_120,
                 max_read_bytes: 10_485_760,
+                max_namespace_files: 10_000,
             };
             assert_eq!(cfg.workflow.storage, want);
             assert_eq!(cfg.workflow.storage_retention_days, 30);
@@ -1990,6 +2003,7 @@ values = { allowed-images = [] }
             jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_FILE_BYTES", "11");
             jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_TASK_BYTES", "22");
             jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_READ_BYTES", "33");
+            jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_NAMESPACE_FILES", "44");
             jail.set_env("EGRET_WORKFLOW__STORAGE_RETENTION_DAYS", "0");
             let cfg: Config = Config::figment().extract()?;
             assert_eq!(
@@ -1999,6 +2013,7 @@ values = { allowed-images = [] }
                     max_file_bytes: 11,
                     max_task_bytes: 22,
                     max_read_bytes: 33,
+                    max_namespace_files: 44,
                 }
             );
             assert_eq!(cfg.workflow.storage_retention_days, 0);
@@ -2036,6 +2051,12 @@ values = { allowed-images = [] }
         let err = check(&|s| s.max_read_bytes = 0).unwrap_err();
         assert!(err.contains("workflow.storage.max_read_bytes"), "{err}");
         assert_eq!(check(&|s| s.max_read_bytes = 1), Ok(()));
+        let err = check(&|s| s.max_namespace_files = 0).unwrap_err();
+        assert!(
+            err.contains("workflow.storage.max_namespace_files"),
+            "{err}"
+        );
+        assert_eq!(check(&|s| s.max_namespace_files = 1), Ok(()));
     }
 
     /// W9a spec §15: a container runner needs `[storage]` at boot; `none`

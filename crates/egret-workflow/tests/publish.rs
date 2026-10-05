@@ -409,3 +409,42 @@ async fn a_trigger_dependency_naming_a_nonexistent_flow_fails_the_same_way() {
         .expect_err("must fail");
     assert!(matches!(err, egret_core::Error::NotFound(_)), "{err:?}");
 }
+
+/// W9b: the save-time refusal of a namespace with a `_files` segment, through
+/// publish (its unit twin is `spec::validate`'s
+/// `publish_refuses_a_files_segment_namespace_by_name`; the run-time twin is
+/// `nsfiles::access`'s `a_files_segment_namespace_is_refused_for_every_access_and_actor`).
+#[tokio::test]
+async fn publish_refuses_a_files_segment_namespace_by_name() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let bad = common::draft(
+        &repo,
+        ws,
+        user,
+        "id: f\nnamespace: a._files.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n",
+    )
+    .await;
+    let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, bad.id, "")
+        .await
+        .expect_err("a `_files` namespace segment must not publish");
+    match err {
+        egret_core::Error::InvalidInput(m) => assert!(
+            m.contains("'a._files.b'") && m.contains("'_files'") && m.contains("(namespace)"),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    // The control: the same flow one character away publishes.
+    let good = common::draft(
+        &repo,
+        ws,
+        user,
+        "id: g\nnamespace: a.files.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n",
+    )
+    .await;
+    egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
+        .await
+        .expect("a.files.b publishes");
+}

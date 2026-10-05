@@ -101,3 +101,19 @@ pub(crate) const FILE_SCOPE: &str = "egret file scope";
 pub(crate) struct FileScopeObject(pub(crate) FileScope);
 
 impl minijinja::value::Object for FileScopeObject {}
+
+/// W9b: the path segment that marks a namespace file in a `kestra:///` URI
+/// and in an object key (`kestra:///{ns-as-path}/_files/{path}`, W9b spec
+/// §3). One definition: `storage::uri` re-exports it.
+pub const NAMESPACE_FILES_SEGMENT: &str = "_files";
+
+/// The index of the FIRST segment equal to [`NAMESPACE_FILES_SEGMENT`] at
+/// index 1 or later -- the namespace-file marker (W9b spec §3). Index 0 is
+/// never the marker: a namespace file needs a namespace before it.
+pub fn namespace_marker(segments: &[&str]) -> Option<usize> {
+    segments
+        .iter()
+        .skip(1)
+        .position(|s| *s == NAMESPACE_FILES_SEGMENT)
+        .map(|i| i + 1)
+}

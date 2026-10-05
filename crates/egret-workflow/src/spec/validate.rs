@@ -621,7 +621,9 @@ fn validate_plugin_tasks(flow: &Flow, report: &mut ValidationReport) {
 
 /// `namespace` against Kestra's own pattern (`AbstractFlow.java`):
 /// `^[a-z0-9][a-z0-9._-]*`, `@Size(min = 1, max = 150)`. A hand-written
-/// character check, not a `regex` dependency for one pattern.
+/// character check, not a `regex` dependency for one pattern. W9b: then no
+/// `_files` segment (`nsfiles::access::check_namespace`), a second finding
+/// only when the pattern passes, so no message is doubled.
 fn validate_namespace(flow: &Flow, report: &mut ValidationReport) {
     if !is_valid_namespace(&flow.namespace) {
         report.errors.push(Finding {
@@ -630,6 +632,15 @@ fn validate_namespace(flow: &Flow, report: &mut ValidationReport) {
                 "namespace '{}' must match ^[a-z0-9][a-z0-9._-]* and be 1-150 characters long",
                 flow.namespace
             ),
+            path: "namespace".to_string(),
+        });
+    } else if let Err(message) = crate::storage::nsfiles::access::check_namespace(&flow.namespace) {
+        // W9b: a `_files` segment would put this namespace's execution files
+        // under another namespace's files (W9b spec §3). The same function
+        // refuses it at run time (`nsfiles::access::authorize`).
+        report.errors.push(Finding {
+            code: "namespace_files_segment",
+            message,
             path: "namespace".to_string(),
         });
     }
@@ -2270,6 +2281,47 @@ mod tests {
             r.errors.iter().any(|e| e.code == "duplicate_task_id"),
             "{r:?}"
         );
+    }
+
+    /// W9b: the save-time refusal of a `_files` namespace segment; its
+    /// run-time twin is `nsfiles::access`'s
+    /// `a_files_segment_namespace_is_refused_for_every_access_and_actor`.
+    #[test]
+    fn publish_refuses_a_files_segment_namespace_by_name() {
+        for ns in ["a._files", "a._files.b", "_x._files"] {
+            let f = parse(&format!(
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            let found: Vec<_> = validate(&f)
+                .errors
+                .into_iter()
+                .filter(|e| e.path == "namespace")
+                .collect();
+            if ns.starts_with('_') {
+                // Refused by the pattern; named once.
+                assert_eq!(found.len(), 1, "{found:?}");
+                assert_eq!(found[0].code, "invalid_namespace");
+                continue;
+            }
+            assert_eq!(found.len(), 1, "{ns}: {found:?}");
+            assert_eq!(found[0].code, "namespace_files_segment");
+            assert!(
+                found[0].message.contains(ns) && found[0].message.contains("'_files'"),
+                "{found:?}"
+            );
+        }
+        // The controls: `_files` inside a segment is not the segment.
+        for ns in ["a.files", "a.x_files", "a._filesx"] {
+            let f = parse(&format!(
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            assert!(
+                !validate(&f).errors.iter().any(|e| e.path == "namespace"),
+                "{ns}"
+            );
+        }
     }
 
     #[test]
