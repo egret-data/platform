@@ -231,6 +231,10 @@ pub struct AppSetFolder {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AppDraft {
     pub source: String,
+    /// marimo's grid-layout companion file, verbatim JSON; omitted for the default
+    /// vertical arrangement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<serde_json::Value>,
     pub revision: i64,
 }
 
@@ -238,6 +242,9 @@ pub struct AppDraft {
 pub struct AppSaveDraft {
     /// marimo source, at most 1 MiB (1 048 576 bytes).
     pub source: String,
+    /// The complete new layout state; omit or send `null` to clear it.
+    #[serde(default)]
+    pub layout: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -808,6 +815,7 @@ async fn draft_get(
         [(ETAG, etag(d.revision))],
         Json(AppDraft {
             source: d.source,
+            layout: d.layout_json.and_then(|s| serde_json::from_str(&s).ok()),
             revision: d.revision,
         }),
     )
@@ -851,10 +859,17 @@ async fn draft_put(
     if b.source.len() > MAX_SOURCE_BYTES {
         return Err(domain(AppsHttpError::SourceTooLarge));
     }
+    let layout_json = b.layout.as_ref().map(|v| v.to_string());
     // Deliberately not audited: drafts save on every edit; publish is the event.
     match st
         .store
-        .save_draft(id, ctx.principal.user_id, expected, &b.source)
+        .save_draft(
+            id,
+            ctx.principal.user_id,
+            expected,
+            &b.source,
+            layout_json.as_deref(),
+        )
         .await?
     {
         SaveOutcome::Saved { revision } => {

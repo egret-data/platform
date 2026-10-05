@@ -32,6 +32,9 @@ pub struct AppRow {
 #[derive(Debug, Clone, FromRow)]
 pub struct Draft {
     pub source: String,
+    /// marimo's grid-layout companion file (`layouts/<app>.<type>.json`), verbatim.
+    /// `None` is the default vertical arrangement.
+    pub layout_json: Option<String>,
     pub revision: i64,
     pub updated_at: DateTime<Utc>,
 }
@@ -50,6 +53,7 @@ pub struct VersionSummary {
 pub struct Version {
     pub summary: VersionSummary,
     pub source: String,
+    pub layout_json: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,7 +304,7 @@ impl AppStore {
     /// Called only after the handler resolved the app in the workspace.
     pub async fn draft(&self, id: Uuid) -> Result<Option<Draft>> {
         sqlx::query_as::<_, Draft>(
-            "SELECT source, revision, updated_at FROM analytics.app_drafts WHERE app_id = $1",
+            "SELECT source, layout_json, revision, updated_at FROM analytics.app_drafts WHERE app_id = $1",
         )
         .bind(id)
         .fetch_optional(&self.db.pool)
@@ -310,22 +314,26 @@ impl AppStore {
 
     /// Called only after the handler resolved the app in the workspace.
     /// Compare-and-swap on `revision`; over-limit source is `InvalidInput`.
+    /// `layout` is the complete new state (`None` clears it) -- the pod patch always
+    /// sends marimo's current layout, so there is no "leave unchanged" case to track.
     pub async fn save_draft(
         &self,
         id: Uuid,
         by: UserId,
         expected: i64,
         source: &str,
+        layout: Option<&str>,
     ) -> Result<SaveOutcome> {
         check_len(source)?;
         let saved: Option<i64> = sqlx::query_scalar(
-            "UPDATE analytics.app_drafts SET source = $3, revision = revision + 1, updated_by = $2, updated_at = now() \
+            "UPDATE analytics.app_drafts SET source = $3, layout_json = $5, revision = revision + 1, updated_by = $2, updated_at = now() \
               WHERE app_id = $1 AND revision = $4 RETURNING revision",
         )
         .bind(id)
         .bind(by.0)
         .bind(source)
         .bind(expected)
+        .bind(layout)
         .fetch_optional(&self.db.pool)
         .await
         .map_err(db_err)?;
@@ -354,7 +362,7 @@ impl AppStore {
     ) -> Result<PublishOutcome> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         let draft = sqlx::query(
-            "SELECT source, revision FROM analytics.app_drafts WHERE app_id = $1 FOR UPDATE",
+            "SELECT source, layout_json, revision FROM analytics.app_drafts WHERE app_id = $1 FOR UPDATE",
         )
         .bind(id)
         .fetch_optional(&mut *tx)
@@ -362,13 +370,23 @@ impl AppStore {
         .map_err(db_err)?
         .ok_or_else(|| Error::NotFound(format!("draft of app {id}")))?;
         let source: String = draft.get("source");
+        let layout_json: Option<String> = draft.get("layout_json");
         let revision: i64 = draft.get("revision");
         if expected.is_some_and(|e| e != revision) {
             return Ok(PublishOutcome::Stale {
                 current_revision: revision,
             });
         }
-        let v = insert_version(&mut tx, id, &source, Some(revision), None, by).await?;
+        let v = insert_version(
+            &mut tx,
+            id,
+            &source,
+            layout_json.as_deref(),
+            Some(revision),
+            None,
+            by,
+        )
+        .await?;
         tx.commit().await.map_err(db_err)?;
         Ok(PublishOutcome::Published(v))
     }
@@ -389,7 +407,7 @@ impl AppStore {
     /// safe even with an unresolved version id.
     pub async fn version(&self, id: Uuid, version_id: Uuid) -> Result<Option<Version>> {
         let row = sqlx::query(
-            "SELECT id, version_no, from_revision, restored_from, published_by, published_at, source \
+            "SELECT id, version_no, from_revision, restored_from, published_by, published_at, source, layout_json \
                FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
         )
         .bind(id)
@@ -401,6 +419,7 @@ impl AppStore {
             Ok(Version {
                 summary: VersionSummary::from_row(&r).map_err(db_err)?,
                 source: r.get("source"),
+                layout_json: r.get("layout_json"),
             })
         })
         .transpose()
@@ -426,8 +445,8 @@ impl AppStore {
             .await
             .map_err(db_err)?
             .ok_or_else(|| Error::NotFound(format!("draft of app {id}")))?;
-        let Some(source) = sqlx::query_scalar::<_, String>(
-            "SELECT source FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
+        let Some((source, layout_json)) = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT source, layout_json FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
         )
         .bind(id)
         .bind(version_id)
@@ -437,7 +456,16 @@ impl AppStore {
         else {
             return Ok(None);
         };
-        let v = insert_version(&mut tx, id, &source, None, Some(version_id), by).await?;
+        let v = insert_version(
+            &mut tx,
+            id,
+            &source,
+            layout_json.as_deref(),
+            None,
+            Some(version_id),
+            by,
+        )
+        .await?;
         tx.commit().await.map_err(db_err)?;
         Ok(Some(v))
     }
@@ -448,17 +476,19 @@ async fn insert_version(
     tx: &mut sqlx::PgConnection,
     app: Uuid,
     source: &str,
+    layout_json: Option<&str>,
     from_revision: Option<i64>,
     restored_from: Option<Uuid>,
     by: UserId,
 ) -> Result<VersionSummary> {
-    sqlx::query_as::<_, VersionSummary>("INSERT INTO analytics.app_versions (app_id, version_no, source, from_revision, restored_from, published_by) \
-         SELECT $1, COALESCE(MAX(version_no), 0) + 1, $2, $3, $4, $5 \
+    sqlx::query_as::<_, VersionSummary>("INSERT INTO analytics.app_versions (app_id, version_no, source, layout_json, from_revision, restored_from, published_by) \
+         SELECT $1, COALESCE(MAX(version_no), 0) + 1, $2, $3, $4, $5, $6 \
            FROM analytics.app_versions WHERE app_id = $1 \
          RETURNING id, version_no, from_revision, restored_from, published_by, published_at",
     )
     .bind(app)
     .bind(source)
+    .bind(layout_json)
     .bind(from_revision)
     .bind(restored_from)
     .bind(by.0)

@@ -197,6 +197,29 @@ def test_run_fetches_the_version_once_and_does_not_install_ipc_patch_by_default(
     assert env["calls"]["storage"] == []
 
 
+def test_run_restores_the_published_versions_layout_file(env, egret, monkeypatch):
+    """A run pod never ran the edit-mode save that produced
+    `layouts/<app>.grid.json` -- D23 needs it restored from the published
+    version's own layout before marimo parses the `.py` header naming it, same
+    as `install_storage_patch.load` does for an edit pod."""
+    monkeypatch.setenv("EGRET_URL", egret.base_url)
+    monkeypatch.setenv("EGRET_BASE_URL", f"/r/{VERSION}")
+    monkeypatch.setenv("EGRET_APP_ID", APP)
+    monkeypatch.setenv("EGRET_VERSION_ID", VERSION)
+    egret.pod_tokens["pod-tok"] = {}
+    layout = {"type": "grid", "data": {"columns": 2}}
+    egret.versions[(APP, VERSION)] = {
+        "source": "# version 7\n",
+        "version_no": 7,
+        "layout": layout,
+    }
+
+    assert launcher.main(["run"]) == 0
+
+    layout_file = env["workdir"].resolve() / "layouts" / f"{APP}.grid.json"
+    assert json.loads(layout_file.read_text()) == layout
+
+
 def test_run_kernel_mode_thread_explicit_also_skips_the_ipc_patch(env, egret, monkeypatch):
     monkeypatch.setenv("EGRET_URL", egret.base_url)
     monkeypatch.setenv("EGRET_APP_ID", APP)

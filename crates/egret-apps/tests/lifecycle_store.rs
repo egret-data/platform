@@ -364,11 +364,15 @@ async fn save_draft_bumps_revision_and_refuses_stale() {
     let app = fx.store_app("v1").await;
     let st = fx.store();
     assert_eq!(
-        st.save_draft(app, fx.uid(), 1, "first").await.unwrap(),
+        st.save_draft(app, fx.uid(), 1, "first", None)
+            .await
+            .unwrap(),
         SaveOutcome::Saved { revision: 2 }
     );
     assert_eq!(
-        st.save_draft(app, fx.uid(), 1, "second").await.unwrap(),
+        st.save_draft(app, fx.uid(), 1, "second", None)
+            .await
+            .unwrap(),
         SaveOutcome::Stale {
             current_revision: 2
         }
@@ -384,7 +388,7 @@ async fn save_draft_over_limit_is_an_error_not_a_save() {
     let big = "a".repeat(MAX_SOURCE_BYTES + 1);
     let err = fx
         .store()
-        .save_draft(app, fx.uid(), 1, &big)
+        .save_draft(app, fx.uid(), 1, &big, None)
         .await
         .unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
@@ -393,7 +397,10 @@ async fn save_draft_over_limit_is_an_error_not_a_save() {
     // Exactly the limit is accepted.
     let ok = "a".repeat(MAX_SOURCE_BYTES);
     assert_eq!(
-        fx.store().save_draft(app, fx.uid(), 1, &ok).await.unwrap(),
+        fx.store()
+            .save_draft(app, fx.uid(), 1, &ok, None)
+            .await
+            .unwrap(),
         SaveOutcome::Saved { revision: 2 }
     );
 }
@@ -406,7 +413,7 @@ async fn publish_numbers_versions_and_honours_expected_revision() {
     let v1 = published(st.publish(app, fx.uid(), None).await.unwrap());
     assert_eq!((v1.version_no, v1.from_revision), (1, Some(1)));
     assert_eq!(v1.published_by, Some(fx.user));
-    st.save_draft(app, fx.uid(), 1, "b").await.unwrap();
+    st.save_draft(app, fx.uid(), 1, "b", None).await.unwrap();
     match st.publish(app, fx.uid(), Some(1)).await.unwrap() {
         PublishOutcome::Stale { current_revision } => assert_eq!(current_revision, 2),
         other => panic!("expected stale, got {other:?}"),
@@ -490,7 +497,7 @@ async fn restore_republishes_old_source_as_a_new_version() {
     let app = fx.store_app("a").await;
     let st = fx.store();
     let v1 = published(st.publish(app, fx.uid(), None).await.unwrap());
-    st.save_draft(app, fx.uid(), 1, "b").await.unwrap();
+    st.save_draft(app, fx.uid(), 1, "b", None).await.unwrap();
     published(st.publish(app, fx.uid(), None).await.unwrap());
     let v3 = st
         .restore_version(app, v1.id, fx.uid())

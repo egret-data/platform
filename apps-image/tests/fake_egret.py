@@ -51,7 +51,8 @@ async def draft(request: Request) -> Response:
     if sent is None:
         return JSONResponse({"error": "If-Match required"}, status_code=428)
     try:
-        source = (await request.json())["source"]
+        body = await request.json()
+        source = body["source"]
         if not isinstance(source, str):
             raise TypeError
     except (ValueError, KeyError, TypeError):
@@ -64,6 +65,12 @@ async def draft(request: Request) -> Response:
             {"error": "stale revision", "current_revision": d["revision"]}, status_code=409
         )
     d["source"] = source
+    # Mirrors the real backend's AppSaveDraft: `layout` is the complete new state,
+    # unconditionally -- a missing key and an explicit `null` both clear it, same
+    # as `Option<&str>` with no `COALESCE` on the real `UPDATE`. The pod client
+    # never omits it for exactly this reason (`EgretStorage.write` always resends
+    # its last-known layout).
+    d["layout"] = body.get("layout")
     d["revision"] += 1
     STATE.events.append({"kind": "draft_saved", "app_id": app_id, "if_match": sent})
     return JSONResponse({"revision": d["revision"]})

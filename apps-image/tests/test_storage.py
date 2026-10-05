@@ -1,5 +1,6 @@
 """EgretStorage against marimo's real workspace and file manager (Task 2)."""
 
+import json
 import threading
 from pathlib import Path
 
@@ -28,7 +29,7 @@ def notebook(code: str) -> str:
     )
 
 
-def save(manager, code: str) -> None:
+def save(manager, code: str, layout: dict | None = None) -> None:
     ids = list(manager.app.cell_manager.cell_ids())
     manager.save(
         SaveNotebookRequest(
@@ -37,6 +38,7 @@ def save(manager, code: str) -> None:
             names=["_"] * len(ids),
             configs=[CellConfig() for _ in ids],
             filename=str(manager.path),
+            layout=layout,
         )
     )
 
@@ -80,7 +82,7 @@ def test_2_stale_session_never_overwrites_and_fresh_session_saves(setup):
     m2 = ws.load(f"{APP}.py")
     assert m2.storage.base_revision == 2
     assert (workdir / f"{APP}.py").read_text() == notebook("x = 'theirs'")
-    theirs = {"source": notebook("x = 'theirs'"), "revision": 2}
+    theirs = {"source": notebook("x = 'theirs'"), "revision": 2, "layout": None}
     for attempt in ("mine", "mine again"):
         with pytest.raises(HTTPException) as e:
             save(m1, f"x = '{attempt}'")
@@ -343,3 +345,73 @@ def test_write_to_any_path_but_the_bound_file_is_refused_before_egret_is_asked(s
     monkeypatch.chdir(workdir)
     m.storage.write(Path(f"{APP}.py"), notebook("x = 5"))
     assert len(puts) == 1 and m.storage.base_revision == 99
+
+
+# --- Grid layout (D23) ------------------------------------------------------
+#
+# marimo writes the `layouts/<app>.<type>.json` companion file with a raw
+# `open()` call (`save_layout_config`), entirely outside `Storage` -- these
+# tests exercise the OTHER patch, on `AppFileManager.save` itself, that
+# captures `request.layout` before that happens. `save()`'s helper above
+# forwards whatever `layout=` it is given straight into `SaveNotebookRequest`.
+
+GRID = {"type": "grid", "data": {"columns": 2}}
+
+
+def test_saving_with_a_layout_forwards_it_to_egret(setup):
+    egret, workdir, _, ws = setup
+    m = ws.load(f"{APP}.py")
+    save(m, "x = 2", layout=GRID)
+    assert egret.drafts[APP]["layout"] == GRID
+    assert egret.drafts[APP]["revision"] == 2
+
+
+def test_removing_the_layout_sends_an_explicit_null(setup):
+    egret, workdir, _, ws = setup
+    m = ws.load(f"{APP}.py")
+    save(m, "x = 2", layout=GRID)
+    save(m, "x = 3", layout=None)
+    assert egret.drafts[APP]["layout"] is None
+    assert egret.drafts[APP]["revision"] == 3
+
+
+def test_a_save_with_no_layout_info_resends_the_last_known_one(setup):
+    """`AppFileManager.save_app_config` -- a real, reachable marimo endpoint for
+    app-level settings outside the cell-save flow -- calls `_save_file` directly,
+    bypassing the `save()` patch that captures `request.layout`. Without tracking
+    the last-known value on `EgretStorage` itself (rather than resetting it after
+    every write), that write would resend `None` and silently wipe out a grid
+    layout nobody asked to remove -- the exact kind of loss D23 exists to close.
+    """
+    egret, workdir, _, ws = setup
+    m = ws.load(f"{APP}.py")
+    save(m, "x = 2", layout=GRID)
+    m.save_app_config({"width": "full"})
+    assert egret.drafts[APP]["layout"] == GRID, "an unrelated config save must not clear the layout"
+    assert egret.drafts[APP]["revision"] == 3
+
+
+def test_a_fresh_pods_load_restores_the_layout_file_from_egrets_draft(setup):
+    """The pod that produced `layouts/<app>.grid.json` and the pod that later loads
+    the draft are not the same machine -- `load` must materialize it from
+    `draft.layout` before marimo parses the `.py` header that names it, or
+    `read_layout_config` finds nothing and the arrangement is silently lost.
+    """
+    egret, workdir, api, ws = setup
+    m1 = ws.load(f"{APP}.py")
+    save(m1, "x = 2", layout=GRID)
+
+    # A second load — a fresh pod never ran the save above — on the same workdir
+    # the fixture already points `install_storage_patch` at.
+    m2 = ws.load(f"{APP}.py")
+    layout_file = workdir / "layouts" / f"{APP}.grid.json"
+    assert layout_file.exists(), "the layout file must be restored before load returns"
+    assert json.loads(layout_file.read_text()) == GRID
+    assert m2.storage.layout == GRID
+
+
+def test_a_draft_with_no_layout_restores_nothing(setup):
+    egret, workdir, _, ws = setup
+    m = ws.load(f"{APP}.py")
+    assert m.storage.layout is None
+    assert not (workdir / "layouts").exists()
