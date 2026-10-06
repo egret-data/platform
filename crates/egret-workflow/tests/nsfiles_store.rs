@@ -3048,20 +3048,30 @@ async fn a_bounded_wait_leaves_no_lock_timeout_on_a_pooled_connection() {
         .unwrap();
     assert_eq!(lock_timeout(pool.clone()).await, "0");
     let held = hold(&db, ws, "/t").await;
-    let r = move_path(&pool, &fs, &api, &file("/t/b.txt"), &file("/t/c.txt"), by()).await;
+    let guard = std::time::Duration::from_secs(20);
+    let r = tokio::time::timeout(
+        guard,
+        move_path(&pool, &fs, &api, &file("/t/b.txt"), &file("/t/c.txt"), by()),
+    )
+    .await
+    .expect("move waited past the guard: its wait is not bounded");
     assert!(is_busy(&r, "/t/b.txt"), "{r:?}");
     assert_eq!(lock_timeout(pool.clone()).await, "0");
     let mut body: &[u8] = b"x";
-    let r = put(
-        &pool,
-        &fs,
-        &api,
-        &file("/t/x.txt"),
-        &mut body,
-        Conflict::Overwrite,
-        by(),
+    let r = tokio::time::timeout(
+        guard,
+        put(
+            &pool,
+            &fs,
+            &api,
+            &file("/t/x.txt"),
+            &mut body,
+            Conflict::Overwrite,
+            by(),
+        ),
     )
-    .await;
+    .await
+    .expect("put waited past the guard: its wait is not bounded");
     assert!(is_busy(&r, "/t/x.txt"), "{r:?}");
     assert_eq!(lock_timeout(pool.clone()).await, "0");
     unhold(held, ws, "/t").await;
