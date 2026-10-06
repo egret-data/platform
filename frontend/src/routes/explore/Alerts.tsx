@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Bell, FolderPlus, ListChecks, Search, Star, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { BulkMoveToFolderMenu, moveEach } from "@/components/explore/BulkMoveToFolderMenu";
 import {
   useScheduleMutations,
   useSchedules,
@@ -273,16 +274,32 @@ export default function Alerts() {
     toast.success("Moved to Trash");
     bulk.clear();
   }
-  async function doBulkMove(name: string) {
+  /**
+   * Move the selected rows to a folder that already exists (`null` = out of any folder): one
+   * request and one verdict per row. See `BulkMoveToFolderMenu` for why this is a picker.
+   */
+  async function doBulkMoveTo(folderId: string | null) {
+    const moved = await moveEach(
+      bulk.selectedIds,
+      (id) => setFolder.mutateAsync({ id, folder_id: folderId }),
+      (e) => toast.error(String(e)),
+    );
+    if (moved > 0) toast.success(`Moved ${moved} ${moved === 1 ? "item" : "items"}`);
+    bulk.clear();
+  }
+  /** "New folder…" from the bulk menu: make the folder, then move into it. A name that already
+   *  exists (case-insensitively) is that folder, not a duplicate of it. */
+  async function doBulkMoveToNew(name: string) {
     const trimmed = name.trim();
+    let folderId: string;
     try {
       const existing = folders.find((f) => f.name.toLowerCase() === trimmed.toLowerCase());
-      const folderId = existing ? existing.id : (await createFolder.mutateAsync(trimmed)).id;
-      for (const id of bulk.selectedIds) await setFolder.mutateAsync({ id, folder_id: folderId });
+      folderId = existing ? existing.id : (await createFolder.mutateAsync(trimmed)).id;
     } catch (e) {
       toast.error(String(e));
+      return;
     }
-    bulk.clear();
+    await doBulkMoveTo(folderId);
   }
 
   const newHref = `/explore/${ws}/alerts/new${tab === "report" ? "?type=report" : ""}`;
@@ -567,9 +584,12 @@ export default function Alerts() {
             )}
             {bulk.bulkMode && bulk.someSelected && !showTrash && (
               <>
-                <Button variant="outline" size="sm" onClick={() => setFolderDialog({ mode: "bulkmove" })}>
-                  Move {bulk.selectedIds.length} to folder…
-                </Button>
+                <BulkMoveToFolderMenu
+                  count={bulk.selectedIds.length}
+                  folders={folders}
+                  onMove={doBulkMoveTo}
+                  onNewFolder={() => setFolderDialog({ mode: "bulkmove" })}
+                />
                 <Button variant="destructive" size="sm" onClick={doBulkTrash}>
                   Move {bulk.selectedIds.length} to Trash
                 </Button>
@@ -724,7 +744,7 @@ export default function Alerts() {
                 .then((f) => setFolder.mutateAsync({ id: d.row!.id, folder_id: f.id }))
                 .then(() => toast.success("Moved")),
             );
-          else if (d.mode === "bulkmove") doBulkMove(name);
+          else if (d.mode === "bulkmove") doBulkMoveToNew(name);
           else guard(createFolder.mutateAsync(name).then(() => toast.success("Folder created")));
         }}
       />

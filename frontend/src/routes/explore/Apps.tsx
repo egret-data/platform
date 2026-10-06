@@ -8,6 +8,7 @@ import { ApiError } from "@/api/client";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { AppActionsMenu } from "@/components/apps/AppActionsMenu";
 import { RenameAppDialog } from "@/components/apps/RenameAppDialog";
+import { BulkMoveToFolderMenu, moveEach } from "@/components/explore/BulkMoveToFolderMenu";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
@@ -31,13 +32,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
@@ -282,10 +276,11 @@ export default function Apps() {
    * the rest still move, and the success toast counts only what moved.
    */
   async function doBulkMoveTo(folderId: string | null) {
-    let moved = 0;
-    for (const id of bulk.selectedIds) {
-      try { await setFolder.mutateAsync({ id, folder_id: folderId }); moved += 1; } catch (e) { toast.error(errText(e)); }
-    }
+    const moved = await moveEach(
+      bulk.selectedIds,
+      (id) => setFolder.mutateAsync({ id, folder_id: folderId }),
+      (e) => toast.error(errText(e)),
+    );
     if (moved > 0) toast.success(`Moved ${moved} ${moved === 1 ? "app" : "apps"}`);
     bulk.clear();
   }
@@ -429,29 +424,14 @@ export default function Apps() {
             </div>
             {bulk.bulkMode && bulk.someSelected && !showTrash && (
               <>
-                {/* A picker of the folders that exist, not a name to type: moving is each row's own
-                    `can_write`, but MAKING a folder is the workspace's permission, so "New folder…"
-                    is the only item that needs `canCreate`. With no folder and no right to make
-                    one there is nowhere to move to, and the control is not drawn. */}
-                {(folders.length > 0 || canCreate) && (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="outline" size="sm">Move {bulk.selectedIds.length} to folder…</Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start">
-                      {folders.map((f) => (
-                        <DropdownMenuItem key={f.id} onClick={() => doBulkMoveTo(f.id)}>{f.name}</DropdownMenuItem>
-                      ))}
-                      {folders.length > 0 && <DropdownMenuItem onClick={() => doBulkMoveTo(null)}>Uncategorized</DropdownMenuItem>}
-                      {canCreate && (
-                        <>
-                          {folders.length > 0 && <DropdownMenuSeparator />}
-                          <DropdownMenuItem onClick={() => setFolderDialog({ mode: "bulkmove" })}>New folder&hellip;</DropdownMenuItem>
-                        </>
-                      )}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                )}
+                {/* Moving is each row's own `can_write`, but MAKING a folder is the workspace's
+                    permission, so "New folder…" is the only item that needs `canCreate`. */}
+                <BulkMoveToFolderMenu
+                  count={bulk.selectedIds.length}
+                  folders={folders}
+                  onMove={doBulkMoveTo}
+                  onNewFolder={canCreate ? () => setFolderDialog({ mode: "bulkmove" }) : undefined}
+                />
                 <Button variant="destructive" size="sm" onClick={doBulkTrash}>
                   Move {bulk.selectedIds.length} to Trash
                 </Button>
