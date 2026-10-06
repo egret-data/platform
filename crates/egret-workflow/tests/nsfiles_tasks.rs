@@ -2645,9 +2645,13 @@ async fn the_namespace_bound_counts_only_what_the_purge_covers() {
 // ---------------------------------------------------------------------------
 
 /// M-3: `UploadFiles` asks the ONE namespace-file predicate
-/// (`runners::files::is_namespace_file_uri`, `classify`'s answer), so a
-/// `kestra:///…/_files/…` URI whose path the path rule refuses is refused by
-/// THE namespace path rule, naming it -- not by the execution snapshot.
+/// (`runners::files::is_namespace_file_uri`, `classify`'s answer). A
+/// `kestra:///…/_files/…` URI whose path the path rule refuses fails the task
+/// with THE namespace path rule's text, naming it, in `files` and in
+/// `filesMap`. Measured 2026-10-07: the removed second predicate produced
+/// the same text (its execution-file branch ends in the same parse refusal),
+/// so this pins the message, not which predicate ran; the mutant restoring
+/// it survives as an equivalent one. The change removes the duplicated rule.
 #[tokio::test(flavor = "multi_thread")]
 async fn upload_files_refuses_a_bad_namespace_uri_by_the_namespace_path_rule() {
     let _turn = SERIAL.lock().await;
