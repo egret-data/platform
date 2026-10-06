@@ -561,19 +561,41 @@ Branch `feat/data-apps-storage-s4-drop-columns` off `main`, **separately, after 
 
 ### Task 11 (S4-1): The migration
 
-**Files:**
-- Create: `migrations/0171_drop_app_draft_source_columns.sql` (confirm 0171 is still free — `ls migrations/ | tail -3` — before writing; this plan was written when 0170 was the latest)
+**A real consequence this section originally missed, found auditing the codebase just before dispatch:** dropping these columns does not just affect a couple of defensive `FromRow` reads (Step 2's original text). It breaks `egret backfill-apps-storage` outright — that command's own SQL (`crates/egret-bin/src/main.rs`) and `AppStore::backfill_draft_locked`'s SQL (`crates/egret-apps/src/store.rs`) read `source`/`layout_json` directly; both fail with "column does not exist" the instant this migration runs. That tool's entire job — migrating pre-existing Postgres-column content into the object store — is permanently moot once the columns don't exist: there is no more such content, ever again, after this migration. The tool and every test built around it must be removed in the SAME task as the migration, not left to rot as dead code that happens to compile but can never run. A full audit (below) also found one test asserting a CHECK constraint that lives on a dropped column, one test whose assertion needs retargeting to a surviving column, and roughly a dozen incidental fixture sites across the crate's other test files that merely used `source` as filler before it was ever this plan's concern.
 
-- [ ] **Step 1:** Write the migration:
+**Files:**
+- Create: `migrations/0173_drop_app_draft_source_columns.sql` (confirmed free via `ls migrations/ | tail -5` — Tasks 9 and 10 took 0171/0172 for their own `DROP NOT NULL` migrations, which this plan did not originally anticipate; re-confirm before writing in case anything else has landed since)
+- Remove: `Command::BackfillAppsStorage` (`crates/egret-bin/src/cli.rs`), `backfill_apps_storage()` (`crates/egret-bin/src/main.rs`)
+- Remove: `AppStore::backfill_draft`, `AppStore::backfill_version`, `AppStore::backfill_draft_locked` (`crates/egret-apps/src/store.rs`)
+- Modify: `crates/egret-apps/tests/lifecycle_store.rs` (remove the `legacy_draft` fixture helper and every migration/backfill test built on it; fix/retarget several others — full list below)
+- Modify: `crates/egret-apps/tests/{podapi,proxy,podtoken_repo,gateway,grant_repo,origin_schema,run_launcher,session_repo}.rs` (strip `source` from incidental fixture INSERTs — full list below)
+
+- [ ] **Step 1 (do this FIRST, before writing the migration):** Remove the dead backfill feature:
+  - `crates/egret-bin/src/cli.rs`: delete the `BackfillAppsStorage` variant from `enum Command`.
+  - `crates/egret-bin/src/main.rs`: delete the `Command::BackfillAppsStorage => ...` dispatch arm and the whole `backfill_apps_storage()` function.
+  - `crates/egret-apps/src/store.rs`: delete `backfill_draft`, `backfill_version`, and `backfill_draft_locked` in full (including their doc comments).
+  - `cargo check -p egret-bin -p egret-apps` after this step alone — it will fail with unused-import/dead-code-adjacent errors pointing at every test file that still calls the now-deleted methods or the now-deleted CLI variant. That compiler-driven list is your checklist for the next step; don't rely on memory of which test files call what.
+
+- [ ] **Step 2 (test audit — an incomplete list to start from, not a substitute for your own `grep -rn "INSERT INTO analytics.app_drafts\|INSERT INTO analytics.app_versions\|SELECT.*source\|SELECT.*layout_json" crates/egret-apps/tests/` before you start)**:
+  - **Delete entirely** (built on the now-removed backfill/migration feature, in `lifecycle_store.rs`): the `legacy_draft` fixture helper (NOT `legacy_draft_key` — that one is a pure S3-key-string formatter with no column dependency, and at least one surviving test still legitimately asserts "nothing is ever written at the old fixed key," which remains true and worth testing post-S4; keep it) and every test calling `legacy_draft` or `backfill_draft`/`backfill_version`/`backfill_draft_locked`: `backfill_writes_pre_s2_rows_content_to_the_object_store`, `migrating_moves_a_pre_revision_keyed_draft_to_its_current_revision_key`, `migrating_takes_the_committed_column_over_an_uncommitted_fixed_key_write`, `migrating_after_a_save_by_the_new_code_never_overwrites_it_with_the_stale_column`, `migrating_a_draft_created_by_the_new_code_is_a_no_op`, `migrating_clears_a_stale_layout_when_the_row_has_none`.
+  - **Delete entirely**: `draft_source_over_one_mib_is_rejected_by_the_schema` (`lifecycle_store.rs`) — tests the `CHECK (octet_length(source) <= 1048576)` constraint, which cannot exist once its column is dropped. The equivalent protection is enforced at the application level (`AppStore`'s own `check_len`/`MAX_SOURCE_BYTES`, unchanged by this plan — confirm a test for that application-level check still exists elsewhere; if not, that's a separate, pre-existing gap, not this task's to fix).
+  - **Retarget, don't delete**: `versions_cannot_be_updated` (`lifecycle_store.rs`) exists to prove the append-only trigger blocks `UPDATE`s on `app_versions` — pick any column that survives this migration (e.g. `published_by` or `restored_from`) and update the test's `UPDATE ... SET <column> = ...` and its read-back assertion to use that column instead of `source`, preserving the test's actual purpose.
+  - **Simplify, don't delete** (the scenario under test never actually required real Postgres content — just strip `source`/`layout_json` from the raw SQL, the rest of each test is unaffected): `a_draft_with_no_object_at_its_current_revision_now_surfaces_as_an_error` (replace its `fx.legacy_draft("legacy", None, 1)` call with a minimal direct `INSERT INTO analytics.app_drafts (app_id, revision) VALUES ($1, $2)`), `a_version_with_no_object_store_content_now_surfaces_as_an_error`, `restoring_a_version_with_no_object_store_content_now_surfaces_as_an_error` (drop `source`/`layout_json` from each one's `INSERT INTO analytics.app_versions` — a bare `version_no` is all either test actually needs), the cascade-trigger test `deleting_the_workspace_cascades_through_versions` (drop `source` from its `app_drafts` insert and its `app_versions ... SELECT app_id, 2, source, id FROM ...` — just needs `version_no`/`restored_from`), `try_version` (the shared fixture helper — drop `source` from its `INSERT`; it is called by many otherwise-unrelated tests and none of them care about its value), and the publisher-deletion test (keep the test, drop only the `source`-reads-back-NULL half of its final assertion and the `source` column from that `SELECT` — the `published_by IS NULL` check is the part Part S3 made this test about and is unaffected).
+  - **Simplify, don't delete**, in OTHER test files (same mechanical shape repeated — each is an unrelated test using a version row purely as fixture setup, with `source` set to a throwaway literal like `'import marimo'` only because the column used to be `NOT NULL`): `podtoken_repo.rs` (2 sites), `gateway.rs` (1), `grant_repo.rs` (1), `origin_schema.rs` (1), `run_launcher.rs` (1), `session_repo.rs` (1), `proxy.rs` (1, plus a second site at the real-content-seeding draft/version pair for the live pod-API test — that one's `source` column is already dead weight since Task 9/10 made reads go through the object store exclusively, drop it there too), `podapi.rs` (3 sites, same dead-weight reasoning).
+  - After every deletion/edit above, grep again to confirm zero remaining references to `source`/`layout_json` as SQL column names in `crates/egret-apps/tests/` (struct-field reads like `d.source`/`d.layout_json` on `Draft`/`Version` values returned by `AppStore` are unrelated and must NOT be touched — those come from the object store now, not these columns, and remain completely valid).
+
+- [ ] **Step 3:** Write the migration:
 
 ```sql
 -- Data Apps: `source` and `layout_json` moved to the shared object store
 -- (`[storage]`, `apps.storage.prefix`) in Parts S1-S3 of
 -- docs/en/plans/2026-10-05-data-apps-storage-s3.md. This is IRREVERSIBLE: any
 -- row whose content was never backfilled (Part S2's `egret
--- backfill-apps-storage`) loses that content for good. Confirmed before this
--- migration was written to run: every environment with real Data Apps
--- content has had the backfill run against it.
+-- backfill-apps-storage`, since removed by this same change) loses that
+-- content for good. Confirmed before this migration was written to run:
+-- every environment with real Data Apps content has had the backfill run
+-- against it, and this migration ships in the same change that removes the
+-- backfill tool itself -- there is no later chance to run it.
 ALTER TABLE analytics.app_drafts
   DROP COLUMN source,
   DROP COLUMN layout_json;
@@ -583,13 +605,15 @@ ALTER TABLE analytics.app_versions
   DROP COLUMN layout_json;
 ```
 
-- [ ] **Step 2:** Remove the now-dead `Draft`/`Version`/`VersionSummary` `FromRow` mappings' reliance on these columns if anything still references them defensively (by Part S3 nothing should).
-- [ ] **Step 3:** Verify against a disposable test database — same recipe this session used for `migrations/0169` and `migrations/0170`: create a scratch DB, run every migration including this one, confirm the columns are gone and every other `egret-apps` test still passes against it.
-- [ ] **Step 4:** Commit `feat(db): drop the now-unused app_drafts/app_versions source columns`.
+- [ ] **Step 4:** Confirm no other `FromRow` mapping or defensive read anywhere in `crates/egret-apps/src/` still references either column (by Part S3 nothing in production code should — `cargo check -p egret-apps` after Step 1 already proved this for the backfill code specifically; this is a final sweep for anything Step 1's compiler errors didn't surface, e.g. a `SELECT *` that happened to still work).
+- [ ] **Step 5:** Verify against a disposable test database — same recipe this session used for `migrations/0169` and `migrations/0170`: create a scratch DB, run every migration including this one, confirm the columns are gone and every other `egret-apps` test still passes against it.
+- [ ] **Step 6:** Run the full workspace suite (`cargo test` across every crate this change touches, not just `egret-apps`/`egret-bin` — `egret-server` depends on live schema too, per Part S3's own precedent of checking it). `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets -- -D warnings`. Expected: all green, with the backfill command, `legacy_draft`, and every test built on either entirely gone — not failing, gone.
+- [ ] **Step 7:** Commit `feat(db): drop the now-unused app_drafts/app_versions source columns and the backfill tool they made obsolete`.
 
 ### Task 12 (S4-2): PR
 
 - [ ] State plainly in the PR description: this is the irreversible step; confirm (again, at merge time, not just at write time) that every real environment has been backfilled.
+- [ ] Also state plainly: the `egret backfill-apps-storage` command no longer exists as of this PR — it cannot be run after this merges, which is exactly why the above confirmation must happen before merging, not after.
 
 ---
 
