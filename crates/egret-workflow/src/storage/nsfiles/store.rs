@@ -108,6 +108,13 @@ fn internal(message: String) -> NsError {
     NsError::Db(egret_core::Error::Internal(anyhow::anyhow!(message)))
 }
 
+/// A purge function handed a grant that is not a purge grant: egret's own
+/// bug. NOT `NsError::Db`, which the handler treats as an outage and
+/// re-claims forever; an `Author` error fails the task, loudly and once.
+fn wrong_grant(e: egret_core::Error) -> NsError {
+    NsError::Author(format!("internal error (an egret bug, not retried): {e}"))
+}
+
 fn db_err(e: sqlx::Error) -> NsError {
     NsError::Db(egret_core::Error::Internal(anyhow::Error::new(e)))
 }
@@ -1407,7 +1414,7 @@ pub async fn purge_rows(
     path: &NsPath,
     rows: &[(i64, u32)],
 ) -> Result<u64, NsError> {
-    require(grant, Access::Purge).map_err(NsError::Db)?;
+    require(grant, Access::Purge).map_err(wrong_grant)?;
     if path.is_dir() {
         return Err(internal(format!(
             "egret purged '{path}' by row as a file, which is a directory"
@@ -1470,7 +1477,7 @@ pub async fn purge_empty_directory(
     dir: &NsPath,
     live_too: bool,
 ) -> Result<u64, NsError> {
-    require(grant, Access::Purge).map_err(NsError::Db)?;
+    require(grant, Access::Purge).map_err(wrong_grant)?;
     if !dir.is_dir() {
         return Err(internal(format!(
             "egret purged '{dir}' as a directory, which is a file path"
@@ -1502,4 +1509,31 @@ pub async fn purge_empty_directory(
         result
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::nsfiles::access::Actor;
+
+    /// A grant of the wrong kind is an egret bug: it fails the task
+    /// (`Author`), never `Db`, which the handler would re-claim forever.
+    #[tokio::test]
+    async fn a_wrong_grant_to_a_purge_is_not_an_outage() {
+        let pool = PgPool::connect_lazy("postgres://unused@localhost:1/none").unwrap();
+        let fs = crate::storage::install_mem_for_tests();
+        let write = crate::storage::nsfiles::access::authorize(
+            Uuid::new_v4(),
+            Actor::Api,
+            "a",
+            Access::Write,
+        )
+        .unwrap();
+        let file = NsPath::parse_file("/a.txt").unwrap();
+        let dir = NsPath::parse_dir("/d/").unwrap();
+        let rows = purge_rows(&pool, &fs, &write, &file, &[(1, 1)]).await;
+        assert!(matches!(rows, Err(NsError::Author(m)) if m.contains("egret bug")));
+        let empty = purge_empty_directory(&pool, &write, &dir, false).await;
+        assert!(matches!(empty, Err(NsError::Author(m)) if m.contains("egret bug")));
+    }
 }

@@ -1737,6 +1737,9 @@ impl TaskHandler for PurgeFiles {
         // first refusal fails the task naming it.
         let mut grants = Vec::with_capacity(resolved.len());
         for ns in &resolved {
+            // Cannot refuse by construction (listed namespaces were authorized
+            // before listing; every other input is a child of a permitted
+            // root); kept as defense in depth.
             match authorize(
                 task.workspace_id,
                 Actor::Flow { namespace: &own },
