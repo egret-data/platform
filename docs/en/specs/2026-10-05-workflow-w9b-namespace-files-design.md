@@ -40,7 +40,7 @@
 | `WorkingDirectory` | its model keeps only `tasks` and silently drops `namespaceFiles`, `inputFiles`, `outputFiles` and `cache` (`models/task.rs:555-565`). **The executor does not run it**: `build_plan` plans it as an opaque `Runnable` (`executor/plan.rs:1230`, `executor/mod.rs:3319-3321`), and the claim answers `None` for it (`worker/claim.rs:258`) |
 | plugin host | `ShimRunContext.storage()` builds `InternalStorage` with `NO_NAMESPACE_FILES`, whose `of(…)` throws `EgretUnsupported` naming W9b (`plugin-host/…/ShimRunContext.java:274-280`); `EgretUnsupported` makes the host exit 4 (`EgretUnsupported.java:7`) |
 | pruner | W9a's pruner deletes per execution under `FileStore::execution_prefix` only (`storage/prune.rs:553`) |
-| migrations | the last is `0168_workflow_execution_files_pruned.sql`; W9b takes **0169** |
+| migrations | the last is `0173_drop_app_draft_source_columns.sql` (origin/main `edccf6c4`); W9b takes **0174** (written as 0169; renumbered 2026-10-06 on rebasing onto origin/main, which took 0169–0173) |
 | corpus | two flows use `namespaceFiles`, both on `WorkingDirectory` (`oracle-exec/corpus/valids/working-directory-namespace-files.yaml`, `…-with-namespaces.yaml`, the second with three namespaces, `folderPerNamespace: true` and an `exclude`); none uses `nsfile://`, `fileURI` or `core.namespace.*` |
 
 ## 2. What Kestra does, and where egret differs
@@ -116,7 +116,7 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 
 ### 4.1 The metadata table
 
-`workflow.namespace_files` (migration 0169): `workspace_id` (FK to the workspace), `namespace` (text), `path` (text, normalised, a directory ending in `/`), `revision` (int ≥ 1; always 1 for a directory), `is_directory`, `size`, `deleted`, `created_at`, `created_by` (the user or the execution that wrote it; *added 2026-10-06, W9b Task 6 fix round 1:* and, for a task's write, the task run, `created_by_task_run`, so a task run re-claimed after an infrastructure failure recognises its own earlier writes, §8.1). Unique `(workspace_id, namespace, path, revision)`; an index on `(workspace_id, namespace, path)` for the latest row. One row per revision; the latest row of a path is its highest revision. No FK to a namespace (there is no namespace table): a namespace with no flows can hold files.
+`workflow.namespace_files` (migration 0174): `workspace_id` (FK to the workspace), `namespace` (text), `path` (text, normalised, a directory ending in `/`), `revision` (int ≥ 1; always 1 for a directory), `is_directory`, `size`, `deleted`, `created_at`, `created_by` (the user or the execution that wrote it; *added 2026-10-06, W9b Task 6 fix round 1:* and, for a task's write, the task run, `created_by_task_run`, so a task run re-claimed after an infrastructure failure recognises its own earlier writes, §8.1). Unique `(workspace_id, namespace, path, revision)`; an index on `(workspace_id, namespace, path)` for the latest row. One row per revision; the latest row of a path is its highest revision. No FK to a namespace (there is no namespace table): a namespace with no flows can hold files.
 
 **A namespace file exists only once its row exists**, as W9a's index (W9a §4.2). Reads, `exists`, stats and listings go through the table.
 
@@ -288,7 +288,7 @@ No message names a storage key or another workspace. A `DELETE` of a missing pat
 ## 12. Tasks
 
 1. **Measure Kestra** (`oracle-exec/w9b-namespace-files.json`): object paths per revision, directories, soft delete then rewrite; glob semantics (the path string a glob sees, `**/` prefixing, `regex:`, excludes); `fileURI` with and without `revision` on present, missing and deleted paths; `read` of another namespace's `kestra:///…/_files/…`; `ifExists` across namespaces, and `inputFiles` overwriting a same-named namespace file; the four tasks' outputs; `PurgeFiles` on a soft-deleted path; path rules; plus the baselines (tests, ratchet, clippy), and the count and list of published flows and corpus entries whose namespace has a `_files` segment.
-2. **Metadata, URIs, path rules, store operations** (migration 0169, `Tail::NamespaceFile`, `nsfile://` parsing, the `_files` segment rule at publish, `authorize`, write/read).
+2. **Metadata, URIs, path rules, store operations** (migration 0174, `Tail::NamespaceFile`, `nsfile://` parsing, the `_files` segment rule at publish, `authorize`, write/read).
 3. **Revisions, conflicts, move, soft delete** (the lock, concurrent writers, rollback).
 4. **The expression functions** (`fileURI`, the four over namespace files, the pool lookup on the render thread).
 5. **`namespaceFiles` staging** (script tasks; the publish gate flipped; on `WorkingDirectory` the block parsed and validated only).

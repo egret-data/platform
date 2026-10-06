@@ -1,4 +1,4 @@
-//! The read side of `workflow.namespace_files` (migration 0169) and the
+//! The read side of `workflow.namespace_files` (migration 0174) and the
 //! objects behind it (W9b spec §4.1, §4.5).
 //!
 //! Every statement is scoped `WHERE workspace_id = $1 AND namespace = $2`,

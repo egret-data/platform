@@ -42,7 +42,7 @@
 | `WorkingDirectory` | model chỉ giữ `tasks` và lặng lẽ bỏ `namespaceFiles`, `inputFiles`, `outputFiles`, `cache` (`models/task.rs:555-565`). **Executor không chạy nó**: `build_plan` lập kế hoạch nó thành một `Runnable` mờ (`executor/plan.rs:1230`, `executor/mod.rs:3319-3321`), và claim trả `None` cho nó (`worker/claim.rs:258`) |
 | plugin host | `ShimRunContext.storage()` dựng `InternalStorage` với `NO_NAMESPACE_FILES`, mà `of(…)` ném `EgretUnsupported` nêu W9b (`plugin-host/…/ShimRunContext.java:274-280`); `EgretUnsupported` khiến host thoát mã 4 (`EgretUnsupported.java:7`) |
 | pruner | pruner của W9a chỉ xoá theo execution dưới `FileStore::execution_prefix` (`storage/prune.rs:553`) |
-| migration | cuối cùng là `0168_workflow_execution_files_pruned.sql`; W9b lấy **0169** |
+| migration | cuối cùng là `0173_drop_app_draft_source_columns.sql` (origin/main `edccf6c4`); W9b lấy **0174** (viết là 0169; đánh số lại 2026-10-06 khi rebase lên origin/main, nơi đã lấy 0169–0173) |
 | corpus | hai flow dùng `namespaceFiles`, cả hai trên `WorkingDirectory` (`oracle-exec/corpus/valids/working-directory-namespace-files.yaml`, `…-with-namespaces.yaml`, cái thứ hai với ba namespace, `folderPerNamespace: true` và một `exclude`); không flow nào dùng `nsfile://`, `fileURI` hay `core.namespace.*` |
 
 ## 2. Kestra làm gì, và egret khác ở đâu
@@ -118,7 +118,7 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 
 ### 4.1 Bảng metadata
 
-`workflow.namespace_files` (migration 0169): `workspace_id` (FK tới workspace), `namespace` (text), `path` (text, đã chuẩn hoá, thư mục kết thúc bằng `/`), `revision` (int ≥ 1; luôn 1 với thư mục), `is_directory`, `size`, `deleted`, `created_at`, `created_by` (user hay execution đã ghi; *thêm ngày 2026-10-06, vòng sửa 1 của W9b Task 6:* và, với một lần ghi của task, task run đó, `created_by_task_run`, để một task run được re-claim sau lỗi hạ tầng nhận ra các lần ghi trước của chính nó, §8.1). Duy nhất `(workspace_id, namespace, path, revision)`; một index trên `(workspace_id, namespace, path)` cho dòng mới nhất. Một dòng cho mỗi revision; dòng mới nhất của một path là revision cao nhất. Không có FK tới namespace (không có bảng namespace): một namespace không có flow vẫn chứa được file.
+`workflow.namespace_files` (migration 0174): `workspace_id` (FK tới workspace), `namespace` (text), `path` (text, đã chuẩn hoá, thư mục kết thúc bằng `/`), `revision` (int ≥ 1; luôn 1 với thư mục), `is_directory`, `size`, `deleted`, `created_at`, `created_by` (user hay execution đã ghi; *thêm ngày 2026-10-06, vòng sửa 1 của W9b Task 6:* và, với một lần ghi của task, task run đó, `created_by_task_run`, để một task run được re-claim sau lỗi hạ tầng nhận ra các lần ghi trước của chính nó, §8.1). Duy nhất `(workspace_id, namespace, path, revision)`; một index trên `(workspace_id, namespace, path)` cho dòng mới nhất. Một dòng cho mỗi revision; dòng mới nhất của một path là revision cao nhất. Không có FK tới namespace (không có bảng namespace): một namespace không có flow vẫn chứa được file.
 
 **Một namespace file chỉ tồn tại khi dòng của nó tồn tại**, như index của W9a (W9a §4.2). Đọc, `exists`, stats và liệt kê đều đi qua bảng.
 
@@ -290,7 +290,7 @@ Không thông báo nào nêu key storage hay workspace khác. `DELETE` một pat
 ## 12. Task
 
 1. **Đo Kestra** (`oracle-exec/w9b-namespace-files.json`): đường dẫn object theo revision, thư mục, xoá mềm rồi ghi lại; ngữ nghĩa glob (chuỗi path mà glob thấy, thêm `**/`, `regex:`, excludes); `fileURI` có và không có `revision` trên path có, thiếu và đã xoá; `read` một `kestra:///…/_files/…` của namespace khác; `ifExists` giữa các namespace, và `inputFiles` ghi đè namespace file cùng tên; output của bốn task; `PurgeFiles` trên path đã xoá mềm; quy tắc path; cộng các baseline (test, ratchet, clippy), và số lượng cùng danh sách các flow đã publish và entry corpus có namespace chứa segment `_files`.
-2. **Metadata, URI, quy tắc path, thao tác store** (migration 0169, `Tail::NamespaceFile`, parse `nsfile://`, quy tắc segment `_files` lúc publish, `authorize`, ghi/đọc).
+2. **Metadata, URI, quy tắc path, thao tác store** (migration 0174, `Tail::NamespaceFile`, parse `nsfile://`, quy tắc segment `_files` lúc publish, `authorize`, ghi/đọc).
 3. **Revision, xung đột, move, xoá mềm** (khoá, writer đồng thời, rollback).
 4. **Các hàm biểu thức** (`fileURI`, bốn hàm trên namespace file, tra qua pool trên thread render).
 5. **Staging `namespaceFiles`** (script task; lật cổng publish; trên `WorkingDirectory` chỉ parse và kiểm tra khối).

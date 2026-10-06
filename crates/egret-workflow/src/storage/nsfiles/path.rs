@@ -4,7 +4,7 @@
 //! and the rule.
 
 /// A namespace file or directory path in its stored form: a leading `/`, a
-/// directory ending with `/` (migration 0169's `path`). Only
+/// directory ending with `/` (migration 0174's `path`). Only
 /// [`NsPath::parse_file`] and [`NsPath::parse_dir`] build one.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NsPath(String);

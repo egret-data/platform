@@ -1,4 +1,4 @@
-//! W9b Task 2: the read side of `workflow.namespace_files` (migration 0169)
+//! W9b Task 2: the read side of `workflow.namespace_files` (migration 0174)
 //! and the objects behind it; W9b Task 3: the write side (`put`,
 //! `create_directory`, `soft_delete`, `move_path`, `purge_revisions`) and its
 //! per-path advisory lock. Requires DATABASE_URL.

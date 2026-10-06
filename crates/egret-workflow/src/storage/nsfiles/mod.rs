@@ -4,7 +4,7 @@
 //! - [`access`]: THE access decision ([`access::authorize`], spec §4.6, §5)
 //!   and the one namespace rule ([`access::check_namespace`]).
 //! - [`store`]: the metadata table `workflow.namespace_files` (migration
-//!   0169) and the objects behind it. Every function takes the
+//!   0174) and the objects behind it. Every function takes the
 //!   [`access::Grant`] `authorize` returned; the workspace is the grant's.
 //! - [`glob`]: Kestra's `PathMatcherPredicate` and Commons-IO's wildcard
 //!   (Task 5; Tasks 6 and 7 reuse them).
