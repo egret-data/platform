@@ -66,7 +66,9 @@
 //!   (§4.3; the user's ruling R1): history stays listed and readable by
 //!   revision until `PurgeFiles`, and no object is removed. With
 //!   `deleteParentFolder`, each parent of a deleted file is soft-deleted,
-//!   deepest first, only when nothing live is left directly in it.
+//!   deepest first, with its empty subdirectories, when no live FILE is left
+//!   at any depth under it (Kestra's rule; the user's ruling of 2026-10-06),
+//!   judged in one transaction holding its lock (`store::soft_delete_if_empty`).
 //! - **`PurgeFiles` purges the flow's own namespace and its children**, never
 //!   another (§5). Default: the flow's own namespace (Kestra: every namespace
 //!   holding a flow), plus its children with `includeChildNamespaces`;
@@ -79,8 +81,11 @@
 //!   the coordinator's ruling B): it is a FILTER, so it never refuses and
 //!   never reaches another namespace. A path whose latest revision is
 //!   soft-deleted is purged entirely, whatever `behavior` keeps (Kestra's
-//!   `keepAmount: 1` keeps its deleted latest revision). Directories are
-//!   never purged: they hold no object and no revision.
+//!   `keepAmount: 1` keeps its deleted latest revision). A soft-deleted
+//!   directory with nothing left under it is purged too (and with
+//!   `keepAmount: 0` a live one), counted in `size`. `before` is `<=`, as
+//!   Kestra's; a `behavior` with neither property is refused (the user's
+//!   ruling of 2026-10-06).
 //!
 //! # Bounds and errors (spec §7, §11)
 //!
@@ -95,11 +100,12 @@
 //! or more bytes than `max_task_bytes`, before its first write (fix round
 //! 1, M3). `DeleteFiles` lists at most `max_namespace_files + 1` live rows.
 //! `PurgeFiles` takes at most [`MAX_NAMESPACES`] namespaces (listed, and
-//! resolved), and lists at most `max_namespace_files + 1` file revisions
-//! across all of them, before it purges anything; it purges exact
-//! `(path, revision)` rows and their objects, never a prefix, through
-//! `store::purge_revisions` (its session locks), on a detached task that runs
-//! to completion once it has started.
+//! covered), and reads each namespace's rows in keyset pages of
+//! `max_namespace_files + 1`; it purges each path at once by ROW id
+//! (`store::purge_rows`, under the path's session lock), so a stale plan
+//! never removes a newer file that reused a revision number, and it refuses
+//! only one file with more revisions than the cap ([`run_purge`]). It runs
+//! on a detached task, to completion once started.
 //! `NsError::{Store, Db}` and a store that fails are infrastructure: `Err`,
 //! so the lease lapses and the run is re-claimed with no attempt spent;
 //! everything else is a failed task naming the path, the property or the cap.
@@ -125,8 +131,9 @@ use crate::storage::nsfiles::glob::{wildcard_match, wildcard_matches, PathMatche
 use crate::storage::nsfiles::path::NsPath;
 use crate::storage::nsfiles::stage::{resolve_input_uri, ListProp, MAX_NAMESPACES};
 use crate::storage::nsfiles::store::{
-    file_revisions, latest_written, list_live, namespaces_with_files, open, purge_revisions, put,
-    soft_delete, Conflict, NsEntry, Written,
+    file_rows_page, latest_written, list_live, namespaces_with_files, open, purge_empty_directory,
+    purge_rows, purgeable_directories_page, put, soft_delete, soft_delete_if_empty, Conflict,
+    NsEntry, Written,
 };
 use crate::storage::nsfiles::{CreatedBy, NsError};
 use crate::storage::uri::{self, Tail};
@@ -1194,22 +1201,15 @@ impl TaskHandler for DeleteFiles {
         }
         let mut folders = 0usize;
         if parents {
+            // Kestra's rule (the user's ruling of 2026-10-06, M1): a parent
+            // goes when no LIVE FILE is left at any depth under it, with its
+            // empty subdirectories; judged and deleted in one locked
+            // transaction (M2), so a concurrent write into it keeps it.
             for dir in parents_deepest_first(&deleted) {
-                // One live row directly in `dir` is enough to keep it: a
-                // listing capped at 0 answers `TooLarge` at the first row.
-                let empty = {
-                    let mut conn = self.pool.acquire().await.map_err(|e| db_err(T, e))?;
-                    match list_live(&mut conn, &grant, Some(&dir), false, 0).await {
-                        Ok(rows) => rows.is_empty(),
-                        Err(NsError::TooLarge(_)) => false,
-                        Err(e) => return split(T, e).map(Outcome::failed_with),
+                match soft_delete_if_empty(&self.pool, &grant, &dir).await {
+                    Ok(marked) => {
+                        folders += marked.iter().filter(|e| e.is_directory).count();
                     }
-                };
-                if !empty {
-                    continue;
-                }
-                match soft_delete(&self.pool, &grant, &dir).await {
-                    Ok(marked) => folders += usize::from(!marked.is_empty()),
                     Err(e) => return split(T, e).map(Outcome::failed_with),
                 }
             }
@@ -1271,9 +1271,10 @@ struct BehaviorSpec {
 enum Keep {
     /// The N highest (`keepAmount`).
     Newest(u64),
-    /// Every revision created at or after the instant, and the highest
-    /// whatever its age (`before`).
-    Since(DateTime<Utc>),
+    /// Every revision created AFTER the instant, and the highest whatever
+    /// its age (`before`): Kestra's `updated <= before` purges one created
+    /// exactly at it (fix round 1, C3/M3).
+    Before(DateTime<Utc>),
 }
 
 /// `behavior`, rendered, to a [`Keep`]; absent = Kestra's default
@@ -1322,10 +1323,13 @@ fn keep_rule(b: Option<BehaviorSpec>) -> std::result::Result<Keep, String> {
             Err("`behavior`: Cannot set both 'before' and 'keepAmount' properties".to_string())
         }
         (Some(n), None) => Ok(Keep::Newest(n)),
-        (None, Some(t)) => Ok(Keep::Since(t)),
+        (None, Some(t)) => Ok(Keep::Before(t)),
+        // The user's ruling (2026-10-06, C2): refused, where Kestra purges
+        // every revision of every matched path, the live latest included.
         (None, None) => Err(
             "`behavior` sets neither `keepAmount` nor `before`, so it names nothing to keep: \
-             set one of them"
+             set `keepAmount` (the newest revisions kept per file) or `before` (an instant); \
+             `keepAmount: 0` purges every revision"
                 .to_string(),
         ),
     }
@@ -1351,9 +1355,9 @@ fn revisions_to_purge(revs: &[NsEntry], keep: Keep) -> Vec<u32> {
                 .collect()
         }
         // Never the latest: `older` holds every revision but it.
-        Keep::Since(t) => older
+        Keep::Before(t) => older
             .iter()
-            .filter(|e| e.created_at < t)
+            .filter(|e| e.created_at <= t)
             .map(|e| e.revision)
             .collect(),
     }
@@ -1404,33 +1408,146 @@ fn purge_namespaces(
     out.into_iter().collect()
 }
 
-/// What one purge removes: a namespace's grant, a path, its revisions.
-type PurgeTarget = (Grant, NsPath, Vec<u32>);
-
-/// `listing` (each namespace's file rows, by path then revision) to the
-/// revisions [`revisions_to_purge`] takes from each path `file_pattern`
+/// One page's complete path groups (`(id, row)`, by path then revision) to
+/// the rows [`revisions_to_purge`] takes from each path `file_pattern`
 /// matches (Commons-IO wildcard on the path without its leading `/`, spec
-/// §8.4). CPU on a pattern of any length: callers run it on the blocking
-/// pool.
-fn purge_targets(
-    listing: Vec<(Grant, Vec<NsEntry>)>,
+/// §8.4), as `(id, revision)`. CPU on a pattern of any length: callers run
+/// it on the blocking pool.
+fn page_targets(
+    rows: Vec<(i64, NsEntry)>,
     file_pattern: Option<&str>,
     keep: Keep,
-) -> Vec<PurgeTarget> {
+) -> Vec<(NsPath, Vec<(i64, u32)>)> {
     let mut out = Vec::new();
-    for (grant, rows) in listing {
-        for revs in rows.chunk_by(|a, b| a.path == b.path) {
-            let path = &revs[0].path;
-            if file_pattern.is_some_and(|p| !wildcard_matches(p, path)) {
-                continue;
+    for group in rows.chunk_by(|a, b| a.1.path == b.1.path) {
+        let path = &group[0].1.path;
+        if file_pattern.is_some_and(|p| !wildcard_matches(p, path)) {
+            continue;
+        }
+        let entries: Vec<NsEntry> = group.iter().map(|(_, e)| e.clone()).collect();
+        let take = revisions_to_purge(&entries, keep);
+        if take.is_empty() {
+            continue;
+        }
+        let rows = group
+            .iter()
+            .filter(|(_, e)| take.contains(&e.revision))
+            .map(|(id, e)| (*id, e.revision))
+            .collect();
+        out.push((path.clone(), rows));
+    }
+    out
+}
+
+/// Whether `file_pattern` takes `path`, on the blocking pool.
+async fn pattern_takes(file_pattern: &Option<Arc<str>>, path: &NsPath) -> bool {
+    let Some(p) = file_pattern.clone() else {
+        return true;
+    };
+    let path = path.clone();
+    tokio::task::spawn_blocking(move || wildcard_matches(&p, &path))
+        .await
+        .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
+}
+
+/// The purge itself (spec §8.4; fix round 1, I1-I3), namespace by namespace:
+///
+/// 1. **Files**, in keyset pages of at most `cap + 1` rows by
+///    `(path, revision)`. Each page's COMPLETE path groups are judged
+///    ([`page_targets`]) and purged at once, path by path, by row id
+///    ([`purge_rows`]); the last, possibly partial group starts the next
+///    page. Only ONE path holding more than `cap` revisions that
+///    `file_pattern` takes is refused, naming it (`Ok(Err)`); one it does not
+///    take is skipped. No other count bounds a purge.
+/// 2. **Directories**, deepest first, in pages of at most `cap + 1`: a
+///    soft-deleted one -- and with `keepAmount: 0` a live one -- that
+///    `file_pattern` takes is removed when nothing is left under it, decided
+///    under its lock ([`purge_empty_directory`]).
+///
+/// Each path is purged atomically (rows, commit, objects); a failure leaves
+/// the paths before it purged, and a re-claim recomputes from the rows as
+/// they then are. Returns the rows removed, directories included.
+async fn run_purge(
+    pool: PgPool,
+    fs: Arc<FileStore>,
+    grants: Vec<Grant>,
+    file_pattern: Option<Arc<str>>,
+    keep: Keep,
+    cap: u64,
+) -> std::result::Result<std::result::Result<u64, String>, NsError> {
+    let mut purged = 0u64;
+    for grant in &grants {
+        let mut after: Option<(NsPath, u32)> = None;
+        loop {
+            let mut page = {
+                let mut conn = pool.acquire().await.map_err(|e| {
+                    NsError::Db(Error::Internal(anyhow::anyhow!(
+                        "the database is unavailable: {e}"
+                    )))
+                })?;
+                file_rows_page(&mut conn, grant, after.as_ref().map(|(p, r)| (p, *r)), cap).await?
+            };
+            let full = page.len() as u64 > cap;
+            if full {
+                let last_path = page.last().map(|(_, e)| e.path.clone()).expect("full");
+                if page.iter().all(|(_, e)| e.path == last_path) {
+                    // One path alone holds more than `cap` revisions.
+                    if pattern_takes(&file_pattern, &last_path).await {
+                        return Ok(Err(format!(
+                            "namespace file '{last_path}' in namespace '{}' has more than {cap} \
+                             revisions, the most one task lists for one file \
+                             (workflow.storage.max_namespace_files); the files before it were \
+                             purged",
+                            grant.namespace()
+                        )));
+                    }
+                    after = Some((last_path, u32::MAX));
+                    continue;
+                }
+                // The last group may be partial: it starts the next page.
+                page.retain(|(_, e)| e.path != last_path);
             }
-            let take = revisions_to_purge(revs, keep);
-            if !take.is_empty() {
-                out.push((grant.clone(), path.clone(), take));
+            let next = page.last().map(|(_, e)| (e.path.clone(), u32::MAX));
+            let pattern = file_pattern.clone();
+            let targets =
+                tokio::task::spawn_blocking(move || page_targets(page, pattern.as_deref(), keep))
+                    .await
+                    .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()));
+            for (path, rows) in targets {
+                purged += purge_rows(&pool, &fs, grant, &path, &rows).await?;
+            }
+            match (full, next) {
+                (true, Some(n)) => after = Some(n),
+                _ => break,
+            }
+        }
+        let live_too = keep == Keep::Newest(0);
+        let mut before: Option<NsPath> = None;
+        loop {
+            let mut page = {
+                let mut conn = pool.acquire().await.map_err(|e| {
+                    NsError::Db(Error::Internal(anyhow::anyhow!(
+                        "the database is unavailable: {e}"
+                    )))
+                })?;
+                purgeable_directories_page(&mut conn, grant, before.as_ref(), live_too, cap).await?
+            };
+            let full = page.len() as u64 > cap;
+            if full {
+                page.pop();
+            }
+            before = page.last().map(|e| e.path.clone());
+            for dir in page {
+                if pattern_takes(&file_pattern, &dir.path).await {
+                    purged += purge_empty_directory(&pool, grant, &dir.path, live_too).await?;
+                }
+            }
+            if !full || before.is_none() {
+                break;
             }
         }
     }
-    out
+    Ok(Ok(purged))
 }
 
 /// `core.namespace.PurgeFiles`: a hard purge of old revisions (and of
@@ -1537,29 +1654,60 @@ impl TaskHandler for PurgeFiles {
             return fail(not_a_flow_run());
         };
 
-        // The candidates: the namespaces holding files that are own or its
-        // children (the store restricts them), at most MAX_NAMESPACES + 1.
-        let candidates = if pattern.is_some() || children {
-            let mut conn = self.pool.acquire().await.map_err(|e| db_err(T, e))?;
-            let found = match namespaces_with_files(
-                &mut conn,
+        // A listed namespace passes the purge rule first: one outside it is
+        // refused by name before anything is listed under it.
+        for ns in listed.iter().flatten() {
+            if let Err(why) = authorize(
                 task.workspace_id,
-                &own,
-                MAX_NAMESPACES as u64,
-            )
-            .await
-            {
-                Ok(f) => f,
-                Err(e) => return split(T, e).map(Outcome::failed_with),
-            };
-            if found.len() > MAX_NAMESPACES {
-                return fail(format!(
-                    "namespace '{own}' and its child namespaces hold files in more than \
-                     {MAX_NAMESPACES} namespaces, the most one task purges: name them in \
-                     `namespaces`, or narrow `namespacePattern`"
-                ));
+                Actor::Flow { namespace: &own },
+                ns,
+                Access::Purge,
+            ) {
+                return fail(why);
             }
-            found
+        }
+        // The candidates: the namespaces holding files under the roots --
+        // own for a pattern or the default, each LISTED one otherwise (fix
+        // round 1, M5) -- restricted by the store to a root and its children
+        // on a dot, at most MAX_NAMESPACES of them.
+        let candidates = if pattern.is_some() || children {
+            let roots: Vec<String> = match (&pattern, &listed) {
+                (None, Some(l)) => l.clone(),
+                _ => vec![own.clone()],
+            };
+            let too_many = || {
+                format!(
+                    "the namespaces under {} hold files in more than {MAX_NAMESPACES} \
+                     namespaces, the most one task purges: list the ones to purge in \
+                     `namespaces` with `includeChildNamespaces: false`, or narrow \
+                     `namespacePattern`",
+                    roots
+                        .iter()
+                        .map(|r| format!("'{r}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            let mut found = std::collections::BTreeSet::new();
+            let mut conn = self.pool.acquire().await.map_err(|e| db_err(T, e))?;
+            for root in &roots {
+                let under = match namespaces_with_files(
+                    &mut conn,
+                    task.workspace_id,
+                    root,
+                    MAX_NAMESPACES as u64,
+                )
+                .await
+                {
+                    Ok(f) => f,
+                    Err(e) => return split(T, e).map(Outcome::failed_with),
+                };
+                found.extend(under);
+                if found.len() > MAX_NAMESPACES {
+                    return fail(too_many());
+                }
+            }
+            found.into_iter().collect()
         } else {
             Vec::new()
         };
@@ -1600,36 +1748,6 @@ impl TaskHandler for PurgeFiles {
             }
         }
 
-        // Every file revision of every namespace, at most the cap TOGETHER,
-        // listed before the first purge.
-        let cap = fs.caps.max_namespace_files;
-        let mut listing = Vec::with_capacity(grants.len());
-        {
-            let mut conn = self.pool.acquire().await.map_err(|e| db_err(T, e))?;
-            let mut remaining = cap;
-            for grant in grants {
-                let rows = match file_revisions(&mut conn, &grant, remaining).await {
-                    Ok(r) => r,
-                    Err(e) => return split(T, e).map(Outcome::failed_with),
-                };
-                if rows.len() as u64 > remaining {
-                    return fail(format!(
-                        "the namespaces to purge ({}) hold more than {cap} file revisions, the \
-                         most one task lists (workflow.storage.max_namespace_files); nothing \
-                         was purged",
-                        resolved.join(", ")
-                    ));
-                }
-                remaining -= rows.len() as u64;
-                listing.push((grant, rows));
-            }
-        }
-        let targets = tokio::task::spawn_blocking(move || {
-            purge_targets(listing, file_pattern.as_deref(), keep)
-        })
-        .await
-        .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()));
-
         task.log
             .line(
                 LogLevel::Info,
@@ -1641,21 +1759,22 @@ impl TaskHandler for PurgeFiles {
             )
             .await;
         // Detached (spec §4.4): once it has started, the purge runs to
-        // completion even if this run is dropped (a timeout, a shutdown);
-        // each path's purge is `store::purge_revisions`, exact rows and
-        // keys under that path's session locks.
-        let (pool, store) = (self.pool.clone(), fs.clone());
-        let purged = tokio::spawn(async move {
-            let mut purged = 0u64;
-            for (grant, path, revisions) in targets {
-                purged += purge_revisions(&pool, &store, &grant, &path, &revisions).await?;
-            }
-            Ok::<u64, NsError>(purged)
-        })
+        // completion even if this run is dropped (a timeout, a shutdown).
+        let file_pattern: Option<Arc<str>> = file_pattern.map(Arc::from);
+        let cap = fs.caps.max_namespace_files;
+        let purged = tokio::spawn(run_purge(
+            self.pool.clone(),
+            fs.clone(),
+            grants,
+            file_pattern,
+            keep,
+            cap,
+        ))
         .await
         .map_err(|e| Error::Internal(anyhow::anyhow!("{T}: the purge stopped: {e}")))?;
         let purged = match purged {
-            Ok(n) => n,
+            Ok(Ok(n)) => n,
+            Ok(Err(why)) => return fail(why),
             Err(e) => return split(T, e).map(Outcome::failed_with),
         };
         task.log
@@ -1761,11 +1880,18 @@ mod tests {
         assert_eq!(revisions_to_purge(&revs, Keep::Newest(3)), [1]);
         assert_eq!(revisions_to_purge(&revs, Keep::Newest(9)), [] as [u32; 0]);
         assert_eq!(revisions_to_purge(&revs, Keep::Newest(0)), [1, 2, 3, 4]);
-        let at = |s| Keep::Since(DateTime::from_timestamp(s, 0).unwrap());
-        assert_eq!(revisions_to_purge(&revs, at(3)), [1, 2]);
-        // Strictly before; and the latest never, even when older.
+        let at = |s| Keep::Before(DateTime::from_timestamp(s, 0).unwrap());
+        // At or before the instant, as Kestra's `<=` (C3): a tie is purged.
+        assert_eq!(revisions_to_purge(&revs, at(2)), [1, 2]);
+        assert_eq!(revisions_to_purge(&revs, at(1)), [1]);
+        assert_eq!(revisions_to_purge(&revs, at(0)), [] as [u32; 0]);
+        // The latest never, even when older.
         assert_eq!(revisions_to_purge(&revs, at(100)), [1, 2, 3]);
-        assert_eq!(revisions_to_purge(&revs, at(1)), [] as [u32; 0]);
+        // M6: a soft-deleted MIDDLE revision counts toward keepAmount, as
+        // Kestra's skip over every version.
+        let mut middle = revs[..3].to_vec();
+        middle[1].deleted = true;
+        assert_eq!(revisions_to_purge(&middle, Keep::Newest(2)), [1]);
         // A soft-deleted latest: every revision, whatever the rule.
         let mut deleted = revs.clone();
         deleted[3].deleted = true;
@@ -1788,7 +1914,7 @@ mod tests {
         );
         assert_eq!(
             parse(serde_json::json!({"type": "version", "before": "2026-10-05T03:12:45Z"})),
-            Ok(Keep::Since(
+            Ok(Keep::Before(
                 "2026-10-05T03:12:45Z".parse::<DateTime<Utc>>().unwrap()
             ))
         );

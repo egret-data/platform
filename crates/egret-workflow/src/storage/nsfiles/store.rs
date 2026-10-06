@@ -77,6 +77,19 @@ macro_rules! latest_under {
 
 type Row = (Uuid, String, String, i32, bool, i64, bool, DateTime<Utc>);
 
+/// `id`, then [`Row`] ([`file_rows_page`]).
+type RowWithId = (
+    i64,
+    Uuid,
+    String,
+    String,
+    i32,
+    bool,
+    i64,
+    bool,
+    DateTime<Utc>,
+);
+
 /// [`Row`], then `created_by_task_run` ([`latest_written`]).
 type RowWithTaskRun = (
     Uuid,
@@ -347,25 +360,71 @@ pub async fn namespaces_with_files(
     .map_err(db_err)
 }
 
-/// Every FILE row of the grant's namespace -- every revision, live or
-/// soft-deleted -- by path (byte order), then revision ascending:
-/// `PurgeFiles`' listing (W9b Task 7). Directories are not listed: they hold
-/// no object and no revision to purge. Fetches at most `cap + 1` rows; the
-/// `+1` is the caller's refusal.
-pub async fn file_revisions(
+/// One page of the grant's namespace's FILE rows -- every revision, live or
+/// soft-deleted -- with each row's `id`, by path (byte order) then revision,
+/// strictly after `after` (`(path, revision)`; `None` = from the start):
+/// `PurgeFiles`' keyset listing (W9b Task 7, fix round 1 I3). Directories
+/// are not listed ([`purgeable_directories_page`]). Fetches at most
+/// `cap + 1` rows; the caller pages on.
+pub async fn file_rows_page(
     conn: &mut PgConnection,
     grant: &Grant,
+    after: Option<(&NsPath, u32)>,
+    cap: u64,
+) -> Result<Vec<(i64, NsEntry)>, NsError> {
+    let (after_path, after_revision) = match after {
+        Some((p, r)) => (
+            Some(p.as_str().to_string()),
+            i32::try_from(r).unwrap_or(i32::MAX),
+        ),
+        None => (None, 0),
+    };
+    let rows: Vec<RowWithId> = sqlx::query_as(concat!(
+        "SELECT id, ",
+        entry_cols!(),
+        " FROM workflow.namespace_files \
+          WHERE workspace_id = $1 AND namespace = $2 AND NOT is_directory \
+            AND ($3::text IS NULL OR path COLLATE \"C\" > $3::text COLLATE \"C\" \
+                 OR (path = $3::text AND revision > $4)) \
+          ORDER BY path COLLATE \"C\", revision LIMIT $5"
+    ))
+    .bind(grant.workspace())
+    .bind(grant.namespace())
+    .bind(after_path)
+    .bind(after_revision)
+    .bind(limit(cap))
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    rows.into_iter()
+        .map(|(id, w, n, p, r, d, s, del, at)| Ok((id, entry((w, n, p, r, d, s, del, at))?)))
+        .collect()
+}
+
+/// One page of the grant's namespace's directory rows a purge may remove --
+/// soft-deleted ones, and with `live_too` live ones as well -- in DESCENDING
+/// byte order (a directory's children sort after it, so a child comes
+/// first), strictly before `before`. At most `cap + 1` rows. Whether one is
+/// removed is decided under its lock ([`purge_empty_directory`]).
+pub async fn purgeable_directories_page(
+    conn: &mut PgConnection,
+    grant: &Grant,
+    before: Option<&NsPath>,
+    live_too: bool,
     cap: u64,
 ) -> Result<Vec<NsEntry>, NsError> {
     let rows: Vec<Row> = sqlx::query_as(concat!(
         "SELECT ",
         entry_cols!(),
         " FROM workflow.namespace_files \
-          WHERE workspace_id = $1 AND namespace = $2 AND NOT is_directory \
-          ORDER BY path COLLATE \"C\", revision LIMIT $3"
+          WHERE workspace_id = $1 AND namespace = $2 AND is_directory AND (deleted OR $3) \
+            AND ($4::text IS NULL OR path COLLATE \"C\" < $4::text COLLATE \"C\") \
+          ORDER BY path COLLATE \"C\" DESC LIMIT $5"
     ))
     .bind(grant.workspace())
     .bind(grant.namespace())
+    .bind(live_too)
+    .bind(before.map(|p| p.as_str().to_string()))
     .bind(limit(cap))
     .fetch_all(&mut *conn)
     .await
@@ -1006,6 +1065,60 @@ pub async fn soft_delete(
     // The chain, as every writer (fix round 1, I1): a move of an ancestor
     // holds that ancestor's key, and a writer under `path` locks `path`.
     xact_lock(&mut tx, &lock_chain(grant, &[path])).await?;
+    let marked = mark_deleted(&mut tx, grant, path).await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(marked)
+}
+
+/// `DeleteFiles`' `deleteParentFolder` (W9b Task 7, fix round 1, M1/M2; the
+/// user's ruling of 2026-10-06, Kestra's `isDirectoryEmpty`): the directory
+/// `dir` is soft-deleted, with every row under it, only when no LIVE FILE
+/// remains at any depth beneath it (live empty subdirectories do not keep
+/// it). The check and the delete run in ONE transaction holding `dir`'s
+/// chain lock, which every writer under `dir` also takes, so a file written
+/// concurrently either commits first (and keeps `dir`) or waits until `dir`
+/// is deleted (and then revives it). Returns what it marked; empty when
+/// `dir` was kept or holds nothing live.
+pub async fn soft_delete_if_empty(
+    pool: &PgPool,
+    grant: &Grant,
+    dir: &NsPath,
+) -> Result<Vec<NsEntry>, NsError> {
+    need_write(grant)?;
+    if !dir.is_dir() {
+        return Err(internal(format!(
+            "egret judged '{dir}' as a directory, which is a file path"
+        )));
+    }
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    xact_lock(&mut tx, &lock_chain(grant, &[dir])).await?;
+    let holds_a_file: bool = sqlx::query_scalar(concat!(
+        "SELECT EXISTS (SELECT 1 FROM (",
+        latest_under!(),
+        ") latest WHERE NOT deleted AND NOT is_directory)"
+    ))
+    .bind(grant.workspace())
+    .bind(grant.namespace())
+    .bind(dir.as_str())
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    let marked = if holds_a_file {
+        Vec::new()
+    } else {
+        mark_deleted(&mut tx, grant, dir).await?
+    };
+    tx.commit().await.map_err(db_err)?;
+    Ok(marked)
+}
+
+/// §4.3's one statement: the latest row of `path` and, for a directory, of
+/// every path under it, marked deleted; by path. The caller holds the lock.
+async fn mark_deleted(
+    conn: &mut PgConnection,
+    grant: &Grant,
+    path: &NsPath,
+) -> Result<Vec<NsEntry>, NsError> {
     let rows: Vec<Row> = sqlx::query_as(
         "UPDATE workflow.namespace_files f SET deleted = true \
            FROM (SELECT DISTINCT ON (path) id, deleted FROM workflow.namespace_files \
@@ -1020,10 +1133,9 @@ pub async fn soft_delete(
     .bind(grant.namespace())
     .bind(path.as_str())
     .bind(path.is_dir())
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?;
-    tx.commit().await.map_err(db_err)?;
     let mut marked = entries(rows)?;
     marked.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
     Ok(marked)
@@ -1273,6 +1385,119 @@ pub async fn purge_revisions(
             .await
             .map_err(NsError::Db)?;
         let result = purge_locked(session.conn(), &fs, &grant, &targets).await;
+        release(session, "purge").await;
+        result
+    })
+    .await
+}
+
+/// `PurgeFiles`' hard delete of one file path's rows, named by ROW `id`
+/// (W9b Task 7, fix round 1, I1): an id is never reused, while a revision
+/// NUMBER is -- a path whose rows were all purged, or moved away, starts
+/// again at revision 1 -- so a purge planned from an earlier listing removes
+/// only the rows it saw, never a newer file that took the same numbers.
+/// Objects are deleted only for the rows this call removed. Session-locked
+/// on `path`'s chain and [`detached`], as [`purge_revisions`]. `rows` are
+/// `(id, revision)`; the revision clause only restates what each id names.
+/// Returns how many rows were removed.
+pub async fn purge_rows(
+    pool: &PgPool,
+    fs: &FileStore,
+    grant: &Grant,
+    path: &NsPath,
+    rows: &[(i64, u32)],
+) -> Result<u64, NsError> {
+    require(grant, Access::Purge).map_err(NsError::Db)?;
+    if path.is_dir() {
+        return Err(internal(format!(
+            "egret purged '{path}' by row as a file, which is a directory"
+        )));
+    }
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let ids: Vec<i64> = rows.iter().map(|(id, _)| *id).collect();
+    let revisions: Vec<i32> = rows
+        .iter()
+        .map(|(_, r)| i32::try_from(*r).unwrap_or(i32::MAX))
+        .collect();
+    let (pool, fs, grant, path) = (pool.clone(), fs.clone(), grant.clone(), path.clone());
+    detached("purge", async move {
+        let keys = session_keys(&pool, &lock_chain(&grant, &[&path])).await?;
+        let mut session = LockedSession::acquire(&pool, &keys)
+            .await
+            .map_err(NsError::Db)?;
+        let result = async {
+            let gone: Vec<i32> = sqlx::query_scalar(
+                "DELETE FROM workflow.namespace_files f \
+                  WHERE f.workspace_id = $1 AND f.namespace = $2 AND f.path = $3 \
+                    AND NOT f.is_directory \
+                    AND f.id = ANY($4) AND f.revision = ANY($5) \
+                  RETURNING f.revision",
+            )
+            .bind(grant.workspace())
+            .bind(grant.namespace())
+            .bind(path.as_str())
+            .bind(&ids)
+            .bind(&revisions)
+            .fetch_all(&mut *session.conn())
+            .await
+            .map_err(db_err)?;
+            for revision in &gone {
+                let key = fs.namespace_object_uri(&grant, &path, *revision as u32);
+                if let Err(e) = fs.store.delete(&key).await {
+                    tracing::warn!(key = %key, error = %e, "a purged namespace file's object could not be deleted: it is an orphan");
+                }
+            }
+            Ok(gone.len() as u64)
+        }
+        .await;
+        release(session, "purge").await;
+        result
+    })
+    .await
+}
+
+/// `PurgeFiles`' removal of one directory row (W9b Task 7, fix round 1, I2):
+/// under `dir`'s chain lock, the row goes only when it is soft-deleted (or,
+/// with `live_too`, live) AND no row at all -- live or soft-deleted, file or
+/// directory -- remains under it: the condition `put` already uses to remove
+/// a lone soft-deleted directory (§4.2 step 4). A directory has no object.
+/// [`detached`]. Returns 1 when the row was removed, else 0.
+pub async fn purge_empty_directory(
+    pool: &PgPool,
+    grant: &Grant,
+    dir: &NsPath,
+    live_too: bool,
+) -> Result<u64, NsError> {
+    require(grant, Access::Purge).map_err(NsError::Db)?;
+    if !dir.is_dir() {
+        return Err(internal(format!(
+            "egret purged '{dir}' as a directory, which is a file path"
+        )));
+    }
+    let (pool, grant, dir) = (pool.clone(), grant.clone(), dir.clone());
+    detached("purge", async move {
+        let keys = session_keys(&pool, &lock_chain(&grant, &[&dir])).await?;
+        let mut session = LockedSession::acquire(&pool, &keys)
+            .await
+            .map_err(NsError::Db)?;
+        let result = sqlx::query(
+            "DELETE FROM workflow.namespace_files f \
+              WHERE f.workspace_id = $1 AND f.namespace = $2 AND f.path = $3 \
+                AND f.is_directory AND (f.deleted OR $4) \
+                AND NOT EXISTS (SELECT 1 FROM workflow.namespace_files u \
+                                 WHERE u.workspace_id = $1 AND u.namespace = $2 \
+                                   AND left(u.path, length($3)) = $3 AND u.path <> $3)",
+        )
+        .bind(grant.workspace())
+        .bind(grant.namespace())
+        .bind(dir.as_str())
+        .bind(live_too)
+        .execute(&mut *session.conn())
+        .await
+        .map(|r| r.rows_affected())
+        .map_err(db_err);
         release(session, "purge").await;
         result
     })

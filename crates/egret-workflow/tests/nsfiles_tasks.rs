@@ -1722,6 +1722,22 @@ async fn delete_parent_folder_removes_parents_left_empty_deepest_first() {
         assert_eq!(live(&db.pool, ws, own, path).await, want, "{path}");
     }
     assert_eq!(listing(&db.pool, ws, own, Some("/p/")).await, ["keep.txt"]);
+
+    // M1 (the user's ruling of 2026-10-06, Kestra's `isDirectoryEmpty`): a
+    // parent holding no live FILE at any depth goes, with the live empty
+    // subdirectory inside it.
+    for path in ["/m/x.txt", "/m/e/y.txt"] {
+        seed(&db, &fs, ws, own, path, b"x").await;
+    }
+    let first = "  - id: first\n    type: io.kestra.plugin.core.namespace.DeleteFiles\n    \
+                 files: \"/m/e/y.txt\"\n";
+    let second = "  - id: second\n    type: io.kestra.plugin.core.namespace.DeleteFiles\n    \
+                  files: \"/m/x.txt\"\n    deleteParentFolder: true\n";
+    let ex = run(&db, ws, &flow("m1", own, &[first.into(), second.into()])).await;
+    assert_eq!(succeeded(&db.pool, ex, "second").await, json!({}));
+    for (path, want) in [("/m/", false), ("/m/e/", false), ("/m/x.txt", false)] {
+        assert_eq!(live(&db.pool, ws, own, path).await, want, "{path}");
+    }
 }
 
 /// `runs.del_other_ns` (chosen): another namespace is refused by the write
@@ -2117,10 +2133,39 @@ async fn keep_amount_keeps_the_n_highest_revisions_and_size_counts_revisions_pur
         objects(&fs, ws, own).await.into_keys().collect::<Vec<_>>(),
         ["d/n.txt.v2", "k.txt.v4", "one.txt"]
     );
+    // keepAmount 0 purges every revision AND the directory rows left with
+    // nothing under them, each counted in `size`, as Kestra's (fix round 1,
+    // M7): k.txt v4, one.txt, d/n.txt v2 and `/d/`.
     let ex = run(&db, ws, &flow("ka", own, &[keep(0)])).await;
-    assert_eq!(purged(&db.pool, ex, "purge").await, json!(3));
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(4));
     assert_eq!(rows(&db.pool, ws, own).await, BTreeMap::new());
+    assert_eq!(every_row(&db.pool, ws, own).await, 0);
     assert_eq!(objects(&fs, ws, own).await, BTreeMap::new());
+
+    // M6: a soft-deleted MIDDLE revision counts toward keepAmount (Kestra's
+    // skip over every version): r1, r2 (deleted), r3 -> keepAmount 2 keeps
+    // [2, 3].
+    seed_revisions(&db, &fs, ws, own, "/m.txt", 2).await;
+    let write = authorize(ws, Actor::Api, own, Access::Write).unwrap();
+    soft_delete(&db.pool, &write, &NsPath::parse_file("/m.txt").unwrap())
+        .await
+        .unwrap();
+    seed(&db, &fs, ws, own, "/m.txt", b"r3").await;
+    let ex = run(&db, ws, &flow("ka", own, &[keep(2)])).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(1));
+    assert_eq!(rows(&db.pool, ws, own).await["/m.txt"], [2, 3]);
+}
+
+/// Every row of `ns` in `ws`, files and directories.
+async fn every_row(pool: &sqlx::PgPool, ws: Uuid, ns: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.namespace_files WHERE workspace_id = $1 AND namespace = $2",
+    )
+    .bind(ws)
+    .bind(ns)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 /// `purge.before` (measured): `filePattern` with a leading `/` matches
@@ -2184,6 +2229,28 @@ async fn before_purges_older_revisions_and_never_the_latest() {
         objects(&fs, ws, own).await,
         fixture_objects(&want["objects_after"])
     );
+
+    // C3/M3: Kestra's `updated <= before`, so a revision created EXACTLY at
+    // the instant is purged.
+    seed_revisions(&db, &fs, ws, own, "/tie.txt", 2).await;
+    let tie = "2026-10-05T03:12:45Z";
+    sqlx::query(
+        "UPDATE workflow.namespace_files SET created_at = $3::timestamptz \
+          WHERE workspace_id = $1 AND namespace = $2 AND path = '/tie.txt' AND revision = 1",
+    )
+    .bind(ws)
+    .bind(own)
+    .bind(tie)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let task = purge_task(
+        "purge",
+        &format!("filePattern: tie.txt\nbehavior:\n  type: version\n  before: \"{tie}\""),
+    );
+    let ex = run(&db, ws, &flow("tie", own, &[task])).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(1));
+    assert_eq!(rows(&db.pool, ws, own).await["/tie.txt"], [2]);
 }
 
 /// `purge.keepAmount_1_on_soft_deleted` (chosen; Kestra keeps the deleted
@@ -2343,9 +2410,11 @@ async fn a_purge_leaves_no_row_without_its_object() {
 }
 
 /// Every list is bounded, and crossing a bound is the author's error naming
-/// it, before anything is deleted or purged: DeleteFiles' live listing and
-/// PurgeFiles' revisions (both `max_namespace_files`, 10 in this binary),
-/// PurgeFiles' listed namespaces (`MAX_NAMESPACES`).
+/// it: DeleteFiles' live listing (`max_namespace_files`, 10 in this binary)
+/// before anything is deleted; PurgeFiles' listed namespaces
+/// (`MAX_NAMESPACES`); and, since paging (fix round 1, I3), only ONE file
+/// with more revisions than the cap that `filePattern` takes -- named, the
+/// files before it purged -- while one it does not take is skipped.
 #[tokio::test(flavor = "multi_thread")]
 async fn delete_and_purge_bounds_are_author_errors_naming_the_cap() {
     let _turn = SERIAL.lock().await;
@@ -2365,49 +2434,29 @@ async fn delete_and_purge_bounds_are_author_errors_naming_the_cap() {
         "{message}"
     );
     assert!(live(&db.pool, ws, own, "/f00.txt").await);
-    // 11 revisions over two namespaces: refused, nothing purged.
-    let other = "w9b.cap2";
-    seed_revisions(&db, &fs, ws, other, "/g.txt", 2).await;
-    let write = authorize(ws, Actor::Api, own, Access::Write).unwrap();
-    for i in 2..11 {
-        soft_delete(
-            &db.pool,
-            &write,
-            &NsPath::parse_file(&format!("/f{i:02}.txt")).unwrap(),
-        )
-        .await
-        .unwrap();
-    }
-    let task = purge_task("purge", "namespaces: [w9b.cap2, w9b.cap]");
-    let ex = run(&db, ws, &flow("cap", own, &[task])).await;
-    // `w9b.cap2` is not a child of `w9b.cap`: the rule first.
-    let message = message_of(&db.pool, ex, "purge", "FAILED").await;
-    assert!(message.contains("'w9b.cap2'"), "{message}");
-    let ex = run(&db, ws, &flow("cap", "w9b", &[task_of_purge_two()])).await;
+
+    // 11 revisions of one file, past the cap of 10.
+    seed_revisions(&db, &fs, ws, own, "/big.txt", 11).await;
+    seed_revisions(&db, &fs, ws, own, "/a.txt", 2).await;
+    seed_revisions(&db, &fs, ws, own, "/z.txt", 2).await;
+    let ex = run(&db, ws, &flow("cap", own, &[purge_task("purge", "")])).await;
     let message = message_of(&db.pool, ex, "purge", "FAILED").await;
     assert!(
-        message.contains("workflow.storage.max_namespace_files")
-            && message.contains("nothing was purged"),
+        message.contains("'/big.txt'")
+            && message.contains("more than 10 revisions")
+            && message.contains("workflow.storage.max_namespace_files"),
         "{message}"
     );
-    assert_eq!(rows(&db.pool, ws, own).await.len(), 11);
-    assert_eq!(rows(&db.pool, ws, other).await["/g.txt"], [1, 2]);
-    // The control: one namespace alone (11 rows) is still over; with 10 it runs.
-    soft_delete(&db.pool, &write, &NsPath::parse_file("/f00.txt").unwrap())
-        .await
-        .unwrap();
-    let grant = authorize(ws, Actor::Api, own, Access::Purge).unwrap();
-    egret_workflow::storage::nsfiles::store::purge_revisions(
-        &db.pool,
-        &fs,
-        &grant,
-        &NsPath::parse_file("/f00.txt").unwrap(),
-        &[1],
-    )
-    .await
-    .unwrap();
-    let ex = run(&db, ws, &flow("cap", own, &[purge_task("purge", "")])).await;
-    assert_eq!(purged(&db.pool, ex, "purge").await, json!(9));
+    // The files before it (byte order) were purged; it and those after not.
+    assert_eq!(rows(&db.pool, ws, own).await["/a.txt"], [2]);
+    assert_eq!(rows(&db.pool, ws, own).await["/big.txt"].len(), 11);
+    assert_eq!(rows(&db.pool, ws, own).await["/z.txt"], [1, 2]);
+    // A filePattern that does not take it skips it: no bound is crossed.
+    let task = purge_task("purge", "filePattern: \"z.txt\"");
+    let ex = run(&db, ws, &flow("cap", own, &[task])).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(1));
+    assert_eq!(rows(&db.pool, ws, own).await["/z.txt"], [2]);
+
     // MAX_NAMESPACES + 1 listed: refused naming the bound.
     let many: Vec<String> = (0..=egret_workflow::storage::nsfiles::stage::MAX_NAMESPACES)
         .map(|i| format!("w9b.cap.n{i}"))
@@ -2424,10 +2473,155 @@ async fn delete_and_purge_bounds_are_author_errors_naming_the_cap() {
     );
 }
 
-/// `w9b.cap` and `w9b.cap2` from their parent `w9b`, children included.
-fn task_of_purge_two() -> String {
-    purge_task(
-        "purge",
-        "namespaces: [w9b.cap, w9b.cap2]\nincludeChildNamespaces: false",
+/// The shipping registry with the namespace tasks over `fs` (a small cap).
+fn registry_all_over(pool: &sqlx::PgPool, fs: Arc<FileStore>) -> Handlers {
+    let mut r = Handlers::with_core_tasks(storage::current());
+    egret_workflow::worker::handlers::storage::register(&mut r, pool.clone(), storage::current());
+    nst::register(&mut r, pool.clone(), Some(fs));
+    r
+}
+
+/// I3: PurgeFiles pages. 1 000 files x 11 revisions (11 000 rows) under a
+/// cap of 20 rows per page: a `filePattern` taking ten of them purges their
+/// ten old revisions each, every other file untouched; nothing counts
+/// toward a bound but one file's own revisions.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_purge_pages_through_far_more_revisions_than_the_cap() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, _fs)) = setup().await else {
+        return;
+    };
+    let own = "w9b.bulk";
+    let fs = capped(storage::Caps {
+        max_namespace_files: 20,
+        ..storage::Caps::default()
+    });
+    // The rows by SQL (a put each would take minutes); the objects of the
+    // ten files the pattern takes are written, so their purge deletes real
+    // keys.
+    sqlx::query(
+        "INSERT INTO workflow.namespace_files \
+           (workspace_id, namespace, path, revision, is_directory, size) \
+         SELECT $1, $2, '/bulk/f' || lpad(f::text, 4, '0') || '.txt', r, false, 2 \
+           FROM generate_series(0, 999) f, generate_series(1, 11) r",
     )
+    .bind(ws)
+    .bind(own)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO workflow.namespace_files \
+           (workspace_id, namespace, path, revision, is_directory, size) \
+         VALUES ($1, $2, '/bulk/', 1, true, 0)",
+    )
+    .bind(ws)
+    .bind(own)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let grant = authorize(ws, Actor::Api, own, Access::Read).unwrap();
+    for f in 0..10 {
+        let p = NsPath::parse_file(&format!("/bulk/f{f:04}.txt")).unwrap();
+        for r in 1..=11 {
+            fs.store
+                .put(&fs.namespace_object_uri(&grant, &p, r), b"xx".to_vec())
+                .await
+                .unwrap();
+        }
+    }
+    let reg = registry_all_over(&db.pool, fs.clone());
+    let task = purge_task("purge", "filePattern: \"bulk/f000?.txt\"");
+    let ex = start_execution(&db.pool, ws, None, &flow("bulk", own, &[task]), json!({}))
+        .await
+        .unwrap();
+    drain_with(&db.pool, &reg).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(100));
+    let all = rows(&db.pool, ws, own).await;
+    assert_eq!(all.len(), 1000);
+    for (path, revs) in &all {
+        let taken = path.as_str() < "/bulk/f0010.txt";
+        let want: Vec<i32> = if taken { vec![11] } else { (1..=11).collect() };
+        assert_eq!(revs, &want, "{path}");
+    }
+    let left = objects(&fs, ws, own).await;
+    assert_eq!(left.len(), 10);
+    assert!(left.keys().all(|k| k.ends_with(".txt.v11")), "{left:?}");
+}
+
+/// I2: a soft-deleted directory with nothing left under it is purged (and
+/// counted), so a move onto its path is no longer refused forever: the
+/// reviewer's case, DeleteFiles `deleteParentFolder` -> PurgeFiles ->
+/// `move_path(/a/ -> /b/)`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_purge_frees_a_soft_deleted_directory_for_a_move() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let own = "w9b.mv";
+    seed(&db, &fs, ws, own, "/a/f.txt", b"af").await;
+    seed(&db, &fs, ws, own, "/b/z.txt", b"bz").await;
+    let del = "  - id: del\n    type: io.kestra.plugin.core.namespace.DeleteFiles\n    \
+               files: \"/b/z.txt\"\n    deleteParentFolder: true\n";
+    let ex = run(
+        &db,
+        ws,
+        &flow("mv", own, &[del.into(), purge_task("purge", "")]),
+    )
+    .await;
+    // z.txt's one revision and the `/b/` row.
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(2));
+    assert!(!live(&db.pool, ws, own, "/b/").await);
+    let write = authorize(ws, Actor::Api, own, Access::Write).unwrap();
+    let moved = egret_workflow::storage::nsfiles::store::move_path(
+        &db.pool,
+        &fs,
+        &write,
+        &NsPath::parse_dir("/a/").unwrap(),
+        &NsPath::parse_dir("/b/").unwrap(),
+        CreatedBy::User(Uuid::nil()),
+    )
+    .await;
+    assert!(moved.is_ok(), "{moved:?}");
+    assert!(live(&db.pool, ws, own, "/b/f.txt").await);
+    // A live directory is never purged by keepAmount >= 1, empty or not.
+    seed(&db, &fs, ws, own, "/c/g.txt", b"cg").await;
+    let ex = run(&db, ws, &flow("mv", own, &[purge_task("purge", "")])).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(0));
+    assert!(live(&db.pool, ws, own, "/c/").await);
+}
+
+/// M5: with `namespaces` listed, only the namespaces under the LISTED ones
+/// count toward `MAX_NAMESPACES`; the default (own and its children) over
+/// the bound is refused with advice that works.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_namespace_bound_counts_only_what_the_purge_covers() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let own = "w9b.m5";
+    let max = egret_workflow::storage::nsfiles::stage::MAX_NAMESPACES;
+    for i in 0..=max {
+        seed(&db, &fs, ws, &format!("{own}.c{i:02}"), "/f.txt", b"x").await;
+    }
+    let ex = run(&db, ws, &flow("m5", own, &[purge_task("purge", "")])).await;
+    let message = message_of(&db.pool, ex, "purge", "FAILED").await;
+    assert!(
+        message.contains(&format!("more than {max} namespaces"))
+            && message.contains("`includeChildNamespaces: false`"),
+        "{message}"
+    );
+    // The advice works: listed, without children.
+    let task = purge_task(
+        "purge",
+        &format!("namespaces: [{own}.c00, {own}.c01]\nincludeChildNamespaces: false"),
+    );
+    let ex = run(&db, ws, &flow("m5", own, &[task])).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(0));
+    // And with children: only `w9b.m5.c00`'s are candidates.
+    let task = purge_task("purge", &format!("namespaces: [{own}.c00]"));
+    let ex = run(&db, ws, &flow("m5", own, &[task])).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(0));
 }

@@ -24,8 +24,9 @@ use egret_workflow::storage;
 use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Grant};
 use egret_workflow::storage::nsfiles::path::NsPath;
 use egret_workflow::storage::nsfiles::store::{
-    create_directory, list_live, move_path, namespaces_with_files, open, purge_revisions, put,
-    resolve, revisions, search, soft_delete, Conflict, NsEntry, Want, Written,
+    create_directory, file_rows_page, list_live, move_path, namespaces_with_files, open,
+    purge_revisions, purge_rows, put, resolve, revisions, search, soft_delete,
+    soft_delete_if_empty, Conflict, NsEntry, Want, Written,
 };
 use egret_workflow::storage::nsfiles::{CreatedBy, NsError};
 use tokio::io::AsyncReadExt as _;
@@ -2290,4 +2291,94 @@ async fn a_file_over_a_deleted_directory_with_history_under_it_is_refused() {
     );
     assert_eq!(written(&db, &fs, &g, "/q", "file").await.revision, 1);
     assert_eq!(rows_of(&db, ws, "/q/").await, []);
+}
+
+/// W9b Task 7 fix round 1, I1: a purge planned from an earlier listing
+/// names rows by `id`, so it never removes a newer file that took the same
+/// revision NUMBER. The reviewer's interleaving, forced in order: plan (a
+/// soft-deleted `/x.txt` revision 1) -> another purge removes it -> a new
+/// upload writes `/x.txt` revision 1, live -> the stale purge removes 0
+/// rows, and the new file stays live with its object.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_purge_never_removes_a_new_file_that_reused_its_revision_numbers() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let w = grant(ws, Access::Write);
+    let purge = grant(ws, Access::Purge);
+    let p = file("/x.txt");
+    written(&db, &fs, &w, "/x.txt", "old").await;
+    soft_delete(&db.pool, &w, &p).await.unwrap();
+    // A plans: every revision of the soft-deleted path.
+    let plan: Vec<(i64, u32)> = {
+        let mut c = conn(&db).await;
+        file_rows_page(&mut c, &purge, None, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(id, e)| (id, e.revision))
+            .collect()
+    };
+    assert_eq!(plan.iter().map(|r| r.1).collect::<Vec<_>>(), [1]);
+    // B purges it first.
+    assert_eq!(
+        purge_rows(&db.pool, &fs, &purge, &p, &plan).await.unwrap(),
+        1
+    );
+    // A new file takes revision 1 again.
+    let new = written(&db, &fs, &w, "/x.txt", "new").await;
+    assert_eq!(new.revision, 1, "the number is reused");
+    // A resumes with its stale plan: nothing of the new file goes.
+    assert_eq!(
+        purge_rows(&db.pool, &fs, &purge, &p, &plan).await.unwrap(),
+        0
+    );
+    assert_eq!(rows_of(&db, ws, "/x.txt").await, [(1, false)]);
+    let key = fs.namespace_object_uri(&w, &p, 1);
+    assert_eq!(store.bytes(&key).as_deref(), Some("new"));
+    let mut c = conn(&db).await;
+    assert!(resolve(&mut c, &w, &p, Want::Latest).await.is_ok());
+}
+
+/// W9b Task 7 fix round 1, M1/M2: `soft_delete_if_empty` judges and deletes
+/// in one transaction holding the directory's chain lock, which a writer
+/// under it holds across its upload. A writer of `/p/new.txt` mid-upload
+/// makes the judge WAIT, then see the new live file and keep `/p/`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_into_a_parent_being_judged_empty_keeps_it() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (_store, fs) = hooked_fs(None);
+    let fs = Arc::new(fs);
+    let g = grant(ws, Access::Write);
+    for round in 0..10 {
+        let d = format!("/p{round}");
+        // The parent holds only a soft-deleted file: empty of live files.
+        let old = format!("{d}/old.txt");
+        written(&db, &fs, &g, &old, "old").await;
+        soft_delete(&db.pool, &g, &file(&old)).await.unwrap();
+        let (body, started, release) = gated("N", "-new");
+        let new = format!("{d}/new.txt");
+        let writer = spawn_put(&db, &fs, &g, &new, body);
+        started
+            .await
+            .expect("the writer holds the chain lock mid-upload");
+        let judge = {
+            let (pool, g, dir) = (db.pool.clone(), g.clone(), dir(&format!("{d}/")));
+            tokio::spawn(async move { soft_delete_if_empty(&pool, &g, &dir).await })
+        };
+        // The judge's first key is the directory's own (`/pN`).
+        let (_never, mut no_body) = oneshot::channel::<()>();
+        let seen = blocked_or_started(&db, ws, &d, &mut no_body).await;
+        assert_eq!(seen, Seen::Blocked, "round {round}: the judge did not wait");
+        release.send(()).unwrap();
+        assert!(matches!(writer.await.unwrap(), Ok(Written::Written(_))));
+        let marked = judge.await.unwrap().unwrap();
+        assert!(marked.is_empty(), "round {round}: {marked:?}");
+        let mut c = conn(&db).await;
+        assert!(resolve(&mut c, &g, &file(&new), Want::Latest).await.is_ok());
+        assert!(resolve(&mut c, &g, &dir(&format!("{d}/")), Want::Latest)
+            .await
+            .is_ok());
+    }
 }
