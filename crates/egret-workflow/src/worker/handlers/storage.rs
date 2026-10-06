@@ -342,7 +342,7 @@ pub fn register(
     handlers.add_publishable(Arc::new(PurgeCurrentExecutionFiles::new(pool, files)));
 }
 
-fn no_storage(type_id: &str) -> String {
+pub(super) fn no_storage(type_id: &str) -> String {
     format!(
         "{type_id} needs internal storage, and egret has none configured (the `[storage]` \
          section of its configuration)"
@@ -350,14 +350,17 @@ fn no_storage(type_id: &str) -> String {
 }
 
 /// The task's properties, or why not -- the message of a failed run.
-fn spec<T: DeserializeOwned>(type_id: &str, task: &TaskInput) -> std::result::Result<T, String> {
+pub(super) fn spec<T: DeserializeOwned>(
+    type_id: &str,
+    task: &TaskInput,
+) -> std::result::Result<T, String> {
     serde_json::from_value(task.spec.clone()).map_err(|e| format!("{type_id}: {e}"))
 }
 
 /// Spec §11 (Task 4): a `read()` inside a property that met a store OUTAGE
 /// failed its render, and that failure is not the author's -- `Err`, so the
 /// run is re-claimed with no attempt spent.
-fn outage(type_id: &str, task: &TaskInput) -> Result<()> {
+pub(super) fn outage(type_id: &str, task: &TaskInput) -> Result<()> {
     match task
         .render
         .files()

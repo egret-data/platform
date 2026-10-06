@@ -404,7 +404,9 @@ def refresh_kinds():
 #
 # **And, since W9a Task 11, the four core storage tasks** (`worker::handlers::
 # storage`), which the ratchet's own registry (`driver::registry`) runs, and
-# since W9a Task 12 the five whole-file ones. The
+# since W9a Task 12 the five whole-file ones, and since W9b Task 6
+# `core.namespace.{UploadFiles, DownloadFiles}` (no corpus flow declares
+# either, so the surface is unchanged by them). The
 # name is kept for the reason given for `W3A_FLOWABLES` below; what it means
 # is "the handlers the oracle's driver runs".
 W3B_HANDLERS = {
@@ -421,6 +423,8 @@ W3B_HANDLERS = {
     "io.kestra.plugin.core.storage.Reverse",
     "io.kestra.plugin.core.storage.DeduplicateItems",
     "io.kestra.plugin.core.storage.FilterItems",
+    "io.kestra.plugin.core.namespace.UploadFiles",
+    "io.kestra.plugin.core.namespace.DownloadFiles",
 }
 
 # The flowables `advance()` already drives and decides for (W3a Tasks 3-6).

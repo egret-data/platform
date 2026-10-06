@@ -726,6 +726,12 @@ pub async fn handlers_for(
         pool.clone(),
         crate::storage::current(),
     );
+    // W9b Task 6: `UploadFiles` and `DownloadFiles`, which need the pool too.
+    crate::worker::handlers::namespace::register(
+        &mut handlers,
+        pool.clone(),
+        crate::storage::current(),
+    );
     let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) = match cfg
         .container_runner
     {

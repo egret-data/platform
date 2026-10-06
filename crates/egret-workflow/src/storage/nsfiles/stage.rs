@@ -250,15 +250,41 @@ fn render_list(
     what: &str,
     v: &ListProp,
 ) -> Result<Vec<String>, String> {
+    v.render(&format!("namespaceFiles.{what}"), render)
+}
+
+impl ListProp {
+    /// Kestra's `Property.asList` at parse (see [`list`]): `key` names the
+    /// property in a refusal. W9b Task 6's `UploadFiles.files` is one too.
+    pub(crate) fn parse(key: &str, v: &Value) -> Result<Self, (String, String)> {
+        list(key, v)
+    }
+
+    /// Each item rendered on its own, or the expression rendered and read
+    /// as a JSON list of strings. `shown` is the property as a message names
+    /// it (`namespaceFiles.include`, `files`); an item is `shown[i]`.
+    pub(crate) fn render(
+        &self,
+        shown: &str,
+        render: &mut impl FnMut(&str, &str) -> Result<String, String>,
+    ) -> Result<Vec<String>, String> {
+        render_list_prop(render, shown, self)
+    }
+}
+
+fn render_list_prop(
+    render: &mut impl FnMut(&str, &str) -> Result<String, String>,
+    shown: &str,
+    v: &ListProp,
+) -> Result<Vec<String>, String> {
     match v {
         ListProp::Items(items) => items
             .iter()
             .enumerate()
-            .map(|(i, s)| render(&format!("namespaceFiles.{what}[{i}]"), s))
+            .map(|(i, s)| render(&format!("{shown}[{i}]"), s))
             .collect(),
         ListProp::Expression(e) => {
-            let shown = format!("namespaceFiles.{what}");
-            let out = render(&shown, e)?;
+            let out = render(shown, e)?;
             serde_json::from_str::<Vec<String>>(&out).map_err(|_| {
                 format!(
                     "`{shown}` must render to a list of strings (a JSON list such as \

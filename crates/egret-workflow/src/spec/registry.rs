@@ -246,6 +246,20 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         aliases: &[],
         references: &[],
     },
+    // ── W9b Task 6: the core namespace-file tasks (`worker::handlers::namespace`),
+    // FQCN only, as the storage rows above. They need the pool and are
+    // registered by `handlers::namespace::register`, which
+    // `runtime::handlers_for` calls. ──
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::namespace::UPLOAD_FILES,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::namespace::DOWNLOAD_FILES,
+        aliases: &[],
+        references: &[],
+    },
 ];
 
 /// The row for `t`, matching the canonical spelling **or any alias**.

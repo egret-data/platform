@@ -43,6 +43,7 @@ pub mod container;
 pub mod fail;
 pub mod kestra;
 pub mod log;
+pub mod namespace;
 pub mod python;
 pub mod ret;
 pub mod script;
