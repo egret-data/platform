@@ -469,7 +469,7 @@ for i in z.infolist():
     assert i.flag_bits & 0x808 == 0x808, (i.filename, i.flag_bits)
     assert i.compress_type == zipfile.ZIP_STORED, i.compress_type
     out["entries"].append({"name": i.filename, "crc": i.CRC, "crc_read": zlib.crc32(data),
-                           "size": i.file_size,
+                           "size": i.file_size, "extra": i.extra.hex(),
                            "hex": data.hex() if len(data) <= 4096 else None,
                            "len": len(data)})
 raw = open(p, "rb").read()
@@ -671,6 +671,14 @@ print(json.dumps(out))
             assert_entries(&read, &entries);
             assert_eq!(read["eocd_count"], 0xFFFF, "sized={sized}");
             assert_eq!(read["zip64_end"]["count"], 4, "sized={sized}");
+            // The central ZIP64 extra field (tag 0x0001) is where a reader
+            // takes each overflowing value from: present for the entry past
+            // the size limit and for the one past the offset limit, absent
+            // for the one that fits both.
+            let extra = |i: usize| read["entries"][i]["extra"].as_str().unwrap().to_string();
+            assert_eq!(extra(0), "", "sized={sized}: small, at offset 0");
+            assert!(extra(1).starts_with("0100"), "sized={sized}: {}", extra(1));
+            assert!(extra(2).starts_with("0100"), "sized={sized}: {}", extra(2));
             let cd_offset = read["zip64_end"]["cd_offset"].as_u64().unwrap();
             assert!(cd_offset > 3200, "sized={sized}: {cd_offset}");
         }
