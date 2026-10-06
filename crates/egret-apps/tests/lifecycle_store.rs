@@ -1186,6 +1186,100 @@ async fn restoring_a_version_with_no_object_store_content_now_surfaces_as_an_err
     assert!(matches!(err, Error::Internal(_)), "{err:?}");
 }
 
+/// The bug this test guards against: `restore_version` used to decide whether
+/// to copy the old version's layout by checking the Postgres `layout_json`
+/// column's `is_some()`. Since Task 9 (S3-1) that column is permanently NULL
+/// for every version published after the cutover, regardless of whether a real
+/// layout object sits in the object store -- so the old check always took the
+/// "no layout" branch and DELETED the new version's layout key, silently
+/// wiping a real layout on every restore. The fix attempts the layout `copy()`
+/// unconditionally and only treats `StorageError::NotFound` as "no layout".
+#[tokio::test]
+async fn restoring_a_version_with_a_real_layout_preserves_it_not_wipes_it() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+
+    st.save_draft(fx.ws(), app, fx.uid(), 1, "v1", Some("real layout"))
+        .await
+        .unwrap();
+    let v1 = published(st.publish(fx.ws(), app, fx.uid(), None).await.unwrap());
+
+    // Confirm the premise: Task 9 means this version's Postgres column is NULL
+    // even though it has a real layout object in the store.
+    let layout_col: Option<String> =
+        sqlx::query_scalar("SELECT layout_json FROM analytics.app_versions WHERE id = $1")
+            .bind(v1.id)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(layout_col, None, "premise: the column is NULL post-cutover");
+
+    let v2 = st
+        .restore_version(fx.ws(), app, v1.id, fx.uid())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Via the reader.
+    let restored = st.version(fx.ws(), app, v2.id).await.unwrap().unwrap();
+    assert_eq!(restored.layout_json.as_deref(), Some("real layout"));
+
+    // Directly against the object store, to prove the fix didn't just mask the
+    // bug at the reader level.
+    let key = format!(
+        "s3://{}/apps/{}/{}/versions/{}/layout.json",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        app.hyphenated(),
+        v2.version_no
+    );
+    assert_eq!(fx.mem_store().get(&key).await.unwrap(), b"real layout");
+}
+
+/// The inverse: restoring a version that genuinely has no layout must still
+/// leave the new version without one, and must not leave a stale object sitting
+/// at the new version's layout key (same orphan-from-a-collided-version_no
+/// reasoning as `insert_version`'s/`publishing_with_no_layout_clears_any_stale_layout_object`'s
+/// `else` arm, but exercised through `restore_version` specifically).
+#[tokio::test]
+async fn restoring_a_version_with_no_layout_leaves_the_new_version_without_one() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+
+    // Pre-seed an orphan at the key the restored version will land on, so a
+    // correct `restore_version` must actively clear it, not just fail to write
+    // a new one.
+    let new_version_key = format!(
+        "s3://{}/apps/{}/{}/versions/2/layout.json",
+        fx.bucket(),
+        fx.ws().0.hyphenated(),
+        app.hyphenated()
+    );
+    fx.mem_store()
+        .put(&new_version_key, b"orphaned layout".to_vec())
+        .await
+        .unwrap();
+
+    let v1 = published(st.publish(fx.ws(), app, fx.uid(), None).await.unwrap());
+    assert_eq!(v1.version_no, 1);
+
+    let v2 = st
+        .restore_version(fx.ws(), app, v1.id, fx.uid())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(v2.version_no, 2);
+
+    let restored = st.version(fx.ws(), app, v2.id).await.unwrap().unwrap();
+    assert_eq!(restored.layout_json, None);
+    assert!(matches!(
+        fx.mem_store().get(&new_version_key).await,
+        Err(StorageError::NotFound(_))
+    ));
+}
+
 /// I2 Test B: a draft layout put-then-clear round-trips through the object
 /// store in both directions -- saving a layout writes the object, and saving
 /// again with `None` leaves no layout object for the new revision (and the

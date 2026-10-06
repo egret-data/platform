@@ -687,11 +687,14 @@ impl AppStore {
     /// Versions are immutable and each already has its own object-store key, so
     /// "restoring" is a pure server-side [`ObjectStore::copy`] of the old
     /// version's objects into the new version's keys -- no bytes pass through
-    /// this process. The layout is only copied if the old version actually has
-    /// one (most won't). Every version is guaranteed an object-store key (Part
-    /// S2's backfill), so `copy()`'s result is trusted directly: any error,
-    /// including `NotFound`, propagates rather than falling back to a
-    /// read-then-write of Postgres columns.
+    /// this process. Every version is guaranteed a source object-store key
+    /// (Part S2's backfill), so the source `copy()`'s result is trusted
+    /// directly: any error, including `NotFound`, propagates. Whether the old
+    /// version has a layout is determined by attempting the layout `copy()`
+    /// itself, never by a Postgres column (which is `NULL` for every version
+    /// published since source/layout stopped being written there): a
+    /// `StorageError::NotFound` from that copy means the old version genuinely
+    /// has no layout, while any other error still propagates.
     pub async fn restore_version(
         &self,
         ws: WorkspaceId,
@@ -706,8 +709,8 @@ impl AppStore {
             .await
             .map_err(db_err)?
             .ok_or_else(|| Error::NotFound(format!("draft of app {id}")))?;
-        let Some((old_no, layout_json)) = sqlx::query_as::<_, (i32, Option<String>)>(
-            "SELECT version_no, layout_json FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
+        let Some(old_no) = sqlx::query_scalar::<_, i32>(
+            "SELECT version_no FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
         )
         .bind(id)
         .bind(version_id)
@@ -735,22 +738,26 @@ impl AppStore {
             )
             .await
             .map_err(store_err)?;
-        if layout_json.is_some() {
-            self.store
-                .copy(
-                    &self.version_layout_key(ws, id, old_no),
-                    &self.version_layout_key(ws, id, new_no),
-                )
-                .await
-                .map_err(store_err)?;
-        } else {
-            // The old version has no layout: clear any stale object that might
-            // already sit at the new key (same orphan-from-a-collided-version_no
-            // reasoning as `insert_version`'s `else` arm).
-            self.store
-                .delete(&self.version_layout_key(ws, id, new_no))
-                .await
-                .map_err(store_err)?;
+        match self
+            .store
+            .copy(
+                &self.version_layout_key(ws, id, old_no),
+                &self.version_layout_key(ws, id, new_no),
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(StorageError::NotFound(_)) => {
+                // The old version genuinely has no layout (copy's source is absent) --
+                // clear any stale object that might already sit at the new key (same
+                // orphan-from-a-collided-version_no reasoning as `insert_version`'s
+                // `else` arm).
+                self.store
+                    .delete(&self.version_layout_key(ws, id, new_no))
+                    .await
+                    .map_err(store_err)?;
+            }
+            Err(e) => return Err(store_err(e)),
         }
 
         let v = sqlx::query_as::<_, VersionSummary>(
