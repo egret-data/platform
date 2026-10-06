@@ -285,8 +285,8 @@ impl Fixture {
         .await
         .unwrap();
         let version: Uuid = sqlx::query_scalar(
-            "INSERT INTO analytics.app_versions (app_id, version_no, source) \
-             VALUES ($1, 1, 'import marimo') RETURNING id",
+            "INSERT INTO analytics.app_versions (app_id, version_no) \
+             VALUES ($1, 1) RETURNING id",
         )
         .bind(app)
         .fetch_one(&db.pool)
@@ -1134,10 +1134,9 @@ async fn real_marimo_behind_the_real_proxy_and_the_real_pod_api() {
         "import marimo\n\napp = marimo.App()\n\n\n@app.cell\ndef _():\n    x = 1\n    return\n\n\n\
          if __name__ == \"__main__\":\n    app.run()\n";
     sqlx::query(
-        "INSERT INTO analytics.app_drafts (app_id, source, revision, updated_by) VALUES ($1, $2, 1, $3)",
+        "INSERT INTO analytics.app_drafts (app_id, revision, updated_by) VALUES ($1, 1, $2)",
     )
     .bind(fx.app)
-    .bind(draft_source)
     .bind(fx.editor.id.0)
     .execute(&fx.db.pool)
     .await

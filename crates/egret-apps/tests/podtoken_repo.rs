@@ -43,8 +43,8 @@ impl Fixture {
         .await
         .unwrap();
         let version: Uuid = sqlx::query_scalar(
-            "INSERT INTO analytics.app_versions (app_id, version_no, source) \
-             VALUES ($1, 1, 'import marimo') RETURNING id",
+            "INSERT INTO analytics.app_versions (app_id, version_no) \
+             VALUES ($1, 1) RETURNING id",
         )
         .bind(app)
         .fetch_one(&db.pool)
@@ -144,8 +144,8 @@ async fn revoke_edit_for_kills_every_live_edit_token_of_that_user_in_that_worksp
 async fn revoke_run_for_kills_every_live_token_of_that_version_only() {
     let fx = Fixture::new().await;
     let other_version: Uuid = sqlx::query_scalar(
-        "INSERT INTO analytics.app_versions (app_id, version_no, source) \
-         VALUES ($1, 2, 'import marimo') RETURNING id",
+        "INSERT INTO analytics.app_versions (app_id, version_no) \
+         VALUES ($1, 2) RETURNING id",
     )
     .bind(fx.app)
     .fetch_one(&fx.db.pool)
