@@ -516,7 +516,7 @@ async fn seed_storage_conn_with_secret(f: &Fixture) -> Uuid {
     .bind("egret-engine-test")
     .bind("AKIATEST")
     .bind(secret_id)
-    .bind("http://minio:9000")
+    .bind("http://rustfs:9000")
     .fetch_one(&f.db.pool)
     .await
     .expect("insert storage connection");
@@ -1600,7 +1600,7 @@ async fn seed_exchange_storage_conn(f: &Fixture) -> Uuid {
     .bind("us-east-1")
     .bind("egret-exchange-test")
     .bind("AKIATEST")
-    .bind("http://minio:9000")
+    .bind("http://rustfs:9000")
     .bind(secret_id)
     .bind(true)
     .fetch_one(&f.db.pool)

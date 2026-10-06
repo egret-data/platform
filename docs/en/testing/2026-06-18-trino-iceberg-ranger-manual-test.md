@@ -7,23 +7,23 @@
 ## What it proves
 
 A real **Trino 481** uses Egret for BOTH governance-core features at once:
-- **Iceberg REST catalog** — `CREATE SCHEMA / CREATE TABLE / INSERT / SELECT` flow data through Egret's `/catalog` into MinIO.
+- **Iceberg REST catalog** — `CREATE SCHEMA / CREATE TABLE / INSERT / SELECT` flow data through Egret's `/catalog` into RustFS.
 - **Apache Ranger access control** — Trino's built-in `ranger` plugin downloads policies from Egret's `/service` and enforces **deny / row-filter / column-mask** on live queries.
 
 ## Why it is not in CI
 
-Needs Docker + a JVM-heavy Trino image + MinIO; the Trino Ranger plugin polls on a timer. Too slow/heavy for CI. The unit + DB-gated + `RangerPolicyEngineImpl` gate tests cover the logic in CI; this fills the **engine-contract** gap manually.
+Needs Docker + a JVM-heavy Trino image + RustFS; the Trino Ranger plugin polls on a timer. Too slow/heavy for CI. The unit + DB-gated + `RangerPolicyEngineImpl` gate tests cover the logic in CI; this fills the **engine-contract** gap manually.
 
 ## Prerequisites
 
 - Docker running.
 - Repo built: `cargo build -p egret-bin`.
 - A Postgres reachable at `postgres://egret:egret@localhost:5432/egret` (the dev `portal-pg` or `docker compose -f deploy/docker-compose.dev.yml up -d postgres`).
-- Free host ports: 8080 (egret), 9000/9001 (MinIO), 8090 (Trino).
+- Free host ports: 8080 (egret), 9000/9001 (RustFS), 8090 (Trino).
 
 ## Networking note (important)
 
-Egret runs on the host; Trino + MinIO run in containers. Egret's signer has an SSRF host-check, and Trino's S3 endpoint must match what Egret signs/writes. Use the host's **LAN IP** as the single address everyone shares:
+Egret runs on the host; Trino + RustFS run in containers. Egret's signer has an SSRF host-check, and Trino's S3 endpoint must match what Egret signs/writes. Use the host's **LAN IP** as the single address everyone shares:
 
 ```bash
 export HOST_IP=$(ipconfig getifaddr en0 || ipconfig getifaddr en1)   # macOS; Linux: hostname -I | awk '{print $1}'
@@ -32,16 +32,16 @@ echo "HOST_IP=$HOST_IP"
 
 ---
 
-## 1. Start MinIO + create the warehouse bucket
+## 1. Start RustFS + create the warehouse bucket
 
 ```bash
 cd deploy
-docker compose -f docker-compose.dev.yml up -d minio
+docker compose -f docker-compose.dev.yml up -d rustfs
 # wait for ready
-until [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:9000/minio/health/ready)" = 200 ]; do sleep 2; done
+until [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:9000/health)" = 200 ]; do sleep 2; done
 NET=egret-dev_default
-docker run --rm --network "$NET" --entrypoint sh minio/mc -c \
-  'mc alias set m http://minio:9000 egret egretsecret && mc mb -p m/warehouse'
+docker run --rm --network "$NET" -e AWS_ACCESS_KEY_ID=egret -e AWS_SECRET_ACCESS_KEY=egretsecret \
+  -e AWS_DEFAULT_REGION=us-east-1 amazon/aws-cli:2.37.9 --endpoint-url http://rustfs:9000 s3 mb s3://warehouse
 ```
 
 ## 2. Run Egret with catalog + ranger enabled
@@ -155,7 +155,7 @@ TX "CREATE TABLE iceberg.demo.report (id bigint, item varchar, country varchar, 
 TX "INSERT INTO iceberg.demo.report VALUES (1,'book','US',9.5),(2,'pen','VN',1.2),(3,'lamp','US',20.0),(4,'desk','VN',55.0)"
 TX "SELECT country, count(*) n, sum(amount) total FROM iceberg.demo.report GROUP BY country ORDER BY country"
 ```
-Expect: `CREATE SCHEMA`, `CREATE TABLE`, `INSERT: 4 rows`, and `US 2 29.5 / VN 2 56.2`. Verify the files landed in MinIO under `warehouse/demo/report-*/` (`data/*.parquet`, `metadata/0000N-*.metadata.json` — note there is **no** `00000`; it is written on the first commit, not on create, which is what lets Trino's empty-location guard pass).
+Expect: `CREATE SCHEMA`, `CREATE TABLE`, `INSERT: 4 rows`, and `US 2 29.5 / VN 2 56.2`. Verify the files landed in RustFS under `warehouse/demo/report-*/` (`data/*.parquet`, `metadata/0000N-*.metadata.json` — note there is **no** `00000`; it is written on the first commit, not on create, which is what lets Trino's empty-location guard pass).
 
 ## 5. Ranger test (policy enforcement on live queries)
 
@@ -196,7 +196,7 @@ If you see those three outcomes, both Egret features are correctly enforced by a
 
 ```bash
 pkill -f "target/debug/egret serve"
-cd deploy && docker compose -f docker-compose.dev.yml rm -fs trino minio
+cd deploy && docker compose -f docker-compose.dev.yml rm -fs trino rustfs
 rm -rf /tmp/egret-itest /tmp/ac.properties /tmp/ranger-trino-security.xml
 rm -f trino/catalog/iceberg.properties   # host-specific; never commit
 ```
@@ -419,7 +419,7 @@ then:
     run_mode = shared_data
     cloud_native_meta_port = 6090
     cloud_native_storage_type = S3
-    aws_s3_endpoint = http://minio.egret-system.svc.cluster.local:9000   # NOT http://minio:9000
+    aws_s3_endpoint = http://rustfs.egret-system.svc.cluster.local:9000   # NOT http://rustfs:9000
     aws_s3_path = e2e/starrocks/sp4d1-sr-gate
     aws_s3_access_key = egret
     aws_s3_secret_key = egretsecret
@@ -489,7 +489,7 @@ Three things will bite, in this order:
    -- on the provisioned FE, as root:
    SHOW CREATE CATALOG sp4a10_wh\G
    -- then on yours, the same PROPERTIES, with
-   --   aws.s3.endpoint = http://minio.egret-system.svc.cluster.local:9000
+   --   aws.s3.endpoint = http://rustfs.egret-system.svc.cluster.local:9000
    ```
 
 **The subject must be a native user, never `root`.** `root` bypasses the access check before
@@ -525,15 +525,18 @@ Keep the profiles and the fixture tables — they are additive, enforced by noth
 are gone, and they are what makes the check cheap to re-run. Both private engines read the same
 Iceberg warehouse, which is what makes the Trino and StarRocks results comparable.
 
-The private StarRocks also leaves a shared-data volume behind in MinIO, which the `kubectl delete`
+The private StarRocks also leaves a shared-data volume behind in RustFS, which the `kubectl delete`
 does not touch. Remove it — but **list before you remove**, and scope to the exact prefix:
 
 ```bash
-M="kubectl --context kind-egret exec -n egret-system <minio-pod> -- sh -c"
-$M 'mc alias set loc http://127.0.0.1:9000 egret egretsecret; mc ls loc/e2e/starrocks/'          # the siblings that must survive
-$M 'mc ls --recursive loc/e2e/starrocks/sp4d1-sr-gate/; mc du loc/e2e/starrocks/sp4d1-sr-gate/'  # the set you are about to delete
-$M 'mc rm --recursive --force "loc/e2e/starrocks/sp4d1-sr-gate/"'                                 # exact prefix, trailing slash, no glob
-$M 'mc ls loc/e2e/starrocks/; mc du loc/e2e/starrocks/'                                           # confirm only yours went
+# The RustFS image ships no S3 client: port-forward it and use the AWS CLI from the host.
+kubectl --context kind-egret port-forward -n egret-system svc/rustfs 9000:9000 &
+export AWS_ACCESS_KEY_ID=egret AWS_SECRET_ACCESS_KEY=egretsecret AWS_DEFAULT_REGION=us-east-1
+S3="aws --endpoint-url http://localhost:9000 s3"
+$S3 ls s3://e2e/starrocks/                                        # the siblings that must survive
+$S3 ls s3://e2e/starrocks/sp4d1-sr-gate/ --recursive --summarize  # the set you are about to delete
+$S3 rm s3://e2e/starrocks/sp4d1-sr-gate/ --recursive              # exact prefix, trailing slash, no glob
+$S3 ls s3://e2e/starrocks/                                        # confirm only yours went
 ```
 
 Delete against a set you have **seen**, never against a pattern you believe. This repo has a

@@ -191,14 +191,15 @@ deps:
   mailpit:
     enabled: true
     image: axllent/mailpit:latest
-  # docker.io/minio/minio and docker.io/minio/mc no longer exist (MinIO moved
-  # its images to quay.io); `:latest` 404s and wedges `helm upgrade --wait`
-  # forever waiting on a deployment that can never pull. Pinned to specific
-  # quay.io releases, each verified with `docker pull` + a live run before
-  # being committed here.
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772
-    mcImage: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+  # The bundled S3 server is RustFS. It replaced MinIO when MinIO withdrew its
+  # public images (docker.io/minio/* and quay.io/minio/* answer 401) and a fresh
+  # install wedged on a deployment that could never pull. egret needs STS
+  # AssumeRole from this server (the embedded catalog vends credentials through
+  # it), which is what ruled the other candidates out.
+  rustfs:
+    image: rustfs/rustfs:1.0.1
+    # Any image with a shell and the `aws` CLI: it creates the bucket once.
+    clientImage: amazon/aws-cli:2.37.9
     rootUser: egret
     rootPassword: egretsecret
     bucket: warehouse

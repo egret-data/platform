@@ -2,13 +2,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct StorageConfig {
-    /// Custom S3 endpoint (MinIO). Empty/None means real AWS.
+    /// Custom S3 endpoint (RustFS). Empty/None means real AWS.
     pub endpoint: Option<String>,
     pub region: String,
     pub bucket: String,
     pub access_key: String,
     pub secret_key: String,
-    /// Required for MinIO.
+    /// Required for RustFS.
     pub path_style: bool,
 }
 

@@ -1,4 +1,4 @@
-//! W9a Task 13: the pruner and the orphan sweep against MinIO (a real
+//! W9a Task 13: the pruner and the orphan sweep against RustFS (a real
 //! `S3Store`): `delete_prefix` of an ended execution, and the sweep reading
 //! S3's own `last_modified` (MemStore has none, so only a real store proves
 //! the age is read at all).
@@ -37,8 +37,8 @@ fn cfg() -> Option<StorageConfig> {
         endpoint: Some(endpoint),
         region: "us-east-1".into(),
         bucket: std::env::var("EGRET_TEST_S3_BUCKET").unwrap_or_else(|_| "warehouse".into()),
-        access_key: std::env::var("EGRET_TEST_S3_KEY").unwrap_or_else(|_| "minioadmin".into()),
-        secret_key: std::env::var("EGRET_TEST_S3_SECRET").unwrap_or_else(|_| "minioadmin".into()),
+        access_key: std::env::var("EGRET_TEST_S3_KEY").unwrap_or_else(|_| "rustfsadmin".into()),
+        secret_key: std::env::var("EGRET_TEST_S3_SECRET").unwrap_or_else(|_| "rustfsadmin".into()),
         path_style: true,
     })
 }
@@ -287,7 +287,7 @@ type Case = fn(StorageConfig) -> Result<(), String>;
 
 fn cases() -> Vec<(&'static str, Case)> {
     vec![(
-        "an_ended_execution_is_pruned_and_an_old_orphan_swept_on_minio",
+        "an_ended_execution_is_pruned_and_an_old_orphan_swept_on_rustfs",
         prune_and_sweep,
     )]
 }

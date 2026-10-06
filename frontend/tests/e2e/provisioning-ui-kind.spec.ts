@@ -30,7 +30,7 @@ import { loginLocalAdmin, csrf, postJson, deleteEngine } from "./helpers";
 const ENABLED = process.env.EGRET_E2E_KIND === "1";
 const RUN_ID = process.env.EGRET_E2E_RUN_ID ?? `${Date.now()}`;
 
-const S3_ENDPOINT = process.env.EGRET_E2E_S3_ENDPOINT ?? "http://minio:9000";
+const S3_ENDPOINT = process.env.EGRET_E2E_S3_ENDPOINT ?? "http://rustfs:9000";
 const S3_KEY = process.env.EGRET_E2E_S3_KEY ?? "egret";
 const S3_SECRET = process.env.EGRET_E2E_S3_SECRET ?? "egretsecret";
 const S3_BUCKET = process.env.EGRET_E2E_BUCKET ?? "warehouse";

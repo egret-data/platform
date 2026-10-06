@@ -357,10 +357,10 @@ mod tests {
             egret_url: "http://egret:8080",
             warehouse: Some(WarehouseRender {
                 name: "wh-a",
-                s3_endpoint: "http://minio:9000",
+                s3_endpoint: "http://rustfs:9000",
             }),
             storage: Some(StorageRender {
-                endpoint: Some("http://minio:9000"),
+                endpoint: Some("http://rustfs:9000"),
                 region: "eu-west-1",
                 path_style: true,
                 access_key: "AKIA",
@@ -383,7 +383,7 @@ mod tests {
 
     const S3_PROPS: [(&str, &str); 6] = [
         ("fs.native-s3.enabled", "true"),
-        ("s3.endpoint", "http://minio:9000"),
+        ("s3.endpoint", "http://rustfs:9000"),
         ("s3.region", "eu-west-1"),
         ("s3.path-style-access", "true"),
         ("s3.aws-access-key", "AKIA"),
@@ -410,7 +410,7 @@ mod tests {
                 ("iceberg.rest-catalog.oauth2.credential", "${ENV:EGRET_C0}"),
                 ("iceberg.rest-catalog.vended-credentials-enabled", "true"),
                 ("fs.native-s3.enabled", "true"),
-                ("s3.endpoint", "http://minio:9000"),
+                ("s3.endpoint", "http://rustfs:9000"),
                 ("s3.region", "us-east-1"),
                 ("s3.path-style-access", "true"),
             ])

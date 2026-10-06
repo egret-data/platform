@@ -11,7 +11,7 @@ set dotenv-load := true
 # server boots from. Naming it explicitly on the recipe line overrides the dotenv value.
 test_database_url := "postgres://egret:egret@localhost:5432/egret_test"
 
-# Start the local dev stack (Postgres, MinIO, Trino, StarRocks)
+# Start the local dev stack (Postgres, RustFS, Trino, StarRocks)
 up:
     docker compose -f deploy/docker-compose.dev.yml up -d
 
@@ -212,7 +212,7 @@ test-workflow-docker:
 migrate:
     cargo run -p egret-bin -- migrate
 
-# Reset local test data (keeps users + demo/eng; wipes catalog, test workspaces, MinIO)
+# Reset local test data (keeps users + demo/eng; wipes catalog, test workspaces, RustFS)
 reset-testdata:
     ./deploy/reset-testdata.sh
 
@@ -335,7 +335,7 @@ e2e-kind-governance: deploy-kind-governance
     ./deploy/k8s/wait-ready.sh
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       EGRET_E2E_BUCKET=e2e \
-      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000 \
       npx playwright test governance-kind
 
 # Opt-in auto-admin e2e: admin queries a governed engine with NO hand-seeded policy
@@ -344,7 +344,7 @@ e2e-kind-ranger-auto: deploy-kind-governance
     ./deploy/k8s/wait-ready.sh
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       EGRET_E2E_BUCKET=e2e \
-      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000 \
       npx playwright test ranger-auto-admin-kind
 
 # Opt-in per-user-enforcement e2e: drives two OIDC identities (admin-sso full vs
@@ -355,7 +355,7 @@ e2e-kind-per-user: deploy-kind-governance
     ./deploy/k8s/wait-ready.sh
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       EGRET_E2E_BUCKET=e2e \
-      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000 \
       npx playwright test per-user-enforcement-kind
 
 # Opt-in STS token-broker e2e: a break-glass local admin (NO Keycloak refresh token)
@@ -366,7 +366,7 @@ e2e-kind-sts: deploy-kind-governance
     ./deploy/k8s/wait-ready.sh
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       EGRET_E2E_BUCKET=e2e \
-      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000 \
       npx playwright test sts-broker-kind
 
 # Opt-in: default provision (no delegationMode) => both engines come up jwt-delegated.
@@ -374,7 +374,7 @@ e2e-kind-delegation-default: deploy-kind-governance
     ./deploy/k8s/wait-ready.sh
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       EGRET_E2E_BUCKET=e2e \
-      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000 \
       npx playwright test delegation-default-kind
 
 # Opt-in local user-management e2e: admin creates a local user, the user logs in and
@@ -385,7 +385,7 @@ e2e-kind-local-user: deploy-kind-governance
     ./deploy/k8s/wait-ready.sh
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       EGRET_E2E_BUCKET=e2e \
-      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000 \
       npx playwright test local-user-mgmt-kind
 
 # Opt-in back-channel logout e2e: Keycloak force-logout → egret session revoked.
@@ -402,7 +402,7 @@ e2e-kind-backchannel-logout: deploy-kind-governance
     sleep 3
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       EGRET_E2E_KC_ADMIN_URL=http://127.0.0.1:18080 \
-      EGRET_E2E_BUCKET=e2e EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      EGRET_E2E_BUCKET=e2e EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000 \
       npx playwright test backchannel-logout-kind
 
 # Uninstall the egret release (leaves the kind cluster + operators up).

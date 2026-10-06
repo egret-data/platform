@@ -320,7 +320,7 @@ impl Out {
         if let Some(ep) = s.endpoint {
             self.set("aws.s3.endpoint", ep);
             // The FE defaults this to `true` (`AwsCloudConfiguration.java:40`),
-            // so an http endpoint (MinIO, most in-cluster S3-compatible stores)
+            // so an http endpoint (RustFS, most in-cluster S3-compatible stores)
             // needs it set explicitly to `false`.
             self.set(
                 "aws.s3.enable_ssl",
@@ -377,7 +377,7 @@ impl Out {
         self.set("iceberg.catalog.vended-credentials-enabled", "true");
         self.set("aws.s3.endpoint", s3_endpoint);
         // The FE defaults `enable_ssl` to `true` (`AwsCloudConfiguration.java:40`),
-        // so an http endpoint (MinIO, most in-cluster S3-compatible stores)
+        // so an http endpoint (RustFS, most in-cluster S3-compatible stores)
         // needs it set explicitly to `false`.
         self.set(
             "aws.s3.enable_ssl",
@@ -833,10 +833,10 @@ mod tests {
             egret_url: "http://egret:8080",
             warehouse: Some(WarehouseRender {
                 name: "wh-a",
-                s3_endpoint: "http://minio:9000",
+                s3_endpoint: "http://rustfs:9000",
             }),
             storage: Some(StorageRender {
-                endpoint: Some("http://minio:9000"),
+                endpoint: Some("http://rustfs:9000"),
                 region: "eu-west-1",
                 path_style: true,
                 access_key: "AKIA",
@@ -910,7 +910,7 @@ mod tests {
                 ),
                 (
                     "aws.s3.endpoint".to_string(),
-                    PropValue::Plain("http://minio:9000".into())
+                    PropValue::Plain("http://rustfs:9000".into())
                 ),
                 (
                     "aws.s3.enable_ssl".to_string(),
@@ -990,7 +990,7 @@ mod tests {
 
         assert_eq!(
             props.get("aws.s3.endpoint"),
-            Some(&PropValue::Plain("http://minio:9000".into())),
+            Some(&PropValue::Plain("http://rustfs:9000".into())),
             "the FE must be told where to talk; props={props:?}"
         );
         assert_eq!(
@@ -1098,7 +1098,7 @@ mod tests {
         // The S3 block every non-egret lakehouse kind carries.
         assert_eq!(
             p["aws.s3.endpoint"],
-            PropValue::Plain("http://minio:9000".into())
+            PropValue::Plain("http://rustfs:9000".into())
         );
         assert_eq!(p["aws.s3.region"], PropValue::Plain("eu-west-1".into()));
         assert_eq!(

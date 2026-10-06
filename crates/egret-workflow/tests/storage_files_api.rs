@@ -12,7 +12,7 @@
 //!
 //! Executions are bare rows inserted directly (as `tests/storage_index.rs`):
 //! which files `{id}` serves is a property of the link columns. Each test
-//! seeds its own workspace; nothing here touches MinIO (that is
+//! seeds its own workspace; nothing here touches RustFS (that is
 //! `storage_files_api_s3_live`).
 
 mod common;

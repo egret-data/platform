@@ -7,7 +7,7 @@
 //! `MemStore` with `max_file_bytes` = [`CAP`], so the cap and the route's
 //! body limit can be crossed in a test, and with [`Faulty`] in front of it:
 //! every write under the namespace [`OUTAGE_NS`] fails as an unreachable S3
-//! does. Nothing here touches MinIO.
+//! does. Nothing here touches RustFS.
 //!
 //! **The tests take turns** ([`SERIAL`]): several drive the real worker,
 //! whose claim is global, so one test must never run another's runs. Each

@@ -2,7 +2,7 @@
 //! it seeds lakekeeper's default project using a stable admin principal built
 //! from public, non-`test-utils` APIs — and that it is idempotent.
 //!
-//! Unlike `roundtrip.rs` this needs NO MinIO: `bootstrap` only touches the
+//! Unlike `roundtrip.rs` this needs NO RustFS: `bootstrap` only touches the
 //! catalog DB (it seeds the default project + registers the system user); there
 //! is no warehouse creation and thus no live S3 `validate_access`.
 //!

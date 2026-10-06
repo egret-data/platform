@@ -3,7 +3,7 @@ import { loginLocalAdmin, csrf, postJson as json } from "./helpers";
 
 /**
  * Embedded-catalog end-to-end (opt-in — needs the live stack + a reserved,
- * initially-empty MinIO bucket; NOT in CI). Proves the machine loop:
+ * initially-empty RustFS bucket; NOT in CI). Proves the machine loop:
  *   provision warehouse → role → grant → Catalog Client
  *   → /oauth/token (mini-IdP) → /catalog/v1 (embedded lakekeeper) → egret guard.
  *

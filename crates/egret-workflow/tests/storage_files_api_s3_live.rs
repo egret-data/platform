@@ -1,4 +1,4 @@
-//! W9a Task 8: the execution file API's download against MinIO (a real
+//! W9a Task 8: the execution file API's download against RustFS (a real
 //! `S3Store`): a 64 MiB object is streamed through
 //! `GET …/executions/{id}/file`, and the route has pulled only a sliver of it
 //! from S3 when the first chunk of the response arrives.
@@ -33,8 +33,8 @@ fn cfg() -> Option<StorageConfig> {
         endpoint: Some(endpoint),
         region: "us-east-1".into(),
         bucket: std::env::var("EGRET_TEST_S3_BUCKET").unwrap_or_else(|_| "warehouse".into()),
-        access_key: std::env::var("EGRET_TEST_S3_KEY").unwrap_or_else(|_| "minioadmin".into()),
-        secret_key: std::env::var("EGRET_TEST_S3_SECRET").unwrap_or_else(|_| "minioadmin".into()),
+        access_key: std::env::var("EGRET_TEST_S3_KEY").unwrap_or_else(|_| "rustfsadmin".into()),
+        secret_key: std::env::var("EGRET_TEST_S3_SECRET").unwrap_or_else(|_| "rustfsadmin".into()),
         path_style: true,
     })
 }
@@ -267,7 +267,7 @@ type Case = fn(StorageConfig) -> Result<(), String>;
 
 fn cases() -> Vec<(&'static str, Case)> {
     vec![(
-        "a_download_larger_than_memory_budget_streams_from_minio",
+        "a_download_larger_than_memory_budget_streams_from_rustfs",
         download_streams,
     )]
 }

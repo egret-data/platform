@@ -82,7 +82,7 @@ frontend that inherits the sparklabx design system.
 | ADR-02 | Frontend | **Single SPA**, two route groups (Admin/Explorer) gated by role | Maximize shared components & theme; simpler ops |
 | ADR-03 | Ranger | **Ranger Admin REST-compatible** | The native Ranger plugins in Trino/StarRocks fetch directly, no plugin changes needed |
 | ADR-04 | Metadata store | **PostgreSQL** (sqlx, compile-time checked) | Source of truth; follows Lakekeeper/Superset/Metabase |
-| ADR-05 | Object storage | **S3-compatible (MinIO)**, pluggable abstraction | Iceberg data + result cache; inherits `lakekeeper/crates/io` |
+| ADR-05 | Object storage | **S3-compatible (RustFS)**, pluggable abstraction | Iceberg data + result cache; inherits `lakekeeper/crates/io` |
 | ADR-06 | Cache/queue | **Redis (optional)**, Postgres fallback | Sessions, async jobs, rate-limiting |
 | ADR-07 | HTTP runtime | **axum + tokio + tower** | Ecosystem standard; Lakekeeper uses axum |
 | ADR-08 | API contract | **OpenAPI via utoipa** | Auto-generate the FE client |
@@ -100,7 +100,7 @@ frontend that inherits the sparklabx design system.
 
 > Each ADR gets a detailed file under `docs/en/adr/` (and `docs/vi/adr/`) once implementation begins.
 > **Note (ADR-19 supersession):** ADR-12's "global register → grant" applies to Ranger policy scope, not database connections — those are now per-workspace self-service (ADR-19 layer 2).
-> **Refinement (ADR-19a, 2026-06-27):** the workspace sidebar is split into **zones** — **EXPLORE** (SQL Lab, Datasets, Charts, Dashboards, Notebooks, Catalog) and **MANAGE** (Storage, …later Members/Connections). Catalog management does NOT live under a generic "Settings" page — instead the **Catalog is a rich multi-tab AREA** (mirroring lakekeeper's web console `data-portal/console`: namespaces · details · tasks · statistics · permissions; table-detail: schema/snapshots/files…) and **catalog access (tokens) is a tab INSIDE that Catalog area**. **Storage is its own MANAGE page**, an editable per-workspace MinIO/S3 config (uses lakekeeper `update_storage_profile`/`update_storage_credential` to re-point the warehouse). Full lakekeeper-console catalog parity is a phased epic.
+> **Refinement (ADR-19a, 2026-06-27):** the workspace sidebar is split into **zones** — **EXPLORE** (SQL Lab, Datasets, Charts, Dashboards, Notebooks, Catalog) and **MANAGE** (Storage, …later Members/Connections). Catalog management does NOT live under a generic "Settings" page — instead the **Catalog is a rich multi-tab AREA** (mirroring lakekeeper's web console `data-portal/console`: namespaces · details · tasks · statistics · permissions; table-detail: schema/snapshots/files…) and **catalog access (tokens) is a tab INSIDE that Catalog area**. **Storage is its own MANAGE page**, an editable per-workspace RustFS/S3 config (uses lakekeeper `update_storage_profile`/`update_storage_credential` to re-point the warehouse). Full lakekeeper-console catalog parity is a phased epic.
 
 ---
 
@@ -121,7 +121,7 @@ graph TB
   end
   IDP[(OIDC / SSO Provider)]
   MAIL[(SMTP / MS Graph)]
-  OBJ[(Object Storage S3/MinIO)]
+  OBJ[(Object Storage S3/RustFS)]
   PG[(PostgreSQL)]
 
   A -->|Admin Portal| EG[Egret]
@@ -200,7 +200,7 @@ graph TB
 ## 4. Deployment model
 
 - **Packaging:** one Docker image (the single `egret` binary) + one static frontend image (nginx) — or the binary serves the static SPA directly.
-- **Required dependencies:** PostgreSQL, object storage (S3/MinIO).
+- **Required dependencies:** PostgreSQL, object storage (S3/RustFS).
 - **Optional dependencies:** Redis (cache/queue), Kafka/NATS (distributed event bus — defaults to in-proc).
 - **CLI binary:** `egret serve` (run the server), `egret migrate` (DB migrations), `egret init` (bootstrap admin/workspace).
 - **Helm chart** for K8s; HorizontalPodAutoscaler at scale (the monolith is stateless apart from DB/Redis/object store).
@@ -214,10 +214,10 @@ graph LR
   end
   PG[(Postgres HA)]
   RD[(Redis)]
-  MINIO[(MinIO/S3)]
+  RUSTFS[(RustFS/S3)]
   EGP --- PG
   EGP --- RD
-  EGP --- MINIO
+  EGP --- RUSTFS
   FE --- EGP
 ```
 
@@ -241,7 +241,7 @@ the router.
 | `egret-config` | Typed config (serde + figment), env + file, validation | core | `Config::load()` |
 | `egret-metastore` | Postgres: sqlx pool, migration runner, base repository, transaction helper | core, sqlx | `Db`, `Repo` traits |
 | `egret-secrets` | Envelope-encrypted credentials at rest, KMS-pluggable provider | core, metastore | `SecretStore` trait |
-| `egret-storage` | Object store IO abstraction (S3/MinIO/GCS/Azure) — inherits `lakekeeper/crates/io` | core | `ObjectStore` trait |
+| `egret-storage` | Object store IO abstraction (S3/RustFS/GCS/Azure) — inherits `lakekeeper/crates/io` | core | `ObjectStore` trait |
 | `egret-events` | Internal event bus (in-proc broadcast + optional Kafka/NATS); topics `policy.changed`, `catalog.changed`, `query.finished`… | core | `EventBus`, `Event` |
 
 ### 5.2 Identity & Access
@@ -738,7 +738,7 @@ sequenceDiagram
 - **Observability:** `tracing` + OpenTelemetry export; Prometheus `/metrics`; structured JSON logs; request-id + workspace-id in spans.
 - **Caching:** query results (engine), data API responses, Ranger policy version (304), dataset metadata. Redis or in-proc.
 - **Migration:** sqlx migrations; `egret migrate` runs at deploy; backward-compatible.
-- **Testing:** per-crate unit tests (mock traits), integration with testcontainers (Postgres/MinIO/Trino), contract tests for Ranger & Iceberg REST (against the spec), Playwright e2e for the SPA.
+- **Testing:** per-crate unit tests (mock traits), integration with testcontainers (Postgres/RustFS/Trino), contract tests for Ranger & Iceberg REST (against the spec), Playwright e2e for the SPA.
 - **Multi-instance:** the monolith is stateless (state lives in PG/Redis/object store); the workflow scheduler needs leader election (Postgres advisory lock) to avoid duplicate runs.
 
 ---
@@ -823,7 +823,7 @@ egret/
 > **Reframe (v0.2):** the build targets **each workspace as a full self-contained data platform** across **4 pillars** (ADR-17). Each item below is its own brainstorm → spec → plan → subagent-build cycle.
 
 ### 16.1 Delivered
-- **Foundation:** Cargo workspace + crates; Postgres metastore + sqlx migrations (0001–0029); typed config; dev docker-compose (Postgres + MinIO + Trino/StarRocks).
+- **Foundation:** Cargo workspace + crates; Postgres metastore + sqlx migrations (0001–0029); typed config; dev docker-compose (Postgres + RustFS + Trino/StarRocks).
 - **Admin / control plane:** local auth + session, workspaces + members + RBAC; database/engine registration (Trino REST + StarRocks MySQL); Ranger REST-compatible policy surface.
 - **Analytics (BI):** Dataset / Chart / Dashboard with deep **Metabase parity** (table & pivot, per-series chart options, axis range, series rename, table view-as + mini-bar, PNG export, Vietnam-map geo).
 - **Catalog (lakehouse core):** per-workspace Iceberg catalog via **embedded lakekeeper** — CE-1 spike → CE-2 tenancy + cutover → CE-3 per-token read/write scope → CE-4 minimal `EgretAuthorizer` + `namespace_scope` → CE-5 per-workspace storage config (each workspace sets its own S3 at create-time; secret via `egret-secrets`; global default when unset) → CE-6 GC / task-queue workers (lakekeeper's built-in tabular-expiration/purge + task-log-cleanup workers spawned; dropped tables are reclaimed) (all merged; see §10.3).

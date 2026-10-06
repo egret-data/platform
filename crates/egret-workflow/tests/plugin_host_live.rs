@@ -802,10 +802,10 @@ async fn a_timed_out_query_is_cancelled_on_postgres(pool: sqlx::PgPool) {
 // W9a Task 9: plugins read and write internal storage through egret
 // ---------------------------------------------------------------------------
 
-/// MinIO under a throwaway prefix `w9a-t9-test/<uuid>/`, from the four
-/// `EGRET_TEST_S3_*` (the gate: this test is MinIO-gated and FAILS without
+/// RustFS under a throwaway prefix `w9a-t9-test/<uuid>/`, from the four
+/// `EGRET_TEST_S3_*` (the gate: this test is RustFS-gated and FAILS without
 /// them, as it does without [`GATE`]).
-async fn minio_files() -> Arc<FileStore> {
+async fn rustfs_files() -> Arc<FileStore> {
     let need = |k: &str| {
         std::env::var(k).unwrap_or_else(|_| {
             panic!("set {k} (and the other EGRET_TEST_S3_*) to run the plugin storage live test")
@@ -874,7 +874,7 @@ async fn sr_sql(sr: &Engine, sql: &str) -> (bool, String) {
 
 /// **Kestra plugins read and write internal storage through egret** (W9a
 /// spec §9.1), end to end through the real worker, `DockerRunner`, the real
-/// host image, a throwaway Postgres and MinIO:
+/// host image, a throwaway Postgres and RustFS:
 ///
 /// `postgresql.Query` `fetchType: STORE` -> `postgresql.Batch` from that
 /// (binary Ion) URI -> `postgresql.CopyOut` (CSV) -> `postgresql.CopyIn` from
@@ -889,10 +889,10 @@ async fn sr_sql(sr: &Engine, sql: &str) -> (bool, String) {
 /// the runtime handle (global constraints); `#[sqlx::test]` is
 /// current-thread.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs EGRET_PLUGIN_HOST_LIVE=1, Docker, egret-plugin-host:dev and MinIO (EGRET_TEST_S3_*)"]
+#[ignore = "needs EGRET_PLUGIN_HOST_LIVE=1, Docker, egret-plugin-host:dev and RustFS (EGRET_TEST_S3_*)"]
 async fn plugins_read_and_write_storage_through_egret() {
     gate();
-    let files = minio_files().await;
+    let files = rustfs_files().await;
     if let Err(other) = egret_workflow::storage::install(files.clone()) {
         panic!("another store is installed in this process: {other:?}");
     }
@@ -1127,9 +1127,9 @@ async fn plugins_read_and_write_storage_through_egret() {
         .objects
         .len();
     println!(
-        "MINIO: {removed} objects deleted by exact key under {}; {left} left",
+        "RUSTFS: {removed} objects deleted by exact key under {}; {left} left",
         files.prefix
     );
-    assert!(removed >= 4, "the run wrote files to MinIO: {removed}");
+    assert!(removed >= 4, "the run wrote files to RustFS: {removed}");
     assert_eq!(left, 0);
 }

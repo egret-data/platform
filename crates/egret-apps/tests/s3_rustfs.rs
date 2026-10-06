@@ -2,9 +2,9 @@
 //! `MemStore`. Every other test in this crate proves the logic is right against
 //! `MemStore`; this is the one place that proves the same code also works
 //! against the actual backend this plan exists to migrate to — the same
-//! discipline `egret-storage/tests/s3_minio.rs` already applies to `ObjectStore`
+//! discipline `egret-storage/tests/s3_rustfs.rs` already applies to `ObjectStore`
 //! itself. Skips (reporting `ok` via early return, not a real pass) unless
-//! `EGRET_TEST_S3_ENDPOINT` is set, e.g. against MinIO via `just up`.
+//! `EGRET_TEST_S3_ENDPOINT` is set, e.g. against RustFS via `just up`.
 
 use egret_apps::store::{AppStore, PublishOutcome, SaveOutcome};
 use egret_core::{UserId, WorkspaceId};
@@ -19,8 +19,8 @@ fn storage_cfg() -> Option<StorageConfig> {
         endpoint: Some(endpoint),
         region: "us-east-1".into(),
         bucket: std::env::var("EGRET_TEST_S3_BUCKET").unwrap_or_else(|_| "warehouse".into()),
-        access_key: std::env::var("EGRET_TEST_S3_KEY").unwrap_or_else(|_| "minioadmin".into()),
-        secret_key: std::env::var("EGRET_TEST_S3_SECRET").unwrap_or_else(|_| "minioadmin".into()),
+        access_key: std::env::var("EGRET_TEST_S3_KEY").unwrap_or_else(|_| "rustfsadmin".into()),
+        secret_key: std::env::var("EGRET_TEST_S3_SECRET").unwrap_or_else(|_| "rustfsadmin".into()),
         path_style: true,
     })
 }

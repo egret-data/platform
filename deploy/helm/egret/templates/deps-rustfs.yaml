@@ -2,57 +2,56 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: minio
+  name: rustfs
   labels:
-    app: minio
+    app: rustfs
 spec:
   replicas: 1
   # As for postgres: a rolling update surges a second pod that cannot mount the
-  # ReadWriteOnce `minio-data` PVC, so the upgrade wedges rather than rolls.
+  # ReadWriteOnce `rustfs-data` PVC, so the upgrade wedges rather than rolls.
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: minio
+      app: rustfs
   template:
     metadata:
       labels:
-        app: minio
+        app: rustfs
     spec:
+      # The image runs as uid 10001; without this the PVC is root-owned and unwritable.
+      securityContext:
+        fsGroup: 10001
       containers:
-        - name: minio
-          image: {{ .Values.deps.minio.image }}
-          args:
-            - server
-            - /data
-            - --console-address
-            - ":9001"
+        - name: rustfs
+          image: {{ .Values.deps.rustfs.image }}
           env:
-            - name: MINIO_ROOT_USER
-              value: "{{ .Values.deps.minio.rootUser }}"
-            - name: MINIO_ROOT_PASSWORD
-              value: "{{ .Values.deps.minio.rootPassword }}"
+            - name: RUSTFS_ACCESS_KEY
+              value: "{{ .Values.deps.rustfs.rootUser }}"
+            - name: RUSTFS_SECRET_KEY
+              value: "{{ .Values.deps.rustfs.rootPassword }}"
           ports:
             - containerPort: 9000
             - containerPort: 9001
           volumeMounts:
-            - name: minio-data
+            - name: rustfs-data
               mountPath: /data
           readinessProbe:
             httpGet:
-              path: /minio/health/ready
+              path: /health
               port: 9000
             initialDelaySeconds: 5
             periodSeconds: 10
       volumes:
-        - name: minio-data
+        - name: rustfs-data
           persistentVolumeClaim:
-            claimName: minio-data
+            claimName: rustfs-data
 ---
+# Not the old `minio-data` claim: RustFS cannot read MinIO's on-disk format.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: minio-data
+  name: rustfs-data
 spec:
   accessModes:
     - ReadWriteOnce
@@ -63,12 +62,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: minio
+  name: rustfs
   labels:
-    app: minio
+    app: rustfs
 spec:
   selector:
-    app: minio
+    app: rustfs
   ports:
     - name: api
       port: 9000

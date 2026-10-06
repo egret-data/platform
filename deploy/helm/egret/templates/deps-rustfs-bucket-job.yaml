@@ -1,0 +1,28 @@
+{{- if .Values.deps.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: egret-rustfs-bucket
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bucket
+          image: {{ .Values.deps.rustfs.clientImage }}
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              until aws s3api list-buckets >/dev/null 2>&1; do echo waiting for the object store; sleep 2; done
+              aws s3api head-bucket --bucket {{ .Values.deps.rustfs.bucket }} 2>/dev/null \
+                || aws s3api create-bucket --bucket {{ .Values.deps.rustfs.bucket }}
+              echo "bucket ready"
+          env:
+            - { name: AWS_ACCESS_KEY_ID, value: "{{ .Values.deps.rustfs.rootUser }}" }
+            - { name: AWS_SECRET_ACCESS_KEY, value: "{{ .Values.deps.rustfs.rootPassword }}" }
+            - { name: AWS_ENDPOINT_URL, value: "http://rustfs:9000" }
+            - { name: AWS_DEFAULT_REGION, value: "{{ .Values.storage.region }}" }
+{{- end }}
