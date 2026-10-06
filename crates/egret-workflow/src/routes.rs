@@ -2472,6 +2472,10 @@ pub fn management_router() -> Router<WorkflowState> {
             get(crate::storage::nsfiles::routes::search_namespace_files),
         )
         .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/files/export",
+            get(crate::storage::nsfiles::routes::export_namespace_files),
+        )
+        .route(
             "/ws/{workspace}/workflows/namespaces/{namespace}/files/directory",
             get(crate::storage::nsfiles::routes::list_namespace_directory)
                 .post(crate::storage::nsfiles::routes::create_namespace_directory),
@@ -2511,6 +2515,7 @@ pub fn management_router() -> Router<WorkflowState> {
         crate::storage::nsfiles::routes::namespace_file_stats,
         crate::storage::nsfiles::routes::namespace_file_revisions,
         crate::storage::nsfiles::routes::search_namespace_files,
+        crate::storage::nsfiles::routes::export_namespace_files,
         crate::storage::nsfiles::routes::list_namespace_directory,
         crate::storage::nsfiles::routes::upload_namespace_file,
         crate::storage::nsfiles::routes::create_namespace_directory,

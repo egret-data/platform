@@ -13,6 +13,8 @@
 //!   name a namespace file (spec §7, Task 5).
 //! - [`staging`]: the staging objects a write uploads its body to before it
 //!   takes any lock, and their sweep (spec §4.2, §8.1; Task 8 fix round 1).
+//! - [`zip`]: the streaming zip writer of `GET …/files/export` (spec §9,
+//!   Task 9).
 //!
 //! The objects live in W9a's [`super::FileStore`], under
 //! `{prefix}{workspace}/{ns-as-path}/_files{path}[.v{N}]`
@@ -25,6 +27,7 @@ pub mod routes;
 pub mod stage;
 pub mod staging;
 pub mod store;
+pub mod zip;
 
 use std::sync::{Arc, OnceLock};
 

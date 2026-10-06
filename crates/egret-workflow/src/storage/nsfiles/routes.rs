@@ -7,6 +7,7 @@
 //! GET    /api/ws/{workspace}/workflows/namespaces/{namespace}/files/revisions?path  workflow:read
 //! GET    /api/ws/{workspace}/workflows/namespaces/{namespace}/files/search?q        workflow:read
 //! GET    /api/ws/{workspace}/workflows/namespaces/{namespace}/files/directory?path  workflow:read
+//! GET    /api/ws/{workspace}/workflows/namespaces/{namespace}/files/export          workflow:read (a streamed zip)
 //! POST   /api/ws/{workspace}/workflows/namespaces/{namespace}/files?path            workflow:manage (multipart)
 //! POST   /api/ws/{workspace}/workflows/namespaces/{namespace}/files/directory?path  workflow:manage
 //! PUT    /api/ws/{workspace}/workflows/namespaces/{namespace}/files?from&to         workflow:manage
@@ -59,7 +60,7 @@ use tokio::io::{AsyncRead, ReadBuf};
 use super::access::{authorize, Access, Actor, Grant};
 use super::path::NsPath;
 use super::store::{self, Conflict, NsEntry, Want, Written};
-use super::{CreatedBy, NsError};
+use super::{zip, CreatedBy, NsError};
 use crate::routes::{refuse, WorkflowState, WF_MANAGE, WF_READ};
 use crate::storage::multipart::{
     idle_text, multipart_body_limit, multipart_refusal, HeaderBudget, IdleTimeout, MultipartGate,
@@ -614,6 +615,155 @@ pub(crate) async fn list_namespace_directory(
         .await
         .map_err(ns_refusal)?;
     Ok(Json(children.iter().map(stats_dto).collect()))
+}
+
+// ─── Export ─────────────────────────────────────────────────────────────────
+
+/// The zip entry of a listed file: its path without the leading `/`
+/// (`NsPath`'s stored form), which [`zip::check_name`] asserts again.
+fn export_name(e: &NsEntry) -> &str {
+    e.path.as_str().strip_prefix('/').unwrap_or(e.path.as_str())
+}
+
+/// Why the export stopped, once the status line has gone: logged naming the
+/// namespace and the path, never a storage key. A client that went away is
+/// not an error.
+fn export_stopped(namespace: &str, path: Option<&str>, e: &std::io::Error) {
+    let path = path.unwrap_or("(the central directory)");
+    if matches!(
+        e.kind(),
+        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+    ) {
+        tracing::info!(
+            namespace,
+            path,
+            "a namespace export's client went away; it stopped"
+        );
+    } else {
+        tracing::error!(namespace, path, error = %e, "a namespace export failed mid-body");
+    }
+}
+
+/// The writer's half of the export: every listed file, in the listing's
+/// order, each read through [`zip::ZipWriter::add_sized`] against its row's
+/// size, then the central directory. Holds no database connection: the rows
+/// were fetched before it was spawned.
+async fn write_export(
+    fs: Arc<FileStore>,
+    grant: Grant,
+    files: Vec<NsEntry>,
+    out: tokio::io::DuplexStream,
+) -> Result<(), ()> {
+    let ns = grant.namespace().to_string();
+    let mut w = zip::ZipWriter::new(out);
+    for e in &files {
+        let fail = |err: std::io::Error| export_stopped(&ns, Some(e.path.as_str()), &err);
+        let mut body = store::open(&fs, &grant, e)
+            .await
+            .map_err(|err| fail(std::io::Error::other(err.to_string())))?;
+        w.add_sized(export_name(e), &mut body, e.created_at, e.size)
+            .await
+            .map_err(fail)?;
+    }
+    let mut out = w
+        .finish()
+        .await
+        .map_err(|err| export_stopped(&ns, None, &err))?;
+    tokio::io::AsyncWriteExt::shutdown(&mut out)
+        .await
+        .map_err(|err| export_stopped(&ns, None, &err))
+}
+
+/// The writer's task, aborted when the body is dropped (the client went
+/// away): nothing reads the duplex any more, so nothing more is opened.
+struct AbortOnDrop(tokio::task::JoinHandle<Result<(), ()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The body: the duplex's bytes, then the writer's verdict. A writer that
+/// failed ends the body with an error, so the response is aborted (no final
+/// chunk) and a client sees a broken download, never a short archive that
+/// ends cleanly.
+fn export_body(rx: tokio::io::DuplexStream, writer: AbortOnDrop) -> axum::body::Body {
+    use futures_util::StreamExt as _;
+    let state = Some((tokio_util::io::ReaderStream::new(rx), writer));
+    axum::body::Body::from_stream(futures_util::stream::unfold(state, |state| async move {
+        let (mut bytes, mut writer) = state?;
+        match bytes.next().await {
+            Some(Ok(chunk)) => Some((Ok(chunk), Some((bytes, writer)))),
+            Some(Err(e)) => Some((Err(e), None)),
+            None => match (&mut writer.0).await {
+                Ok(Ok(())) => None,
+                _ => Some((
+                    Err(std::io::Error::other(
+                        "the namespace export stopped before its end; the archive is \
+                             incomplete",
+                    )),
+                    None,
+                )),
+            },
+        }
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/namespaces/{namespace}/files/export",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("namespace" = String, Path, description = "The namespace"),
+    ),
+    responses(
+        (status = 200, description = "A zip archive of the latest live revision of every FILE of the namespace (no directory entry, no flow, no soft-deleted file), each named by its path without the leading `/`; stored (not compressed), streamed as it is read from internal storage, ZIP64 where a size, an offset or the count needs it. `Content-Type: application/zip`, `Content-Disposition: attachment; filename=\"{namespace}_files.zip\"`, `X-Content-Type-Options: nosniff`. A failure once the body has started (internal storage, or an object that is not its recorded size) aborts the response: the download is broken, never a shorter archive.", content_type = "application/zip", body = Vec<u8>),
+        (status = 400, description = "A refused namespace", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 413, description = "Refused before any byte is sent: the namespace holds more entries than one answer may hold (`workflow.storage.max_namespace_files`, named), or its files hold more bytes in all than one export may read (`workflow.storage.max_task_bytes`, named).", body = egret_core::http::ErrorBody),
+        (status = 503, description = "Internal storage or the database is unavailable or not configured; the request can be retried.", body = egret_core::http::ErrorBody),
+    ),
+)]
+pub(crate) async fn export_namespace_files(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, namespace)): Path<(String, String)>,
+) -> Result<Response, Response> {
+    let grant = grant(&st, &ctx, &namespace, Access::Read).await?;
+    let fs = crate::storage::current().ok_or_else(no_store)?;
+    let files: Vec<NsEntry> = {
+        let mut c = conn(&st).await?;
+        store::list_live(&mut c, &grant, None, true, fs.caps.max_namespace_files)
+            .await
+            .map_err(ns_refusal)?
+            .into_iter()
+            .filter(|e| !e.is_directory)
+            .collect()
+        // The connection goes back to the pool here, before anything streams.
+    };
+    // The bytes one export may read: the rows' sizes, summed before the
+    // status line; each object is then held to its row's size as it streams.
+    let total = files.iter().fold(0u64, |t, e| t.saturating_add(e.size));
+    let cap = fs.caps.max_task_bytes;
+    if total > cap {
+        return Err(ns_refusal(NsError::TooLarge(format!(
+            "namespace '{}' holds {total} bytes of files, more than one export may read: {cap} \
+             bytes (workflow.storage.max_task_bytes)",
+            grant.namespace()
+        ))));
+    }
+    let (tx, rx) = tokio::io::duplex(zip::COPY_BUF);
+    let writer = AbortOnDrop(tokio::spawn(write_export(fs, grant.clone(), files, tx)));
+    let mut res = Response::new(export_body(rx, writer));
+    download_headers(&mut res, &format!("{}_files.zip", grant.namespace()))?;
+    res.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/zip"),
+    );
+    Ok(res)
 }
 
 // ─── Writes ─────────────────────────────────────────────────────────────────

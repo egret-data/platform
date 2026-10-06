@@ -29648,6 +29648,109 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/namespaces/{namespace}/files/export": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "export_namespace_files",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A zip archive of the latest live revision of every FILE of the namespace (no directory entry, no flow, no soft-deleted file), each named by its path without the leading `/`; stored (not compressed), streamed as it is read from internal storage, ZIP64 where a size, an offset or the count needs it. `Content-Type: application/zip`, `Content-Disposition: attachment; filename=\"{namespace}_files.zip\"`, `X-Content-Type-Options: nosniff`. A failure once the body has started (internal storage, or an object that is not its recorded size) aborts the response: the download is broken, never a shorter archive.",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A refused namespace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Refused before any byte is sent: the namespace holds more entries than one answer may hold (`workflow.storage.max_namespace_files`, named), or its files hold more bytes in all than one export may read (`workflow.storage.max_task_bytes`, named).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Internal storage or the database is unavailable or not configured; the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/namespaces/{namespace}/files/revisions": {
       "get": {
         "tags": [

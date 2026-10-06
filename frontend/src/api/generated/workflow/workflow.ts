@@ -3321,7 +3321,148 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getWorkflowCreateNamespaceDirectoryMutationOptions(options), queryClient);
     }
-    export type workflowNamespaceFileRevisionsResponse200 = {
+    export type workflowExportNamespaceFilesResponse200 = {
+  data: Blob
+  status: 200
+}
+
+export type workflowExportNamespaceFilesResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowExportNamespaceFilesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowExportNamespaceFilesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowExportNamespaceFilesResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowExportNamespaceFilesResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowExportNamespaceFilesResponseSuccess = (workflowExportNamespaceFilesResponse200) & {
+  headers: Headers;
+};
+export type workflowExportNamespaceFilesResponseError = (workflowExportNamespaceFilesResponse400 | workflowExportNamespaceFilesResponse401 | workflowExportNamespaceFilesResponse403 | workflowExportNamespaceFilesResponse413 | workflowExportNamespaceFilesResponse503) & {
+  headers: Headers;
+};
+
+export type workflowExportNamespaceFilesResponse = (workflowExportNamespaceFilesResponseSuccess | workflowExportNamespaceFilesResponseError)
+
+export const getWorkflowExportNamespaceFilesUrl = (workspace: string,
+    namespace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/export`
+}
+
+export const workflowExportNamespaceFiles = async (workspace: string,
+    namespace: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowExportNamespaceFilesResponse> => {
+
+  return customInstance<workflowExportNamespaceFilesResponse>(getWorkflowExportNamespaceFilesUrl(workspace,namespace),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowExportNamespaceFilesQueryKey = (workspace: string,
+    namespace: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/export`
+    ] as const;
+    }
+
+
+export const getWorkflowExportNamespaceFilesQueryOptions = <TData = Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError = ErrorBody>(workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowExportNamespaceFilesQueryKey(workspace,namespace);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>> = ({ signal }) => workflowExportNamespaceFiles(workspace,namespace, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && namespace !== null && namespace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowExportNamespaceFilesQueryResult = NonNullable<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>>
+export type WorkflowExportNamespaceFilesQueryError = ErrorBody
+
+
+export function useWorkflowExportNamespaceFiles<TData = Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowExportNamespaceFiles>>,
+          TError,
+          Awaited<ReturnType<typeof workflowExportNamespaceFiles>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowExportNamespaceFiles<TData = Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowExportNamespaceFiles>>,
+          TError,
+          Awaited<ReturnType<typeof workflowExportNamespaceFiles>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowExportNamespaceFiles<TData = Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowExportNamespaceFiles<TData = Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowExportNamespaceFilesQueryOptions(workspace,namespace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowNamespaceFileRevisionsResponse200 = {
   data: NsFileRevisionDto[]
   status: 200
 }

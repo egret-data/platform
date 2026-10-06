@@ -298,6 +298,9 @@ pub(crate) async fn download_execution_file(
 /// `Content-Disposition: attachment` naming `name` ([`content_disposition`]:
 /// sanitised, and percent-encoded in `filename*`), `X-Content-Type-Options:
 /// nosniff` -- so a browser saves the bytes and never renders them.
+// The `Err` is the response itself, built once per request, as every handler
+// here answers (`Result<_, Response>`); its callers return it with `?`.
+#[allow(clippy::result_large_err)]
 pub(crate) fn download_headers(res: &mut Response, name: &str) -> Result<(), Response> {
     let disposition = HeaderValue::from_str(&content_disposition(name))
         .map_err(|e| core_refusal(Error::Internal(anyhow::anyhow!("{name:?}: {e}"))))?;

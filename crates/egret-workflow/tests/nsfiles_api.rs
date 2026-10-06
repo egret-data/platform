@@ -24,14 +24,21 @@ use uuid::Uuid;
 
 const NS: &str = "w9b.api";
 const OUTAGE_NS: &str = "w9b.outage";
+/// A second namespace of the same workspace (Task 9).
+const OTHER_NS: &str = "w9b.other";
 /// `max_file_bytes` for this binary: the body limit is this + 1 MiB, above
 /// the 900 KiB bodies of the header-budget test.
 const CAP: u64 = 64 * 1024;
-/// `max_namespace_files` for this binary.
-const MAX_FILES: u64 = 8;
+/// `max_namespace_files` for this binary: above the 19 entries (files and
+/// directories) of Task 9's export test, whose listing the cap counts.
+const MAX_FILES: u64 = 24;
 
 /// `MemStore`, failing every read and write under [`OUTAGE_NS`].
 struct Faulty(egret_storage::MemStore);
+
+/// Objects opened under the namespace `w9b.gone` (Task 9's client-disconnect
+/// test, the only one that uses it).
+static GONE_OPENS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn in_outage(uri: &str) -> bool {
     uri.contains("/w9b/outage/")
@@ -86,6 +93,9 @@ impl ObjectStore for Faulty {
     ) -> Result<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>, StorageError> {
         if in_outage(uri) {
             return Err(outage(uri));
+        }
+        if uri.contains("/w9b/gone/") {
+            GONE_OPENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         self.0.get_stream(uri).await
     }
@@ -1476,4 +1486,331 @@ async fn query_refusals_are_error_bodies_and_write_answers_have_no_content() {
         );
         assert_eq!(text(res).await, "");
     }
+}
+
+// ─── Export (Task 9) ────────────────────────────────────────────────────────
+
+/// Python's `zipfile` reading of an archive: `testzip()` (every CRC), then
+/// each entry's name and bytes; `None` (printed) without python3. The
+/// independent reader: no egret code parses the archive.
+fn python_entries(zip: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("SKIP python3: not found");
+        return None;
+    }
+    let p = std::env::temp_dir().join(format!("w9b-t9-api-{}.zip", Uuid::new_v4()));
+    std::fs::write(&p, zip).unwrap();
+    let o = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import json,sys,zipfile\n\
+             z=zipfile.ZipFile(sys.argv[1])\n\
+             assert z.testzip() is None\n\
+             print(json.dumps([[i.filename, z.read(i).hex()] for i in z.infolist()]))",
+        )
+        .arg(&p)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&p);
+    assert!(
+        o.status.success(),
+        "python's zipfile refused the export: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let v: Vec<(String, String)> = serde_json::from_slice(&o.stdout).unwrap();
+    Some(
+        v.into_iter()
+            .map(|(n, h)| (n, hex::decode(h).unwrap()))
+            .collect(),
+    )
+}
+
+impl Fx {
+    async fn export_as(&self, user: UserId, ns: &str) -> axum::response::Response {
+        self.get_as(user, ns, "/export").await
+    }
+
+    async fn export(&self, ns: &str) -> axum::response::Response {
+        self.export_as(self.user, ns).await
+    }
+
+    /// Insert a row with no object behind it (`size` as given).
+    async fn bare_row(&self, ns: &str, path: &str, size: i64) {
+        sqlx::query(
+            "INSERT INTO workflow.namespace_files \
+               (workspace_id, namespace, path, revision, is_directory, size, deleted) \
+             VALUES ($1, $2, $3, 1, false, $4, false)",
+        )
+        .bind(self.ws)
+        .bind(ns)
+        .bind(path)
+        .bind(size)
+        .execute(&self.db.pool)
+        .await
+        .unwrap();
+    }
+}
+
+/// The body's chunks until it ends: `Ok` with every byte when it ended
+/// cleanly, `Err` with the bytes that arrived when it ended with an error.
+async fn drain(res: axum::response::Response) -> Result<Vec<u8>, Vec<u8>> {
+    use futures_util::StreamExt as _;
+    let mut stream = res.into_body().into_data_stream();
+    let mut got = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(b) => got.extend_from_slice(&b),
+            Err(_) => return Err(got),
+        }
+    }
+    Ok(got)
+}
+
+/// w9b `api.summary.export` (chosen) over the fixture's namespace as egret
+/// builds it (`/top.zip` stored, never expanded, so it is one entry where
+/// Kestra's `api.routes.export` had `inner.txt` and `zdir/inner2.txt`): the
+/// latest live revision of every file, named without the leading `/`; no
+/// directory, no soft-deleted file, no older revision.
+#[tokio::test]
+async fn export_streams_the_latest_live_files_only() {
+    let Some(fx) = fx().await else { return };
+    let zip = fixture_namespace(&fx, NS).await;
+    fx.ok_upload(NS, "/gone/deleted.txt", b"deleted").await;
+    assert_eq!(fx.rm(NS, "/gone/deleted.txt").await.status(), 200);
+    assert_eq!(fx.mkdir_as(fx.user, NS, "/empty/dir").await.status(), 200);
+    fx.ok_upload(OTHER_NS, "/not-this-namespace.txt", b"other")
+        .await;
+
+    let res = fx.export(NS).await;
+    assert_eq!(res.status(), 200);
+    let h = res.headers().clone();
+    assert_eq!(h["content-type"], "application/zip");
+    assert_eq!(h["x-content-type-options"], "nosniff");
+    let disposition = h["content-disposition"].to_str().unwrap();
+    let kestra = route("export");
+    let want = kestra["headers"]["content-disposition"].as_str().unwrap();
+    assert!(disposition.starts_with(want), "{disposition} / {want}");
+    let body = drain(res).await.expect("the export ended cleanly");
+    let Some(mut got) = python_entries(&body) else {
+        return;
+    };
+    got.sort();
+    // Kestra's entries, `inner.txt` and `zdir/inner2.txt` (from its
+    // expansion of /top.zip) replaced by the stored /top.zip.
+    let mut want: Vec<(String, Vec<u8>)> = kestra["body"]["zip_entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["name"].as_str().unwrap().to_string(),
+                e["content"].as_str().unwrap().as_bytes().to_vec(),
+            )
+        })
+        .filter(|(n, _)| n != "inner.txt" && n != "zdir/inner2.txt")
+        .chain([("top.zip".to_string(), zip)])
+        .collect();
+    want.sort();
+    assert_eq!(got, want);
+    assert!(got
+        .iter()
+        .all(|(n, _)| !n.starts_with('/') && !n.contains("..")));
+}
+
+/// `workflow:read` is the permission (`workflow:manage` alone is 403); B
+/// cannot reach A's workspace, and B's export of the same namespace name in
+/// its own workspace holds none of A's files; another namespace of A's holds
+/// none of them either.
+#[tokio::test]
+async fn export_needs_workflow_read_and_is_404_for_another_workspace() {
+    let Some(mut a) = fx().await else { return };
+    let Some(b) = fx().await else { return };
+    a.ok_upload(NS, "/secret.txt", b"a's").await;
+    let reader = member(&a.db, a.ws, &["workflow:read"]).await;
+    let manager_only = member(&a.db, a.ws, &["workflow:manage"]).await;
+    a.app = common::app(&a.db).await;
+
+    let res = a.export_as(manager_only, NS).await;
+    assert_eq!(res.status(), 403, "{}", text(res).await);
+    let res = a.export_as(reader, NS).await;
+    assert_eq!(res.status(), 200);
+    let body = drain(res).await.expect("clean");
+    if let Some(got) = python_entries(&body) {
+        assert_eq!(got, [("secret.txt".to_string(), b"a's".to_vec())]);
+    }
+
+    // B's member, A's workspace in the URL.
+    let uri = format!("{}/export", a.base(NS));
+    let res = common::get(&b.app, &uri, b.user).await;
+    assert!(
+        matches!(res.status().as_u16(), 403 | 404),
+        "{}",
+        res.status()
+    );
+    // B's own workspace, the same namespace name: an empty archive.
+    for (who, ns) in [(&b, NS), (&a, OTHER_NS)] {
+        let res = who.export(ns).await;
+        assert_eq!(res.status(), 200);
+        let body = drain(res).await.expect("clean");
+        if let Some(got) = python_entries(&body) {
+            assert!(got.is_empty(), "{ns}: {got:?}");
+        }
+    }
+}
+
+/// Over `max_namespace_files` entries (files and directories), or over `max_task_bytes` in all (the
+/// rows' sizes), the export is a 413 naming the cap: an error body with its
+/// status, before a byte of an archive. At the cap it is served.
+#[tokio::test]
+async fn export_past_max_namespace_files_is_refused_before_a_byte_is_sent() {
+    let Some(fx) = fx().await else { return };
+    // The cap counts the listing's entries, a directory's included (one
+    // `list_live`); the archive holds the files only.
+    for i in 0..MAX_FILES - 1 {
+        fx.ok_upload(NS, &format!("/d/f{i}.txt"), b"x").await;
+    }
+    let res = fx.export(NS).await;
+    assert_eq!(res.status(), 200, "at the cap: the control");
+    let body = drain(res).await.expect("clean");
+    if let Some(got) = python_entries(&body) {
+        assert_eq!(got.len(), MAX_FILES as usize - 1);
+    }
+    fx.ok_upload(NS, "/one-more.txt", b"x").await;
+    let res = fx.export(NS).await;
+    assert_eq!(res.headers()["content-type"], "application/json");
+    let msg = refusal(res, 413).await;
+    assert!(
+        msg.contains("max_namespace_files") && msg.contains(&MAX_FILES.to_string()),
+        "{msg}"
+    );
+
+    // Bytes: two rows of 3 GiB (no object behind them: nothing is opened).
+    let cap = storage::Caps::default().max_task_bytes;
+    fx.bare_row(OTHER_NS, "/big1.bin", 3 << 30).await;
+    let res = fx.export(OTHER_NS).await;
+    assert_eq!(res.status(), 200, "under max_task_bytes: the control");
+    fx.bare_row(OTHER_NS, "/big2.bin", 3 << 30).await;
+    let res = fx.export(OTHER_NS).await;
+    let msg = refusal(res, 413).await;
+    assert!(
+        msg.contains("max_task_bytes") && msg.contains(&cap.to_string()),
+        "{msg}"
+    );
+}
+
+/// Once the status line has gone, a failure aborts the body: an object
+/// shorter or longer than its row, a row with no object, an outage. The
+/// client sees an error, never an archive that ends cleanly.
+#[tokio::test]
+async fn an_export_that_fails_mid_body_ends_the_body_with_an_error() {
+    let Some(fx) = fx().await else { return };
+    fx.ok_upload(NS, "/a.txt", b"first").await;
+    fx.ok_upload(NS, "/b.txt", b"second").await;
+    let clean = drain(fx.export(NS).await).await.expect("the control");
+    if let Some(got) = python_entries(&clean) {
+        assert_eq!(got.len(), 2);
+    }
+    let set_size = |size: i64| {
+        sqlx::query(
+            "UPDATE workflow.namespace_files SET size = $3 \
+             WHERE workspace_id = $1 AND namespace = $2 AND path = '/b.txt'",
+        )
+        .bind(fx.ws)
+        .bind(NS)
+        .bind(size)
+        .execute(&fx.db.pool)
+    };
+    for size in [7, 5] {
+        set_size(size).await.unwrap();
+        let res = fx.export(NS).await;
+        assert_eq!(res.status(), 200);
+        let got = drain(res).await;
+        let partial = got.expect_err(&format!("row size {size}: the body ended cleanly"));
+        assert!(
+            partial.windows(5).any(|w| w == b"first"),
+            "row size {size}: the first entry streamed before the failure"
+        );
+    }
+    set_size(6).await.unwrap();
+    drain(fx.export(NS).await).await.expect("restored");
+
+    fx.bare_row(NS, "/c-no-object.txt", 3).await;
+    let res = fx.export(NS).await;
+    assert_eq!(res.status(), 200);
+    drain(res).await.expect_err("a row with no object");
+
+    fx.bare_row(OUTAGE_NS, "/y.txt", 1).await;
+    let res = fx.export(OUTAGE_NS).await;
+    assert_eq!(res.status(), 200);
+    drain(res).await.expect_err("an outage");
+}
+
+/// The rows are listed and the connection returned before the body streams:
+/// five exports whose bodies nobody reads (each writer blocked on its full
+/// duplex) on the five-connection pool leave connections idle and an
+/// unrelated GET answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn exports_whose_bodies_are_not_read_hold_no_pool_connection() {
+    let Some(fx) = fx().await else { return };
+    assert_eq!(fx.db.pool.options().get_max_connections(), 5);
+    let big = vec![b'z'; 60 * 1024];
+    fx.ok_upload(NS, "/p1.bin", &big).await;
+    fx.ok_upload(NS, "/p2.bin", &big).await;
+    let mut held = Vec::new();
+    for _ in 0..5 {
+        let res = fx.export(NS).await;
+        assert_eq!(res.status(), 200);
+        held.push(res);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        fx.db.pool.num_idle() > 0,
+        "the unread exports hold every pool connection"
+    );
+    let get = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        fx.get(NS, "/stats?path=/p1.bin"),
+    )
+    .await
+    .expect("an unrelated GET waited on the unread exports");
+    assert_eq!(get.status(), 200);
+    // Control: the bodies were complete archives all along.
+    let body = drain(held.pop().unwrap()).await.expect("clean");
+    if let Some(got) = python_entries(&body) {
+        assert_eq!(got.len(), 2);
+    }
+}
+
+/// A client that goes away stops the export: nothing more is opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_export_whose_client_goes_away_stops_opening_files() {
+    use futures_util::StreamExt as _;
+    use std::sync::atomic::Ordering::SeqCst;
+    let Some(fx) = fx().await else { return };
+    const GONE: &str = "w9b.gone";
+    let big = vec![b'g'; 60 * 1024];
+    for i in 0..6 {
+        fx.ok_upload(GONE, &format!("/g{i}.bin"), &big).await;
+    }
+    let before = GONE_OPENS.load(SeqCst);
+    let res = fx.export(GONE).await;
+    assert_eq!(res.status(), 200);
+    let mut stream = res.into_body().into_data_stream();
+    let first = stream.next().await.expect("a first chunk").expect("ok");
+    assert!(!first.is_empty());
+    drop(stream);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let after_drop = GONE_OPENS.load(SeqCst) - before;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let later = GONE_OPENS.load(SeqCst) - before;
+    assert_eq!(after_drop, later, "the export kept opening files");
+    assert!(later < 6, "every file was opened: {later}");
+    // Control: read to the end, all six are opened.
+    let before = GONE_OPENS.load(SeqCst);
+    drain(fx.export(GONE).await).await.expect("clean");
+    assert_eq!(GONE_OPENS.load(SeqCst) - before, 6);
 }

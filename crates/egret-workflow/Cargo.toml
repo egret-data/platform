@@ -283,6 +283,12 @@ futures-util.workspace = true
 # uses it.
 egret-storage.workspace = true
 
+# W9b Task 9: `storage::nsfiles::zip` (the streamed export) computes each
+# entry's CRC-32 as its body streams through. A new DIRECT dependency; the
+# crate and this exact version were already in Cargo.lock (flate2 and others
+# pull it), so no new crate enters the build.
+crc32fast = "=1.5.0"
+
 [features]
 # `storage::install_mem_for_tests` and `egret_storage::MemStore`.
 test-util = ["egret-storage/test-util"]

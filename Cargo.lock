@@ -3763,6 +3763,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
+ "crc32fast",
  "egret-analytics-api",
  "egret-audit",
  "egret-auth",
