@@ -578,12 +578,14 @@ async fn matching(
 /// summed over what the runner will stream -- the stored inputs AFTER
 /// [`merge`], so a namespace file an `inputFiles` name replaced does not
 /// count, and an `inputFiles` namespace-file URI does. Each size is its
-/// row's; the transfer refuses an object of any other size.
+/// row's; the transfer refuses an object of any other size. The plugin
+/// bridge calls it too (W9b Task 10 fix round 1, M1), over its execution
+/// files and namespace files: one cap, one set, for both handlers.
 pub fn check_task_bytes(stored: &BTreeMap<String, StoredInput>, max: u64) -> Result<(), String> {
     let bytes: u64 = stored.values().map(|f| f.size).sum();
     if bytes > max {
         return Err(format!(
-            "the input files staged from storage (namespace files and inputFiles) hold \
+            "the input files staged from storage (namespace files and execution files) hold \
              {bytes} bytes, more than the {max} one task may stage \
              (workflow.storage.max_task_bytes)"
         ));

@@ -120,7 +120,7 @@ use crate::runners::files::{is_namespace_file_uri, NSFILE_SCHEME};
 use crate::runners::render_str;
 use crate::runners::secrets::{render_with_secrets, SecretSource};
 use crate::scripts::{RunnerKind, RunnerSpec};
-use crate::storage::nsfiles::stage::resolve_ns_file;
+use crate::storage::nsfiles::stage::{check_task_bytes, resolve_ns_file};
 use crate::storage::uri::SCHEME_PREFIX;
 use crate::worker::commands::NoObserver;
 
@@ -406,7 +406,9 @@ impl Kestra {
     ///   namespace of the execution's workspace; the latest live revision,
     ///   or the revision a `kestra://` URI names, R1) on ONE connection from
     ///   [`KestraRuntime::pool`], dropped before this returns. Bounded by
-    ///   `max_namespace_files` (count) and `max_task_bytes` (their total).
+    ///   `max_namespace_files` (their count) and, through the script
+    ///   handler's `check_task_bytes`, `max_task_bytes` (the total of EVERY
+    ///   staged file, execution files included; fix round 1, M1).
     ///
     /// [`RenderFiles::lookup`]: crate::runners::RenderFiles::lookup
     pub(crate) async fn bridge(
@@ -472,14 +474,12 @@ impl Kestra {
             );
         }
         drop(conn);
+        // Fix round 1, M1: the script handler's own check over every staged
+        // file, execution files and namespace files alike -- one cap, one
+        // meaning, one implementation.
         if let Some(files) = &self.rt.files {
-            let bytes: u64 = bridge.namespace_files.iter().map(|f| f.size).sum();
-            let max = files.caps.max_task_bytes;
-            if bytes > max {
-                return Ok(Err(format!(
-                    "the namespace files the properties name hold {bytes} bytes, more than the \
-                     {max} one task may stage (workflow.storage.max_task_bytes)"
-                )));
+            if let Err(why) = check_task_bytes(&bridge.stored_inputs, files.caps.max_task_bytes) {
+                return Ok(Err(why));
             }
         }
         let flow = (
@@ -2079,6 +2079,21 @@ mod tests {
         type_id: &str,
         spec: Value,
     ) -> TaskInput {
+        ns_plugin_task_rendering(files, pool, ws, own, own, type_id, spec)
+    }
+
+    /// [`ns_plugin_task`] whose render context says `flow.namespace` is
+    /// `rendered`, while the execution's flow (the file scope's) is `own`
+    /// (fix round 1, M2).
+    fn ns_plugin_task_rendering(
+        files: &Arc<crate::storage::FileStore>,
+        pool: &sqlx::PgPool,
+        ws: uuid::Uuid,
+        own: &str,
+        rendered: &str,
+        type_id: &str,
+        spec: Value,
+    ) -> TaskInput {
         let snapshot = crate::storage::scope::Snapshot::from_parts(
             BTreeMap::from([(upstream("a.ion"), Ok(indexed(&upstream("a.ion"), 7)))]),
             files.clone(),
@@ -2094,7 +2109,10 @@ mod tests {
         }))
         .expect("an object")
         .with_files(snapshot.into_scope());
-        cx.insert("flow", serde_json::json!({"namespace": own, "id": "t10"}));
+        cx.insert(
+            "flow",
+            serde_json::json!({"namespace": rendered, "id": "t10"}),
+        );
         TaskInput {
             workspace_id: ws,
             execution_id: EXEC,
@@ -2459,21 +2477,75 @@ mod tests {
         assert_eq!(out.state, RunState::Success, "{:?}", out.message);
     }
 
+    /// **The running namespace is the execution's flow's** (the file scope's
+    /// `flow_namespace`, Task 4), never the rendered `{{ flow.namespace }}`
+    /// (fix round 1, M2): here the context says `w9b.s2`, the execution's
+    /// flow is `w9b.stage`, and `nsfile:///x.txt` and `nsfile:///own.txt`
+    /// are `w9b.stage`'s. Reading the namespace from the render would stage
+    /// `w9b.s2`'s `x.txt` and miss `own.txt`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_running_namespace_is_the_executions_flow_not_the_rendered_one() {
+        let Some(pool) = ns::pool().await else { return };
+        let files = ns::mem_files(crate::storage::Caps::default());
+        let ws = ns::workspace(&pool).await;
+        ns::setup(&pool, &files, ws).await;
+        let spy = Spy::ok(ok(serde_json::json!({"size": 1})));
+        let t = ns_plugin_task_rendering(
+            &files,
+            &pool,
+            ws,
+            OWN,
+            "w9b.s2",
+            QUERY,
+            query_with(serde_json::json!({
+                "x": "nsfile:///x.txt",
+                "own": "nsfile:///own.txt",
+            })),
+        );
+        let out = with_ns(QUERY, spy.clone(), files.clone(), Some(pool))
+            .run(&t)
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        let cmds = spy.only();
+        let doc = task_json(&cmds);
+        let listed = doc["namespaceFiles"].as_array().expect("a list");
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        for (e, body) in listed.iter().zip(["from-stage", "own"]) {
+            assert_eq!(e["namespace"], OWN, "{e}");
+            let rel = e["staged"].as_str().unwrap();
+            assert_eq!(
+                contents(&files, &cmds.stored_inputs[rel].object_uri).await,
+                body
+            );
+        }
+        assert_eq!(
+            doc["context"]["namespace"], "w9b.s2",
+            "context is the render's"
+        );
+    }
+
     /// **The staged namespace files are bounded by count
-    /// (`max_namespace_files`) and total bytes (`max_task_bytes`)**, each an
-    /// author error naming its cap, before any runner; at the cap each passes.
+    /// (`max_namespace_files`), and every staged file -- execution files
+    /// included (fix round 1, M1) -- by total bytes (`max_task_bytes`)**,
+    /// each an author error naming its cap, before any runner; at the cap
+    /// each passes.
     #[tokio::test(flavor = "multi_thread")]
     async fn namespace_files_are_bounded_by_count_and_bytes() {
         let Some(pool) = ns::pool().await else { return };
         let spec = query_with(serde_json::json!({
+            "e": "{{ outputs.q.a }}",
             "a": "nsfile:///own.txt",
             "b": "nsfile:///x.txt",
         }));
-        // own.txt "own" (3) + x.txt "from-stage" (10) = 13 bytes, 2 files.
+        // The execution file (7) + own.txt "own" (3) + x.txt "from-stage"
+        // (10) = 20 bytes; 2 namespace files. Fix round 1, M1: the byte cap
+        // is the script handler's, over EVERY staged file -- 19 is refused
+        // though the namespace files alone hold 13.
         for (count, bytes, refused) in [
-            (1, 13, Some("workflow.storage.max_namespace_files")),
-            (2, 12, Some("workflow.storage.max_task_bytes")),
-            (2, 13, None),
+            (1, 20, Some("workflow.storage.max_namespace_files")),
+            (2, 19, Some("workflow.storage.max_task_bytes")),
+            (2, 20, None),
         ] {
             let caps = crate::storage::Caps {
                 max_namespace_files: count,

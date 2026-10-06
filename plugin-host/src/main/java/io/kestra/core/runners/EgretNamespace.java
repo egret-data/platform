@@ -41,9 +41,13 @@ import io.kestra.core.storages.NamespaceFile;
  *       says nothing about which revision is latest, or whether the path is still live (R1: a latest
  *       read of a soft-deleted path is not-found), so it is not part of the latest view.</li>
  *   <li>An absent path is a {@link FileNotFoundException} naming it and saying why.</li>
- *   <li>{@code putFile}, {@code delete}, {@code move}, {@code createDirectory} and {@code children}
- *       throw {@link UnsupportedOperationException} with the reason: the pod holds no credential to
- *       egret's store, and egret's catalog holds no plugin that writes a namespace file.</li>
+ *   <li>{@code putFile}, {@code delete}, {@code move} and {@code createDirectory} throw
+ *       {@link UnsupportedOperationException} with the reason: the pod holds no credential to egret's
+ *       store, and egret's catalog holds no plugin that writes a namespace file. {@code children} answers
+ *       over the latest view, as {@code all} does (fix round 1, M4).</li>
+ *   <li>{@link #get} of a path not staged throws {@link FileNotFoundException}, where Kestra's returns a
+ *       revision-1 {@code NamespaceFile} unchecked; the URI of one that is staged is readable through
+ *       {@code storage().getFile} (fix round 1, I1).</li>
  * </ul>
  */
 final class EgretNamespace implements Namespace {
@@ -108,6 +112,15 @@ final class EgretNamespace implements Namespace {
 
     private NamespaceFile file(Staged s) {
         return NamespaceFile.of(namespace, Path.of(key(s.path())), s.revision());
+    }
+
+    /**
+     * The URI Kestra gives this staged revision ({@code NamespaceFile.of(ns, path, revision).uri()}):
+     * what {@link #get} returns and what {@code ShimRunContext.StorageSpec#readableByUri} keys it under
+     * (fix round 1, I1).
+     */
+    static String canonicalUri(Staged s) {
+        return NamespaceFile.of(s.namespace(), Path.of(key(s.path())), s.revision()).uri().toString();
     }
 
     private Path fileOf(Staged s) {
@@ -221,13 +234,34 @@ final class EgretNamespace implements Namespace {
         throw readOnly("cannot move '" + source + "' to '" + target + "' in namespace '" + namespace + "'");
     }
 
-    /** Unsupported: listing a directory would show files egret did not stage. */
+    /**
+     * Fix round 1, M4: over the same latest view as {@link #all()}, as Kestra's
+     * {@code NamespaceFileMetadataStateStore.findChildren} filters: the files whose parent path is
+     * {@code parentPath + "/"} (or, {@code recursive}, starts with it). No directory is staged, so no
+     * directory entry is returned, where Kestra also returns directory rows.
+     */
     @Override
-    public List<NamespaceFileMetadata> children(String parentPath, boolean recursive) {
-        throw new UnsupportedOperationException("cannot list the children of '" + parentPath
-            + "' in namespace '" + namespace + "': a plugin reads only the namespace files named whole in "
-            + "its properties, which egret staged before the task started; nothing is listed on its behalf "
-            + "(W9b spec §10, §15)");
+    public List<NamespaceFileMetadata> children(String parentPath, boolean recursive) throws IOException {
+        String dir = parentPath == null ? "/" : key(parentPath);
+        String prefix = dir.endsWith("/") ? dir : dir + "/";
+        List<NamespaceFileMetadata> out = new ArrayList<>();
+        for (Staged s : latest.values()) {
+            String path = key(s.path());
+            String parent = NamespaceFileMetadata.parentPath(path);
+            if (parent != null && (recursive ? parent.startsWith(prefix) : parent.equals(prefix))) {
+                BasicFileAttributes a = Files.readAttributes(fileOf(s), BasicFileAttributes.class);
+                out.add(NamespaceFileMetadata.builder()
+                    .tenantId(tenantId)
+                    .namespace(namespace)
+                    .path(path)
+                    .revision(s.revision())
+                    .size(s.size())
+                    .created(a.creationTime().toInstant())
+                    .updated(a.lastModifiedTime().toInstant())
+                    .build());
+            }
+        }
+        return out;
     }
 
     private record Attributes(String fileName, long lastModifiedTime, long creationTime, long size)

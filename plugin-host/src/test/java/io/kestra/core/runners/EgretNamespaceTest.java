@@ -128,6 +128,29 @@ class EgretNamespaceTest {
         assertTrue(ns.isDirectoryEmpty("/data"), "nothing listed on the plugin's behalf");
     }
 
+    /** Fix round 1, M4: {@code children} answers over the same latest view as {@code all()}. */
+    @Test
+    void children_answer_over_the_same_staged_set_as_all() throws Exception {
+        var staged = List.of(
+            new EgretNamespace.Staged("nsfile:///q.sql", NS, "/q.sql", 2, Q.length, ".egret/storage/0"),
+            new EgretNamespace.Staged("nsfile:///data/data.csv", NS, "/data/data.csv", 1, DATA.length, ".egret/storage/1"),
+            new EgretNamespace.Staged("nsfile:///data/deep/o.txt", NS, "/data/deep/o.txt", 1, OTHER_BYTES.length,
+                ".egret/storage/2"));
+        var ns = new EgretNamespace(null, NS, wd, staged);
+        assertEquals(List.of("/q.sql"), ns.children("/", false).stream().map(m -> m.getPath()).toList());
+        assertEquals(List.of("/data/data.csv", "/data/deep/o.txt", "/q.sql"),
+            ns.children("/", true).stream().map(m -> m.getPath()).sorted().toList());
+        assertEquals(List.of("/data/data.csv"), ns.children("data", false).stream().map(m -> m.getPath()).toList());
+        assertEquals(List.of("/data/data.csv", "/data/deep/o.txt"),
+            ns.children("/data/", true).stream().map(m -> m.getPath()).sorted().toList());
+        var q = ns.children("/", false).get(0);
+        assertEquals(2, q.getRevision());
+        assertEquals(Q.length, q.getSize());
+        assertEquals(NS, q.getNamespace());
+        // own(): the kestra:// entry is not in the latest view, so neither all() nor children() list it.
+        assertEquals(List.of(), own().children("/data", true));
+    }
+
     // --- writes ------------------------------------------------------------------------------
 
     @Test
@@ -144,8 +167,6 @@ class EgretNamespaceTest {
             var e = assertThrows(UnsupportedOperationException.class, write);
             assertTrue(e.getMessage().contains(EgretNamespace.WHY_READ_ONLY), e.getMessage());
         }
-        var c = assertThrows(UnsupportedOperationException.class, () -> ns.children("/", true));
-        assertTrue(c.getMessage().contains("nothing is listed on its behalf"), c.getMessage());
         assertArrayEquals(Q, assertDoesNotThrowRead(ns), "a refused write changed nothing");
     }
 
@@ -194,6 +215,29 @@ class EgretNamespaceTest {
         // A namespace file that was not staged is not readable by URI either.
         assertThrows(FileNotFoundException.class,
             () -> storage.getFile(URI.create("kestra:///w9b/t10/_files/nope.csv")));
+    }
+
+    /**
+     * Fix round 1, I1: Kestra's own read of a URI value ({@code URIFetcher.fetch}, which {@code Data.from}
+     * and {@code FilesService} use) works against egret's run context, for an {@code nsfile://} value --
+     * {@code storage().getFile(namespace(ns).get(path).uri())} -- and for a {@code kestra://} one.
+     */
+    @Test
+    void kestras_uri_fetcher_reads_a_staged_nsfile_and_a_staged_kestra_uri() throws Exception {
+        var shim = shim();
+        assertArrayEquals(Q, read(io.kestra.core.models.property.URIFetcher.of("nsfile:///q.sql").fetch(shim)));
+        assertArrayEquals(Q, read(io.kestra.core.models.property.URIFetcher.of("nsfile://w9b.t10/q.sql").fetch(shim)));
+        assertArrayEquals(OTHER_BYTES,
+            read(io.kestra.core.models.property.URIFetcher.of("nsfile://other.ns/o.txt").fetch(shim)));
+        assertArrayEquals(DATA, read(io.kestra.core.models.property.URIFetcher.of(DATA_URI).fetch(shim)));
+        // The canonical URI names the staged revision only.
+        assertArrayEquals(Q, read(shim.storage().getFile(URI.create("kestra:///w9b/t10/_files/q.sql.v2"))));
+        assertThrows(FileNotFoundException.class,
+            () -> shim.storage().getFile(URI.create("kestra:///w9b/t10/_files/q.sql")));
+        // A namespace nothing staged: not found, naming the path.
+        var e = assertThrows(FileNotFoundException.class,
+            () -> io.kestra.core.models.property.URIFetcher.of("nsfile:///nope.sql").fetch(shim));
+        assertTrue(e.getMessage().contains("'/nope.sql'"), e.getMessage());
     }
 
     @Test

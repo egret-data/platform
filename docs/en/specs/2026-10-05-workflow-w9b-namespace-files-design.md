@@ -269,6 +269,12 @@ No message names a storage key or another workspace. A `DELETE` of a missing pat
 - **Staging:** egret stages every rendered property value that is a **whole** `nsfile://` or `kestra:///…/_files/…` URI (or that `fileURI` produced), read-checked (§5), at W9a's `.egret/storage/<n>`; `task.json` gains a separate `namespaceFiles` array, one entry per staged file with its URI, namespace, path, revision, size and staged path; W9a's `storage` map (URI → staged path) is unchanged (the controller's ruling, header).
 - `Namespace.getFileContent`, `exists`, `getFileMetadata`, `all`, `findAllFilesMatching`, `get` answer over the staged set of that namespace.
 - `putFile`, `delete`, `move`, `createDirectory` throw `UnsupportedOperationException` with a reason: the pod holds no credential and no catalog plugin uses them (Task 1 checks the catalog). A plugin that computes a namespace path at run does not see it (§15).
+- *(2026-10-06, Task 10 fix round 1.)* What the bridge decided:
+  - **The latest view (R1, strict).** A latest read (`getFileContent(path)`, `exists`, `getFileMetadata`, `get`, `all`, `findAllFilesMatching`, `children`) answers only from `nsfile://` entries, which egret resolved as the latest live revision. A `kestra:///…/_files/…[.vN]` entry names one revision and is readable only by that revision (`getFileContent(path, n)`, or `storage().getFile(uri)`), because it does not say whether the path is still live. No `latest` field is sent.
+  - **Read by URI.** `storage().getFile(uri)` reads a staged namespace file under its literal `kestra://` URI and under its canonical URI (`NamespaceFile.of(ns, path, revision).uri()`), so Kestra's own read of an `nsfile://` value (`URIFetcher.fetch`, `Data.from`: `namespace(ns).get(path).uri()`, then `getFile`) works.
+  - **`children`** answers over the same latest view as `all` (files only; no directory is staged).
+  - **`get(path)` of a path not staged throws `FileNotFoundException`**, where Kestra's `InternalNamespace.get` returns a revision-1 `NamespaceFile` unchecked.
+  - **The caps.** The staged namespace files are counted against `max_namespace_files`; the total bytes of EVERY staged file of the plugin task, execution files and namespace files alike, against `max_task_bytes` — the script handler's own check (`check_task_bytes`, §7), so one cap means one thing for both handlers. Each crossing fails the task naming the cap.
 
 ## 11. Lifecycle and errors
 
@@ -316,6 +322,7 @@ The KV store (W9c); running `WorkingDirectory` itself (and so its `namespaceFile
 - `WorkingDirectory`'s `namespaceFiles` is validated at publish and kept, but not run, because egret does not run `WorkingDirectory`; running it is a later package (§7).
 - `ifExists` does not protect a namespace file from an `inputFiles` entry of the same name, as in Kestra (§7).
 - A plugin reads only namespace files named by a whole property value; one that computes a namespace path at run, or writes a namespace file, fails with a reason (§10).
+- *(2026-10-06, Task 10 fix round 1.)* In the plugin bridge, a latest read of a namespace file named only by a `kestra:///…/_files/…` URI (e.g. a `fileURI` value) is not-found: that URI names one revision, readable by that revision or by URI, and says nothing about whether it is the latest live one (R1, strict). In Kestra the same read returns the latest revision. `get(path)` of a path not staged throws, where Kestra returns revision 1 unchecked. A plugin task's `max_task_bytes` counts its staged execution files as well as its namespace files, as a script task's does (§10).
 - A missing object behind a metadata row is an error, where Kestra serves an older revision (§4.5).
 - `read` of a binary file is an error, where Kestra returns bytes (§6).
 - `UploadFiles.files` globs the execution's files, not a working directory (§8.1).

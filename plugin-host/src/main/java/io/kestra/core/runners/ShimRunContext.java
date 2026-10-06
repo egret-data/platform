@@ -89,8 +89,16 @@ public class ShimRunContext extends DefaultRunContext {
 
         /**
          * What {@link EgretStorage} reads by URI: W9a's {@code storage} map, plus every staged namespace
-         * file named by a {@code kestra:///…/_files/…} URI ({@code fileURI}'s), under that URI -- so a
-         * plugin's {@code storage().getFile(uri)} reads it, as {@code CopyIn}'s {@code from} does.
+         * file, under
+         * <ul>
+         *   <li>its literal URI when that is a {@code kestra:///…/_files/…} one ({@code fileURI}'s) -- so a
+         *       plugin's {@code storage().getFile(uri)} reads it, as {@code CopyIn}'s {@code from} does;</li>
+         *   <li>(fix round 1, I1) its CANONICAL URI, {@code NamespaceFile.of(ns, path, revision).uri()},
+         *       for every entry, {@code nsfile://} ones included: Kestra's own read of an {@code nsfile://}
+         *       value ({@code URIFetcher.fetch}, {@code Data.from}) is
+         *       {@code storage().getFile(namespace(ns).get(path).uri())}, and {@link EgretNamespace#get}
+         *       answers that URI. It names exactly the staged revision, so R1 still holds.</li>
+         * </ul>
          * {@code task.json}'s {@code storage} map itself is unchanged (the controller's ruling).
          */
         Map<String, String> readableByUri() {
@@ -99,6 +107,7 @@ public class ShimRunContext extends DefaultRunContext {
                 if (s.uri().startsWith(EgretStorage.SCHEME + "://")) {
                     all.putIfAbsent(s.uri(), s.staged());
                 }
+                all.putIfAbsent(EgretNamespace.canonicalUri(s), s.staged());
             }
             return all;
         }

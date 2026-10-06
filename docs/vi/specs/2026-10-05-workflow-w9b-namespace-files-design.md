@@ -271,6 +271,12 @@ Không thông báo nào nêu key storage hay workspace khác. `DELETE` một pat
 - **Staging:** egret stage mọi giá trị thuộc tính đã render là **nguyên một** URI `nsfile://` hay `kestra:///…/_files/…` (hoặc do `fileURI` tạo ra), được kiểm quyền đọc (§5), tại `.egret/storage/<n>` của W9a; `task.json` có thêm một mảng `namespaceFiles` riêng, mỗi entry một file đã stage với URI, namespace, path, revision, size và path đã stage; map `storage` của W9a (URI → path đã stage) không đổi (phán quyết của controller, header).
 - `Namespace.getFileContent`, `exists`, `getFileMetadata`, `all`, `findAllFilesMatching`, `get` trả lời trên tập đã stage của namespace đó.
 - `putFile`, `delete`, `move`, `createDirectory` ném `UnsupportedOperationException` kèm lý do: pod không giữ credential và không plugin nào trong catalog dùng chúng (Task 1 kiểm catalog). Plugin tính path namespace lúc chạy sẽ không thấy nó (§15).
+- *(2026-10-06, Task 10 fix round 1.)* Những gì cầu plugin đã quyết:
+  - **Góc nhìn latest (R1, nghiêm).** Một lần đọc latest (`getFileContent(path)`, `exists`, `getFileMetadata`, `get`, `all`, `findAllFilesMatching`, `children`) chỉ trả lời từ các entry `nsfile://`, mà egret đã resolve là revision live mới nhất. Một entry `kestra:///…/_files/…[.vN]` nêu một revision và chỉ đọc được theo revision đó (`getFileContent(path, n)`, hoặc `storage().getFile(uri)`), vì nó không cho biết path còn live hay không. Không gửi trường `latest` nào.
+  - **Đọc theo URI.** `storage().getFile(uri)` đọc một namespace file đã stage theo URI `kestra://` nguyên văn của nó và theo URI chuẩn (`NamespaceFile.of(ns, path, revision).uri()`), nên đường đọc giá trị `nsfile://` của chính Kestra (`URIFetcher.fetch`, `Data.from`: `namespace(ns).get(path).uri()`, rồi `getFile`) chạy được.
+  - **`children`** trả lời trên cùng góc nhìn latest như `all` (chỉ file; không thư mục nào được stage).
+  - **`get(path)` của một path không được stage ném `FileNotFoundException`**, trong khi `InternalNamespace.get` của Kestra trả một `NamespaceFile` revision 1 mà không kiểm.
+  - **Các trần.** Số namespace file đã stage tính vào `max_namespace_files`; tổng byte của MỌI file đã stage của plugin task, cả file execution lẫn namespace file, tính vào `max_task_bytes` — chính phép kiểm của script handler (`check_task_bytes`, §7), nên một trần mang một nghĩa cho cả hai handler. Mỗi lần vượt làm task fail, nêu tên trần.
 
 ## 11. Vòng đời và lỗi
 
@@ -318,6 +324,7 @@ KV store (W9c); chạy chính `WorkingDirectory` (và vì thế `namespaceFiles`
 - `namespaceFiles` của `WorkingDirectory` được kiểm tra lúc publish và giữ lại, nhưng không chạy, vì egret không chạy `WorkingDirectory`; chạy nó là một gói sau (§7).
 - `ifExists` không bảo vệ namespace file khỏi một entry `inputFiles` cùng tên, như Kestra (§7).
 - Plugin chỉ đọc được namespace file được nêu bằng nguyên một giá trị thuộc tính; plugin tính path namespace lúc chạy, hoặc ghi namespace file, sẽ fail kèm lý do (§10).
+- *(2026-10-06, Task 10 fix round 1.)* Trong cầu plugin, một lần đọc latest của namespace file chỉ được nêu bằng URI `kestra:///…/_files/…` (vd. một giá trị `fileURI`) là không tìm thấy: URI đó nêu một revision, đọc được theo revision đó hoặc theo URI, và không cho biết nó có phải revision live mới nhất (R1, nghiêm). Ở Kestra cùng lần đọc đó trả revision mới nhất. `get(path)` của path không được stage thì ném lỗi, trong khi Kestra trả revision 1 mà không kiểm. `max_task_bytes` của plugin task tính cả các file execution đã stage lẫn namespace file, như của script task (§10).
 - Object thiếu sau một dòng metadata là lỗi, trong khi Kestra phục vụ revision cũ hơn (§4.5).
 - `read` một file nhị phân là lỗi, trong khi Kestra trả byte (§6).
 - `UploadFiles.files` glob trên file của execution, không trên working directory (§8.1).
