@@ -2167,6 +2167,9 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
     want.extend([
         egret_workflow::worker::handlers::storage::DELETE.to_string(),
         egret_workflow::worker::handlers::storage::PURGE_CURRENT_EXECUTION_FILES.to_string(),
+        // W9b Task 6: the namespace tasks, registered beside them.
+        egret_workflow::worker::handlers::namespace::UPLOAD_FILES.to_string(),
+        egret_workflow::worker::handlers::namespace::DOWNLOAD_FILES.to_string(),
     ]);
     want.sort_unstable();
     assert_eq!(reg.type_ids(), want);
@@ -2219,6 +2222,8 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         vec![
             "egret.container",
             "egret.script.python",
+            "io.kestra.plugin.core.namespace.DownloadFiles",
+            "io.kestra.plugin.core.namespace.UploadFiles",
             "io.kestra.plugin.core.storage.Delete",
             "io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles",
             "io.kestra.plugin.scripts.python.Commands",
@@ -2227,7 +2232,7 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
             "io.kestra.plugin.scripts.shell.Script",
         ]
     );
-    assert_eq!(reg.type_ids().len(), core + 2 + 6 + 9);
+    assert_eq!(reg.type_ids().len(), core + 2 + 2 + 6 + 9);
     assert_eq!(default_runner, Some(RunnerKind::Docker));
     assert!(
         reg.orphan_sweep().is_some(),
