@@ -31,7 +31,9 @@ pub struct AppRow {
     pub bookmarked: bool,
 }
 
-#[derive(Debug, Clone, FromRow)]
+/// Assembled from the `app_drafts` row (`revision`, `updated_at`) and the object
+/// store (`source`, `layout_json`) -- not a row type: Postgres holds no content.
+#[derive(Debug, Clone)]
 pub struct Draft {
     pub source: String,
     /// marimo's grid-layout companion file (`layouts/<app>.<type>.json`), verbatim.
@@ -233,9 +235,7 @@ impl AppStore {
         // The object store is the only home of draft content. A new draft row
         // takes `revision`'s schema default of 1, so its content goes to
         // revision 1's key. Written before the tx commits, same fail-fast
-        // ordering as `save_draft` (nothing durable if the PUT fails). `source`
-        // is left NULL: a non-NULL column means "pre-Task-10 content to
-        // migrate" to `backfill_draft_locked` (migration 0172).
+        // ordering as `save_draft` (nothing durable if the PUT fails).
         self.store
             .put(&self.draft_key(ws, id, 1), source.as_bytes().to_vec())
             .await
@@ -376,9 +376,8 @@ impl AppStore {
     /// Called only after the handler resolved the app in the workspace. Reads the
     /// row's current `revision`, then that revision's objects -- object store
     /// only: every draft revision has a source object (written by
-    /// `create`/`save_draft` before their commit, or by `egret
-    /// backfill-apps-storage` for a draft last written before revision-keyed
-    /// content), so a source `NotFound` is a real error. A missing layout object
+    /// `create`/`save_draft` before their commit), so a source `NotFound` is a
+    /// real error. A missing layout object
     /// just means that revision has no layout.
     ///
     /// The row read takes no lock, so a `save_draft` can commit revision N+1 and
@@ -465,9 +464,7 @@ impl AppStore {
     /// The content goes to the NEXT revision's keys (finding I3): if this
     /// transaction never commits (commit error, or the handler future dropped
     /// between the PUT and the commit), the row still points at `expected`, so
-    /// the uncommitted object is never read. The row's `source`/`layout_json`
-    /// columns are set to NULL (migration 0172: non-NULL means "pre-Task-10
-    /// content still to migrate"). Only after the commit are `expected`'s
+    /// the uncommitted object is never read. Only after the commit are `expected`'s
     /// objects deleted -- best-effort cleanup, never failing a committed save.
     pub async fn save_draft(
         &self,
@@ -520,7 +517,7 @@ impl AppStore {
                 .map_err(store_err)?,
         }
         let new_revision: i64 = sqlx::query_scalar(
-            "UPDATE analytics.app_drafts SET source = NULL, layout_json = NULL, revision = revision + 1, updated_by = $2, updated_at = now() \
+            "UPDATE analytics.app_drafts SET revision = revision + 1, updated_by = $2, updated_at = now() \
               WHERE app_id = $1 AND revision = $3 RETURNING revision",
         )
         .bind(id)
@@ -619,8 +616,8 @@ impl AppStore {
 
     /// Scoped to the app by the query itself (`app_id = $1 AND id = $2`), so it is
     /// safe even with an unresolved version id. Reads `source`/`layout_json` from
-    /// the object store only -- Part S2's backfill guarantees every version has a
-    /// source object, so a `StorageError::NotFound` there is a real error, not a
+    /// the object store only -- every version has a source object (written by
+    /// `insert_version` before its row is inserted), so a `StorageError::NotFound` there is a real error, not a
     /// fallback case. A missing layout object is unambiguous (a version simply has
     /// no layout) and reads back as `None`.
     pub async fn version(
@@ -688,11 +685,10 @@ impl AppStore {
     /// "restoring" is a pure server-side [`ObjectStore::copy`] of the old
     /// version's objects into the new version's keys -- no bytes pass through
     /// this process. Every version is guaranteed a source object-store key
-    /// (Part S2's backfill), so the source `copy()`'s result is trusted
+    /// (written by `insert_version`), so the source `copy()`'s result is trusted
     /// directly: any error, including `NotFound`, propagates. Whether the old
     /// version has a layout is determined by attempting the layout `copy()`
-    /// itself, never by a Postgres column (which is `NULL` for every version
-    /// published since source/layout stopped being written there): a
+    /// itself (Postgres holds no content at all): a
     /// `StorageError::NotFound` from that copy means the old version genuinely
     /// has no layout, while any other error still propagates.
     pub async fn restore_version(
@@ -822,7 +818,7 @@ impl AppStore {
             // attempt wrote this same key (e.g. the handler future was dropped
             // after this PUT but before the transaction committed) and this
             // publish has no layout, an orphaned layout object would otherwise
-            // survive and be served ahead of the genuinely NULL Postgres column.
+            // survive and be served as this version's (absent) layout.
             self.store
                 .delete(&self.version_layout_key(ws, app, version_no))
                 .await
@@ -842,123 +838,5 @@ impl AppStore {
         .fetch_one(tx)
         .await
         .map_err(db_err)
-    }
-
-    /// Backfill only: write a draft's known-good Postgres content to revision
-    /// `revision`'s object-store key(s). Pure S3 writes -- no Postgres
-    /// statement, no transaction/lock -- so the caller must hold the row lock
-    /// and have read `revision` and the content under it (see
-    /// [`Self::backfill_draft_locked`]). Mirrors [`Self::save_draft`]'s S3-write
-    /// shape (`Some` layout => put, `None` => delete, so a rerun never leaves a
-    /// stale layout object behind).
-    pub async fn backfill_draft(
-        &self,
-        ws: WorkspaceId,
-        app: Uuid,
-        revision: i64,
-        source: &str,
-        layout: Option<&str>,
-    ) -> Result<()> {
-        self.store
-            .put(
-                &self.draft_key(ws, app, revision),
-                source.as_bytes().to_vec(),
-            )
-            .await
-            .map_err(store_err)?;
-        match layout {
-            Some(l) => self
-                .store
-                .put(
-                    &self.draft_layout_key(ws, app, revision),
-                    l.as_bytes().to_vec(),
-                )
-                .await
-                .map_err(store_err)?,
-            None => self
-                .store
-                .delete(&self.draft_layout_key(ws, app, revision))
-                .await
-                .map_err(store_err)?,
-        }
-        Ok(())
-    }
-
-    /// Moves one draft written before revision-keyed content (Parts S1/S2's
-    /// fixed `draft.py` key, or pre-S1 Postgres-only) to its CURRENT revision's
-    /// object-store key. Returns whether it wrote anything.
-    ///
-    /// The source of truth is the row's own `source`/`layout_json` columns, not
-    /// the old fixed-key object: every pre-Task-10 write committed those columns
-    /// in the same `UPDATE` that bumped `revision`, so they are exactly the
-    /// current revision's committed content -- whereas the fixed key may hold a
-    /// write whose transaction never committed (finding I3 itself). Code from
-    /// Task 10 on sets those columns to NULL (migration 0172), so a NULL
-    /// `source` means the current revision's object was written by
-    /// revision-keyed code and there is nothing to migrate; a rerun, or a run
-    /// after saves by the new code, never overwrites newer content with the
-    /// stale column.
-    ///
-    /// Takes the same `FOR UPDATE` row lock `save_draft`/`publish` do and reads
-    /// the row under it, so a concurrent `save_draft` either commits first (and
-    /// this sees its NULL columns) or waits for this to finish. (Versions don't
-    /// need this: `app_versions` rows are append-only and immutable.)
-    pub async fn backfill_draft_locked(&self, ws: WorkspaceId, app: Uuid) -> Result<bool> {
-        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
-        let (revision, source, layout_json): (i64, Option<String>, Option<String>) =
-            sqlx::query_as(
-                "SELECT revision, source, layout_json FROM analytics.app_drafts \
-                  WHERE app_id = $1 FOR UPDATE",
-            )
-            .bind(app)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(db_err)?;
-        let Some(source) = source else {
-            return Ok(false);
-        };
-        self.backfill_draft(ws, app, revision, &source, layout_json.as_deref())
-            .await?;
-        tx.commit().await.map_err(db_err)?;
-        Ok(true)
-    }
-
-    /// S2-1 backfill only: write a pre-S1 published version's known-good
-    /// Postgres content to its object-store key(s). Pure S3 writes -- no
-    /// Postgres statement, no transaction/lock -- because the row's Postgres
-    /// state is already correct and this is only catching the object store up.
-    /// Mirrors [`Self::insert_version`]'s S3-write shape (`Some` layout => put,
-    /// `None` => delete, so a rerun never leaves a stale layout object behind).
-    pub async fn backfill_version(
-        &self,
-        ws: WorkspaceId,
-        app: Uuid,
-        version_no: i32,
-        source: &str,
-        layout: Option<&str>,
-    ) -> Result<()> {
-        self.store
-            .put(
-                &self.version_key(ws, app, version_no),
-                source.as_bytes().to_vec(),
-            )
-            .await
-            .map_err(store_err)?;
-        match layout {
-            Some(l) => self
-                .store
-                .put(
-                    &self.version_layout_key(ws, app, version_no),
-                    l.as_bytes().to_vec(),
-                )
-                .await
-                .map_err(store_err)?,
-            None => self
-                .store
-                .delete(&self.version_layout_key(ws, app, version_no))
-                .await
-                .map_err(store_err)?,
-        }
-        Ok(())
     }
 }

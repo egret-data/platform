@@ -68,8 +68,8 @@ impl Fixture {
     /// A new published version of this fixture's one app.
     async fn version(&self) -> Uuid {
         sqlx::query_scalar(
-            "INSERT INTO analytics.app_versions (app_id, version_no, source) \
-             VALUES ($1, (SELECT coalesce(max(version_no),0)+1 FROM analytics.app_versions WHERE app_id = $1), 'import marimo') \
+            "INSERT INTO analytics.app_versions (app_id, version_no) \
+             VALUES ($1, (SELECT coalesce(max(version_no),0)+1 FROM analytics.app_versions WHERE app_id = $1)) \
              RETURNING id",
         )
         .bind(self.app)

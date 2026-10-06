@@ -18,9 +18,6 @@ pub enum Command {
     Openapi,
     /// Apply database migrations and exit.
     Migrate,
-    /// One-off backfill: copy every existing draft's and version's Postgres
-    /// content into the object store. Idempotent -- safe to run more than once.
-    BackfillAppsStorage,
     /// Bootstrap the initial admin user and default workspace.
     Init {
         /// Create an additional platform_admin even if one already exists.

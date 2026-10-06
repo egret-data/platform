@@ -137,15 +137,17 @@ impl Fixture {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-        sqlx::query("INSERT INTO analytics.app_drafts (app_id, source, revision, updated_by) VALUES ($1, 'draft v1', 1, $2)")
-            .bind(app)
-            .bind(editor)
-            .execute(&db.pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO analytics.app_drafts (app_id, revision, updated_by) VALUES ($1, 1, $2)",
+        )
+        .bind(app)
+        .bind(editor)
+        .execute(&db.pool)
+        .await
+        .unwrap();
         let version: Uuid = sqlx::query_scalar(
-            "INSERT INTO analytics.app_versions (app_id, version_no, source) \
-             VALUES ($1, 1, 'published v1') RETURNING id",
+            "INSERT INTO analytics.app_versions (app_id, version_no) \
+             VALUES ($1, 1) RETURNING id",
         )
         .bind(app)
         .fetch_one(&db.pool)
@@ -326,8 +328,8 @@ async fn a_token_of_the_wrong_kind_is_forbidden_on_the_other_route() {
 async fn a_run_token_reads_only_its_own_version() {
     let fx = Fixture::new().await;
     let second: Uuid = sqlx::query_scalar(
-        "INSERT INTO analytics.app_versions (app_id, version_no, source) \
-         VALUES ($1, 2, 'published v2') RETURNING id",
+        "INSERT INTO analytics.app_versions (app_id, version_no) \
+         VALUES ($1, 2) RETURNING id",
     )
     .bind(fx.app)
     .fetch_one(&fx.db.pool)

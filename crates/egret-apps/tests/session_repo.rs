@@ -60,8 +60,8 @@ impl Fixture {
         .await
         .expect("insert app");
         let version: Uuid = sqlx::query_scalar(
-            "INSERT INTO analytics.app_versions (app_id, version_no, source) \
-             VALUES ($1, 1, 'import marimo') RETURNING id",
+            "INSERT INTO analytics.app_versions (app_id, version_no) \
+             VALUES ($1, 1) RETURNING id",
         )
         .bind(app)
         .fetch_one(&db.pool)

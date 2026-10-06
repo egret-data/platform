@@ -85,8 +85,8 @@ impl Fixture {
 
     async fn try_version(&self, app: Uuid, no: i32) -> Result<Uuid, sqlx::Error> {
         sqlx::query_scalar(
-            "INSERT INTO analytics.app_versions (app_id, version_no, source, from_revision, published_by) \
-             VALUES ($1, $2, 'import marimo', 1, $3) RETURNING id",
+            "INSERT INTO analytics.app_versions (app_id, version_no, from_revision, published_by) \
+             VALUES ($1, $2, 1, $3) RETURNING id",
         )
         .bind(app)
         .bind(no)
@@ -147,18 +147,18 @@ fn constraint<T: std::fmt::Debug>(r: Result<T, sqlx::Error>) -> String {
 async fn versions_cannot_be_updated() {
     let fx = Fixture::new().await;
     let v = fx.version(fx.app, 1).await;
-    let r = sqlx::query("UPDATE analytics.app_versions SET source = 'x' WHERE id = $1")
+    let r = sqlx::query("UPDATE analytics.app_versions SET from_revision = 99 WHERE id = $1")
         .bind(v)
         .execute(&fx.db.pool)
         .await;
     assert_eq!(code(r), "23001");
-    let source: String =
-        sqlx::query_scalar("SELECT source FROM analytics.app_versions WHERE id = $1")
+    let from_revision: Option<i64> =
+        sqlx::query_scalar("SELECT from_revision FROM analytics.app_versions WHERE id = $1")
             .bind(v)
             .fetch_one(&fx.db.pool)
             .await
             .unwrap();
-    assert_eq!(source, "import marimo");
+    assert_eq!(from_revision, Some(1));
 }
 
 #[tokio::test]
@@ -189,21 +189,19 @@ async fn deleting_the_workspace_cascades_through_versions() {
     let fx = Fixture::new().await;
     let v1 = fx.version(fx.app, 1).await;
     let v2: Uuid = sqlx::query_scalar(
-        "INSERT INTO analytics.app_versions (app_id, version_no, source, restored_from) \
-         SELECT app_id, 2, source, id FROM analytics.app_versions WHERE id = $1 RETURNING id",
+        "INSERT INTO analytics.app_versions (app_id, version_no, restored_from) \
+         SELECT app_id, 2, id FROM analytics.app_versions WHERE id = $1 RETURNING id",
     )
     .bind(v1)
     .fetch_one(&fx.db.pool)
     .await
     .expect("insert restore");
-    sqlx::query(
-        "INSERT INTO analytics.app_drafts (app_id, source, updated_by) VALUES ($1, 'draft', $2)",
-    )
-    .bind(fx.app)
-    .bind(fx.user)
-    .execute(&fx.db.pool)
-    .await
-    .expect("insert draft");
+    sqlx::query("INSERT INTO analytics.app_drafts (app_id, updated_by) VALUES ($1, $2)")
+        .bind(fx.app)
+        .bind(fx.user)
+        .execute(&fx.db.pool)
+        .await
+        .expect("insert draft");
     fx.try_run_session(fx.app, v1)
         .await
         .expect("run session on v1");
@@ -239,22 +237,6 @@ async fn version_numbers_are_unique_per_app() {
     // The same number on a DIFFERENT app is fine.
     let other = fx.new_app().await;
     fx.version(other, 1).await;
-}
-
-#[tokio::test]
-async fn draft_source_over_one_mib_is_rejected_by_the_schema() {
-    let fx = Fixture::new().await;
-    let insert = |source: String| {
-        sqlx::query("INSERT INTO analytics.app_drafts (app_id, source) VALUES ($1, $2)")
-            .bind(fx.app)
-            .bind(source)
-            .execute(&fx.db.pool)
-    };
-    assert_eq!(code(insert("a".repeat(1_048_577)).await), "23514");
-    // Exactly 1 MiB is the limit, not past it.
-    insert("a".repeat(1_048_576))
-        .await
-        .expect("a 1 MiB draft is accepted");
 }
 
 #[tokio::test]
@@ -374,24 +356,6 @@ impl Fixture {
             app.hyphenated()
         )
     }
-    /// A draft row exactly as pre-Task-10 code left it: content in the
-    /// `source`/`layout_json` columns at `revision`, inserted raw (bypassing
-    /// `AppStore`, so no revision-keyed object exists).
-    async fn legacy_draft(&self, source: &str, layout: Option<&str>, revision: i64) -> Uuid {
-        let app = self.new_app().await;
-        sqlx::query(
-            "INSERT INTO analytics.app_drafts (app_id, source, layout_json, revision) \
-             VALUES ($1, $2, $3, $4)",
-        )
-        .bind(app)
-        .bind(source)
-        .bind(layout)
-        .bind(revision)
-        .execute(&self.db.pool)
-        .await
-        .expect("insert legacy draft");
-        app
-    }
     /// An app made through the store (so it has a rev-1 draft).
     async fn store_app(&self, source: &str) -> Uuid {
         self.store()
@@ -462,28 +426,36 @@ async fn draft_content_round_trips_through_the_object_store_not_postgres() {
     // The content is at the saved revision's own key...
     let bytes = fx.mem_store().get(&fx.draft_key(app, 2)).await.unwrap();
     assert_eq!(String::from_utf8(bytes).unwrap(), "x = 2");
-    // ...and nowhere in Postgres: both `create` and `save_draft` leave the
-    // columns NULL (migration 0172).
-    let (source, layout): (Option<String>, Option<String>) =
-        sqlx::query_as("SELECT source, layout_json FROM analytics.app_drafts WHERE app_id = $1")
-            .bind(app)
-            .fetch_one(&fx.db.pool)
-            .await
-            .unwrap();
-    assert_eq!((source, layout), (None, None));
+    // ...and nowhere in Postgres: neither content table has a column that
+    // could hold it (migration 0173 dropped them).
+    let content_columns: Vec<String> = sqlx::query_scalar(
+        "SELECT table_name || '.' || column_name FROM information_schema.columns \
+          WHERE table_schema = 'analytics' \
+            AND table_name IN ('app_drafts', 'app_versions') \
+            AND column_name IN ('source', 'layout_json')",
+    )
+    .fetch_all(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(content_columns, Vec::<String>::new());
 
     let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
     assert_eq!(d.source, "x = 2");
 }
 
 /// Task 10 (S3-2) removed `draft()`'s Postgres fallback: a draft row whose
-/// current revision has no source object is a real error, even when its
-/// legacy `source` column holds content (that content is
-/// `egret backfill-apps-storage`'s to move, not the reader's to serve).
+/// current revision has no source object is a real error. Inserted raw
+/// (bypassing `AppStore`), so no object was ever written for it.
 #[tokio::test]
 async fn a_draft_with_no_object_at_its_current_revision_now_surfaces_as_an_error() {
     let fx = Fixture::new().await;
-    let app = fx.legacy_draft("legacy", None, 1).await;
+    let app = fx.app;
+    sqlx::query("INSERT INTO analytics.app_drafts (app_id, revision) VALUES ($1, $2)")
+        .bind(app)
+        .bind(1_i64)
+        .execute(&fx.db.pool)
+        .await
+        .expect("insert draft row");
 
     let err = fx
         .store()
@@ -964,8 +936,8 @@ async fn a_version_with_no_object_store_content_now_surfaces_as_an_error() {
     let fx = Fixture::new().await;
     let app = fx.store_app("v1").await;
     let (version_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO analytics.app_versions (app_id, version_no, source) \
-         VALUES ($1, 1, 'legacy v1') RETURNING id",
+        "INSERT INTO analytics.app_versions (app_id, version_no) \
+         VALUES ($1, 1) RETURNING id",
     )
     .bind(app)
     .fetch_one(&fx.db.pool)
@@ -1093,24 +1065,20 @@ async fn deleting_a_publisher_keeps_their_versions_with_publisher_null() {
         .expect("a publisher can be deleted");
     assert!(deleted.is_some(), "the user row was deleted");
 
-    // Task 9 (S3-1): `publish()` no longer writes the `source` column, so it
-    // reads back NULL here -- the content lives only in the object store now.
-    let (by, source, no): (Option<Uuid>, Option<String>, i32) = sqlx::query_as(
-        "SELECT published_by, source, version_no FROM analytics.app_versions WHERE id = $1",
-    )
-    .bind(v.id)
-    .fetch_one(&fx.db.pool)
-    .await
-    .expect("the version row survives");
+    let (by, no): (Option<Uuid>, i32) =
+        sqlx::query_as("SELECT published_by, version_no FROM analytics.app_versions WHERE id = $1")
+            .bind(v.id)
+            .fetch_one(&fx.db.pool)
+            .await
+            .expect("the version row survives");
     assert_eq!(by, None);
-    assert_eq!(source, None);
     assert_eq!(no, v.version_no);
 
     // The allowance is exact: nulling `published_by` while changing anything else
     // is still an UPDATE of a published version.
     let v2 = published(st.publish(fx.ws(), app, fx.uid(), None).await.unwrap());
     let r = sqlx::query(
-        "UPDATE analytics.app_versions SET published_by = NULL, source = 'tampered' WHERE id = $1",
+        "UPDATE analytics.app_versions SET published_by = NULL, from_revision = 99 WHERE id = $1",
     )
     .bind(v2.id)
     .execute(&fx.db.pool)
@@ -1128,7 +1096,7 @@ async fn deleting_a_publisher_keeps_their_versions_with_publisher_null() {
 /// (e.g. the handler future dropped after `insert_version`'s layout PUT but
 /// before the transaction committed). Pre-seed exactly such an orphan at the
 /// key version 1 will use, then publish a draft with NO layout -- `version()`
-/// must report `None` (Postgres's genuinely NULL column), not the stale object.
+/// must report `None` (the draft genuinely has no layout), not the stale object.
 #[tokio::test]
 async fn publishing_with_no_layout_clears_any_stale_layout_object() {
     let fx = Fixture::new().await;
@@ -1171,8 +1139,8 @@ async fn restoring_a_version_with_no_object_store_content_now_surfaces_as_an_err
     let app = fx.store_app("v1").await;
     let st = fx.store();
     let (version_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO analytics.app_versions (app_id, version_no, source, layout_json) \
-         VALUES ($1, 1, 'legacy source', 'legacy layout') RETURNING id",
+        "INSERT INTO analytics.app_versions (app_id, version_no) \
+         VALUES ($1, 1) RETURNING id",
     )
     .bind(app)
     .fetch_one(&fx.db.pool)
@@ -1188,11 +1156,11 @@ async fn restoring_a_version_with_no_object_store_content_now_surfaces_as_an_err
 
 /// The bug this test guards against: `restore_version` used to decide whether
 /// to copy the old version's layout by checking the Postgres `layout_json`
-/// column's `is_some()`. Since Task 9 (S3-1) that column is permanently NULL
-/// for every version published after the cutover, regardless of whether a real
-/// layout object sits in the object store -- so the old check always took the
-/// "no layout" branch and DELETED the new version's layout key, silently
-/// wiping a real layout on every restore. The fix attempts the layout `copy()`
+/// column's `is_some()`. Since Task 9 (S3-1) that column was permanently NULL
+/// for every version published after the cutover (and migration 0173 dropped
+/// it), regardless of whether a real layout object sits in the object store --
+/// so the old check always took the "no layout" branch and DELETED the new
+/// version's layout key, silently wiping a real layout on every restore. The fix attempts the layout `copy()`
 /// unconditionally and only treats `StorageError::NotFound` as "no layout".
 #[tokio::test]
 async fn restoring_a_version_with_a_real_layout_preserves_it_not_wipes_it() {
@@ -1204,16 +1172,6 @@ async fn restoring_a_version_with_a_real_layout_preserves_it_not_wipes_it() {
         .await
         .unwrap();
     let v1 = published(st.publish(fx.ws(), app, fx.uid(), None).await.unwrap());
-
-    // Confirm the premise: Task 9 means this version's Postgres column is NULL
-    // even though it has a real layout object in the store.
-    let layout_col: Option<String> =
-        sqlx::query_scalar("SELECT layout_json FROM analytics.app_versions WHERE id = $1")
-            .bind(v1.id)
-            .fetch_one(&fx.db.pool)
-            .await
-            .unwrap();
-    assert_eq!(layout_col, None, "premise: the column is NULL post-cutover");
 
     let v2 = st
         .restore_version(fx.ws(), app, v1.id, fx.uid())
@@ -1314,236 +1272,4 @@ async fn saving_with_no_layout_clears_a_previously_saved_one() {
             Err(StorageError::NotFound(_))
         ));
     }
-}
-
-// ---------------------------------------------------------------------------
-// Task 8 (S2-1): the one-off backfill of pre-S1 rows into the object store.
-// ---------------------------------------------------------------------------
-
-/// Simulates data from before Part S1 shipped: a draft row and a published
-/// version row inserted directly via SQL (bypassing `AppStore` entirely, so
-/// nothing has ever touched the object store for this app), each with real
-/// `source`/`layout_json` content. `backfill_draft`/`backfill_version` are
-/// pure S3 writes driven by values already read from Postgres -- exactly the
-/// shape `backfill_apps_storage` (the CLI command) uses, minus its own SELECT.
-#[tokio::test]
-async fn backfill_writes_pre_s2_rows_content_to_the_object_store() {
-    let fx = Fixture::new().await;
-    // `fx.app` was inserted raw by the fixture and has no draft/version/object
-    // store content of any kind yet.
-    sqlx::query(
-        "INSERT INTO analytics.app_drafts (app_id, source, layout_json) \
-         VALUES ($1, 'pre-s2 draft source', 'pre-s2 draft layout')",
-    )
-    .bind(fx.app)
-    .execute(&fx.db.pool)
-    .await
-    .expect("insert pre-S2 draft");
-    sqlx::query(
-        "INSERT INTO analytics.app_versions (app_id, version_no, source, layout_json) \
-         VALUES ($1, 1, 'pre-s2 version source', 'pre-s2 version layout')",
-    )
-    .bind(fx.app)
-    .execute(&fx.db.pool)
-    .await
-    .expect("insert pre-S2 version");
-
-    let st = fx.store();
-    st.backfill_draft(
-        fx.ws(),
-        fx.app,
-        1,
-        "pre-s2 draft source",
-        Some("pre-s2 draft layout"),
-    )
-    .await
-    .expect("backfill_draft");
-    st.backfill_version(
-        fx.ws(),
-        fx.app,
-        1,
-        "pre-s2 version source",
-        Some("pre-s2 version layout"),
-    )
-    .await
-    .expect("backfill_version");
-
-    let draft_source_key = fx.draft_key(fx.app, 1);
-    let draft_layout_key = fx.draft_layout_key(fx.app, 1);
-    let version_source_key = format!(
-        "s3://{}/apps/{}/{}/versions/1/source.py",
-        fx.bucket(),
-        fx.ws().0.hyphenated(),
-        fx.app.hyphenated()
-    );
-    let version_layout_key = format!(
-        "s3://{}/apps/{}/{}/versions/1/layout.json",
-        fx.bucket(),
-        fx.ws().0.hyphenated(),
-        fx.app.hyphenated()
-    );
-
-    assert_eq!(
-        fx.mem_store().get(&draft_source_key).await.unwrap(),
-        b"pre-s2 draft source"
-    );
-    assert_eq!(
-        fx.mem_store().get(&draft_layout_key).await.unwrap(),
-        b"pre-s2 draft layout"
-    );
-    assert_eq!(
-        fx.mem_store().get(&version_source_key).await.unwrap(),
-        b"pre-s2 version source"
-    );
-    assert_eq!(
-        fx.mem_store().get(&version_layout_key).await.unwrap(),
-        b"pre-s2 version layout"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Task 10 (S3-2): moving drafts onto revision-keyed content.
-// `backfill_draft_locked` is the per-row step `egret backfill-apps-storage`
-// runs for every draft whose `source` column is non-NULL.
-// ---------------------------------------------------------------------------
-
-/// The migration end to end: a draft exactly as Parts S1/S2 left it -- content
-/// in its columns at revision 4, and the same content at the old fixed
-/// `draft.py` key -- moves to revision 4's key and reads back through
-/// `draft()`. A later save then writes revision 5's key and never touches the
-/// old fixed key, and a rerun of the migration is a no-op.
-#[tokio::test]
-async fn migrating_moves_a_pre_revision_keyed_draft_to_its_current_revision_key() {
-    let fx = Fixture::new().await;
-    let app = fx.legacy_draft("committed", Some("layout"), 4).await;
-    let mem = fx.mem_store();
-    mem.put(&fx.legacy_draft_key(app), b"committed".to_vec())
-        .await
-        .unwrap();
-    let st = fx.store();
-    assert!(st.draft(fx.ws(), app).await.is_err(), "unreadable before");
-
-    assert!(st.backfill_draft_locked(fx.ws(), app).await.unwrap());
-    assert_eq!(mem.get(&fx.draft_key(app, 4)).await.unwrap(), b"committed");
-    assert_eq!(
-        mem.get(&fx.draft_layout_key(app, 4)).await.unwrap(),
-        b"layout"
-    );
-    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
-    assert_eq!(
-        (d.source.as_str(), d.layout_json.as_deref(), d.revision),
-        ("committed", Some("layout"), 4)
-    );
-
-    st.save_draft(fx.ws(), app, fx.uid(), 4, "edited", None)
-        .await
-        .unwrap();
-    assert_eq!(mem.get(&fx.draft_key(app, 5)).await.unwrap(), b"edited");
-    assert_eq!(
-        mem.get(&fx.legacy_draft_key(app)).await.unwrap(),
-        b"committed",
-        "nothing writes the old fixed key any more"
-    );
-
-    assert!(
-        !st.backfill_draft_locked(fx.ws(), app).await.unwrap(),
-        "a saved draft has nothing left to migrate"
-    );
-    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
-    assert_eq!((d.source.as_str(), d.revision), ("edited", 5));
-}
-
-/// The migration's source of truth is the row's committed columns, not the
-/// old fixed key: under the old scheme, the fixed key could hold a write whose
-/// transaction never committed (finding I3), and copying it would make that
-/// uncommitted content the draft.
-#[tokio::test]
-async fn migrating_takes_the_committed_column_over_an_uncommitted_fixed_key_write() {
-    let fx = Fixture::new().await;
-    let app = fx.legacy_draft("committed", None, 2).await;
-    fx.mem_store()
-        .put(&fx.legacy_draft_key(app), b"never committed".to_vec())
-        .await
-        .unwrap();
-    let st = fx.store();
-
-    assert!(st.backfill_draft_locked(fx.ws(), app).await.unwrap());
-    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
-    assert_eq!((d.source.as_str(), d.revision), ("committed", 2));
-}
-
-/// The data-loss case a "copy the old content to the current revision's key"
-/// migration would have: a pre-Task-10 draft (stale content still in its
-/// columns) is saved by the new code BEFORE the migration runs -- e.g. the
-/// server was deployed first. The save's content at revision 2 must survive
-/// the migration; it can only because `save_draft` NULLs the columns, telling
-/// the migration there is nothing left to move.
-#[tokio::test]
-async fn migrating_after_a_save_by_the_new_code_never_overwrites_it_with_the_stale_column() {
-    let fx = Fixture::new().await;
-    let app = fx
-        .legacy_draft("v1 (stale column)", Some("stale layout"), 1)
-        .await;
-    fx.mem_store()
-        .put(&fx.legacy_draft_key(app), b"v1 (stale column)".to_vec())
-        .await
-        .unwrap();
-    let st = fx.store();
-
-    st.save_draft(
-        fx.ws(),
-        app,
-        fx.uid(),
-        1,
-        "v2 (live edit)",
-        Some("live layout"),
-    )
-    .await
-    .unwrap();
-    assert!(!st.backfill_draft_locked(fx.ws(), app).await.unwrap());
-
-    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
-    assert_eq!(
-        (d.source.as_str(), d.layout_json.as_deref(), d.revision),
-        ("v2 (live edit)", Some("live layout"), 2)
-    );
-    assert_eq!(
-        fx.mem_store().get(&fx.draft_key(app, 2)).await.unwrap(),
-        b"v2 (live edit)"
-    );
-}
-
-/// A draft created by the new code has nothing in its columns to migrate.
-#[tokio::test]
-async fn migrating_a_draft_created_by_the_new_code_is_a_no_op() {
-    let fx = Fixture::new().await;
-    let app = fx.store_app("v1").await;
-    let st = fx.store();
-
-    assert!(!st.backfill_draft_locked(fx.ws(), app).await.unwrap());
-    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
-    assert_eq!((d.source.as_str(), d.revision), ("v1", 1));
-}
-
-/// Same orphan-object shape as `publishing_with_no_layout_clears_any_stale_layout_object`,
-/// for the migration: when the row being migrated has `layout_json = NULL`, a
-/// layout object already sitting at its revision's layout key (e.g. from an
-/// uncommitted write) is cleared rather than served as its layout.
-#[tokio::test]
-async fn migrating_clears_a_stale_layout_when_the_row_has_none() {
-    let fx = Fixture::new().await;
-    let app = fx.legacy_draft("v1", None, 3).await;
-    fx.mem_store()
-        .put(&fx.draft_layout_key(app, 3), b"orphaned layout".to_vec())
-        .await
-        .unwrap();
-    let st = fx.store();
-
-    assert!(st.backfill_draft_locked(fx.ws(), app).await.unwrap());
-    assert!(matches!(
-        fx.mem_store().get(&fx.draft_layout_key(app, 3)).await,
-        Err(StorageError::NotFound(_))
-    ));
-    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
-    assert_eq!((d.source.as_str(), d.layout_json), ("v1", None));
 }
