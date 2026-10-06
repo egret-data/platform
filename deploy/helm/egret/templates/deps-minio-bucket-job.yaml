@@ -11,15 +11,18 @@ spec:
     spec:
       restartPolicy: OnFailure
       containers:
-        - name: mc
-          image: {{ .Values.deps.minio.mcImage }}
+        - name: bucket
+          image: {{ .Values.deps.minio.clientImage }}
           command: ["/bin/sh","-c"]
           args:
             - |
-              until mc alias set local http://minio:9000 "$MC_USER" "$MC_PASS" 2>/dev/null; do echo waiting for minio; sleep 2; done
-              mc mb --ignore-existing local/{{ .Values.deps.minio.bucket }}
+              until aws s3api list-buckets >/dev/null 2>&1; do echo waiting for the object store; sleep 2; done
+              aws s3api head-bucket --bucket {{ .Values.deps.minio.bucket }} 2>/dev/null \
+                || aws s3api create-bucket --bucket {{ .Values.deps.minio.bucket }}
               echo "bucket ready"
           env:
-            - { name: MC_USER, value: "{{ .Values.deps.minio.rootUser }}" }
-            - { name: MC_PASS, value: "{{ .Values.deps.minio.rootPassword }}" }
+            - { name: AWS_ACCESS_KEY_ID, value: "{{ .Values.deps.minio.rootUser }}" }
+            - { name: AWS_SECRET_ACCESS_KEY, value: "{{ .Values.deps.minio.rootPassword }}" }
+            - { name: AWS_ENDPOINT_URL, value: "http://minio:9000" }
+            - { name: AWS_DEFAULT_REGION, value: "{{ .Values.storage.region }}" }
 {{- end }}

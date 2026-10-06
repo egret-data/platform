@@ -45,7 +45,8 @@ helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespac
   namespace.
 - **nginx frontend** — serves the built SPA.
 - **Bundled Postgres** — the control-plane metastore.
-- **Bundled MinIO** — object storage, pre-created bucket `warehouse`.
+- **Bundled RustFS** — S3-compatible object storage (Service `minio`), pre-created
+  bucket `warehouse`.
 
 ## Configuration
 
@@ -53,11 +54,26 @@ Everything is driven by `EGRET_*` environment variables, sourced from the
 ConfigMap `egret-env` and the Secret `egret-secrets`. Edit the values in
 [`values.yaml`](./values.yaml).
 
-To use an **external Postgres/MinIO** instead of the bundled ones, set
+To use an **external Postgres/S3 store** instead of the bundled ones, set
 `deps.enabled=false` and point the `EGRET_*` connection values at your
 services.
 
 ## Upgrade notes
+
+### The bundled object store is RustFS, on a new volume
+
+MinIO withdrew its public images, so the bundled S3 server is now RustFS (`deps.minio.image`),
+still reachable as `http://minio:9000`. RustFS cannot read MinIO's on-disk format, so it gets a new
+PersistentVolumeClaim, `rustfs-data`.
+
+**Upgrading an existing dev release starts with an empty bucket.** Whatever the old MinIO held
+(Iceberg data files, query results, workflow files, Data Apps sources) is not carried over; the
+catalog rows in Postgres that point at those objects are left dangling. Reinstall, or reseed, rather
+than upgrade in place. The old `minio-data` claim is no longer referenced by the chart; delete it by
+hand when you no longer need it.
+
+`deps.minio.mcImage` is replaced by `deps.minio.clientImage` (an image with a shell and the `aws`
+CLI, used once to create the bucket).
 
 ### StarRocks FE metadata is persistent for engines created from this release on
 

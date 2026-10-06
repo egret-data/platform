@@ -8,7 +8,7 @@ metadata:
 spec:
   replicas: 1
   # As for postgres: a rolling update surges a second pod that cannot mount the
-  # ReadWriteOnce `minio-data` PVC, so the upgrade wedges rather than rolls.
+  # ReadWriteOnce `rustfs-data` PVC, so the upgrade wedges rather than rolls.
   strategy:
     type: Recreate
   selector:
@@ -19,40 +19,39 @@ spec:
       labels:
         app: minio
     spec:
+      # The image runs as uid 10001; without this the PVC is root-owned and unwritable.
+      securityContext:
+        fsGroup: 10001
       containers:
-        - name: minio
+        - name: rustfs
           image: {{ .Values.deps.minio.image }}
-          args:
-            - server
-            - /data
-            - --console-address
-            - ":9001"
           env:
-            - name: MINIO_ROOT_USER
+            - name: RUSTFS_ACCESS_KEY
               value: "{{ .Values.deps.minio.rootUser }}"
-            - name: MINIO_ROOT_PASSWORD
+            - name: RUSTFS_SECRET_KEY
               value: "{{ .Values.deps.minio.rootPassword }}"
           ports:
             - containerPort: 9000
             - containerPort: 9001
           volumeMounts:
-            - name: minio-data
+            - name: rustfs-data
               mountPath: /data
           readinessProbe:
             httpGet:
-              path: /minio/health/ready
+              path: /health
               port: 9000
             initialDelaySeconds: 5
             periodSeconds: 10
       volumes:
-        - name: minio-data
+        - name: rustfs-data
           persistentVolumeClaim:
-            claimName: minio-data
+            claimName: rustfs-data
 ---
+# A new claim, not `minio-data`: RustFS cannot read MinIO's on-disk format.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: minio-data
+  name: rustfs-data
 spec:
   accessModes:
     - ReadWriteOnce
