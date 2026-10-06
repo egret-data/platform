@@ -11,5 +11,10 @@
  */
 export interface AppDraft {
   source: string;
+  /**
+     * marimo's grid-layout companion file, verbatim JSON; omitted for the default
+     * vertical arrangement.
+     */
+  layout?: unknown;
   revision: number;
 }

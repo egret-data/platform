@@ -15,6 +15,20 @@ use uuid::Uuid;
 
 pub const MAX_SOURCE_BYTES: usize = 1_048_576;
 
+/// `analytics.apps.name` is `CHECK (length(name) BETWEEN 1 AND 200)` (migration
+/// 0161); Postgres `length` counts characters.
+pub const MAX_NAME_CHARS: usize = 200;
+
+const COPY_PREFIX: &str = "Copy of ";
+
+/// The name a duplicate gets: `Copy of <name>`, with the original cut (by
+/// character, never mid-codepoint) so the whole stays within [`MAX_NAME_CHARS`].
+fn copy_name(name: &str) -> String {
+    let room = MAX_NAME_CHARS - COPY_PREFIX.chars().count();
+    let kept: String = name.chars().take(room).collect();
+    format!("{COPY_PREFIX}{kept}")
+}
+
 #[derive(Debug, Clone)]
 pub struct AppRow {
     pub id: Uuid,
@@ -70,6 +84,17 @@ pub enum SaveOutcome {
 pub enum PublishOutcome {
     Published(VersionSummary),
     Stale { current_revision: i64 },
+}
+
+/// What [`AppStore::delete`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    /// Rows gone (and the objects, best-effort).
+    Deleted,
+    /// No such app in that workspace.
+    NotFound,
+    /// The app is live: it must be moved to the trash first. Nothing was deleted.
+    NotTrashed,
 }
 
 #[derive(FromRow)]
@@ -157,53 +182,48 @@ impl AppStore {
         }
     }
 
-    /// Mirrors `FileStore::object_uri`'s shape: `s3://{bucket}/{prefix}{workspace}/...`.
-    ///
+    /// Everything of one app lives under this prefix, and nothing else does:
+    /// `s3://{bucket}/{prefix}{workspace}/{app}/` (mirrors
+    /// `FileStore::object_uri`'s shape). Every key below is built from it, so
+    /// the prefix [`Self::delete`] removes and the keys the app was written to
+    /// cannot drift apart. It ends in `/`: `delete_prefix` matches by string
+    /// prefix, and without the slash one app's prefix would also be the start of
+    /// any id that extends it.
+    fn app_prefix(&self, ws: WorkspaceId, app: Uuid) -> String {
+        format!(
+            "s3://{}/{}{}/{}/",
+            self.bucket,
+            self.prefix,
+            ws.0.hyphenated(),
+            app.hyphenated()
+        )
+    }
+
     /// Keyed by draft revision (like [`Self::version_key`] is by `version_no`), so
     /// each revision's content is its own object: a save writes the NEXT
     /// revision's key and only becomes visible once its row commits, which is
     /// what keeps a write whose transaction never committed (finding I3) from
     /// ever being read as the draft.
     fn draft_key(&self, ws: WorkspaceId, app: Uuid, revision: i64) -> String {
-        format!(
-            "s3://{}/{}{}/{}/draft/{}.py",
-            self.bucket,
-            self.prefix,
-            ws.0.hyphenated(),
-            app.hyphenated(),
-            revision
-        )
+        format!("{}draft/{}.py", self.app_prefix(ws, app), revision)
     }
 
     fn draft_layout_key(&self, ws: WorkspaceId, app: Uuid, revision: i64) -> String {
-        format!(
-            "s3://{}/{}{}/{}/draft/{}.layout.json",
-            self.bucket,
-            self.prefix,
-            ws.0.hyphenated(),
-            app.hyphenated(),
-            revision
-        )
+        format!("{}draft/{}.layout.json", self.app_prefix(ws, app), revision)
     }
 
     fn version_key(&self, ws: WorkspaceId, app: Uuid, version_no: i32) -> String {
         format!(
-            "s3://{}/{}{}/{}/versions/{}/source.py",
-            self.bucket,
-            self.prefix,
-            ws.0.hyphenated(),
-            app.hyphenated(),
+            "{}versions/{}/source.py",
+            self.app_prefix(ws, app),
             version_no
         )
     }
 
     fn version_layout_key(&self, ws: WorkspaceId, app: Uuid, version_no: i32) -> String {
         format!(
-            "s3://{}/{}{}/{}/versions/{}/layout.json",
-            self.bucket,
-            self.prefix,
-            ws.0.hyphenated(),
-            app.hyphenated(),
+            "{}versions/{}/layout.json",
+            self.app_prefix(ws, app),
             version_no
         )
     }
@@ -217,6 +237,125 @@ impl AppStore {
         description: &str,
         folder_id: Option<Uuid>,
         source: &str,
+    ) -> Result<AppRow> {
+        self.insert_app(ws, owner, name, description, folder_id, source, None)
+            .await
+    }
+
+    /// Workspace-scoped: `source_id` is resolved in `ws`, and the copy is made
+    /// there. `NotFound` when the app (or its draft) is absent. The trash state is
+    /// the handler's to refuse; this copies whatever it is given.
+    ///
+    /// The copy is a new app through the same insert as [`Self::create`], whose
+    /// revision-1 draft is the source's CURRENT draft (source and layout, read
+    /// through [`Self::draft`] and written to the copy's own keys -- the two apps
+    /// share no object). Nothing else comes along: no versions, shares or
+    /// bookmarks. It is named [`copy_name`], keeps the source's description and
+    /// folder, and belongs to `user`.
+    pub async fn duplicate(
+        &self,
+        ws: WorkspaceId,
+        user: UserId,
+        source_id: Uuid,
+    ) -> Result<AppRow> {
+        let src = self
+            .get(ws, user, source_id)
+            .await?
+            .ok_or_else(|| Error::NotFound("app".into()))?;
+        let draft = self
+            .draft(ws, source_id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("draft of app {source_id}")))?;
+        self.insert_app(
+            ws,
+            user,
+            &copy_name(&src.name),
+            &src.description,
+            src.folder_id,
+            &draft.source,
+            draft.layout_json.as_deref(),
+        )
+        .await
+    }
+
+    /// Workspace-scoped: permanently delete a TRASHED app. Irreversible.
+    ///
+    /// One transaction, with the app row locked so the trash state it checks is
+    /// the state it deletes (a concurrent restore waits, then finds no app):
+    /// the caller-independent polymorphic rows that no foreign key reaches --
+    /// every user's bookmark of it, every object share on it and every tag
+    /// assigned to it -- then the app
+    /// row itself. Drafts, versions, sessions, grants and run pod tokens follow
+    /// by `ON DELETE CASCADE` (migrations 0161, 0163, 0165); the `app_versions`
+    /// append-only trigger lets a version go exactly when its app row is already
+    /// gone, which is this case.
+    ///
+    /// Only after the commit are the app's objects removed, by its prefix. Rows
+    /// first, objects second: a failure in between leaves objects nothing
+    /// references, never rows pointing at content that is gone. The object delete
+    /// is therefore best-effort -- logged, and not an error of a delete whose
+    /// rows are already gone.
+    pub async fn delete(&self, ws: WorkspaceId, id: Uuid) -> Result<DeleteOutcome> {
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        let Some(deleted_at) = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+            "SELECT deleted_at FROM analytics.apps WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+        )
+        .bind(id)
+        .bind(ws.0)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?
+        else {
+            return Ok(DeleteOutcome::NotFound);
+        };
+        if deleted_at.is_none() {
+            return Ok(DeleteOutcome::NotTrashed);
+        }
+        sqlx::query("DELETE FROM analytics.bookmarks WHERE entity_type = 'app' AND entity_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        sqlx::query("DELETE FROM access_grants WHERE scope_type = 'object' AND scope_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        sqlx::query("DELETE FROM tag_assignments WHERE object_type = 'app' AND object_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        sqlx::query("DELETE FROM analytics.apps WHERE id = $1 AND workspace_id = $2")
+            .bind(id)
+            .bind(ws.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+
+        let prefix = self.app_prefix(ws, id);
+        match self.store.delete_prefix(&prefix).await {
+            Ok(n) => tracing::debug!(%prefix, objects = n, "data app: deleted its objects"),
+            Err(e) => {
+                tracing::warn!(error = %e, %prefix, "data app: rows deleted but its objects could not be; they are orphans")
+            }
+        }
+        Ok(DeleteOutcome::Deleted)
+    }
+
+    /// The one insert path for a new app: the row, its revision-1 draft row, and
+    /// that revision's objects.
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_app(
+        &self,
+        ws: WorkspaceId,
+        owner: UserId,
+        name: &str,
+        description: &str,
+        folder_id: Option<Uuid>,
+        source: &str,
+        layout: Option<&str>,
     ) -> Result<AppRow> {
         check_len(source)?;
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
@@ -240,6 +379,14 @@ impl AppStore {
             .put(&self.draft_key(ws, id, 1), source.as_bytes().to_vec())
             .await
             .map_err(store_err)?;
+        // `id` was generated by this transaction, so no earlier attempt can have
+        // left a layout object under it: absent means "no layout", no delete needed.
+        if let Some(l) = layout {
+            self.store
+                .put(&self.draft_layout_key(ws, id, 1), l.as_bytes().to_vec())
+                .await
+                .map_err(store_err)?;
+        }
         sqlx::query("INSERT INTO analytics.app_drafts (app_id, updated_by) VALUES ($1, $2)")
             .bind(id)
             .bind(owner.0)
@@ -838,5 +985,24 @@ impl AppStore {
         .fetch_one(tx)
         .await
         .map_err(db_err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_copy_name_is_prefixed_and_stays_within_the_limit() {
+        assert_eq!(copy_name("Sales"), "Copy of Sales");
+        let long = "x".repeat(MAX_NAME_CHARS);
+        let got = copy_name(&long);
+        assert_eq!(got.chars().count(), MAX_NAME_CHARS);
+        assert!(got.starts_with("Copy of x"));
+        // Characters, not bytes: Postgres `length` is what the CHECK measures.
+        let wide = "é".repeat(MAX_NAME_CHARS);
+        let got = copy_name(&wide);
+        assert_eq!(got.chars().count(), MAX_NAME_CHARS);
+        assert!(got.len() > MAX_NAME_CHARS);
     }
 }

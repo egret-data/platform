@@ -11,7 +11,9 @@
 //! skip the workspace.
 //!
 //! A trashed app is read-only: every route that changes it, other than
-//! `POST …/restore` itself, answers 409 until it is restored.
+//! `POST …/restore` itself, answers 409 until it is restored. The one thing a
+//! trashed app (and only a trashed app) can have done to it is `DELETE`, which
+//! removes it for good and needs `app:manage`.
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, FromRef, Path, Query, State};
@@ -42,12 +44,14 @@ use uuid::Uuid;
 use crate::grant::{GrantRepo, NewGrant};
 use crate::session::AppMode;
 use crate::store::{
-    AppRow, AppStore, PublishOutcome, SaveOutcome, VersionSummary, MAX_SOURCE_BYTES,
+    AppRow, AppStore, DeleteOutcome, PublishOutcome, SaveOutcome, VersionSummary, MAX_SOURCE_BYTES,
 };
 use crate::template::new_app_source;
 
 const APP_READ: &str = "app:read";
 const APP_WRITE: &str = "app:write";
+/// Sharing and permanent delete.
+const APP_MANAGE: &str = "app:manage";
 /// Edit mode also needs arbitrary SQL, as SQL Lab does (spec §4.2).
 const QUERY_RUN: &str = "query:run";
 
@@ -59,6 +63,8 @@ const QUERY_RUN: &str = "query:run";
 pub(crate) const MAX_BODY_BYTES: usize = 3 * 1024 * 1024;
 
 const TRASHED: &str = "app is in the trash; restore it first";
+const NOT_TRASHED: &str =
+    "app is not in the trash; move it to Trash before deleting it permanently";
 
 #[derive(Clone)]
 pub struct AppsApiState {
@@ -97,9 +103,13 @@ impl FromRef<AppsApiState> for Authorizer {
 pub fn apps_router() -> Router<AppsApiState> {
     Router::new()
         .route("/ws/{workspace}/apps", get(list).post(create))
-        .route("/ws/{workspace}/apps/{id}", get(get_one).patch(update))
+        .route(
+            "/ws/{workspace}/apps/{id}",
+            get(get_one).patch(update).delete(delete_app),
+        )
         .route("/ws/{workspace}/apps/{id}/trash", post(trash))
         .route("/ws/{workspace}/apps/{id}/restore", post(restore))
+        .route("/ws/{workspace}/apps/{id}/duplicate", post(duplicate))
         .route("/ws/{workspace}/apps/{id}/folder", patch(set_folder))
         .route(
             "/ws/{workspace}/apps/{id}/bookmark",
@@ -143,6 +153,11 @@ pub struct AppSummary {
     pub draft_revision: i64,
     /// `None` until the first publish.
     pub latest_version_no: Option<i32>,
+    /// The caller holds `app:write` on THIS app (per object: a share on one app
+    /// makes it true on that row only).
+    pub can_write: bool,
+    /// The caller holds `app:manage` on THIS app (sharing, permanent delete).
+    pub can_manage: bool,
 }
 
 /// One app, as returned by get / create / update.
@@ -160,10 +175,22 @@ pub struct AppDetail {
     pub bookmarked: bool,
     pub draft_revision: i64,
     pub latest_version_no: Option<i32>,
+    /// The caller holds `app:write` on THIS app (per object: a share on one app
+    /// makes it true on that row only).
+    pub can_write: bool,
+    /// The caller holds `app:manage` on THIS app (sharing, permanent delete).
+    pub can_manage: bool,
+}
+
+/// What the caller may do to one app; see [`caps`].
+#[derive(Debug, Clone, Copy)]
+struct Caps {
+    can_write: bool,
+    can_manage: bool,
 }
 
 impl AppSummary {
-    fn of(r: AppRow, ctx: &WorkspaceContext) -> Self {
+    fn of(r: AppRow, ctx: &WorkspaceContext, caps: Caps) -> Self {
         Self {
             is_owner: r.owner_user_id == Some(ctx.principal.user_id.0),
             id: r.id,
@@ -176,12 +203,14 @@ impl AppSummary {
             bookmarked: r.bookmarked,
             draft_revision: r.draft_revision,
             latest_version_no: r.latest_version_no,
+            can_write: caps.can_write,
+            can_manage: caps.can_manage,
         }
     }
 }
 
 impl AppDetail {
-    fn of(r: AppRow, ctx: &WorkspaceContext) -> Self {
+    fn of(r: AppRow, ctx: &WorkspaceContext, caps: Caps) -> Self {
         Self {
             is_owner: r.owner_user_id == Some(ctx.principal.user_id.0),
             id: r.id,
@@ -195,6 +224,8 @@ impl AppDetail {
             bookmarked: r.bookmarked,
             draft_revision: r.draft_revision,
             latest_version_no: r.latest_version_no,
+            can_write: caps.can_write,
+            can_manage: caps.can_manage,
         }
     }
 }
@@ -353,6 +384,8 @@ pub enum AppsHttpError {
     StaleRevision { current_revision: i64 },
     /// 409: a change to a trashed app.
     Trashed,
+    /// 409: a permanent delete of an app that is not in the trash.
+    NotTrashed,
     /// 409: a run ticket for an app that has never been published.
     NoPublishedVersion,
     /// 503: `apps.origin` is not configured, so there is nowhere to send an iframe.
@@ -386,6 +419,7 @@ impl IntoResponse for AppsHttpError {
             )
                 .into_response(),
             Self::Trashed => body(StatusCode::CONFLICT, TRASHED),
+            Self::NotTrashed => body(StatusCode::CONFLICT, NOT_TRASHED),
             Self::NoPublishedVersion => body(
                 StatusCode::CONFLICT,
                 "the app has no published version to run; publish it first",
@@ -419,13 +453,43 @@ async fn app_object_ref(
         .get(ctx.workspace_id, ctx.principal.user_id, id)
         .await?
         .ok_or_else(|| Error::NotFound("app".into()))?;
-    let obj = ObjectRef {
+    let obj = object_ref_of(ctx, &row);
+    Ok((obj, row))
+}
+
+/// The one place an app's [`ObjectRef`] is built, so a capability flag and the
+/// handler that later enforces it are asked about the same resource.
+fn object_ref_of(ctx: &WorkspaceContext, row: &AppRow) -> ObjectRef {
+    ObjectRef {
         kind: "app".into(),
-        id,
+        id: row.id,
         folder_id: row.folder_id,
         workspace_id: ctx.workspace_id,
-    };
-    Ok((obj, row))
+    }
+}
+
+/// Whether the caller holds `action` on this app: the [`require_object`] the
+/// mutating handlers run, with its refusal read as `false`. Any other failure
+/// (the PDP itself erroring) is still an error.
+async fn allowed(
+    st: &AppsApiState,
+    ctx: &WorkspaceContext,
+    action: &str,
+    row: &AppRow,
+) -> AppsResult<bool> {
+    match require_object(&*st.pdp, ctx, action, object_ref_of(ctx, row)).await {
+        Ok(()) => Ok(true),
+        Err(Error::Forbidden) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Per-object `can_write` / `can_manage` for a response row (two PDP checks).
+async fn caps(st: &AppsApiState, ctx: &WorkspaceContext, row: &AppRow) -> AppsResult<Caps> {
+    Ok(Caps {
+        can_write: allowed(st, ctx, APP_WRITE, row).await?,
+        can_manage: allowed(st, ctx, APP_MANAGE, row).await?,
+    })
 }
 
 fn refuse_if_trashed(row: &AppRow) -> AppsResult<()> {
@@ -451,7 +515,8 @@ async fn detail(st: &AppsApiState, ctx: &WorkspaceContext, id: Uuid) -> AppsResu
         .get(ctx.workspace_id, ctx.principal.user_id, id)
         .await?
         .ok_or_else(|| Error::NotFound("app".into()))?;
-    Ok(AppDetail::of(row, ctx))
+    let caps = caps(st, ctx, &row).await?;
+    Ok(AppDetail::of(row, ctx, caps))
 }
 
 fn emit(
@@ -516,9 +581,12 @@ async fn list(
         .store
         .list(ctx.workspace_id, ctx.principal.user_id, q.trashed)
         .await?;
-    Ok(Json(
-        rows.into_iter().map(|r| AppSummary::of(r, &ctx)).collect(),
-    ))
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let caps = caps(&st, &ctx, &r).await?;
+        out.push(AppSummary::of(r, &ctx, caps));
+    }
+    Ok(Json(out))
 }
 
 #[utoipa::path(
@@ -575,7 +643,8 @@ async fn create(
         )
         .await?;
     emit(&st, &ctx, "app:create", row.id, json!({ "name": row.name }));
-    Ok((StatusCode::CREATED, Json(AppDetail::of(row, &ctx))))
+    let caps = caps(&st, &ctx, &row).await?;
+    Ok((StatusCode::CREATED, Json(AppDetail::of(row, &ctx, caps))))
 }
 
 #[utoipa::path(
@@ -598,7 +667,8 @@ async fn get_one(
 ) -> AppsResult<Json<AppDetail>> {
     let (obj, row) = app_object_ref(&st, &ctx, id).await?;
     require_object(&*st.pdp, &ctx, APP_READ, obj).await?;
-    Ok(Json(AppDetail::of(row, &ctx)))
+    let caps = caps(&st, &ctx, &row).await?;
+    Ok(Json(AppDetail::of(row, &ctx, caps)))
 }
 
 #[utoipa::path(
@@ -641,6 +711,39 @@ async fn update(
         json!({ "name": name, "description_changed": b.description.is_some() }),
     );
     Ok(Json(detail(&st, &ctx, id).await?))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/apps/{id}",
+    tag = "apps",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "App id")),
+    responses(
+        (status = 204, description = "The app is permanently deleted, with its draft, versions, shares and every user's bookmark of it. Irreversible"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing app:manage on this app", body = ErrorBody),
+        (status = 404, description = "No such app in this workspace", body = ErrorBody),
+        (status = 409, description = "The app is not in the trash; move it to Trash first", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn delete_app(
+    State(st): State<AppsApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> AppsResult<StatusCode> {
+    let (obj, row) = app_object_ref(&st, &ctx, id).await?;
+    require_object(&*st.pdp, &ctx, APP_MANAGE, obj).await?;
+    // The trash check is the store's, under the row lock it deletes with.
+    match st.store.delete(ctx.workspace_id, id).await? {
+        DeleteOutcome::Deleted => {
+            emit(&st, &ctx, "app:delete", id, json!({ "name": row.name }));
+            Ok(StatusCode::NO_CONTENT)
+        }
+        DeleteOutcome::NotTrashed => Err(domain(AppsHttpError::NotTrashed)),
+        // Deleted by someone else between the resolve above and the store call.
+        DeleteOutcome::NotFound => Err(Error::NotFound("app".into()).into()),
+    }
 }
 
 #[utoipa::path(
@@ -691,6 +794,40 @@ async fn restore(
     st.store.set_trashed(ctx.workspace_id, id, false).await?;
     emit(&st, &ctx, "app:restore", id, json!({}));
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/apps/{id}/duplicate",
+    tag = "apps",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "App to copy")),
+    responses(
+        (status = 201, description = "A new app named `Copy of <name>`, owned by the caller, in the source's folder, whose revision-1 draft is the source's current draft (source and layout). Versions, shares and bookmarks are not copied", body = AppDetail),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing app:write on this app, or app:write in the workspace", body = ErrorBody),
+        (status = 404, description = "No such app in this workspace", body = ErrorBody),
+        (status = 409, description = "The app is in the trash", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn duplicate(
+    State(st): State<AppsApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> AppsResult<(StatusCode, Json<AppDetail>)> {
+    let (obj, row) = app_object_ref(&st, &ctx, id).await?;
+    // Write, not read: the copy is made from the DRAFT, which a reader may not
+    // see (`draft_get`). And workspace write, as `create`: the result is a new app.
+    require_object(&*st.pdp, &ctx, APP_WRITE, obj).await?;
+    egret_core::authz::require(&*st.pdp, &ctx, APP_WRITE).await?;
+    refuse_if_trashed(&row)?;
+    let copy = st
+        .store
+        .duplicate(ctx.workspace_id, ctx.principal.user_id, id)
+        .await?;
+    emit(&st, &ctx, "app:duplicate", copy.id, json!({ "from": id }));
+    let caps = caps(&st, &ctx, &copy).await?;
+    Ok((StatusCode::CREATED, Json(AppDetail::of(copy, &ctx, caps))))
 }
 
 #[utoipa::path(
@@ -1164,8 +1301,10 @@ async fn version_restore(
         create,
         get_one,
         update,
+        delete_app,
         trash,
         restore,
+        duplicate,
         set_folder,
         bookmark_add,
         bookmark_remove,

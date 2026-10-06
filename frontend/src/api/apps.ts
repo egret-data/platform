@@ -7,9 +7,16 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import { ApiError } from "./client";
 import {
+  appsBookmarkAdd,
+  appsBookmarkRemove,
   appsCreate,
+  appsDeleteApp,
+  appsDuplicate,
   appsPublish,
+  appsRestore,
   appsTicket,
+  appsTrash,
+  appsUpdate,
   appsVersionRestore,
   getAppsGetOneQueryKey,
   getAppsListQueryKey,
@@ -22,10 +29,60 @@ import type { AppDetail, AppSummary, AppTicketMode, AppVersionSummary } from "./
 
 export type { AppDetail, AppSummary, AppVersionSummary };
 
-export function useApps(ws: string) {
-  return useAppsList<AppSummary[], ApiError>(ws, undefined, {
+/** The live list, or the trash bin with `{ trashed: true }` — two server queries, not a filter. */
+export function useApps(ws: string, opts?: { trashed?: boolean }) {
+  const trashed = !!opts?.trashed;
+  return useAppsList<AppSummary[], ApiError>(ws, trashed ? { trashed: true } : undefined, {
     query: { select: (r) => r.data as AppSummary[] },
   });
+}
+
+/**
+ * The list page's writes, in the shape of `useDashboardMutations`.
+ *
+ * Every one invalidates `getAppsListQueryKey(ws)` with NO params: that key is a prefix of the
+ * trashed list's (`[url]` vs `[url, { trashed: true }]`), so a trash or restore refreshes the
+ * view it left and the view it arrived in with one call.
+ */
+export function useAppMutations(ws: string) {
+  const qc = useQueryClient();
+  const invalidate = (id?: string) => {
+    qc.invalidateQueries({ queryKey: getAppsListQueryKey(ws) });
+    if (id) qc.invalidateQueries({ queryKey: getAppsGetOneQueryKey(ws, id) });
+  };
+
+  /** Rename / re-describe. A key left out is left unchanged by the server (`PATCH`). */
+  const update = useMutation<AppDetail, ApiError, { id: string; name?: string; description?: string }>({
+    mutationFn: async ({ id, ...b }) => (await appsUpdate(ws, id, b)).data as AppDetail,
+    onSuccess: (d) => invalidate(d.id),
+  });
+  const trash = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await appsTrash(ws, id); },
+    onSuccess: () => invalidate(),
+  });
+  const restore = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await appsRestore(ws, id); },
+    onSuccess: () => invalidate(),
+  });
+  /** Permanent delete. The server refuses (409) unless the app is already in the trash. */
+  const remove = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await appsDeleteApp(ws, id); },
+    onSuccess: () => invalidate(),
+  });
+  /** Copies the source's DRAFT into a new app the caller owns, and returns that new app. */
+  const duplicate = useMutation<AppDetail, ApiError, string>({
+    mutationFn: async (id) => (await appsDuplicate(ws, id)).data as AppDetail,
+    onSuccess: () => invalidate(),
+  });
+  const addBookmark = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await appsBookmarkAdd(ws, id); },
+    onSuccess: () => invalidate(),
+  });
+  const removeBookmark = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await appsBookmarkRemove(ws, id); },
+    onSuccess: () => invalidate(),
+  });
+  return { update, trash, restore, remove, duplicate, addBookmark, removeBookmark };
 }
 
 /** One app; `refetchMs` keeps the draft revision shown next to Publish honest while an author edits. */
