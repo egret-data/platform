@@ -1260,15 +1260,15 @@ async fn stalled_uploads_hold_no_pool_connection_and_block_no_other_request() {
         async move { common::send_body(app, "POST", &uri, fx.user, &ct(), body).await }
     }));
     let probe = async {
-        // Guards against a hang, not measurements.
+        // Wait for the five stalls, but not for ever: uploads that hold a
+        // connection each starve one another before they all get there, and
+        // the assertions below are the ones that say so.
         let all_stalled = async {
             while stalled.load(std::sync::atomic::Ordering::SeqCst) < 5 {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         };
-        tokio::time::timeout(std::time::Duration::from_secs(20), all_stalled)
-            .await
-            .expect("five uploads reached their stalled bodies");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), all_stalled).await;
         let idle = || fx.db.pool.num_idle();
         assert!(idle() > 0, "the stalled uploads hold every pool connection");
         let get = tokio::time::timeout(
@@ -1279,6 +1279,11 @@ async fn stalled_uploads_hold_no_pool_connection_and_block_no_other_request() {
         .expect("an unrelated GET waited on the stalled uploads");
         assert_eq!(get.status(), 200, "{}", text(get).await);
         assert!(idle() > 0, "the pool ran dry while the uploads stalled");
+        assert_eq!(
+            stalled.load(std::sync::atomic::Ordering::SeqCst),
+            5,
+            "not every upload reached its stalled body"
+        );
     };
     tokio::select! {
         _ = uploads => panic!("a stalled upload ended"),
