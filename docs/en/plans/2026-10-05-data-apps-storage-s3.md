@@ -535,6 +535,7 @@ Because Parts S1/S2 already wrote real content at the OLD fixed key (`draft.py`/
 
 - Confirmed Part S2's backfill has actually run against every real environment before this merges, AND Task 10's key-format migration has too — this is a process check, not a code one; state it plainly in the PR description, same as every other irreversible-adjacent step this session has handled.
 - I3 (tracked since Part S1's final review, reaffirmed as a hard Part S3 prerequisite in Part S2's own review) is resolved by Task 10, not deferred further.
+- **Deploy order matters for this PR specifically, not just the usual rolling-deploy caveats.** Tasks 9 and 10 each relax a `NOT NULL` constraint (`app_versions.source`, `app_drafts.source`) and make new code write `NULL` into it. An OLD pod (pre-this-PR binary) still assumes that column is never `NULL` and will **panic** decoding a `NULL` value for any row the NEW code creates or saves (e.g. a brand-new app, or a save on an existing one) — this is not just "stale reads," it is a crash. Deploy this PR with no old/new pod overlap (a `Recreate` strategy, or scale old pods to zero before the new ones start serving) rather than an ordinary rolling deploy. Run `egret backfill-apps-storage` once before the deploy and once again after it finishes, exactly as Part S2 already required — the second run catches anything an old pod wrote in the brief window before it was fully replaced. State this explicitly in the PR description; it is a real behavior change for this one release, not a generic caveat.
 
 ---
 
