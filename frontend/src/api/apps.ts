@@ -21,13 +21,14 @@ import {
   getAppsGetOneQueryKey,
   getAppsListQueryKey,
   getAppsVersionsQueryKey,
+  useAppsCapabilities,
   useAppsGetOne,
   useAppsList,
   useAppsVersions,
 } from "./generated/apps/apps";
-import type { AppDetail, AppSummary, AppTicketMode, AppVersionSummary } from "./generated/model";
+import type { AppCapabilities, AppDetail, AppSummary, AppTicketMode, AppVersionSummary } from "./generated/model";
 
-export type { AppDetail, AppSummary, AppVersionSummary };
+export type { AppCapabilities, AppDetail, AppSummary, AppVersionSummary };
 
 /** The live list, or the trash bin with `{ trashed: true }` — two server queries, not a filter. */
 export function useApps(ws: string, opts?: { trashed?: boolean }) {
@@ -83,6 +84,17 @@ export function useAppMutations(ws: string) {
     onSuccess: () => invalidate(),
   });
   return { update, trash, restore, remove, duplicate, addBookmark, removeBookmark };
+}
+
+/**
+ * What the caller may do with apps in this workspace that no row can answer: create one, and
+ * create / rename / delete an app folder (the backend gates both on workspace `app:write`).
+ * Per-app permissions are on each row (`can_write`, `can_manage`).
+ */
+export function useAppCapabilities(ws: string) {
+  return useAppsCapabilities<AppCapabilities, ApiError>(ws, {
+    query: { select: (r) => r.data as AppCapabilities },
+  });
 }
 
 /** One app; `refetchMs` keeps the draft revision shown next to Publish honest while an author edits. */

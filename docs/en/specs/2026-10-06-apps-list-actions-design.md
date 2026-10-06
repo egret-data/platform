@@ -48,6 +48,19 @@ be wrong for a share-only collaborator.
 Cost: two PDP checks per row on the list. Acceptable for a list of this size; if it shows up in
 a profile, batch it then.
 
+### 3.1a Workspace capability (added 2026-10-06, after the first release of this page)
+
+`GET /api/ws/{workspace}/apps/capabilities` → `{ "can_create": bool }`.
+
+`can_create` is workspace-level `app:write` — the check `POST /apps` makes, and the one
+egret-bi's folder routes make for creating, renaming and deleting an app folder. It needs the
+same workspace `app:read` the list does.
+
+It exists because no row can answer it. The page first inferred it from the rows ("can write
+some app here"), which was wrong for a share-only collaborator — a writable row, and still no
+right to create — and had no answer for an empty list. Seen live: that collaborator was shown
+`+ App` and New folder and refused on use.
+
 ### 3.2 `POST /api/ws/{workspace}/apps/{id}/duplicate` (A2, A6, A7)
 
 1. Resolve the app in the caller's workspace (404 otherwise, identical body).
@@ -133,6 +146,15 @@ mutation, and its disabled state explains itself.
 Bulk select is offered when at least one visible row has `can_write`. Checkboxes appear only on
 writable rows, so "Move n to Trash" can never count a row the server will refuse. Actions: move
 to folder, move to Trash.
+
+### 4.3a Workspace-level controls
+
+`+ App`, the empty state's create button, New folder, and a folder's rename / delete / share are
+shown only when the server says `can_create`. While that answer is loading, or if the request
+failed, they stay hidden: no answer is not a yes.
+
+Dropping a row on a folder is **not** one of them. It moves one app, which is that app's own
+`can_write` — already what makes the row draggable.
 
 ### 4.4 API layer
 

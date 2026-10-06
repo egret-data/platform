@@ -3,7 +3,7 @@ import { FolderPlus, ListChecks, Loader2, Search, Star, Trash2 } from "lucide-re
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { type AppSummary, useAppMutations, useApps, useCreateApp } from "@/api/apps";
+import { type AppSummary, useAppCapabilities, useAppMutations, useApps, useCreateApp } from "@/api/apps";
 import { ApiError } from "@/api/client";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { AppActionsMenu } from "@/components/apps/AppActionsMenu";
@@ -136,6 +136,7 @@ export default function Apps() {
   const nav = useNavigate();
   const [showTrash, setShowTrash] = useState(false);
   const { data, isLoading, isError, error } = useApps(ws, { trashed: showTrash });
+  const capabilities = useAppCapabilities(ws);
   const { trash, restore, remove, duplicate, addBookmark, removeBookmark } = useAppMutations(ws);
   const { data: folders = [] } = useFolders(ws, "apps");
   const setFolder = useSetFolder(ws, "apps");
@@ -176,24 +177,19 @@ export default function Apps() {
    * reason Dashboards gives: a greyed control advertises a capability the reader does not have.
    *
    * Everything about a single app is gated on that app's own `can_write` / `can_manage`
-   * instead (the row menu, the checkbox, dragging), because app permissions are granted per
-   * app through shares and differ row to row. This flag is only for what is not about one row,
-   * and the response carries no workspace-level answer for it. So it is INFERRED: someone who
-   * can write at least one app here is treated as an author.
+   * instead (the row menu, the checkbox, dragging, dropping it on a folder), because app
+   * permissions are granted per app through shares and differ row to row. This flag is only for
+   * what is not about one row, and the server answers it directly (`GET …/apps/capabilities`:
+   * workspace-level `app:write`, the check `POST /apps` and the folder routes make).
    *
-   * That inference is wrong in one direction for a share-only collaborator — they can write a
-   * row, and the server will still refuse them a new app or a folder, with a toast. It is the
-   * recoverable direction; inferring the other way would hide `+ App` from real authors.
+   * It used to be inferred from the rows — "can write some app here" — which was wrong for a
+   * share-only collaborator (a writable row, and still no right to create) and had no answer at
+   * all for an empty list.
    *
-   * `data`, not `rows`: `rows` is search-filtered, so typing a query that matches nothing would
-   * otherwise revoke the toolbar.
-   *
-   * The empty list is the one case with no answer — there is no row to carry it. Defaulting to
-   * `true` there keeps Create available to a legitimate author in a fresh workspace (a reader
-   * who clicks it gets the server's 403); defaulting to `false` would block real work.
-   * Wrong-but-recoverable beats blocking.
+   * No answer is not a yes: while the request is loading, or if it failed, these controls stay
+   * hidden. Showing a control the server then refuses is the defect this exists to remove.
    */
-  const canAuthor = !data || data.length === 0 || data.some((a) => a.can_write);
+  const canCreate = capabilities.data?.can_create === true;
 
   const filtering = query.trim() !== "" || onlyBookmarked;
   const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
@@ -321,7 +317,8 @@ export default function Apps() {
             onRename={setRenameTarget}
             onDuplicate={onDuplicate}
             onMove={(x, fid) => setFolder.mutateAsync({ id: x.id, folder_id: fid }).catch((e) => toast.error(errText(e)))}
-            onNewFolder={(x) => setFolderDialog({ mode: "move", app: x })}
+            // Creating a folder is the workspace's permission, not this row's.
+            onNewFolder={canCreate ? (x) => setFolderDialog({ mode: "move", app: x }) : undefined}
             onShare={setShareTarget}
             onTrash={(x) => guard(trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")))}
             onRestore={(x) => guard(restore.mutateAsync(x.id))}
@@ -368,7 +365,7 @@ export default function Apps() {
             filled
             onClick={() => { const next = !showTrash; setShowTrash(next); if (next) { setOnlyBookmarked(false); bulk.setBulkMode(false); } }}
           />
-          {!showTrash && canAuthor && (
+          {!showTrash && canCreate && (
             <ListToolbarButton
               icon={FolderPlus}
               label="New folder"
@@ -377,7 +374,7 @@ export default function Apps() {
           )}
         </>
       }
-      action={canAuthor ? <Button onClick={() => setCreating(true)}>+ App</Button> : undefined}
+      action={canCreate ? <Button onClick={() => setCreating(true)}>+ App</Button> : undefined}
     >
       <ListStates
         isLoading={isLoading}
@@ -393,8 +390,12 @@ export default function Apps() {
             <EmptyState
               variant="dashed"
               title="No apps yet."
-              description="Create one to build a dashboard in code that queries your data as each viewer."
-              action={<Button onClick={() => setCreating(true)}>Create your first app</Button>}
+              description={
+                canCreate
+                  ? "Create one to build a dashboard in code that queries your data as each viewer."
+                  : "Apps shared with you will appear here."
+              }
+              action={canCreate ? <Button onClick={() => setCreating(true)}>Create your first app</Button> : undefined}
             />
           )
         }
@@ -453,12 +454,13 @@ export default function Apps() {
                         colSpan={bulk.bulkMode ? 5 : 4}
                         collapsed={isCollapsed}
                         onToggle={() => collapse.toggle(key)}
-                        // Folder share/rename/delete and the drop target are workspace
-                        // mutations, not mutations of one app, so they travel with `canAuthor`.
-                        onShare={group.folder && canAuthor ? () => setFolderShare({ id: group.folder!.id, name: group.folder!.name }) : undefined}
-                        onRename={group.folder && canAuthor ? () => setFolderDialog({ mode: "rename", folder: group.folder! }) : undefined}
-                        onDelete={group.folder && canAuthor ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(errText(e))) : undefined}
-                        onDropItem={canAuthor ? (id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(errText(e))) : undefined}
+                        // Folder share/rename/delete are workspace mutations, so they travel with
+                        // `canCreate`. The drop target does not: dropping moves ONE app, which
+                        // is that app's own `can_write` — already what makes its row draggable.
+                        onShare={group.folder && canCreate ? () => setFolderShare({ id: group.folder!.id, name: group.folder!.name }) : undefined}
+                        onRename={group.folder && canCreate ? () => setFolderDialog({ mode: "rename", folder: group.folder! }) : undefined}
+                        onDelete={group.folder && canCreate ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(errText(e))) : undefined}
+                        onDropItem={(id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(errText(e)))}
                       />
                       {!isCollapsed && group.rows.map(renderRow)}
                     </tbody>

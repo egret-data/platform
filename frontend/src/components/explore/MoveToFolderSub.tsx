@@ -2,10 +2,12 @@ import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdow
 import type { Folder } from "@/api/folders";
 
 /** Flat "Move to folder" choices for a row kebab: each folder, Uncategorized, then New folder…
+ *  (the last only when `onNewFolder` is given: creating a folder is a workspace permission the
+ *  caller may lack while still being able to move this one row).
  *  Rendered inline (not a Radix sub-menu) to keep it simple + testable. */
 export function MoveToFolderItems({ folders, currentFolderId, onMove, onNewFolder }: {
   folders: Folder[]; currentFolderId: string | null;
-  onMove: (folderId: string | null) => void; onNewFolder: () => void;
+  onMove: (folderId: string | null) => void; onNewFolder?: () => void;
 }) {
   return (
     <>
@@ -16,7 +18,7 @@ export function MoveToFolderItems({ folders, currentFolderId, onMove, onNewFolde
         </DropdownMenuItem>
       ))}
       {currentFolderId !== null && <DropdownMenuItem onClick={() => onMove(null)}>Remove from folder</DropdownMenuItem>}
-      <DropdownMenuItem onClick={onNewFolder}>Move to new folder&hellip;</DropdownMenuItem>
+      {onNewFolder && <DropdownMenuItem onClick={onNewFolder}>Move to new folder&hellip;</DropdownMenuItem>}
     </>
   );
 }

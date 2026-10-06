@@ -13464,6 +13464,67 @@
         }
       }
     },
+    "/api/ws/{workspace}/apps/capabilities": {
+      "get": {
+        "tags": [
+          "apps"
+        ],
+        "operationId": "capabilities",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What the caller may do with apps in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppCapabilities"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing app:read, or the apps feature is disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/apps/{id}": {
       "get": {
         "tags": [
@@ -30242,6 +30303,19 @@
           },
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "AppCapabilities": {
+        "type": "object",
+        "description": "What the caller may do in this workspace that no single app can answer for.\n\nThe per-row `can_write` / `can_manage` say what the caller may do TO an app.\nCreating one -- and creating, renaming or deleting an app folder, which\negret-bi's folder routes gate on the same action -- is a workspace question:\nan empty list has no row to read it from, and a collaborator holding a write\nshare on one app has a writable row and still may not create.",
+        "required": [
+          "can_create"
+        ],
+        "properties": {
+          "can_create": {
+            "type": "boolean",
+            "description": "The caller holds `app:write` in the workspace: `POST /apps` will not be\nrefused for lack of permission."
           }
         }
       },
