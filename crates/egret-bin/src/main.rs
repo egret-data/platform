@@ -2335,6 +2335,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                             command: pod.command.clone(),
                             work_dir: pod.work_dir.clone().into(),
                             config_dir: pod.config_dir.clone().into(),
+                            venv_shim_dir: pod.venv_shim_dir.clone().into(),
                             callback_url: pod.callback_url.clone(),
                             run_kernel_mode: pod.run_kernel_mode.clone(),
                         },
