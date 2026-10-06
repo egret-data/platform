@@ -9521,6 +9521,188 @@ The W5b spec's storage refusals (§1 table, §3 shim, exit code 4, publish
 refusals, the catalog note, the test table, §14, §15), EN and VI, each gain a
 dated *Superseded 2026-10-04, W9a* note rather than a rewrite.
 
+### W9b — namespace files
+
+**108 before W9b and 108 after, both measured; no entry moved, as expected.**
+Before: the `executor_matches_golden` line printed with `--nocapture` at the
+package base (W9b Task 1, `w9b-baseline-ratchet.txt`, code = `e0543603`, on the
+old base `e539d8b3`): **294 golden entries, 108 mismatching, 108 baselined, 0
+broken**. After: the same line on the branch rebased onto `origin/main`
+`edccf6c4` (W9b Task 11, HEAD `c61868b9`): **294 golden entries, 108 mismatching, 108 baselined, 0 broken** (`executor_matches_golden -- --nocapture`, 1 passed).
+`golden.json`, `baseline.txt` and `corpus/` are byte-identical to
+`origin/main`'s (`git diff --quiet edccf6c4 HEAD -- …golden.json …baseline.txt
+…corpus` exits 0). W9b's spec (§7, §13) predicted no change, and a change would
+have been a finding to explain, not a bank.
+
+| | ratchet (measured) | what the task shipped |
+|---|---|---|
+| package base `e0543603` | 108 (Task 1) | -- |
+| Task 1 | 108 | the artifact measured (`oracle-exec/w9b-namespace-files.json`): layout and revisions, soft delete, globs, the functions, `ifExists` across namespaces, the four tasks, the API, `PurgeFiles`, the path rules; the `_files` count |
+| Tasks 2-4 | `executor_matches_golden` passed in each gate (a moved entry fails it; the line was not quoted) | the store, URIs and path rules (migration 0174, written as 0169); revisions, conflicts, move and soft delete under advisory locks; the five expression functions over namespace files |
+| Task 5 | 108 | `namespaceFiles` staged on the four script types; `inputFiles` namespace-file URIs; `WorkingDirectory.namespaceFiles` validated at publish only |
+| Task 6 | 108 | `UploadFiles`, `DownloadFiles` |
+| Task 7 | 108 | `DeleteFiles`, `PurgeFiles` |
+| Tasks 8-9 | `executor_matches_golden` passed in each gate | the namespace file API (staging, the hourly staging sweep), the export zip |
+| Task 10 | 108 | the plugin bridge (`EgretNamespace`, `task.json`'s `namespaceFiles`) |
+| Task 11 | **108** (above) | the end to end on a temporary kind cluster, this section, the specs' corrections, the full local gate |
+
+**The two `WorkingDirectory` corpus flows, before and after: unchanged, and
+outside the ratchet both times.** `valids/working-directory-namespace-files`
+and `valids/working-directory-namespace-files-with-namespaces` are the only
+corpus flows that declare `namespaceFiles`. Task 1 measured
+(`w9b-baseline-corpus-flows.txt`, HEAD `e0543603`) and Task 11 re-measured
+(HEAD `c61868b9`, the same `/usr/bin/grep -n 'namespace-files'` over
+`baseline.txt`, `golden.json`, `runnable.txt` and `harvest-run.txt`) the same
+four lines and nothing else: `runnable.txt:223`/`:225` `[task-type-not-in-image]`
+and `harvest-run.txt:347`/`:348` *"rejected publish -> 422: Invalid type:
+io.kestra.core.tasks.test.Read"*. Neither is in `baseline.txt` (whose 3
+`working-directory` lines are other flows) or among the 294 golden entries. The
+artifact refused both at publish, so there is no golden trace to compare; the
+spec's first wording, *"stay baselined"*, was corrected on 2026-10-05. Egret
+now publishes their `namespaceFiles` block (validated, kept in the model) and
+still does not run `WorkingDirectory`, so no ratchet change can come from them.
+
+**The `_files`-namespace count (Task 1), the population the new publish refusal
+reaches.** 0 of 345 corpus flows have a namespace with a `_files` segment
+(control: 342 have an `io` segment). Of published flows, **0 of 5**: a
+read-only `SELECT` over every database of the dev Postgres that has
+`workflow.flows` (38 of 44, plus `:5439`) found 5 rows in all, every one in
+namespace `t` (`w9b-files-segment-namespaces.txt`). That zero rests on very few
+rows: no database with real flows existed to count (the dev `egret` database
+was at migration 127 and has no `workflow.flows`). A deployment that has a
+flow in such a namespace sees the publish refusal on its next save, and the
+flow's existing executions are untouched.
+
+What the ratchet can see of W9b: in principle the four `core.namespace`
+tasks, which the driver registers over the test `MemStore` with the
+namespace-file database options of the pool it runs (`oracle-exec/driver.rs:129-169`,
+since W9b Tasks 6 and 7); in practice nothing. **0** corpus flows name a
+`core.namespace` task, `nsfile` or `fileURI` (control: 108 name
+`core.log.Log`), `golden.json` holds none of the three, and the only
+`namespaceFiles` declarations are the two `WorkingDirectory` flows above. No
+corpus flow runs a script or plugin task standalone either. Every W9b
+behaviour rests on the tests below.
+
+#### What is covered live, and by which gate
+
+**Live on a real cluster, through egret's API** (Task 11, a temporary kind
+cluster `egret-w9b-e2e`, kind v0.29 / Kubernetes v1.33.1, kindnet, its own
+kubeconfig so the shared `kind-egret` context was never touched; the chart
+from this branch with `workflow.containerRunner=kubernetes`,
+`workflow.workerEnabled=true`, `workflow.pluginHost.image=egret-plugin-host:dev`
+and the backend image built at `c61868b9`; the chart's object store is now
+RustFS, with **distinct** root credentials so a zero below means something; a
+Postgres 16 in `e2e-data`; transcripts `w9b-e2e-0-setup.txt` … `w9b-e2e-7.txt`
+and `w9b-e2e-server-log.txt` in the package's working notes, every figure below
+copied from them). **7 of 7 passed; no product defect was found.**
+
+1. **Upload twice, revisions, two downloads** (`w9b-e2e-1.txt`). Two uploads of
+   `/cfg/a.txt` and one of `/data.csv`, each 200; `revisions` answered
+   `[{revision:1,size:10},{revision:2,size:26}]`; `?revision=1` and the latest
+   download each `cmp`-equal to their upload, differing at byte 9; `stats`,
+   `directory` and `search` (`q=A.TXT` → `["/cfg/a.txt"]`) answered; the
+   bucket keys follow §3's layout (`…/e2e/w9b/_files/cfg/a.txt` and `….v2`).
+2. **Functions and script staging** (`w9b-e2e-2.txt`). A `Log` printed
+   `READ=[config v2 (second upload)\n] URI=[kestra:///e2e/w9b/_files/cfg/a.txt.v2]`.
+   A script task in a pod, `namespaceFiles` over `e2e.w9b` and `e2e.other`
+   with `folderPerNamespace: true`, printed both namespaces' files under their
+   folders, `./e2e.w9b/cfg/a.txt=OVERWRITTEN-BY-INPUTFILES` (an `inputFiles`
+   entry overwrote the namespace file), and the `inputFiles` values
+   `nsfile://e2e.other/x.txt` and `{{ fileURI('data.csv') }}` staged.
+3. **`UploadFiles` → `DownloadFiles` → `DeleteFiles` → `PurgeFiles`**
+   (`w9b-e2e-3.txt`). Three upload runs gave revisions 1-3 of `/up/w.txt` and
+   `/up/gone.txt`; `DownloadFiles` `/up/**` gave execution URIs whose `read()`
+   was revision 3; after `DeleteFiles` `/up/gone.txt` its revision 3 was
+   flagged deleted, a latest read 404 and `?revision=2` 200 (R1);
+   `PurgeFiles` `keepAmount: 1`, `filePattern: "up/*"` answered `size: 5`:
+   `w.txt` kept `[3]`, `gone.txt` was purged entirely (§2), `/cfg/a.txt` kept
+   `[1,2]`, and the bucket held only `up/w.txt.v3` under `/up/`. A first purge
+   with `"/up/*"` purged nothing (`size: 0`): the pattern is matched against
+   the path without its leading `/`, as Kestra's is (spec §8.4, measured by
+   Task 1) — the specified behaviour, and a trap the spec's §15 now records.
+4. **`CopyIn` from `{{ fileURI('data.csv') }}`** (`w9b-e2e-4.txt`), run by the
+   plugin host in a pod: `rowCount: 3`, and Postgres held the three rows.
+5. **The pod holds no storage credential** (`w9b-e2e-5.txt`). `kubectl get
+   pod -o yaml` of three task pods while their `main` container ran — a script
+   pod with `namespaceFiles` and both kinds of namespace `inputFiles` (held by
+   `sleep 20`), a plugin pod (`pg_sleep(20)`), and a plugin pod **using the
+   nsfile bridge** (`CopyIn`, held by a `LOCK TABLE`) — counted **0** of the
+   access key, the secret key, the endpoint, `rustfs`, `:9000`, `warehouse`,
+   `s3://`, `AWS_`, `STORAGE`, `ACCESS_KEY` and `SECRET_KEY` in each, against
+   controls `alpine:3.20` 2, `egret-plugin-host:dev` 2 and 2,
+   `egret-task-helper:dev` 4, 4, 4. The bridge pod's `task.json` lists the file
+   as `{"uri":"kestra:///e2e/w9b/_files/data.csv", …, "staged":".egret/storage/0"}`
+   and holds no key, endpoint or bucket. Both storage keys occur 0 times in the
+   server log.
+6. **Isolation** (`w9b-e2e-6.txt`). From a second workspace, reading the first
+   workspace's file by every form — `read` of `nsfile://`, of the
+   `kestra:///…/_files/…` URI and its `.v2`, with `namespace=`, `fileURI`, a
+   script `inputFiles`, a plugin `CopyIn from:`, `namespaceFiles.namespaces`,
+   `DownloadFiles` — failed naming the path or staged nothing (`COUNT=0`,
+   `files: {}`); the API answered 404 on every route that takes a path, while
+   `search` (`200 []`) and `export` (an empty 22-byte zip) were `cmp`-identical
+   to a namespace that never held anything. A flow writing to another
+   namespace of its own workspace (`UploadFiles`, `DeleteFiles`, `PurgeFiles`)
+   failed naming both namespaces and the rule; its control succeeded; nothing
+   moved in the bucket.
+7. **Export** (`w9b-e2e-7.txt`). `200 application/zip`,
+   `filename="e2e.w9b_files.zip"`, `Content-Length: 414` and 414 bytes
+   received; `unzip -t` "No errors detected"; three stored entries `cmp`-equal
+   to the uploads; Python's `testzip` and Java's `ZipInputStream` (the reader
+   Kestra's import uses) read them all.
+
+**Live, driven by tests, each gated** (without its gate a case reports IGNORED
+or fails, never passes; all were run during the package with the gates set):
+
+| test | gate | what it runs |
+|---|---|---|
+| `tests/nsfiles_s3_live.rs` (2) | `EGRET_TEST_S3_ENDPOINT` + `_KEY`/`_SECRET`/`_BUCKET`, `DATABASE_URL` | a namespace file larger than one multipart part round-trips; a move and a purge of names holding spaces and non-ASCII, under a fenced throwaway prefix |
+| `tests/nsfiles_api_s3_live.rs` (2) | `EGRET_TEST_S3_*`, `DATABASE_URL` | a 64 MiB upload through staging and a server-side copy, streamed back down; the staging sweep deleting an old orphan, fenced |
+| `tests/container_docker_live.rs` `namespace_files_are_staged_into_the_container_as_the_artifact_does` | Docker daemon; `EGRET_ALLOW_DOCKER_SKIP=1` opts out | two namespaces, `folderPerNamespace`, each `ifExists`, and an `inputFiles` entry overwriting a namespace file under every `ifExists` |
+| `tests/k8s_runner_live.rs` `namespace_files_are_staged_into_the_pod_as_the_artifact_does` | `EGRET_TEST_KIND=1` (`EGRET_TEST_KIND_CONTEXT` for a temporary cluster) | the same in a pod, as the chart's Role |
+| `tests/plugin_host_live.rs` `plugins_read_namespace_files_through_egret` | `EGRET_PLUGIN_HOST_LIVE=1`, Docker, `egret-plugin-host:dev`, `EGRET_TEST_S3_*` | a plugin reading namespace files through the bridge, on Docker |
+| `tests/nsfiles_render_outage.rs` | `DATABASE_URL` (its own binary: it installs namespace-file connect options that reach a closed port) | a database outage during a namespace lookup at render is egret's, not the author's |
+| `plugin-host` `EgretNamespaceTest` (11) | none: `mvn -f plugin-host/pom.xml verify`, Java 25 | the bridge's `Namespace` over staged files, the latest view, the refusals |
+
+**Not measured live, and stated so nobody infers it:**
+
+1. **NetworkPolicy was not enforced** (kindnet), as in W5b and W9a.
+2. **The frontend** was not built; the e2e drove the API only.
+3. **A large file through a pod on kind**: the e2e moved bytes; the 64 MiB and
+   multi-part cases are the gated S3 tests above.
+4. **No store or database outage was induced live**; the infrastructure-error
+   split rests on `nsfiles_render_outage` and the MemStore tests.
+5. **`WorkingDirectory`** does not run on egret, so its `namespaceFiles` was
+   only published, never staged.
+6. **The ratchet cannot judge any of this**, for the reason above.
+
+#### The release note
+
+The programme spec's W9b correction (§9) carries it; in short: the config key
+`workflow.storage.max_namespace_files` (10 000); migration **0174** (written as
+0169, renumbered at the rebase onto `edccf6c4`, before merge: a dev database
+that applied the branch's 0169 must reset with `just reset-testdata`, or delete
+`(169, 'workflow namespace files')` from `_sqlx_migrations`, drop
+`workflow.namespace_files` and `workflow.namespace_file_staging`, and drop
+`egret_test_template`); the staging table and its hourly sweep; publish refuses
+a namespace with a `_files` segment and a flow id `_files`; `namespaceFiles`
+publishes on script tasks; `WorkingDirectory.namespaceFiles` is validated at
+publish; nine API routes plus the export; the plugin host no longer exits 4 on
+`storage().namespace(..)`; `workflow.storage.prefix` over 200 bytes is refused
+at boot.
+
+#### The sweep: messages and docs that described W9b's absence
+
+Counted with `/usr/bin/grep` with file arguments at `c61868b9`, before this
+task edited anything.
+
+| # | population | examined | corrected |
+|---|---|---:|---:|
+| 1 | `-w W9b` in `crates/egret-workflow/src`, `plugin-host/src` and both programme specs | **163** lines (src 139, `plugin-host/src` 12, spec EN 6, VI 6) | **0** in code: every code line is a provenance tag or describes W9b as present (Tasks 2-10 updated each message they flipped). Per spec **5** of 6 lines, each with a dated note rather than a rewrite: §3 finding 4, the W9 row, the W5b correction's *"namespace files for W9b"*, the W9a release note's *"namespace files exit 4 naming W9b"* and the W9a correction's *"What is still not true: namespace files (W9b)"*; plus a new W9b correction. **Left**: the W9a correction's account of the split, which stays true |
+| 2 | `namespaceFiles` in `docs/`, `crates/egret-workflow/src`, `plugin-host/src` and this README, saying it is refused | **170** lines | **2**: the W5a spec's *"Refused at save … `namespaceFiles`"*, EN and VI (dated note). **Left**: the W9b spec's §1 table (the state at the base) and §7 (the change itself), the plan's task text, the code's doc comments (already dated by Task 5) |
+| 3 | `NO_NAMESPACE_FILES` | **8** lines (`ShimRunContext.java` 1, W9b spec EN 2, VI 2, plan 3) | **0**: the code line is the replacement's history comment; the spec lines are §1 (state at the base) and §10 (the change) |
+| 4 | (beside the brief's three) `-w W9b` in the W5b and W9a specs | **7** EN (W5b 3, W9a 4), **7** VI | **3** per language: the W5b spec's shim line and exit code 4, and the W9a spec's *"`fileURI` stays refused, now naming W9b"* (dated notes). **Left**: scope and out-of-scope lines that assign the work to W9b, which stay true |
+
 
 ### What this ratchet does **not** prove
 
