@@ -2594,6 +2594,40 @@ async fn a_task_runs_own_latest_revision_is_already_written_under_every_conflict
     assert_eq!(read_rev(&fs, &db, &g, "/r.txt", Want::Latest).await, "four");
 }
 
+/// Re-review m-1: the caller's future is dropped once the body is staged
+/// (paused at the staging -> revision copy, under the path's lock). The
+/// commit still runs to completion once released, and the staging object
+/// and its row are deleted with no sweep run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_put_whose_caller_goes_away_once_staged_leaves_no_staging_object_or_row() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let fs = Arc::new(fs);
+    let g = grant(ws, Access::Write);
+    let (copying, release_copy) = store.arm_copy_gate();
+    let caller = spawn_put(&db, &fs, &g, "/gone/x.txt", bytes("staged"));
+    copying.await.expect("the body is staged and being copied");
+    assert_eq!(staging_rows(&db, ws).await, 1);
+    assert_eq!(staging_objects(&store, &fs, ws).len(), 1);
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    let _ = release_copy.send(());
+    let cleaned = async {
+        while staging_rows(&db, ws).await != 0 || !staging_objects(&store, &fs, ws).is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), cleaned)
+        .await
+        .expect("a dropped put left its staging object or row for the sweep");
+    assert_eq!(rows_of(&db, ws, "/gone/x.txt").await, [(1, false)]);
+    assert_eq!(
+        read_rev(&fs, &db, &g, "/gone/x.txt", Want::Latest).await,
+        "staged"
+    );
+}
+
 /// Every way out of `put` deletes its staging object and its staging row:
 /// written, skipped, a conflict, over the cap, a body that fails, a copy
 /// that fails. A staging delete that fails leaves the row for the sweep.

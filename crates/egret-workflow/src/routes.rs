@@ -92,7 +92,7 @@ use crate::storage::multipart::{
 /// Moved to [`crate::storage::multipart`] (W9b Task 8); re-exported where
 /// W9a's tests and callers name them.
 pub use crate::storage::multipart::{
-    MAX_MULTIPART_HEADER_BYTES, MULTIPART_OVERHEAD_BYTES, UPLOAD_IDLE_TIMEOUT,
+    MAX_MULTIPART_HEADER_BYTES, MULTIPART_OVERHEAD_BYTES, UPLOAD_IDLE_TIMEOUT, UPLOAD_TOTAL_TIMEOUT,
 };
 use egret_workflow_api::WorkflowRefPort;
 
@@ -218,6 +218,11 @@ pub struct WorkflowState {
     /// [`UPLOAD_IDLE_TIMEOUT`] in production; a field so a test can drive the
     /// refusal in milliseconds (fix round 1, I-2).
     pub upload_idle_timeout: std::time::Duration,
+    /// W9b Task 8 re-review m-2: how long a namespace file upload's body may
+    /// take in all before the upload is refused with 408 --
+    /// [`UPLOAD_TOTAL_TIMEOUT`] (12 hours) in production; a field so a test
+    /// can drive the refusal in milliseconds.
+    pub upload_total_timeout: std::time::Duration,
 }
 
 impl FromRef<WorkflowState> for SessionService {

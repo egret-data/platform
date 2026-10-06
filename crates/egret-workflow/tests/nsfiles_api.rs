@@ -1343,6 +1343,49 @@ async fn a_stalled_upload_is_408_writes_nothing_and_leaves_the_path_writable() {
         .expect("the pool did not get its connections back");
 }
 
+/// A multipart upload body that hands over its headers, then one byte of the
+/// file every 20 ms, for ever: never idle, never done.
+fn trickling_body() -> axum::body::Body {
+    use futures_util::StreamExt as _;
+    let head = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"fileContent\"; \
+         filename=\"t.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+    );
+    let first = futures_util::stream::once(async move {
+        Ok::<_, std::io::Error>(axum::body::Bytes::from(head))
+    });
+    let trickle = futures_util::stream::repeat_with(|| ()).then(|()| async {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"t"))
+    });
+    axum::body::Body::from_stream(first.chain(trickle))
+}
+
+/// Re-review m-2: a body that keeps arriving but takes longer than the
+/// (injected, 300 ms) total timeout is refused 408 like an idle one; nothing
+/// is written and no staging row is left.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_over_its_total_time_is_408_and_writes_nothing() {
+    let Some(fx) = fx().await else { return };
+    let app = common::app_with_upload_total(&fx.db, std::time::Duration::from_millis(300)).await;
+    let before = fx.rows().await;
+    let uri = format!("{}?path=/total/x.txt", fx.base(NS));
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        common::send_body(&app, "POST", &uri, fx.user, &ct(), trickling_body()),
+    )
+    .await
+    .expect("the trickling upload was never refused");
+    let msg = refusal(res, 408).await;
+    assert!(
+        msg.contains("the request body took longer than 300 ms in all")
+            && msg.contains("nothing was stored"),
+        "{msg}"
+    );
+    assert_eq!(fx.rows().await, before, "a row was written");
+    assert_eq!(staging_rows(&fx).await, 0, "the staging row is left");
+}
+
 /// M-2: a soft-deleted directory is nothing there on every read route (404),
 /// where a live one is the wrong kind (400) on the download and `revisions`.
 #[tokio::test]

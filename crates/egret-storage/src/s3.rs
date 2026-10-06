@@ -521,6 +521,16 @@ mod tests {
             "b/workflow/ws/_nsfiles_staging/0a-Z.~_"
         );
         assert_eq!(copy_source("b", "a b/%+?#é"), "b/a%20b/%25%2B%3F%23%C3%A9");
+        // W9b Task 8 re-review m-3: `[`, `]` and `*`, which some encoders
+        // leave raw; multi-byte UTF-8 (Vietnamese, CJK, an emoji); and an
+        // already-encoded `%2F`, which must stay a literal `%2F` in the key
+        // (`%252F`), never become a `/`.
+        assert_eq!(copy_source("b", "x[1]*.txt"), "b/x%5B1%5D%2A.txt");
+        assert_eq!(
+            copy_source("b", "dữ liệu/日本😀"),
+            "b/d%E1%BB%AF%20li%E1%BB%87u/%E6%97%A5%E6%9C%AC%F0%9F%98%80"
+        );
+        assert_eq!(copy_source("b", "a%2Fb/c"), "b/a%252Fb/c");
     }
 
     #[test]

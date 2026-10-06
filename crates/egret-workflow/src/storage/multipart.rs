@@ -6,9 +6,10 @@
 //! Moved here unchanged from `routes.rs` (W9b Task 8): the body limit
 //! ([`multipart_body_limit`], `http_body_util::Limited`), the header budget
 //! ([`HeaderBudget`], [`MultipartGate`]) and the refusal that reads what the
-//! gate saw ([`multipart_refusal`]). [`IdleTimeout`] is W9b's: a namespace
-//! file upload holds the path's advisory lock and a pool connection for as
-//! long as its body takes to arrive, so a body that stops arriving ends it.
+//! gate saw ([`multipart_refusal`]). [`IdleTimeout`] and [`TotalTimeout`]
+//! are W9b's: a namespace file upload holds an object-store upload for as
+//! long as its body takes to arrive, so a body that stops arriving, or takes
+//! too long in all, ends it.
 
 use std::future::Future as _;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -213,9 +214,68 @@ pub(crate) fn is_multipart(headers: &axum::http::HeaderMap) -> bool {
 /// the user's ruling of 2026-10-06), so a stalled client holds no pool
 /// connection and no lock; this bounds the object-store upload it holds open
 /// instead. The body ends with an error, nothing is stored, and the answer is
-/// a 408. The total time is bounded by the body limit at this rate, not by a
-/// clock: a 1 GiB file on a slow link is legal.
+/// a 408. The total time is bounded separately, by [`UPLOAD_TOTAL_TIMEOUT`].
 pub const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The longest a namespace file upload's body may take in all, by default
+/// (`WorkflowState::upload_total_timeout`; re-review m-2, 2026-10-06). Idle
+/// bounding alone bounds no duration: one byte every 29 seconds never ends.
+/// Past it the body ends with an error, nothing is stored, and the answer is
+/// a 408, as for idleness. 12 hours is well under the staging sweep's
+/// 24 hours (`StagingSweepConfig::older_than`), so the sweep never takes a
+/// staging object a live upload is still writing; a 1 GiB file needs only
+/// about 25 KiB/s to arrive within it.
+pub const UPLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(12 * 3600);
+
+/// A body stream that fails once `total` has passed since it was built,
+/// whatever its pace, and says so in `timed_out` (so the route answers 408,
+/// not the store's 503).
+pub(crate) struct TotalTimeout<S> {
+    inner: std::pin::Pin<Box<S>>,
+    total: Duration,
+    deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+    timed_out: Arc<AtomicBool>,
+}
+
+impl<S> TotalTimeout<S> {
+    pub(crate) fn new(inner: S, total: Duration, timed_out: Arc<AtomicBool>) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            total,
+            deadline: Box::pin(tokio::time::sleep(total)),
+            timed_out,
+        }
+    }
+}
+
+impl<S> futures_util::Stream for TotalTimeout<S>
+where
+    S: futures_util::Stream<Item = std::result::Result<axum::body::Bytes, axum::Error>>,
+{
+    type Item = std::result::Result<axum::body::Bytes, axum::Error>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::task::Poll;
+        let this = self.get_mut();
+        if this.timed_out.load(Ordering::SeqCst) {
+            return Poll::Ready(None);
+        }
+        if this.deadline.as_mut().poll(cx).is_ready() {
+            this.timed_out.store(true, Ordering::SeqCst);
+            return Poll::Ready(Some(Err(axum::Error::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "the request body took longer than {} in all",
+                    idle_text(this.total)
+                ),
+            )))));
+        }
+        this.inner.as_mut().poll_next(cx)
+    }
+}
 
 /// A body stream that fails once `idle` passes with no chunk arriving, and
 /// says so in `timed_out` (so the route can answer 408, not the store's 503).
@@ -246,9 +306,11 @@ impl<S> IdleTimeout<S> {
     }
 }
 
-/// `idle` as the 408 says it: whole seconds, or milliseconds below one.
+/// `idle` as the 408 says it: whole hours, whole seconds, or milliseconds.
 pub(crate) fn idle_text(idle: Duration) -> String {
-    if idle >= Duration::from_secs(1) && idle.subsec_millis() == 0 {
+    if idle >= Duration::from_secs(3600) && idle.as_secs() % 3600 == 0 && idle.subsec_nanos() == 0 {
+        format!("{} hours", idle.as_secs() / 3600)
+    } else if idle >= Duration::from_secs(1) && idle.subsec_millis() == 0 {
         format!("{} seconds", idle.as_secs())
     } else {
         format!("{} ms", idle.as_millis())
@@ -365,10 +427,54 @@ mod tests {
         assert!(!flag.load(Ordering::SeqCst));
     }
 
+    /// Re-review m-2: a body that keeps arriving, never idle, still ends
+    /// once its total time passes, flagged; one that ends sooner does not.
+    #[tokio::test]
+    async fn a_body_that_keeps_trickling_ends_at_its_total_timeout() {
+        let total = Duration::from_millis(300);
+        let flag = Arc::new(AtomicBool::new(false));
+        let trickle = futures_util::stream::repeat_with(|| ()).then(|()| async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok::<_, axum::Error>(axum::body::Bytes::from_static(b"t"))
+        });
+        let mut s = TotalTimeout::new(trickle, total, flag.clone());
+        let started = std::time::Instant::now();
+        let mut chunks = 0;
+        let err = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match s.next().await.expect("the body never ends by itself") {
+                    Ok(_) => chunks += 1,
+                    Err(e) => return e,
+                }
+            }
+        })
+        .await
+        .expect("the total timeout fired");
+        assert!(err.to_string().contains("took longer than 300 ms"), "{err}");
+        assert!(started.elapsed() >= total);
+        assert!(chunks > 1, "{chunks}");
+        assert!(flag.load(Ordering::SeqCst));
+        assert!(s.next().await.is_none());
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let short = futures_util::stream::iter(0..3).then(|_| async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok::<_, axum::Error>(axum::body::Bytes::from_static(b"s"))
+        });
+        let got: Vec<_> = TotalTimeout::new(short, total, flag.clone())
+            .collect()
+            .await;
+        assert_eq!(got.len(), 3);
+        assert!(got.iter().all(Result::is_ok));
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
     #[test]
     fn the_idle_text_names_seconds_or_milliseconds() {
         assert_eq!(idle_text(Duration::from_secs(30)), "30 seconds");
         assert_eq!(idle_text(Duration::from_millis(300)), "300 ms");
         assert_eq!(idle_text(Duration::from_millis(1500)), "1500 ms");
+        assert_eq!(idle_text(UPLOAD_TOTAL_TIMEOUT), "12 hours");
+        assert_eq!(idle_text(Duration::from_secs(5400)), "5400 seconds");
     }
 }

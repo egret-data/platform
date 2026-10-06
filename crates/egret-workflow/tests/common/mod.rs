@@ -185,19 +185,44 @@ pub async fn app(db: &Db) -> App {
 /// [`app`], with the platform half of the W5a script-task gate
 /// (`plugin_configurations`, the default runner) set to `scripts`.
 pub async fn app_with_scripts(db: &Db, scripts: egret_workflow::scripts::ScriptSettings) -> App {
-    app_with(db, scripts, egret_workflow::routes::UPLOAD_IDLE_TIMEOUT).await
+    app_with(
+        db,
+        scripts,
+        egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+    )
+    .await
 }
 
 /// [`app`], with the namespace file upload's idle timeout set to `idle` (W9b
 /// Task 8 fix round 1, I-2: a test drives the 408 in milliseconds).
 pub async fn app_with_upload_idle(db: &Db, idle: std::time::Duration) -> App {
-    app_with(db, Default::default(), idle).await
+    app_with(
+        db,
+        Default::default(),
+        idle,
+        egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+    )
+    .await
+}
+
+/// [`app`], with the namespace file upload's total timeout set to `total`
+/// (W9b Task 8 re-review m-2: a test drives that 408 in milliseconds).
+pub async fn app_with_upload_total(db: &Db, total: std::time::Duration) -> App {
+    app_with(
+        db,
+        Default::default(),
+        egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        total,
+    )
+    .await
 }
 
 async fn app_with(
     db: &Db,
     scripts: egret_workflow::scripts::ScriptSettings,
     upload_idle_timeout: std::time::Duration,
+    upload_total_timeout: std::time::Duration,
 ) -> App {
     let sessions = egret_auth::session::SessionService::new(
         db.clone(),
@@ -226,6 +251,7 @@ async fn app_with(
         audit: audit_sink,
         scripts,
         upload_idle_timeout,
+        upload_total_timeout,
     };
     let router = axum::Router::new()
         .nest("/api", egret_workflow::management_router())
@@ -568,6 +594,7 @@ pub async fn webhook_app_with_guard(
         audit: egret_audit::AuditSink::new(16).0,
         scripts: Default::default(),
         upload_idle_timeout: egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        upload_total_timeout: egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
     };
     WebhookApp {
         router: axum::Router::new()

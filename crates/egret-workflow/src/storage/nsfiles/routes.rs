@@ -63,6 +63,7 @@ use super::{CreatedBy, NsError};
 use crate::routes::{refuse, WorkflowState, WF_MANAGE, WF_READ};
 use crate::storage::multipart::{
     idle_text, multipart_body_limit, multipart_refusal, HeaderBudget, IdleTimeout, MultipartGate,
+    TotalTimeout,
 };
 use crate::storage::routes::{download_headers, NamedErrors};
 use crate::storage::{Caps, FileStore};
@@ -662,19 +663,42 @@ fn upload_timed_out(idle_for: std::time::Duration) -> Response {
     )
 }
 
-/// A multipart failure, read through what the gates saw first: the idle
-/// timeout (408), the body limit (413, this route's message), then W9a's
-/// [`multipart_refusal`] (the header budget, the parser's own status).
-fn body_refusal(
-    idle: &AtomicBool,
+/// The 408 of a body that took longer than `total` in all (re-review m-2).
+fn upload_took_too_long(total: std::time::Duration) -> Response {
+    refuse(
+        StatusCode::REQUEST_TIMEOUT,
+        format!(
+            "the upload stopped: the request body took longer than {} in all; nothing was \
+             stored",
+            idle_text(total)
+        ),
+    )
+}
+
+/// The upload's two clocks and what each saw (re-review m-2): idleness and
+/// total duration, both answered 408.
+struct UploadClocks {
+    idle: Arc<AtomicBool>,
     idle_for: std::time::Duration,
+    over_total: Arc<AtomicBool>,
+    total: std::time::Duration,
+}
+
+/// A multipart failure, read through what the gates saw first: the idle or
+/// total timeout (408), the body limit (413, this route's message), then
+/// W9a's [`multipart_refusal`] (the header budget, the parser's own status).
+fn body_refusal(
+    clocks: &UploadClocks,
     gate: &MultipartGate,
     limit: usize,
     status: StatusCode,
     text: String,
 ) -> Response {
-    if idle.load(Ordering::SeqCst) {
-        return upload_timed_out(idle_for);
+    if clocks.over_total.load(Ordering::SeqCst) {
+        return upload_took_too_long(clocks.total);
+    }
+    if clocks.idle.load(Ordering::SeqCst) {
+        return upload_timed_out(clocks.idle_for);
     }
     if gate.body_limit.load(Ordering::SeqCst) {
         return upload_too_large(limit);
@@ -692,7 +716,7 @@ fn body_refusal(
         NsTargetQuery,
     ),
     request_body(
-        description = "`multipart/form-data` with one part, `fileContent` (at most `workflow.storage.max_file_bytes`; the body at most that + 1 MiB, each part's headers at most 64 KiB). The bytes become the next revision of `path` (a new path's revision 1; a soft-deleted path's next revision, live again). A `.zip` is stored as one file, never expanded; `/_flows` is refused (flows are published through the flow API). A body that stops arriving for 30 seconds ends the upload (408). **Build the body as a `FormData`** and let the browser set `multipart/form-data; boundary=…`.",
+        description = "`multipart/form-data` with one part, `fileContent` (at most `workflow.storage.max_file_bytes`; the body at most that + 1 MiB, each part's headers at most 64 KiB). The bytes become the next revision of `path` (a new path's revision 1; a soft-deleted path's next revision, live again). A `.zip` is stored as one file, never expanded; `/_flows` is refused (flows are published through the flow API). A body that stops arriving for 30 seconds, or takes longer than 12 hours in all, ends the upload (408). **Build the body as a `FormData`** and let the browser set `multipart/form-data; boundary=…`.",
         content((NsFileUploadForm = "multipart/form-data")),
     ),
     responses(
@@ -700,7 +724,7 @@ fn body_refusal(
         (status = 400, description = "A path rule (named), a refused namespace, `/_flows`, no `fileContent` part or another part before it (named), a malformed multipart body, or headers over the budget", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
-        (status = 408, description = "No byte of the body arrived for 30 seconds; nothing was stored and the path's lock was released.", body = egret_core::http::ErrorBody),
+        (status = 408, description = "No byte of the body arrived for 30 seconds, or the body took longer than 12 hours in all; nothing was stored.", body = egret_core::http::ErrorBody),
         (status = 409, description = "A directory is at `path`, a file is where one of its parent directories goes, or a soft-deleted entry of the other kind still holds history there (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route)", body = egret_core::http::ErrorBody),
         (status = 413, description = "The file is over `workflow.storage.max_file_bytes`, or the body over its limit (named)", body = egret_core::http::ErrorBody),
         (status = 415, description = "Not `multipart/form-data`", body = egret_core::http::ErrorBody),
@@ -736,15 +760,23 @@ pub(crate) async fn upload_namespace_file(
     // bypasses `Guarded`; no test can reach it, so none pins it (mutant d).
     let limit = multipart_body_limit(fs.caps);
     let gate = Arc::new(MultipartGate::default());
-    let idle = Arc::new(AtomicBool::new(false));
-    let idle_for = st.upload_idle_timeout;
+    let clocks = UploadClocks {
+        idle: Arc::new(AtomicBool::new(false)),
+        idle_for: st.upload_idle_timeout,
+        over_total: Arc::new(AtomicBool::new(false)),
+        total: st.upload_total_timeout,
+    };
     let req = req.map(|b| {
         let limited = axum::body::Body::new(http_body_util::Limited::new(b, limit));
         axum::body::Body::from_stream(HeaderBudget {
-            inner: Box::pin(IdleTimeout::new(
-                limited.into_data_stream(),
-                idle_for,
-                idle.clone(),
+            inner: Box::pin(TotalTimeout::new(
+                IdleTimeout::new(
+                    limited.into_data_stream(),
+                    clocks.idle_for,
+                    clocks.idle.clone(),
+                ),
+                clocks.total,
+                clocks.over_total.clone(),
             )),
             pending: axum::body::Bytes::new(),
             gate: gate.clone(),
@@ -758,7 +790,7 @@ pub(crate) async fn upload_namespace_file(
     let next = multipart.next_field().await;
     gate.end_headers();
     let field = next
-        .map_err(|e| body_refusal(&idle, idle_for, &gate, limit, e.status(), e.body_text()))?
+        .map_err(|e| body_refusal(&clocks, &gate, limit, e.status(), e.body_text()))?
         .ok_or_else(|| {
             bad_request(format!(
                 "the multipart body has no part `{FILE_PART}`: it carries the file"
@@ -800,8 +832,7 @@ pub(crate) async fn upload_namespace_file(
             // The body's own failure is the request's, not the store's.
             if let Some(text) = first_error.lock().expect("body error slot").take() {
                 return Err(body_refusal(
-                    &idle,
-                    idle_for,
+                    &clocks,
                     &gate,
                     limit,
                     StatusCode::BAD_REQUEST,

@@ -987,7 +987,9 @@ pub fn namespace_file_cap(caps: &crate::storage::Caps) -> (u64, &'static str) {
 ///    staged size) -> insert the row -> insert missing parent directory rows
 ///    -> commit.
 /// 3. The staging object and its row are deleted, whatever happened
-///    (best-effort; the staging sweep takes what is left).
+///    (best-effort; the staging sweep takes what is left). Steps 2 and 3 run
+///    on a detached task ([`detached`]): once the body is staged, dropping
+///    the caller's future no longer leaves a staged object behind.
 ///
 /// A row of the other kind, or a file where a parent goes, is `Conflict` when
 /// it is live or still holds history: a write never purges history
@@ -1015,12 +1017,29 @@ pub async fn put(
         )));
     }
     let staged = super::staging::record(pool, fs, grant.workspace()).await?;
-    let result = match stage_body(fs, grant, path, body, &staged.uri).await {
-        Ok(size) => commit_staged(pool, fs, grant, path, &staged.uri, size, conflict, by).await,
-        Err(e) => Err(e),
+    let size = match stage_body(fs, grant, path, body, &staged.uri).await {
+        Ok(size) => size,
+        Err(e) => {
+            super::staging::forget(pool, fs, &staged).await;
+            return Err(e);
+        }
     };
-    super::staging::forget(pool, fs, &staged).await;
-    result
+    // The body is staged (re-review m-1, 2026-10-06): the commit and the
+    // staging object's deletion run on a detached task, as `move_path` does,
+    // so a caller whose future is dropped from here on (a client that goes
+    // away, a task timeout) still gets its write committed or refused and its
+    // staging object and row deleted; only the answer is lost. A future
+    // dropped while the body is still being read leaves at most the row (an
+    // S3 multipart upload is aborted on drop) and whatever the last
+    // single-request upload landed, which the staging sweep takes.
+    let (pool, fs, grant, path) = (pool.clone(), fs.clone(), grant.clone(), path.clone());
+    detached("write", async move {
+        let result =
+            commit_staged(&pool, &fs, &grant, &path, &staged.uri, size, conflict, by).await;
+        super::staging::forget(&pool, &fs, &staged).await;
+        result
+    })
+    .await
 }
 
 /// Step 1 of [`put`]: `body` to the staging object under the cap; its size.

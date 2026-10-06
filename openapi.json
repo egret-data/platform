@@ -29245,7 +29245,7 @@
           }
         ],
         "requestBody": {
-          "description": "`multipart/form-data` with one part, `fileContent` (at most `workflow.storage.max_file_bytes`; the body at most that + 1 MiB, each part's headers at most 64 KiB). The bytes become the next revision of `path` (a new path's revision 1; a soft-deleted path's next revision, live again). A `.zip` is stored as one file, never expanded; `/_flows` is refused (flows are published through the flow API). A body that stops arriving for 30 seconds ends the upload (408). **Build the body as a `FormData`** and let the browser set `multipart/form-data; boundary=…`.",
+          "description": "`multipart/form-data` with one part, `fileContent` (at most `workflow.storage.max_file_bytes`; the body at most that + 1 MiB, each part's headers at most 64 KiB). The bytes become the next revision of `path` (a new path's revision 1; a soft-deleted path's next revision, live again). A `.zip` is stored as one file, never expanded; `/_flows` is refused (flows are published through the flow API). A body that stops arriving for 30 seconds, or takes longer than 12 hours in all, ends the upload (408). **Build the body as a `FormData`** and let the browser set `multipart/form-data; boundary=…`.",
           "content": {
             "multipart/form-data": {
               "schema": {
@@ -29290,7 +29290,7 @@
             }
           },
           "408": {
-            "description": "No byte of the body arrived for 30 seconds; nothing was stored and the path's lock was released.",
+            "description": "No byte of the body arrived for 30 seconds, or the body took longer than 12 hours in all; nothing was stored.",
             "content": {
               "application/json": {
                 "schema": {

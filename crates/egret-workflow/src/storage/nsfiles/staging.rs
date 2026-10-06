@@ -17,8 +17,11 @@
 //! Every staging object has a row in `workflow.namespace_file_staging`,
 //! written BEFORE its upload starts ([`record`]) and deleted only AFTER its
 //! object is ([`forget`]). `put` forgets its staging object on every way out
-//! it returns from; a process that dies in between (or a caller's future
-//! dropped mid-way) leaves the row, and [`sweep`] -- run hourly by
+//! it returns from, and once the body is staged its commit and its forget
+//! run on a detached task, so a caller's future dropped then still forgets
+//! (re-review m-1, 2026-10-06). A process that dies in between, or a
+//! caller's future dropped while the body is still being read, leaves the
+//! row, and [`sweep`] -- run hourly by
 //! [`spawn_staging_sweeper`] -- deletes every staging object whose row is
 //! older than [`StagingSweepConfig::older_than`] (24 hours), then its row.
 //! The age is the database's clock on both sides, never the store's
@@ -100,9 +103,14 @@ pub fn is_staging_uri(fs: &FileStore, workspace: Uuid, id: Uuid, uri: &str) -> b
 pub struct StagingSweepConfig {
     /// Between passes.
     pub every: Duration,
-    /// A staging row older than this is an orphan: no `put` takes that long
-    /// between its upload and its commit (its body is idle-bounded and its
-    /// transaction server-paced).
+    /// A staging row older than this is an orphan. What makes that true
+    /// (re-review m-2, 2026-10-06): an API upload's body is bounded in TOTAL
+    /// duration, not only in idleness, by
+    /// [`UPLOAD_TOTAL_TIMEOUT`](crate::storage::multipart::UPLOAD_TOTAL_TIMEOUT)
+    /// (12 hours, a 408 past it); every other caller's body is internal
+    /// storage, read at the server's pace; and the commit after it is one
+    /// short, server-paced transaction. So a live `put`'s row is under
+    /// 12 hours old plus that transaction, below this 24 hours.
     pub older_than: Duration,
     /// Rows per query.
     pub batch: i64,

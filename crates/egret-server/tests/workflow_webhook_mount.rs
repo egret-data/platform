@@ -124,6 +124,7 @@ fn composed_app_with_workflow() -> axum::Router {
         audit: egret_audit::AuditSink::new(16).0,
         scripts: Default::default(),
         upload_idle_timeout: egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        upload_total_timeout: egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
     };
     build_router(
         AppState::without_db()
@@ -156,6 +157,7 @@ fn composed_app_with_workflow_webhooks_off() -> axum::Router {
         audit: egret_audit::AuditSink::new(16).0,
         scripts: Default::default(),
         upload_idle_timeout: egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        upload_total_timeout: egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
     };
     build_router(AppState::without_db().with_workflow(state))
 }
