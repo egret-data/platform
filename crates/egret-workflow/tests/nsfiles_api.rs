@@ -40,6 +40,19 @@ struct Faulty(egret_storage::MemStore);
 /// test, the only one that uses it).
 static GONE_OPENS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Opens under `w9b.stall`, which never answer, and how many of those were
+/// dropped (Task 9 fix round 1, M-3: the export's writer is aborted).
+static STALL_OPENS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static STALL_DROPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+struct CountsDrop;
+
+impl Drop for CountsDrop {
+    fn drop(&mut self) {
+        STALL_DROPPED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 fn in_outage(uri: &str) -> bool {
     uri.contains("/w9b/outage/")
 }
@@ -96,6 +109,12 @@ impl ObjectStore for Faulty {
         }
         if uri.contains("/w9b/gone/") {
             GONE_OPENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        if uri.contains("/w9b/stall/") {
+            // An open that never answers; the guard counts its future's drop.
+            STALL_OPENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _dropped = CountsDrop;
+            std::future::pending::<()>().await;
         }
         self.0.get_stream(uri).await
     }
@@ -1490,16 +1509,49 @@ async fn query_refusals_are_error_bodies_and_write_answers_have_no_content() {
 
 // ─── Export (Task 9) ────────────────────────────────────────────────────────
 
-/// Python's `zipfile` reading of an archive: `testzip()` (every CRC), then
-/// each entry's name and bytes; `None` (printed) without python3. The
-/// independent reader: no egret code parses the archive.
-fn python_entries(zip: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
-    if std::process::Command::new("python3")
-        .arg("--version")
+/// Is `bin` on PATH? Without it a reader's check is skipped and says so;
+/// with `CI` set it fails instead (fix round 1, M-2).
+fn have(bin: &str) -> bool {
+    let arg = if bin == "java" {
+        "-version"
+    } else {
+        "--version"
+    };
+    let found = std::process::Command::new(bin)
+        .arg(arg)
         .output()
-        .is_err()
-    {
-        eprintln!("SKIP python3: not found");
+        .is_ok_and(|o| o.status.success());
+    if !found {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{bin} is not on PATH and CI is set: the export's independent reader is missing"
+        );
+        eprintln!("SKIP {bin}: not found");
+    }
+    found
+}
+
+/// Java's `java.util.zip.ZipInputStream`, the class Kestra expands an
+/// uploaded `.zip` with (fix round 1, I-2), streaming every entry from the
+/// front: name and bytes (hex).
+const JAVA_READ: &str = r#"
+import java.io.*; import java.util.HexFormat; import java.util.zip.*;
+public class W9bExportRead { public static void main(String[] a) throws Exception {
+  try (ZipInputStream z = new ZipInputStream(new BufferedInputStream(new FileInputStream(a[0])))) {
+    ZipEntry e;
+    while ((e = z.getNextEntry()) != null) {
+      System.out.println(e.getName() + "\t" + HexFormat.of().formatHex(z.readAllBytes()));
+    }
+  }
+}}
+"#;
+
+/// The export's entries as Python's `zipfile` reads them (`testzip()`: every
+/// CRC), which Java's `ZipInputStream` must read identically, in order;
+/// `None` (printed) without python3. The independent readers: no egret code
+/// parses the archive.
+fn python_entries(zip: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
+    if !have("python3") {
         return None;
     }
     let p = std::env::temp_dir().join(format!("w9b-t9-api-{}.zip", Uuid::new_v4()));
@@ -1515,18 +1567,45 @@ fn python_entries(zip: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
         .arg(&p)
         .output()
         .unwrap();
-    let _ = std::fs::remove_file(&p);
     assert!(
         o.status.success(),
         "python's zipfile refused the export: {}",
         String::from_utf8_lossy(&o.stderr)
     );
     let v: Vec<(String, String)> = serde_json::from_slice(&o.stdout).unwrap();
-    Some(
-        v.into_iter()
-            .map(|(n, h)| (n, hex::decode(h).unwrap()))
-            .collect(),
-    )
+    let python: Vec<(String, Vec<u8>)> = v
+        .into_iter()
+        .map(|(n, h)| (n, hex::decode(h).unwrap()))
+        .collect();
+    if have("java") {
+        let dir = std::env::temp_dir().join(format!("w9b-t9-java-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("W9bExportRead.java");
+        std::fs::write(&src, JAVA_READ).unwrap();
+        let o = std::process::Command::new("java")
+            .arg("-Dstdout.encoding=UTF-8")
+            .arg(&src)
+            .arg(&p)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            o.status.success(),
+            "java.util.zip.ZipInputStream refused the export: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        let java: Vec<(String, Vec<u8>)> = String::from_utf8(o.stdout)
+            .unwrap()
+            .lines()
+            .map(|l| {
+                let (n, h) = l.split_once('\t').unwrap();
+                (n.to_string(), hex::decode(h).unwrap())
+            })
+            .collect();
+        assert_eq!(java, python, "Java's ZipInputStream read another archive");
+    }
+    let _ = std::fs::remove_file(&p);
+    Some(python)
 }
 
 impl Fx {
@@ -1594,7 +1673,13 @@ async fn export_streams_the_latest_live_files_only() {
     let kestra = route("export");
     let want = kestra["headers"]["content-disposition"].as_str().unwrap();
     assert!(disposition.starts_with(want), "{disposition} / {want}");
+    let declared: usize = h["content-length"].to_str().unwrap().parse().unwrap();
     let body = drain(res).await.expect("the export ended cleanly");
+    assert_eq!(
+        body.len(),
+        declared,
+        "Content-Length is the archive's length"
+    );
     let Some(mut got) = python_entries(&body) else {
         return;
     };
@@ -1684,7 +1769,9 @@ async fn export_past_max_namespace_files_is_refused_before_a_byte_is_sent() {
     assert_eq!(res.headers()["content-type"], "application/json");
     let msg = refusal(res, 413).await;
     assert!(
-        msg.contains("max_namespace_files") && msg.contains(&MAX_FILES.to_string()),
+        msg.contains("max_namespace_files")
+            && msg.contains(&MAX_FILES.to_string())
+            && msg.contains("entries (files and directories)"),
         "{msg}"
     );
 
@@ -1728,8 +1815,18 @@ async fn an_export_that_fails_mid_body_ends_the_body_with_an_error() {
         set_size(size).await.unwrap();
         let res = fx.export(NS).await;
         assert_eq!(res.status(), 200);
+        let declared: usize = res.headers()["content-length"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
         let got = drain(res).await;
         let partial = got.expect_err(&format!("row size {size}: the body ended cleanly"));
+        assert!(
+            partial.len() < declared,
+            "row size {size}: {} of {declared} declared bytes",
+            partial.len()
+        );
         assert!(
             partial.windows(5).any(|w| w == b"first"),
             "row size {size}: the first entry streamed before the failure"
@@ -1808,9 +1905,86 @@ async fn an_export_whose_client_goes_away_stops_opening_files() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let later = GONE_OPENS.load(SeqCst) - before;
     assert_eq!(after_drop, later, "the export kept opening files");
-    assert!(later < 6, "every file was opened: {later}");
-    // Control: read to the end, all six are opened.
+    assert!(later < 12, "every file was opened: {later}");
+    // Control: read to the end, all six are opened twice (two passes).
     let before = GONE_OPENS.load(SeqCst);
     drain(fx.export(GONE).await).await.expect("clean");
-    assert_eq!(GONE_OPENS.load(SeqCst) - before, 6);
+    assert_eq!(GONE_OPENS.load(SeqCst) - before, 12);
+}
+
+/// M-3: a client that goes away while the writer waits on the store (an open
+/// that never answers) aborts the writer: the open's future is dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_writer_waiting_on_the_store_is_aborted_when_the_client_goes_away() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let Some(fx) = fx().await else { return };
+    const STALL: &str = "w9b.stall";
+    fx.ok_upload(STALL, "/s.txt", b"stalls").await;
+    let (opens, dropped) = (STALL_OPENS.load(SeqCst), STALL_DROPPED.load(SeqCst));
+    let res = fx.export(STALL).await;
+    assert_eq!(res.status(), 200);
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while STALL_OPENS.load(SeqCst) == opens {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(waited.is_ok(), "the writer never opened the file");
+    assert_eq!(
+        STALL_DROPPED.load(SeqCst),
+        dropped,
+        "control: still waiting"
+    );
+    drop(res);
+    let aborted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while STALL_DROPPED.load(SeqCst) == dropped {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        aborted.is_ok(),
+        "the writer still waits on the store after its client went away"
+    );
+}
+
+/// M-5: a path whose first segment a Windows extractor reads as a drive
+/// cannot be an entry: the export is refused before any byte, naming it.
+#[tokio::test]
+async fn a_drive_letter_path_refuses_the_export_naming_it() {
+    let Some(fx) = fx().await else { return };
+    fx.ok_upload(NS, "/fine.txt", b"ok").await;
+    drain(fx.export(NS).await).await.expect("control");
+    fx.ok_upload(NS, "/C:/x.txt", b"drive").await;
+    let msg = refusal(fx.export(NS).await, 400).await;
+    assert!(msg.contains("/C:/x.txt") && msg.contains("drive"), "{msg}");
+}
+
+/// M-7: the response body is bounded in total time (injected 300 ms here,
+/// 12 hours in production): a client that does not read is cut off short of
+/// the declared length, with an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_export_past_its_total_time_ends_short_with_an_error() {
+    let Some(mut fx) = fx().await else { return };
+    let big = vec![b't'; 60 * 1024];
+    fx.ok_upload(NS, "/t1.bin", &big).await;
+    fx.ok_upload(NS, "/t2.bin", &big).await;
+    // Control on the default app: a slow start is no failure.
+    let res = fx.export(NS).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    drain(res).await.expect("the 12-hour bound is far away");
+
+    fx.app = common::app_with_export_total(&fx.db, std::time::Duration::from_millis(300)).await;
+    let res = fx.export(NS).await;
+    assert_eq!(res.status(), 200);
+    let declared: usize = res.headers()["content-length"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let partial = drain(res)
+        .await
+        .expect_err("the body ended cleanly past its total time");
+    assert!(partial.len() < declared, "{} of {declared}", partial.len());
 }

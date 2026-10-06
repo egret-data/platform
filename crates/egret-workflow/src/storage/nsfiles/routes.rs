@@ -645,9 +645,12 @@ fn export_stopped(namespace: &str, path: Option<&str>, e: &std::io::Error) {
 }
 
 /// The writer's half of the export: every listed file, in the listing's
-/// order, each read through [`zip::ZipWriter::add_sized`] against its row's
-/// size, then the central directory. Holds no database connection: the rows
-/// were fetched before it was spawned.
+/// order, read twice (the user's ruling, 2026-10-06, fix round 1 I-2): once
+/// through [`zip::ZipWriter::checksum`] (its CRC, its length held to its
+/// row's size), then through [`zip::ZipWriter::add`], whose local header
+/// carries that CRC and size, which the second read must match. Then the
+/// central directory. Holds no database connection: the rows were fetched
+/// before it was spawned.
 async fn write_export(
     fs: Arc<FileStore>,
     grant: Grant,
@@ -658,10 +661,17 @@ async fn write_export(
     let mut w = zip::ZipWriter::new(out);
     for e in &files {
         let fail = |err: std::io::Error| export_stopped(&ns, Some(e.path.as_str()), &err);
-        let mut body = store::open(&fs, &grant, e)
+        let open = || async {
+            store::open(&fs, &grant, e)
+                .await
+                .map_err(|err| fail(std::io::Error::other(err.to_string())))
+        };
+        let name = export_name(e);
+        let crc = w
+            .checksum(name, &mut open().await?, e.size)
             .await
-            .map_err(|err| fail(std::io::Error::other(err.to_string())))?;
-        w.add_sized(export_name(e), &mut body, e.created_at, e.size)
+            .map_err(fail)?;
+        w.add(name, &mut open().await?, e.created_at, e.size, crc)
             .await
             .map_err(fail)?;
     }
@@ -675,7 +685,8 @@ async fn write_export(
 }
 
 /// The writer's task, aborted when the body is dropped (the client went
-/// away): nothing reads the duplex any more, so nothing more is opened.
+/// away, or the total time passed): a writer waiting on the store (an open
+/// or a read) stops there, not at its next write.
 struct AbortOnDrop(tokio::task::JoinHandle<Result<(), ()>>);
 
 impl Drop for AbortOnDrop {
@@ -684,30 +695,40 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// The body: the duplex's bytes, then the writer's verdict. A writer that
-/// failed ends the body with an error, so the response is aborted (no final
-/// chunk) and a client sees a broken download, never a short archive that
-/// ends cleanly.
-fn export_body(rx: tokio::io::DuplexStream, writer: AbortOnDrop) -> axum::body::Body {
+/// The body: the duplex's bytes, then the writer's verdict, all within
+/// `total` (fix round 1, M-7: Task 8's 12-hour bound, [`TotalTimeout`]). A
+/// writer that failed, or a body past its total time, ends the body with an
+/// error, short of its `Content-Length`: the response is aborted and a
+/// client sees a broken download on every HTTP version.
+fn export_body(
+    rx: tokio::io::DuplexStream,
+    writer: AbortOnDrop,
+    total: std::time::Duration,
+) -> axum::body::Body {
     use futures_util::StreamExt as _;
     let state = Some((tokio_util::io::ReaderStream::new(rx), writer));
-    axum::body::Body::from_stream(futures_util::stream::unfold(state, |state| async move {
+    let stream = futures_util::stream::unfold(state, |state| async move {
         let (mut bytes, mut writer) = state?;
         match bytes.next().await {
             Some(Ok(chunk)) => Some((Ok(chunk), Some((bytes, writer)))),
-            Some(Err(e)) => Some((Err(e), None)),
+            Some(Err(e)) => Some((Err(axum::Error::new(e)), None)),
             None => match (&mut writer.0).await {
                 Ok(Ok(())) => None,
                 _ => Some((
-                    Err(std::io::Error::other(
+                    Err(axum::Error::new(std::io::Error::other(
                         "the namespace export stopped before its end; the archive is \
-                             incomplete",
-                    )),
+                         incomplete",
+                    ))),
                     None,
                 )),
             },
         }
-    }))
+    });
+    axum::body::Body::from_stream(TotalTimeout::new(
+        stream,
+        total,
+        Arc::new(AtomicBool::new(false)),
+    ))
 }
 
 #[utoipa::path(
@@ -719,11 +740,11 @@ fn export_body(rx: tokio::io::DuplexStream, writer: AbortOnDrop) -> axum::body::
         ("namespace" = String, Path, description = "The namespace"),
     ),
     responses(
-        (status = 200, description = "A zip archive of the latest live revision of every FILE of the namespace (no directory entry, no flow, no soft-deleted file), each named by its path without the leading `/`; stored (not compressed), streamed as it is read from internal storage, ZIP64 where a size, an offset or the count needs it. `Content-Type: application/zip`, `Content-Disposition: attachment; filename=\"{namespace}_files.zip\"`, `X-Content-Type-Options: nosniff`. A failure once the body has started (internal storage, or an object that is not its recorded size) aborts the response: the download is broken, never a shorter archive.", content_type = "application/zip", body = Vec<u8>),
-        (status = 400, description = "A refused namespace", body = egret_core::http::ErrorBody),
+        (status = 200, description = "A zip archive of the latest live revision of every FILE of the namespace (no directory entry, no flow, no soft-deleted file), each named by its path without the leading `/`; stored (not compressed), each file read twice (once for its CRC, once into the archive) so every local header carries its CRC and sizes (no data descriptor; Java's `ZipInputStream`, Kestra's import, reads it), ZIP64 where a size, an offset or the count needs it. `Content-Type: application/zip`, `Content-Length` (the archive's exact length, known before the first byte), `Content-Disposition: attachment; filename=\"{namespace}_files.zip\"`, `X-Content-Type-Options: nosniff`. A failure once the body has started (internal storage, an object that is not its recorded size or that changed between its two reads, or 12 hours passed) aborts the response short of its `Content-Length`.", content_type = "application/zip", body = Vec<u8>),
+        (status = 400, description = "A refused namespace, or a file whose path cannot be a zip entry name (its first segment looks like a Windows drive, `C:`; named)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
-        (status = 413, description = "Refused before any byte is sent: the namespace holds more entries than one answer may hold (`workflow.storage.max_namespace_files`, named), or its files hold more bytes in all than one export may read (`workflow.storage.max_task_bytes`, named).", body = egret_core::http::ErrorBody),
+        (status = 413, description = "Refused before any byte is sent: the namespace holds more entries (files and directories) than one export may hold (`workflow.storage.max_namespace_files`, named), or its files hold more bytes in all than one export may read (`workflow.storage.max_task_bytes`, named).", body = egret_core::http::ErrorBody),
         (status = 503, description = "Internal storage or the database is unavailable or not configured; the request can be retried.", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -734,11 +755,21 @@ pub(crate) async fn export_namespace_files(
 ) -> Result<Response, Response> {
     let grant = grant(&st, &ctx, &namespace, Access::Read).await?;
     let fs = crate::storage::current().ok_or_else(no_store)?;
+    let cap = fs.caps.max_namespace_files;
     let files: Vec<NsEntry> = {
         let mut c = conn(&st).await?;
-        store::list_live(&mut c, &grant, None, true, fs.caps.max_namespace_files)
+        store::list_live(&mut c, &grant, None, true, cap)
             .await
-            .map_err(ns_refusal)?
+            .map_err(|e| match e {
+                // The cap counts the listing's entries, directories too
+                // (fix round 1, M-6).
+                NsError::TooLarge(_) => ns_refusal(NsError::TooLarge(format!(
+                    "namespace '{}' holds more than {cap} entries (files and directories), the \
+                     most one export may hold (workflow.storage.max_namespace_files)",
+                    grant.namespace()
+                ))),
+                other => ns_refusal(other),
+            })?
             .into_iter()
             .filter(|e| !e.is_directory)
             .collect()
@@ -747,22 +778,40 @@ pub(crate) async fn export_namespace_files(
     // The bytes one export may read: the rows' sizes, summed before the
     // status line; each object is then held to its row's size as it streams.
     let total = files.iter().fold(0u64, |t, e| t.saturating_add(e.size));
-    let cap = fs.caps.max_task_bytes;
-    if total > cap {
+    let max_bytes = fs.caps.max_task_bytes;
+    if total > max_bytes {
         return Err(ns_refusal(NsError::TooLarge(format!(
-            "namespace '{}' holds {total} bytes of files, more than one export may read: {cap} \
-             bytes (workflow.storage.max_task_bytes)",
+            "namespace '{}' holds {total} bytes of files, more than one export may read: \
+             {max_bytes} bytes (workflow.storage.max_task_bytes)",
             grant.namespace()
         ))));
     }
+    // Every name is checked before the status line (M-5): a path the zip
+    // rule refuses fails the export naming it, never mid-body.
+    if let Some((e, why)) = files
+        .iter()
+        .find_map(|e| zip::check_name(export_name(e)).err().map(|why| (e, why)))
+    {
+        return Err(bad_request(format!(
+            "namespace file '{}' in namespace '{}' cannot be exported: {why}",
+            e.path,
+            grant.namespace()
+        )));
+    }
+    let length = zip::archive_len(
+        files.iter().map(|e| (export_name(e).len(), e.size)),
+        zip::Limits::APPNOTE,
+    );
     let (tx, rx) = tokio::io::duplex(zip::COPY_BUF);
     let writer = AbortOnDrop(tokio::spawn(write_export(fs, grant.clone(), files, tx)));
-    let mut res = Response::new(export_body(rx, writer));
+    let mut res = Response::new(export_body(rx, writer, st.export_total_timeout));
     download_headers(&mut res, &format!("{}_files.zip", grant.namespace()))?;
-    res.headers_mut().insert(
+    let h = res.headers_mut();
+    h.insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/zip"),
     );
+    h.insert(axum::http::header::CONTENT_LENGTH, length.into());
     Ok(res)
 }
 

@@ -2254,6 +2254,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         },
         upload_idle_timeout: egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
         upload_total_timeout: egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        export_total_timeout: egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
     });
 
     // Data Apps query gateway (`POST /api/apps/query`). Same query engine `Arc`,

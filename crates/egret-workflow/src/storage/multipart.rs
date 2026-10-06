@@ -227,6 +227,14 @@ pub const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// about 25 KiB/s to arrive within it.
 pub const UPLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(12 * 3600);
 
+/// The longest a namespace export's response body may take in all (W9b
+/// Task 9 fix round 1, M-7; `WorkflowState::export_total_timeout`): the
+/// upload's bound, applied to the response with [`TotalTimeout`]. A client
+/// that holds the connection and reads slowly or not at all holds an open
+/// store read; past it the body ends with an error, short of its
+/// `Content-Length`.
+pub const EXPORT_TOTAL_TIMEOUT: Duration = UPLOAD_TOTAL_TIMEOUT;
+
 /// A body stream that fails once `total` has passed since it was built,
 /// whatever its pace, and says so in `timed_out` (so the route answers 408,
 /// not the store's 503).

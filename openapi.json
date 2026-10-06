@@ -29684,7 +29684,7 @@
         ],
         "responses": {
           "200": {
-            "description": "A zip archive of the latest live revision of every FILE of the namespace (no directory entry, no flow, no soft-deleted file), each named by its path without the leading `/`; stored (not compressed), streamed as it is read from internal storage, ZIP64 where a size, an offset or the count needs it. `Content-Type: application/zip`, `Content-Disposition: attachment; filename=\"{namespace}_files.zip\"`, `X-Content-Type-Options: nosniff`. A failure once the body has started (internal storage, or an object that is not its recorded size) aborts the response: the download is broken, never a shorter archive.",
+            "description": "A zip archive of the latest live revision of every FILE of the namespace (no directory entry, no flow, no soft-deleted file), each named by its path without the leading `/`; stored (not compressed), each file read twice (once for its CRC, once into the archive) so every local header carries its CRC and sizes (no data descriptor; Java's `ZipInputStream`, Kestra's import, reads it), ZIP64 where a size, an offset or the count needs it. `Content-Type: application/zip`, `Content-Length` (the archive's exact length, known before the first byte), `Content-Disposition: attachment; filename=\"{namespace}_files.zip\"`, `X-Content-Type-Options: nosniff`. A failure once the body has started (internal storage, an object that is not its recorded size or that changed between its two reads, or 12 hours passed) aborts the response short of its `Content-Length`.",
             "content": {
               "application/zip": {
                 "schema": {
@@ -29699,7 +29699,7 @@
             }
           },
           "400": {
-            "description": "A refused namespace",
+            "description": "A refused namespace, or a file whose path cannot be a zip entry name (its first segment looks like a Windows drive, `C:`; named)",
             "content": {
               "application/json": {
                 "schema": {
@@ -29729,7 +29729,7 @@
             }
           },
           "413": {
-            "description": "Refused before any byte is sent: the namespace holds more entries than one answer may hold (`workflow.storage.max_namespace_files`, named), or its files hold more bytes in all than one export may read (`workflow.storage.max_task_bytes`, named).",
+            "description": "Refused before any byte is sent: the namespace holds more entries (files and directories) than one export may hold (`workflow.storage.max_namespace_files`, named), or its files hold more bytes in all than one export may read (`workflow.storage.max_task_bytes`, named).",
             "content": {
               "application/json": {
                 "schema": {

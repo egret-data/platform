@@ -92,7 +92,8 @@ use crate::storage::multipart::{
 /// Moved to [`crate::storage::multipart`] (W9b Task 8); re-exported where
 /// W9a's tests and callers name them.
 pub use crate::storage::multipart::{
-    MAX_MULTIPART_HEADER_BYTES, MULTIPART_OVERHEAD_BYTES, UPLOAD_IDLE_TIMEOUT, UPLOAD_TOTAL_TIMEOUT,
+    EXPORT_TOTAL_TIMEOUT, MAX_MULTIPART_HEADER_BYTES, MULTIPART_OVERHEAD_BYTES,
+    UPLOAD_IDLE_TIMEOUT, UPLOAD_TOTAL_TIMEOUT,
 };
 use egret_workflow_api::WorkflowRefPort;
 
@@ -223,6 +224,11 @@ pub struct WorkflowState {
     /// [`UPLOAD_TOTAL_TIMEOUT`] (12 hours) in production; a field so a test
     /// can drive the refusal in milliseconds.
     pub upload_total_timeout: std::time::Duration,
+    /// W9b Task 9 fix round 1, M-7: how long a namespace export's response
+    /// body may take in all before it is aborted -- [`EXPORT_TOTAL_TIMEOUT`]
+    /// (12 hours) in production; a field so a test can drive it in
+    /// milliseconds.
+    pub export_total_timeout: std::time::Duration,
 }
 
 impl FromRef<WorkflowState> for SessionService {

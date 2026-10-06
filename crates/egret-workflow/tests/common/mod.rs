@@ -190,6 +190,7 @@ pub async fn app_with_scripts(db: &Db, scripts: egret_workflow::scripts::ScriptS
         scripts,
         egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
         egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
     )
     .await
 }
@@ -202,6 +203,7 @@ pub async fn app_with_upload_idle(db: &Db, idle: std::time::Duration) -> App {
         Default::default(),
         idle,
         egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
     )
     .await
 }
@@ -214,6 +216,20 @@ pub async fn app_with_upload_total(db: &Db, total: std::time::Duration) -> App {
         Default::default(),
         egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
         total,
+        egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
+    )
+    .await
+}
+
+/// [`app`] with a namespace export's total time bound set to `total` (W9b
+/// Task 9 fix round 1, M-7).
+pub async fn app_with_export_total(db: &Db, total: std::time::Duration) -> App {
+    app_with(
+        db,
+        Default::default(),
+        egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        total,
     )
     .await
 }
@@ -223,6 +239,7 @@ async fn app_with(
     scripts: egret_workflow::scripts::ScriptSettings,
     upload_idle_timeout: std::time::Duration,
     upload_total_timeout: std::time::Duration,
+    export_total_timeout: std::time::Duration,
 ) -> App {
     let sessions = egret_auth::session::SessionService::new(
         db.clone(),
@@ -252,6 +269,7 @@ async fn app_with(
         scripts,
         upload_idle_timeout,
         upload_total_timeout,
+        export_total_timeout,
     };
     let router = axum::Router::new()
         .nest("/api", egret_workflow::management_router())
@@ -595,6 +613,7 @@ pub async fn webhook_app_with_guard(
         scripts: Default::default(),
         upload_idle_timeout: egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
         upload_total_timeout: egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        export_total_timeout: egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
     };
     WebhookApp {
         router: axum::Router::new()
