@@ -1,4 +1,4 @@
-//! Folder-style S3 listing test. Gated on EGRET_TEST_S3_ENDPOINT (MinIO via `just up`).
+//! Folder-style S3 listing test. Gated on EGRET_TEST_S3_ENDPOINT (RustFS via `just up`).
 use egret_storage::{ObjectStore, S3Store, StorageConfig};
 
 fn cfg() -> Option<StorageConfig> {

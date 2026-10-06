@@ -171,7 +171,7 @@ describe("WorkspaceDetail cockpit", () => {
       { id: "wh2", name: "wh-other", workspaceId: "other-ws", storageConnId: "s1", lakekeeperWarehouseId: null },
     ]);
     vi.mocked(cpApi.listStorage).mockResolvedValue([
-      { id: "s1", name: "minio-main" },
+      { id: "s1", name: "rustfs-main" },
     ] as unknown as Awaited<ReturnType<typeof cpApi.listStorage>>);
   });
 

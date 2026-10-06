@@ -766,7 +766,7 @@ fn the_fetch_spellings_are_the_ones_a_flow_writes() {
 /// statement under the shipping cap and fails as FETCH does.
 ///
 /// The store is `storage::install_mem_for_tests`'s `MemStore` (nothing here
-/// touches MinIO); `multi_thread` because `read()` blocks the render thread
+/// touches RustFS); `multi_thread` because `read()` blocks the render thread
 /// on the runtime handle.
 #[tokio::test(flavor = "multi_thread")]
 async fn store_of_50_000_rows_is_indexed_and_read_returns_its_first_line() {

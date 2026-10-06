@@ -7,7 +7,7 @@
 //! `Loop`'s values file is read on a render thread that blocks on the
 //! runtime, and a claim is global. The store is [`Probe`] over a `MemStore`,
 //! installed once for this binary with `max_read_bytes` = [`READ_CAP`]:
-//! nothing here touches MinIO.
+//! nothing here touches RustFS.
 
 mod common;
 

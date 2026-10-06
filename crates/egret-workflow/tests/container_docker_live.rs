@@ -112,7 +112,7 @@ fn handler_over(type_id: &str, files: Arc<FileStore>) -> Script {
 }
 
 /// This process's internal storage: a `MemStore` (the transfer is what is
-/// judged here; MinIO is driven by
+/// judged here; RustFS is driven by
 /// `output_files_are_uris_streamed_out_and_read_back_byte_identical` when
 /// `EGRET_TEST_S3_ENDPOINT` is set).
 fn suite_files() -> Arc<FileStore> {
@@ -1656,7 +1656,7 @@ async fn a_missing_stored_object_fails_the_task_and_the_container_never_starts()
 // W9a Task 6: output files are streamed into internal storage
 // ---------------------------------------------------------------------------
 
-/// MinIO when `EGRET_TEST_S3_ENDPOINT` is set (all four `EGRET_TEST_S3_*`),
+/// RustFS when `EGRET_TEST_S3_ENDPOINT` is set (all four `EGRET_TEST_S3_*`),
 /// under a throwaway prefix `w9a-t6-test/<uuid>/`; else a `MemStore`.
 async fn live_files() -> (Arc<FileStore>, &'static str) {
     let Ok(endpoint) = std::env::var("EGRET_TEST_S3_ENDPOINT") else {
@@ -1681,7 +1681,7 @@ async fn live_files() -> (Arc<FileStore>, &'static str) {
             caps: egret_workflow::storage::Caps::default(),
             retention_days: 30,
         }),
-        "MinIO",
+        "RustFS",
     )
 }
 

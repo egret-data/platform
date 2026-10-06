@@ -49,7 +49,7 @@ flowchart LR
 
     subgraph SOT["Nguồn sự thật duy nhất"]
         ENG["Query engine<br/>Trino · StarRocks"]
-        LAKE["Iceberg lakehouse — CHÍNH<br/>S3 / MinIO<br/>+ nguồn federated"]
+        LAKE["Iceberg lakehouse — CHÍNH<br/>S3 / RustFS<br/>+ nguồn federated"]
     end
 
     A --> WA
@@ -67,7 +67,7 @@ làm việc trong một **workspace tách biệt**, và chỉ thấy được nh
 ## Data plane — Trino & StarRocks đọc dữ liệu thế nào (ngoài S3)
 
 Nền tảng dữ liệu của Egret là một **Iceberg lakehouse** — một **Iceberg REST catalog** dùng chung
-([lakekeeper](https://github.com/lakekeeper/lakekeeper) nhúng) trên S3/MinIO. Lakehouse đó là **store
+([lakekeeper](https://github.com/lakekeeper/lakekeeper) nhúng) trên S3/RustFS. Lakehouse đó là **store
 chính**: các bảng của chính Egret nằm ở đây, và đây là nơi cả hai engine đọc/ghi. Nhưng nền tảng
 **không** bị giới hạn ở đó — nhờ **query federation**, cả **Trino** và **StarRocks** đều có thể đọc dữ
 liệu *tại chỗ* từ các hệ thống ngoài (cơ sở dữ liệu quan hệ, các định dạng lakehouse khác, NoSQL,
@@ -75,7 +75,7 @@ stream, cloud warehouse) mà không cần copy vào.
 
 ### Sơ đồ tổng thể data plane
 
-**Iceberg lakehouse trên S3/MinIO là store chính** (nguồn sự thật). Cả hai engine đọc nó qua đường
+**Iceberg lakehouse trên S3/RustFS là store chính** (nguồn sự thật). Cả hai engine đọc nó qua đường
 **đậm**; các hệ thống ngoài được query tại chỗ như federation **thứ cấp** (đường nét đứt). Chỉ vẽ các
 nguồn tiêu biểu — danh sách connector đầy đủ nằm ở bảng bên dưới.
 
@@ -93,7 +93,7 @@ flowchart TB
     subgraph LH["🧊 Lakehouse — nguồn sự thật · CHÍNH"]
         direction TB
         ICE["Iceberg REST catalog<br/>(lakekeeper nhúng · OAUTH2 vended creds)"]
-        OBJ[("Object storage S3 / MinIO")]
+        OBJ[("Object storage S3 / RustFS")]
         ICE --> OBJ
     end
 
@@ -168,7 +168,7 @@ tiêu biểu, không phải toàn bộ:
 
 > **StarRocks** vươn tới cùng các loại nguồn qua **external catalog riêng** của nó (Iceberg, Hive,
 > JDBC/MySQL/PostgreSQL, Delta, …); những catalog đó được cấu hình phía StarRocks, còn Egret query kết
-> quả. **Object store tương thích S3** (AWS S3, MinIO, hoặc bất kỳ store S3-API nào qua `s3.endpoint`
+> quả. **Object store tương thích S3** (AWS S3, RustFS, hoặc bất kỳ store S3-API nào qua `s3.endpoint`
 > tùy chỉnh); các connector lakehouse có thể trỏ tới metastore/bucket riêng, độc lập với catalog nhúng
 > của Egret.
 
@@ -304,7 +304,7 @@ bảo mật riêng:
 - **Backend** — modular monolith: workspace Rust ~27 crate, một binary (axum + tokio + sqlx).
 - **Frontend** — một SPA (React + Vite + Tailwind v4 + Radix), hai nhóm route: **Control plane**
   (governance/admin) và **Explorer** (làm việc theo workspace).
-- **Hạ tầng** — PostgreSQL + object storage (S3/MinIO); engine chạy trên Kubernetes.
+- **Hạ tầng** — PostgreSQL + object storage (S3/RustFS); engine chạy trên Kubernetes.
 
 ```mermaid
 flowchart TB
@@ -326,7 +326,7 @@ flowchart TB
             EMG["egret-engine-mgmt · engine + catalog"]
             ORCH["egret-provisioner · Trino trên k8s"]
             QRY["egret-query · router SQL federated"]
-            STOR["egret-storage · S3/MinIO"]
+            STOR["egret-storage · S3/RustFS"]
             SEC["egret-secrets · vault"]
         end
         subgraph APPS["Ứng dụng workspace"]
@@ -339,7 +339,7 @@ flowchart TB
 
     subgraph INFRA["Hạ tầng"]
         PGSQL[("PostgreSQL")]
-        OBJ[("S3 / MinIO")]
+        OBJ[("S3 / RustFS")]
         K8S["Kubernetes<br/>(cluster Trino)"]
         IDP["Keycloak (OIDC)"]
     end

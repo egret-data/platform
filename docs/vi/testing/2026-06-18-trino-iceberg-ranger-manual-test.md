@@ -7,23 +7,23 @@
 ## Bài test chứng minh gì
 
 Một **Trino 481** thật dùng Egret cho CẢ HAI tính năng lõi-governance cùng lúc:
-- **Iceberg REST catalog** — `CREATE SCHEMA / CREATE TABLE / INSERT / SELECT` đẩy data qua `/catalog` của Egret vào MinIO.
+- **Iceberg REST catalog** — `CREATE SCHEMA / CREATE TABLE / INSERT / SELECT` đẩy data qua `/catalog` của Egret vào RustFS.
 - **Apache Ranger access control** — plugin `ranger` tích hợp sẵn của Trino tải policy từ `/service` của Egret và enforce **deny / row-filter / column-mask** trên query thật.
 
 ## Vì sao không nằm trong CI
 
-Cần Docker + image Trino nặng JVM + MinIO; plugin Ranger của Trino poll theo timer. Quá chậm/nặng cho CI. Các test unit + gate-DB + `RangerPolicyEngineImpl` đã phủ logic trong CI; bài này lấp khoảng **hợp đồng-engine** một cách thủ công.
+Cần Docker + image Trino nặng JVM + RustFS; plugin Ranger của Trino poll theo timer. Quá chậm/nặng cho CI. Các test unit + gate-DB + `RangerPolicyEngineImpl` đã phủ logic trong CI; bài này lấp khoảng **hợp đồng-engine** một cách thủ công.
 
 ## Điều kiện tiên quyết
 
 - Docker đang chạy.
 - Repo đã build: `cargo build -p egret-bin`.
 - Postgres truy cập được ở `postgres://egret:egret@localhost:5432/egret` (`portal-pg` dev hoặc `docker compose -f deploy/docker-compose.dev.yml up -d postgres`).
-- Cổng host trống: 8080 (egret), 9000/9001 (MinIO), 8090 (Trino).
+- Cổng host trống: 8080 (egret), 9000/9001 (RustFS), 8090 (Trino).
 
 ## Lưu ý mạng (quan trọng)
 
-Egret chạy trên host; Trino + MinIO chạy trong container. Signer của Egret có kiểm SSRF host, và S3 endpoint của Trino phải khớp cái Egret ký/ghi. Dùng **IP LAN** của host làm địa chỉ chung duy nhất:
+Egret chạy trên host; Trino + RustFS chạy trong container. Signer của Egret có kiểm SSRF host, và S3 endpoint của Trino phải khớp cái Egret ký/ghi. Dùng **IP LAN** của host làm địa chỉ chung duy nhất:
 
 ```bash
 export HOST_IP=$(ipconfig getifaddr en0 || ipconfig getifaddr en1)   # macOS; Linux: hostname -I | awk '{print $1}'
@@ -32,15 +32,15 @@ echo "HOST_IP=$HOST_IP"
 
 ---
 
-## 1. Khởi động MinIO + tạo bucket warehouse
+## 1. Khởi động RustFS + tạo bucket warehouse
 
 ```bash
 cd deploy
-docker compose -f docker-compose.dev.yml up -d minio
-until [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:9000/minio/health/ready)" = 200 ]; do sleep 2; done
+docker compose -f docker-compose.dev.yml up -d rustfs
+until [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:9000/health)" = 200 ]; do sleep 2; done
 NET=egret-dev_default
-docker run --rm --network "$NET" --entrypoint sh minio/mc -c \
-  'mc alias set m http://minio:9000 egret egretsecret && mc mb -p m/warehouse'
+docker run --rm --network "$NET" -e AWS_ACCESS_KEY_ID=egret -e AWS_SECRET_ACCESS_KEY=egretsecret \
+  -e AWS_DEFAULT_REGION=us-east-1 amazon/aws-cli:2.37.9 --endpoint-url http://rustfs:9000 s3 mb s3://warehouse
 ```
 
 ## 2. Chạy Egret bật catalog + ranger
@@ -153,7 +153,7 @@ TX "CREATE TABLE iceberg.demo.report (id bigint, item varchar, country varchar, 
 TX "INSERT INTO iceberg.demo.report VALUES (1,'book','US',9.5),(2,'pen','VN',1.2),(3,'lamp','US',20.0),(4,'desk','VN',55.0)"
 TX "SELECT country, count(*) n, sum(amount) total FROM iceberg.demo.report GROUP BY country ORDER BY country"
 ```
-Kỳ vọng: `CREATE SCHEMA`, `CREATE TABLE`, `INSERT: 4 rows`, và `US 2 29.5 / VN 2 56.2`. Kiểm file trong MinIO dưới `warehouse/demo/report-*/` (`data/*.parquet`, `metadata/0000N-*.metadata.json` — lưu ý KHÔNG có `00000`; nó được ghi ở commit đầu tiên, không phải lúc create, nhờ vậy qua được guard empty-location của Trino).
+Kỳ vọng: `CREATE SCHEMA`, `CREATE TABLE`, `INSERT: 4 rows`, và `US 2 29.5 / VN 2 56.2`. Kiểm file trong RustFS dưới `warehouse/demo/report-*/` (`data/*.parquet`, `metadata/0000N-*.metadata.json` — lưu ý KHÔNG có `00000`; nó được ghi ở commit đầu tiên, không phải lúc create, nhờ vậy qua được guard empty-location của Trino).
 
 ## 5. Test Ranger (enforce policy trên query thật)
 
@@ -193,7 +193,7 @@ Thấy đúng ba kết quả trên = cả hai tính năng Egret được engine 
 
 ```bash
 pkill -f "target/debug/egret serve"
-cd deploy && docker compose -f docker-compose.dev.yml rm -fs trino minio
+cd deploy && docker compose -f docker-compose.dev.yml rm -fs trino rustfs
 rm -rf /tmp/egret-itest /tmp/ac.properties /tmp/ranger-trino-security.xml
 rm -f trino/catalog/iceberg.properties   # host-specific; không bao giờ commit
 ```

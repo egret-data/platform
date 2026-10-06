@@ -1,4 +1,4 @@
-//! Object-store abstraction (S3/MinIO) and S3 SigV4 remote signing for the catalog,
+//! Object-store abstraction (S3/RustFS) and S3 SigV4 remote signing for the catalog,
 //! plus the global storage-connection registry (`storage.storage_connections`, E3a).
 mod config;
 mod error;

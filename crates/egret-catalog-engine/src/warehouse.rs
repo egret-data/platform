@@ -1,6 +1,6 @@
 //! Provision a lakekeeper warehouse in-process (EB-3). egret's control plane
 //! records a `warehouses` row; this drives the embedded lakekeeper to actually
-//! create the warehouse (with an S3/MinIO storage profile) so data ops work.
+//! create the warehouse (with an S3/RustFS storage profile) so data ops work.
 
 use anyhow::Context as _;
 use lakekeeper::api::management::v1::warehouse::{
@@ -18,12 +18,12 @@ use crate::mount::EngineState;
 type EngineApiServer =
     lakekeeper::api::management::v1::ApiServer<PostgresBackend, AllowAllAuthorizer, SecretsState>;
 
-/// S3-compatible storage config for a warehouse (MinIO in dev).
+/// S3-compatible storage config for a warehouse (RustFS in dev).
 #[derive(Debug, Clone)]
 pub struct S3StorageConfig {
     pub bucket: String,
     pub region: String,
-    /// S3 endpoint (e.g. MinIO `http://minio:9000`); `None` uses the region default.
+    /// S3 endpoint (e.g. RustFS `http://rustfs:9000`); `None` uses the region default.
     pub endpoint: Option<String>,
     pub path_style: bool,
     pub access_key: String,
@@ -52,7 +52,7 @@ pub async fn create_lakekeeper_warehouse(
         "path-style-access": s3.path_style,
         "flavor": "s3-compat",
         // STS-vended credentials: on a `vended-credentials` load, lakekeeper calls
-        // AssumeRole on the S3 endpoint (MinIO needs no role-arn for s3-compat) with
+        // AssumeRole on the S3 endpoint (RustFS needs no role-arn for s3-compat) with
         // an inline policy downscoped to the table's location, and hands the client
         // short-lived, table-scoped creds. Clients that don't request delegation fall
         // back to their own static access key. Remote request-signing stays off — the

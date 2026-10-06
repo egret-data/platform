@@ -2075,7 +2075,7 @@ mod tests {
         s.config.fault_tolerant = Some(FaultTolerant {
             retry_policy: "TASK".into(),
             s3_base_dir: "s3://spool/exchange".into(),
-            s3_endpoint: "http://minio:9000".into(),
+            s3_endpoint: "http://rustfs:9000".into(),
             s3_region: "us-east-1".into(),
             s3_path_style: true,
         });
@@ -2156,7 +2156,7 @@ mod tests {
         s.config.fault_tolerant = Some(FaultTolerant {
             retry_policy: "TASK".into(),
             s3_base_dir: "s3://spool/exchange".into(),
-            s3_endpoint: "http://minio:9000".into(),
+            s3_endpoint: "http://rustfs:9000".into(),
             s3_region: "us-east-1".into(),
             s3_path_style: true,
         });

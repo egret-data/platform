@@ -377,7 +377,7 @@ harness = false
 name = "k8s_runner_live"
 harness = false
 
-# W9a Task 4 fix round 1: `read()` against MinIO (a real S3Store) on one, two
+# W9a Task 4 fix round 1: `read()` against RustFS (a real S3Store) on one, two
 # and four tokio workers with as many or more concurrent renders, under a
 # watchdog so a wedged runtime FAILS. Gated on EGRET_TEST_S3_ENDPOINT and
 # reported IGNORED (never passed) without it -- the same hand-rolled main.
@@ -385,13 +385,13 @@ harness = false
 name = "storage_render_s3_live"
 harness = false
 
-# W9a Task 8: a 64 MiB download through the execution file API, from MinIO,
+# W9a Task 8: a 64 MiB download through the execution file API, from RustFS,
 # gated on EGRET_TEST_S3_ENDPOINT and reported IGNORED without it.
 [[test]]
 name = "storage_files_api_s3_live"
 harness = false
 
-# W9a Task 13: the pruner and the orphan sweep on MinIO, under a throwaway
+# W9a Task 13: the pruner and the orphan sweep on RustFS, under a throwaway
 # prefix and a fence refusing any delete outside it; IGNORED without the gate.
 [[test]]
 name = "storage_prune_s3_live"

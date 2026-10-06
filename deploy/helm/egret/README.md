@@ -2,7 +2,7 @@
 
 Deploys the full egret stack into a local **kind** cluster for development.
 
-> **Dev only — NOT for production.** This chart bundles Postgres and MinIO,
+> **Dev only — NOT for production.** This chart bundles Postgres and RustFS,
 > ships an insecure local-admin login, and targets NodePorts on `localhost`. It
 > is meant for a single-developer kind cluster, not a real deployment.
 
@@ -45,7 +45,7 @@ helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespac
   namespace.
 - **nginx frontend** — serves the built SPA.
 - **Bundled Postgres** — the control-plane metastore.
-- **Bundled RustFS** — S3-compatible object storage (Service `minio`), pre-created
+- **Bundled RustFS** — S3-compatible object storage (Service `rustfs`), pre-created
   bucket `warehouse`.
 
 ## Configuration
@@ -60,20 +60,29 @@ services.
 
 ## Upgrade notes
 
-### The bundled object store is RustFS, on a new volume
+### The bundled object store is RustFS (was MinIO)
 
-MinIO withdrew its public images, so the bundled S3 server is now RustFS (`deps.minio.image`),
-still reachable as `http://minio:9000`. RustFS cannot read MinIO's on-disk format, so it gets a new
-PersistentVolumeClaim, `rustfs-data`.
+MinIO withdrew its public images, so the bundled S3 server is now RustFS. Everything that named
+MinIO was renamed with it:
 
-**Upgrading an existing dev release starts with an empty bucket.** Whatever the old MinIO held
-(Iceberg data files, query results, workflow files, Data Apps sources) is not carried over; the
-catalog rows in Postgres that point at those objects are left dangling. Reinstall, or reseed, rather
-than upgrade in place. The old `minio-data` claim is no longer referenced by the chart; delete it by
-hand when you no longer need it.
+| Before | Now |
+|---|---|
+| Service / Deployment `minio` (`http://minio:9000`) | `rustfs` (`http://rustfs:9000`) |
+| values `deps.minio.*` | `deps.rustfs.*` |
+| `deps.minio.mcImage` | `deps.rustfs.clientImage` (a shell plus the `aws` CLI; creates the bucket once) |
+| PersistentVolumeClaim `minio-data` | `rustfs-data` |
 
-`deps.minio.mcImage` is replaced by `deps.minio.clientImage` (an image with a shell and the `aws`
-CLI, used once to create the bucket).
+**Upgrading an existing dev release starts with an empty bucket.** RustFS cannot read MinIO's
+on-disk format, so it gets a new volume. Whatever the old MinIO held (Iceberg data files, query
+results, workflow files, Data Apps sources) is not carried over, and the catalog rows in Postgres
+that point at those objects are left dangling. Reinstall, or reseed, rather than upgrade in place.
+
+**Engines provisioned before the upgrade keep `http://minio…:9000` in their rendered catalog
+properties and storage connections**, and that name no longer resolves. Re-create the storage
+connection with the new endpoint and re-apply the catalogs, or re-provision the engines.
+
+Helm leaves the old `minio-data` claim in place (it does not delete PVCs it no longer renders);
+delete it by hand when you no longer need it.
 
 ### StarRocks FE metadata is persistent for engines created from this release on
 

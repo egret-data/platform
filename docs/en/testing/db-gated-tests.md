@@ -147,7 +147,7 @@ because CI has no engine to give them:
 | --- | --- |
 | `EGRET_TEST_STARROCKS_URL` | StarRocks over the MySQL protocol, e.g. `mysql://localhost:9030` |
 | `EGRET_TEST_TRINO_URL` | a Trino coordinator, e.g. `https://localhost:8453` |
-| `EGRET_TEST_S3_ENDPOINT` | MinIO |
+| `EGRET_TEST_S3_ENDPOINT` | RustFS |
 | `EGRET_TEST_RANGER_E2E` | the Ranger enforcement gate |
 
 See `just test-dataapi-starrocks` for the one Data API path that runs against a real

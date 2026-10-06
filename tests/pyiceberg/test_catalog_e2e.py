@@ -9,8 +9,8 @@ def catalog():
         "uri": os.environ["EGRET_CATALOG_URI"],          # http://localhost:8080/catalog
         "token": os.environ["EGRET_CATALOG_TOKEN"],
         "s3.endpoint": os.environ["EGRET_TEST_S3_ENDPOINT"],
-        "s3.access-key-id": os.environ.get("EGRET_TEST_S3_KEY", "minioadmin"),
-        "s3.secret-access-key": os.environ.get("EGRET_TEST_S3_SECRET", "minioadmin"),
+        "s3.access-key-id": os.environ.get("EGRET_TEST_S3_KEY", "rustfsadmin"),
+        "s3.secret-access-key": os.environ.get("EGRET_TEST_S3_SECRET", "rustfsadmin"),
         "s3.path-style-access": "true",
     })
 

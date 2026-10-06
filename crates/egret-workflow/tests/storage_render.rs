@@ -11,7 +11,7 @@
 //! one database for this test binary -- and, because a claim is global (a
 //! worker serves every workspace), they take turns on [`SERIAL`] so one test
 //! never runs another's handlers. The object store is
-//! `storage::install_mem_for_tests`'s `MemStore`: nothing here touches MinIO.
+//! `storage::install_mem_for_tests`'s `MemStore`: nothing here touches RustFS.
 //!
 //! # How a file gets written
 //!

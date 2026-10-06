@@ -185,7 +185,7 @@ fn minimal(fqcn: &str) -> Value {
 /// `from` -- now parses on its class, which is in the catalog. The run-time
 /// proofs that these plugins RUN are the handler's
 /// `fetch_type_store_runs_and_its_file_is_indexed` (spy) and
-/// `plugin_host_live`'s storage chain (Docker, a real Postgres, MinIO).
+/// `plugin_host_live`'s storage chain (Docker, a real Postgres, RustFS).
 #[test]
 fn every_value_w5b_refused_for_storage_now_parses() {
     let uri = "kestra:///w9a/plugins/f/executions/00000000-0000-0000-0000-000000000001/tasks/q/\

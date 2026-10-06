@@ -1,4 +1,4 @@
-//! Gated S3 round-trip. Skips unless EGRET_TEST_S3_ENDPOINT is set (e.g. MinIO via `just up`).
+//! Gated S3 round-trip. Skips unless EGRET_TEST_S3_ENDPOINT is set (e.g. RustFS via `just up`).
 use egret_storage::{ObjectStore, S3Store, StorageConfig, StorageError};
 
 fn cfg() -> Option<StorageConfig> {
@@ -7,8 +7,8 @@ fn cfg() -> Option<StorageConfig> {
         endpoint: Some(endpoint),
         region: "us-east-1".into(),
         bucket: std::env::var("EGRET_TEST_S3_BUCKET").unwrap_or_else(|_| "warehouse".into()),
-        access_key: std::env::var("EGRET_TEST_S3_KEY").unwrap_or_else(|_| "minioadmin".into()),
-        secret_key: std::env::var("EGRET_TEST_S3_SECRET").unwrap_or_else(|_| "minioadmin".into()),
+        access_key: std::env::var("EGRET_TEST_S3_KEY").unwrap_or_else(|_| "rustfsadmin".into()),
+        secret_key: std::env::var("EGRET_TEST_S3_SECRET").unwrap_or_else(|_| "rustfsadmin".into()),
         path_style: true,
     })
 }
@@ -54,13 +54,13 @@ async fn copy_object_round_trip() {
 
 /// `CopyObjectError` has no modeled "no such key" variant the way
 /// `GetObjectError` does (it only models `ObjectNotInActiveTierError`), so a
-/// missing-source `copy_object` against real S3/MinIO falls into
+/// missing-source `copy_object` against real S3/RustFS falls into
 /// `CopyObjectError::Unhandled` rather than a typed variant `copy()` could
 /// pattern-match on directly the way `get()` does with `is_no_such_key()`.
 /// `egret-apps`'s `restore_version()` fallback (copy the old version's object;
 /// on `NotFound`, fall back to a Postgres-column GET+PUT) depends on `copy()`
 /// still mapping that case to `StorageError::NotFound`, same as `get()`/
-/// `head()` -- this is a live, real-MinIO regression test for that mapping,
+/// `head()` -- this is a live, real-RustFS regression test for that mapping,
 /// not just the round-trip `MemStore` already proves for free.
 #[tokio::test]
 async fn copy_of_a_missing_source_is_not_found() {

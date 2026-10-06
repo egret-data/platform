@@ -12,14 +12,14 @@
 --
 -- The lakekeeper schema is DROPPED rather than surgically truncated (it has
 -- ~45 tables + triggers); `egret serve` re-migrates + re-bootstraps an empty
--- catalog schema on its next start. MinIO objects are cleared separately by
+-- catalog schema on its next start. RustFS objects are cleared separately by
 -- deploy/reset-testdata.sh.
 --
 -- Tables are SCHEMA-QUALIFIED for the service-ready owned-schema layout (E-series
 -- split: catalog / engine_mgmt / analytics / query / storage / audit / public).
 -- Keep this file in sync if a table moves schemas or is renamed.
 --
--- Run via `just reset-testdata` (which also stops serve + clears MinIO), or
+-- Run via `just reset-testdata` (which also stops serve + clears RustFS), or
 -- directly: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f deploy/reset-testdata.sql
 
 BEGIN;

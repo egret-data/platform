@@ -191,14 +191,12 @@ deps:
   mailpit:
     enabled: true
     image: axllent/mailpit:latest
-  # The bundled S3 server is RustFS, not MinIO: MinIO withdrew its public images
-  # (docker.io/minio/* and quay.io/minio/* both answer 401), so a fresh install
-  # wedged forever on a deployment that could never pull. The key, the Service
-  # and the Deployment keep the name `minio` because engines, e2e recipes and
-  # seed scripts address `http://minio:9000`; only what runs behind it changed.
-  # egret needs STS AssumeRole from this server (the embedded catalog vends
-  # credentials through it), which is what ruled the other candidates out.
-  minio:
+  # The bundled S3 server is RustFS. It replaced MinIO when MinIO withdrew its
+  # public images (docker.io/minio/* and quay.io/minio/* answer 401) and a fresh
+  # install wedged on a deployment that could never pull. egret needs STS
+  # AssumeRole from this server (the embedded catalog vends credentials through
+  # it), which is what ruled the other candidates out.
+  rustfs:
     image: rustfs/rustfs:1.0.1
     # Any image with a shell and the `aws` CLI: it creates the bucket once.
     clientImage: amazon/aws-cli:2.37.9

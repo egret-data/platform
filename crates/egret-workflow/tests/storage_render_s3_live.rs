@@ -1,4 +1,4 @@
-//! W9a Task 4 fix round 1, C1: `read()` on a real `S3Store` (MinIO), with as
+//! W9a Task 4 fix round 1, C1: `read()` on a real `S3Store` (RustFS), with as
 //! many or more concurrent renders than tokio workers. W9a Task 7 adds two
 //! cases for an uploaded FILE input ([`upload_input_on_s3`]).
 //!
@@ -43,8 +43,8 @@ fn cfg() -> Option<StorageConfig> {
         endpoint: Some(endpoint),
         region: "us-east-1".into(),
         bucket: std::env::var("EGRET_TEST_S3_BUCKET").unwrap_or_else(|_| "warehouse".into()),
-        access_key: std::env::var("EGRET_TEST_S3_KEY").unwrap_or_else(|_| "minioadmin".into()),
-        secret_key: std::env::var("EGRET_TEST_S3_SECRET").unwrap_or_else(|_| "minioadmin".into()),
+        access_key: std::env::var("EGRET_TEST_S3_KEY").unwrap_or_else(|_| "rustfsadmin".into()),
+        secret_key: std::env::var("EGRET_TEST_S3_SECRET").unwrap_or_else(|_| "rustfsadmin".into()),
         path_style: true,
     })
 }
@@ -80,7 +80,7 @@ fn concurrent_reads(cfg: StorageConfig, workers: usize, renders: usize) -> Resul
         let uri = uri_of("s3.txt");
         let object = fs.object_uri(WS, &uri)?;
         fs.store
-            .put(&object, b"from minio".to_vec())
+            .put(&object, b"from rustfs".to_vec())
             .await
             .map_err(|e| e.to_string())?;
         let files = BTreeMap::from([(
@@ -108,7 +108,7 @@ fn concurrent_reads(cfg: StorageConfig, workers: usize, renders: usize) -> Resul
         // One by one, by key: never a prefix delete on a shared bucket.
         fs.store.delete(&object).await.map_err(|e| e.to_string())?;
         for a in answers {
-            if a.as_deref() != Ok("from minio") {
+            if a.as_deref() != Ok("from rustfs") {
                 return Err(format!("a render answered {a:?}"));
             }
         }

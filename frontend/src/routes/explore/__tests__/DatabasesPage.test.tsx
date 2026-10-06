@@ -636,7 +636,7 @@ describe("DatabasesPage", () => {
         type: "trino",
         status: "ok",
         catalogs: [
-          { name: "iceberg", kind: "iceberg", storage_name: "prod-minio", secret_name: "prod-key" },
+          { name: "iceberg", kind: "iceberg", storage_name: "prod-rustfs", secret_name: "prod-key" },
           { name: "adhoc", kind: "iceberg", storage_name: null, secret_name: null },
         ],
       },
@@ -650,7 +650,7 @@ describe("DatabasesPage", () => {
       // "adhoc" is a unique catalog name (kind is "iceberg" on both rows).
       expect(screen.getByText("adhoc")).toBeInTheDocument();
     });
-    expect(screen.getByText("prod-minio")).toBeInTheDocument();
+    expect(screen.getByText("prod-rustfs")).toBeInTheDocument();
     expect(screen.getByText("prod-key")).toBeInTheDocument();
     // Unresolvable storage/secret fall back to an em dash.
     expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);

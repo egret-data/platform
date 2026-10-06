@@ -15,7 +15,7 @@ curl -sf http://localhost:8182/q/health   # {"status":"UP"}
 - Image `apache/polaris:latest`; API + management on `:8181`, health on `:8182`.
 - **Auth (dev): INTERNAL.** `POLARIS_BOOTSTRAP_CREDENTIALS: POLARIS,root,s3cr3t`
   bootstraps realm `POLARIS` with a root principal (clientId `root`, secret `s3cr3t`).
-- Storage: MinIO (`AWS_ENDPOINT_URL_S3=http://minio:9000`, `ALLOW_INSECURE_STORAGE_TYPES`).
+- Storage: RustFS (`AWS_ENDPOINT_URL_S3=http://rustfs:9000`, `ALLOW_INSECURE_STORAGE_TYPES`).
 - Persistence: in-memory — **catalogs/principals reset when the Polaris container restarts.**
 
 > **Prod target = MIXED / Keycloak OIDC** (see the control-plane-polaris spec). There egret-admin
@@ -65,7 +65,7 @@ grant and stores the principal's `clientId`/`clientSecret` as a global secret (t
 
 `deploy/trino/catalog/iceberg.properties` points Trino's Iceberg REST connector at Polaris
 (`iceberg.rest-catalog.uri=http://polaris:8181/api/catalog`, `warehouse=lakehouse`, OAUTH2 via
-Polaris's token endpoint, `fs.native-s3` → MinIO). Restart Trino to load it. In real use the
+Polaris's token endpoint, `fs.native-s3` → RustFS). Restart Trino to load it. In real use the
 `oauth2.credential` is an **assignment's** Polaris principal (clientId:clientSecret) scoped to
 that workspace's catalog-role; auto-pushing it into the connector is the future
 engines-centralization / K8s-provisioning epic — here it is manual (dev uses `root:s3cr3t`).
@@ -77,10 +77,10 @@ ACL for the test (see `deploy/trino/etc/README.md`).
 
 ## 5. End-to-end (the full loop)
 
-With the stack up (postgres, minio, keycloak, **polaris**, trino wired) + egret `serve`: via
+With the stack up (postgres, rustfs, keycloak, **polaris**, trino wired) + egret `serve`: via
 SQL Lab, `CREATE TABLE lakehouse.eda.summary AS SELECT ...` then `SELECT * FROM
 lakehouse.eda.summary` — the engine performs the governed write into the Polaris catalog on
-MinIO and reads it back. See `frontend/tests/e2e/README.md`.
+RustFS and reads it back. See `frontend/tests/e2e/README.md`.
 
 ## What is live-validated (this repo)
 

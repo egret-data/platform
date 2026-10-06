@@ -17,20 +17,19 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
+  rustfs:
+    # Not MinIO: its public images were withdrawn (docker.io and quay.io answer 401). egret
+    # needs STS AssumeRole from this server — the embedded catalog vends credentials through it.
+    image: rustfs/rustfs:1.0.1
     environment:
-      MINIO_ROOT_USER: egret
-      MINIO_ROOT_PASSWORD: egretsecret
+      RUSTFS_ACCESS_KEY: egret
+      RUSTFS_SECRET_KEY: egretsecret
     ports:
-      - "9000:9000"
-      - "9001:9001"
-    # No healthcheck: `minio/minio:latest` has no `local` mc alias preconfigured and
-    # no curl, so a readiness probe is unreliable here. Phase 2 (when a service gates
-    # on MinIO) adds a proper probe against http://localhost:9000/minio/health/ready.
+      - "9000:9000"   # S3 API; readiness is GET /health
+      - "9001:9001"   # console
+    # A new volume, not the old `miniodata`: RustFS cannot read MinIO's on-disk format.
     volumes:
-      - miniodata:/data
+      - rustfsdata:/data
 
   trino:
     image: trinodb/trino:latest
@@ -91,4 +90,4 @@ services:
 
 volumes:
   pgdata:
-  miniodata:
+  rustfsdata:

@@ -332,7 +332,7 @@ fn without_comments(yaml: &str) -> String {
 /// the Data API's rate-limit buckets and response cache split across them for
 /// the length of the rollout, and a published limit transiently doubles on a
 /// `helm upgrade` that touched nothing to do with limits. For postgres and
-/// minio it is older and blunter: the surged pod cannot mount a ReadWriteOnce
+/// rustfs it is older and blunter: the surged pod cannot mount a ReadWriteOnce
 /// PVC, so the upgrade wedges instead of rolling.
 ///
 /// Only the stateful three. The frontend and keycloak Deployments are
@@ -355,8 +355,8 @@ fn every_single_instance_store_is_recreated_rather_than_rolled() {
              directory",
         ),
         (
-            "deps-minio.yaml",
-            "a surged minio cannot mount the ReadWriteOnce minio-data PVC",
+            "deps-rustfs.yaml",
+            "a surged rustfs cannot mount the ReadWriteOnce rustfs-data PVC",
         ),
     ] {
         let yaml = without_comments(&read(&format!("deploy/helm/egret/templates/{file}")));

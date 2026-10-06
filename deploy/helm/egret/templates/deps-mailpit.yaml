@@ -8,7 +8,7 @@
 # the demo workspace's SMTP at `localhost:1025` — right for docker-compose, wrong
 # in a cluster, so someone had to edit the row by hand every time.
 #
-# Gated on `deps.enabled` like postgres and minio: a real deployment brings its
+# Gated on `deps.enabled` like postgres and rustfs: a real deployment brings its
 # own relay, and a catcher that silently swallowed production mail would be the
 # worst possible default.
 apiVersion: v1

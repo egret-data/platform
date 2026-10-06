@@ -2,9 +2,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: minio
+  name: rustfs
   labels:
-    app: minio
+    app: rustfs
 spec:
   replicas: 1
   # As for postgres: a rolling update surges a second pod that cannot mount the
@@ -13,23 +13,23 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: minio
+      app: rustfs
   template:
     metadata:
       labels:
-        app: minio
+        app: rustfs
     spec:
       # The image runs as uid 10001; without this the PVC is root-owned and unwritable.
       securityContext:
         fsGroup: 10001
       containers:
         - name: rustfs
-          image: {{ .Values.deps.minio.image }}
+          image: {{ .Values.deps.rustfs.image }}
           env:
             - name: RUSTFS_ACCESS_KEY
-              value: "{{ .Values.deps.minio.rootUser }}"
+              value: "{{ .Values.deps.rustfs.rootUser }}"
             - name: RUSTFS_SECRET_KEY
-              value: "{{ .Values.deps.minio.rootPassword }}"
+              value: "{{ .Values.deps.rustfs.rootPassword }}"
           ports:
             - containerPort: 9000
             - containerPort: 9001
@@ -47,7 +47,7 @@ spec:
           persistentVolumeClaim:
             claimName: rustfs-data
 ---
-# A new claim, not `minio-data`: RustFS cannot read MinIO's on-disk format.
+# Not the old `minio-data` claim: RustFS cannot read MinIO's on-disk format.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -62,12 +62,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: minio
+  name: rustfs
   labels:
-    app: minio
+    app: rustfs
 spec:
   selector:
-    app: minio
+    app: rustfs
   ports:
     - name: api
       port: 9000

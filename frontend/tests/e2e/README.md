@@ -116,11 +116,11 @@ EGRET_E2E_CATALOG=1 EGRET_E2E_BUCKET=e2e-auto npx playwright test embedded-catal
 
 Requirements:
 - The live stack up (`serve` + Vite; Vite proxies `/api`, `/catalog`, `/oauth`).
-- A **reserved, initially-empty** MinIO bucket (`EGRET_E2E_BUCKET`, default `e2e`)
+- A **reserved, initially-empty** RustFS bucket (`EGRET_E2E_BUCKET`, default `e2e`)
   with **no prefix-less warehouse** on it — each run uses a unique `key_prefix`,
   so repeated runs on that bucket don't overlap. Create it once:
-  `docker exec egret-dev-minio-1 mc mb --ignore-existing loc/e2e-auto`.
-- S3 overrides (defaults match dev MinIO): `EGRET_E2E_S3_ENDPOINT`,
+  `AWS_ACCESS_KEY_ID=egret AWS_SECRET_ACCESS_KEY=egretsecret aws --endpoint-url http://localhost:9000 s3 mb s3://e2e-auto`.
+- S3 overrides (defaults match dev RustFS): `EGRET_E2E_S3_ENDPOINT`,
   `EGRET_E2E_S3_KEY`, `EGRET_E2E_S3_SECRET`.
 
 Skipped unless `EGRET_E2E_CATALOG=1`. See `deploy/embedded-catalog/engine-wiring.md`
@@ -151,15 +151,15 @@ just ingress-install   # nginx-ingress (kind flavor)
 just coredns-rewrite   # egret.localtest.me resolves cluster-wide
 ```
 
-**Reserved MinIO bucket.** lakekeeper rejects a new warehouse whose storage profile
+**Reserved RustFS bucket.** lakekeeper rejects a new warehouse whose storage profile
 overlaps an existing one, and a **prefix-less** warehouse claims a whole bucket — so
 point the e2e at a bucket that has no root-level warehouse, via `EGRET_E2E_BUCKET`
 (default `warehouse`, the chart-seeded bucket). If that bucket already holds a
 prefix-less warehouse (e.g. a hand-provisioned `demo-catalog`), use a dedicated
-bucket and create it once in the in-cluster MinIO, e.g.:
+bucket and create it once in the in-cluster RustFS, e.g.:
 
 ```bash
-kubectl port-forward -n egret-system svc/minio 9000:9000 &
+kubectl port-forward -n egret-system svc/rustfs 9000:9000 &
 AWS_ACCESS_KEY_ID=egret AWS_SECRET_ACCESS_KEY=egretsecret \
   aws --endpoint-url http://localhost:9000 s3 mb s3://e2e
 # then: EGRET_E2E_BUCKET=e2e just e2e-kind   (each run uses a unique key_prefix)
@@ -215,8 +215,8 @@ MASKED `item` values and ONLY `country='US'` rows.
 Notes (baked into `just e2e-kind-governance`):
 - `EGRET_E2E_BUCKET=e2e` — a reserved bucket (the default `warehouse` bucket carries
   a prefix-less orphan warehouse; see the data-plane section's reserved-bucket note).
-- `EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000` — the FQDN,
-  because Trino (namespace `egret-engines`) can't resolve the bare `minio` (in
+- `EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000` — the FQDN,
+  because Trino (namespace `egret-engines`) can't resolve the bare `rustfs` (in
   `egret-system`) for the Iceberg write path.
 - The egret Trino provisioner sets the Ranger plugin poll interval to **30s**, so a
   new mask/row-filter takes up to ~30s to enforce — the spec re-queries until it does.

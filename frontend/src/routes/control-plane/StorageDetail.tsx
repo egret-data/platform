@@ -345,7 +345,7 @@ function OverviewTab({ conn, loading }: { conn: Storage | undefined; loading: bo
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="s3">S3 / MinIO</SelectItem>
+                    <SelectItem value="s3">S3 / RustFS</SelectItem>
                     <SelectItem value="gcs" disabled>
                       Google Cloud Storage — coming soon
                     </SelectItem>

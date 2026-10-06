@@ -4,24 +4,32 @@
 #
 # Keeps users + the seeded demo/eng workspaces; wipes all embedded-catalog
 # objects, the lakekeeper catalog schema, every other (test) workspace, and all
-# MinIO objects. See deploy/reset-testdata.sql for the exact SQL.
+# RustFS objects. See deploy/reset-testdata.sql for the exact SQL.
 #
 # Usage:  just reset-testdata      (or: ./deploy/reset-testdata.sh [--yes])
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-# Load .env for DATABASE_URL / MinIO creds when run standalone.
+# Load .env for DATABASE_URL / RustFS creds when run standalone.
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
 
 PGURL="${DATABASE_URL:-postgres://egret:egret@localhost:5432/egret}"
-MINIO_CONTAINER="${MINIO_CONTAINER:-egret-dev-minio-1}"
-MINIO_USER="${MINIO_ROOT_USER:-egret}"
-MINIO_PASS="${MINIO_ROOT_PASSWORD:-egretsecret}"
+RUSTFS_CONTAINER="${RUSTFS_CONTAINER:-egret-dev-rustfs-1}"
+RUSTFS_USER="${RUSTFS_ACCESS_KEY:-egret}"
+RUSTFS_PASS="${RUSTFS_SECRET_KEY:-egretsecret}"
+# The RustFS image ships no S3 client, so one runs beside it, in its network namespace.
+S3_CLIENT_IMAGE="${S3_CLIENT_IMAGE:-amazon/aws-cli:2.37.9}"
+s3() {
+  docker run --rm --network "container:$RUSTFS_CONTAINER" \
+    -e AWS_ACCESS_KEY_ID="$RUSTFS_USER" -e AWS_SECRET_ACCESS_KEY="$RUSTFS_PASS" \
+    -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ENDPOINT_URL=http://localhost:9000 \
+    "$S3_CLIENT_IMAGE" "$@"
+}
 
 # Confirmation (skip with --yes).
 if [ "${1:-}" != "--yes" ]; then
   echo "⚠️  This WIPES all catalog data, the lakekeeper schema, every test"
-  echo "    workspace, and all MinIO objects. Keeps users + demo/eng workspaces."
+  echo "    workspace, and all RustFS objects. Keeps users + demo/eng workspaces."
   printf "    Type 'reset' to confirm: "
   read -r reply
   [ "$reply" = "reset" ] || { echo "Aborted."; exit 1; }
@@ -37,17 +45,15 @@ fi
 echo "→ resetting Postgres…"
 psql "$PGURL" -v ON_ERROR_STOP=1 -f deploy/reset-testdata.sql
 
-# 3. MinIO: clear every bucket's objects (keep the empty buckets).
-echo "→ clearing MinIO objects…"
-if docker exec "$MINIO_CONTAINER" sh -c '
-    mc alias set lo "http://localhost:9000" "'"$MINIO_USER"'" "'"$MINIO_PASS"'" >/dev/null 2>&1 || exit 1
-    for b in $(mc ls lo | awk "{print \$NF}"); do
-      mc rm --recursive --force "lo/$b" >/dev/null 2>&1 || true
-    done
-  ' 2>/dev/null; then
-  echo "  cleared MinIO buckets"
+# 3. RustFS: clear every bucket's objects (keep the empty buckets).
+echo "→ clearing RustFS objects…"
+if buckets=$(s3 s3api list-buckets --query 'Buckets[].Name' --output text 2>/dev/null); then
+  for b in $buckets; do
+    s3 s3 rm "s3://$b" --recursive >/dev/null 2>&1 || true
+  done
+  echo "  cleared RustFS buckets"
 else
-  echo "  (MinIO container '$MINIO_CONTAINER' not reachable — skipped)"
+  echo "  (RustFS container '$RUSTFS_CONTAINER' not reachable — skipped)"
 fi
 
 echo ""

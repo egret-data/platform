@@ -48,7 +48,7 @@ flowchart LR
 
     subgraph SOT["Single source of truth"]
         ENG["Query engines<br/>Trino · StarRocks"]
-        LAKE["Iceberg lakehouse — PRIMARY<br/>S3 / MinIO<br/>+ federated sources"]
+        LAKE["Iceberg lakehouse — PRIMARY<br/>S3 / RustFS<br/>+ federated sources"]
     end
 
     A --> WA
@@ -66,7 +66,7 @@ Every team logs into the **same platform** and reads from the **same governed da
 ## Data plane — how Trino & StarRocks read your data (beyond S3)
 
 Egret's data foundation is an **Iceberg lakehouse** — a shared **Iceberg REST catalog** (embedded
-[lakekeeper](https://github.com/lakekeeper/lakekeeper)) on S3/MinIO. That lakehouse is the **primary
+[lakekeeper](https://github.com/lakekeeper/lakekeeper)) on S3/RustFS. That lakehouse is the **primary
 store**: Egret's own tables live there, and it is where both engines read and write. But the platform
 is **not** limited to it — through **query federation**, both **Trino** and **StarRocks** can also
 read data *in place* from external systems (relational databases, other lakehouse formats, NoSQL,
@@ -74,7 +74,7 @@ streams, cloud warehouses) without copying it in.
 
 ### Data-plane topology
 
-The **Iceberg lakehouse on S3/MinIO is the primary store** (the source of truth). Both engines read
+The **Iceberg lakehouse on S3/RustFS is the primary store** (the source of truth). Both engines read
 it over the **bold** paths; external systems are queried in place as **secondary** federation
 (dotted). Only representative sources are drawn — the full connector list is in the table below.
 
@@ -92,7 +92,7 @@ flowchart TB
     subgraph LH["🧊 Lakehouse — the source of truth · PRIMARY"]
         direction TB
         ICE["Iceberg REST catalog<br/>(embedded lakekeeper · OAUTH2 vended creds)"]
-        OBJ[("S3 / MinIO object storage")]
+        OBJ[("S3 / RustFS object storage")]
         ICE --> OBJ
     end
 
@@ -167,7 +167,7 @@ representative highlights, not the whole list:
 
 > **StarRocks** reaches the same kinds of sources through its **own external catalogs** (Iceberg,
 > Hive, JDBC/MySQL/PostgreSQL, Delta, …); those are configured on the StarRocks side, and Egret
-> queries the result. **Object stores are S3-compatible** (AWS S3, MinIO, or any S3-API store via a
+> queries the result. **Object stores are S3-compatible** (AWS S3, RustFS, or any S3-API store via a
 > custom `s3.endpoint`); lakehouse connectors can point at their own metastores/buckets, independent
 > of Egret's embedded catalog.
 
@@ -300,7 +300,7 @@ would otherwise force a separate tool, a separate login, or a separate security 
 - **Backend** — modular monolith: a Rust workspace of ~27 crates, one binary (axum + tokio + sqlx).
 - **Frontend** — a single SPA (React + Vite + Tailwind v4 + Radix), two route groups: **Control
   plane** (governance/admin) and **Explorer** (per-workspace work).
-- **Infrastructure** — PostgreSQL + object storage (S3/MinIO); engines on Kubernetes.
+- **Infrastructure** — PostgreSQL + object storage (S3/RustFS); engines on Kubernetes.
 
 ```mermaid
 flowchart TB
@@ -322,7 +322,7 @@ flowchart TB
             EMG["egret-engine-mgmt · engines + catalogs"]
             ORCH["egret-provisioner · Trino on k8s"]
             QRY["egret-query · federated SQL router"]
-            STOR["egret-storage · S3/MinIO"]
+            STOR["egret-storage · S3/RustFS"]
             SEC["egret-secrets · vault"]
         end
         subgraph APPS["Workspace apps"]
@@ -335,7 +335,7 @@ flowchart TB
 
     subgraph INFRA["Infrastructure"]
         PGSQL[("PostgreSQL")]
-        OBJ[("S3 / MinIO")]
+        OBJ[("S3 / RustFS")]
         K8S["Kubernetes<br/>(Trino clusters)"]
         IDP["Keycloak (OIDC)"]
     end

@@ -76,7 +76,7 @@ pub async fn sign_s3_request(
     };
 
     let mut settings = SigningSettings::default();
-    // `Single` percent-encoding is correct for S3-compatible stores (MinIO), which is the
+    // `Single` percent-encoding is correct for S3-compatible stores, which is the
     // Phase 2a target. Real AWS S3 requires double-encoding for some keys; revisit when AWS is supported.
     settings.percent_encoding_mode = PercentEncodingMode::Single;
     settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;

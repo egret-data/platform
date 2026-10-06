@@ -1,5 +1,5 @@
-//! Streaming against a real S3 (MinIO). Gated on EGRET_TEST_S3_ENDPOINT, plus
-//! EGRET_TEST_S3_KEY / _SECRET / _BUCKET (the `minioadmin` default is refused by the dev MinIO).
+//! Streaming against a real S3 (RustFS). Gated on EGRET_TEST_S3_ENDPOINT, plus
+//! EGRET_TEST_S3_KEY / _SECRET / _BUCKET (the `rustfsadmin` default is not what the dev RustFS uses: `just up` sets egret/egretsecret).
 //! Each test says so loudly when it skips, so a skip is never mistaken for a pass.
 use egret_storage::{ObjectStore, S3Store, StorageConfig, StorageError, PART_BYTES};
 use std::pin::Pin;
@@ -18,8 +18,8 @@ fn cfg() -> Option<StorageConfig> {
         endpoint: Some(endpoint),
         region: "us-east-1".into(),
         bucket: std::env::var("EGRET_TEST_S3_BUCKET").unwrap_or_else(|_| "warehouse".into()),
-        access_key: std::env::var("EGRET_TEST_S3_KEY").unwrap_or_else(|_| "minioadmin".into()),
-        secret_key: std::env::var("EGRET_TEST_S3_SECRET").unwrap_or_else(|_| "minioadmin".into()),
+        access_key: std::env::var("EGRET_TEST_S3_KEY").unwrap_or_else(|_| "rustfsadmin".into()),
+        secret_key: std::env::var("EGRET_TEST_S3_SECRET").unwrap_or_else(|_| "rustfsadmin".into()),
         path_style: true,
     })
 }
@@ -241,8 +241,9 @@ async fn a_failing_body_aborts_the_multipart_upload() {
         .send()
         .await
         .unwrap();
-    // MinIO lists open uploads only for an exact-key prefix (a directory prefix returns
-    // none even with the upload open), so both listings below use the exact key.
+    // MinIO listed open uploads only for an exact-key prefix (a directory prefix returned
+    // none even with the upload open). The exact key is right on any S3 server, so both
+    // listings below use it.
     let seen = raw
         .list_multipart_uploads()
         .bucket(&c.bucket)
