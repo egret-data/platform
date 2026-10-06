@@ -1304,11 +1304,18 @@ async fn real_marimo_behind_the_real_proxy_and_the_real_pod_api() {
     )
     .await
     .expect("marimo WebSocket through the proxy");
-    let first = tokio::time::timeout(Duration::from_secs(60), ws.next())
-        .await
-        .expect("marimo sent nothing within 60 s")
-        .expect("socket closed")
-        .expect("socket error");
+    // The pod's WebSocket server may ping before marimo says anything; a browser answers that
+    // without the page seeing it, so it is not what this step is about.
+    let first = loop {
+        let m = tokio::time::timeout(Duration::from_secs(60), ws.next())
+            .await
+            .expect("marimo sent nothing within 60 s")
+            .expect("socket closed")
+            .expect("socket error");
+        if !(m.is_ping() || m.is_pong()) {
+            break m;
+        }
+    };
     assert!(first.is_text() || first.is_binary(), "{first:?}");
 
     // marimo's skew protection: the page carries a token the browser echoes on every POST

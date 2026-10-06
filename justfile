@@ -290,9 +290,13 @@ deploy-kind-apps:
     docker build -f deploy/docker/backend.Dockerfile -t egret-backend:p4e .
     docker build -f frontend/Dockerfile -t egret-frontend:p4e frontend
     docker build -t egret-apps:p4e apps-image
-    kind load docker-image egret-backend:p4e egret-frontend:p4e egret-apps:p4e --name egret
+    # The chart renders the renderer Deployment unconditionally: without its image `--wait` below
+    # sits on ImagePullBackOff until the timeout and the post-install hooks never run.
+    docker build -t egret-renderer:p4e renderer
+    kind load docker-image egret-backend:p4e egret-frontend:p4e egret-apps:p4e egret-renderer:p4e --name egret
     helm upgrade --install egret-verify deploy/helm/egret -n egret-verify --create-namespace --wait --timeout 10m \
       --set backend.image.tag=p4e --set frontend.image.tag=p4e --set frontend.nodePort=30081 \
+      --set renderer.image.tag=p4e \
       --set ingress.enabled=true --set ingress.host={{apps_host}} --set ingress.tls.enabled=true \
       --set-file ingress.tls.cert="$tls/tls.crt" --set-file ingress.tls.key="$tls/tls.key" \
       --set apps.origin=https://apps.{{apps_host}} --set apps.egretOrigin=https://{{apps_host}} \
@@ -412,7 +416,7 @@ kind-undeploy:
 # Install the kind-flavored ingress-nginx controller (needs a cluster created with the ingress-ready label + :80 map).
 ingress-install:
     kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
-    kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=180s
+    kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=600s
 
 # Make egret.localtest.me resolve cluster-wide to the ingress controller (so in-cluster
 # pods — incl. provisioned engines fetching the OIDC JWKS — reach it). Run AFTER ingress-install.
