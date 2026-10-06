@@ -155,11 +155,12 @@ sinh lại bằng `npm run gen:api` — không dùng `orval` trần.
 
 Lịch sử version từ danh sách; chứng nhận, đăng ký báo cáo; dừng pod đồng bộ khi xoá.
 
-## 6. Vấn đề có sẵn mà phần này thừa hưởng
+## 6. Chia sẻ thư mục (đã sửa riêng, 2026-10-06)
 
-Chia sẻ một **thư mục** cần `folder:manage`, quyền mà không vai trò nào có — lỗi có từ trước và
-đã ảnh hưởng các danh sách khác. Nút Share của thư mục vẫn được nối ở đây cho đồng bộ và sẽ lỗi
-y như vậy cho tới khi được sửa riêng.
+Khi trang này ra mắt, chia sẻ một **thư mục** bị từ chối với mọi người ở mọi danh sách: route
+đòi `folder:manage`, một quyền không vai trò nào có và không nằm trong danh mục quyền. Giờ nó
+đòi quyền manage của thứ thư mục chứa — thư mục app cần `app:manage`, cùng mức với chia sẻ một
+app — nên nút Share của thư mục ở đây dùng được với admin của workspace.
 
 ## 7. Kiểm chứng
 

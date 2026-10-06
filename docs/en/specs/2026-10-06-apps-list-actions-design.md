@@ -168,11 +168,12 @@ list key. The client is regenerated with `npm run gen:api` — never bare `orval
 - Certification, subscriptions.
 - Stopping pods synchronously on delete.
 
-## 6. Known problem this inherits
+## 6. Folder sharing (fixed separately, 2026-10-06)
 
-Sharing a **folder** requires `folder:manage`, which no role holds — a defect that predates this
-work and already affects the other lists. The folder Share action is wired here for parity and
-will fail the same way until that is fixed separately.
+When this page shipped, sharing a **folder** was refused for everyone on every list: the route
+asked for `folder:manage`, a key that was in no role and not in the permission catalog. It now
+asks for the manage action of what the folder holds — an apps folder needs `app:manage`, the
+same bar as sharing one app — so the folder Share action here works for a workspace admin.
 
 ## 7. Verification
 
