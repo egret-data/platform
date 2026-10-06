@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Search, Star, Trash2, FolderPlus, ListChecks, BadgeCheck } from "lucide-react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
+import { BulkMoveToFolderMenu, moveEach } from "@/components/explore/BulkMoveToFolderMenu";
 import { useDashboards, useDashboardMutations, type DashboardSummary } from "@/api/dashboards";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -154,14 +155,29 @@ export default function Dashboards() {
     for (const id of bulk.selectedIds) { try { await trash.mutateAsync(id); } catch (e) { toast.error(String(e)); } }
     toast.success("Moved to Trash"); bulk.clear();
   }
-  async function doBulkMove(name: string) {
+  /**
+   * Move the selected rows to a folder that already exists (`null` = out of any folder): one
+   * request and one verdict per row. See `BulkMoveToFolderMenu` for why this is a picker.
+   */
+  async function doBulkMoveTo(folderId: string | null) {
+    const moved = await moveEach(
+      bulk.selectedIds,
+      (id) => setFolder.mutateAsync({ id, folder_id: folderId }),
+      (e) => toast.error(String(e)),
+    );
+    if (moved > 0) toast.success(`Moved ${moved} ${moved === 1 ? "dashboard" : "dashboards"}`);
+    bulk.clear();
+  }
+  /** "New folder…" from the bulk menu: make the folder, then move into it. A name that already
+   *  exists (case-insensitively) is that folder, not a duplicate of it. */
+  async function doBulkMoveToNew(name: string) {
     const trimmed = name.trim();
+    let folderId: string;
     try {
       const existing = folders.find((f) => f.name.toLowerCase() === trimmed.toLowerCase());
-      const folderId = existing ? existing.id : (await createFolder.mutateAsync(trimmed)).id;
-      for (const id of bulk.selectedIds) await setFolder.mutateAsync({ id, folder_id: folderId });
-    } catch (e) { toast.error(String(e)); }
-    bulk.clear();
+      folderId = existing ? existing.id : (await createFolder.mutateAsync(trimmed)).id;
+    } catch (e) { toast.error(String(e)); return; }
+    await doBulkMoveTo(folderId);
   }
 
   const hasData = !!data && data.length > 0;
@@ -297,9 +313,12 @@ export default function Dashboards() {
             </div>
             {bulk.bulkMode && bulk.someSelected && !showTrash && canManage && (
               <>
-                <Button variant="outline" size="sm" onClick={() => setFolderDialog({ mode: "bulkmove" })}>
-                  Move {bulk.selectedIds.length} to folder…
-                </Button>
+                <BulkMoveToFolderMenu
+                  count={bulk.selectedIds.length}
+                  folders={folders}
+                  onMove={doBulkMoveTo}
+                  onNewFolder={() => setFolderDialog({ mode: "bulkmove" })}
+                />
                 <Button variant="destructive" size="sm" onClick={doBulkTrash}>
                   Move {bulk.selectedIds.length} to Trash
                 </Button>
@@ -366,7 +385,7 @@ export default function Dashboards() {
 
       <FolderNameDialog
         open={!!folderDialog}
-        title={folderDialog?.mode === "rename" ? "Rename folder" : folderDialog?.mode === "move" ? "Move to new folder" : folderDialog?.mode === "bulkmove" ? "Move to folder" : "New folder"}
+        title={folderDialog?.mode === "rename" ? "Rename folder" : folderDialog?.mode === "move" ? "Move to new folder" : folderDialog?.mode === "bulkmove" ? "Move to new folder" : "New folder"}
         submitLabel={folderDialog?.mode === "rename" ? "Rename" : folderDialog?.mode === "move" || folderDialog?.mode === "bulkmove" ? "Move" : "Create"}
         initialValue={folderDialog?.mode === "rename" ? folderDialog.folder!.name : ""}
         onOpenChange={(o) => { if (!o) setFolderDialog(null); }}
@@ -374,7 +393,7 @@ export default function Dashboards() {
           const d = folderDialog!;
           if (d.mode === "rename") renameFolder.mutateAsync({ id: d.folder!.id, name }).catch((e) => toast.error(String(e)));
           else if (d.mode === "move") createFolder.mutateAsync(name).then((f) => setFolder.mutateAsync({ id: d.dash!.id, folder_id: f.id })).then(() => toast.success("Moved")).catch((e) => toast.error(String(e)));
-          else if (d.mode === "bulkmove") doBulkMove(name);
+          else if (d.mode === "bulkmove") doBulkMoveToNew(name);
           else createFolder.mutateAsync(name).then(() => toast.success("Folder created")).catch((e) => toast.error(String(e)));
         }}
       />
