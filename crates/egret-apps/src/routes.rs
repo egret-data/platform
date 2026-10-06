@@ -11,7 +11,9 @@
 //! skip the workspace.
 //!
 //! A trashed app is read-only: every route that changes it, other than
-//! `POST …/restore` itself, answers 409 until it is restored.
+//! `POST …/restore` itself, answers 409 until it is restored. The one thing a
+//! trashed app (and only a trashed app) can have done to it is `DELETE`, which
+//! removes it for good and needs `app:manage`.
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, FromRef, Path, Query, State};
@@ -42,7 +44,7 @@ use uuid::Uuid;
 use crate::grant::{GrantRepo, NewGrant};
 use crate::session::AppMode;
 use crate::store::{
-    AppRow, AppStore, PublishOutcome, SaveOutcome, VersionSummary, MAX_SOURCE_BYTES,
+    AppRow, AppStore, DeleteOutcome, PublishOutcome, SaveOutcome, VersionSummary, MAX_SOURCE_BYTES,
 };
 use crate::template::new_app_source;
 
@@ -61,6 +63,8 @@ const QUERY_RUN: &str = "query:run";
 pub(crate) const MAX_BODY_BYTES: usize = 3 * 1024 * 1024;
 
 const TRASHED: &str = "app is in the trash; restore it first";
+const NOT_TRASHED: &str =
+    "app is not in the trash; move it to Trash before deleting it permanently";
 
 #[derive(Clone)]
 pub struct AppsApiState {
@@ -99,7 +103,10 @@ impl FromRef<AppsApiState> for Authorizer {
 pub fn apps_router() -> Router<AppsApiState> {
     Router::new()
         .route("/ws/{workspace}/apps", get(list).post(create))
-        .route("/ws/{workspace}/apps/{id}", get(get_one).patch(update))
+        .route(
+            "/ws/{workspace}/apps/{id}",
+            get(get_one).patch(update).delete(delete_app),
+        )
         .route("/ws/{workspace}/apps/{id}/trash", post(trash))
         .route("/ws/{workspace}/apps/{id}/restore", post(restore))
         .route("/ws/{workspace}/apps/{id}/duplicate", post(duplicate))
@@ -377,6 +384,8 @@ pub enum AppsHttpError {
     StaleRevision { current_revision: i64 },
     /// 409: a change to a trashed app.
     Trashed,
+    /// 409: a permanent delete of an app that is not in the trash.
+    NotTrashed,
     /// 409: a run ticket for an app that has never been published.
     NoPublishedVersion,
     /// 503: `apps.origin` is not configured, so there is nowhere to send an iframe.
@@ -410,6 +419,7 @@ impl IntoResponse for AppsHttpError {
             )
                 .into_response(),
             Self::Trashed => body(StatusCode::CONFLICT, TRASHED),
+            Self::NotTrashed => body(StatusCode::CONFLICT, NOT_TRASHED),
             Self::NoPublishedVersion => body(
                 StatusCode::CONFLICT,
                 "the app has no published version to run; publish it first",
@@ -701,6 +711,39 @@ async fn update(
         json!({ "name": name, "description_changed": b.description.is_some() }),
     );
     Ok(Json(detail(&st, &ctx, id).await?))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/apps/{id}",
+    tag = "apps",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "App id")),
+    responses(
+        (status = 204, description = "The app is permanently deleted, with its draft, versions, shares and every user's bookmark of it. Irreversible"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing app:manage on this app", body = ErrorBody),
+        (status = 404, description = "No such app in this workspace", body = ErrorBody),
+        (status = 409, description = "The app is not in the trash; move it to Trash first", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn delete_app(
+    State(st): State<AppsApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> AppsResult<StatusCode> {
+    let (obj, row) = app_object_ref(&st, &ctx, id).await?;
+    require_object(&*st.pdp, &ctx, APP_MANAGE, obj).await?;
+    // The trash check is the store's, under the row lock it deletes with.
+    match st.store.delete(ctx.workspace_id, id).await? {
+        DeleteOutcome::Deleted => {
+            emit(&st, &ctx, "app:delete", id, json!({ "name": row.name }));
+            Ok(StatusCode::NO_CONTENT)
+        }
+        DeleteOutcome::NotTrashed => Err(domain(AppsHttpError::NotTrashed)),
+        // Deleted by someone else between the resolve above and the store call.
+        DeleteOutcome::NotFound => Err(Error::NotFound("app".into()).into()),
+    }
 }
 
 #[utoipa::path(
@@ -1258,6 +1301,7 @@ async fn version_restore(
         create,
         get_one,
         update,
+        delete_app,
         trash,
         restore,
         duplicate,

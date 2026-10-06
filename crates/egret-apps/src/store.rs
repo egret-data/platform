@@ -86,6 +86,17 @@ pub enum PublishOutcome {
     Stale { current_revision: i64 },
 }
 
+/// What [`AppStore::delete`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    /// Rows gone (and the objects, best-effort).
+    Deleted,
+    /// No such app in that workspace.
+    NotFound,
+    /// The app is live: it must be moved to the trash first. Nothing was deleted.
+    NotTrashed,
+}
+
 #[derive(FromRow)]
 struct AppRowRaw {
     id: Uuid,
@@ -171,53 +182,48 @@ impl AppStore {
         }
     }
 
-    /// Mirrors `FileStore::object_uri`'s shape: `s3://{bucket}/{prefix}{workspace}/...`.
-    ///
+    /// Everything of one app lives under this prefix, and nothing else does:
+    /// `s3://{bucket}/{prefix}{workspace}/{app}/` (mirrors
+    /// `FileStore::object_uri`'s shape). Every key below is built from it, so
+    /// the prefix [`Self::delete`] removes and the keys the app was written to
+    /// cannot drift apart. It ends in `/`: `delete_prefix` matches by string
+    /// prefix, and without the slash one app's prefix would also be the start of
+    /// any id that extends it.
+    fn app_prefix(&self, ws: WorkspaceId, app: Uuid) -> String {
+        format!(
+            "s3://{}/{}{}/{}/",
+            self.bucket,
+            self.prefix,
+            ws.0.hyphenated(),
+            app.hyphenated()
+        )
+    }
+
     /// Keyed by draft revision (like [`Self::version_key`] is by `version_no`), so
     /// each revision's content is its own object: a save writes the NEXT
     /// revision's key and only becomes visible once its row commits, which is
     /// what keeps a write whose transaction never committed (finding I3) from
     /// ever being read as the draft.
     fn draft_key(&self, ws: WorkspaceId, app: Uuid, revision: i64) -> String {
-        format!(
-            "s3://{}/{}{}/{}/draft/{}.py",
-            self.bucket,
-            self.prefix,
-            ws.0.hyphenated(),
-            app.hyphenated(),
-            revision
-        )
+        format!("{}draft/{}.py", self.app_prefix(ws, app), revision)
     }
 
     fn draft_layout_key(&self, ws: WorkspaceId, app: Uuid, revision: i64) -> String {
-        format!(
-            "s3://{}/{}{}/{}/draft/{}.layout.json",
-            self.bucket,
-            self.prefix,
-            ws.0.hyphenated(),
-            app.hyphenated(),
-            revision
-        )
+        format!("{}draft/{}.layout.json", self.app_prefix(ws, app), revision)
     }
 
     fn version_key(&self, ws: WorkspaceId, app: Uuid, version_no: i32) -> String {
         format!(
-            "s3://{}/{}{}/{}/versions/{}/source.py",
-            self.bucket,
-            self.prefix,
-            ws.0.hyphenated(),
-            app.hyphenated(),
+            "{}versions/{}/source.py",
+            self.app_prefix(ws, app),
             version_no
         )
     }
 
     fn version_layout_key(&self, ws: WorkspaceId, app: Uuid, version_no: i32) -> String {
         format!(
-            "s3://{}/{}{}/{}/versions/{}/layout.json",
-            self.bucket,
-            self.prefix,
-            ws.0.hyphenated(),
-            app.hyphenated(),
+            "{}versions/{}/layout.json",
+            self.app_prefix(ws, app),
             version_no
         )
     }
@@ -270,6 +276,66 @@ impl AppStore {
             draft.layout_json.as_deref(),
         )
         .await
+    }
+
+    /// Workspace-scoped: permanently delete a TRASHED app. Irreversible.
+    ///
+    /// One transaction, with the app row locked so the trash state it checks is
+    /// the state it deletes (a concurrent restore waits, then finds no app):
+    /// the caller-independent polymorphic rows that no foreign key reaches --
+    /// every user's bookmark of it and every object share on it -- then the app
+    /// row itself. Drafts, versions, sessions, grants and run pod tokens follow
+    /// by `ON DELETE CASCADE` (migrations 0161, 0163, 0165); the `app_versions`
+    /// append-only trigger lets a version go exactly when its app row is already
+    /// gone, which is this case.
+    ///
+    /// Only after the commit are the app's objects removed, by its prefix. Rows
+    /// first, objects second: a failure in between leaves objects nothing
+    /// references, never rows pointing at content that is gone. The object delete
+    /// is therefore best-effort -- logged, and not an error of a delete whose
+    /// rows are already gone.
+    pub async fn delete(&self, ws: WorkspaceId, id: Uuid) -> Result<DeleteOutcome> {
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        let Some(deleted_at) = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+            "SELECT deleted_at FROM analytics.apps WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+        )
+        .bind(id)
+        .bind(ws.0)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?
+        else {
+            return Ok(DeleteOutcome::NotFound);
+        };
+        if deleted_at.is_none() {
+            return Ok(DeleteOutcome::NotTrashed);
+        }
+        sqlx::query("DELETE FROM analytics.bookmarks WHERE entity_type = 'app' AND entity_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        sqlx::query("DELETE FROM access_grants WHERE scope_type = 'object' AND scope_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        sqlx::query("DELETE FROM analytics.apps WHERE id = $1 AND workspace_id = $2")
+            .bind(id)
+            .bind(ws.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+
+        let prefix = self.app_prefix(ws, id);
+        match self.store.delete_prefix(&prefix).await {
+            Ok(n) => tracing::debug!(%prefix, objects = n, "data app: deleted its objects"),
+            Err(e) => {
+                tracing::warn!(error = %e, %prefix, "data app: rows deleted but its objects could not be; they are orphans")
+            }
+        }
+        Ok(DeleteOutcome::Deleted)
     }
 
     /// The one insert path for a new app: the row, its revision-1 draft row, and

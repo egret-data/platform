@@ -9,14 +9,14 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use egret_apps::grant::GrantRepo;
 use egret_apps::session::AppMode;
-use egret_apps::store::{AppStore, MAX_SOURCE_BYTES};
+use egret_apps::store::{AppStore, DeleteOutcome, MAX_SOURCE_BYTES};
 use egret_apps::{apps_router, AppsApiState};
 use egret_audit::AuditEvent;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_core::{UserId, WorkspaceId};
 use egret_metastore::Db;
-use egret_storage::{MemStore, ObjectStore};
+use egret_storage::{MemStore, ObjectStore, StorageError};
 use egret_workspace::members::MemberRepo;
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
@@ -503,6 +503,7 @@ async fn an_app_of_another_workspace_is_404_on_every_route_like_a_random_id() {
 
     let routes: Vec<Route> = vec![
         ("GET", "/{id}".to_string(), None, vec![]),
+        ("DELETE", "/{id}".to_string(), None, vec![]),
         (
             "PATCH",
             "/{id}".to_string(),
@@ -1189,6 +1190,7 @@ async fn with_the_apps_feature_disabled_every_route_is_403() {
         ("GET", String::new(), None),
         ("POST", String::new(), Some(json!({ "name": "x" }))),
         ("GET", format!("/{id}"), None),
+        ("DELETE", format!("/{id}"), None),
         ("PATCH", format!("/{id}"), Some(json!({ "name": "x" }))),
         ("POST", format!("/{id}/trash"), None),
         ("POST", format!("/{id}/restore"), None),
@@ -1843,4 +1845,358 @@ async fn a_long_name_is_truncated_to_the_name_limit() {
     let got = r.body["name"].as_str().unwrap();
     assert_eq!(got.chars().count(), 200);
     assert_eq!(got, format!("Copy of {}", "é".repeat(192)));
+}
+
+// ── Delete permanently (list actions spec §3.3) ─────────────────────────────
+//
+// Destructive: `MemStore` and the per-process test database only.
+
+const NOT_TRASHED: &str =
+    "app is not in the trash; move it to Trash before deleting it permanently";
+
+/// Every table that holds something of an app, with the count of its rows there.
+/// Each is asserted non-zero BEFORE a delete, so a zero afterwards means "removed"
+/// and not "never seeded".
+const APP_TABLES: [(&str, &str); 8] = [
+    ("apps", "SELECT count(*) FROM analytics.apps WHERE id = $1"),
+    (
+        "app_drafts",
+        "SELECT count(*) FROM analytics.app_drafts WHERE app_id = $1",
+    ),
+    (
+        "app_versions",
+        "SELECT count(*) FROM analytics.app_versions WHERE app_id = $1",
+    ),
+    (
+        "app_grants",
+        "SELECT count(*) FROM analytics.app_grants WHERE app_id = $1",
+    ),
+    (
+        "app_pod_tokens",
+        "SELECT count(*) FROM analytics.app_pod_tokens WHERE app_id = $1",
+    ),
+    (
+        "app_sessions",
+        "SELECT count(*) FROM analytics.app_sessions WHERE app_id = $1",
+    ),
+    (
+        "bookmarks",
+        "SELECT count(*) FROM analytics.bookmarks WHERE entity_type = 'app' AND entity_id = $1",
+    ),
+    (
+        "access_grants",
+        "SELECT count(*) FROM access_grants WHERE scope_type = 'object' AND scope_id = $1",
+    ),
+];
+
+/// An object store whose `delete_prefix` always fails; everything else is the
+/// `MemStore` behind it.
+struct FailingDeletePrefix(Arc<MemStore>);
+
+#[async_trait::async_trait]
+impl ObjectStore for FailingDeletePrefix {
+    async fn put(&self, uri: &str, bytes: Vec<u8>) -> Result<(), StorageError> {
+        self.0.put(uri, bytes).await
+    }
+    async fn get(&self, uri: &str) -> Result<Vec<u8>, StorageError> {
+        self.0.get(uri).await
+    }
+    async fn delete(&self, uri: &str) -> Result<(), StorageError> {
+        self.0.delete(uri).await
+    }
+    async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError> {
+        self.0.copy(src, dst).await
+    }
+    async fn list(
+        &self,
+        prefix: &str,
+        delimiter: Option<&str>,
+    ) -> Result<egret_storage::Listing, StorageError> {
+        self.0.list(prefix, delimiter).await
+    }
+    async fn delete_prefix(&self, uri: &str) -> Result<u64, StorageError> {
+        Err(StorageError::S3(format!("{uri}: the bucket is on fire")))
+    }
+}
+
+impl Fixture {
+    /// An app with everything a delete has to take with it: a draft with a
+    /// layout, two published versions and a restored one (a `restored_from`
+    /// self-reference), a grant, a run pod token, a run session, two bookmarks
+    /// and a share.
+    async fn seeded_app(&self, name: &str) -> String {
+        let (id, _layout) = self.app_with_a_layout(name, None).await;
+        let app = Uuid::parse_str(&id).unwrap();
+        let v1 = self.publish_app(&id).await;
+        self.publish_app(&id).await;
+        let r = self
+            .call(
+                "POST",
+                &self.path(&format!("/{id}/versions/{v1}/restore")),
+                &self.editor,
+                None,
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::CREATED, "restore: {}", r.body);
+        assert_eq!(r.body["restored_from"], json!(v1));
+        // `app_grants`, through the route that writes them.
+        let r = self
+            .ticket(&id, &self.editor, json!({ "mode": "run" }))
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "ticket: {}", r.body);
+        egret_apps::podtoken::PodTokenRepo::new(self.db.clone())
+            .mint_run(self.ws, app, v1)
+            .await
+            .expect("pod token");
+        sqlx::query(
+            "INSERT INTO analytics.app_sessions \
+             (token_hash, user_id, workspace_id, app_id, version_id, mode, login_sid, \
+              idle_expires_at, absolute_expires_at) \
+             VALUES ($1, $2, $3, $4, $5, 'run', $6, \
+                     now() + interval '30 minutes', now() + interval '8 hours')",
+        )
+        .bind(Uuid::new_v4().simple().to_string())
+        .bind(self.editor.id.0)
+        .bind(self.ws.0)
+        .bind(app)
+        .bind(v1)
+        .bind(self.login_session_of(&self.editor).await)
+        .execute(&self.db.pool)
+        .await
+        .expect("app session");
+        for who in [&self.editor, &self.viewer] {
+            let r = self
+                .call("POST", &self.path(&format!("/{id}/bookmark")), who, None)
+                .await;
+            assert_eq!(r.status, StatusCode::NO_CONTENT, "bookmark: {}", r.body);
+        }
+        let guest = self.user().await;
+        self.share(&id, &guest, "ws_viewer").await;
+        id
+    }
+
+    async fn rows_of(&self, id: &str) -> Vec<(&'static str, i64)> {
+        let app = Uuid::parse_str(id).unwrap();
+        let mut out = Vec::new();
+        for (table, sql) in APP_TABLES {
+            let n: i64 = sqlx::query_scalar(sql)
+                .bind(app)
+                .fetch_one(&self.db.pool)
+                .await
+                .unwrap();
+            out.push((table, n));
+        }
+        out
+    }
+
+    /// The app's objects, found by a prefix written out here rather than taken
+    /// from the store's own helper (which is the thing under test).
+    fn objects_of(&self, ws: WorkspaceId, id: &str) -> Vec<String> {
+        let prefix = format!(
+            "s3://{TEST_BUCKET}/{TEST_PREFIX}{}/{id}/",
+            ws.0.hyphenated()
+        );
+        self.mem
+            .keys()
+            .into_iter()
+            .filter(|k| k.starts_with(&prefix))
+            .collect()
+    }
+
+    async fn trash_app(&self, id: &str) {
+        let r = self
+            .call(
+                "POST",
+                &self.path(&format!("/{id}/trash")),
+                &self.editor,
+                None,
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::NO_CONTENT, "trash: {}", r.body);
+    }
+
+    async fn delete_app(&self, id: &str, who: &User) -> Resp {
+        self.call("DELETE", &self.path(&format!("/{id}")), who, None)
+            .await
+    }
+
+    /// Assert the seed left something in every table and the object store.
+    async fn assert_fully_seeded(&self, id: &str) -> (Vec<(&'static str, i64)>, Vec<String>) {
+        let rows = self.rows_of(id).await;
+        for (table, n) in &rows {
+            assert!(*n > 0, "seed left nothing in {table}");
+        }
+        let versions = rows.iter().find(|(t, _)| *t == "app_versions").unwrap().1;
+        assert_eq!(versions, 3);
+        let objects = self.objects_of(self.ws, id);
+        // draft source + layout, and source + layout for each of three versions
+        assert_eq!(objects.len(), 8, "{objects:?}");
+        (rows, objects)
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_trashed_app_removes_all_of_it_and_nothing_of_its_neighbour() {
+    let mut fx = Fixture::new().await;
+    let doomed = fx.seeded_app("doomed").await;
+    let neighbour = fx.seeded_app("neighbour").await;
+    let admin = fx.member(fx.ws, "ws_admin").await;
+    fx.rebuild().await;
+    fx.assert_fully_seeded(&doomed).await;
+    let (neighbour_rows, neighbour_objects) = fx.assert_fully_seeded(&neighbour).await;
+    fx.trash_app(&doomed).await;
+    let others: Vec<String> = fx
+        .mem
+        .keys()
+        .into_iter()
+        .filter(|k| !k.contains(&doomed))
+        .collect();
+    fx.mutations();
+
+    let r = fx.delete_app(&doomed, &admin).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+
+    for (table, n) in fx.rows_of(&doomed).await {
+        assert_eq!(n, 0, "{table} still has rows of the deleted app");
+    }
+    assert_eq!(fx.objects_of(fx.ws, &doomed), Vec::<String>::new());
+    // The neighbour: every row and every object, and its content still reads.
+    assert_eq!(fx.rows_of(&neighbour).await, neighbour_rows);
+    assert_eq!(fx.objects_of(fx.ws, &neighbour), neighbour_objects);
+    assert_eq!(fx.mem.keys(), others, "only the deleted app's objects went");
+    let d = fx
+        .store()
+        .draft(fx.ws, Uuid::parse_str(&neighbour).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.source, DUP_SOURCE);
+    assert!(d.layout_json.is_some());
+
+    assert_eq!(fx.mutations(), vec!["app:delete".to_string()]);
+    // Gone for good: not in either list, and a second delete finds nothing.
+    for list in ["", "?trashed=true"] {
+        let r = fx.get(&fx.path(list), &admin).await;
+        assert_eq!(r.status, StatusCode::OK);
+        assert!(
+            r.body
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["id"] != doomed.as_str()),
+            "{}",
+            r.body
+        );
+    }
+    assert_eq!(
+        fx.get(&fx.path(&format!("/{doomed}")), &admin).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        fx.delete_app(&doomed, &admin).await.status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn an_app_that_is_not_in_the_trash_is_not_deleted() {
+    let mut fx = Fixture::new().await;
+    let id = fx.seeded_app("live").await;
+    let admin = fx.member(fx.ws, "ws_admin").await;
+    fx.rebuild().await;
+    let (rows, objects) = fx.assert_fully_seeded(&id).await;
+    fx.mutations();
+
+    let r = fx.delete_app(&id, &admin).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+    assert_eq!(r.body, json!({ "error": NOT_TRASHED }));
+    assert_eq!(fx.rows_of(&id).await, rows);
+    assert_eq!(fx.objects_of(fx.ws, &id), objects);
+    assert!(fx.mutations().is_empty());
+}
+
+#[tokio::test]
+async fn deleting_needs_manage_not_write() {
+    let mut fx = Fixture::new().await;
+    let id = fx.seeded_app("a").await;
+    let guest = fx.user().await;
+    fx.share(&id, &guest, "ws_editor").await;
+    fx.rebuild().await;
+    fx.trash_app(&id).await;
+    // `rows_of` after the extra share and the trash, so it is the exact "before".
+    let rows = fx.rows_of(&id).await;
+    let objects = fx.objects_of(fx.ws, &id);
+    assert_eq!(objects.len(), 8);
+    fx.mutations();
+
+    for (who, what) in [
+        (&fx.editor, "workspace editor"),
+        (&guest, "share-only editor"),
+        (&fx.viewer, "reader"),
+    ] {
+        // The editors really do hold write on it: restore-and-trash would work.
+        let r = fx.delete_app(&id, who).await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{what}: {}", r.body);
+    }
+    assert_eq!(fx.rows_of(&id).await, rows);
+    assert_eq!(fx.objects_of(fx.ws, &id), objects);
+    assert!(fx.mutations().is_empty());
+}
+
+#[tokio::test]
+async fn an_app_of_another_workspace_is_404_and_survives() {
+    let mut fx = Fixture::new().await;
+    // A trashed app with a version in workspace B, in the SAME object store the
+    // router deletes from.
+    let store = fx.store();
+    let b_app = store
+        .create(fx.ws_b, fx.owner, "b", "", None, "import marimo")
+        .await
+        .unwrap()
+        .id;
+    store.publish(fx.ws_b, b_app, fx.owner, None).await.unwrap();
+    assert!(store.set_trashed(fx.ws_b, b_app, true).await.unwrap());
+    let admin = fx.member(fx.ws, "ws_admin").await;
+    fx.rebuild().await;
+    let b = b_app.to_string();
+    let rows = fx.rows_of(&b).await;
+    let objects = fx.objects_of(fx.ws_b, &b);
+    assert_eq!(objects.len(), 2, "{objects:?}");
+
+    let r = fx.delete_app(&b, &admin).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
+    let random = fx.delete_app(&Uuid::new_v4().to_string(), &admin).await;
+    assert_eq!(r.body, random.body, "same body as a random id");
+    assert_eq!(fx.rows_of(&b).await, rows);
+    assert_eq!(fx.objects_of(fx.ws_b, &b), objects);
+    // And the store itself refuses the pair, not only the handler.
+    assert_eq!(
+        store.delete(fx.ws, b_app).await.unwrap(),
+        DeleteOutcome::NotFound
+    );
+    assert_eq!(fx.rows_of(&b).await, rows);
+    assert_eq!(fx.objects_of(fx.ws_b, &b), objects);
+}
+
+#[tokio::test]
+async fn a_failing_object_delete_still_deletes_the_rows_and_answers_204() {
+    let mut fx = Fixture::new().await;
+    let id = fx.seeded_app("a").await;
+    let admin = fx.member(fx.ws, "ws_admin").await;
+    let (router, rx) = build_router(&fx.db, Arc::new(FailingDeletePrefix(fx.mem.clone()))).await;
+    fx.router = router;
+    fx.audit_rx = rx;
+    let (_rows, objects) = fx.assert_fully_seeded(&id).await;
+    fx.trash_app(&id).await;
+    fx.mutations();
+
+    let r = fx.delete_app(&id, &admin).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+    for (table, n) in fx.rows_of(&id).await {
+        assert_eq!(n, 0, "{table} still has rows of the deleted app");
+    }
+    // Orphans nothing references -- which also shows the failing store was the
+    // one the handler used.
+    assert_eq!(fx.objects_of(fx.ws, &id), objects);
+    assert_eq!(fx.mutations(), vec!["app:delete".to_string()]);
 }
