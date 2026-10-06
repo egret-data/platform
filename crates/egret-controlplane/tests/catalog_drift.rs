@@ -127,7 +127,7 @@ const GATE_CALLS: &[&str] = &[
 /// `manage_action` in `egret-bi/src/shares.rs` is the second case: the share and
 /// tag handlers gate with `require_object(.., manage_action_for(&kind)?, obj)`, so
 /// `app:manage` never appears on a gate line.
-const PERM_TABLE_FNS: &[&str] = &["fn kind_perms(", "fn manage_action("];
+const PERM_TABLE_FNS: &[&str] = &["fn kind_perms(", "fn manage_action(", "fn read_action("];
 
 /// Functions whose whole body IS the gate, so the permission is named inside
 /// them rather than on the line that calls the gate.
@@ -350,6 +350,47 @@ fn every_catalog_permission_is_enforced_somewhere() {
          to ALLOWED_UNENFORCED with a reason, or remove it from egret_core::rbac::PERMISSIONS.",
         CONTROLPLANE_FILES,
         EXTRA_FILES,
+    );
+}
+
+/// Keys that are enforced and CAN be held, without being in `PERMISSIONS`. Each
+/// needs its reason here; "it failed the test" is not one.
+///
+/// - `catalog:read`: the workspace-scope key from migration 0024, held by every
+///   workspace role and gated in egret-query's registry routes. It is kept out of
+///   the catalog on purpose -- `egret_core::rbac` pins `!is_known("catalog:read")`
+///   so it cannot be confused with the platform `catalog_registry:*` family.
+const HELD_OUTSIDE_THE_CATALOG: &[&str] = &["catalog:read"];
+
+/// The other direction: every key the code ENFORCES must be one somebody can hold.
+///
+/// A gate on a key no role can be granted cannot be satisfied, so the route
+/// behind it refuses everyone. `folder:manage` was exactly that for the whole life
+/// of folder sharing -- `shares.rs` asked for it, it was in no catalog and no
+/// migration, and workspace admins got 403. The scan above could not see it,
+/// because it only asks whether each catalog key has a gate.
+///
+/// "Can hold" is three sets: the catalog, the admin-graph actions (not grantable,
+/// but the PDP permits them to `platform_admin`), and the named exceptions above.
+/// Same scan, same files, read the other way.
+#[test]
+fn every_enforced_key_can_be_held_by_someone() {
+    let holdable: HashSet<&str> = egret_core::rbac::PERMISSIONS
+        .iter()
+        .map(|p| p.key)
+        .chain(egret_core::rbac::ADMIN_GRAPH_ACTIONS.iter().copied())
+        .chain(HELD_OUTSIDE_THE_CATALOG.iter().copied())
+        .collect();
+    let mut unknown: Vec<String> = enforced_keys()
+        .into_iter()
+        .filter(|k| !holdable.contains(k.as_str()))
+        .collect();
+    unknown.sort();
+    assert!(
+        unknown.is_empty(),
+        "gate(s) on a key nobody can hold -- not in egret_core::rbac::PERMISSIONS, not an \
+         admin-graph action -- so the route refuses everyone: {unknown:?}. Add the key to the \
+         catalog and grant it in a migration, or gate on a key that exists."
     );
 }
 
