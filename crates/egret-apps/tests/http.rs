@@ -1421,3 +1421,178 @@ async fn with_no_apps_origin_configured_the_iframe_cannot_be_opened() {
     let r = fx.ticket(&id, &fx.editor, json!({ "mode": "edit" })).await;
     assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{}", r.body);
 }
+
+// ── Per-row capabilities (list actions spec §3.1) ───────────────────────────
+
+impl Fixture {
+    /// The row the share API (`egret-bi/src/shares.rs`) writes: `who` holds the
+    /// workspace role `role` on this one app.
+    async fn share(&self, app: &str, who: &User, role: &str) {
+        let n = sqlx::query(
+            "INSERT INTO access_grants \
+               (principal_type, principal_id, role_id, scope_type, object_type, scope_id, effect, granted_by) \
+             SELECT 'user', $1, id, 'object', 'app', $2, 'allow', $3 \
+               FROM roles WHERE scope = 'workspace' AND name = $4",
+        )
+        .bind(who.id.0)
+        .bind(Uuid::parse_str(app).unwrap())
+        .bind(self.owner.0)
+        .bind(role)
+        .execute(&self.db.pool)
+        .await
+        .expect("share")
+        .rows_affected();
+        assert_eq!(n, 1, "role {role} must exist");
+    }
+
+    /// `(can_write, can_manage)` of `app` as `who` sees it in the list.
+    async fn listed_caps(&self, app: &str, who: &User) -> (Value, Value) {
+        let r = self.get(&self.path(""), who).await;
+        assert_eq!(r.status, StatusCode::OK, "list: {}", r.body);
+        let row = r
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == app)
+            .unwrap_or_else(|| panic!("app {app} not in the list: {}", r.body))
+            .clone();
+        (row["can_write"].clone(), row["can_manage"].clone())
+    }
+
+    /// `(can_write, can_manage)` of `app` as `who` sees it on the detail route.
+    async fn detail_caps(&self, app: &str, who: &User) -> (Value, Value) {
+        let r = self.get(&self.path(&format!("/{app}")), who).await;
+        assert_eq!(r.status, StatusCode::OK, "get: {}", r.body);
+        (r.body["can_write"].clone(), r.body["can_manage"].clone())
+    }
+
+    /// What `PATCH` (needs `app:write` on the app) answers `who`.
+    async fn patch_status(&self, app: &str, who: &User) -> StatusCode {
+        self.call(
+            "PATCH",
+            &self.path(&format!("/{app}")),
+            who,
+            Some(json!({ "description": "touched" })),
+        )
+        .await
+        .status
+    }
+}
+
+#[tokio::test]
+async fn a_workspace_admin_can_write_and_manage_every_row() {
+    let mut fx = Fixture::new().await;
+    let id = fx.create_app("a").await;
+    let admin = fx.member(fx.ws, "ws_admin").await;
+    fx.rebuild().await;
+
+    assert_eq!(
+        fx.listed_caps(&id, &admin).await,
+        (json!(true), json!(true))
+    );
+    assert_eq!(
+        fx.detail_caps(&id, &admin).await,
+        (json!(true), json!(true))
+    );
+    assert_eq!(fx.patch_status(&id, &admin).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_reader_can_neither_write_nor_manage() {
+    let fx = Fixture::new().await;
+    let id = fx.create_app("a").await;
+
+    assert_eq!(
+        fx.listed_caps(&id, &fx.viewer).await,
+        (json!(false), json!(false))
+    );
+    assert_eq!(
+        fx.detail_caps(&id, &fx.viewer).await,
+        (json!(false), json!(false))
+    );
+    assert_eq!(
+        fx.patch_status(&id, &fx.viewer).await,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn an_editor_can_write_but_not_manage() {
+    let fx = Fixture::new().await;
+    let id = fx.create_app("a").await;
+
+    assert_eq!(
+        fx.listed_caps(&id, &fx.editor).await,
+        (json!(true), json!(false))
+    );
+    assert_eq!(fx.patch_status(&id, &fx.editor).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_write_share_on_one_app_shows_on_that_row_only() {
+    let mut fx = Fixture::new().await;
+    let shared = fx.create_app("shared").await;
+    let unshared = fx.create_app("unshared").await;
+    // A workspace viewer (so the list is theirs to read) with an Editor share on
+    // ONE app: a workspace-wide answer would be wrong for one of the two rows.
+    let collaborator = fx.member(fx.ws, "ws_viewer").await;
+    fx.share(&shared, &collaborator, "ws_editor").await;
+    // And a guest with no workspace role at all, holding only the share.
+    let guest = fx.user().await;
+    fx.share(&shared, &guest, "ws_editor").await;
+    fx.rebuild().await;
+
+    assert_eq!(
+        fx.listed_caps(&shared, &collaborator).await,
+        (json!(true), json!(false))
+    );
+    assert_eq!(
+        fx.listed_caps(&unshared, &collaborator).await,
+        (json!(false), json!(false))
+    );
+    assert_eq!(
+        fx.detail_caps(&shared, &guest).await,
+        (json!(true), json!(false))
+    );
+
+    // The flag and the refusal agree.
+    assert_eq!(
+        fx.patch_status(&shared, &collaborator).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        fx.patch_status(&unshared, &collaborator).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(fx.patch_status(&shared, &guest).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn create_and_update_report_the_callers_capabilities() {
+    let fx = Fixture::new().await;
+    let r = fx
+        .call(
+            "POST",
+            &fx.path(""),
+            &fx.editor,
+            Some(json!({ "name": "a" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(r.body["can_write"], json!(true), "{}", r.body);
+    assert_eq!(r.body["can_manage"], json!(false), "{}", r.body);
+    let id = r.body["id"].as_str().unwrap().to_string();
+
+    let r = fx
+        .call(
+            "PATCH",
+            &fx.path(&format!("/{id}")),
+            &fx.editor,
+            Some(json!({ "name": "b" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body["can_write"], json!(true), "{}", r.body);
+    assert_eq!(r.body["can_manage"], json!(false), "{}", r.body);
+}

@@ -48,6 +48,8 @@ use crate::template::new_app_source;
 
 const APP_READ: &str = "app:read";
 const APP_WRITE: &str = "app:write";
+/// Sharing and permanent delete.
+const APP_MANAGE: &str = "app:manage";
 /// Edit mode also needs arbitrary SQL, as SQL Lab does (spec §4.2).
 const QUERY_RUN: &str = "query:run";
 
@@ -143,6 +145,11 @@ pub struct AppSummary {
     pub draft_revision: i64,
     /// `None` until the first publish.
     pub latest_version_no: Option<i32>,
+    /// The caller holds `app:write` on THIS app (per object: a share on one app
+    /// makes it true on that row only).
+    pub can_write: bool,
+    /// The caller holds `app:manage` on THIS app (sharing, permanent delete).
+    pub can_manage: bool,
 }
 
 /// One app, as returned by get / create / update.
@@ -160,10 +167,22 @@ pub struct AppDetail {
     pub bookmarked: bool,
     pub draft_revision: i64,
     pub latest_version_no: Option<i32>,
+    /// The caller holds `app:write` on THIS app (per object: a share on one app
+    /// makes it true on that row only).
+    pub can_write: bool,
+    /// The caller holds `app:manage` on THIS app (sharing, permanent delete).
+    pub can_manage: bool,
+}
+
+/// What the caller may do to one app; see [`caps`].
+#[derive(Debug, Clone, Copy)]
+struct Caps {
+    can_write: bool,
+    can_manage: bool,
 }
 
 impl AppSummary {
-    fn of(r: AppRow, ctx: &WorkspaceContext) -> Self {
+    fn of(r: AppRow, ctx: &WorkspaceContext, caps: Caps) -> Self {
         Self {
             is_owner: r.owner_user_id == Some(ctx.principal.user_id.0),
             id: r.id,
@@ -176,12 +195,14 @@ impl AppSummary {
             bookmarked: r.bookmarked,
             draft_revision: r.draft_revision,
             latest_version_no: r.latest_version_no,
+            can_write: caps.can_write,
+            can_manage: caps.can_manage,
         }
     }
 }
 
 impl AppDetail {
-    fn of(r: AppRow, ctx: &WorkspaceContext) -> Self {
+    fn of(r: AppRow, ctx: &WorkspaceContext, caps: Caps) -> Self {
         Self {
             is_owner: r.owner_user_id == Some(ctx.principal.user_id.0),
             id: r.id,
@@ -195,6 +216,8 @@ impl AppDetail {
             bookmarked: r.bookmarked,
             draft_revision: r.draft_revision,
             latest_version_no: r.latest_version_no,
+            can_write: caps.can_write,
+            can_manage: caps.can_manage,
         }
     }
 }
@@ -419,13 +442,43 @@ async fn app_object_ref(
         .get(ctx.workspace_id, ctx.principal.user_id, id)
         .await?
         .ok_or_else(|| Error::NotFound("app".into()))?;
-    let obj = ObjectRef {
+    let obj = object_ref_of(ctx, &row);
+    Ok((obj, row))
+}
+
+/// The one place an app's [`ObjectRef`] is built, so a capability flag and the
+/// handler that later enforces it are asked about the same resource.
+fn object_ref_of(ctx: &WorkspaceContext, row: &AppRow) -> ObjectRef {
+    ObjectRef {
         kind: "app".into(),
-        id,
+        id: row.id,
         folder_id: row.folder_id,
         workspace_id: ctx.workspace_id,
-    };
-    Ok((obj, row))
+    }
+}
+
+/// Whether the caller holds `action` on this app: the [`require_object`] the
+/// mutating handlers run, with its refusal read as `false`. Any other failure
+/// (the PDP itself erroring) is still an error.
+async fn allowed(
+    st: &AppsApiState,
+    ctx: &WorkspaceContext,
+    action: &str,
+    row: &AppRow,
+) -> AppsResult<bool> {
+    match require_object(&*st.pdp, ctx, action, object_ref_of(ctx, row)).await {
+        Ok(()) => Ok(true),
+        Err(Error::Forbidden) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Per-object `can_write` / `can_manage` for a response row (two PDP checks).
+async fn caps(st: &AppsApiState, ctx: &WorkspaceContext, row: &AppRow) -> AppsResult<Caps> {
+    Ok(Caps {
+        can_write: allowed(st, ctx, APP_WRITE, row).await?,
+        can_manage: allowed(st, ctx, APP_MANAGE, row).await?,
+    })
 }
 
 fn refuse_if_trashed(row: &AppRow) -> AppsResult<()> {
@@ -451,7 +504,8 @@ async fn detail(st: &AppsApiState, ctx: &WorkspaceContext, id: Uuid) -> AppsResu
         .get(ctx.workspace_id, ctx.principal.user_id, id)
         .await?
         .ok_or_else(|| Error::NotFound("app".into()))?;
-    Ok(AppDetail::of(row, ctx))
+    let caps = caps(st, ctx, &row).await?;
+    Ok(AppDetail::of(row, ctx, caps))
 }
 
 fn emit(
@@ -516,9 +570,12 @@ async fn list(
         .store
         .list(ctx.workspace_id, ctx.principal.user_id, q.trashed)
         .await?;
-    Ok(Json(
-        rows.into_iter().map(|r| AppSummary::of(r, &ctx)).collect(),
-    ))
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let caps = caps(&st, &ctx, &r).await?;
+        out.push(AppSummary::of(r, &ctx, caps));
+    }
+    Ok(Json(out))
 }
 
 #[utoipa::path(
@@ -575,7 +632,8 @@ async fn create(
         )
         .await?;
     emit(&st, &ctx, "app:create", row.id, json!({ "name": row.name }));
-    Ok((StatusCode::CREATED, Json(AppDetail::of(row, &ctx))))
+    let caps = caps(&st, &ctx, &row).await?;
+    Ok((StatusCode::CREATED, Json(AppDetail::of(row, &ctx, caps))))
 }
 
 #[utoipa::path(
@@ -598,7 +656,8 @@ async fn get_one(
 ) -> AppsResult<Json<AppDetail>> {
     let (obj, row) = app_object_ref(&st, &ctx, id).await?;
     require_object(&*st.pdp, &ctx, APP_READ, obj).await?;
-    Ok(Json(AppDetail::of(row, &ctx)))
+    let caps = caps(&st, &ctx, &row).await?;
+    Ok(Json(AppDetail::of(row, &ctx, caps)))
 }
 
 #[utoipa::path(
