@@ -208,19 +208,29 @@ pub(crate) fn is_multipart(headers: &axum::http::HeaderMap) -> bool {
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("multipart/form-data"))
 }
 /// The longest a namespace file upload's body may go without a byte arriving
-/// (W9b Task 8). `put` holds the path's advisory lock and a pool connection
-/// across the upload, so a client that stops sending must not hold them: the
-/// body ends with an error, `put` rolls back, the lock and the connection are
-/// released, and the answer is a 408. The total time is bounded by the body
-/// limit at this rate, not by a clock: a 1 GiB file on a slow link is legal.
+/// (W9b Task 8), by default (`WorkflowState::upload_idle_timeout`). The body
+/// is streamed to a staging object before any lock is taken (fix round 1,
+/// the user's ruling of 2026-10-06), so a stalled client holds no pool
+/// connection and no lock; this bounds the object-store upload it holds open
+/// instead. The body ends with an error, nothing is stored, and the answer is
+/// a 408. The total time is bounded by the body limit at this rate, not by a
+/// clock: a 1 GiB file on a slow link is legal.
 pub const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A body stream that fails once `idle` passes with no chunk arriving, and
 /// says so in `timed_out` (so the route can answer 408, not the store's 503).
+///
+/// Only time spent waiting on the CLIENT counts (fix round 1, M-1): the
+/// deadline is armed when a poll starts after the previous one returned a
+/// chunk (or on the first poll), never at construction and never while the
+/// reader is busy elsewhere -- a server that is slow to ask for the next chunk
+/// is not a client that is slow to send it.
 pub(crate) struct IdleTimeout<S> {
     inner: std::pin::Pin<Box<S>>,
     idle: Duration,
     sleep: std::pin::Pin<Box<tokio::time::Sleep>>,
+    /// The deadline in `sleep` belongs to the wait in progress.
+    armed: bool,
     timed_out: Arc<AtomicBool>,
 }
 
@@ -230,8 +240,18 @@ impl<S> IdleTimeout<S> {
             inner: Box::pin(inner),
             idle,
             sleep: Box::pin(tokio::time::sleep(idle)),
+            armed: false,
             timed_out,
         }
+    }
+}
+
+/// `idle` as the 408 says it: whole seconds, or milliseconds below one.
+pub(crate) fn idle_text(idle: Duration) -> String {
+    if idle >= Duration::from_secs(1) && idle.subsec_millis() == 0 {
+        format!("{} seconds", idle.as_secs())
+    } else {
+        format!("{} ms", idle.as_millis())
     }
 }
 
@@ -250,10 +270,14 @@ where
         if this.timed_out.load(Ordering::SeqCst) {
             return Poll::Ready(None);
         }
+        if !this.armed {
+            let deadline = tokio::time::Instant::now() + this.idle;
+            this.sleep.as_mut().reset(deadline);
+            this.armed = true;
+        }
         match this.inner.as_mut().poll_next(cx) {
             Poll::Ready(item) => {
-                let deadline = tokio::time::Instant::now() + this.idle;
-                this.sleep.as_mut().reset(deadline);
+                this.armed = false;
                 Poll::Ready(item)
             }
             Poll::Pending => match this.sleep.as_mut().poll(cx) {
@@ -262,8 +286,8 @@ where
                     Poll::Ready(Some(Err(axum::Error::new(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         format!(
-                            "no byte of the request body arrived for {} seconds",
-                            this.idle.as_secs()
+                            "no byte of the request body arrived for {}",
+                            idle_text(this.idle)
                         ),
                     )))))
                 }
@@ -315,5 +339,36 @@ mod tests {
         assert_eq!(got.len(), 8);
         assert!(got.iter().all(Result::is_ok));
         assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    /// Fix round 1, M-1: time before the first poll, and time between a chunk
+    /// and the next poll, is the SERVER's, not the client's idleness. Each
+    /// gap here is longer than the timeout, and each chunk comes 50 ms after
+    /// it is asked for: nothing times out.
+    #[tokio::test]
+    async fn time_the_reader_spends_elsewhere_is_not_client_idleness() {
+        let idle = Duration::from_millis(200);
+        let flag = Arc::new(AtomicBool::new(false));
+        let prompt = futures_util::stream::iter(0..2).then(|_| async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok::<_, axum::Error>(axum::body::Bytes::from_static(b"c"))
+        });
+        let mut s = IdleTimeout::new(prompt, idle, flag.clone());
+        // Built, then not polled for longer than `idle` (a reader waiting on
+        // a pool or a lock, before staging).
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(s.next().await.unwrap().unwrap(), "c");
+        // A chunk, then the reader busy elsewhere (a part upload).
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(s.next().await.unwrap().unwrap(), "c");
+        assert!(s.next().await.is_none());
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn the_idle_text_names_seconds_or_milliseconds() {
+        assert_eq!(idle_text(Duration::from_secs(30)), "30 seconds");
+        assert_eq!(idle_text(Duration::from_millis(300)), "300 ms");
+        assert_eq!(idle_text(Duration::from_millis(1500)), "1500 ms");
     }
 }

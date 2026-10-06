@@ -1863,6 +1863,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         },
         reaper_cancel.clone(),
     );
+    // W9b Task 8 fix round 1: the hourly sweep of namespace-file staging
+    // objects a crash left behind (older than 24 h). On every replica with a
+    // store, worker or not: the namespace file API uploads through staging
+    // wherever it is served, and two sweeps of one row are no-ops.
+    if let Some(fs) = egret_workflow::storage::current() {
+        egret_workflow::storage::nsfiles::staging::spawn_staging_sweeper(
+            db.pool.clone(),
+            fs,
+            egret_workflow::storage::nsfiles::staging::StagingSweepConfig::default(),
+            reaper_cancel.clone(),
+        );
+    }
     // SIGTERM or SIGINT (`shutdown_signal` observes both) stops every
     // background loop on `reaper_cancel` -- the automation ticker and the
     // workflow runtime -- at the signal, while the HTTP server drains.
@@ -2240,6 +2252,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             plugin_configurations: config.workflow.plugin_configurations.clone(),
             default_runner: container_runner,
         },
+        upload_idle_timeout: egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
     });
 
     // Data Apps query gateway (`POST /api/apps/query`). Same query engine `Arc`,

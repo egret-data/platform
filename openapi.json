@@ -29128,14 +29128,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Moved: every revision of the file (or of every path under the directory), numbers kept; the source is gone, `to`'s missing parents exist. No body (Kestra's answer). **A move runs to completion once it has started:** it runs detached from the request, so a client that disconnects mid-move loses only this answer -- the move still finishes (or rolls its copies back), never stopping half-way.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "default": null
-                }
-              }
-            }
+            "description": "Moved: every revision of the file (or of every path under the directory), numbers kept; the source is gone, `to`'s missing parents exist. No content and no content type (Kestra's answer). **A move runs to completion once it has started:** it runs detached from the request, so a client that disconnects mid-move loses only this answer -- the move still finishes (or rolls its copies back), never stopping half-way."
           },
           "400": {
             "description": "A path rule (named) for either path, a refused namespace, `/_flows`, or a move onto or under itself",
@@ -29264,14 +29257,7 @@
         },
         "responses": {
           "200": {
-            "description": "Stored, as the path's next revision. No body (Kestra's answer).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "default": null
-                }
-              }
-            }
+            "description": "Stored, as the path's next revision. No content and no content type (Kestra's answer)."
           },
           "400": {
             "description": "A path rule (named), a refused namespace, `/_flows`, no `fileContent` part or another part before it (named), a malformed multipart body, or headers over the budget",
@@ -29399,14 +29385,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Soft-deleted: the path and, for a directory, every path under it; parents left empty stay. Revisions are kept (listed by `revisions`, served by `?revision=N`) until a flow's `PurgeFiles` removes them. A path with nothing live is not an error: 200, nothing done. No body.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "default": null
-                }
-              }
-            }
+            "description": "Soft-deleted: the path and, for a directory, every path under it; parents left empty stay. Revisions are kept (listed by `revisions`, served by `?revision=N`) until a flow's `PurgeFiles` removes them. A path with nothing live is not an error: 200, nothing done. No content and no content type."
           },
           "400": {
             "description": "A path rule (named), the root, a refused namespace, or `/_flows`",
@@ -29614,14 +29593,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The directory and each missing parent exist (an existing live directory is not an error). No body (Kestra's answer).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "default": null
-                }
-              }
-            }
+            "description": "The directory and each missing parent exist (an existing live directory is not an error). No content and no content type (Kestra's answer)."
           },
           "400": {
             "description": "A path rule (named), the root, a refused namespace, or `/_flows`",

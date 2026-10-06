@@ -69,6 +69,25 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// CopyObject's `x-amz-copy-source`, `bucket/key`, percent-encoded: every
+/// byte but the unreserved characters and `/` (W9b Task 8 fix round 1; a key
+/// holding a space, `%`, `+`, `?` or a non-ASCII character was sent raw).
+fn copy_source(bucket: &str, key: &str) -> String {
+    let mut out = String::with_capacity(bucket.len() + key.len() + 1);
+    for b in bucket
+        .bytes()
+        .chain(std::iter::once(b'/'))
+        .chain(key.bytes())
+    {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// A HEAD that succeeds must say how long the object is; guessing 0 would read as empty.
 fn head_size(uri: &str, content_length: Option<i64>) -> Result<u64, StorageError> {
     content_length
@@ -237,13 +256,13 @@ impl ObjectStore for S3Store {
     async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError> {
         let (_src_bucket, src_key) = Self::split(src)?;
         let (_dst_bucket, dst_key) = Self::split(dst)?;
-        // `copy_source` is `bucket/key`; we always copy within this store's
-        // configured bucket. Keys are kept simple (no URL-encoding) — see the
-        // trait doc.
+        // `copy_source` is `bucket/key`, URL-encoded (S3's CopyObject reads it
+        // percent-decoded); we always copy within this store's configured
+        // bucket.
         self.client
             .copy_object()
             .bucket(&self.bucket)
-            .copy_source(format!("{}/{}", self.bucket, src_key))
+            .copy_source(copy_source(&self.bucket, &src_key))
             .key(dst_key)
             .send()
             .await
@@ -494,6 +513,15 @@ impl ObjectStore for S3Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copy_source_is_percent_encoded_except_unreserved_characters_and_slashes() {
+        assert_eq!(
+            copy_source("b", "workflow/ws/_nsfiles_staging/0a-Z.~_"),
+            "b/workflow/ws/_nsfiles_staging/0a-Z.~_"
+        );
+        assert_eq!(copy_source("b", "a b/%+?#é"), "b/a%20b/%25%2B%3F%23%C3%A9");
+    }
 
     #[test]
     fn a_head_without_content_length_is_an_error_naming_the_uri() {

@@ -54,7 +54,12 @@ impl ObjectStore for Faulty {
     async fn delete(&self, uri: &str) -> Result<(), StorageError> {
         self.0.delete(uri).await
     }
+    // A namespace file's body reaches its key by a copy from its staging
+    // object (fix round 1): the outage refuses the copy onto its key.
     async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError> {
+        if in_outage(dst) {
+            return Err(outage(dst));
+        }
         self.0.copy(src, dst).await
     }
     async fn list(
@@ -1203,4 +1208,224 @@ async fn a_namespace_with_no_flow_can_hold_files() {
         "k: v"
     );
     assert_eq!(paths(&fx.listing("w9b.noflow", "/").await), ["/cfg/"]);
+}
+
+// ─── Fix round 1 (2026-10-06) ───────────────────────────────────────────────
+
+/// A multipart upload body that hands over its headers and three bytes of
+/// the file, counts itself in `stalled`, and then sends nothing more, ever.
+fn stalling_body(stalled: Arc<std::sync::atomic::AtomicUsize>) -> axum::body::Body {
+    use futures_util::StreamExt as _;
+    let head = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"fileContent\"; \
+         filename=\"s.bin\"\r\nContent-Type: application/octet-stream\r\n\r\nabc"
+    );
+    let first = futures_util::stream::once(async move {
+        Ok::<_, std::io::Error>(axum::body::Bytes::from(head))
+    });
+    let stall = futures_util::stream::once(async move {
+        stalled.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::future::pending::<Result<axum::body::Bytes, std::io::Error>>().await
+    });
+    axum::body::Body::from_stream(first.chain(stall))
+}
+
+/// This workspace's staging rows.
+async fn staging_rows(fx: &Fx) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.namespace_file_staging WHERE workspace_id = $1",
+    )
+    .bind(fx.ws)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap()
+}
+
+/// I-1 (the user's ruling of 2026-10-06: the body is uploaded before any lock
+/// is taken). Five uploads whose bodies stall, on this binary's 5-connection
+/// pool, hold no connection: the pool keeps an idle one, and an unrelated GET
+/// (its session alone needs the database) answers at once. Before staging,
+/// each held a connection and its path's lock until its idle timeout (30 s).
+#[tokio::test(flavor = "multi_thread")]
+async fn stalled_uploads_hold_no_pool_connection_and_block_no_other_request() {
+    let Some(fx) = fx().await else { return };
+    assert_eq!(fx.db.pool.options().get_max_connections(), 5);
+    fx.ok_upload(NS, "/stall/seen.txt", b"seen").await;
+    let before = fx.rows().await;
+    let stalled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let uploads = futures_util::future::join_all((0..5).map(|i| {
+        let uri = format!("{}?path=/stall/{i}.txt", fx.base(NS));
+        let body = stalling_body(stalled.clone());
+        let app = &fx.app;
+        async move { common::send_body(app, "POST", &uri, fx.user, &ct(), body).await }
+    }));
+    let probe = async {
+        // Guards against a hang, not measurements.
+        let all_stalled = async {
+            while stalled.load(std::sync::atomic::Ordering::SeqCst) < 5 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(20), all_stalled)
+            .await
+            .expect("five uploads reached their stalled bodies");
+        let idle = || fx.db.pool.num_idle();
+        assert!(idle() > 0, "the stalled uploads hold every pool connection");
+        let get = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fx.get(NS, "/stats?path=/stall/seen.txt"),
+        )
+        .await
+        .expect("an unrelated GET waited on the stalled uploads");
+        assert_eq!(get.status(), 200, "{}", text(get).await);
+        assert!(idle() > 0, "the pool ran dry while the uploads stalled");
+    };
+    tokio::select! {
+        _ = uploads => panic!("a stalled upload ended"),
+        () = probe => {}
+    }
+    // The uploads were dropped mid-body: nothing was written.
+    assert_eq!(fx.rows().await, before);
+}
+
+/// I-2: a body that stops arriving is refused 408 once the (injected, 300 ms)
+/// idle timeout passes; nothing is written, its staging object is gone, the
+/// pool has its connections back, and the same path is written at once
+/// afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_upload_is_408_writes_nothing_and_leaves_the_path_writable() {
+    let Some(fx) = fx().await else { return };
+    let app = common::app_with_upload_idle(&fx.db, std::time::Duration::from_millis(300)).await;
+    let before = fx.rows().await;
+    let uri = format!("{}?path=/idle/x.txt", fx.base(NS));
+    let stalled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        common::send_body(&app, "POST", &uri, fx.user, &ct(), stalling_body(stalled)),
+    )
+    .await
+    .expect("the stalled upload was never refused");
+    let msg = refusal(res, 408).await;
+    assert!(
+        msg.contains("no byte of the request body arrived for 300 ms")
+            && msg.contains("nothing was stored"),
+        "{msg}"
+    );
+    assert_eq!(fx.rows().await, before, "a row was written");
+    assert_eq!(staging_rows(&fx).await, 0, "the staging row is left");
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        common::send_raw(
+            &app,
+            "POST",
+            &uri,
+            fx.user,
+            &ct(),
+            multipart_file("fileContent", "x", b"after"),
+        ),
+    )
+    .await
+    .expect("the same path waited after the 408");
+    assert_eq!(res.status(), 200, "{}", text(res).await);
+    assert_eq!(text(fx.download(NS, "/idle/x.txt").await).await, "after");
+    let recovered = async {
+        while fx.db.pool.num_idle() != fx.db.pool.size() as usize {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), recovered)
+        .await
+        .expect("the pool did not get its connections back");
+}
+
+/// M-2: a soft-deleted directory is nothing there on every read route (404),
+/// where a live one is the wrong kind (400) on the download and `revisions`.
+#[tokio::test]
+async fn a_soft_deleted_directory_is_404_on_every_read_route() {
+    let Some(fx) = fx().await else { return };
+    fx.ok_upload(NS, "/gone/a.txt", b"a").await;
+    assert_eq!(
+        fx.download(NS, "/gone").await.status(),
+        400,
+        "live: the control"
+    );
+    assert_eq!(fx.rm(NS, "/gone").await.status(), 200);
+    for rest in [
+        "?path=/gone",
+        "/revisions?path=/gone",
+        "/stats?path=/gone/",
+        "/directory?path=/gone/",
+    ] {
+        let res = fx.get(NS, rest).await;
+        assert_eq!(res.status(), 404, "{rest}: {}", text(res).await);
+    }
+    // Spelled as a directory, the file routes answer what they answer for a
+    // directory that never existed: the path rule's 400, not "is a directory".
+    for route in ["?path=", "/revisions?path="] {
+        let gone = fx.get(NS, &format!("{route}/gone/")).await;
+        let never = fx.get(NS, &format!("{route}/never/")).await;
+        assert_eq!(gone.status(), never.status(), "{route}");
+        let (gone, never) = (text(gone).await, text(never).await);
+        assert_eq!(gone.replace("gone", "never"), never, "{route}");
+        assert!(!gone.contains("is a directory"), "{route}: {gone}");
+    }
+}
+
+/// M-3: a DELETE of nothing audits the path as a real delete would name it.
+#[tokio::test]
+async fn a_no_op_delete_audits_the_normalised_path() {
+    let Some(fx) = fx().await else { return };
+    common::audit_mutations(&fx.app);
+    for (raw, normal) in [("nope.txt", "/nope.txt"), ("/d/", "/d/"), ("d/e", "/d/e")] {
+        assert_eq!(fx.rm(NS, raw).await.status(), 200, "{raw}");
+        let got = common::audit_mutations(&fx.app);
+        assert_eq!(got.len(), 1, "{raw}: {got:?}");
+        let (action, id, detail) = &got[0];
+        assert_eq!(action, "workflow_namespace_file:delete");
+        assert_eq!(
+            id.as_deref(),
+            Some(format!("{NS}:{normal}").as_str()),
+            "{raw}"
+        );
+        assert_eq!(detail["path"], normal, "{raw}");
+        assert_eq!(detail["deleted"], 0, "{raw}");
+    }
+}
+
+/// M-5: a missing or malformed query parameter is the documented `ErrorBody`
+/// 400 (JSON naming it), not axum's `text/plain`; a write's 200 has no
+/// content and no content type, as openapi now says.
+#[tokio::test]
+async fn query_refusals_are_error_bodies_and_write_answers_have_no_content() {
+    let Some(fx) = fx().await else { return };
+    for rest in [
+        "/search",
+        "?path=/x&revision=abc",
+        "/revisions",
+        "?revision=1",
+    ] {
+        let res = fx.get(NS, rest).await;
+        assert_eq!(res.status(), 400, "{rest}");
+        assert_eq!(res.headers()["content-type"], "application/json", "{rest}");
+        let body: Value = serde_json::from_str(&text(res).await).unwrap();
+        assert!(
+            body["error"].as_str().is_some_and(|m| !m.is_empty()),
+            "{rest}: {body}"
+        );
+    }
+    let writes = [
+        fx.upload(NS, "/w/a.txt", b"a").await,
+        fx.mkdir_as(fx.user, NS, "/w/d").await,
+        fx.mv(NS, "/w/a.txt", "/w/b.txt").await,
+        fx.rm(NS, "/w/b.txt").await,
+    ];
+    for res in writes {
+        assert_eq!(res.status(), 200);
+        assert!(
+            res.headers().get("content-type").is_none(),
+            "{:?}",
+            res.headers()
+        );
+        assert_eq!(text(res).await, "");
+    }
 }

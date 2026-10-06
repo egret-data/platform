@@ -43,9 +43,21 @@ const NS: &str = "w9b.tasks";
 /// While set, `get_stream` fails as an unreachable S3 does (spec §11).
 static OUTAGE: AtomicBool = AtomicBool::new(false);
 
-/// The next `put_stream` to a key ending with this fails once, as an
-/// unreachable S3 does: the injectable fault of fix round 1's I1 test.
+/// The next write onto a key ending with this -- a `put_stream`, or the
+/// `copy` a namespace file's staged body reaches its key by (Task 8 fix
+/// round 1) -- fails once, as an unreachable S3 does: the injectable fault of
+/// fix round 1's I1 test.
 static FAIL_PUT_ONCE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Takes the fault when `uri` is its key.
+fn fault_fires(uri: &str) -> bool {
+    let mut fault = FAIL_PUT_ONCE.lock().unwrap();
+    if fault.as_deref().is_some_and(|suffix| uri.ends_with(suffix)) {
+        *fault = None;
+        return true;
+    }
+    false
+}
 
 struct Probe(egret_storage::MemStore);
 
@@ -61,6 +73,11 @@ impl ObjectStore for Probe {
         self.0.delete(object).await
     }
     async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError> {
+        if fault_fires(dst) {
+            return Err(StorageError::S3(format!(
+                "{dst}: dispatch failure: connection refused"
+            )));
+        }
         self.0.copy(src, dst).await
     }
     async fn list(
@@ -87,14 +104,10 @@ impl ObjectStore for Probe {
         body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
         size_hint: Option<u64>,
     ) -> Result<u64, StorageError> {
-        {
-            let mut fault = FAIL_PUT_ONCE.lock().unwrap();
-            if fault.as_deref().is_some_and(|suffix| uri.ends_with(suffix)) {
-                *fault = None;
-                return Err(StorageError::S3(format!(
-                    "{uri}: dispatch failure: connection refused"
-                )));
-            }
+        if fault_fires(uri) {
+            return Err(StorageError::S3(format!(
+                "{uri}: dispatch failure: connection refused"
+            )));
         }
         self.0.put_stream(uri, body, size_hint).await
     }

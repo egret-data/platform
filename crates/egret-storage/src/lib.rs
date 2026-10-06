@@ -20,6 +20,10 @@ pub use s3::S3Store;
 /// Multipart part size, and the size under which `put_stream` is a single PUT.
 pub const PART_BYTES: usize = 8 * 1024 * 1024;
 
+/// The most one [`ObjectStore::copy`] moves: 5 GiB, S3's limit for a single
+/// CopyObject (a larger object needs UploadPartCopy).
+pub const MAX_SINGLE_COPY_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+
 use async_trait::async_trait;
 
 /// A folder-style listing result.
@@ -46,12 +50,15 @@ pub trait ObjectStore: Send + Sync {
     async fn put(&self, uri: &str, bytes: Vec<u8>) -> Result<(), StorageError>;
     async fn get(&self, uri: &str) -> Result<Vec<u8>, StorageError>;
     async fn delete(&self, uri: &str) -> Result<(), StorageError>;
-    /// Server-side copy `src` → `dst` (both `s3://bucket/key` URIs).
+    /// Server-side copy `src` → `dst` (both `s3://bucket/key` URIs, within
+    /// this store's bucket), replacing `dst`. Any key is accepted: the S3 copy
+    /// source is percent-encoded. One copy moves at most
+    /// [`MAX_SINGLE_COPY_BYTES`] (S3's CopyObject limit; larger objects need a
+    /// multipart copy, which this method does not do): a caller that copies
+    /// what a client uploaded caps the upload at that.
     ///
-    /// Used by the file manager's move/rename (copy-then-delete). Keys are
-    /// expected to be simple (the file-browser confines them under a connection
-    /// root via `safe_key`); special characters in a key would need URL-encoding
-    /// of the S3 copy-source and are not handled here.
+    /// Used by the file manager's move/rename (copy-then-delete) and by W9b's
+    /// namespace-file write (staging object → revision key).
     async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError>;
     /// List objects under `prefix` within the store's configured bucket.
     ///

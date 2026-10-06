@@ -868,6 +868,20 @@ impl TaskHandler for UploadFiles {
             };
             match written {
                 Ok(Written::Written(_)) => {}
+                // The same re-claim, caught under the path's lock: an earlier
+                // attempt of this run committed it after the check above.
+                Ok(Written::Already(e)) => {
+                    task.log
+                        .line(
+                            LogLevel::Info,
+                            &format!(
+                                "namespace file '{path}' was already written by an earlier \
+                                 attempt of this task run (revision {}): not written again",
+                                e.revision
+                            ),
+                        )
+                        .await;
+                }
                 Ok(Written::Skipped(path)) => {
                     task.log
                         .line(

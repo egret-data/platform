@@ -503,8 +503,10 @@ pub async fn open(
 // one global order is what keeps two of them from deadlocking.
 //
 // `put`, `create_directory` and `soft_delete` take transaction locks
-// (`pg_advisory_xact_lock`), held across the upload and the row insert, so
-// that no second writer computes the same revision. `purge_revisions` and
+// (`pg_advisory_xact_lock`), held from the revision's choice to the row
+// insert, so that no second writer computes the same revision. `put` takes
+// them only once its body is in a staging object (the user's ruling of
+// 2026-10-06): the lock window is server-paced, never a client's. `purge_revisions` and
 // `move_path` take the same keys as SESSION locks ([`LockedSession`]) held
 // across "delete rows, commit, delete objects": a transaction lock would be
 // released by that commit, and a writer could then take the purged revision
@@ -513,10 +515,11 @@ pub async fn open(
 
 /// How a 409 over kept history names the one tool that removes it (W9b Task
 /// 8): the namespace file API has no purge route, so "purge it first" alone
-/// would send an API caller looking for one.
+/// would send an API caller looking for one. Worded for both readers (fix
+/// round 1, M-6): a task's author and an API caller see the same text.
 pub const PURGE_FILES_IS_THE_TOOL: &str =
-    "only a flow's io.kestra.plugin.core.namespace.PurgeFiles task removes history, \
-     run from this namespace or a parent of it; the API has no purge route";
+    "only a flow's io.kestra.plugin.core.namespace.PurgeFiles task, run from this namespace \
+     or a parent of it, removes history; the namespace file API has no purge route";
 
 /// What [`put`] does when the path already holds a live file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -533,6 +536,11 @@ pub enum Conflict {
 pub enum Written {
     Written(NsEntry),
     Skipped(NsPath),
+    /// A `CreatedBy::TaskRun` write whose task run already committed the
+    /// path's latest revision (an earlier attempt, re-claimed after an
+    /// infrastructure failure): nothing is written (Task 6 fix round 1, I1,
+    /// judged under the path's lock since Task 8 fix round 1).
+    Already(NsEntry),
 }
 
 /// The lock key's text of one `lock_path`, bound as a value.
@@ -946,20 +954,51 @@ async fn purge_locked(
     Ok(gone.len() as u64)
 }
 
-/// §4.2: lock -> read latest -> conflict rule -> revision = max + 1 (1 when
-/// none) -> `put_stream` to the revision's key under `max_file_bytes` ->
-/// `head` -> insert the row -> insert missing parent directory rows ->
-/// commit. A row of the other kind, or a file where a parent goes, is
-/// `Conflict` when it is live or still holds history: a write never purges
-/// history implicitly ([`check_kinds`]; the user's ruling, 2026-10-05).
-/// Commits immediately: namespace files are not in any execution's
-/// transaction (§6).
+/// The most bytes one namespace file may hold, and the setting that says
+/// so: `workflow.storage.max_file_bytes`, or -- when that is configured above
+/// it -- [`egret_storage::MAX_SINGLE_COPY_BYTES`] (5 GiB), the most one
+/// server-side copy moves from the staging object to the revision's key
+/// (W9b Task 8 fix round 1: refused, not copied in parts).
+pub fn namespace_file_cap(caps: &crate::storage::Caps) -> (u64, &'static str) {
+    if caps.max_file_bytes <= egret_storage::MAX_SINGLE_COPY_BYTES {
+        (caps.max_file_bytes, "workflow.storage.max_file_bytes")
+    } else {
+        (
+            egret_storage::MAX_SINGLE_COPY_BYTES,
+            "the most one internal-storage copy moves, which is below \
+             workflow.storage.max_file_bytes",
+        )
+    }
+}
+
+/// §4.2, the user's ruling of 2026-10-06 (W9b Task 8 fix round 1, I-1):
+/// **the body is uploaded before any lock is taken.**
 ///
-/// A failed upload rolls the transaction back and leaves at most an
-/// unindexed object at the revision's key, which the next write of that
-/// revision overwrites. A body that fails to read (not the store) is
-/// `NsError::Store` too: the caller's source is internal storage or a
-/// request body, neither the author's.
+/// 1. A staging row, then the body streamed to its staging object
+///    ([`staging`](super::staging)) under the file cap
+///    ([`namespace_file_cap`]) -- holding NO pool connection and NO advisory
+///    lock, so a caller that sends slowly (a client) holds nothing another
+///    request needs.
+/// 2. Then ONE short, server-paced transaction: lock the path's chain ->
+///    a task run's own earlier write is [`Written::Already`] (Task 6's
+///    re-claim, judged under the lock) -> [`check_kinds`] -> the conflict rule
+///    -> revision = max + 1 (1 when none) -> server-side `copy` of the
+///    staging object to the revision's key -> `head` (its size must be the
+///    staged size) -> insert the row -> insert missing parent directory rows
+///    -> commit.
+/// 3. The staging object and its row are deleted, whatever happened
+///    (best-effort; the staging sweep takes what is left).
+///
+/// A row of the other kind, or a file where a parent goes, is `Conflict` when
+/// it is live or still holds history: a write never purges history
+/// implicitly ([`check_kinds`]; the user's ruling, 2026-10-05). Commits
+/// immediately: namespace files are not in any execution's transaction (§6).
+///
+/// A failed copy rolls the transaction back and leaves at most an unindexed
+/// object at the revision's key, which the next write of that revision
+/// overwrites. A body that fails to read (not the store) is `NsError::Store`
+/// too: the caller's source is internal storage or a request body, neither
+/// the author's; the API tells its own body's failures apart.
 pub async fn put(
     pool: &PgPool,
     fs: &FileStore,
@@ -975,12 +1014,83 @@ pub async fn put(
             "egret wrote contents to '{path}', which is a directory"
         )));
     }
+    let staged = super::staging::record(pool, fs, grant.workspace()).await?;
+    let result = match stage_body(fs, grant, path, body, &staged.uri).await {
+        Ok(size) => commit_staged(pool, fs, grant, path, &staged.uri, size, conflict, by).await,
+        Err(e) => Err(e),
+    };
+    super::staging::forget(pool, fs, &staged).await;
+    result
+}
+
+/// Step 1 of [`put`]: `body` to the staging object under the cap; its size.
+/// Holds nothing of the database.
+async fn stage_body(
+    fs: &FileStore,
+    grant: &Grant,
+    path: &NsPath,
+    body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+    staging: &str,
+) -> Result<u64, NsError> {
+    let (cap, cap_name) = namespace_file_cap(&fs.caps);
+    let mut guarded = Guarded {
+        inner: body,
+        cap,
+        read: 0,
+        over: false,
+        failed: None,
+    };
+    let put = fs.store.put_stream(staging, &mut guarded, None).await;
+    if guarded.over {
+        return Err(NsError::TooLarge(format!(
+            "namespace file '{path}' in namespace '{}' is over the {cap} bytes one file \
+             may be ({cap_name})",
+            grant.namespace()
+        )));
+    }
+    if let Some(e) = guarded.failed {
+        return Err(store_failed(
+            grant,
+            path,
+            "read while it was being stored",
+            staging,
+            &e,
+        ));
+    }
+    put.map_err(|e| store_failed(grant, path, "stored", staging, &e))
+}
+
+/// Step 2 of [`put`]: the short transaction over a staged body of `size`
+/// bytes.
+#[allow(clippy::too_many_arguments)]
+async fn commit_staged(
+    pool: &PgPool,
+    fs: &FileStore,
+    grant: &Grant,
+    path: &NsPath,
+    staging: &str,
+    size: u64,
+    conflict: Conflict,
+    by: CreatedBy,
+) -> Result<Written, NsError> {
     let ns = grant.namespace();
     let subject = format!("namespace file '{path}' cannot be written");
     let mut tx = pool.begin().await.map_err(db_err)?;
     xact_lock(&mut tx, &lock_chain(grant, &[path])).await?;
+    // Task 6 (fix round 1, I1), under the lock: a re-claimed task run whose
+    // earlier attempt committed this path's latest revision does not write
+    // it again, under every conflict mode -- even when that attempt is still
+    // running beside this one.
+    let latest_now = latest_written(&mut tx, grant, path).await?;
+    if let CreatedBy::TaskRun { task_run, .. } = by {
+        if let Some((e, Some(run))) = &latest_now {
+            if *run == task_run && !e.deleted && !e.is_directory {
+                return Ok(Written::Already(e.clone()));
+            }
+        }
+    }
     check_kinds(&mut tx, grant, path, &subject).await?;
-    let current = latest(&mut tx, grant, path.as_str()).await?;
+    let current = latest_now.map(|(e, _)| e);
     if current.as_ref().is_some_and(|l| !l.deleted) {
         match conflict {
             Conflict::Overwrite => {}
@@ -995,44 +1105,32 @@ pub async fn put(
     }
     let revision = current.map_or(1, |l| l.revision + 1);
     let key = fs.namespace_object_uri(grant, path, revision);
-    let cap = fs.caps.max_file_bytes;
-    let mut guarded = Guarded {
-        inner: body,
-        cap,
-        read: 0,
-        over: false,
-        failed: None,
-    };
-    let put = fs.store.put_stream(&key, &mut guarded, None).await;
-    if guarded.over {
-        return Err(NsError::TooLarge(format!(
-            "namespace file '{path}' in namespace '{ns}' is over the {cap} bytes one file \
-             may be (workflow.storage.max_file_bytes)"
-        )));
-    }
-    if let Some(e) = guarded.failed {
-        return Err(store_failed(
-            grant,
-            path,
-            "read while it was being stored",
-            &key,
-            &e,
-        ));
-    }
-    put.map_err(|e| store_failed(grant, path, "stored", &key, &e))?;
-    let size = match fs.store.head(&key).await {
-        Ok(Some(size)) => size,
+    fs.store
+        .copy(staging, &key)
+        .await
+        .map_err(|e| store_failed(grant, path, "stored", &key, &e))?;
+    match fs.store.head(&key).await {
+        Ok(Some(n)) if n == size => {}
+        Ok(Some(n)) => {
+            return Err(store_failed(
+                grant,
+                path,
+                "stored",
+                &key,
+                &format!("copied {n} bytes of a {size}-byte staging object"),
+            ))
+        }
         Ok(None) => {
             return Err(store_failed(
                 grant,
                 path,
                 "stored",
                 &key,
-                &"written, but head finds no object",
+                &"copied, but head finds no object",
             ))
         }
         Err(e) => return Err(store_failed(grant, path, "stored", &key, &e)),
-    };
+    }
     let e = insert_row(&mut tx, grant, path, revision, size, false, by).await?;
     ensure_directories(&mut tx, grant, path, false, by).await?;
     tx.commit().await.map_err(db_err)?;
@@ -1161,9 +1259,7 @@ async fn mark_deleted(
 /// §4.4: refuses a live target (`Conflict`) and a missing source
 /// (`NotFound` naming it, application of R3); copies every revision of
 /// `from` and of each path under it to `to`, keeping revision numbers and
-/// `deleted` flags (`get_stream` -> `put_stream`, never `ObjectStore::copy`:
-/// its copy source is not URL-encoded, `crates/egret-storage/src/s3.rs`, and
-/// it is capped at 5 GiB per S3 operation), inserting rows as it goes; on any
+/// `deleted` flags (`get_stream` -> `put_stream`), inserting rows as it goes; on any
 /// failure purges every copy made, in reverse order, and reports both paths;
 /// then creates `to`'s missing parent directories and purges the source
 /// (rows, commit, objects).

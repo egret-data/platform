@@ -10,12 +10,17 @@
 //!
 //! # The concurrency tests are ordered, not timed
 //!
-//! A writer's body is a [`Gated`] reader: it hands over its first byte, says
-//! so, and then waits to be released. "Writer A holds the lock mid-upload" is
-//! therefore an event the test waits for, and so is "writer B is blocked":
-//! either B's body says it started (no lock stopped it) or `pg_locks` shows B
-//! waiting on the path's advisory key ([`blocked_or_started`]). Nothing is
-//! asserted about time; the poll of `pg_locks` only waits for a state.
+//! A writer's body is uploaded to a staging object BEFORE it takes any lock
+//! (Task 8 fix round 1, the user's ruling of 2026-10-06); under the lock it
+//! copies that object onto the revision's key. So a writer's lock is held
+//! across its [`Hooked`] `copy`, which can be gated: it says it started, then
+//! waits to be released. "Writer A holds the lock mid-write" is therefore an
+//! event the test waits for, and so is "writer B is blocked": either B's copy
+//! says it started (no lock stopped it) or `pg_locks` shows B waiting on the
+//! path's advisory key ([`blocked_or_started`]). Nothing is asserted about
+//! time; the poll of `pg_locks` only waits for a state. A [`Gated`] BODY,
+//! which stalls mid-upload, now holds nothing a writer needs
+//! (`a_stalled_body_holds_no_connection_and_no_lock`).
 
 mod common;
 
@@ -660,6 +665,12 @@ struct Hooked {
     /// The next `put_stream` says it started and waits to be released
     /// (fix round 1: a move paused mid-copy).
     gate_put_stream: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    /// Each `copy` takes the first gate queued, says it started and waits to
+    /// be released (Task 8 fix round 1: a `put` paused under its lock, mid
+    /// staging -> revision copy).
+    gate_copy: Mutex<std::collections::VecDeque<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    /// Every `copy` fails.
+    fail_copies: AtomicBool,
 }
 
 impl Hooked {
@@ -695,6 +706,22 @@ impl Hooked {
         let (release_tx, release_rx) = oneshot::channel();
         *self.gate_put_stream.lock().unwrap() = Some((started_tx, release_rx));
         (started_rx, release_tx)
+    }
+
+    /// Queues a copy gate: answers (started, release).
+    fn arm_copy_gate(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        self.gate_copy
+            .lock()
+            .unwrap()
+            .push_back((started_tx, release_rx));
+        (started_rx, release_tx)
+    }
+
+    /// Drops every copy gate no copy took.
+    fn clear_copy_gates(&self) {
+        self.gate_copy.lock().unwrap().clear();
     }
 
     /// Arms the delete gate: answers (started, release).
@@ -737,6 +764,14 @@ impl ObjectStore for Hooked {
         self.mem.delete(uri).await
     }
     async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError> {
+        let gate = self.gate_copy.lock().unwrap().pop_front();
+        if let Some((started, release)) = gate {
+            let _ = started.send(());
+            let _ = release.await;
+        }
+        if self.fail_copies.load(Ordering::SeqCst) {
+            return Err(StorageError::S3(format!("{dst}: the copy failed")));
+        }
         self.mem.copy(src, dst).await
     }
     async fn list(
@@ -953,19 +988,25 @@ async fn blocked_or_started(
         .unwrap_or_else(|_| panic!("neither a wait on {lock_path:?} nor the body's start was seen"))
 }
 
-fn spawn_put(
+fn spawn_put<B: AsyncRead + Send + Unpin + 'static>(
     db: &Db,
     fs: &Arc<storage::FileStore>,
     g: &Grant,
     p: &str,
-    mut body: Gated,
+    mut body: B,
 ) -> tokio::task::JoinHandle<Result<Written, NsError>> {
     let (pool, fs, g, p) = (db.pool.clone(), fs.clone(), g.clone(), file(p));
     tokio::spawn(async move { put(&pool, &fs, &g, &p, &mut body, Conflict::Overwrite, by()).await })
 }
 
-/// THE lock test (§4.2). Writer A holds the path's lock mid-upload when
-/// writer B starts; B must wait, then take the next revision.
+/// A body handed over at once.
+fn bytes(b: &'static str) -> &'static [u8] {
+    b.as_bytes()
+}
+
+/// THE lock test (§4.2). Writer A holds the path's lock mid-write (its
+/// staging -> revision copy) when writer B starts; B must wait, then take
+/// the next revision.
 #[tokio::test(flavor = "multi_thread")]
 async fn two_concurrent_writers_of_one_path_get_distinct_revisions_and_keys() {
     let Some(db) = common::db().await else { return };
@@ -978,13 +1019,13 @@ async fn two_concurrent_writers_of_one_path_get_distinct_revisions_and_keys() {
         // At the root: the path is its only lock key, the one B waits on.
         let p = format!("/race-{round}.txt");
         written(&db, &fs, &g, &p, "initial").await;
-        let (body_a, started_a, release_a) = gated("A", "-a");
-        let (body_b, mut started_b, release_b) = gated("B", "-b");
-        let a = spawn_put(&db, &fs, &g, &p, body_a);
+        let (started_a, release_a) = store.arm_copy_gate();
+        let a = spawn_put(&db, &fs, &g, &p, bytes("A-a"));
         started_a
             .await
-            .expect("A's body was read: A holds the lock");
-        let b = spawn_put(&db, &fs, &g, &p, body_b);
+            .expect("A copies under its lock: A holds it");
+        let (mut started_b, release_b) = store.arm_copy_gate();
+        let b = spawn_put(&db, &fs, &g, &p, bytes("B-b"));
         let seen = blocked_or_started(&db, ws, &p, &mut started_b).await;
         release_a.send(()).unwrap();
         let _ = release_b.send(());
@@ -1025,7 +1066,7 @@ async fn two_concurrent_writers_of_one_path_get_distinct_revisions_and_keys() {
 async fn a_writer_of_a_child_and_a_writer_of_a_file_named_like_its_parent_never_both_win() {
     let Some(db) = common::db().await else { return };
     let (ws, _) = common::seed_workspace(&db).await;
-    let (_store, fs) = hooked_fs(None);
+    let (store, fs) = hooked_fs(None);
     let fs = Arc::new(fs);
     let g = grant(ws, Access::Write);
     for round in 0..20 {
@@ -1037,15 +1078,17 @@ async fn a_writer_of_a_child_and_a_writer_of_a_file_named_like_its_parent_never_
         } else {
             (&parent, &child)
         };
-        let (body_1, started_1, release_1) = gated("1", "");
-        let (body_2, mut started_2, release_2) = gated("2", "");
-        let h1 = spawn_put(&db, &fs, &g, first, body_1);
+        let (started_1, release_1) = store.arm_copy_gate();
+        let h1 = spawn_put(&db, &fs, &g, first, bytes("1"));
         started_1.await.unwrap();
-        let h2 = spawn_put(&db, &fs, &g, second, body_2);
+        let (mut started_2, release_2) = store.arm_copy_gate();
+        let h2 = spawn_put(&db, &fs, &g, second, bytes("2"));
         let seen = blocked_or_started(&db, ws, &parent, &mut started_2).await;
         release_1.send(()).unwrap();
         let _ = release_2.send(());
         let (r1, r2) = (h1.await.unwrap(), h2.await.unwrap());
+        // The loser never reaches its copy: its gate is left unused.
+        store.clear_copy_gates();
         let won = [&r1, &r2]
             .iter()
             .filter(|r| matches!(r, Ok(Written::Written(_))))
@@ -1828,8 +1871,8 @@ async fn a_purge_and_a_writer_never_leave_a_row_without_an_object() {
         [],
         "the rows went first, committed"
     );
-    let (body, mut started, release_writer) = gated("n", "ew");
-    let writer = spawn_put(&db, &fs, &g, p, body);
+    let (mut started, release_writer) = store.arm_copy_gate();
+    let writer = spawn_put(&db, &fs, &g, p, bytes("new"));
     let seen = blocked_or_started(&db, ws, p, &mut started).await;
     if seen == Seen::Started {
         // Nothing stopped the writer: let it finish before the purge goes on.
@@ -1868,6 +1911,8 @@ async fn a_purge_commits_its_row_deletes_before_it_deletes_an_object() {
     let w = grant(ws, Access::Write);
     written(&db, &fs, &w, "/o.txt", "1").await;
     written(&db, &fs, &w, "/o.txt", "2").await;
+    // The writes' own deletes (their staging objects, Task 8 fix round 1).
+    store.deletes.lock().unwrap().clear();
     let (delete_started, release_delete) = store.arm_delete_gate();
     let purge = {
         let (pool, fs, g) = (db.pool.clone(), fs.clone(), g.clone());
@@ -2342,13 +2387,14 @@ async fn a_stale_purge_never_removes_a_new_file_that_reused_its_revision_numbers
 
 /// W9b Task 7 fix round 1, M1/M2: `soft_delete_if_empty` judges and deletes
 /// in one transaction holding the directory's chain lock, which a writer
-/// under it holds across its upload. A writer of `/p/new.txt` mid-upload
-/// makes the judge WAIT, then see the new live file and keep `/p/`.
+/// under it holds from its revision's choice to its commit. A writer of
+/// `/p/new.txt` paused there makes the judge WAIT, then see the new live
+/// file and keep `/p/`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_write_into_a_parent_being_judged_empty_keeps_it() {
     let Some(db) = common::db().await else { return };
     let (ws, _) = common::seed_workspace(&db).await;
-    let (_store, fs) = hooked_fs(None);
+    let (store, fs) = hooked_fs(None);
     let fs = Arc::new(fs);
     let g = grant(ws, Access::Write);
     for round in 0..10 {
@@ -2357,12 +2403,12 @@ async fn a_write_into_a_parent_being_judged_empty_keeps_it() {
         let old = format!("{d}/old.txt");
         written(&db, &fs, &g, &old, "old").await;
         soft_delete(&db.pool, &g, &file(&old)).await.unwrap();
-        let (body, started, release) = gated("N", "-new");
+        let (started, release) = store.arm_copy_gate();
         let new = format!("{d}/new.txt");
-        let writer = spawn_put(&db, &fs, &g, &new, body);
+        let writer = spawn_put(&db, &fs, &g, &new, bytes("N-new"));
         started
             .await
-            .expect("the writer holds the chain lock mid-upload");
+            .expect("the writer holds the chain lock mid-write");
         let judge = {
             let (pool, g, dir) = (db.pool.clone(), g.clone(), dir(&format!("{d}/")));
             tokio::spawn(async move { soft_delete_if_empty(&pool, &g, &dir).await })
@@ -2380,5 +2426,351 @@ async fn a_write_into_a_parent_being_judged_empty_keeps_it() {
         assert!(resolve(&mut c, &g, &dir(&format!("{d}/")), Want::Latest)
             .await
             .is_ok());
+    }
+}
+
+// ─── Task 8 fix round 1: staging (the user's ruling of 2026-10-06) ─────────
+
+use egret_workflow::storage::nsfiles::staging::{self, StagingSweepConfig};
+
+/// The advisory keys of `lock_paths` that some session holds now.
+async fn held_keys(db: &Db, ws: Uuid, lock_paths: &[&str]) -> i64 {
+    let texts: Vec<String> = lock_paths
+        .iter()
+        .map(|lp| format!("w9b:{ws}:{W}:{lp}"))
+        .collect();
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_locks l \
+          WHERE l.locktype = 'advisory' AND l.granted \
+            AND ((l.classid::bigint << 32) | l.objid::bigint) IN \
+                (SELECT hashtextextended(t, 0) FROM unnest($1::text[]) AS t)",
+    )
+    .bind(&texts)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap()
+}
+
+/// This workspace's staging rows.
+async fn staging_rows(db: &Db, ws: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.namespace_file_staging WHERE workspace_id = $1",
+    )
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap()
+}
+
+/// This workspace's staging objects.
+fn staging_objects(store: &Hooked, fs: &storage::FileStore, ws: Uuid) -> Vec<String> {
+    let prefix = format!(
+        "s3://{}/{}{ws}/{}/",
+        fs.bucket,
+        fs.prefix,
+        staging::STAGING_SEGMENT
+    );
+    store
+        .mem
+        .keys()
+        .into_iter()
+        .filter(|k| k.starts_with(&prefix))
+        .collect()
+}
+
+/// I-1: writer A's body stalls mid-upload. It holds no advisory lock and no
+/// pool connection meanwhile, so writer B of the SAME path writes at once.
+/// Released, A takes the next revision; neither leaves a staging object.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_body_holds_no_connection_and_no_lock() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let fs = Arc::new(fs);
+    let g = grant(ws, Access::Write);
+    let p = "/stall/s.txt";
+    let (body_a, started_a, release_a) = gated("s", "-a");
+    let a = spawn_put(&db, &fs, &g, p, body_a);
+    started_a.await.expect("A's body is being read");
+    assert_eq!(
+        held_keys(&db, ws, &["/stall", p]).await,
+        0,
+        "A holds a lock of its path while its body stalls"
+    );
+    // A connection this test used goes back to the pool a moment after its
+    // query; one A held would never come back. A guard, not a measurement.
+    let all_idle = async {
+        while db.pool.size() as usize != db.pool.num_idle() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), all_idle)
+        .await
+        .expect("A holds a pool connection while its body stalls");
+    let b = tokio::time::timeout(std::time::Duration::from_secs(30), {
+        let (pool, fs, g) = (db.pool.clone(), fs.clone(), g.clone());
+        async move {
+            let mut body = bytes("B");
+            put(
+                &pool,
+                &fs,
+                &g,
+                &file(p),
+                &mut body,
+                Conflict::Overwrite,
+                by(),
+            )
+            .await
+        }
+    })
+    .await
+    .expect("B waited for A's stalled body");
+    match b {
+        Ok(Written::Written(e)) => assert_eq!(e.revision, 1),
+        other => panic!("{other:?}"),
+    }
+    release_a.send(()).unwrap();
+    match a.await.unwrap() {
+        Ok(Written::Written(e)) => assert_eq!(e.revision, 2),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(read_rev(&fs, &db, &g, p, Want::Revision(1)).await, "B");
+    assert_eq!(read_rev(&fs, &db, &g, p, Want::Latest).await, "s-a");
+    assert_eq!(staging_rows(&db, ws).await, 0);
+    assert_eq!(staging_objects(&store, &fs, ws), Vec::<String>::new());
+}
+
+/// Task 6's re-claim, judged under the path's lock (fix round 1): a task
+/// run's own live latest revision is `Already` under every conflict mode and
+/// nothing is written; another task run writes the next revision; a deleted
+/// latest is written again.
+#[tokio::test]
+async fn a_task_runs_own_latest_revision_is_already_written_under_every_conflict_mode() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (_store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    let execution = Uuid::new_v4();
+    let me = CreatedBy::TaskRun {
+        execution,
+        task_run: Uuid::new_v4(),
+    };
+    let other = CreatedBy::TaskRun {
+        execution,
+        task_run: Uuid::new_v4(),
+    };
+    let p = file("/r.txt");
+    let put_as = |by: CreatedBy, body: &'static str, conflict: Conflict| {
+        let (pool, fs, g, p) = (db.pool.clone(), fs.clone(), g.clone(), p.clone());
+        async move {
+            let mut b = body.as_bytes();
+            put(&pool, &fs, &g, &p, &mut b, conflict, by).await
+        }
+    };
+    assert!(matches!(
+        put_as(me, "one", Conflict::Overwrite).await,
+        Ok(Written::Written(e)) if e.revision == 1
+    ));
+    for conflict in [Conflict::Overwrite, Conflict::Error, Conflict::Skip] {
+        match put_as(me, "again", conflict).await {
+            Ok(Written::Already(e)) => assert_eq!(e.revision, 1, "{conflict:?}"),
+            other => panic!("{conflict:?}: {other:?}"),
+        }
+    }
+    assert_eq!(rows_of(&db, ws, "/r.txt").await, [(1, false)]);
+    assert!(matches!(
+        put_as(other, "two", Conflict::Overwrite).await,
+        Ok(Written::Written(e)) if e.revision == 2
+    ));
+    assert!(matches!(
+        put_as(me, "three", Conflict::Overwrite).await,
+        Ok(Written::Written(e)) if e.revision == 3
+    ));
+    soft_delete(&db.pool, &g, &p).await.unwrap();
+    assert!(matches!(
+        put_as(me, "four", Conflict::Overwrite).await,
+        Ok(Written::Written(e)) if e.revision == 4
+    ));
+    assert_eq!(read_rev(&fs, &db, &g, "/r.txt", Want::Latest).await, "four");
+}
+
+/// Every way out of `put` deletes its staging object and its staging row:
+/// written, skipped, a conflict, over the cap, a body that fails, a copy
+/// that fails. A staging delete that fails leaves the row for the sweep.
+#[tokio::test]
+async fn every_put_leaves_no_staging_object_and_no_staging_row() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(Some(4));
+    let g = grant(ws, Access::Write);
+    let clean = |what: &'static str| {
+        let (db, store, fs) = (&db, &store, &fs);
+        async move {
+            assert_eq!(staging_rows(db, ws).await, 0, "{what}");
+            assert_eq!(
+                staging_objects(store, fs, ws),
+                Vec::<String>::new(),
+                "{what}"
+            );
+        }
+    };
+    written(&db, &fs, &g, "/a", "x").await;
+    clean("written").await;
+    assert!(matches!(
+        write(&db, &fs, &g, "/a", "y", Conflict::Skip).await,
+        Ok(Written::Skipped(_))
+    ));
+    clean("skipped").await;
+    assert!(matches!(
+        write(&db, &fs, &g, "/a", "y", Conflict::Error).await,
+        Err(NsError::Conflict(_))
+    ));
+    clean("conflict").await;
+    assert!(matches!(
+        write(&db, &fs, &g, "/b", "12345", Conflict::Overwrite).await,
+        Err(NsError::TooLarge(_))
+    ));
+    clean("over the cap").await;
+    let mut broken = Breaks(2);
+    assert!(matches!(
+        put(
+            &db.pool,
+            &fs,
+            &g,
+            &file("/c"),
+            &mut broken,
+            Conflict::Overwrite,
+            by()
+        )
+        .await,
+        Err(NsError::Store(_))
+    ));
+    clean("a body that fails").await;
+    store.fail_copies.store(true, Ordering::SeqCst);
+    match write(&db, &fs, &g, "/d", "z", Conflict::Overwrite).await {
+        Err(NsError::Store(m)) => assert!(m.contains("'/d'") && !m.contains("s3://"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        rows_of(&db, ws, "/d").await,
+        [],
+        "a failed copy writes no row"
+    );
+    clean("a copy that fails").await;
+    store.fail_copies.store(false, Ordering::SeqCst);
+    // The staging delete fails: the row stays, for the sweep.
+    store.fail_deletes.store(true, Ordering::SeqCst);
+    written(&db, &fs, &g, "/e", "e").await;
+    assert_eq!(staging_rows(&db, ws).await, 1);
+    assert_eq!(staging_objects(&store, &fs, ws).len(), 1);
+}
+
+/// The staging sweep (fix round 1, I-1 step 4): a staging row older than
+/// 24 hours loses its object, then itself; a younger one is kept; a row that
+/// names anything but its own staging key is removed WITHOUT deleting what it
+/// names; a store failure ends the pass and keeps the row. Batches of one,
+/// so the loop over pages is exercised.
+#[tokio::test]
+async fn the_staging_sweep_deletes_old_orphans_only_and_only_their_staging_keys() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    let keep = written(&db, &fs, &g, "/keep.txt", "keep").await;
+    let keep_key = fs.namespace_object_uri(&g, &keep.path, 1);
+    let mut staged = Vec::new();
+    for body in ["old-1", "old-2", "fresh", "forged"] {
+        let s = staging::record(&db.pool, &fs, ws).await.unwrap();
+        fs.store
+            .put(&s.uri, body.as_bytes().to_vec())
+            .await
+            .unwrap();
+        staged.push(s);
+    }
+    let (old1, old2, fresh, forged) = (&staged[0], &staged[1], &staged[2], &staged[3]);
+    sqlx::query("UPDATE workflow.namespace_file_staging SET object_uri = $2 WHERE id = $1")
+        .bind(forged.id)
+        .bind(&keep_key)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let age = |ids: Vec<Uuid>, hours: i32| {
+        let pool = db.pool.clone();
+        async move {
+            sqlx::query(
+                "UPDATE workflow.namespace_file_staging \
+                    SET created_at = now() - make_interval(hours => $2) WHERE id = ANY($1)",
+            )
+            .bind(&ids)
+            .bind(hours)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    age(vec![old1.id, old2.id, forged.id], 25).await;
+    age(vec![fresh.id], 23).await;
+    let row = |id: Uuid| {
+        let pool = db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM workflow.namespace_file_staging WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let cfg = StagingSweepConfig {
+        batch: 1,
+        ..StagingSweepConfig::default()
+    };
+    let removed = staging::sweep(&db.pool, &fs, &cfg).await.unwrap();
+    assert!(removed >= 3, "{removed}");
+    for (s, what) in [(old1, "old-1"), (old2, "old-2")] {
+        assert_eq!(row(s.id).await, 0, "{what}'s row");
+        assert_eq!(store.bytes(&s.uri), None, "{what}'s object");
+    }
+    assert_eq!(row(forged.id).await, 0, "the forged row is removed");
+    assert_eq!(
+        store.bytes(&keep_key).as_deref(),
+        Some("keep"),
+        "the key a forged row names is never deleted"
+    );
+    assert_eq!(store.bytes(&forged.uri).as_deref(), Some("forged"));
+    assert_eq!(row(fresh.id).await, 1, "a young row is kept");
+    assert_eq!(store.bytes(&fresh.uri).as_deref(), Some("fresh"));
+    // A store that fails: the pass ends, the row stays for the next one.
+    age(vec![fresh.id], 25).await;
+    store.fail_deletes.store(true, Ordering::SeqCst);
+    staging::sweep(&db.pool, &fs, &cfg).await.unwrap();
+    assert_eq!(row(fresh.id).await, 1);
+    store.fail_deletes.store(false, Ordering::SeqCst);
+    staging::sweep(&db.pool, &fs, &cfg).await.unwrap();
+    assert_eq!(row(fresh.id).await, 0);
+    assert_eq!(store.bytes(&fresh.uri), None);
+}
+
+/// The file cap a namespace file gets: `max_file_bytes`, or 5 GiB -- one
+/// server-side copy's limit -- when that is configured above it, named.
+#[test]
+fn a_namespace_file_is_capped_at_one_copys_limit_naming_it() {
+    use egret_workflow::storage::nsfiles::store::namespace_file_cap;
+    let five = egret_storage::MAX_SINGLE_COPY_BYTES;
+    assert_eq!(five, 5 << 30);
+    for (configured, cap, named) in [
+        (1 << 30, 1 << 30, "workflow.storage.max_file_bytes"),
+        (five, five, "workflow.storage.max_file_bytes"),
+        (five + 1, five, "internal-storage copy"),
+        (u64::MAX, five, "internal-storage copy"),
+    ] {
+        let caps = storage::Caps {
+            max_file_bytes: configured,
+            ..Default::default()
+        };
+        let (got, name) = namespace_file_cap(&caps);
+        assert_eq!(got, cap, "{configured}");
+        assert!(name.contains(named), "{configured}: {name}");
     }
 }

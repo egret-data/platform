@@ -2682,7 +2682,7 @@ export function useWorkflowDownloadNamespaceFile<TData = Awaited<ReturnType<type
 
 
 export type workflowMoveNamespaceFileResponse200 = {
-  data: unknown
+  data: void
   status: 200
 }
 
@@ -2806,7 +2806,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       return useMutation(getWorkflowMoveNamespaceFileMutationOptions(options), queryClient);
     }
     export type workflowUploadNamespaceFileResponse200 = {
-  data: unknown
+  data: void
   status: 200
 }
 
@@ -2938,7 +2938,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       return useMutation(getWorkflowUploadNamespaceFileMutationOptions(options), queryClient);
     }
     export type workflowDeleteNamespaceFileResponse200 = {
-  data: unknown
+  data: void
   status: 200
 }
 
@@ -3208,7 +3208,7 @@ export function useWorkflowListNamespaceDirectory<TData = Awaited<ReturnType<typ
 
 
 export type workflowCreateNamespaceDirectoryResponse200 = {
-  data: unknown
+  data: void
   status: 200
 }
 

@@ -1,6 +1,7 @@
 //! W9b Task 8: the namespace file API against MinIO (a real `S3Store`): a
-//! 64 MiB file uploaded through `POST …/files` and downloaded through
-//! `GET …/files`, streamed both ways.
+//! 64 MiB file uploaded through `POST …/files` (through its staging object
+//! and a server-side copy, fix round 1) and downloaded through `GET …/files`,
+//! streamed both ways; and the staging sweep deleting an old orphan on MinIO.
 //!
 //! # Gated, and honest about it
 //!
@@ -184,6 +185,26 @@ fn a_download_of_64_mib_streams_from_minio() -> Result<(), String> {
             if chunks < 2 {
                 return Err("one chunk: the download was not streamed".into());
             }
+            // Fix round 1: the body went through a staging object, which the
+            // write deleted, with its row, once it was copied.
+            let staging_prefix = format!(
+                "{throwaway}{ws}/{}/",
+                egret_workflow::storage::nsfiles::staging::STAGING_SEGMENT
+            );
+            let left = fence
+                .list(&staging_prefix, None)
+                .await
+                .map_err(|e| e.to_string())?;
+            let rows: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM workflow.namespace_file_staging WHERE workspace_id = $1",
+            )
+            .bind(ws)
+            .fetch_one(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            if !left.objects.is_empty() || rows != 0 {
+                return Err(format!("staging left: {:?}, {rows} row(s)", left.objects));
+            }
             Ok(())
         };
         let result = case.await;
@@ -201,13 +222,129 @@ fn a_download_of_64_mib_streams_from_minio() -> Result<(), String> {
     })
 }
 
+/// Fix round 1: the staging sweep on MinIO, under its own throwaway prefix
+/// (a `FileStore` of its own, not installed): a staging object whose row is
+/// 25 hours old is deleted, with its row; one whose row is fresh, and a
+/// namespace file written beside them, are kept.
+fn the_staging_sweep_deletes_an_old_orphan_on_minio() -> Result<(), String> {
+    use egret_workflow::storage::nsfiles::staging::{self, StagingSweepConfig};
+    let cfg = cfg().ok_or("no S3")?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(async move {
+        let Some(db) = common::db().await else {
+            return Err("DATABASE_URL is required".to_string());
+        };
+        let throwaway = format!("w9b-t8-test/{}/", Uuid::new_v4());
+        let bucket = cfg.bucket.clone();
+        let fence = Arc::new(Fence {
+            s3: S3Store::new(&cfg).await.map_err(|e| e.to_string())?,
+            allowed: format!("s3://{bucket}/{throwaway}"),
+            refused: Mutex::new(Vec::new()),
+        });
+        let fs = FileStore {
+            store: fence.clone(),
+            bucket,
+            prefix: throwaway.clone(),
+            caps: Caps::default(),
+            retention_days: 30,
+        };
+        let (ws, _) = common::seed_workspace(&db).await;
+        let case = async {
+            let err = |e: &dyn std::fmt::Display| e.to_string();
+            let old = staging::record(&db.pool, &fs, ws).await.map_err(|e| err(&e))?;
+            let fresh = staging::record(&db.pool, &fs, ws).await.map_err(|e| err(&e))?;
+            for s in [&old, &fresh] {
+                fs.store
+                    .put(&s.uri, b"orphan".to_vec())
+                    .await
+                    .map_err(|e| err(&e))?;
+            }
+            sqlx::query(
+                "UPDATE workflow.namespace_file_staging                     SET created_at = now() - interval '25 hours' WHERE id = $1",
+            )
+            .bind(old.id)
+            .execute(&db.pool)
+            .await
+            .map_err(|e| err(&e))?;
+            let g = egret_workflow::storage::nsfiles::access::authorize(
+                ws,
+                egret_workflow::storage::nsfiles::access::Actor::Api,
+                NS,
+                egret_workflow::storage::nsfiles::access::Access::Write,
+            )?;
+            let p = egret_workflow::storage::nsfiles::path::NsPath::parse_file("/kept.txt")?;
+            let mut body: &[u8] = b"kept";
+            egret_workflow::storage::nsfiles::store::put(
+                &db.pool,
+                &fs,
+                &g,
+                &p,
+                &mut body,
+                egret_workflow::storage::nsfiles::store::Conflict::Overwrite,
+                egret_workflow::storage::nsfiles::CreatedBy::User(Uuid::nil()),
+            )
+            .await
+            .map_err(|e| err(&e))?;
+            let removed = staging::sweep(&db.pool, &fs, &StagingSweepConfig::default())
+                .await
+                .map_err(|e| err(&e))?;
+            let head = |uri: String| {
+                let fs = &fs;
+                async move { fs.store.head(&uri).await.map_err(|e| e.to_string()) }
+            };
+            let (h_old, h_fresh, h_kept) = (
+                head(old.uri.clone()).await?,
+                head(fresh.uri.clone()).await?,
+                head(fs.namespace_object_uri(&g, &p, 1)).await?,
+            );
+            let rows: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM workflow.namespace_file_staging WHERE workspace_id = $1",
+            )
+            .bind(ws)
+            .fetch_all(&db.pool)
+            .await
+            .map_err(|e| err(&e))?;
+            if (removed, h_old, h_fresh, h_kept, rows.clone()) != (1, None, Some(6), Some(4), vec![fresh.id]) {
+                return Err(format!(
+                    "removed {removed}; old {h_old:?}, fresh {h_fresh:?}, kept {h_kept:?}; \
+                     rows {rows:?}"
+                ));
+            }
+            println!("    the old orphan {} was swept", old.uri);
+            Ok(())
+        };
+        let result: Result<(), String> = case.await;
+        let removed = fence
+            .delete_prefix(&fence.allowed)
+            .await
+            .map_err(|e| e.to_string())?;
+        println!("    delete_prefix {}: {removed} object(s)", fence.allowed);
+        let refused = fence.refused.lock().unwrap().clone();
+        result?;
+        if !refused.is_empty() {
+            return Err(format!("deletes outside {throwaway}: {refused:?}"));
+        }
+        Ok(())
+    })
+}
+
 type Case = fn() -> Result<(), String>;
 
 fn cases() -> Vec<(&'static str, Case)> {
-    vec![(
-        "a_download_of_64_mib_streams_from_minio",
-        a_download_of_64_mib_streams_from_minio,
-    )]
+    vec![
+        (
+            "a_download_of_64_mib_streams_from_minio",
+            a_download_of_64_mib_streams_from_minio,
+        ),
+        (
+            "the_staging_sweep_deletes_an_old_orphan_on_minio",
+            the_staging_sweep_deletes_an_old_orphan_on_minio,
+        ),
+    ]
 }
 
 fn main() {

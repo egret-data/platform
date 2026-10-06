@@ -27,3 +27,16 @@ CREATE TABLE workflow.namespace_files (
   CONSTRAINT workflow_namespace_files_task_run_of_an_execution
     CHECK (created_by_task_run IS NULL OR created_by_execution IS NOT NULL)
 );
+
+-- (W9b Task 8 fix round 1, 2026-10-06, the user's ruling) A namespace file's body is uploaded
+-- to a staging object before any lock is taken, then copied onto its revision's key in a short
+-- transaction (spec §4.2). One row per staging object, written before its upload and deleted
+-- after its object, so an object left by a crash between the two is found and deleted by the
+-- staging sweep once its row is old. No FK to a workspace: the object outlives a deleted one.
+CREATE TABLE workflow.namespace_file_staging (
+  id           uuid        PRIMARY KEY,
+  workspace_id uuid        NOT NULL,
+  object_uri   text        NOT NULL,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX workflow_namespace_file_staging_created_at ON workflow.namespace_file_staging (created_at);

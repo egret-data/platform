@@ -152,6 +152,24 @@ impl FileStore {
         )
     }
 
+    /// `s3://{bucket}/{prefix}{workspace}/_nsfiles_staging/{id}`: where a
+    /// namespace file's body is uploaded before any lock is taken (W9b Task 8
+    /// fix round 1, the user's ruling of 2026-10-06; [`nsfiles::staging`]).
+    /// No other key can be under it: every other key of the workspace starts
+    /// `{workspace}/{first namespace segment}/`, and a namespace starts with
+    /// `[a-z0-9]` (`is_valid_namespace`, which `check_namespace` and publish
+    /// call), never `_`.
+    pub fn namespace_staging_uri(&self, workspace: Uuid, id: Uuid) -> String {
+        format!(
+            "s3://{}/{}{}/{}/{}",
+            self.bucket,
+            self.prefix,
+            workspace.hyphenated(),
+            nsfiles::staging::STAGING_SEGMENT,
+            id.hyphenated()
+        )
+    }
+
     /// `s3://{bucket}/{prefix}{workspace}/{ns}/{flow-slug}/executions/{exec}/`,
     /// ending with `/` as `ObjectStore::delete_prefix` requires.
     pub fn execution_prefix(

@@ -62,8 +62,7 @@ use super::store::{self, Conflict, NsEntry, Want, Written};
 use super::{CreatedBy, NsError};
 use crate::routes::{refuse, WorkflowState, WF_MANAGE, WF_READ};
 use crate::storage::multipart::{
-    multipart_body_limit, multipart_refusal, HeaderBudget, IdleTimeout, MultipartGate,
-    UPLOAD_IDLE_TIMEOUT,
+    idle_text, multipart_body_limit, multipart_refusal, HeaderBudget, IdleTimeout, MultipartGate,
 };
 use crate::storage::routes::{download_headers, NamedErrors};
 use crate::storage::{Caps, FileStore};
@@ -165,6 +164,29 @@ impl utoipa::PartialSchema for NsFileUploadForm {
 impl utoipa::ToSchema for NsFileUploadForm {}
 
 // ─── Mapping ────────────────────────────────────────────────────────────────
+
+/// axum's `Query<T>`, whose refusal (a missing or malformed parameter) is the
+/// documented `ErrorBody` 400 rather than axum's `text/plain` one (fix round
+/// 1, M-5).
+pub(crate) struct NsQuery<T>(pub T);
+
+impl<S, T> axum::extract::FromRequestParts<S> for NsQuery<T>
+where
+    S: Send + Sync,
+    T: serde::de::DeserializeOwned,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Response> {
+        Query::<T>::from_request_parts(parts, state)
+            .await
+            .map(|Query(q)| NsQuery(q))
+            .map_err(|r| bad_request(r.body_text()))
+    }
+}
 
 fn core_refusal(e: Error) -> Response {
     e.into_response()
@@ -283,9 +305,11 @@ async fn resolve_any(
     }
 }
 
-/// Does `raw`, read as a directory, have any row (live or soft-deleted)? The
-/// wrong-kind check of a download and of `revisions` (w9b
-/// `api.routes.get_file_directory`, `revisions_dir`).
+/// Is `raw`, read as a directory, a LIVE directory? The wrong-kind check of
+/// a download and of `revisions` (w9b `api.routes.get_file_directory`,
+/// `revisions_dir`). A soft-deleted directory is not one (fix round 1, M-2):
+/// every route answers it as nothing there, 404, as `stats` and `directory`
+/// do -- a directory has no revisions to keep visible (R1 is a file's).
 async fn holds_a_directory(
     conn: &mut sqlx::PgConnection,
     grant: &Grant,
@@ -294,8 +318,8 @@ async fn holds_a_directory(
     let Ok(dir) = NsPath::parse_dir(raw) else {
         return Ok(false);
     };
-    match store::revisions(conn, grant, &dir).await {
-        Ok(rows) => Ok(!rows.is_empty()),
+    match store::resolve(conn, grant, &dir, Want::Latest).await {
+        Ok(_) => Ok(true),
         Err(NsError::NotFound(_)) => Ok(false),
         Err(e) => Err(e),
     }
@@ -362,7 +386,7 @@ pub(crate) async fn download_namespace_file(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, namespace)): Path<(String, String)>,
-    Query(q): Query<NsPathQuery>,
+    NsQuery(q): NsQuery<NsPathQuery>,
 ) -> Result<Response, Response> {
     let grant = grant(&st, &ctx, &namespace, Access::Read).await?;
     let want = q.revision.map_or(Want::Latest, Want::Revision);
@@ -425,7 +449,7 @@ pub(crate) async fn namespace_file_stats(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, namespace)): Path<(String, String)>,
-    Query(q): Query<NsDirQuery>,
+    NsQuery(q): NsQuery<NsDirQuery>,
 ) -> Result<Json<NsFileStatsDto>, Response> {
     let grant = grant(&st, &ctx, &namespace, Access::Read).await?;
     let Some(raw) = q.path.as_deref().filter(|_| !is_root(q.path.as_deref())) else {
@@ -465,7 +489,7 @@ pub(crate) async fn namespace_file_revisions(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, namespace)): Path<(String, String)>,
-    Query(q): Query<NsTargetQuery>,
+    NsQuery(q): NsQuery<NsTargetQuery>,
 ) -> Result<Json<Vec<NsFileRevisionDto>>, Response> {
     let grant = grant(&st, &ctx, &namespace, Access::Read).await?;
     let mut c = conn(&st).await?;
@@ -518,7 +542,7 @@ pub(crate) async fn search_namespace_files(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, namespace)): Path<(String, String)>,
-    Query(q): Query<NsSearchQuery>,
+    NsQuery(q): NsQuery<NsSearchQuery>,
 ) -> Result<Json<Vec<String>>, Response> {
     let grant = grant(&st, &ctx, &namespace, Access::Read).await?;
     let mut c = conn(&st).await?;
@@ -556,7 +580,7 @@ pub(crate) async fn list_namespace_directory(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, namespace)): Path<(String, String)>,
-    Query(q): Query<NsDirQuery>,
+    NsQuery(q): NsQuery<NsDirQuery>,
 ) -> Result<Json<Vec<NsFileStatsDto>>, Response> {
     let grant = grant(&st, &ctx, &namespace, Access::Read).await?;
     let cap = caps().max_namespace_files;
@@ -627,13 +651,13 @@ fn upload_too_large(limit: usize) -> Response {
     )
 }
 
-fn upload_timed_out() -> Response {
+fn upload_timed_out(idle_for: std::time::Duration) -> Response {
     refuse(
         StatusCode::REQUEST_TIMEOUT,
         format!(
-            "the upload stopped: no byte of the request body arrived for {} seconds; nothing \
-             was stored",
-            UPLOAD_IDLE_TIMEOUT.as_secs()
+            "the upload stopped: no byte of the request body arrived for {}; nothing was \
+             stored",
+            idle_text(idle_for)
         ),
     )
 }
@@ -643,13 +667,14 @@ fn upload_timed_out() -> Response {
 /// [`multipart_refusal`] (the header budget, the parser's own status).
 fn body_refusal(
     idle: &AtomicBool,
+    idle_for: std::time::Duration,
     gate: &MultipartGate,
     limit: usize,
     status: StatusCode,
     text: String,
 ) -> Response {
     if idle.load(Ordering::SeqCst) {
-        return upload_timed_out();
+        return upload_timed_out(idle_for);
     }
     if gate.body_limit.load(Ordering::SeqCst) {
         return upload_too_large(limit);
@@ -671,7 +696,7 @@ fn body_refusal(
         content((NsFileUploadForm = "multipart/form-data")),
     ),
     responses(
-        (status = 200, description = "Stored, as the path's next revision. No body (Kestra's answer).", body = ()),
+        (status = 200, description = "Stored, as the path's next revision. No content and no content type (Kestra's answer)."),
         (status = 400, description = "A path rule (named), a refused namespace, `/_flows`, no `fileContent` part or another part before it (named), a malformed multipart body, or headers over the budget", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
@@ -686,7 +711,7 @@ pub(crate) async fn upload_namespace_file(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, namespace)): Path<(String, String)>,
-    Query(q): Query<NsTargetQuery>,
+    NsQuery(q): NsQuery<NsTargetQuery>,
     req: axum::extract::Request,
 ) -> Result<StatusCode, Response> {
     use axum::extract::FromRequest as _;
@@ -702,15 +727,23 @@ pub(crate) async fn upload_namespace_file(
         ));
     }
     let fs: Arc<FileStore> = crate::storage::current().ok_or_else(no_store)?;
+    // W9a's body limit, kept as a backstop (fix round 1, M-4). It is
+    // UNREACHABLE on this route today: `put` refuses the file part at
+    // `max_file_bytes` + 1 bytes (`Guarded`), the header budget refuses
+    // headers and preamble past 64 KiB, and nothing after the file part is
+    // read -- so at most cap + 1 + 64 KiB + one 8 KiB piece is pulled, under
+    // cap + 1 MiB. It guards a future change that reads further parts or
+    // bypasses `Guarded`; no test can reach it, so none pins it (mutant d).
     let limit = multipart_body_limit(fs.caps);
     let gate = Arc::new(MultipartGate::default());
     let idle = Arc::new(AtomicBool::new(false));
+    let idle_for = st.upload_idle_timeout;
     let req = req.map(|b| {
         let limited = axum::body::Body::new(http_body_util::Limited::new(b, limit));
         axum::body::Body::from_stream(HeaderBudget {
             inner: Box::pin(IdleTimeout::new(
                 limited.into_data_stream(),
-                UPLOAD_IDLE_TIMEOUT,
+                idle_for,
                 idle.clone(),
             )),
             pending: axum::body::Bytes::new(),
@@ -725,7 +758,7 @@ pub(crate) async fn upload_namespace_file(
     let next = multipart.next_field().await;
     gate.end_headers();
     let field = next
-        .map_err(|e| body_refusal(&idle, &gate, limit, e.status(), e.body_text()))?
+        .map_err(|e| body_refusal(&idle, idle_for, &gate, limit, e.status(), e.body_text()))?
         .ok_or_else(|| {
             bad_request(format!(
                 "the multipart body has no part `{FILE_PART}`: it carries the file"
@@ -758,9 +791,9 @@ pub(crate) async fn upload_namespace_file(
     .await;
     let entry = match written {
         Ok(Written::Written(e)) => e,
-        Ok(Written::Skipped(_)) => {
+        Ok(Written::Skipped(_) | Written::Already(_)) => {
             return Err(core_refusal(Error::Internal(anyhow::anyhow!(
-                "an OVERWRITE upload of '{path}' was skipped"
+                "an OVERWRITE upload of '{path}' by a user was skipped"
             ))))
         }
         Err(e) => {
@@ -768,6 +801,7 @@ pub(crate) async fn upload_namespace_file(
             if let Some(text) = first_error.lock().expect("body error slot").take() {
                 return Err(body_refusal(
                     &idle,
+                    idle_for,
                     &gate,
                     limit,
                     StatusCode::BAD_REQUEST,
@@ -803,7 +837,7 @@ pub(crate) async fn upload_namespace_file(
         NsTargetQuery,
     ),
     responses(
-        (status = 200, description = "The directory and each missing parent exist (an existing live directory is not an error). No body (Kestra's answer).", body = ()),
+        (status = 200, description = "The directory and each missing parent exist (an existing live directory is not an error). No content and no content type (Kestra's answer)."),
         (status = 400, description = "A path rule (named), the root, a refused namespace, or `/_flows`", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
@@ -815,7 +849,7 @@ pub(crate) async fn create_namespace_directory(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, namespace)): Path<(String, String)>,
-    Query(q): Query<NsTargetQuery>,
+    NsQuery(q): NsQuery<NsTargetQuery>,
 ) -> Result<StatusCode, Response> {
     let grant = grant(&st, &ctx, &namespace, Access::Write).await?;
     let dir = NsPath::parse_dir(&q.path).map_err(bad_request)?;
@@ -844,7 +878,7 @@ pub(crate) async fn create_namespace_directory(
         NsMoveQuery,
     ),
     responses(
-        (status = 200, description = "Moved: every revision of the file (or of every path under the directory), numbers kept; the source is gone, `to`'s missing parents exist. No body (Kestra's answer). **A move runs to completion once it has started:** it runs detached from the request, so a client that disconnects mid-move loses only this answer -- the move still finishes (or rolls its copies back), never stopping half-way.", body = ()),
+        (status = 200, description = "Moved: every revision of the file (or of every path under the directory), numbers kept; the source is gone, `to`'s missing parents exist. No content and no content type (Kestra's answer). **A move runs to completion once it has started:** it runs detached from the request, so a client that disconnects mid-move loses only this answer -- the move still finishes (or rolls its copies back), never stopping half-way."),
         (status = 400, description = "A path rule (named) for either path, a refused namespace, `/_flows`, or a move onto or under itself", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
@@ -858,7 +892,7 @@ pub(crate) async fn move_namespace_file(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, namespace)): Path<(String, String)>,
-    Query(q): Query<NsMoveQuery>,
+    NsQuery(q): NsQuery<NsMoveQuery>,
 ) -> Result<StatusCode, Response> {
     let grant = grant(&st, &ctx, &namespace, Access::Write).await?;
     // `to` must be a path at all before anything is looked up.
@@ -903,7 +937,7 @@ pub(crate) async fn move_namespace_file(
         NsTargetQuery,
     ),
     responses(
-        (status = 200, description = "Soft-deleted: the path and, for a directory, every path under it; parents left empty stay. Revisions are kept (listed by `revisions`, served by `?revision=N`) until a flow's `PurgeFiles` removes them. A path with nothing live is not an error: 200, nothing done. No body.", body = ()),
+        (status = 200, description = "Soft-deleted: the path and, for a directory, every path under it; parents left empty stay. Revisions are kept (listed by `revisions`, served by `?revision=N`) until a flow's `PurgeFiles` removes them. A path with nothing live is not an error: 200, nothing done. No content and no content type."),
         (status = 400, description = "A path rule (named), the root, a refused namespace, or `/_flows`", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
@@ -914,7 +948,7 @@ pub(crate) async fn delete_namespace_file(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, namespace)): Path<(String, String)>,
-    Query(q): Query<NsTargetQuery>,
+    NsQuery(q): NsQuery<NsTargetQuery>,
 ) -> Result<StatusCode, Response> {
     let grant = grant(&st, &ctx, &namespace, Access::Write).await?;
     let found = {
@@ -933,7 +967,15 @@ pub(crate) async fn delete_namespace_file(
                 .map_err(ns_refusal)?;
             (e.path.as_str().to_string(), marked.len())
         }
-        None => (q.path.clone(), 0),
+        // Fix round 1, M-3: the path as a real delete would name it -- the
+        // file form when it parses, else the directory form (`resolve_any`
+        // parsed one of them, or it would have answered 400).
+        None => {
+            let normal = NsPath::parse_file(&q.path)
+                .or_else(|_| NsPath::parse_dir(&q.path))
+                .map_err(bad_request)?;
+            (normal.as_str().to_string(), 0)
+        }
     };
     audit(
         &st,
