@@ -97,10 +97,10 @@ async fn build_router(db: &Db, store: Arc<MemStore>) -> axum::Router {
         .with_state(st)
 }
 
-/// Mirrors `AppStore::draft_key`'s private format (S1-2): `s3://{bucket}/{prefix}{ws}/{app}/draft.py`.
-fn draft_object_key(ws: Uuid, app: Uuid) -> String {
+/// Mirrors `AppStore::draft_key`'s private format (Task 10): `s3://{bucket}/{prefix}{ws}/{app}/draft/{revision}.py`.
+fn draft_object_key(ws: Uuid, app: Uuid, revision: i64) -> String {
     format!(
-        "s3://{TEST_BUCKET}/{TEST_PREFIX}{}/{}/draft.py",
+        "s3://{TEST_BUCKET}/{TEST_PREFIX}{}/{}/draft/{revision}.py",
         ws.hyphenated(),
         app.hyphenated()
     )
@@ -151,13 +151,12 @@ impl Fixture {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-        // `draft()` reads the source from the object store first, falling back
-        // to this row's `source` column only on a miss -- seed the matching key
-        // so the object store is what actually answers here (the column is a
-        // legitimate fallback source, not dead weight).
+        // `draft()` reads the source from the object store only, at the row's
+        // current revision (Task 10) -- seed revision 1's key, or the draft
+        // would be unreadable (the `source` column above is never read).
         let store = Arc::new(MemStore::new());
         store
-            .put(&draft_object_key(ws, app), b"draft v1".to_vec())
+            .put(&draft_object_key(ws, app, 1), b"draft v1".to_vec())
             .await
             .unwrap();
         // `version()` has no Postgres fallback as of Task 9 (S3-1): seed the
@@ -380,14 +379,12 @@ async fn saving_follows_the_cookie_api_contract() {
     let (status, _) = put(Some("\"2\""), "x".repeat(1024 * 1024 + 1)).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 
-    let stored: String =
-        sqlx::query_scalar("SELECT source FROM analytics.app_drafts WHERE app_id = $1")
-            .bind(fx.app)
-            .fetch_one(&fx.db.pool)
-            .await
-            .unwrap();
+    // Read back through the API: the content lives in the object store only.
+    let (status, body) = fx.call("GET", &fx.draft_uri(), Some(&t), None, None).await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        stored, "draft v2",
+        body,
+        json!({"source": "draft v2", "revision": 2}),
         "a stale or oversized save changes nothing"
     );
 }

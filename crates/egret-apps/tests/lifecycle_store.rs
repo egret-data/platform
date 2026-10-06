@@ -346,6 +346,52 @@ impl Fixture {
     fn mem_store(&self) -> Arc<MemStore> {
         self.mem.clone()
     }
+    /// Mirrors `AppStore::draft_key`'s private format: `.../{app}/draft/{revision}.py`.
+    fn draft_key(&self, app: Uuid, revision: i64) -> String {
+        format!(
+            "s3://{}/apps/{}/{}/draft/{revision}.py",
+            self.bucket(),
+            self.ws().0.hyphenated(),
+            app.hyphenated()
+        )
+    }
+    /// Mirrors `AppStore::draft_layout_key`: `.../{app}/draft/{revision}.layout.json`.
+    fn draft_layout_key(&self, app: Uuid, revision: i64) -> String {
+        format!(
+            "s3://{}/apps/{}/{}/draft/{revision}.layout.json",
+            self.bucket(),
+            self.ws().0.hyphenated(),
+            app.hyphenated()
+        )
+    }
+    /// Parts S1/S2's fixed, revision-less draft key (`.../{app}/draft.py`),
+    /// which nothing writes any more.
+    fn legacy_draft_key(&self, app: Uuid) -> String {
+        format!(
+            "s3://{}/apps/{}/{}/draft.py",
+            self.bucket(),
+            self.ws().0.hyphenated(),
+            app.hyphenated()
+        )
+    }
+    /// A draft row exactly as pre-Task-10 code left it: content in the
+    /// `source`/`layout_json` columns at `revision`, inserted raw (bypassing
+    /// `AppStore`, so no revision-keyed object exists).
+    async fn legacy_draft(&self, source: &str, layout: Option<&str>, revision: i64) -> Uuid {
+        let app = self.new_app().await;
+        sqlx::query(
+            "INSERT INTO analytics.app_drafts (app_id, source, layout_json, revision) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(app)
+        .bind(source)
+        .bind(layout)
+        .bind(revision)
+        .execute(&self.db.pool)
+        .await
+        .expect("insert legacy draft");
+        app
+    }
     /// An app made through the store (so it has a rev-1 draft).
     async fn store_app(&self, source: &str) -> Uuid {
         self.store()
@@ -413,45 +459,235 @@ async fn draft_content_round_trips_through_the_object_store_not_postgres() {
         .await
         .unwrap();
 
-    // Postgres's source column is still written too (the Task 9 rollback/fallback
-    // safety net), but the object store is preferred when present -- prove this
-    // content came from there by reading the key directly.
-    let key = format!(
-        "s3://{}/apps/{}/{}/draft.py",
-        fx.bucket(),
-        fx.ws().0.hyphenated(),
-        app.hyphenated()
-    );
-    let bytes = fx.mem_store().get(&key).await.unwrap();
+    // The content is at the saved revision's own key...
+    let bytes = fx.mem_store().get(&fx.draft_key(app, 2)).await.unwrap();
     assert_eq!(String::from_utf8(bytes).unwrap(), "x = 2");
+    // ...and nowhere in Postgres: both `create` and `save_draft` leave the
+    // columns NULL (migration 0172).
+    let (source, layout): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT source, layout_json FROM analytics.app_drafts WHERE app_id = $1")
+            .bind(app)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!((source, layout), (None, None));
 
     let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
     assert_eq!(d.source, "x = 2");
 }
 
-/// Part S1 must stay safe to ship on its own, with existing Postgres-only rows
-/// still readable, until Part S2's backfill runs -- so `draft()` falls back to
-/// the row's own column on an object-store miss. Inserted directly via SQL
-/// (NOT through `store_app`/`create`, which writes the object store too as of
-/// this task) to simulate data that genuinely predates this code.
+/// Task 10 (S3-2) removed `draft()`'s Postgres fallback: a draft row whose
+/// current revision has no source object is a real error, even when its
+/// legacy `source` column holds content (that content is
+/// `egret backfill-apps-storage`'s to move, not the reader's to serve).
 #[tokio::test]
-async fn a_pre_s1_row_with_no_object_store_content_falls_back_to_postgres() {
+async fn a_draft_with_no_object_at_its_current_revision_now_surfaces_as_an_error() {
     let fx = Fixture::new().await;
-    let app_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO analytics.apps (workspace_id, name, description) VALUES ($1, 'legacy', '') RETURNING id",
-    )
-    .bind(fx.ws().0)
-    .fetch_one(&fx.db.pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO analytics.app_drafts (app_id, source) VALUES ($1, 'legacy')")
-        .bind(app_id)
-        .execute(&fx.db.pool)
+    let app = fx.legacy_draft("legacy", None, 1).await;
+
+    let err = fx
+        .store()
+        .draft(fx.ws(), app)
+        .await
+        .expect_err("a draft revision with no source object must be a real error");
+    assert!(matches!(err, Error::Internal(_)), "{err:?}");
+}
+
+/// A layout-key miss is unambiguous now (no backfill-not-run-yet case left):
+/// that revision simply has no layout.
+#[tokio::test]
+async fn a_draft_with_no_layout_object_at_its_current_revision_reads_back_none_not_an_error() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    assert!(matches!(
+        fx.mem_store().get(&fx.draft_layout_key(app, 1)).await,
+        Err(StorageError::NotFound(_))
+    ));
+
+    let d = fx.store().draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!(
+        (d.source.as_str(), d.layout_json, d.revision),
+        ("v1", None, 1)
+    );
+}
+
+/// Each save lands at its own revision's key -- the key format really is
+/// revision-scoped, not a renamed fixed key -- and, once the save has
+/// committed, the superseded revision's objects are cleaned up.
+#[tokio::test]
+async fn successive_saves_write_distinct_per_revision_objects() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+    let mem = fx.mem_store();
+
+    st.save_draft(fx.ws(), app, fx.uid(), 1, "a", Some("layout a"))
+        .await
+        .unwrap();
+    assert_eq!(mem.get(&fx.draft_key(app, 2)).await.unwrap(), b"a");
+    assert_eq!(
+        mem.get(&fx.draft_layout_key(app, 2)).await.unwrap(),
+        b"layout a"
+    );
+
+    st.save_draft(fx.ws(), app, fx.uid(), 2, "b", Some("layout b"))
+        .await
+        .unwrap();
+    assert_eq!(mem.get(&fx.draft_key(app, 3)).await.unwrap(), b"b");
+    assert_eq!(
+        mem.get(&fx.draft_layout_key(app, 3)).await.unwrap(),
+        b"layout b"
+    );
+    for superseded in [
+        fx.draft_key(app, 1),
+        fx.draft_key(app, 2),
+        fx.draft_layout_key(app, 2),
+    ] {
+        assert!(
+            matches!(mem.get(&superseded).await, Err(StorageError::NotFound(_))),
+            "{superseded} should have been cleaned up after its successor committed"
+        );
+    }
+    // Nothing writes the old fixed key any more.
+    assert!(matches!(
+        mem.get(&fx.legacy_draft_key(app)).await,
+        Err(StorageError::NotFound(_))
+    ));
+
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!(
+        (d.source.as_str(), d.layout_json.as_deref(), d.revision),
+        ("b", Some("layout b"), 3)
+    );
+}
+
+/// Finding I3: a save whose object-store write landed but whose transaction
+/// never committed (commit error, or the handler future dropped in between)
+/// leaves objects at the NEXT revision's keys. The row still points at the
+/// committed revision, so they are never read -- and the next successful save
+/// at that revision replaces them, including clearing an orphaned layout when
+/// it has none of its own.
+#[tokio::test]
+async fn an_uncommitted_write_at_the_next_revision_is_never_read() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("committed").await;
+    let st = fx.store();
+    // Exactly what an uncommitted `save_draft(expected = 1)` leaves behind.
+    fx.mem_store()
+        .put(&fx.draft_key(app, 2), b"uncommitted".to_vec())
+        .await
+        .unwrap();
+    fx.mem_store()
+        .put(&fx.draft_layout_key(app, 2), b"uncommitted layout".to_vec())
         .await
         .unwrap();
 
-    let d = fx.store().draft(fx.ws(), app_id).await.unwrap().unwrap();
-    assert_eq!(d.source, "legacy");
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!(
+        (d.source.as_str(), d.layout_json, d.revision),
+        ("committed", None, 1)
+    );
+
+    st.save_draft(fx.ws(), app, fx.uid(), 1, "second", None)
+        .await
+        .unwrap();
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!(
+        (d.source.as_str(), d.layout_json, d.revision),
+        ("second", None, 2)
+    );
+}
+
+/// An `ObjectStore` that runs a one-shot hook just before the first GET of one
+/// key -- used to land a `save_draft` exactly between `draft()` reading the
+/// row's revision and fetching that revision's objects.
+struct RaceStore {
+    inner: Arc<MemStore>,
+    trigger: String,
+    hook: tokio::sync::Mutex<Option<futures_util::future::BoxFuture<'static, ()>>>,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for RaceStore {
+    async fn put(&self, uri: &str, bytes: Vec<u8>) -> Result<(), StorageError> {
+        self.inner.put(uri, bytes).await
+    }
+    async fn get(&self, uri: &str) -> Result<Vec<u8>, StorageError> {
+        if uri == self.trigger {
+            let hook = self.hook.lock().await.take();
+            if let Some(hook) = hook {
+                hook.await;
+            }
+        }
+        self.inner.get(uri).await
+    }
+    async fn delete(&self, uri: &str) -> Result<(), StorageError> {
+        self.inner.delete(uri).await
+    }
+    async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError> {
+        self.inner.copy(src, dst).await
+    }
+    async fn list(
+        &self,
+        prefix: &str,
+        delimiter: Option<&str>,
+    ) -> Result<egret_storage::Listing, StorageError> {
+        self.inner.list(prefix, delimiter).await
+    }
+}
+
+/// `draft()` reads the row without a lock, so a save can commit revision 2 and
+/// delete revision 1's objects between `draft()` reading `revision = 1` and
+/// fetching them. The resulting miss must be retried against the new
+/// revision: as an error for the source key, and -- the silent case -- as
+/// "no layout" next to revision 1's source for the layout key.
+async fn a_save_racing_a_read_is_retried(trigger_on_layout: bool) {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    fx.store()
+        .save_draft(fx.ws(), app, fx.uid(), 1, "v2", Some("layout v2"))
+        .await
+        .unwrap();
+    // The row is now at revision 2; the racing save moves it to 3.
+    let trigger = if trigger_on_layout {
+        fx.draft_layout_key(app, 2)
+    } else {
+        fx.draft_key(app, 2)
+    };
+    let saver = fx.store();
+    let (ws, uid) = (fx.ws(), fx.uid());
+    let race = RaceStore {
+        inner: fx.mem_store(),
+        trigger,
+        hook: tokio::sync::Mutex::new(Some(Box::pin(async move {
+            saver
+                .save_draft(ws, app, uid, 2, "v3", Some("layout v3"))
+                .await
+                .expect("racing save");
+        }))),
+    };
+    let reader = AppStore::new(
+        fx.db.clone(),
+        Arc::new(race),
+        fx.bucket.clone(),
+        fx.prefix.clone(),
+    );
+
+    let d = reader.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!(
+        (d.source.as_str(), d.layout_json.as_deref(), d.revision),
+        ("v3", Some("layout v3"), 3)
+    );
+}
+
+#[tokio::test]
+async fn a_save_racing_a_read_of_the_source_is_retried_not_an_error() {
+    a_save_racing_a_read_is_retried(false).await;
+}
+
+#[tokio::test]
+async fn a_save_racing_a_read_of_the_layout_is_retried_not_read_as_no_layout() {
+    a_save_racing_a_read_is_retried(true).await;
 }
 
 /// Regression test for a race a task review caught: an unlocked "check revision,
@@ -952,18 +1188,13 @@ async fn restoring_a_version_with_no_object_store_content_now_surfaces_as_an_err
 
 /// I2 Test B: a draft layout put-then-clear round-trips through the object
 /// store in both directions -- saving a layout writes the object, and saving
-/// again with `None` actually deletes it (not just stops exposing it).
+/// again with `None` leaves no layout object for the new revision (and the
+/// old revision's is cleaned up), not just stops exposing it.
 #[tokio::test]
 async fn saving_with_no_layout_clears_a_previously_saved_one() {
     let fx = Fixture::new().await;
     let app = fx.store_app("v1").await;
     let st = fx.store();
-    let layout_key = format!(
-        "s3://{}/apps/{}/{}/draft.layout.json",
-        fx.bucket(),
-        fx.ws().0.hyphenated(),
-        app.hyphenated()
-    );
 
     st.save_draft(fx.ws(), app, fx.uid(), 1, "v1", Some("some layout"))
         .await
@@ -971,7 +1202,10 @@ async fn saving_with_no_layout_clears_a_previously_saved_one() {
     let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
     assert_eq!(d.layout_json.as_deref(), Some("some layout"));
     assert_eq!(
-        fx.mem_store().get(&layout_key).await.unwrap(),
+        fx.mem_store()
+            .get(&fx.draft_layout_key(app, 2))
+            .await
+            .unwrap(),
         b"some layout"
     );
 
@@ -980,36 +1214,12 @@ async fn saving_with_no_layout_clears_a_previously_saved_one() {
         .unwrap();
     let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
     assert_eq!(d.layout_json, None);
-    assert!(matches!(
-        fx.mem_store().get(&layout_key).await,
-        Err(StorageError::NotFound(_))
-    ));
-}
-
-/// I2 Test C: a pre-S1 draft row's `layout_json` column also falls back
-/// correctly, mirroring `a_pre_s1_row_with_no_object_store_content_falls_back_to_postgres`
-/// for `source` but extended to the layout column too.
-#[tokio::test]
-async fn a_pre_s1_drafts_layout_also_falls_back_to_postgres() {
-    let fx = Fixture::new().await;
-    let app_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO analytics.apps (workspace_id, name, description) VALUES ($1, 'legacy', '') RETURNING id",
-    )
-    .bind(fx.ws().0)
-    .fetch_one(&fx.db.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO analytics.app_drafts (app_id, source, layout_json) VALUES ($1, 'legacy', 'legacy layout')",
-    )
-    .bind(app_id)
-    .execute(&fx.db.pool)
-    .await
-    .unwrap();
-
-    let d = fx.store().draft(fx.ws(), app_id).await.unwrap().unwrap();
-    assert_eq!(d.source, "legacy");
-    assert_eq!(d.layout_json.as_deref(), Some("legacy layout"));
+    for rev in [2, 3] {
+        assert!(matches!(
+            fx.mem_store().get(&fx.draft_layout_key(app, rev)).await,
+            Err(StorageError::NotFound(_))
+        ));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,6 +1258,7 @@ async fn backfill_writes_pre_s2_rows_content_to_the_object_store() {
     st.backfill_draft(
         fx.ws(),
         fx.app,
+        1,
         "pre-s2 draft source",
         Some("pre-s2 draft layout"),
     )
@@ -1063,18 +1274,8 @@ async fn backfill_writes_pre_s2_rows_content_to_the_object_store() {
     .await
     .expect("backfill_version");
 
-    let draft_source_key = format!(
-        "s3://{}/apps/{}/{}/draft.py",
-        fx.bucket(),
-        fx.ws().0.hyphenated(),
-        fx.app.hyphenated()
-    );
-    let draft_layout_key = format!(
-        "s3://{}/apps/{}/{}/draft.layout.json",
-        fx.bucket(),
-        fx.ws().0.hyphenated(),
-        fx.app.hyphenated()
-    );
+    let draft_source_key = fx.draft_key(fx.app, 1);
+    let draft_layout_key = fx.draft_layout_key(fx.app, 1);
     let version_source_key = format!(
         "s3://{}/apps/{}/{}/versions/1/source.py",
         fx.bucket(),
@@ -1106,113 +1307,149 @@ async fn backfill_writes_pre_s2_rows_content_to_the_object_store() {
     );
 }
 
-/// I5 (final whole-branch review): `backfill_draft` alone takes an unlocked
-/// caller-supplied snapshot, so a backfill run racing a concurrent
-/// `save_draft` can overwrite the live save's S3 content with the stale
-/// snapshot it read before the save landed. `backfill_draft_locked` closes
-/// this by taking the same `FOR UPDATE` row lock `save_draft` does and
-/// re-reading the row itself from inside that lock, rather than trusting a
-/// snapshot: here the "concurrent save" has already committed by the time
-/// `backfill_draft_locked` runs, so it must see and write the save's content,
-/// not the draft's original "v1" source.
-#[tokio::test]
-async fn backfill_draft_locked_never_overwrites_a_concurrent_live_save() {
-    let fx = Fixture::new().await;
-    let app = fx.store_app("v1").await;
-    let st = fx.store();
+// ---------------------------------------------------------------------------
+// Task 10 (S3-2): moving drafts onto revision-keyed content.
+// `backfill_draft_locked` is the per-row step `egret backfill-apps-storage`
+// runs for every draft whose `source` column is non-NULL.
+// ---------------------------------------------------------------------------
 
-    // The "concurrent save that already landed" the finding describes.
-    let outcome = st
-        .save_draft(
-            fx.ws(),
-            app,
-            fx.uid(),
-            1,
-            "v2 (live edit)",
-            Some("live layout"),
-        )
+/// The migration end to end: a draft exactly as Parts S1/S2 left it -- content
+/// in its columns at revision 4, and the same content at the old fixed
+/// `draft.py` key -- moves to revision 4's key and reads back through
+/// `draft()`. A later save then writes revision 5's key and never touches the
+/// old fixed key, and a rerun of the migration is a no-op.
+#[tokio::test]
+async fn migrating_moves_a_pre_revision_keyed_draft_to_its_current_revision_key() {
+    let fx = Fixture::new().await;
+    let app = fx.legacy_draft("committed", Some("layout"), 4).await;
+    let mem = fx.mem_store();
+    mem.put(&fx.legacy_draft_key(app), b"committed".to_vec())
         .await
         .unwrap();
-    let SaveOutcome::Saved { revision } = outcome else {
-        panic!("expected Saved, got {outcome:?}");
-    };
-    assert_eq!(revision, 2);
+    let st = fx.store();
+    assert!(st.draft(fx.ws(), app).await.is_err(), "unreadable before");
 
-    // No earlier caller-passed snapshot to go stale: this must re-read the
-    // CURRENT row content, not "v1".
-    st.backfill_draft_locked(fx.ws(), app)
+    assert!(st.backfill_draft_locked(fx.ws(), app).await.unwrap());
+    assert_eq!(mem.get(&fx.draft_key(app, 4)).await.unwrap(), b"committed");
+    assert_eq!(
+        mem.get(&fx.draft_layout_key(app, 4)).await.unwrap(),
+        b"layout"
+    );
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!(
+        (d.source.as_str(), d.layout_json.as_deref(), d.revision),
+        ("committed", Some("layout"), 4)
+    );
+
+    st.save_draft(fx.ws(), app, fx.uid(), 4, "edited", None)
         .await
-        .expect("backfill_draft_locked");
+        .unwrap();
+    assert_eq!(mem.get(&fx.draft_key(app, 5)).await.unwrap(), b"edited");
+    assert_eq!(
+        mem.get(&fx.legacy_draft_key(app)).await.unwrap(),
+        b"committed",
+        "nothing writes the old fixed key any more"
+    );
+
+    assert!(
+        !st.backfill_draft_locked(fx.ws(), app).await.unwrap(),
+        "a saved draft has nothing left to migrate"
+    );
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!((d.source.as_str(), d.revision), ("edited", 5));
+}
+
+/// The migration's source of truth is the row's committed columns, not the
+/// old fixed key: under the old scheme, the fixed key could hold a write whose
+/// transaction never committed (finding I3), and copying it would make that
+/// uncommitted content the draft.
+#[tokio::test]
+async fn migrating_takes_the_committed_column_over_an_uncommitted_fixed_key_write() {
+    let fx = Fixture::new().await;
+    let app = fx.legacy_draft("committed", None, 2).await;
+    fx.mem_store()
+        .put(&fx.legacy_draft_key(app), b"never committed".to_vec())
+        .await
+        .unwrap();
+    let st = fx.store();
+
+    assert!(st.backfill_draft_locked(fx.ws(), app).await.unwrap());
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!((d.source.as_str(), d.revision), ("committed", 2));
+}
+
+/// The data-loss case a "copy the old content to the current revision's key"
+/// migration would have: a pre-Task-10 draft (stale content still in its
+/// columns) is saved by the new code BEFORE the migration runs -- e.g. the
+/// server was deployed first. The save's content at revision 2 must survive
+/// the migration; it can only because `save_draft` NULLs the columns, telling
+/// the migration there is nothing left to move.
+#[tokio::test]
+async fn migrating_after_a_save_by_the_new_code_never_overwrites_it_with_the_stale_column() {
+    let fx = Fixture::new().await;
+    let app = fx
+        .legacy_draft("v1 (stale column)", Some("stale layout"), 1)
+        .await;
+    fx.mem_store()
+        .put(&fx.legacy_draft_key(app), b"v1 (stale column)".to_vec())
+        .await
+        .unwrap();
+    let st = fx.store();
+
+    st.save_draft(
+        fx.ws(),
+        app,
+        fx.uid(),
+        1,
+        "v2 (live edit)",
+        Some("live layout"),
+    )
+    .await
+    .unwrap();
+    assert!(!st.backfill_draft_locked(fx.ws(), app).await.unwrap());
 
     let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
-    assert_eq!(d.source, "v2 (live edit)");
-    assert_eq!(d.layout_json.as_deref(), Some("live layout"));
-
-    // Direct against the object store too, not just through `draft()`'s
-    // reader (which a broken S3 write could mask via Postgres fallback).
-    let draft_source_key = format!(
-        "s3://{}/apps/{}/{}/draft.py",
-        fx.bucket(),
-        fx.ws().0.hyphenated(),
-        app.hyphenated()
-    );
-    let draft_layout_key = format!(
-        "s3://{}/apps/{}/{}/draft.layout.json",
-        fx.bucket(),
-        fx.ws().0.hyphenated(),
-        app.hyphenated()
+    assert_eq!(
+        (d.source.as_str(), d.layout_json.as_deref(), d.revision),
+        ("v2 (live edit)", Some("live layout"), 2)
     );
     assert_eq!(
-        fx.mem_store().get(&draft_source_key).await.unwrap(),
+        fx.mem_store().get(&fx.draft_key(app, 2)).await.unwrap(),
         b"v2 (live edit)"
-    );
-    assert_eq!(
-        fx.mem_store().get(&draft_layout_key).await.unwrap(),
-        b"live layout"
     );
 }
 
-/// Bundled with the I5 fix per the final reviewer's recommendation (same code
-/// path): `backfill_draft_locked` must clear a stale layout object it finds
-/// at the draft's layout key when the CURRENT row has `layout_json = NULL` --
-/// mirroring `publishing_with_no_layout_clears_any_stale_layout_object`'s
-/// orphan-object shape, but for the locked backfill path.
+/// A draft created by the new code has nothing in its columns to migrate.
 #[tokio::test]
-async fn backfill_draft_locked_clears_a_stale_layout_when_the_current_row_has_none() {
+async fn migrating_a_draft_created_by_the_new_code_is_a_no_op() {
     let fx = Fixture::new().await;
     let app = fx.store_app("v1").await;
     let st = fx.store();
 
-    // Give the draft a layout, then clear it via a normal save -- the
-    // current row now has `layout_json = NULL`.
-    st.save_draft(fx.ws(), app, fx.uid(), 1, "v1", Some("old layout"))
-        .await
-        .unwrap();
-    st.save_draft(fx.ws(), app, fx.uid(), 2, "v1", None)
-        .await
-        .unwrap();
+    assert!(!st.backfill_draft_locked(fx.ws(), app).await.unwrap());
+    let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
+    assert_eq!((d.source.as_str(), d.revision), ("v1", 1));
+}
 
-    let draft_layout_key = format!(
-        "s3://{}/apps/{}/{}/draft.layout.json",
-        fx.bucket(),
-        fx.ws().0.hyphenated(),
-        app.hyphenated()
-    );
-    // Pre-seed an orphaned layout object at that same key, as if a prior
-    // crashed/partial write left one behind.
+/// Same orphan-object shape as `publishing_with_no_layout_clears_any_stale_layout_object`,
+/// for the migration: when the row being migrated has `layout_json = NULL`, a
+/// layout object already sitting at its revision's layout key (e.g. from an
+/// uncommitted write) is cleared rather than served as its layout.
+#[tokio::test]
+async fn migrating_clears_a_stale_layout_when_the_row_has_none() {
+    let fx = Fixture::new().await;
+    let app = fx.legacy_draft("v1", None, 3).await;
     fx.mem_store()
-        .put(&draft_layout_key, b"orphaned layout".to_vec())
+        .put(&fx.draft_layout_key(app, 3), b"orphaned layout".to_vec())
         .await
         .unwrap();
+    let st = fx.store();
 
-    st.backfill_draft_locked(fx.ws(), app)
-        .await
-        .expect("backfill_draft_locked");
-
+    assert!(st.backfill_draft_locked(fx.ws(), app).await.unwrap());
     assert!(matches!(
-        fx.mem_store().get(&draft_layout_key).await,
+        fx.mem_store().get(&fx.draft_layout_key(app, 3)).await,
         Err(StorageError::NotFound(_))
     ));
     let d = st.draft(fx.ws(), app).await.unwrap().unwrap();
-    assert_eq!(d.layout_json, None);
+    assert_eq!((d.source.as_str(), d.layout_json), ("v1", None));
 }
