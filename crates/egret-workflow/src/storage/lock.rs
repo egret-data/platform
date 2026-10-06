@@ -41,9 +41,27 @@ impl LockedSession {
     /// one statement per key (a set-returning form over `unnest` does not
     /// guarantee the order). An error part-way drops the session, which
     /// closes the connection and so releases what was taken.
-    pub(crate) async fn acquire(pool: &PgPool, keys: &[i64]) -> Result<Self> {
+    ///
+    /// `wait` bounds each key's wait (`lock_timeout`, W9b final review I-1):
+    /// past it the statement fails with SQLSTATE 55P03 ([`is_lock_timeout`]),
+    /// and the session -- whose `lock_timeout` was set for the session -- is
+    /// dropped and so closed, never returned to the pool with the setting.
+    /// Once every key is held the setting is `RESET`, so the work done under
+    /// the locks is not bounded by it. `None` waits as long as it takes.
+    pub(crate) async fn acquire(
+        pool: &PgPool,
+        keys: &[i64],
+        wait: Option<std::time::Duration>,
+    ) -> Result<Self> {
         let conn = pool.acquire().await.map_err(db_err)?;
         let mut session = Self::hold(conn);
+        if let Some(wait) = wait {
+            sqlx::query("SELECT set_config('lock_timeout', $1, false)")
+                .bind(lock_timeout_value(wait))
+                .execute(session.conn())
+                .await
+                .map_err(db_err)?;
+        }
         for &key in keys {
             sqlx::query("SELECT pg_advisory_lock($1)")
                 .bind(key)
@@ -51,6 +69,12 @@ impl LockedSession {
                 .await
                 .map_err(db_err)?;
             session.keys.push(key);
+        }
+        if wait.is_some() {
+            sqlx::query("RESET lock_timeout")
+                .execute(session.conn())
+                .await
+                .map_err(db_err)?;
         }
         Ok(session)
     }
@@ -97,6 +121,29 @@ impl Drop for LockedSession {
                 drop(conn.detach());
             }
         }
+    }
+}
+
+/// `lock_timeout`'s value for `wait`, in milliseconds; never `0`, which
+/// would disable the bound.
+pub(crate) fn lock_timeout_value(wait: std::time::Duration) -> String {
+    format!("{}ms", wait.as_millis().max(1))
+}
+
+/// Did a statement fail because its `lock_timeout` ran out (SQLSTATE 55P03,
+/// `lock_not_available`)?
+pub(crate) fn is_lock_timeout(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .and_then(|d| d.code())
+        .is_some_and(|c| c == "55P03")
+}
+
+/// [`is_lock_timeout`] through [`Error::Internal`], which is how
+/// [`LockedSession::acquire`] answers.
+pub(crate) fn is_lock_timeout_error(e: &Error) -> bool {
+    match e {
+        Error::Internal(a) => a.downcast_ref::<sqlx::Error>().is_some_and(is_lock_timeout),
+        _ => false,
     }
 }
 

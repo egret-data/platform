@@ -28,7 +28,9 @@ use super::access::{require, Access, Grant};
 use super::path::NsPath;
 use super::{CreatedBy, NsError};
 use crate::storage::inputs::Guarded;
-use crate::storage::lock::LockedSession;
+use crate::storage::lock::{
+    is_lock_timeout, is_lock_timeout_error, lock_timeout_value, LockedSession,
+};
 use crate::storage::FileStore;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -506,12 +508,20 @@ pub async fn open(
 // (`pg_advisory_xact_lock`), held from the revision's choice to the row
 // insert, so that no second writer computes the same revision. `put` takes
 // them only once its body is in a staging object (the user's ruling of
-// 2026-10-06): the lock window is server-paced, never a client's. `purge_revisions` and
-// `move_path` take the same keys as SESSION locks ([`LockedSession`]) held
-// across "delete rows, commit, delete objects": a transaction lock would be
-// released by that commit, and a writer could then take the purged revision
-// number again and upload to its key, which the purge would then delete -- a
-// row naming nothing (plan item 7). The two kinds of lock on one key conflict.
+// 2026-10-06): the lock window is server-paced, never a client's. The
+// purges (`purge_rows`, `purge_empty_directory`) and `move_path` take the same
+// keys as SESSION locks ([`LockedSession`]) held across "delete rows, commit,
+// delete objects": a transaction lock would be released by that commit, and a
+// writer could then take the purged revision number again and upload to its
+// key, which the purge would then delete -- a row naming nothing (plan item
+// 7). The two kinds of lock on one key conflict.
+//
+// A move's window is server-side copies only (W9b final review I-1,
+// 2026-10-07): no byte of a revision passes through egret, and a move copies
+// at most `max_task_bytes` in all. An API grant waits at most
+// `access::API_LOCK_WAIT` for any of these keys (a 409 past it), so requests
+// queued behind a move cannot hold every pool connection; a flow's grant
+// waits as long as it takes (its task run is leased).
 
 /// How a 409 over kept history names the one tool that removes it (W9b Task
 /// 8): the namespace file API has no purge route, so "purge it first" alone
@@ -571,16 +581,67 @@ fn lock_chain(grant: &Grant, paths: &[&NsPath]) -> Vec<String> {
 }
 
 /// `pg_advisory_xact_lock` on each text's hash, one statement per key, in the
-/// order given.
-async fn xact_lock(conn: &mut PgConnection, texts: &[String]) -> Result<(), NsError> {
+/// order given. A grant with a [`Grant::lock_wait`] (the API's) bounds each
+/// wait with `SET LOCAL lock_timeout` (W9b final review I-1, 2026-10-07):
+/// past it the write is [`busy`], a 409, and its transaction -- and pool
+/// connection -- is let go. A flow's grant waits as long as it takes.
+async fn xact_lock(
+    conn: &mut PgConnection,
+    grant: &Grant,
+    path: &NsPath,
+    texts: &[String],
+) -> Result<(), NsError> {
+    if let Some(wait) = grant.lock_wait() {
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(lock_timeout_value(wait))
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    }
     for text in texts {
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(text)
             .execute(&mut *conn)
             .await
-            .map_err(db_err)?;
+            .map_err(|e| {
+                if is_lock_timeout(&e) {
+                    busy(grant, path)
+                } else {
+                    db_err(e)
+                }
+            })?;
     }
     Ok(())
+}
+
+/// A bounded wait for a path's lock ran out (W9b final review I-1): the
+/// author's to retry, a 409. Names the path, never what holds it.
+fn busy(grant: &Grant, path: &NsPath) -> NsError {
+    NsError::Conflict(format!(
+        "namespace file '{path}' in namespace '{}': the path is busy (a move or another \
+         write holds it); try again",
+        grant.namespace()
+    ))
+}
+
+/// The session locks of `texts`, waiting at most the grant's
+/// [`Grant::lock_wait`]; a wait that runs out is [`busy`] naming `path`.
+async fn lock_session(
+    pool: &PgPool,
+    grant: &Grant,
+    path: &NsPath,
+    texts: &[String],
+) -> Result<LockedSession, NsError> {
+    let keys = session_keys(pool, texts).await?;
+    LockedSession::acquire(pool, &keys, grant.lock_wait())
+        .await
+        .map_err(|e| {
+            if is_lock_timeout_error(&e) {
+                busy(grant, path)
+            } else {
+                NsError::Db(e)
+            }
+        })
 }
 
 /// The session lock keys of `texts`, in the order given: one
@@ -1095,7 +1156,7 @@ async fn commit_staged(
     let ns = grant.namespace();
     let subject = format!("namespace file '{path}' cannot be written");
     let mut tx = pool.begin().await.map_err(db_err)?;
-    xact_lock(&mut tx, &lock_chain(grant, &[path])).await?;
+    xact_lock(&mut tx, grant, path, &lock_chain(grant, &[path])).await?;
     // Task 6 (fix round 1, I1), under the lock: a re-claimed task run whose
     // earlier attempt committed this path's latest revision does not write
     // it again, under every conflict mode -- even when that attempt is still
@@ -1175,7 +1236,7 @@ pub async fn create_directory(
     }
     let subject = format!("cannot create directory '{}'", path.lock_path());
     let mut tx = pool.begin().await.map_err(db_err)?;
-    xact_lock(&mut tx, &lock_chain(grant, &[path])).await?;
+    xact_lock(&mut tx, grant, path, &lock_chain(grant, &[path])).await?;
     check_kinds(&mut tx, grant, path, &subject).await?;
     ensure_directories(&mut tx, grant, path, true, by).await?;
     let e = latest(&mut tx, grant, path.as_str())
@@ -1198,7 +1259,7 @@ pub async fn soft_delete(
     let mut tx = pool.begin().await.map_err(db_err)?;
     // The chain, as every writer (fix round 1, I1): a move of an ancestor
     // holds that ancestor's key, and a writer under `path` locks `path`.
-    xact_lock(&mut tx, &lock_chain(grant, &[path])).await?;
+    xact_lock(&mut tx, grant, path, &lock_chain(grant, &[path])).await?;
     let marked = mark_deleted(&mut tx, grant, path).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(marked)
@@ -1225,7 +1286,7 @@ pub async fn soft_delete_if_empty(
         )));
     }
     let mut tx = pool.begin().await.map_err(db_err)?;
-    xact_lock(&mut tx, &lock_chain(grant, &[dir])).await?;
+    xact_lock(&mut tx, grant, dir, &lock_chain(grant, &[dir])).await?;
     let holds_a_file: bool = sqlx::query_scalar(concat!(
         "SELECT EXISTS (SELECT 1 FROM (",
         latest_under!(),
@@ -1278,7 +1339,8 @@ async fn mark_deleted(
 /// §4.4: refuses a live target (`Conflict`) and a missing source
 /// (`NotFound` naming it, application of R3); copies every revision of
 /// `from` and of each path under it to `to`, keeping revision numbers and
-/// `deleted` flags (`get_stream` -> `put_stream`), inserting rows as it goes; on any
+/// `deleted` flags (a server-side `copy` per revision, then `head` checks its
+/// size; W9b final review I-1, 2026-10-07), inserting rows as it goes; on any
 /// failure purges every copy made, in reverse order, and reports both paths;
 /// then creates `to`'s missing parent directories and purges the source
 /// (rows, commit, objects).
@@ -1294,7 +1356,13 @@ async fn mark_deleted(
 /// part-way; the source is then purged or the copies rolled back as if the
 /// caller had waited.
 ///
-/// Holds the session locks of both paths' chains throughout. `from` and `to`
+/// Bounded before anything is copied: at most `max_namespace_files` rows
+/// (revisions and directories) under `from`, and at most `max_task_bytes` in
+/// all over its revisions (`TooLarge` naming the cap and the count).
+///
+/// Holds the session locks of both paths' chains throughout; an API grant
+/// waits for them at most [`Grant::lock_wait`] (`Conflict`, "the path is
+/// busy"). `from` and `to`
 /// are the same kind (callers parse `to` as `from` is); a directory cannot
 /// move under itself. Returns each `(source, copy)` pair, in copy order.
 pub async fn move_path(
@@ -1321,10 +1389,8 @@ pub async fn move_path(
     let (pool, fs, grant) = (pool.clone(), fs.clone(), grant.clone());
     let (from, to) = (from.clone(), to.clone());
     detached("move", async move {
-        let keys = session_keys(&pool, &lock_chain(&grant, &[&from, &to])).await?;
-        let mut session = LockedSession::acquire(&pool, &keys)
-            .await
-            .map_err(NsError::Db)?;
+        let mut session =
+            lock_session(&pool, &grant, &from, &lock_chain(&grant, &[&from, &to])).await?;
         let result = move_locked(session.conn(), &fs, &grant, &from, &to, by).await;
         release(session, "move").await;
         result
@@ -1349,12 +1415,28 @@ async fn move_locked(
     {
         return Err(not_found(grant, from));
     }
-    let what = format!("the move of '{from}' in namespace '{ns}'");
-    let sources = capped(
-        rows_at_or_under(conn, grant, from.as_str(), cap).await?,
-        cap,
-        &what,
-    )?;
+    let sources = rows_at_or_under(conn, grant, from.as_str(), cap).await?;
+    if sources.len() as u64 > cap {
+        return Err(NsError::TooLarge(format!(
+            "{subject} in namespace '{ns}': '{from}' holds more than {cap} rows (revisions \
+             and directories), the most one move may copy \
+             (workflow.storage.max_namespace_files); nothing was moved"
+        )));
+    }
+    // The bytes every revision holds, counted on the rows fetched, before any
+    // copy (W9b final review I-1): one move copies at most what one task may.
+    let bytes = sources
+        .iter()
+        .filter(|e| !e.is_directory)
+        .fold(0u64, |n, e| n.saturating_add(e.size));
+    let max_bytes = fs.caps.max_task_bytes;
+    if bytes > max_bytes {
+        return Err(NsError::TooLarge(format!(
+            "{subject} in namespace '{ns}': its revisions hold {bytes} bytes in all, over the \
+             {max_bytes} bytes one move may copy (workflow.storage.max_task_bytes); nothing was \
+             moved"
+        )));
+    }
     // Each copy's path, before anything is written: a path too long is the
     // author's, and nothing has been touched.
     let mut plan = Vec::with_capacity(sources.len());
@@ -1450,9 +1532,11 @@ async fn move_locked(
     Ok(copies)
 }
 
-/// One revision of a move: its object streamed to the copy's key (a file),
-/// then its row inserted. A copy whose row could not be inserted has its
-/// object removed again.
+/// One revision of a move: its object copied server-side to the copy's key
+/// (a file; W9b final review I-1: no byte passes through egret, and every
+/// namespace object is at most [`namespace_file_cap`], within one copy),
+/// `head` checks the copy holds the revision's size, then its row is
+/// inserted. A copy whose size or row fails has its object removed again.
 async fn copy_one(
     conn: &mut PgConnection,
     fs: &FileStore,
@@ -1466,8 +1550,8 @@ async fn copy_one(
     }
     let from_key = fs.namespace_object_uri(grant, &src.path, src.revision);
     let to_key = fs.namespace_object_uri(grant, dst, src.revision);
-    let mut body = match fs.store.get_stream(&from_key).await {
-        Ok(r) => r,
+    match fs.store.copy(&from_key, &to_key).await {
+        Ok(()) => {}
         Err(egret_storage::StorageError::NotFound(_)) => {
             return Err(NsError::Author(format!(
                 "revision {} of namespace file '{}' is recorded but its contents are gone from \
@@ -1475,34 +1559,49 @@ async fn copy_one(
                 src.revision, src.path
             )))
         }
-        Err(e) => return Err(store_failed(grant, &src.path, "read", &from_key, &e)),
+        Err(e) => return Err(store_failed(grant, dst, "stored", &to_key, &e)),
+    }
+    let checked = match fs.store.head(&to_key).await {
+        Ok(Some(n)) if n == src.size => Ok(()),
+        Ok(Some(n)) => Err(store_failed(
+            grant,
+            dst,
+            "stored",
+            &to_key,
+            &format!("copied {n} bytes of a {}-byte revision", src.size),
+        )),
+        Ok(None) => Err(store_failed(
+            grant,
+            dst,
+            "stored",
+            &to_key,
+            &"copied, but head finds no object",
+        )),
+        Err(e) => Err(store_failed(grant, dst, "stored", &to_key, &e)),
     };
-    let size = fs
-        .store
-        .put_stream(&to_key, &mut body, Some(src.size))
-        .await
-        .map_err(|e| store_failed(grant, dst, "stored", &to_key, &e))?;
-    match insert_row(conn, grant, dst, src.revision, size, src.deleted, by).await {
-        Ok(e) => Ok(e),
-        Err(e) => {
-            if let Err(d) = fs.store.delete(&to_key).await {
-                tracing::warn!(key = %to_key, error = %d, "a moved namespace file's copy could not be deleted: it is an orphan");
-            }
-            Err(e)
+    let inserted = match checked {
+        Ok(()) => insert_row(conn, grant, dst, src.revision, src.size, src.deleted, by).await,
+        Err(e) => Err(e),
+    };
+    if inserted.is_err() {
+        if let Err(d) = fs.store.delete(&to_key).await {
+            tracing::warn!(key = %to_key, error = %d, "a moved namespace file's copy could not be deleted: it is an orphan");
         }
     }
+    inserted
 }
 
-/// Hard delete of the given revisions of one path (and, when `path` is a
-/// directory, of nothing under it: callers pass files). Session-locked on
-/// `path`'s chain (its parents and itself, as every writer; fix round 1, I1):
-/// delete rows RETURNING, commit, delete objects, unlock. Runs [`detached`]:
-/// once started, a purge deletes the objects of the rows it deleted even if
-/// the caller goes away (I3). A
-/// crash leaves orphan objects, never a row naming nothing (§8.4). Requires
-/// `Access::Purge` or `Access::Write` (the API's DELETE never calls it; move
-/// does). Returns how many revisions were purged (a revision with no row is
-/// not counted).
+/// **Tests only** (W9b final review M-2, 2026-10-07): hard delete of the
+/// given revisions of one path, by revision NUMBER. Production purges by row
+/// id ([`purge_rows`], Task 7 fix round 1 I1: revision numbers are reused, so
+/// a purge planned by number can remove a newer file); move purges its source
+/// through `purge_locked` directly. The tests use it to drive the session
+/// lock's ordering: session-locked on `path`'s chain (its parents and
+/// itself, as every writer), delete rows RETURNING, commit, delete objects,
+/// unlock, [`detached`]. A crash leaves orphan objects, never a row naming
+/// nothing (§8.4). Requires `Access::Purge` or `Access::Write`. Returns how
+/// many revisions were purged (a revision with no row is not counted).
+#[cfg(any(test, feature = "test-util"))]
 pub async fn purge_revisions(
     pool: &PgPool,
     fs: &FileStore,
@@ -1517,10 +1616,7 @@ pub async fn purge_revisions(
     let targets: Vec<(NsPath, u32)> = revisions.iter().map(|r| (path.clone(), *r)).collect();
     let path = path.clone();
     detached("purge", async move {
-        let keys = session_keys(&pool, &lock_chain(&grant, &[&path])).await?;
-        let mut session = LockedSession::acquire(&pool, &keys)
-            .await
-            .map_err(NsError::Db)?;
+        let mut session = lock_session(&pool, &grant, &path, &lock_chain(&grant, &[&path])).await?;
         let result = purge_locked(session.conn(), &fs, &grant, &targets).await;
         release(session, "purge").await;
         result
@@ -1534,7 +1630,7 @@ pub async fn purge_revisions(
 /// again at revision 1 -- so a purge planned from an earlier listing removes
 /// only the rows it saw, never a newer file that took the same numbers.
 /// Objects are deleted only for the rows this call removed. Session-locked
-/// on `path`'s chain and [`detached`], as [`purge_revisions`]. `rows` are
+/// on `path`'s chain and [`detached`]. `rows` are
 /// `(id, revision)`; the revision clause only restates what each id names.
 /// Returns how many rows were removed.
 pub async fn purge_rows(
@@ -1560,10 +1656,7 @@ pub async fn purge_rows(
         .collect();
     let (pool, fs, grant, path) = (pool.clone(), fs.clone(), grant.clone(), path.clone());
     detached("purge", async move {
-        let keys = session_keys(&pool, &lock_chain(&grant, &[&path])).await?;
-        let mut session = LockedSession::acquire(&pool, &keys)
-            .await
-            .map_err(NsError::Db)?;
+        let mut session = lock_session(&pool, &grant, &path, &lock_chain(&grant, &[&path])).await?;
         let result = async {
             let gone: Vec<i32> = sqlx::query_scalar(
                 "DELETE FROM workflow.namespace_files f \
@@ -1615,10 +1708,7 @@ pub async fn purge_empty_directory(
     }
     let (pool, grant, dir) = (pool.clone(), grant.clone(), dir.clone());
     detached("purge", async move {
-        let keys = session_keys(&pool, &lock_chain(&grant, &[&dir])).await?;
-        let mut session = LockedSession::acquire(&pool, &keys)
-            .await
-            .map_err(NsError::Db)?;
+        let mut session = lock_session(&pool, &grant, &dir, &lock_chain(&grant, &[&dir])).await?;
         let result = sqlx::query(
             "DELETE FROM workflow.namespace_files f \
               WHERE f.workspace_id = $1 AND f.namespace = $2 AND f.path = $3 \

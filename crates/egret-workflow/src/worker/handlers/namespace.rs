@@ -126,6 +126,7 @@ use super::super::{Outcome, TaskHandler, TaskInput};
 use super::storage::{no_storage, outage, spec};
 use crate::logs::LogLevel;
 use crate::models::Property;
+use crate::runners::files::is_namespace_file_uri;
 use crate::storage::nsfiles::access::{authorize, Access, Actor, Grant};
 use crate::storage::nsfiles::glob::{wildcard_match, wildcard_matches, PathMatcher};
 use crate::storage::nsfiles::path::NsPath;
@@ -427,14 +428,6 @@ impl Plan {
     }
 }
 
-/// A namespace-file reference: `nsfile://…`, or a `kestra:///…/_files/…`
-/// URI (W9b spec §3).
-fn is_namespace_ref(s: &str) -> bool {
-    s.starts_with(crate::runners::files::NSFILE_SCHEME)
-        || (s.starts_with("kestra://")
-            && matches!(uri::parse_any(s), Ok(uri::StorageUri::NamespaceFile(_))))
-}
-
 /// `core.namespace.UploadFiles`: execution files (or literal contents) into
 /// the flow's own namespace, each written by `nsfiles::store::put`.
 #[derive(Debug, Clone)]
@@ -647,7 +640,7 @@ impl TaskHandler for UploadFiles {
         let mut globs = Vec::new();
         for (i, item) in files.unwrap_or_default().into_iter().enumerate() {
             let shown = format!("`files[{i}]`");
-            if is_namespace_ref(&item) {
+            if is_namespace_file_uri(&item) {
                 ns_refs.push((shown, item, None));
                 continue;
             }
@@ -702,7 +695,7 @@ impl TaskHandler for UploadFiles {
         }
         for (name, value) in files_map.unwrap_or_default() {
             let shown = format!("`filesMap.{name}`");
-            if is_namespace_ref(&value) {
+            if is_namespace_file_uri(&value) {
                 ns_refs.push((shown, value, Some(name)));
                 continue;
             }
@@ -1643,6 +1636,21 @@ impl TaskHandler for PurgeFiles {
         let listed = namespaces.filter(|l| !l.is_empty());
         let pattern = pattern.filter(|p| !p.trim().is_empty());
         let file_pattern = file_pattern.filter(|p| !p.trim().is_empty());
+        // Kestra's matching is kept (§8.4): the pattern is matched against
+        // each path WITHOUT its leading '/', so one that starts with '/'
+        // takes nothing. Said once, at WARN (W9b final review M-8).
+        if let Some(p) = file_pattern.as_deref().filter(|p| p.starts_with('/')) {
+            task.log
+                .line(
+                    LogLevel::Warn,
+                    &format!(
+                        "`filePattern` is matched against each path without its leading '/'; \
+                         '{p}' matches nothing, write '{}'",
+                        p.trim_start_matches('/')
+                    ),
+                )
+                .await;
+        }
         if listed.is_some() && pattern.is_some() {
             // Kestra's text (`PurgeTask.findNamespaces`), naming both.
             return fail(

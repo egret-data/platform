@@ -924,7 +924,7 @@ fn body_refusal(
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 408, description = "No byte of the body arrived for 30 seconds, or the body took longer than 12 hours in all; nothing was stored.", body = egret_core::http::ErrorBody),
-        (status = 409, description = "A directory is at `path`, a file is where one of its parent directories goes, or a soft-deleted entry of the other kind still holds history there (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route)", body = egret_core::http::ErrorBody),
+        (status = 409, description = "A directory is at `path`, a file is where one of its parent directories goes, or a soft-deleted entry of the other kind still holds history there (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route). Also 409 when the path is busy: a move or another write holds its lock for longer than the API waits (5 s); nothing was written, try again.", body = egret_core::http::ErrorBody),
         (status = 413, description = "The file is over `workflow.storage.max_file_bytes`, or the body over its limit (named)", body = egret_core::http::ErrorBody),
         (status = 415, description = "Not `multipart/form-data`", body = egret_core::http::ErrorBody),
         (status = 503, description = "Internal storage or the database is unavailable or not configured; nothing was stored and the request can be retried.", body = egret_core::http::ErrorBody),
@@ -1071,7 +1071,7 @@ pub(crate) async fn upload_namespace_file(
         (status = 400, description = "A path rule (named), the root, a refused namespace, or `/_flows`", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
-        (status = 409, description = "A file is at `path` or where one of its parents goes, live or soft-deleted with its history (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route)", body = egret_core::http::ErrorBody),
+        (status = 409, description = "A file is at `path` or where one of its parents goes, live or soft-deleted with its history (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route). Also 409 when the path is busy: a move or another write holds its lock for longer than the API waits (5 s); nothing was written, try again.", body = egret_core::http::ErrorBody),
         (status = 503, description = "The database is unavailable; the request can be retried.", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -1113,8 +1113,8 @@ pub(crate) async fn create_namespace_directory(
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
         (status = 404, description = "Nothing live at `from` in this workspace's namespace (named); nothing is written", body = egret_core::http::ErrorBody),
-        (status = 409, description = "`to` has any history -- a live entry, or a soft-deleted path's revisions at it, under it, of the other kind, or a file where one of its parents goes (named); nothing is moved and nothing purged (only a flow's `PurgeFiles` task removes history -- the API has no purge route)", body = egret_core::http::ErrorBody),
-        (status = 413, description = "The directory holds more paths than one operation may (`workflow.storage.max_namespace_files`)", body = egret_core::http::ErrorBody),
+        (status = 409, description = "`to` has any history -- a live entry, or a soft-deleted path's revisions at it, under it, of the other kind, or a file where one of its parents goes (named); nothing is moved and nothing purged (only a flow's `PurgeFiles` task removes history -- the API has no purge route). Also 409 when either path is busy: another move or a write holds its lock for longer than the API waits (5 s); nothing was moved, try again.", body = egret_core::http::ErrorBody),
+        (status = 413, description = "Refused before anything is copied: `from` holds more rows -- revisions and directories -- than one move may copy (`workflow.storage.max_namespace_files`), or its revisions hold more bytes in all than one move may copy (`workflow.storage.max_task_bytes`); the cap and the count are named", body = egret_core::http::ErrorBody),
         (status = 503, description = "Internal storage or the database is unavailable; every copy made was rolled back and the source is untouched.", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -1171,6 +1171,7 @@ pub(crate) async fn move_namespace_file(
         (status = 400, description = "A path rule (named), the root, a refused namespace, or `/_flows`", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 409, description = "The path is busy: a move or another write holds its lock for longer than the API waits (5 s); nothing was deleted, try again.", body = egret_core::http::ErrorBody),
         (status = 503, description = "The database is unavailable; the request can be retried.", body = egret_core::http::ErrorBody),
     ),
 )]

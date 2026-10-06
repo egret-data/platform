@@ -150,7 +150,7 @@ fn registry_over(pool: &sqlx::PgPool, fs: Arc<FileStore>) -> Handlers {
 fn installed() -> Arc<FileStore> {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        let _ = storage::install(Arc::new(FileStore {
+        storage::install(Arc::new(FileStore {
             store: probe(),
             bucket: "egret-test".to_string(),
             prefix: "workflow/".to_string(),
@@ -159,7 +159,8 @@ fn installed() -> Arc<FileStore> {
                 ..storage::Caps::default()
             },
             retention_days: 30,
-        }));
+        }))
+        .expect("this binary installs the only store");
     });
     storage::current().expect("installed above")
 }
@@ -2637,4 +2638,101 @@ async fn the_namespace_bound_counts_only_what_the_purge_covers() {
     let task = purge_task("purge", &format!("namespaces: [{own}.c00]"));
     let ex = run(&db, ws, &flow("m5", own, &[task])).await;
     assert_eq!(purged(&db.pool, ex, "purge").await, json!(0));
+}
+
+// ---------------------------------------------------------------------------
+// W9b final review fixes (2026-10-07)
+// ---------------------------------------------------------------------------
+
+/// M-3: `UploadFiles` asks the ONE namespace-file predicate
+/// (`runners::files::is_namespace_file_uri`, `classify`'s answer), so a
+/// `kestra:///…/_files/…` URI whose path the path rule refuses is refused by
+/// THE namespace path rule, naming it -- not by the execution snapshot.
+#[tokio::test(flavor = "multi_thread")]
+async fn upload_files_refuses_a_bad_namespace_uri_by_the_namespace_path_rule() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, _fs)) = setup().await else {
+        return;
+    };
+    for (id, field) in [
+        ("m3f", "files: [\"kestra:///w9b/tasks/_files/x.v02\"]"),
+        (
+            "m3m",
+            "filesMap:\n      k.txt: \"kestra:///w9b/tasks/_files/x.v02\"",
+        ),
+    ] {
+        let up = format!(
+            "  - id: up\n    type: io.kestra.plugin.core.namespace.UploadFiles\n    {field}\n    \
+             destination: /{id}\n"
+        );
+        let ex = run(&db, ws, &flow(id, NS, &[up])).await;
+        let message = message_of(&db.pool, ex, "up", "FAILED").await;
+        assert!(
+            message.contains("x.v02") && message.contains("'.v' and digits"),
+            "{id}: {message}"
+        );
+    }
+    assert_eq!(rows(&db.pool, ws, NS).await, BTreeMap::new());
+}
+
+/// Every line written, in order.
+#[derive(Debug, Default)]
+struct Lines(std::sync::Mutex<Vec<egret_workflow::logs::LogLine>>);
+
+#[async_trait::async_trait]
+impl egret_workflow::worker::handlers::LogSink for Lines {
+    async fn write(&self, line: egret_workflow::logs::LogLine) {
+        self.0.lock().unwrap().push(line);
+    }
+}
+
+impl Lines {
+    /// The WARN lines about `execution`.
+    fn warnings(&self, execution: Uuid) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| {
+                l.execution_id == execution && l.level == egret_workflow::logs::LogLevel::Warn
+            })
+            .map(|l| l.message.clone())
+            .collect()
+    }
+}
+
+/// M-8: a rendered `filePattern` that starts with '/' matches nothing (it is
+/// matched against the path without its leading '/', as Kestra's is); the
+/// task still succeeds, and says so in ONE WARN line naming the fix. A
+/// pattern without the '/' logs no warning.
+#[tokio::test(flavor = "multi_thread")]
+async fn purge_files_warns_once_when_file_pattern_starts_with_a_slash() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let own = "w9b.m8";
+    seed_revisions(&db, &fs, ws, own, "/up/a.txt", 2).await;
+    let sink = Arc::new(Lines::default());
+    let reg =
+        registry(&db.pool).with_log_sink(sink.clone(), egret_workflow::logs::LogLimits::default());
+    let mut runs = Vec::new();
+    for (id, pattern) in [("slash", "/up/*"), ("plain", "up/*")] {
+        let task = purge_task("purge", &format!("filePattern: \"{pattern}\""));
+        let ex = start_execution(&db.pool, ws, None, &flow(id, own, &[task]), json!({}))
+            .await
+            .unwrap();
+        drain_with(&db.pool, &reg).await;
+        runs.push(ex);
+    }
+    assert_eq!(purged(&db.pool, runs[0], "purge").await, json!(0));
+    assert_eq!(
+        sink.warnings(runs[0]),
+        [
+            "`filePattern` is matched against each path without its leading '/'; '/up/*' \
+          matches nothing, write 'up/*'"
+        ]
+    );
+    assert_eq!(purged(&db.pool, runs[1], "purge").await, json!(1));
+    assert_eq!(sink.warnings(runs[1]), Vec::<String>::new());
 }

@@ -654,23 +654,27 @@ fn by() -> CreatedBy {
 #[derive(Default)]
 struct Hooked {
     mem: MemStore,
-    /// `put_stream` number N (1-based) fails; 0 = none.
-    fail_put_stream_at: AtomicUsize,
+    /// How many `put_stream`s ran.
     put_streams: AtomicUsize,
     /// Every `delete`, in order.
     deletes: Mutex<Vec<String>>,
     fail_deletes: AtomicBool,
     /// The next `delete` says it started and waits to be released.
     gate_delete: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
-    /// The next `put_stream` says it started and waits to be released
-    /// (fix round 1: a move paused mid-copy).
-    gate_put_stream: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
     /// Each `copy` takes the first gate queued, says it started and waits to
     /// be released (Task 8 fix round 1: a `put` paused under its lock, mid
     /// staging -> revision copy).
     gate_copy: Mutex<std::collections::VecDeque<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
     /// Every `copy` fails.
     fail_copies: AtomicBool,
+    /// `copy` number N (1-based) fails; 0 = none (final review I-1: a move
+    /// copies server-side, so its mid-copy failure is a copy's).
+    fail_copy_at: AtomicUsize,
+    copies: AtomicUsize,
+    /// How many `get_stream`s ran, and how long each one stalls first (ms;
+    /// 0 = none): the reviewer's stalled source (final review I-1).
+    get_streams: AtomicUsize,
+    stall_get_stream_ms: std::sync::atomic::AtomicU64,
 }
 
 impl Hooked {
@@ -698,14 +702,6 @@ impl Hooked {
                 (k[prefix.len()..].to_string(), b)
             })
             .collect()
-    }
-
-    /// Arms the `put_stream` gate: answers (started, release).
-    fn arm_put_stream_gate(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        let (started_tx, started_rx) = oneshot::channel();
-        let (release_tx, release_rx) = oneshot::channel();
-        *self.gate_put_stream.lock().unwrap() = Some((started_tx, release_rx));
-        (started_rx, release_tx)
     }
 
     /// Queues a copy gate: answers (started, release).
@@ -764,6 +760,10 @@ impl ObjectStore for Hooked {
         self.mem.delete(uri).await
     }
     async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError> {
+        let n = self.copies.fetch_add(1, Ordering::SeqCst) + 1;
+        if n == self.fail_copy_at.load(Ordering::SeqCst) {
+            return Err(StorageError::S3(format!("{dst}: copy number {n} failed")));
+        }
         let gate = self.gate_copy.lock().unwrap().pop_front();
         if let Some((started, release)) = gate {
             let _ = started.send(());
@@ -787,21 +787,18 @@ impl ObjectStore for Hooked {
         body: &mut (dyn AsyncRead + Send + Unpin),
         size_hint: Option<u64>,
     ) -> Result<u64, StorageError> {
-        let n = self.put_streams.fetch_add(1, Ordering::SeqCst) + 1;
-        let gate = self.gate_put_stream.lock().unwrap().take();
-        if let Some((started, release)) = gate {
-            let _ = started.send(());
-            let _ = release.await;
-        }
-        if n == self.fail_put_stream_at.load(Ordering::SeqCst) {
-            return Err(StorageError::S3(format!("{uri}: put number {n} failed")));
-        }
+        self.put_streams.fetch_add(1, Ordering::SeqCst);
         self.mem.put_stream(uri, body, size_hint).await
     }
     async fn get_stream(
         &self,
         uri: &str,
     ) -> Result<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>, StorageError> {
+        self.get_streams.fetch_add(1, Ordering::SeqCst);
+        let stall = self.stall_get_stream_ms.load(Ordering::SeqCst);
+        if stall > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(stall)).await;
+        }
         self.mem.get_stream(uri).await
     }
     async fn head(&self, uri: &str) -> Result<Option<u64>, StorageError> {
@@ -810,11 +807,15 @@ impl ObjectStore for Hooked {
 }
 
 fn hooked_fs(max_file_bytes: Option<u64>) -> (Arc<Hooked>, storage::FileStore) {
-    let store = Arc::new(Hooked::default());
     let mut caps = storage::Caps::default();
     if let Some(cap) = max_file_bytes {
         caps.max_file_bytes = cap;
     }
+    hooked_fs_with(caps)
+}
+
+fn hooked_fs_with(caps: storage::Caps) -> (Arc<Hooked>, storage::FileStore) {
+    let store = Arc::new(Hooked::default());
     let fs = storage::FileStore {
         store: store.clone(),
         bucket: "egret-test".into(),
@@ -1810,9 +1811,10 @@ async fn move_that_fails_mid_copy_purges_its_copies_in_reverse_and_leaves_the_so
     written(&db, &fs, &g, "/s/a", "a2").await;
     written(&db, &fs, &g, "/s/b", "b1").await;
     let before = (all_rows(&db, ws).await, store.objects(&fs, ws));
-    // The copies' put_streams are 4, 5, 6: the third copy fails.
-    assert_eq!(store.put_streams.load(Ordering::SeqCst), 3);
-    store.fail_put_stream_at.store(6, Ordering::SeqCst);
+    // Each write reached its key by one copy (staging -> revision), so the
+    // move's server-side copies are 4, 5, 6: the third one fails.
+    assert_eq!(store.copies.load(Ordering::SeqCst), 3);
+    store.fail_copy_at.store(6, Ordering::SeqCst);
     store.deletes.lock().unwrap().clear();
     let err = move_path(&db.pool, &fs, &g, &dir("/s"), &dir("/n/t"), by())
         .await
@@ -2100,7 +2102,7 @@ async fn a_soft_delete_of_a_child_waits_for_a_move_of_its_parent() {
     let fs = Arc::new(fs);
     let g = grant(ws, Access::Write);
     written(&db, &fs, &g, "/m/x", "x").await;
-    let (copying, release_copy) = store.arm_put_stream_gate();
+    let (copying, release_copy) = store.arm_copy_gate();
     let mover = spawn_move(&db, &fs, &g, dir("/m"), dir("/t"));
     copying.await.unwrap();
     let (pool, g2) = (db.pool.clone(), g.clone());
@@ -2132,7 +2134,7 @@ async fn a_purge_of_a_child_waits_for_a_move_of_its_parent() {
     let fs = Arc::new(fs);
     let g = grant(ws, Access::Write);
     written(&db, &fs, &g, "/m/x", "x").await;
-    let (copying, release_copy) = store.arm_put_stream_gate();
+    let (copying, release_copy) = store.arm_copy_gate();
     let mover = spawn_move(&db, &fs, &g, dir("/m"), dir("/t"));
     copying.await.unwrap();
     let (pool, fs2, p) = (db.pool.clone(), fs.clone(), grant(ws, Access::Purge));
@@ -2243,7 +2245,7 @@ async fn a_move_whose_caller_goes_away_still_runs_to_completion() {
     written(&db, &fs, &g, "/c/a", "a1").await;
     written(&db, &fs, &g, "/c/a", "a2").await;
     written(&db, &fs, &g, "/c/b", "b1").await;
-    let (copying, release_copy) = store.arm_put_stream_gate();
+    let (copying, release_copy) = store.arm_copy_gate();
     let caller = spawn_move(&db, &fs, &g, dir("/c"), dir("/d"));
     copying.await.unwrap();
     caller.abort();
@@ -2807,4 +2809,334 @@ fn a_namespace_file_is_capped_at_one_copys_limit_naming_it() {
         assert_eq!(got, cap, "{configured}");
         assert!(name.contains(named), "{configured}: {name}");
     }
+}
+
+// ─── W9b final review, I-1 (2026-10-07) ─────────────────────────────────────
+
+/// A pool of `n` connections to the same database as `db`'s, whose
+/// `acquire` gives up after 2 s.
+async fn small_pool(db: &Db, n: u32) -> sqlx::PgPool {
+    let opts = (*db.pool.connect_options()).clone();
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(n)
+        .acquire_timeout(std::time::Duration::from_secs(2))
+        .connect_with(opts)
+        .await
+        .unwrap()
+}
+
+/// The reviewer's measurement, re-run: a 3-connection pool, a source whose
+/// every read stalls 4 s, a move of `/src/` (one file), and two writers under
+/// `/src/` 0.5 s later. Before the fix the move streamed the revision
+/// through egret, holding its connection for the whole stall while each
+/// writer held one waiting for its lock, and an unrelated `acquire` timed
+/// out. Now the move copies server-side -- it reads no byte -- so the pool
+/// stays usable: the unrelated `acquire` (2 s limit, 1 s in) succeeds while a
+/// streamed read would still be stalled, and every operation completes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_with_a_stalled_source_does_not_starve_the_pool() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs(None);
+    let fs = Arc::new(fs);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/src/one.txt", "one").await;
+    store.stall_get_stream_ms.store(4000, Ordering::SeqCst);
+    let pool = small_pool(&db, 3).await;
+    let mover = {
+        let (pool, fs, g) = (pool.clone(), fs.clone(), g.clone());
+        tokio::spawn(
+            async move { move_path(&pool, &fs, &g, &dir("/src"), &dir("/dst"), by()).await },
+        )
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let writers: Vec<_> = ["/src/w0.txt", "/src/w1.txt"]
+        .into_iter()
+        .map(|p| {
+            let (pool, fs, g) = (pool.clone(), fs.clone(), g.clone());
+            tokio::spawn(async move {
+                let mut body: &[u8] = b"w";
+                put(
+                    &pool,
+                    &fs,
+                    &g,
+                    &file(p),
+                    &mut body,
+                    Conflict::Overwrite,
+                    by(),
+                )
+                .await
+            })
+        })
+        .collect();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let unrelated = pool.acquire().await;
+    assert!(
+        unrelated.is_ok(),
+        "an unrelated acquire must not wait behind a move: {:?}",
+        unrelated.err()
+    );
+    drop(unrelated);
+    let moved = mover.await.unwrap().unwrap();
+    assert_eq!(moved.len(), 2, "/src/ and /src/one.txt");
+    for w in writers {
+        let written = w.await.unwrap();
+        assert!(matches!(written, Ok(Written::Written(_))), "{written:?}");
+    }
+    assert_eq!(
+        store.get_streams.load(Ordering::SeqCst),
+        0,
+        "a move reads no byte through egret"
+    );
+    assert_eq!(
+        read_rev(&fs, &db, &g, "/dst/one.txt", Want::Latest).await,
+        "one"
+    );
+    pool.close().await;
+}
+
+/// A session on its own connection holding `lock_path`'s advisory key (the
+/// key every writer of a path under it takes); [`unhold`] releases it.
+async fn hold(db: &Db, ws: Uuid, lock_path: &str) -> sqlx::pool::PoolConnection<sqlx::Postgres> {
+    let mut c = conn(db).await;
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(format!("w9b:{ws}:{W}:{lock_path}"))
+        .execute(&mut *c)
+        .await
+        .unwrap();
+    c
+}
+
+async fn unhold(mut c: sqlx::pool::PoolConnection<sqlx::Postgres>, ws: Uuid, lock_path: &str) {
+    let released: bool = sqlx::query_scalar("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(format!("w9b:{ws}:{W}:{lock_path}"))
+        .fetch_one(&mut *c)
+        .await
+        .unwrap();
+    assert!(released);
+}
+
+fn is_busy(r: &Result<impl std::fmt::Debug, NsError>, path: &str) -> bool {
+    matches!(r, Err(NsError::Conflict(m))
+        if m.contains("the path is busy (a move or another write holds it); try again")
+            && m.contains(&format!("'{path}'")))
+}
+
+/// I-1: an API writer whose path's lock is held waits at most its grant's
+/// lock wait (injected: 300 ms; `API_LOCK_WAIT` in production), then answers
+/// `Conflict` "the path is busy" naming the path -- each writer: the
+/// transaction-locked ones (put, create_directory, soft_delete) and the
+/// session-locked move. A guard of 20 s turns a wait that is not bounded into
+/// a failure here rather than a hang. A FLOW's writer keeps waiting (the
+/// recorded choice: its task run is leased) and writes once the lock goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_api_writer_behind_a_held_lock_is_refused_as_busy_and_a_flow_waits() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (_store, fs) = hooked_fs(None);
+    let fs = Arc::new(fs);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/busy/m.txt", "m").await;
+    let api = g
+        .clone()
+        .with_lock_wait(Some(std::time::Duration::from_millis(300)));
+    let held = hold(&db, ws, "/busy").await;
+    let guard = std::time::Duration::from_secs(20);
+
+    let mut body: &[u8] = b"new";
+    let r = tokio::time::timeout(
+        guard,
+        put(
+            &db.pool,
+            &fs,
+            &api,
+            &file("/busy/f.txt"),
+            &mut body,
+            Conflict::Overwrite,
+            by(),
+        ),
+    )
+    .await
+    .expect("put waited past the guard: its wait is not bounded");
+    assert!(is_busy(&r, "/busy/f.txt"), "{r:?}");
+    let r = tokio::time::timeout(
+        guard,
+        create_directory(&db.pool, &api, &dir("/busy/d"), by()),
+    )
+    .await
+    .expect("create_directory waited past the guard: its wait is not bounded");
+    assert!(is_busy(&r, "/busy/d/"), "{r:?}");
+    let r = tokio::time::timeout(guard, soft_delete(&db.pool, &api, &file("/busy/m.txt")))
+        .await
+        .expect("soft_delete waited past the guard: its wait is not bounded");
+    assert!(is_busy(&r, "/busy/m.txt"), "{r:?}");
+    let r = tokio::time::timeout(
+        guard,
+        move_path(
+            &db.pool,
+            &fs,
+            &api,
+            &file("/busy/m.txt"),
+            &file("/moved.txt"),
+            by(),
+        ),
+    )
+    .await
+    .expect("move waited past the guard: its wait is not bounded");
+    assert!(is_busy(&r, "/busy/m.txt"), "{r:?}");
+    // Nothing was written, deleted or moved.
+    assert_eq!(
+        all_rows(&db, ws).await,
+        [
+            ("/busy/".into(), 1, false, 0),
+            ("/busy/m.txt".into(), 1, false, 1)
+        ]
+    );
+
+    // A flow's grant has no bound: it waits, then writes.
+    let flow = authorize(ws, Actor::Flow { namespace: W }, W, Access::Write).unwrap();
+    assert_eq!(flow.lock_wait(), None);
+    assert_eq!(
+        g.lock_wait(),
+        Some(egret_workflow::storage::nsfiles::access::API_LOCK_WAIT)
+    );
+    let (pool, fs2) = (db.pool.clone(), fs.clone());
+    let (writer, mut returned) = spawn_signalled(async move {
+        let mut body: &[u8] = b"flow";
+        put(
+            &pool,
+            &fs2,
+            &flow,
+            &file("/busy/f.txt"),
+            &mut body,
+            Conflict::Overwrite,
+            by(),
+        )
+        .await
+    });
+    let seen = blocked_or_started(&db, ws, "/busy", &mut returned).await;
+    assert_eq!(seen, Seen::Blocked, "a flow's writer waits for the lock");
+    unhold(held, ws, "/busy").await;
+    let w = writer.await.unwrap();
+    assert!(matches!(w, Ok(Written::Written(_))), "{w:?}");
+}
+
+/// The bound never outlives its wait: a pooled connection goes back with
+/// the server's `lock_timeout` (0), after a bounded move that got its locks
+/// (the session setting is RESET), after one that timed out (its session is
+/// closed, never returned), and after a bounded transaction (SET LOCAL).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bounded_wait_leaves_no_lock_timeout_on_a_pooled_connection() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (_store, fs) = hooked_fs(None);
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/t/a.txt", "a").await;
+    let pool = small_pool(&db, 1).await;
+    let api = g
+        .clone()
+        .with_lock_wait(Some(std::time::Duration::from_millis(300)));
+    let lock_timeout = |pool: sqlx::PgPool| async move {
+        let v: String = sqlx::query_scalar("SHOW lock_timeout")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        v
+    };
+    move_path(&pool, &fs, &api, &file("/t/a.txt"), &file("/t/b.txt"), by())
+        .await
+        .unwrap();
+    assert_eq!(lock_timeout(pool.clone()).await, "0");
+    let held = hold(&db, ws, "/t").await;
+    let r = move_path(&pool, &fs, &api, &file("/t/b.txt"), &file("/t/c.txt"), by()).await;
+    assert!(is_busy(&r, "/t/b.txt"), "{r:?}");
+    assert_eq!(lock_timeout(pool.clone()).await, "0");
+    let mut body: &[u8] = b"x";
+    let r = put(
+        &pool,
+        &fs,
+        &api,
+        &file("/t/x.txt"),
+        &mut body,
+        Conflict::Overwrite,
+        by(),
+    )
+    .await;
+    assert!(is_busy(&r, "/t/x.txt"), "{r:?}");
+    assert_eq!(lock_timeout(pool.clone()).await, "0");
+    unhold(held, ws, "/t").await;
+    pool.close().await;
+}
+
+/// I-1: a move is bounded before anything is copied -- its revisions' bytes
+/// by `max_task_bytes` and its rows (revisions and directories) by
+/// `max_namespace_files` -- each refused naming the cap and the count, with
+/// nothing copied or moved. At the byte cap it moves.
+#[tokio::test]
+async fn a_move_over_its_caps_is_refused_before_any_copy() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (store, fs) = hooked_fs_with(storage::Caps {
+        max_task_bytes: 5,
+        max_namespace_files: 5,
+        ..storage::Caps::default()
+    });
+    let g = grant(ws, Access::Write);
+    written(&db, &fs, &g, "/c/a", "aa").await;
+    written(&db, &fs, &g, "/c/a", "aaa").await;
+    // 5 bytes in two revisions: at the cap, it moves.
+    move_path(&db.pool, &fs, &g, &dir("/c"), &dir("/d"), by())
+        .await
+        .unwrap();
+    written(&db, &fs, &g, "/d/b", "b").await;
+    let before = (all_rows(&db, ws).await, store.objects(&fs, ws));
+    let copies = store.copies.load(Ordering::SeqCst);
+    let err = move_path(&db.pool, &fs, &g, &dir("/d"), &dir("/e"), by())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::TooLarge(m)
+            if m.contains("6 bytes in all")
+                && m.contains("over the 5 bytes one move may copy")
+                && m.contains("workflow.storage.max_task_bytes")
+                && m.contains("nothing was moved")),
+        "{err:?}"
+    );
+    assert_eq!(
+        store.copies.load(Ordering::SeqCst),
+        copies,
+        "nothing copied"
+    );
+    assert_eq!((all_rows(&db, ws).await, store.objects(&fs, ws)), before);
+
+    // Rows under /d/: the directory, /d/a's two revisions, /d/b, then two
+    // directories -- six, one past the row cap.
+    create_directory(&db.pool, &g, &dir("/d/c"), by())
+        .await
+        .unwrap();
+    let mut rows = rows_of(&db, ws, "/d/").await.len()
+        + rows_of(&db, ws, "/d/a").await.len()
+        + rows_of(&db, ws, "/d/b").await.len()
+        + rows_of(&db, ws, "/d/c/").await.len();
+    assert_eq!(rows, 5);
+    create_directory(&db.pool, &g, &dir("/d/e"), by())
+        .await
+        .unwrap();
+    rows += 1;
+    assert_eq!(rows, 6);
+    let err = move_path(&db.pool, &fs, &g, &dir("/d"), &dir("/e"), by())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, NsError::TooLarge(m)
+            if m.contains("more than 5 rows (revisions and directories)")
+                && m.contains("workflow.storage.max_namespace_files")
+                && m.contains("nothing was moved")),
+        "{err:?}"
+    );
+    assert_eq!(
+        store.copies.load(Ordering::SeqCst),
+        copies,
+        "nothing copied"
+    );
 }

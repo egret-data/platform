@@ -1991,3 +1991,63 @@ async fn an_export_past_its_total_time_ends_short_with_an_error() {
         .expect_err("the body ended cleanly past its total time");
     assert!(partial.len() < declared, "{} of {declared}", partial.len());
 }
+
+/// W9b final review I-1 (2026-10-07): an API write whose path's lock is held
+/// -- by a move or another write -- waits at most `API_LOCK_WAIT` (5 s), then
+/// answers 409 "the path is busy … try again", naming the path; it does not
+/// hold its pool connection for as long as the holder takes. The upload
+/// (a transaction lock) and the move (session locks) both; once the lock is
+/// released the same upload succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_behind_a_held_lock_is_409_busy_after_the_api_wait() {
+    let Some(fx) = fx().await else { return };
+    fx.ok_upload(NS, "/busy/m.txt", b"m").await;
+    let key = format!("w9b:{}:{NS}:/busy", fx.ws);
+    let mut held = fx.db.pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(&key)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let wait = egret_workflow::storage::nsfiles::access::API_LOCK_WAIT;
+    let guard = wait * 4;
+
+    let started = std::time::Instant::now();
+    let res = tokio::time::timeout(guard, fx.upload(NS, "/busy/f.txt", b"new"))
+        .await
+        .expect("the upload's wait is bounded");
+    let msg = refusal(res, 409).await;
+    assert!(
+        msg.contains("'/busy/f.txt'")
+            && msg.contains("the path is busy")
+            && msg.contains("try again"),
+        "{msg}"
+    );
+    assert!(
+        started.elapsed() >= wait,
+        "it waited {:?}",
+        started.elapsed()
+    );
+
+    let res = tokio::time::timeout(guard, fx.mv(NS, "/busy/m.txt", "/moved.txt"))
+        .await
+        .expect("the move's wait is bounded");
+    let msg = refusal(res, 409).await;
+    assert!(
+        msg.contains("'/busy/m.txt'") && msg.contains("the path is busy"),
+        "{msg}"
+    );
+    assert_eq!(
+        fx.rows().await,
+        2,
+        "/busy/ and /busy/m.txt: nothing written"
+    );
+
+    let released: bool = sqlx::query_scalar("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(&key)
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    assert!(released);
+    fx.ok_upload(NS, "/busy/f.txt", b"new").await;
+}

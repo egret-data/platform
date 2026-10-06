@@ -108,9 +108,16 @@ pub struct StagingSweepConfig {
     /// duration, not only in idleness, by
     /// [`UPLOAD_TOTAL_TIMEOUT`](crate::storage::multipart::UPLOAD_TOTAL_TIMEOUT)
     /// (12 hours, a 408 past it); every other caller's body is internal
-    /// storage, read at the server's pace; and the commit after it is one
-    /// short, server-paced transaction. So a live `put`'s row is under
-    /// 12 hours old plus that transaction, below this 24 hours.
+    /// storage, read at the server's pace. The commit after it is one
+    /// server-paced transaction, but it first waits for its path's lock
+    /// (corrected 2026-10-07, W9b final review I-1): an API write waits at
+    /// most [`API_LOCK_WAIT`](super::access::API_LOCK_WAIT) (5 s, then a
+    /// 409); a task's write waits behind whatever holds the chain -- another
+    /// write's one server-side copy of at most 5 GiB, or a move's server-side
+    /// copies of at most `max_task_bytes` in all, each waiter in turn. Those
+    /// waits are the store's copy speed, not a client's, and stay far below
+    /// the 12 hours left. So a live `put`'s row is under 12 hours old plus
+    /// that wait and transaction, below this 24 hours.
     pub older_than: Duration,
     /// Rows per query.
     pub batch: i64,

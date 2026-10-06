@@ -29171,7 +29171,7 @@
             }
           },
           "409": {
-            "description": "`to` has any history -- a live entry, or a soft-deleted path's revisions at it, under it, of the other kind, or a file where one of its parents goes (named); nothing is moved and nothing purged (only a flow's `PurgeFiles` task removes history -- the API has no purge route)",
+            "description": "`to` has any history -- a live entry, or a soft-deleted path's revisions at it, under it, of the other kind, or a file where one of its parents goes (named); nothing is moved and nothing purged (only a flow's `PurgeFiles` task removes history -- the API has no purge route). Also 409 when either path is busy: another move or a write holds its lock for longer than the API waits (5 s); nothing was moved, try again.",
             "content": {
               "application/json": {
                 "schema": {
@@ -29181,7 +29181,7 @@
             }
           },
           "413": {
-            "description": "The directory holds more paths than one operation may (`workflow.storage.max_namespace_files`)",
+            "description": "Refused before anything is copied: `from` holds more rows -- revisions and directories -- than one move may copy (`workflow.storage.max_namespace_files`), or its revisions hold more bytes in all than one move may copy (`workflow.storage.max_task_bytes`); the cap and the count are named",
             "content": {
               "application/json": {
                 "schema": {
@@ -29300,7 +29300,7 @@
             }
           },
           "409": {
-            "description": "A directory is at `path`, a file is where one of its parent directories goes, or a soft-deleted entry of the other kind still holds history there (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route)",
+            "description": "A directory is at `path`, a file is where one of its parent directories goes, or a soft-deleted entry of the other kind still holds history there (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route). Also 409 when the path is busy: a move or another write holds its lock for longer than the API waits (5 s); nothing was written, try again.",
             "content": {
               "application/json": {
                 "schema": {
@@ -29409,6 +29409,16 @@
           },
           "403": {
             "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The path is busy: a move or another write holds its lock for longer than the API waits (5 s); nothing was deleted, try again.",
             "content": {
               "application/json": {
                 "schema": {
@@ -29626,7 +29636,7 @@
             }
           },
           "409": {
-            "description": "A file is at `path` or where one of its parents goes, live or soft-deleted with its history (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route)",
+            "description": "A file is at `path` or where one of its parents goes, live or soft-deleted with its history (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route). Also 409 when the path is busy: a move or another write holds its lock for longer than the API waits (5 s); nothing was written, try again.",
             "content": {
               "application/json": {
                 "schema": {

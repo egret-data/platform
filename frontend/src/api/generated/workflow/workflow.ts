@@ -2957,6 +2957,11 @@ export type workflowDeleteNamespaceFileResponse403 = {
   status: 403
 }
 
+export type workflowDeleteNamespaceFileResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type workflowDeleteNamespaceFileResponse503 = {
   data: ErrorBody
   status: 503
@@ -2965,7 +2970,7 @@ export type workflowDeleteNamespaceFileResponse503 = {
 export type workflowDeleteNamespaceFileResponseSuccess = (workflowDeleteNamespaceFileResponse200) & {
   headers: Headers;
 };
-export type workflowDeleteNamespaceFileResponseError = (workflowDeleteNamespaceFileResponse400 | workflowDeleteNamespaceFileResponse401 | workflowDeleteNamespaceFileResponse403 | workflowDeleteNamespaceFileResponse503) & {
+export type workflowDeleteNamespaceFileResponseError = (workflowDeleteNamespaceFileResponse400 | workflowDeleteNamespaceFileResponse401 | workflowDeleteNamespaceFileResponse403 | workflowDeleteNamespaceFileResponse409 | workflowDeleteNamespaceFileResponse503) & {
   headers: Headers;
 };
 

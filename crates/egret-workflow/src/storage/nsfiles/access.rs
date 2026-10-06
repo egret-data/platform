@@ -12,6 +12,8 @@
 //! `a.`), which publish still accepts: that rule is namespace files' own (the
 //! user's ruling, 2026-10-05, W9b Task 2 fix round 1 M3).
 
+use std::time::Duration;
+
 use uuid::Uuid;
 
 use crate::runners::files::NAMESPACE_FILES_SEGMENT;
@@ -41,7 +43,21 @@ pub struct Grant {
     workspace: Uuid,
     namespace: String,
     access: Access,
+    /// How long a writer holding this grant waits for a path's advisory
+    /// lock: [`API_LOCK_WAIT`] for [`Actor::Api`], `None` (wait as long as
+    /// it takes) for [`Actor::Flow`] (W9b final review I-1, 2026-10-07).
+    lock_wait: Option<Duration>,
 }
+
+/// The longest an API writer (upload, create directory, delete, move) waits
+/// for a path's advisory lock -- held by a move or another write of the same
+/// chain -- before it answers 409 "the path is busy" (W9b final review I-1,
+/// 2026-10-07). A waiter holds a pool connection, so an unbounded wait lets
+/// queued requests starve the pool. A task's writer (`UploadFiles`,
+/// `DeleteFiles`, `PurgeFiles`) keeps waiting: it runs under a lease, one per
+/// task run, and failing it on a busy path would fail a flow for another
+/// writer's timing.
+pub const API_LOCK_WAIT: Duration = Duration::from_secs(5);
 
 impl Grant {
     /// The caller's workspace (the execution's, or the route's `{ws}`).
@@ -55,6 +71,20 @@ impl Grant {
 
     pub fn access(&self) -> Access {
         self.access
+    }
+
+    /// How long a write under this grant waits for a path's lock; `None`
+    /// waits as long as it takes.
+    pub fn lock_wait(&self) -> Option<Duration> {
+        self.lock_wait
+    }
+
+    /// Tests only: the same grant with another lock wait (an API grant's
+    /// [`API_LOCK_WAIT`] shortened, so a test measures the refusal fast).
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn with_lock_wait(mut self, wait: Option<Duration>) -> Self {
+        self.lock_wait = wait;
+        self
     }
 }
 
@@ -130,10 +160,15 @@ pub fn authorize(
             }
         }
     }
+    let lock_wait = match actor {
+        Actor::Api => Some(API_LOCK_WAIT),
+        Actor::Flow { .. } => None,
+    };
     Ok(Grant {
         workspace,
         namespace: target.to_string(),
         access,
+        lock_wait,
     })
 }
 
