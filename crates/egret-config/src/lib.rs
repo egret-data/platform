@@ -887,8 +887,9 @@ fn default_max_read_bytes() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AppsStorageConfig {
-    /// The key prefix: a draft's key is `{prefix}{workspace_id}/{app_id}/draft.py`
-    /// (and `draft.layout.json`); a version's is
+    /// The key prefix: a draft revision's key is
+    /// `{prefix}{workspace_id}/{app_id}/draft/{revision}.py` (and
+    /// `draft/{revision}.layout.json`); a version's is
     /// `{prefix}{workspace_id}/{app_id}/versions/{version_no}/source.py`.
     /// Default `apps/`.
     #[serde(default = "default_apps_storage_prefix")]

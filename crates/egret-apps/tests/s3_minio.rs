@@ -68,7 +68,7 @@ async fn app_lifecycle_round_trips_through_real_s3() {
     let draft = app_store.draft(ws_id, app.id).await.unwrap().unwrap();
     assert_eq!(draft.source, "x = 1");
     let draft_key = format!(
-        "s3://{bucket}/{prefix}{}/{}/draft.py",
+        "s3://{bucket}/{prefix}{}/{}/draft/1.py",
         ws.hyphenated(),
         app.id.hyphenated()
     );
@@ -94,6 +94,24 @@ async fn app_lifecycle_round_trips_through_real_s3() {
     let draft2 = app_store.draft(ws_id, app.id).await.unwrap().unwrap();
     assert_eq!(draft2.source, "x = 2");
     assert_eq!(draft2.layout_json.as_deref(), Some(layout));
+    // Revision-keyed (Task 10): the save landed at revision 2's own keys, and
+    // revision 1's object was cleaned up once the save committed.
+    let rev_key = |rev: i64, file: &str| {
+        format!(
+            "s3://{bucket}/{prefix}{}/{}/draft/{rev}.{file}",
+            ws.hyphenated(),
+            app.id.hyphenated()
+        )
+    };
+    assert_eq!(store.get(&rev_key(2, "py")).await.unwrap(), b"x = 2");
+    assert_eq!(
+        store.get(&rev_key(2, "layout.json")).await.unwrap(),
+        layout.as_bytes()
+    );
+    assert!(matches!(
+        store.get(&rev_key(1, "py")).await,
+        Err(egret_storage::StorageError::NotFound(_))
+    ));
 
     // Publish -> the version's own S3 key holds the draft's content.
     let v1 = match app_store

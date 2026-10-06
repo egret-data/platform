@@ -1143,16 +1143,16 @@ async fn real_marimo_behind_the_real_proxy_and_the_real_pod_api() {
     .await
     .unwrap();
 
-    // `draft()` reads the source from the object store first, falling back to
-    // the row above only on a miss -- seed the matching key so the real pod
-    // (an external process) gets the same content from the object store.
+    // `draft()` reads the source from the object store only, at the row's
+    // current revision (1) -- seed that key so the real pod (an external
+    // process) gets this content.
     let bucket = "test-bucket".to_string();
     let prefix = "apps/".to_string();
     let store: Arc<dyn egret_storage::ObjectStore> = Arc::new(egret_storage::MemStore::new());
     store
         .put(
             &format!(
-                "s3://{bucket}/{prefix}{}/{}/draft.py",
+                "s3://{bucket}/{prefix}{}/{}/draft/1.py",
                 fx.ws.0.hyphenated(),
                 fx.app.hyphenated()
             ),

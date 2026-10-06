@@ -89,11 +89,15 @@ async fn migrate(config: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// One-off backfill (S2-1): copy every existing `app_drafts`/`app_versions`
-/// row's Postgres content into the object store, so Part S3 can later stop
-/// reading/writing those columns. Pure S3 writes per row -- the Postgres state
-/// is already correct, only the object store is catching up. Idempotent: safe
-/// to run more than once (each write is an overwrite, not an append).
+/// One-off backfill (S2-1, revision-keyed drafts since S3-2): copy every
+/// `app_drafts`/`app_versions` row whose content still lives in its Postgres
+/// columns into the object store. Drafts go to their CURRENT revision's key
+/// (`draft/{revision}.py`), which is also the migration off Parts S1/S2's
+/// fixed `draft.py` key: those rows' columns hold the same committed content.
+/// A NULL `source` column means the row was written by object-store-only code
+/// and is skipped. Idempotent, and safe to run while the server is live, before
+/// or after a deploy: each write is an overwrite of the row's own committed
+/// content, and a draft is re-read under its row lock.
 async fn backfill_apps_storage(config: Config) -> anyhow::Result<()> {
     let db = Db::connect(&config.database.url, config.database.max_connections)
         .await
@@ -118,26 +122,34 @@ async fn backfill_apps_storage(config: Config) -> anyhow::Result<()> {
         config.apps.storage.prefix.clone(),
     );
 
+    // Only a candidate list: `backfill_draft_locked` re-checks the row under
+    // its lock, since a save can NULL the columns after this read.
     let drafts = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid)>(
         "SELECT a.workspace_id, d.app_id \
-           FROM analytics.app_drafts d JOIN analytics.apps a ON a.id = d.app_id",
+           FROM analytics.app_drafts d JOIN analytics.apps a ON a.id = d.app_id \
+          WHERE d.source IS NOT NULL",
     )
     .fetch_all(&db.pool)
     .await
     .context("fetching drafts to backfill")?;
     let mut n = 0u64;
     for (ws, app_id) in drafts {
-        app_store
+        if app_store
             .backfill_draft_locked(egret_core::WorkspaceId(ws), app_id)
             .await
-            .with_context(|| format!("backfilling draft for app {app_id}"))?;
-        n += 1;
+            .with_context(|| format!("backfilling draft for app {app_id}"))?
+        {
+            n += 1;
+        }
     }
     tracing::info!(count = n, "drafts backfilled");
 
+    // Versions published since S3-1 have a NULL `source` column (their content
+    // was only ever written to the object store): nothing to backfill.
     let versions = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, i32, String, Option<String>)>(
         "SELECT a.workspace_id, v.app_id, v.version_no, v.source, v.layout_json \
-           FROM analytics.app_versions v JOIN analytics.apps a ON a.id = v.app_id",
+           FROM analytics.app_versions v JOIN analytics.apps a ON a.id = v.app_id \
+          WHERE v.source IS NOT NULL",
     )
     .fetch_all(&db.pool)
     .await

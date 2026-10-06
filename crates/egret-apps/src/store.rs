@@ -156,23 +156,31 @@ impl AppStore {
     }
 
     /// Mirrors `FileStore::object_uri`'s shape: `s3://{bucket}/{prefix}{workspace}/...`.
-    fn draft_key(&self, ws: WorkspaceId, app: Uuid) -> String {
+    ///
+    /// Keyed by draft revision (like [`Self::version_key`] is by `version_no`), so
+    /// each revision's content is its own object: a save writes the NEXT
+    /// revision's key and only becomes visible once its row commits, which is
+    /// what keeps a write whose transaction never committed (finding I3) from
+    /// ever being read as the draft.
+    fn draft_key(&self, ws: WorkspaceId, app: Uuid, revision: i64) -> String {
         format!(
-            "s3://{}/{}{}/{}/draft.py",
+            "s3://{}/{}{}/{}/draft/{}.py",
             self.bucket,
             self.prefix,
             ws.0.hyphenated(),
-            app.hyphenated()
+            app.hyphenated(),
+            revision
         )
     }
 
-    fn draft_layout_key(&self, ws: WorkspaceId, app: Uuid) -> String {
+    fn draft_layout_key(&self, ws: WorkspaceId, app: Uuid, revision: i64) -> String {
         format!(
-            "s3://{}/{}{}/{}/draft.layout.json",
+            "s3://{}/{}{}/{}/draft/{}.layout.json",
             self.bucket,
             self.prefix,
             ws.0.hyphenated(),
-            app.hyphenated()
+            app.hyphenated(),
+            revision
         )
     }
 
@@ -222,25 +230,22 @@ impl AppStore {
         .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?;
-        // `draft()` reads from the object store first, falling back to this
-        // row's columns only for a pre-S1 row with no object-store content yet;
-        // the rev-1 draft's content must land there too, or the app this just
-        // created would be unreadable until a fallback rescued it. Written
-        // before the tx commits, same fail-fast ordering as `save_draft`
-        // (nothing durable if the PUT fails).
+        // The object store is the only home of draft content. A new draft row
+        // takes `revision`'s schema default of 1, so its content goes to
+        // revision 1's key. Written before the tx commits, same fail-fast
+        // ordering as `save_draft` (nothing durable if the PUT fails). `source`
+        // is left NULL: a non-NULL column means "pre-Task-10 content to
+        // migrate" to `backfill_draft_locked` (migration 0172).
         self.store
-            .put(&self.draft_key(ws, id), source.as_bytes().to_vec())
+            .put(&self.draft_key(ws, id, 1), source.as_bytes().to_vec())
             .await
             .map_err(store_err)?;
-        sqlx::query(
-            "INSERT INTO analytics.app_drafts (app_id, source, updated_by) VALUES ($1, $2, $3)",
-        )
-        .bind(id)
-        .bind(source)
-        .bind(owner.0)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+        sqlx::query("INSERT INTO analytics.app_drafts (app_id, updated_by) VALUES ($1, $2)")
+            .bind(id)
+            .bind(owner.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
         tx.commit().await.map_err(db_err)?;
         self.get(ws, owner, id)
             .await?
@@ -368,57 +373,76 @@ impl AppStore {
         Ok(())
     }
 
-    /// Called only after the handler resolved the app in the workspace. Prefers
-    /// the object store for `source`/`layout_json`, falling back to the row's own
-    /// columns on `StorageError::NotFound` -- a row from before this code shipped
-    /// has real content in Postgres and nothing in the object store yet, and this
-    /// plan is only safe to ship with that fallback in place (Task 9/S3-1 removes
-    /// it once Task 8/S2's backfill is confirmed to have run everywhere). The
-    /// columns are therefore still selected here, not dead weight.
+    /// Called only after the handler resolved the app in the workspace. Reads the
+    /// row's current `revision`, then that revision's objects -- object store
+    /// only: every draft revision has a source object (written by
+    /// `create`/`save_draft` before their commit, or by `egret
+    /// backfill-apps-storage` for a draft last written before revision-keyed
+    /// content), so a source `NotFound` is a real error. A missing layout object
+    /// just means that revision has no layout.
+    ///
+    /// The row read takes no lock, so a `save_draft` can commit revision N+1 and
+    /// then delete revision N's objects between this reading `revision = N` and
+    /// fetching N's objects. A `NotFound` caused that way is always preceded by
+    /// that commit, so on any `NotFound` this re-reads the revision: if it moved,
+    /// the read is retried against the new revision instead of reporting an
+    /// error (source) or, worse, silently answering "no layout" (layout).
     pub async fn draft(&self, ws: WorkspaceId, id: Uuid) -> Result<Option<Draft>> {
-        let Some(row) = sqlx::query(
-            "SELECT source, layout_json, revision, updated_at FROM analytics.app_drafts WHERE app_id = $1",
+        const ATTEMPTS: usize = 5;
+        for _ in 0..ATTEMPTS {
+            let Some((revision, updated_at)) = self.draft_revision(id).await? else {
+                return Ok(None);
+            };
+            let source = match self.store.get(&self.draft_key(ws, id, revision)).await {
+                Ok(bytes) => Some(String::from_utf8(bytes).map_err(|e| {
+                    Error::Internal(anyhow::anyhow!("draft {id} source is not UTF-8: {e}"))
+                })?),
+                Err(StorageError::NotFound(_)) => None,
+                Err(e) => return Err(store_err(e)),
+            };
+            let layout = match self
+                .store
+                .get(&self.draft_layout_key(ws, id, revision))
+                .await
+            {
+                Ok(bytes) => Some(String::from_utf8(bytes).map_err(|e| {
+                    Error::Internal(anyhow::anyhow!("draft {id} layout is not UTF-8: {e}"))
+                })?),
+                Err(StorageError::NotFound(_)) => None,
+                Err(e) => return Err(store_err(e)),
+            };
+            if source.is_none() || layout.is_none() {
+                // A miss is only trustworthy if the revision did not move.
+                let current = self.draft_revision(id).await?.map(|(r, _)| r);
+                if current != Some(revision) {
+                    continue;
+                }
+            }
+            let Some(source) = source else {
+                return Err(Error::Internal(anyhow::anyhow!(
+                    "draft {id} revision {revision} has no source object"
+                )));
+            };
+            return Ok(Some(Draft {
+                source,
+                layout_json: layout,
+                revision,
+                updated_at,
+            }));
+        }
+        Err(Error::Internal(anyhow::anyhow!(
+            "draft {id} kept changing while being read ({ATTEMPTS} attempts)"
+        )))
+    }
+
+    async fn draft_revision(&self, id: Uuid) -> Result<Option<(i64, DateTime<Utc>)>> {
+        sqlx::query_as::<_, (i64, DateTime<Utc>)>(
+            "SELECT revision, updated_at FROM analytics.app_drafts WHERE app_id = $1",
         )
         .bind(id)
         .fetch_optional(&self.db.pool)
         .await
-        .map_err(db_err)?
-        else {
-            return Ok(None);
-        };
-        let pg_source: String = row.get("source");
-        let pg_layout_json: Option<String> = row.get("layout_json");
-        let revision: i64 = row.get("revision");
-        let updated_at: DateTime<Utc> = row.get("updated_at");
-
-        let source = match self.store.get(&self.draft_key(ws, id)).await {
-            Ok(bytes) => String::from_utf8(bytes).map_err(|e| {
-                Error::Internal(anyhow::anyhow!("draft {id} source is not UTF-8: {e}"))
-            })?,
-            // Pre-S1 row: fall back to the column, which the dual-write keeps
-            // populated for every row, old and new.
-            Err(StorageError::NotFound(_)) => pg_source,
-            Err(e) => return Err(store_err(e)),
-        };
-        // A layout-key miss is ambiguous between "no layout saved" (post-S1) and
-        // "backfill hasn't run yet" (pre-S1) -- both fall back to the column,
-        // which already carries the right answer either way (`None` or the
-        // legacy value), so the two cases collapse correctly without having to
-        // tell them apart.
-        let layout_json = match self.store.get(&self.draft_layout_key(ws, id)).await {
-            Ok(bytes) => Some(String::from_utf8(bytes).map_err(|e| {
-                Error::Internal(anyhow::anyhow!("draft {id} layout is not UTF-8: {e}"))
-            })?),
-            Err(StorageError::NotFound(_)) => pg_layout_json,
-            Err(e) => return Err(store_err(e)),
-        };
-
-        Ok(Some(Draft {
-            source,
-            layout_json,
-            revision,
-            updated_at,
-        }))
+        .map_err(db_err)
     }
 
     /// Called only after the handler resolved the app in the workspace.
@@ -436,9 +460,15 @@ impl AppStore {
     /// including its S3 round-trip, and wakes to see the new revision -- so it
     /// returns `Stale` without ever touching the object store. The trailing
     /// `UPDATE` is therefore a formality under the lock, not a second
-    /// compare-and-swap; it still binds `source`/`layout_json` into Postgres as
-    /// the rollback safety net (a revert to the pre-S1 binary reads them from
-    /// Postgres again).
+    /// compare-and-swap.
+    ///
+    /// The content goes to the NEXT revision's keys (finding I3): if this
+    /// transaction never commits (commit error, or the handler future dropped
+    /// between the PUT and the commit), the row still points at `expected`, so
+    /// the uncommitted object is never read. The row's `source`/`layout_json`
+    /// columns are set to NULL (migration 0172: non-NULL means "pre-Task-10
+    /// content still to migrate"). Only after the commit are `expected`'s
+    /// objects deleted -- best-effort cleanup, never failing a committed save.
     pub async fn save_draft(
         &self,
         ws: WorkspaceId,
@@ -467,32 +497,35 @@ impl AppStore {
         }
         // Still holding the lock: no other saver can observe or change this row
         // until this transaction commits or rolls back.
+        let next = expected + 1;
         self.store
-            .put(&self.draft_key(ws, id), source.as_bytes().to_vec())
+            .put(&self.draft_key(ws, id, next), source.as_bytes().to_vec())
             .await
             .map_err(store_err)?;
         match layout {
             Some(l) => self
                 .store
-                .put(&self.draft_layout_key(ws, id), l.as_bytes().to_vec())
+                .put(&self.draft_layout_key(ws, id, next), l.as_bytes().to_vec())
                 .await
                 .map_err(store_err)?,
-            // "Key already absent" is success -- no existence check needed first.
+            // `next`'s keys are not this save's alone: an earlier attempt at the
+            // same revision whose transaction never committed may have left a
+            // layout object there (same orphan reasoning as `insert_version`'s
+            // `else` arm), which would otherwise be served as this revision's
+            // layout. "Key already absent" is success.
             None => self
                 .store
-                .delete(&self.draft_layout_key(ws, id))
+                .delete(&self.draft_layout_key(ws, id, next))
                 .await
                 .map_err(store_err)?,
         }
         let new_revision: i64 = sqlx::query_scalar(
-            "UPDATE analytics.app_drafts SET source = $3, layout_json = $5, revision = revision + 1, updated_by = $2, updated_at = now() \
-              WHERE app_id = $1 AND revision = $4 RETURNING revision",
+            "UPDATE analytics.app_drafts SET source = NULL, layout_json = NULL, revision = revision + 1, updated_by = $2, updated_at = now() \
+              WHERE app_id = $1 AND revision = $3 RETURNING revision",
         )
         .bind(id)
         .bind(by.0)
-        .bind(source)
         .bind(expected)
-        .bind(layout)
         .fetch_optional(&mut *tx)
         .await
         .map_err(db_err)?
@@ -504,6 +537,16 @@ impl AppStore {
             ))
         })?;
         tx.commit().await.map_err(db_err)?;
+        // Committed: nothing points at `expected` any more. Its objects are
+        // only taking up space; a failed delete leaves an object nothing reads.
+        for key in [
+            self.draft_key(ws, id, expected),
+            self.draft_layout_key(ws, id, expected),
+        ] {
+            if let Err(e) = self.store.delete(&key).await {
+                tracing::warn!(error = %e, %key, "data app: could not delete a superseded draft object");
+            }
+        }
         Ok(SaveOutcome::Saved {
             revision: new_revision,
         })
@@ -513,7 +556,7 @@ impl AppStore {
     /// draft row serialises publishes (and restores) of one app.
     ///
     /// Locks first, then reads the draft's *current* content via [`Self::draft`]
-    /// (object-store-first, Postgres-fallback, same as every other reader) --
+    /// (the locked revision's object, same as every other reader) --
     /// `draft()`'s own SELECT is a plain read, which Postgres never blocks behind
     /// this transaction's row lock, and nothing can have changed the draft since
     /// the lock was taken. The version's own object-store write then happens
@@ -575,13 +618,11 @@ impl AppStore {
     }
 
     /// Scoped to the app by the query itself (`app_id = $1 AND id = $2`), so it is
-    /// safe even with an unresolved version id. Mirrors [`Self::draft`]'s fallback:
-    /// prefers the object store for `source`/`layout_json`, falling back to the
-    /// row's own columns on `StorageError::NotFound` -- a version published before
-    /// this code shipped has real content in Postgres and nothing in the object
-    /// store yet (Task 9/S3-1 removes this once Task 8/S2's backfill is confirmed
-    /// to have run everywhere). The columns are therefore still selected here, not
-    /// dead weight.
+    /// safe even with an unresolved version id. Reads `source`/`layout_json` from
+    /// the object store only -- Part S2's backfill guarantees every version has a
+    /// source object, so a `StorageError::NotFound` there is a real error, not a
+    /// fallback case. A missing layout object is unambiguous (a version simply has
+    /// no layout) and reads back as `None`.
     pub async fn version(
         &self,
         ws: WorkspaceId,
@@ -589,7 +630,7 @@ impl AppStore {
         version_id: Uuid,
     ) -> Result<Option<Version>> {
         let Some(row) = sqlx::query(
-            "SELECT id, version_no, from_revision, restored_from, published_by, published_at, source, layout_json \
+            "SELECT id, version_no, from_revision, restored_from, published_by, published_at \
                FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
         )
         .bind(id)
@@ -601,8 +642,6 @@ impl AppStore {
             return Ok(None);
         };
         let summary = VersionSummary::from_row(&row).map_err(db_err)?;
-        let pg_source: String = row.get("source");
-        let pg_layout_json: Option<String> = row.get("layout_json");
 
         let source = match self
             .store
@@ -614,7 +653,6 @@ impl AppStore {
                     "version {version_id} source is not UTF-8: {e}"
                 ))
             })?,
-            Err(StorageError::NotFound(_)) => pg_source,
             Err(e) => return Err(store_err(e)),
         };
         let layout_json = match self
@@ -627,7 +665,7 @@ impl AppStore {
                     "version {version_id} layout is not UTF-8: {e}"
                 ))
             })?),
-            Err(StorageError::NotFound(_)) => pg_layout_json,
+            Err(StorageError::NotFound(_)) => None,
             Err(e) => return Err(store_err(e)),
         };
 
@@ -649,13 +687,14 @@ impl AppStore {
     /// Versions are immutable and each already has its own object-store key, so
     /// "restoring" is a pure server-side [`ObjectStore::copy`] of the old
     /// version's objects into the new version's keys -- no bytes pass through
-    /// this process. The layout is only copied if the old version actually has
-    /// one (most won't). If the OLD version predates object-store-backed
-    /// versions, `copy()`'s source is missing and fails with `NotFound`; that one
-    /// case falls back to `put`-ing the old version's Postgres columns straight
-    /// to the new key -- the one place a GET-then-PUT through this process is
-    /// unavoidable, and only for the one-time migration of a version that
-    /// predates this rollout.
+    /// this process. Every version is guaranteed a source object-store key
+    /// (Part S2's backfill), so the source `copy()`'s result is trusted
+    /// directly: any error, including `NotFound`, propagates. Whether the old
+    /// version has a layout is determined by attempting the layout `copy()`
+    /// itself, never by a Postgres column (which is `NULL` for every version
+    /// published since source/layout stopped being written there): a
+    /// `StorageError::NotFound` from that copy means the old version genuinely
+    /// has no layout, while any other error still propagates.
     pub async fn restore_version(
         &self,
         ws: WorkspaceId,
@@ -670,8 +709,8 @@ impl AppStore {
             .await
             .map_err(db_err)?
             .ok_or_else(|| Error::NotFound(format!("draft of app {id}")))?;
-        let Some((old_no, source, layout_json)) = sqlx::query_as::<_, (i32, String, Option<String>)>(
-            "SELECT version_no, source, layout_json FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
+        let Some(old_no) = sqlx::query_scalar::<_, i32>(
+            "SELECT version_no FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
         )
         .bind(id)
         .bind(version_id)
@@ -692,66 +731,42 @@ impl AppStore {
         .await
         .map_err(db_err)?;
 
-        match self
-            .store
+        self.store
             .copy(
                 &self.version_key(ws, id, old_no),
                 &self.version_key(ws, id, new_no),
             )
             .await
+            .map_err(store_err)?;
+        match self
+            .store
+            .copy(
+                &self.version_layout_key(ws, id, old_no),
+                &self.version_layout_key(ws, id, new_no),
+            )
+            .await
         {
             Ok(()) => {}
             Err(StorageError::NotFound(_)) => {
+                // The old version genuinely has no layout (copy's source is absent) --
+                // clear any stale object that might already sit at the new key (same
+                // orphan-from-a-collided-version_no reasoning as `insert_version`'s
+                // `else` arm).
                 self.store
-                    .put(
-                        &self.version_key(ws, id, new_no),
-                        source.as_bytes().to_vec(),
-                    )
+                    .delete(&self.version_layout_key(ws, id, new_no))
                     .await
                     .map_err(store_err)?;
             }
             Err(e) => return Err(store_err(e)),
         }
-        if let Some(l) = &layout_json {
-            match self
-                .store
-                .copy(
-                    &self.version_layout_key(ws, id, old_no),
-                    &self.version_layout_key(ws, id, new_no),
-                )
-                .await
-            {
-                Ok(()) => {}
-                Err(StorageError::NotFound(_)) => {
-                    self.store
-                        .put(
-                            &self.version_layout_key(ws, id, new_no),
-                            l.as_bytes().to_vec(),
-                        )
-                        .await
-                        .map_err(store_err)?;
-                }
-                Err(e) => return Err(store_err(e)),
-            }
-        } else {
-            // The old version has no layout: clear any stale object that might
-            // already sit at the new key (same orphan-from-a-collided-version_no
-            // reasoning as `insert_version`'s `else` arm).
-            self.store
-                .delete(&self.version_layout_key(ws, id, new_no))
-                .await
-                .map_err(store_err)?;
-        }
 
         let v = sqlx::query_as::<_, VersionSummary>(
-            "INSERT INTO analytics.app_versions (app_id, version_no, source, layout_json, from_revision, restored_from, published_by) \
-             VALUES ($1, $2, $3, $4, NULL, $5, $6) \
+            "INSERT INTO analytics.app_versions (app_id, version_no, from_revision, restored_from, published_by) \
+             VALUES ($1, $2, NULL, $3, $4) \
              RETURNING id, version_no, from_revision, restored_from, published_by, published_at",
         )
         .bind(id)
         .bind(new_no)
-        .bind(&source)
-        .bind(&layout_json)
         .bind(version_id)
         .bind(by.0)
         .fetch_one(&mut *tx)
@@ -815,14 +830,12 @@ impl AppStore {
         }
 
         sqlx::query_as::<_, VersionSummary>(
-            "INSERT INTO analytics.app_versions (app_id, version_no, source, layout_json, from_revision, restored_from, published_by) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+            "INSERT INTO analytics.app_versions (app_id, version_no, from_revision, restored_from, published_by) \
+             VALUES ($1, $2, $3, $4, $5) \
              RETURNING id, version_no, from_revision, restored_from, published_by, published_at",
         )
         .bind(app)
         .bind(version_no)
-        .bind(source)
-        .bind(layout_json)
         .bind(from_revision)
         .bind(restored_from)
         .bind(by.0)
@@ -831,61 +844,83 @@ impl AppStore {
         .map_err(db_err)
     }
 
-    /// S2-1 backfill only: write a pre-S1 draft row's known-good Postgres
-    /// content to its object-store key(s). Pure S3 writes -- no Postgres
-    /// statement, no transaction/lock -- because the row's Postgres state is
-    /// already correct and this is only catching the object store up. Mirrors
-    /// [`Self::save_draft`]'s S3-write shape (`Some` layout => put, `None` =>
-    /// delete, so a rerun never leaves a stale layout object behind).
+    /// Backfill only: write a draft's known-good Postgres content to revision
+    /// `revision`'s object-store key(s). Pure S3 writes -- no Postgres
+    /// statement, no transaction/lock -- so the caller must hold the row lock
+    /// and have read `revision` and the content under it (see
+    /// [`Self::backfill_draft_locked`]). Mirrors [`Self::save_draft`]'s S3-write
+    /// shape (`Some` layout => put, `None` => delete, so a rerun never leaves a
+    /// stale layout object behind).
     pub async fn backfill_draft(
         &self,
         ws: WorkspaceId,
         app: Uuid,
+        revision: i64,
         source: &str,
         layout: Option<&str>,
     ) -> Result<()> {
         self.store
-            .put(&self.draft_key(ws, app), source.as_bytes().to_vec())
+            .put(
+                &self.draft_key(ws, app, revision),
+                source.as_bytes().to_vec(),
+            )
             .await
             .map_err(store_err)?;
         match layout {
             Some(l) => self
                 .store
-                .put(&self.draft_layout_key(ws, app), l.as_bytes().to_vec())
+                .put(
+                    &self.draft_layout_key(ws, app, revision),
+                    l.as_bytes().to_vec(),
+                )
                 .await
                 .map_err(store_err)?,
             None => self
                 .store
-                .delete(&self.draft_layout_key(ws, app))
+                .delete(&self.draft_layout_key(ws, app, revision))
                 .await
                 .map_err(store_err)?,
         }
         Ok(())
     }
 
-    /// Backfills one draft's CURRENT content into the object store, taking the
-    /// same `FOR UPDATE` row lock `save_draft`/`publish` do. Unlike
-    /// `backfill_draft`, this re-reads the row itself rather than trusting a
-    /// caller-supplied snapshot: a concurrent `save_draft` either commits first
-    /// (and this sees its result) or blocks until this transaction commits (and
-    /// then proceeds against the now-current row) -- so a live backfill run can
-    /// never overwrite a draft with stale content a concurrent save just
-    /// replaced. (Versions don't need this: `app_versions` rows are append-only
-    /// and immutable, so re-reading and rewriting their already-committed
-    /// content is always safe with no lock.)
-    pub async fn backfill_draft_locked(&self, ws: WorkspaceId, app: Uuid) -> Result<()> {
+    /// Moves one draft written before revision-keyed content (Parts S1/S2's
+    /// fixed `draft.py` key, or pre-S1 Postgres-only) to its CURRENT revision's
+    /// object-store key. Returns whether it wrote anything.
+    ///
+    /// The source of truth is the row's own `source`/`layout_json` columns, not
+    /// the old fixed-key object: every pre-Task-10 write committed those columns
+    /// in the same `UPDATE` that bumped `revision`, so they are exactly the
+    /// current revision's committed content -- whereas the fixed key may hold a
+    /// write whose transaction never committed (finding I3 itself). Code from
+    /// Task 10 on sets those columns to NULL (migration 0172), so a NULL
+    /// `source` means the current revision's object was written by
+    /// revision-keyed code and there is nothing to migrate; a rerun, or a run
+    /// after saves by the new code, never overwrites newer content with the
+    /// stale column.
+    ///
+    /// Takes the same `FOR UPDATE` row lock `save_draft`/`publish` do and reads
+    /// the row under it, so a concurrent `save_draft` either commits first (and
+    /// this sees its NULL columns) or waits for this to finish. (Versions don't
+    /// need this: `app_versions` rows are append-only and immutable.)
+    pub async fn backfill_draft_locked(&self, ws: WorkspaceId, app: Uuid) -> Result<bool> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
-        let (source, layout_json): (String, Option<String>) = sqlx::query_as(
-            "SELECT source, layout_json FROM analytics.app_drafts WHERE app_id = $1 FOR UPDATE",
-        )
-        .bind(app)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(db_err)?;
-        self.backfill_draft(ws, app, &source, layout_json.as_deref())
+        let (revision, source, layout_json): (i64, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT revision, source, layout_json FROM analytics.app_drafts \
+                  WHERE app_id = $1 FOR UPDATE",
+            )
+            .bind(app)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        let Some(source) = source else {
+            return Ok(false);
+        };
+        self.backfill_draft(ws, app, revision, &source, layout_json.as_deref())
             .await?;
         tx.commit().await.map_err(db_err)?;
-        Ok(())
+        Ok(true)
     }
 
     /// S2-1 backfill only: write a pre-S1 published version's known-good
