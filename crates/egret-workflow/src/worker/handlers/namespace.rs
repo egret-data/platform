@@ -736,6 +736,9 @@ impl TaskHandler for UploadFiles {
             // I1: a re-claim of this task run after an infrastructure failure
             // skips what its earlier attempt committed, under every conflict
             // mode: no second OVERWRITE revision, no ERROR against itself.
+            // Each path has exactly one source (I2), so "the latest revision
+            // was written by this task run" already proves the file is done;
+            // the first attempt's bytes are kept even if the source changed.
             let earlier = {
                 let mut conn = self.pool.acquire().await.map_err(|e| db_err(T, e))?;
                 match latest_written(&mut conn, &grant, &path).await {
@@ -744,7 +747,7 @@ impl TaskHandler for UploadFiles {
                 }
             };
             if let Some((e, Some(run))) = earlier {
-                if run == task.run_id && !e.deleted && !e.is_directory && e.size == source.size() {
+                if run == task.run_id && !e.deleted && !e.is_directory {
                     task.log
                         .line(
                             LogLevel::Info,

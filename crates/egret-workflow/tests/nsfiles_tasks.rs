@@ -1180,6 +1180,48 @@ async fn a_reclaim_after_a_partial_upload_skips_what_its_earlier_attempt_wrote()
     }
 }
 
+/// M-R1 (re-review 1): a source whose rendered length differs between the
+/// first attempt and the re-claim (`read('/ctl.txt')`, rewritten in between,
+/// stands in for `{{ now() }}`) is still skipped on the re-claim: under ERROR
+/// the task ends SUCCESS with one revision, and attempt 1's bytes are kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reclaim_keeps_the_first_attempts_bytes_when_the_source_renders_longer() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let reg = registry(&db.pool);
+    seed(&db, &fs, ws, NS, "/ctl.txt", b"first").await;
+    let up = "  - id: up\n    type: io.kestra.plugin.core.namespace.UploadFiles\n    \
+              conflict: ERROR\n    destination: /rerender\n    filesMap:\n      \
+              a.txt: \"{{ read('/ctl.txt') }}\"\n      b.txt: \"contents b\"\n"
+        .to_string();
+    let ex = start_execution(&db.pool, ws, None, &flow("rerender", NS, &[up]), json!({}))
+        .await
+        .unwrap();
+    tick_until_claimable(&db.pool, ex, "up").await;
+    *FAIL_PUT_ONCE.lock().unwrap() = Some("/_files/rerender/b.txt".to_string());
+    assert!(tick(&db.pool, 1, &registry(&db.pool)).await.is_err());
+    assert!(FAIL_PUT_ONCE.lock().unwrap().is_none(), "the fault fired");
+    // The source now renders longer than attempt 1's 5 bytes.
+    seed(&db, &fs, ws, NS, "/ctl.txt", b"a much longer second render").await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(reap(&db.pool, std::time::Duration::ZERO).await.unwrap(), 1);
+    let ticked = tick(&db.pool, 1, &reg).await;
+    assert!(ticked.is_ok(), "{ticked:?}");
+    let (state, _, message) = result_of(&db.pool, ex, "up").await;
+    assert_eq!(state, "SUCCESS", "{message:?}");
+    let all = rows(&db.pool, ws, NS).await;
+    assert_eq!(all["/rerender/a.txt"], vec![1], "one revision of a.txt");
+    assert_eq!(all["/rerender/b.txt"], vec![1]);
+    assert_eq!(
+        ns_bytes(&fs, ws, NS, "/rerender/a.txt", 1).await,
+        b"first",
+        "attempt 1's bytes are kept"
+    );
+}
+
 /// I2 (the coordinator's ruling, 2026-10-06, R3): two Writes name their
 /// files `content.txt`, so `**.txt` plans two DIFFERENT sources for
 /// `/o/content.txt`; the task is refused before anything is written, naming

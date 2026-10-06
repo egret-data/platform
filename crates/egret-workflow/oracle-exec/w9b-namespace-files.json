@@ -7324,7 +7324,7 @@
      "files may be a single string; a pattern matching nothing gives files: {}",
      "another namespace (w9b.s1) is readable"
     ],
-    "basis": "measured",
+    "basis": "measured, except the cell marked chosen (runs.dl_dest_no_slash)",
     "premise": "the namespace w9b.tasks holds, before the run, the rows Kestra's held after the upload flow (raw_records.tasks_after.upload): /up/m.txt, /up/sub/n.txt, /rootm.txt, /up2m.txt, /globbed/top.txt, /globbed/g/one.txt, each revision 1. egret's upload flow would not produce them all (UploadFiles' missing-URI refusal, its destination join, and the WorkingDirectory egret does not run), so a Task 6/7 test SEEDS them with store::put (CreatedBy::User) before running the task; the cells then compare one for one, URIs masked as `compare` says",
     "compare": "the URIs are compared after masking the execution id and the task-run id (`…/executions/<exec>/tasks/<task-slug>/<taskrun>/…`); the namespace path, the flow id, the task slug, the destination and the file path are compared exactly"
    },
