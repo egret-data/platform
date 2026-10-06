@@ -1634,6 +1634,17 @@ impl Fx {
     }
 }
 
+/// The export's `Content-Length` (fix round 1, I-1).
+fn declared_len(res: &axum::response::Response) -> usize {
+    res.headers()
+        .get("content-length")
+        .expect("the export declares its Content-Length")
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
 /// The body's chunks until it ends: `Ok` with every byte when it ended
 /// cleanly, `Err` with the bytes that arrived when it ended with an error.
 async fn drain(res: axum::response::Response) -> Result<Vec<u8>, Vec<u8>> {
@@ -1673,7 +1684,7 @@ async fn export_streams_the_latest_live_files_only() {
     let kestra = route("export");
     let want = kestra["headers"]["content-disposition"].as_str().unwrap();
     assert!(disposition.starts_with(want), "{disposition} / {want}");
-    let declared: usize = h["content-length"].to_str().unwrap().parse().unwrap();
+    let declared = declared_len(&res);
     let body = drain(res).await.expect("the export ended cleanly");
     assert_eq!(
         body.len(),
@@ -1815,11 +1826,7 @@ async fn an_export_that_fails_mid_body_ends_the_body_with_an_error() {
         set_size(size).await.unwrap();
         let res = fx.export(NS).await;
         assert_eq!(res.status(), 200);
-        let declared: usize = res.headers()["content-length"]
-            .to_str()
-            .unwrap()
-            .parse()
-            .unwrap();
+        let declared = declared_len(&res);
         let got = drain(res).await;
         let partial = got.expect_err(&format!("row size {size}: the body ended cleanly"));
         assert!(
@@ -1977,11 +1984,7 @@ async fn an_export_past_its_total_time_ends_short_with_an_error() {
     fx.app = common::app_with_export_total(&fx.db, std::time::Duration::from_millis(300)).await;
     let res = fx.export(NS).await;
     assert_eq!(res.status(), 200);
-    let declared: usize = res.headers()["content-length"]
-        .to_str()
-        .unwrap()
-        .parse()
-        .unwrap();
+    let declared = declared_len(&res);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let partial = drain(res)
         .await
