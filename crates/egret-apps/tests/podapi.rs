@@ -106,6 +106,18 @@ fn draft_object_key(ws: Uuid, app: Uuid) -> String {
     )
 }
 
+/// Mirrors `AppStore::version_key`'s private format: `s3://{bucket}/{prefix}{ws}/{app}/versions/{version_no}/source.py`.
+/// Task 9 (S3-1) removed `version()`'s Postgres fallback, so every version row
+/// used by a test that actually reads its source needs a matching object.
+fn version_object_key(ws: Uuid, app: Uuid, version_no: i32) -> String {
+    format!(
+        "s3://{TEST_BUCKET}/{TEST_PREFIX}{}/{}/versions/{}/source.py",
+        ws.hyphenated(),
+        app.hyphenated(),
+        version_no
+    )
+}
+
 impl Fixture {
     async fn new() -> Self {
         let url = egret_test_db::url().await.expect("test database");
@@ -146,6 +158,13 @@ impl Fixture {
         let store = Arc::new(MemStore::new());
         store
             .put(&draft_object_key(ws, app), b"draft v1".to_vec())
+            .await
+            .unwrap();
+        // `version()` has no Postgres fallback as of Task 9 (S3-1): seed the
+        // object-store key this version's row claims, or a test that actually
+        // GETs this version's source would fail with a real error.
+        store
+            .put(&version_object_key(ws, app, 1), b"published v1".to_vec())
             .await
             .unwrap();
         let router = build_router(&db, store).await;

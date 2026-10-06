@@ -717,11 +717,14 @@ async fn restoring_a_version_copies_its_object_server_side_without_reading_it_in
     // instead of asserting it here.
 }
 
-/// Same fallback as Task 3's `draft()` -- a version published before this code
-/// shipped has real content in `analytics.app_versions.source` and nothing in
-/// the object store.
+/// Task 9 (S3-1): every version is guaranteed an object-store key once Part
+/// S2's backfill has run, so a version row with nothing at its source key is
+/// no longer a "pre-S1 row, fall back to Postgres" case -- it is a real error.
+/// Seeded directly via SQL (bypassing `AppStore`, same pattern the old
+/// fallback test used) so nothing has ever touched the object store for this
+/// version.
 #[tokio::test]
-async fn a_pre_s1_version_with_no_object_store_content_falls_back_to_postgres() {
+async fn a_version_with_no_object_store_content_now_surfaces_as_an_error() {
     let fx = Fixture::new().await;
     let app = fx.store_app("v1").await;
     let (version_id,): (Uuid,) = sqlx::query_as(
@@ -733,13 +736,32 @@ async fn a_pre_s1_version_with_no_object_store_content_falls_back_to_postgres() 
     .await
     .unwrap();
 
-    let v = fx
+    let err = fx
         .store()
         .version(fx.ws(), app, version_id)
         .await
-        .unwrap()
+        .expect_err("no object-store content at the source key must be a real error");
+    assert!(matches!(err, Error::Internal(_)), "{err:?}");
+}
+
+/// Task 9 (S3-1): a layout-key miss is unambiguous now that there is no
+/// backfill-not-run-yet case left to confuse it with -- it just means this
+/// version has no layout, so `version()` must succeed with `layout_json:
+/// None`, not error and not fall back to any Postgres column.
+#[tokio::test]
+async fn a_version_with_no_layout_object_reads_back_none_not_an_error() {
+    let fx = Fixture::new().await;
+    let app = fx.store_app("v1").await;
+    let st = fx.store();
+    let v1 = published(st.publish(fx.ws(), app, fx.uid(), None).await.unwrap());
+
+    let v = st
+        .version(fx.ws(), app, v1.id)
+        .await
+        .expect("a missing layout object must not be an error")
         .unwrap();
-    assert_eq!(v.source, "legacy v1");
+    assert_eq!(v.source, "v1");
+    assert_eq!(v.layout_json, None);
 }
 
 #[tokio::test]
@@ -835,7 +857,9 @@ async fn deleting_a_publisher_keeps_their_versions_with_publisher_null() {
         .expect("a publisher can be deleted");
     assert!(deleted.is_some(), "the user row was deleted");
 
-    let (by, source, no): (Option<Uuid>, String, i32) = sqlx::query_as(
+    // Task 9 (S3-1): `publish()` no longer writes the `source` column, so it
+    // reads back NULL here -- the content lives only in the object store now.
+    let (by, source, no): (Option<Uuid>, Option<String>, i32) = sqlx::query_as(
         "SELECT published_by, source, version_no FROM analytics.app_versions WHERE id = $1",
     )
     .bind(v.id)
@@ -843,7 +867,7 @@ async fn deleting_a_publisher_keeps_their_versions_with_publisher_null() {
     .await
     .expect("the version row survives");
     assert_eq!(by, None);
-    assert_eq!(source, "by the publisher");
+    assert_eq!(source, None);
     assert_eq!(no, v.version_no);
 
     // The allowance is exact: nulling `published_by` while changing anything else
@@ -898,11 +922,15 @@ async fn publishing_with_no_layout_clears_any_stale_layout_object() {
     assert_eq!(v.layout_json, None);
 }
 
-/// I2 Test A: restoring a pre-S1 version (no object-store content for either
-/// source or layout) falls back to Postgres's columns -- the path
-/// `S3Store::copy`'s `NotFound`-mapping fix exists to make reachable.
+/// Task 9 (S3-1): `restore_version` trusts `copy()`'s result directly now --
+/// every version is guaranteed an object-store key once Part S2's backfill
+/// has run, so a pre-S1 version with nothing at its source key is no longer a
+/// "fall back to Postgres and GET+PUT" case. `copy()`'s `NotFound` must
+/// propagate as a real error. Replaces the old
+/// `restoring_a_pre_s1_version_falls_back_to_postgres_content` test, which
+/// asserted the fallback this step removes.
 #[tokio::test]
-async fn restoring_a_pre_s1_version_falls_back_to_postgres_content() {
+async fn restoring_a_version_with_no_object_store_content_now_surfaces_as_an_error() {
     let fx = Fixture::new().await;
     let app = fx.store_app("v1").await;
     let st = fx.store();
@@ -915,44 +943,11 @@ async fn restoring_a_pre_s1_version_falls_back_to_postgres_content() {
     .await
     .unwrap();
 
-    let new_summary = st
+    let err = st
         .restore_version(fx.ws(), app, version_id, fx.uid())
         .await
-        .unwrap()
-        .expect("version belongs to the app");
-    assert_eq!(new_summary.version_no, 2);
-
-    let new_version = st
-        .version(fx.ws(), app, new_summary.id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(new_version.source, "legacy source");
-    assert_eq!(new_version.layout_json.as_deref(), Some("legacy layout"));
-
-    // Prove the fallback `put` path actually ran: the new version's own
-    // object-store keys hold the right bytes, not just that some reader
-    // (which could itself fall back) found the right content.
-    let source_key = format!(
-        "s3://{}/apps/{}/{}/versions/2/source.py",
-        fx.bucket(),
-        fx.ws().0.hyphenated(),
-        app.hyphenated()
-    );
-    let layout_key = format!(
-        "s3://{}/apps/{}/{}/versions/2/layout.json",
-        fx.bucket(),
-        fx.ws().0.hyphenated(),
-        app.hyphenated()
-    );
-    assert_eq!(
-        fx.mem_store().get(&source_key).await.unwrap(),
-        b"legacy source"
-    );
-    assert_eq!(
-        fx.mem_store().get(&layout_key).await.unwrap(),
-        b"legacy layout"
-    );
+        .expect_err("no object-store content at the old version's source key must be a real error");
+    assert!(matches!(err, Error::Internal(_)), "{err:?}");
 }
 
 /// I2 Test B: a draft layout put-then-clear round-trips through the object

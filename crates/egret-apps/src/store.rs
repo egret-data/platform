@@ -575,13 +575,11 @@ impl AppStore {
     }
 
     /// Scoped to the app by the query itself (`app_id = $1 AND id = $2`), so it is
-    /// safe even with an unresolved version id. Mirrors [`Self::draft`]'s fallback:
-    /// prefers the object store for `source`/`layout_json`, falling back to the
-    /// row's own columns on `StorageError::NotFound` -- a version published before
-    /// this code shipped has real content in Postgres and nothing in the object
-    /// store yet (Task 9/S3-1 removes this once Task 8/S2's backfill is confirmed
-    /// to have run everywhere). The columns are therefore still selected here, not
-    /// dead weight.
+    /// safe even with an unresolved version id. Reads `source`/`layout_json` from
+    /// the object store only -- Part S2's backfill guarantees every version has a
+    /// source object, so a `StorageError::NotFound` there is a real error, not a
+    /// fallback case. A missing layout object is unambiguous (a version simply has
+    /// no layout) and reads back as `None`.
     pub async fn version(
         &self,
         ws: WorkspaceId,
@@ -589,7 +587,7 @@ impl AppStore {
         version_id: Uuid,
     ) -> Result<Option<Version>> {
         let Some(row) = sqlx::query(
-            "SELECT id, version_no, from_revision, restored_from, published_by, published_at, source, layout_json \
+            "SELECT id, version_no, from_revision, restored_from, published_by, published_at \
                FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
         )
         .bind(id)
@@ -601,8 +599,6 @@ impl AppStore {
             return Ok(None);
         };
         let summary = VersionSummary::from_row(&row).map_err(db_err)?;
-        let pg_source: String = row.get("source");
-        let pg_layout_json: Option<String> = row.get("layout_json");
 
         let source = match self
             .store
@@ -614,7 +610,6 @@ impl AppStore {
                     "version {version_id} source is not UTF-8: {e}"
                 ))
             })?,
-            Err(StorageError::NotFound(_)) => pg_source,
             Err(e) => return Err(store_err(e)),
         };
         let layout_json = match self
@@ -627,7 +622,7 @@ impl AppStore {
                     "version {version_id} layout is not UTF-8: {e}"
                 ))
             })?),
-            Err(StorageError::NotFound(_)) => pg_layout_json,
+            Err(StorageError::NotFound(_)) => None,
             Err(e) => return Err(store_err(e)),
         };
 
@@ -650,12 +645,10 @@ impl AppStore {
     /// "restoring" is a pure server-side [`ObjectStore::copy`] of the old
     /// version's objects into the new version's keys -- no bytes pass through
     /// this process. The layout is only copied if the old version actually has
-    /// one (most won't). If the OLD version predates object-store-backed
-    /// versions, `copy()`'s source is missing and fails with `NotFound`; that one
-    /// case falls back to `put`-ing the old version's Postgres columns straight
-    /// to the new key -- the one place a GET-then-PUT through this process is
-    /// unavoidable, and only for the one-time migration of a version that
-    /// predates this rollout.
+    /// one (most won't). Every version is guaranteed an object-store key (Part
+    /// S2's backfill), so `copy()`'s result is trusted directly: any error,
+    /// including `NotFound`, propagates rather than falling back to a
+    /// read-then-write of Postgres columns.
     pub async fn restore_version(
         &self,
         ws: WorkspaceId,
@@ -670,8 +663,8 @@ impl AppStore {
             .await
             .map_err(db_err)?
             .ok_or_else(|| Error::NotFound(format!("draft of app {id}")))?;
-        let Some((old_no, source, layout_json)) = sqlx::query_as::<_, (i32, String, Option<String>)>(
-            "SELECT version_no, source, layout_json FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
+        let Some((old_no, layout_json)) = sqlx::query_as::<_, (i32, Option<String>)>(
+            "SELECT version_no, layout_json FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
         )
         .bind(id)
         .bind(version_id)
@@ -692,47 +685,21 @@ impl AppStore {
         .await
         .map_err(db_err)?;
 
-        match self
-            .store
+        self.store
             .copy(
                 &self.version_key(ws, id, old_no),
                 &self.version_key(ws, id, new_no),
             )
             .await
-        {
-            Ok(()) => {}
-            Err(StorageError::NotFound(_)) => {
-                self.store
-                    .put(
-                        &self.version_key(ws, id, new_no),
-                        source.as_bytes().to_vec(),
-                    )
-                    .await
-                    .map_err(store_err)?;
-            }
-            Err(e) => return Err(store_err(e)),
-        }
-        if let Some(l) = &layout_json {
-            match self
-                .store
+            .map_err(store_err)?;
+        if layout_json.is_some() {
+            self.store
                 .copy(
                     &self.version_layout_key(ws, id, old_no),
                     &self.version_layout_key(ws, id, new_no),
                 )
                 .await
-            {
-                Ok(()) => {}
-                Err(StorageError::NotFound(_)) => {
-                    self.store
-                        .put(
-                            &self.version_layout_key(ws, id, new_no),
-                            l.as_bytes().to_vec(),
-                        )
-                        .await
-                        .map_err(store_err)?;
-                }
-                Err(e) => return Err(store_err(e)),
-            }
+                .map_err(store_err)?;
         } else {
             // The old version has no layout: clear any stale object that might
             // already sit at the new key (same orphan-from-a-collided-version_no
@@ -744,14 +711,12 @@ impl AppStore {
         }
 
         let v = sqlx::query_as::<_, VersionSummary>(
-            "INSERT INTO analytics.app_versions (app_id, version_no, source, layout_json, from_revision, restored_from, published_by) \
-             VALUES ($1, $2, $3, $4, NULL, $5, $6) \
+            "INSERT INTO analytics.app_versions (app_id, version_no, from_revision, restored_from, published_by) \
+             VALUES ($1, $2, NULL, $3, $4) \
              RETURNING id, version_no, from_revision, restored_from, published_by, published_at",
         )
         .bind(id)
         .bind(new_no)
-        .bind(&source)
-        .bind(&layout_json)
         .bind(version_id)
         .bind(by.0)
         .fetch_one(&mut *tx)
@@ -815,14 +780,12 @@ impl AppStore {
         }
 
         sqlx::query_as::<_, VersionSummary>(
-            "INSERT INTO analytics.app_versions (app_id, version_no, source, layout_json, from_revision, restored_from, published_by) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+            "INSERT INTO analytics.app_versions (app_id, version_no, from_revision, restored_from, published_by) \
+             VALUES ($1, $2, $3, $4, $5) \
              RETURNING id, version_no, from_revision, restored_from, published_by, published_at",
         )
         .bind(app)
         .bind(version_no)
-        .bind(source)
-        .bind(layout_json)
         .bind(from_revision)
         .bind(restored_from)
         .bind(by.0)
