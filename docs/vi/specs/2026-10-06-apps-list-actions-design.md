@@ -137,6 +137,12 @@ người đọc không có. Open là ngoại lệ — nó không thay đổi gì
 Chỉ bật khi có ít nhất một hàng đang hiện có `can_write`. Ô chọn chỉ xuất hiện trên hàng ghi
 được, để "Move n to Trash" không bao giờ đếm một hàng mà server sẽ từ chối.
 
+"Move n to folder…" mở một **menu chọn** các thư mục đang có, cùng Uncategorized. Di chuyển là
+`can_write` của từng hàng; "New folder…" là mục duy nhất cần `can_create` và là đường duy nhất
+dẫn tới ô gõ tên. Không có thư mục nào và cũng không được tạo thì nút không được vẽ. (Trước đây
+nó là ô gõ tên cho mọi người, tạo thư mục cho bất kỳ tên nào nó không nhận ra — một lần từ chối
+với cộng tác viên chỉ được chia sẻ, và một thư mục trùng với ai gõ sai.)
+
 ### 4.3a Điều khiển cấp workspace
 
 `+ App`, nút tạo ở trạng thái rỗng, New folder, và đổi tên / xoá / chia sẻ thư mục chỉ hiện khi

@@ -147,6 +147,12 @@ Bulk select is offered when at least one visible row has `can_write`. Checkboxes
 writable rows, so "Move n to Trash" can never count a row the server will refuse. Actions: move
 to folder, move to Trash.
 
+"Move n to folder…" opens a **picker** of the folders that exist, plus Uncategorized. Moving is
+each row's own `can_write`; "New folder…" is the one item that needs `can_create`, and is the
+only way to a name box. With no folder and no right to make one, the control is not drawn. (It
+used to be a name box for everyone, which created a folder for any name it did not recognise —
+a refusal for a share-only collaborator, and a duplicate folder for anyone who mistyped.)
+
 ### 4.3a Workspace-level controls
 
 `+ App`, the empty state's create button, New folder, and a folder's rename / delete / share are

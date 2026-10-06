@@ -488,20 +488,88 @@ describe("Apps list — bulk select over mixed-permission rows", () => {
     expect(m.trash).not.toHaveBeenCalledWith("r1");
   });
 
-  it("moves exactly the selected writable rows to a folder", async () => {
-    folders = [{ id: "f1", name: "Finance" }];
-    serve(MIXED);
-    renderApps();
+  const selectAllThenOpenMove = async (label: string) => {
     await userEvent.click(screen.getByRole("button", { name: "Bulk select" }));
     await userEvent.click(screen.getByLabelText("Select all"));
-    await userEvent.click(screen.getByRole("button", { name: "Move 2 to folder…" }));
-    fireEvent.change(await screen.findByPlaceholderText("Folder name"), { target: { value: "finance" } });
-    fireEvent.click(screen.getByRole("button", { name: "Move" }));
+    await userEvent.click(screen.getByRole("button", { name: label }));
+  };
+
+  it("moves exactly the selected writable rows to the folder picked from the list", async () => {
+    folders = [{ id: "f1", name: "Finance" }, { id: "f2", name: "Ops" }];
+    serve(MIXED);
+    renderApps();
+    await selectAllThenOpenMove("Move 2 to folder…");
+    // A picker of what exists, not a name to type: the old dialog created a folder for any
+    // name it did not recognise, including a typo of an existing one.
+    expect(menuItems()).toEqual(["Finance", "Ops", "Uncategorized", "New folder…"]);
+    await userEvent.click(screen.getByRole("menuitem", { name: "Ops" }));
 
     await waitFor(() => expect(setFolderMock).toHaveBeenCalledTimes(2));
     expect(setFolderMock.mock.calls.map((c) => c[0])).toEqual(
-      expect.arrayContaining([{ id: "w1", folder_id: "f1" }, { id: "w2", folder_id: "f1" }]),
+      expect.arrayContaining([{ id: "w1", folder_id: "f2" }, { id: "w2", folder_id: "f2" }]),
     );
+    expect(setFolderMock).not.toHaveBeenCalledWith(expect.objectContaining({ id: "r1" }));
+  });
+
+  it("Uncategorized takes the selected rows out of their folders", async () => {
+    folders = [{ id: "f1", name: "Finance" }];
+    serve([app({ id: "w1", name: "One", folder_id: "f1" }), app({ id: "w2", name: "Two", folder_id: "f1" })]);
+    renderApps();
+    await selectAllThenOpenMove("Move 2 to folder…");
+    await userEvent.click(screen.getByRole("menuitem", { name: "Uncategorized" }));
+    await waitFor(() => expect(setFolderMock).toHaveBeenCalledTimes(2));
+    expect(setFolderMock.mock.calls.map((c) => c[0])).toEqual(
+      expect.arrayContaining([{ id: "w1", folder_id: null }, { id: "w2", folder_id: null }]),
+    );
+  });
+
+  it("New folder… creates the folder, then moves the rows into it", async () => {
+    folders = [{ id: "f1", name: "Finance" }];
+    serve(MIXED);
+    renderApps();
+    await selectAllThenOpenMove("Move 2 to folder…");
+    await userEvent.click(screen.getByRole("menuitem", { name: "New folder…" }));
+    fireEvent.change(await screen.findByPlaceholderText("Folder name"), { target: { value: "Brand new" } });
+    fireEvent.click(screen.getByRole("button", { name: "Move" }));
+    await waitFor(() => expect(setFolderMock).toHaveBeenCalledTimes(2));
+    // "f-new" is what the mocked create returns: the rows went to the folder just made.
+    expect(setFolderMock.mock.calls.map((c) => c[0])).toEqual(
+      expect.arrayContaining([{ id: "w1", folder_id: "f-new" }, { id: "w2", folder_id: "f-new" }]),
+    );
+  });
+
+  it("offers a collaborator who may not create folders only the folders that exist", async () => {
+    // They used to get a name box that created a folder for any new name, and a refusal.
+    capsMock.mockReturnValue({ data: { can_create: false } });
+    folders = [{ id: "f1", name: "Finance" }];
+    serve([app({ id: "w1", name: "Shared with me", can_manage: false })]);
+    renderApps();
+    await selectAllThenOpenMove("Move 1 to folder…");
+    expect(menuItems()).toEqual(["Finance", "Uncategorized"]);
+    await userEvent.click(screen.getByRole("menuitem", { name: "Finance" }));
+    await waitFor(() => expect(setFolderMock).toHaveBeenCalledWith({ id: "w1", folder_id: "f1" }));
+  });
+
+  it("offers no move at all when there is no folder and none can be made", async () => {
+    capsMock.mockReturnValue({ data: { can_create: false } });
+    folders = [];
+    serve([app({ id: "w1", name: "Shared with me", can_manage: false })]);
+    renderApps();
+    await userEvent.click(screen.getByRole("button", { name: "Bulk select" }));
+    await userEvent.click(screen.getByLabelText("Select all"));
+    expect(screen.queryByRole("button", { name: /to folder/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Move 1 to Trash" })).toBeTruthy();
+  });
+
+  it("says how many moved, and reports a refusal without claiming the rest", async () => {
+    folders = [{ id: "f1", name: "Finance" }];
+    serve(MIXED);
+    setFolderMock.mockReset().mockResolvedValueOnce({}).mockRejectedValueOnce(new Error("forbidden"));
+    renderApps();
+    await selectAllThenOpenMove("Move 2 to folder…");
+    await userEvent.click(screen.getByRole("menuitem", { name: "Finance" }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("forbidden"));
+    expect(toast.success).toHaveBeenCalledWith("Moved 1 app");
   });
 
   it("does not claim success when every trash call is refused", async () => {

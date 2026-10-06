@@ -31,6 +31,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
@@ -269,14 +276,29 @@ export default function Apps() {
     if (moved > 0) toast.success("Moved to Trash");
     bulk.clear();
   }
-  async function doBulkMove(name: string) {
+  /**
+   * Move the selected rows to a folder that already exists (`null` = out of any folder). Each
+   * row is its own request and its own verdict, like the bulk trash: one refusal is reported and
+   * the rest still move, and the success toast counts only what moved.
+   */
+  async function doBulkMoveTo(folderId: string | null) {
+    let moved = 0;
+    for (const id of bulk.selectedIds) {
+      try { await setFolder.mutateAsync({ id, folder_id: folderId }); moved += 1; } catch (e) { toast.error(errText(e)); }
+    }
+    if (moved > 0) toast.success(`Moved ${moved} ${moved === 1 ? "app" : "apps"}`);
+    bulk.clear();
+  }
+  /** "New folder…" from the bulk menu: make the folder, then move into it. A name that already
+   *  exists (case-insensitively) is that folder, not a duplicate of it. */
+  async function doBulkMoveToNew(name: string) {
     const trimmed = name.trim();
+    let folderId: string;
     try {
       const existing = folders.find((f) => f.name.toLowerCase() === trimmed.toLowerCase());
-      const folderId = existing ? existing.id : (await createFolder.mutateAsync(trimmed)).id;
-      for (const id of bulk.selectedIds) await setFolder.mutateAsync({ id, folder_id: folderId });
-    } catch (e) { toast.error(errText(e)); }
-    bulk.clear();
+      folderId = existing ? existing.id : (await createFolder.mutateAsync(trimmed)).id;
+    } catch (e) { toast.error(errText(e)); return; }
+    await doBulkMoveTo(folderId);
   }
 
   const hasData = !!data && data.length > 0;
@@ -407,9 +429,29 @@ export default function Apps() {
             </div>
             {bulk.bulkMode && bulk.someSelected && !showTrash && (
               <>
-                <Button variant="outline" size="sm" onClick={() => setFolderDialog({ mode: "bulkmove" })}>
-                  Move {bulk.selectedIds.length} to folder…
-                </Button>
+                {/* A picker of the folders that exist, not a name to type: moving is each row's own
+                    `can_write`, but MAKING a folder is the workspace's permission, so "New folder…"
+                    is the only item that needs `canCreate`. With no folder and no right to make
+                    one there is nowhere to move to, and the control is not drawn. */}
+                {(folders.length > 0 || canCreate) && (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="outline" size="sm">Move {bulk.selectedIds.length} to folder…</Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start">
+                      {folders.map((f) => (
+                        <DropdownMenuItem key={f.id} onClick={() => doBulkMoveTo(f.id)}>{f.name}</DropdownMenuItem>
+                      ))}
+                      {folders.length > 0 && <DropdownMenuItem onClick={() => doBulkMoveTo(null)}>Uncategorized</DropdownMenuItem>}
+                      {canCreate && (
+                        <>
+                          {folders.length > 0 && <DropdownMenuSeparator />}
+                          <DropdownMenuItem onClick={() => setFolderDialog({ mode: "bulkmove" })}>New folder&hellip;</DropdownMenuItem>
+                        </>
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
                 <Button variant="destructive" size="sm" onClick={doBulkTrash}>
                   Move {bulk.selectedIds.length} to Trash
                 </Button>
@@ -487,7 +529,7 @@ export default function Apps() {
 
       <FolderNameDialog
         open={!!folderDialog}
-        title={folderDialog?.mode === "rename" ? "Rename folder" : folderDialog?.mode === "move" ? "Move to new folder" : folderDialog?.mode === "bulkmove" ? "Move to folder" : "New folder"}
+        title={folderDialog?.mode === "rename" ? "Rename folder" : folderDialog?.mode === "move" ? "Move to new folder" : folderDialog?.mode === "bulkmove" ? "Move to new folder" : "New folder"}
         submitLabel={folderDialog?.mode === "rename" ? "Rename" : folderDialog?.mode === "move" || folderDialog?.mode === "bulkmove" ? "Move" : "Create"}
         initialValue={folderDialog?.mode === "rename" ? folderDialog.folder!.name : ""}
         onOpenChange={(o) => { if (!o) setFolderDialog(null); }}
@@ -495,7 +537,7 @@ export default function Apps() {
           const d = folderDialog!;
           if (d.mode === "rename") renameFolder.mutateAsync({ id: d.folder!.id, name }).catch((e) => toast.error(errText(e)));
           else if (d.mode === "move") createFolder.mutateAsync(name).then((f) => setFolder.mutateAsync({ id: d.app!.id, folder_id: f.id })).then(() => toast.success("Moved")).catch((e) => toast.error(errText(e)));
-          else if (d.mode === "bulkmove") doBulkMove(name);
+          else if (d.mode === "bulkmove") doBulkMoveToNew(name);
           else createFolder.mutateAsync(name).then(() => toast.success("Folder created")).catch((e) => toast.error(errText(e)));
         }}
       />
