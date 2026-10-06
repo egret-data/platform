@@ -1285,6 +1285,9 @@ async fn plugins_read_namespace_files_through_egret() {
         "RUSTFS: {removed} objects deleted by exact key under {}; {left} left",
         files.prefix
     );
-    assert!(removed >= 3, "the namespace files were in RustFS: {removed}");
+    assert!(
+        removed >= 3,
+        "the namespace files were in RustFS: {removed}"
+    );
     assert_eq!(left, 0);
 }
