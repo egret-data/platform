@@ -274,6 +274,9 @@ pub struct AppPodConfig {
     /// The locked marimo configuration directory (`apps-image/config`), as the image's
     /// `EGRET_APPS_CONFIG`. Honoured by the launcher only outside the image.
     pub config_dir: String,
+    /// The venv shim directory (`apps-image/venv-shim`), as the image's `EGRET_VENV_SHIM`. Run
+    /// pods need it to start. Honoured by the launcher only outside the image.
+    pub venv_shim_dir: String,
     // ── run pods (D24: one pod per (viewer, published version), never shared) ──
     /// A run pod nobody has used for this long is stopped. Separate from `idle_secs` (the edit
     /// default, 30 min) because an abandoned viewer tab is cheaper to let go of than an author's
@@ -306,6 +309,7 @@ impl Default for AppPodConfig {
             command: Vec::new(),
             work_dir: "/tmp/egret-apps".into(),
             config_dir: String::new(),
+            venv_shim_dir: String::new(),
             run_idle_secs: 300,
             run_session_cap: 8,
             run_kernel_mode: "thread".into(),
@@ -1738,10 +1742,14 @@ impl Config {
                     );
                 }
                 if pod.launcher == "subprocess"
-                    && (pod.command.is_empty() || pod.config_dir.is_empty())
+                    && (pod.command.is_empty()
+                        || pod.config_dir.is_empty()
+                        || pod.venv_shim_dir.is_empty())
                 {
                     return Err(
-                        "apps.pod.launcher = \"subprocess\" needs command and config_dir".into(),
+                        "apps.pod.launcher = \"subprocess\" needs command, config_dir and \
+                         venv_shim_dir"
+                            .into(),
                     );
                 }
                 if !matches!(pod.run_kernel_mode.as_str(), "thread" | "forced_ipc") {
@@ -2662,6 +2670,8 @@ values = { allowed-images = [] }
         assert!(cfg.validate().unwrap_err().contains("command"));
         cfg.apps.pod.command = vec!["egret-apps".into()];
         cfg.apps.pod.config_dir = "apps-image/config".into();
+        assert!(cfg.validate().unwrap_err().contains("venv_shim_dir"));
+        cfg.apps.pod.venv_shim_dir = "apps-image/venv-shim".into();
         assert!(cfg.validate().is_ok());
     }
 
@@ -2673,6 +2683,7 @@ values = { allowed-images = [] }
         cfg.apps.pod.launcher = "subprocess".into();
         cfg.apps.pod.command = vec!["egret-apps".into()];
         cfg.apps.pod.config_dir = "apps-image/config".into();
+        cfg.apps.pod.venv_shim_dir = "apps-image/venv-shim".into();
         cfg.apps.pod.callback_url = "http://egret:8080".into();
         // Set storage to allow validation to proceed
         cfg.storage.bucket = "test-bucket".into();
@@ -3205,6 +3216,7 @@ values = { allowed-images = [] }
         cfg.apps.pod.callback_url = "http://egret:8080".into();
         cfg.apps.pod.command = vec!["egret-apps".into()];
         cfg.apps.pod.config_dir = "apps-image/config".into();
+        cfg.apps.pod.venv_shim_dir = "apps-image/venv-shim".into();
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("[storage]"), "{err}");
     }

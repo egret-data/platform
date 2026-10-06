@@ -68,6 +68,7 @@ impl Fixture {
                 command,
                 work_dir: self.dir.join("pods"),
                 config_dir: self.dir.join("config"),
+                venv_shim_dir: self.dir.join("venv-shim"),
                 callback_url: "http://egret.test:8080".into(),
                 run_kernel_mode: "thread".into(),
             },

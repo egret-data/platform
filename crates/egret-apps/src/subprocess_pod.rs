@@ -32,6 +32,9 @@ pub struct SubprocessConfig {
     pub work_dir: PathBuf,
     /// The locked marimo configuration directory.
     pub config_dir: PathBuf,
+    /// The venv shim directory (`apps-image/venv-shim`). Run pods only: the launcher refuses to
+    /// start one without it, and outside the image it has no other way to find it.
+    pub venv_shim_dir: PathBuf,
     /// The base URL pods call back to (egret's pod API and query gateway).
     pub callback_url: String,
     /// `apps.pod.run_kernel_mode` (D24): `"thread"` or `"forced_ipc"`. Run pods only — edit
@@ -235,6 +238,10 @@ impl SubprocessPodLauncher {
             ("EGRET_APP_ID", app_id.to_string()),
             ("EGRET_VERSION_ID", key.version_id.to_string()),
             ("EGRET_RUN_KERNEL_MODE", self.cfg.run_kernel_mode.clone()),
+            (
+                "EGRET_VENV_SHIM",
+                self.cfg.venv_shim_dir.to_string_lossy().into_owned(),
+            ),
         ];
         match self
             .spawn_and_wait(&key.pod_ref(), "run", &pod_token, &extra, timeout)
