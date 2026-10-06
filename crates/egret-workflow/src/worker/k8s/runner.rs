@@ -76,11 +76,11 @@ use crate::logs::{LogLevel, LogRepo, RunIdentity};
 use crate::scripts::RunnerSpec;
 use crate::storage::transfer::{write_tar, TarError, TarSource};
 use crate::worker::commands::{
-    collection_target, expand_outputs, listing_too_big, output_problem, pattern_dirs,
-    relative_problem, run_liveness, staging_error, stream_replayed_line, CommandsResult,
-    LineObserver, OrphanSweep, StreamState, TaskCommands, TaskRunner, CANCEL_WAIT_MARGIN,
-    MAX_LISTING_BYTES, MAX_OUTPUT_NAMES, MAX_VARS_BYTES, OUTPUT_DIR, OUTPUT_DIR_REL,
-    RUN_NAME_PREFIX, TASKRUN_LABEL, WORKING_DIR,
+    collection_target, expand_outputs, listing_too_big, output_problem, pattern_dirs, run_liveness,
+    staged_name_problem, staging_error, stream_replayed_line, CommandsResult, LineObserver,
+    OrphanSweep, StreamState, TaskCommands, TaskRunner, CANCEL_WAIT_MARGIN, MAX_LISTING_BYTES,
+    MAX_OUTPUT_NAMES, MAX_VARS_BYTES, OUTPUT_DIR, OUTPUT_DIR_REL, RUN_NAME_PREFIX, TASKRUN_LABEL,
+    WORKING_DIR,
 };
 use crate::worker::TaskInput;
 
@@ -1331,7 +1331,8 @@ impl TaskRunner for KubernetesRunner {
             .keys()
             .chain(commands.stored_inputs.keys())
         {
-            if let Some(problem) = relative_problem(rel) {
+            // W9b Task 5 fix round 1, I2: the staged-name rule, as Docker's.
+            if let Some(problem) = staged_name_problem(rel) {
                 return Err(Error::InvalidInput(problem));
             }
         }

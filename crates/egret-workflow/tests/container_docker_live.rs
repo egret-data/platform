@@ -51,6 +51,13 @@
 //! positional argument filters by substring, which is what `cargo test -p
 //! egret-workflow --test container_docker_live <name>` needs.
 //!
+//! # The namespace-file case needs the test database
+//!
+//! `namespace_files_are_staged_into_the_container_as_the_artifact_does` (W9b
+//! Task 5) lists namespace files from Postgres, so it needs `DATABASE_URL`
+//! (the dedicated test database) and fails naming it when it is unset; it is
+//! not skipped, as the daemon is not.
+//!
 //! # Two axes, and the image axis is one of them
 //!
 //! Fix round 1's Important 3: the opt-out used to cover the daemon and not the
@@ -69,6 +76,8 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+
+mod common;
 
 use egret_workflow::logs::{LogLevel, LogLimits, LogLine, RunIdentity, RunLog};
 use egret_workflow::scripts::{RunnerKind, RunnerSpec};
@@ -107,6 +116,7 @@ fn handler_over(type_id: &str, files: Arc<FileStore>) -> Script {
             }]),
             features: Arc::new(FixedFeatureState(true)),
             files: Some(files),
+            pool: None,
         }),
     )
 }
@@ -1476,6 +1486,7 @@ async fn a_stored_input_file_streams_into_the_container() {
             }]),
             features: Arc::new(FixedFeatureState(true)),
             files: Some(files.clone()),
+            pool: None,
         }),
     );
     let (mut t, rec) = recorded(
@@ -1612,6 +1623,7 @@ async fn a_missing_stored_object_fails_the_task_and_the_container_never_starts()
             }]),
             features: Arc::new(FixedFeatureState(true)),
             files: Some(files.clone()),
+            pool: None,
         }),
     );
     let (mut t, rec) = recorded(
@@ -1872,6 +1884,242 @@ async fn a_reattached_container_is_collected_under_the_same_uris() {
     force_remove(&name);
 }
 
+// ---- W9b Task 5: namespace files staged into the container -----------------
+
+/// The namespace files of w9b `staging.setup` (the two shared namespaces) in
+/// this suite's workspace, which is made a real workspace row first (the
+/// table's FK). The database is required: a case that cannot reach it FAILS.
+async fn namespace_files_setup() -> sqlx::PgPool {
+    use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor};
+    use egret_workflow::storage::nsfiles::path::NsPath;
+    use egret_workflow::storage::nsfiles::store::{put, Conflict};
+    let pool = common::db()
+        .await
+        .expect("the namespace-file cases need DATABASE_URL")
+        .pool;
+    let user: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (email, name, provider, status, password_hash) \
+         VALUES ($1, 't', 'local', 'active', 'x') RETURNING id",
+    )
+    .bind(format!("u_{}@t.local", Uuid::new_v4().simple()))
+    .fetch_one(&pool)
+    .await
+    .expect("seed user");
+    sqlx::query(
+        "INSERT INTO workspaces (id, slug, name, created_by) VALUES ($1, $2, 't', $3) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(suite_workspace())
+    .bind(suite_workspace().to_string())
+    .bind(user)
+    .execute(&pool)
+    .await
+    .expect("seed workspace");
+    let files = suite_files();
+    for (ns, path, body) in [
+        ("w9b.s1", "/x.txt", "from-s1"),
+        ("w9b.s1", "/only1.txt", "only1"),
+        ("w9b.s2", "/x.txt", "from-s2"),
+        ("w9b.s2", "/sub/y.txt", "y2"),
+        // W9b Task 5 fix round 1, I2: glob characters in a stored name.
+        ("w9b.s3", "/reports/q[1].csv", "q,1"),
+    ] {
+        let grant = authorize(suite_workspace(), Actor::Api, ns, Access::Write).unwrap();
+        let path = NsPath::parse_file(path).unwrap();
+        let has = egret_workflow::storage::nsfiles::store::resolve(
+            &mut pool.acquire().await.unwrap(),
+            &grant,
+            &path,
+            egret_workflow::storage::nsfiles::store::Want::Latest,
+        )
+        .await
+        .is_ok();
+        if !has {
+            put(
+                &pool,
+                &files,
+                &grant,
+                &path,
+                &mut body.as_bytes(),
+                Conflict::Overwrite,
+                egret_workflow::storage::nsfiles::CreatedBy::User(user),
+            )
+            .await
+            .expect("written");
+        }
+    }
+    pool
+}
+
+/// One shell task with `namespaceFiles: block` and `inputFiles`, run in a
+/// real container that prints what it was given; its lines.
+async fn run_with_namespace_files(
+    pool: &sqlx::PgPool,
+    block: serde_json::Value,
+    input_files: serde_json::Value,
+) -> (Outcome, Vec<String>) {
+    use egret_config::{PluginConfiguration, PluginConfigurationValues, PluginConfigurations};
+    let files = suite_files();
+    let h = Script::new(
+        egret_workflow::scripts::kind_of(container::TYPE_ID).expect("a script type"),
+        Arc::new(ScriptRuntime {
+            runner_kind: RunnerKind::Docker,
+            runner: Arc::new(DockerRunner::new().with_files(files.clone())),
+            plugin_configurations: PluginConfigurations(vec![PluginConfiguration {
+                r#type: RunnerKind::Docker.fqcn().to_string(),
+                values: PluginConfigurationValues {
+                    allowed_images: Some(vec!["*".into(), "*/*".into(), "*/*/*".into()]),
+                    allowed_types: None,
+                },
+            }]),
+            features: Arc::new(FixedFeatureState(true)),
+            files: Some(files.clone()),
+            pool: Some(pool.clone()),
+        }),
+    );
+    let (mut t, rec) = recorded(
+        container::TYPE_ID,
+        serde_json::json!({
+            "image": SHELL_IMAGE,
+            "namespaceFiles": block,
+            "inputFiles": input_files,
+            "commands": [
+                "find . -type f ! -path './.egret/*' | sort | while read f; do echo \"FILE $f=$(cat \"$f\")\"; done",
+            ],
+        }),
+    );
+    let snapshot = egret_workflow::storage::scope::Snapshot::from_parts(
+        BTreeMap::new(),
+        files,
+        suite_workspace(),
+        Some(prefix_of(&t)),
+    )
+    .with_namespace_files(Some("w9b.stage".to_string()), None);
+    t.render = egret_workflow::runners::RenderContext::new().with_files(snapshot.into_scope());
+    let out = h
+        .run(&t)
+        .await
+        .expect("a real daemon is not a worker failure");
+    h.release(&t).await.expect("released");
+    let lines = rec
+        .texts()
+        .into_iter()
+        .filter(|l| l.starts_with("FILE "))
+        .collect();
+    (out, lines)
+}
+
+fn file_lines(pairs: &[(&str, &str)]) -> Vec<String> {
+    pairs
+        .iter()
+        .map(|(f, c)| format!("FILE ./{f}={c}"))
+        .collect()
+}
+
+/// **W9b spec §7, §13 (live): two namespaces, `folderPerNamespace`, each
+/// `ifExists`, and an `inputFiles` entry overwriting a namespace file under
+/// EVERY `ifExists`** -- `cat` in the container prints the bytes.
+async fn namespace_files_are_staged_into_the_container_as_the_artifact_does() {
+    let pool = namespace_files_setup().await;
+    let both = serde_json::json!(["w9b.s1", "w9b.s2"]);
+    for (mode, x) in [
+        ("OVERWRITE", "from-s2"),
+        ("WARN", "from-s1"),
+        ("IGNORE", "from-s1"),
+    ] {
+        let (out, lines) = run_with_namespace_files(
+            &pool,
+            serde_json::json!({"namespaces": both, "ifExists": mode}),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(
+            out.state,
+            egret_workflow::executor::RunState::Success,
+            "{mode}: {out:?}"
+        );
+        assert_eq!(
+            lines,
+            file_lines(&[("only1.txt", "only1"), ("sub/y.txt", "y2"), ("x.txt", x)]),
+            "{mode}"
+        );
+    }
+    let (out, lines) = run_with_namespace_files(
+        &pool,
+        serde_json::json!({"namespaces": both, "ifExists": "FAIL"}),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(out.state, egret_workflow::executor::RunState::Failed);
+    let m = out.message.unwrap_or_default();
+    assert!(
+        m.contains("'x.txt'") && m.contains("'w9b.s1'") && m.contains("'w9b.s2'"),
+        "{m}"
+    );
+    assert!(lines.is_empty(), "the container never ran: {lines:?}");
+
+    let (out, lines) = run_with_namespace_files(
+        &pool,
+        serde_json::json!({"namespaces": both, "folderPerNamespace": true}),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        out.state,
+        egret_workflow::executor::RunState::Success,
+        "{out:?}"
+    );
+    assert_eq!(
+        lines,
+        file_lines(&[
+            ("w9b.s1/only1.txt", "only1"),
+            ("w9b.s1/x.txt", "from-s1"),
+            ("w9b.s2/sub/y.txt", "y2"),
+            ("w9b.s2/x.txt", "from-s2"),
+        ])
+    );
+
+    for mode in ["OVERWRITE", "FAIL", "WARN", "IGNORE"] {
+        let (out, lines) = run_with_namespace_files(
+            &pool,
+            serde_json::json!({"namespaces": ["w9b.s1"], "ifExists": mode}),
+            serde_json::json!({"x.txt": "from-input", "y.txt": "nsfile://w9b.s2/sub/y.txt"}),
+        )
+        .await;
+        assert_eq!(
+            out.state,
+            egret_workflow::executor::RunState::Success,
+            "{mode}: {out:?}"
+        );
+        assert_eq!(
+            lines,
+            file_lines(&[
+                ("only1.txt", "only1"),
+                ("x.txt", "from-input"),
+                ("y.txt", "y2")
+            ]),
+            "{mode}"
+        );
+    }
+
+    // Fix round 1, I2 (the user's ruling of 2026-10-06): a namespace file
+    // named with glob characters stages as in Kestra, with no include and
+    // with an include that matches it, and `cat` prints its bytes.
+    for block in [
+        serde_json::json!({"namespaces": ["w9b.s3"]}),
+        serde_json::json!({"namespaces": ["w9b.s3"], "include": ["reports/*.csv"]}),
+    ] {
+        let (out, lines) =
+            run_with_namespace_files(&pool, block.clone(), serde_json::json!({})).await;
+        assert_eq!(
+            out.state,
+            egret_workflow::executor::RunState::Success,
+            "{block}: {out:?}"
+        );
+        assert_eq!(lines, file_lines(&[("reports/q[1].csv", "q,1")]), "{block}");
+    }
+}
+
 type Case = fn() -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
 macro_rules! case {
@@ -1905,6 +2153,7 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
         case!(the_runner_refuses_an_empty_image_with_the_artifacts_own_message),
         case!(output_files_are_uris_streamed_out_and_read_back_byte_identical),
         case!(a_reattached_container_is_collected_under_the_same_uris),
+        case!(namespace_files_are_staged_into_the_container_as_the_artifact_does),
     ]
 }
 

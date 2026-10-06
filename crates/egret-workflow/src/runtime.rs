@@ -726,6 +726,13 @@ pub async fn handlers_for(
         pool.clone(),
         crate::storage::current(),
     );
+    // W9b Tasks 6 and 7: `UploadFiles`, `DownloadFiles`, `DeleteFiles` and
+    // `PurgeFiles`, which need the pool too.
+    crate::worker::handlers::namespace::register(
+        &mut handlers,
+        pool.clone(),
+        crate::storage::current(),
+    );
     let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) = match cfg
         .container_runner
     {
@@ -759,7 +766,7 @@ pub async fn handlers_for(
         }
     };
     let features: Arc<dyn crate::worker::handlers::script::FeatureState> =
-        Arc::new(PgFeatureState::new(pool));
+        Arc::new(PgFeatureState::new(pool.clone()));
     register(
         &mut handlers,
         Arc::new(ScriptRuntime {
@@ -768,6 +775,8 @@ pub async fn handlers_for(
             plugin_configurations: cfg.plugin_configurations.clone(),
             features: features.clone(),
             files: crate::storage::current(),
+            // W9b Task 5: namespace files are staged on this pool.
+            pool: Some(pool.clone()),
         }),
     );
     crate::worker::handlers::kestra::register(
@@ -782,6 +791,8 @@ pub async fn handlers_for(
             // W9a Task 9: the plugin storage bridge stages from, and collects
             // into, the installed store.
             files: crate::storage::current(),
+            // W9b Task 10: namespace-file values are resolved on this pool.
+            pool: Some(pool),
         }),
     );
     Ok((handlers.with_orphan_sweep(sweep), Some(kind)))

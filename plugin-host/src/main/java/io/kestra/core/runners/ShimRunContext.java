@@ -5,6 +5,7 @@ import java.net.URI;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -45,9 +46,10 @@ import jakarta.validation.Validator;
  *   <li>{@link #workingDir()} is Kestra's own {@link LocalWorkingDir} under the JVM's temp directory
  *       (W9a Task 9: on Docker, {@code $WORKING_DIR} is root-owned and the host runs as USER 65532).</li>
  *   <li>{@link #storage()} is Kestra's own {@link InternalStorage} over {@link EgretStorage}: the files
- *       egret staged and the ones this task writes (W9a spec §9.1).</li>
- *   <li>KV, namespace files, secrets, encryption, ACLs and the application context throw
- *       {@link EgretUnsupported}.</li>
+ *       egret staged and the ones this task writes (W9a spec §9.1); its {@code namespace(ns)} is an
+ *       {@link EgretNamespace}, read-only, over the namespace files egret staged (W9b spec §10,
+ *       2026-10-06).</li>
+ *   <li>KV, secrets, encryption, ACLs and the application context throw {@link EgretUnsupported}.</li>
  * </ul>
  */
 public class ShimRunContext extends DefaultRunContext {
@@ -73,9 +75,42 @@ public class ShimRunContext extends DefaultRunContext {
      * @param staged {@code kestra:// URI -> path relative to $WORKING_DIR}
      * @param baseUri this task run's prefix, {@code null} when egret has no internal storage
      * @param context {@code namespace, flowId, executionId, taskId, taskRunId}; {@code null} when absent
+     * @param namespaceFiles {@code task.json}'s {@code namespaceFiles} (W9b spec §10): every namespace file
+     *     egret staged because a property named it whole, of any namespace
      */
-    record StorageSpec(Map<String, String> staged, URI baseUri, long maxTaskBytes, Map<String, String> context) {
+    record StorageSpec(Map<String, String> staged, URI baseUri, long maxTaskBytes, Map<String, String> context,
+                       List<EgretNamespace.Staged> namespaceFiles) {
         static final StorageSpec NONE = new StorageSpec(Map.of(), null, 0, null);
+
+        /** W9a's shape: no namespace file staged. */
+        StorageSpec(Map<String, String> staged, URI baseUri, long maxTaskBytes, Map<String, String> context) {
+            this(staged, baseUri, maxTaskBytes, context, List.of());
+        }
+
+        /**
+         * What {@link EgretStorage} reads by URI: W9a's {@code storage} map, plus every staged namespace
+         * file, under
+         * <ul>
+         *   <li>its literal URI when that is a {@code kestra:///…/_files/…} one ({@code fileURI}'s) -- so a
+         *       plugin's {@code storage().getFile(uri)} reads it, as {@code CopyIn}'s {@code from} does;</li>
+         *   <li>(fix round 1, I1) its CANONICAL URI, {@code NamespaceFile.of(ns, path, revision).uri()},
+         *       for every entry, {@code nsfile://} ones included: Kestra's own read of an {@code nsfile://}
+         *       value ({@code URIFetcher.fetch}, {@code Data.from}) is
+         *       {@code storage().getFile(namespace(ns).get(path).uri())}, and {@link EgretNamespace#get}
+         *       answers that URI. It names exactly the staged revision, so R1 still holds.</li>
+         * </ul>
+         * {@code task.json}'s {@code storage} map itself is unchanged (the controller's ruling).
+         */
+        Map<String, String> readableByUri() {
+            Map<String, String> all = new LinkedHashMap<>(staged);
+            for (EgretNamespace.Staged s : namespaceFiles) {
+                if (s.uri().startsWith(EgretStorage.SCHEME + "://")) {
+                    all.putIfAbsent(s.uri(), s.staged());
+                }
+                all.putIfAbsent(EgretNamespace.canonicalUri(s), s.staged());
+            }
+            return all;
+        }
     }
 
     private final Path workingDirBase;
@@ -249,7 +284,7 @@ public class ShimRunContext extends DefaultRunContext {
      *
      * <p>The third argument, the {@link NamespaceFactory}, is read by {@code InternalStorage} only in
      * {@code namespace()} (its constructor stores it; {@code getFile}/{@code putFile} never reach it --
-     * read in 2.0.0-rc13's bytecode). Namespace files are W9b's, so the factory egret hands it throws.
+     * read in 2.0.0-rc13's bytecode). It is {@link #namespaceFactory}'s, over the staged namespace files.
      */
     @Override
     public synchronized Storage storage() {
@@ -264,26 +299,34 @@ public class ShimRunContext extends DefaultRunContext {
             }
             StorageContext context = StorageContext.forTask(null, c.get("namespace"), c.get("flowId"),
                 c.get("executionId"), c.get("taskId"), c.get("taskRunId"), null);
-            EgretStorage bridge = new EgretStorage(workingDirBase, storageSpec.staged(), storageSpec.baseUri(),
+            EgretStorage bridge = new EgretStorage(workingDirBase, storageSpec.readableByUri(), storageSpec.baseUri(),
                 storageSpec.maxTaskBytes());
-            storage = new InternalStorage(context, bridge, NO_NAMESPACE_FILES);
+            storage = new InternalStorage(context, bridge, namespaceFactory(workingDirBase, storageSpec.namespaceFiles()));
         }
         return storage;
     }
 
-    /** Namespace files are W9b's: every {@code storage().namespace(…)} throws. */
-    static final NamespaceFactory NO_NAMESPACE_FILES = new NamespaceFactory(null) {
-        @Override
-        public Namespace of(String tenantId, String namespace, StorageInterface storageInterface) {
-            throw new EgretUnsupported("storage().namespace(" + namespace + ") needs namespace files, "
-                + "which egret does not provide yet (W9b)");
-        }
+    /**
+     * W9b spec §10 (2026-10-06, replacing W9a's {@code NO_NAMESPACE_FILES}, which threw for every
+     * namespace): {@code storage().namespace(ns)} is an {@link EgretNamespace} over the staged entries of
+     * {@code ns} -- an empty one for a namespace no property named, never an exit 4. Kestra's
+     * {@code InternalStorage.namespace(..)} calls {@code of(logger, tenant, ns, storage)} (read in
+     * 2.0.0-rc13's bytecode); the {@code StorageInterface} it passes is not used: egret staged the bytes.
+     */
+    static NamespaceFactory namespaceFactory(Path workingDir, List<EgretNamespace.Staged> staged) {
+        return new NamespaceFactory(null) {
+            @Override
+            public Namespace of(String tenantId, String namespace, StorageInterface storageInterface) {
+                List<EgretNamespace.Staged> own = staged.stream().filter(s -> s.namespace().equals(namespace)).toList();
+                return new EgretNamespace(tenantId, namespace, workingDir, own);
+            }
 
-        @Override
-        public Namespace of(Logger logger, String tenantId, String namespace, StorageInterface storageInterface) {
-            return of(tenantId, namespace, storageInterface);
-        }
-    };
+            @Override
+            public Namespace of(Logger logger, String tenantId, String namespace, StorageInterface storageInterface) {
+                return of(tenantId, namespace, storageInterface);
+            }
+        };
+    }
 
     // --- what egret does not provide ----------------------------------------------------
 

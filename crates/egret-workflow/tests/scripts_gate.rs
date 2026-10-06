@@ -92,15 +92,15 @@ fn the_three_property_sets_partition_what_kestra_accepts() {
         let implemented = owned(&kind.implemented_properties());
         let handled = owned(scripts::HANDLED_BY_TASK_MODEL);
         let refused = owned(&kind.refused_properties());
-        // W9a Task 6 moved `outputDirectory` from refused to implemented; the
-        // fixture records W5a's partition, so the move is applied here.
+        // W9a Task 6 moved `outputDirectory`, and W9b Task 5 `namespaceFiles`,
+        // from refused to implemented; the fixture records W5a's partition, so
+        // the moves are applied here.
         let mut implemented_now = set(&t["implemented_in_w5a"]);
-        implemented_now.insert("outputDirectory".to_string());
         let mut refused_now = set(&t["refused_in_w5a"]);
-        assert!(
-            refused_now.remove("outputDirectory"),
-            "{fqcn}: W5a refused it"
-        );
+        for moved in ["outputDirectory", "namespaceFiles"] {
+            implemented_now.insert(moved.to_string());
+            assert!(refused_now.remove(moved), "{fqcn}: W5a refused {moved}");
+        }
         assert_eq!(implemented, implemented_now, "{fqcn} implemented");
         assert_eq!(
             handled,
@@ -134,8 +134,8 @@ fn every_refused_property_is_refused_by_name() {
     let mut checked = 0;
     for (fqcn, kind, t) in types() {
         for prop in set(&t["refused_in_w5a"]) {
-            if prop == "outputDirectory" {
-                continue; // implemented since W9a Task 6
+            if prop == "outputDirectory" || prop == "namespaceFiles" {
+                continue; // implemented since W9a Task 6 and W9b Task 5
             }
             let errs = refusals(&fqcn, &with(kind, &prop, json!("x")));
             assert!(
@@ -147,8 +147,9 @@ fn every_refused_property_is_refused_by_name() {
             checked += 1;
         }
     }
-    // 10 + 10 + 17 + 17 (W5a's 11 + 11 + 18 + 18, less `outputDirectory`).
-    assert_eq!(checked, 54, "the loop saw every refused property");
+    // 9 + 9 + 16 + 16 (W5a's 11 + 11 + 18 + 18, less `outputDirectory` and
+    // `namespaceFiles`).
+    assert_eq!(checked, 50, "the loop saw every refused property");
 }
 
 /// The seven base-task properties, named one by one: these are the ones that
@@ -930,23 +931,66 @@ async fn publish_is_refused_with_each_named_error() {
     assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("is refused by egret"), "{body}");
 
-    // 5. An unimplemented property, by name.
+    // 5. An unimplemented property, by name. (`namespaceFiles` was this
+    // property until W9b Task 5 implemented it; `targetOS` still is.)
+    let (s, body) = publish(
+        &app,
+        ws,
+        user,
+        &flow("w5a.prop", &format!("{SHELL}    targetOS: LINUX\n")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("property 'targetOS'"), "{body}");
+
+    // And the control: the same task, allowed, publishes.
+    let (s, body) = publish(&app, ws, user, &flow("w5a.ok", SHELL)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+}
+
+/// W9b Task 5: `namespaceFiles` publishes on a script task (it left
+/// `COMMON_REFUSED`), and a malformed block is refused naming the property
+/// inside it, `namespaceFiles.namespaces`.
+#[tokio::test]
+async fn a_script_task_with_namespace_files_publishes_and_a_malformed_block_is_refused_by_name() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    common::enable_feature(&db, ws, "workflow_containers").await;
+    let app =
+        common::app_with_scripts(&db, settings(&[(scripts::DOCKER_RUNNER, &["ubuntu:*"])])).await;
+
     let (s, body) = publish(
         &app,
         ws,
         user,
         &flow(
-            "w5a.prop",
-            &format!("{SHELL}    namespaceFiles:\n      enabled: true\n"),
+            "w9b.nf",
+            &format!(
+                "{SHELL}    namespaceFiles:\n      enabled: true\n      include: ['**.txt']\n      \
+                 namespaces: [w9b.s1, '{{{{ flow.namespace }}}}']\n      ifExists: WARN\n      \
+                 folderPerNamespace: true\n"
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+
+    let (s, body) = publish(
+        &app,
+        ws,
+        user,
+        &flow(
+            "w9b.nf.bad",
+            &format!("{SHELL}    namespaceFiles:\n      namespaces: w9b.s1\n"),
         ),
     )
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
-    assert!(body.contains("property 'namespaceFiles'"), "{body}");
-
-    // And the control: the same task, allowed, publishes.
-    let (s, body) = publish(&app, ws, user, &flow("w5a.ok", SHELL)).await;
-    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("namespaceFiles.namespaces") && body.contains("must be a list of strings"),
+        "{body}"
+    );
 }
 
 /// **A script task publishes only onto the runner this deployment has**
@@ -1174,6 +1218,7 @@ fn worker_registry(
             plugin_configurations: configs(&[(scripts::DOCKER_RUNNER, images)]),
             features: std::sync::Arc::new(PgFeatureState::new(pool.clone())),
             files: None,
+            pool: None,
         }),
     );
     reg
@@ -1474,6 +1519,7 @@ fn daemon_registry(
             plugin_configurations: configs(&[(scripts::DOCKER_RUNNER, &["ubuntu:*"])]),
             features: std::sync::Arc::new(PgFeatureState::new(pool.clone())),
             files: None,
+            pool: None,
         }),
     );
     reg

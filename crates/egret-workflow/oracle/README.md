@@ -3696,6 +3696,13 @@ which is now their pairing. The test above is
 `the_eight_refusals_name_themselves_and_their_owner`; `fileURI` names W9b and
 `kv` W9c.
 
+**W9b Task 4 (2026-10-05):** `fileURI` is implemented over namespace files and
+left the refusals; a corpus render has no file scope, so `function-fileuri`
+still fails, by the sentence the four's test asserts for it too, and is paired
+with `without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution`.
+The refusals' test is now `kv_still_names_w9c_and_the_refused_list_shrinks_to_seven`
+(seven names; `kv` names W9c).
+
 ### `fetchContext`'s key order is `HashMap`'s, and that is a recorded divergence
 
 Measured: `{"b":1,"a":2}` comes back `{"a":2,"b":1}` and

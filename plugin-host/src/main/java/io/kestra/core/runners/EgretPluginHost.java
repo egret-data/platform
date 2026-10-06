@@ -47,12 +47,16 @@ import jakarta.validation.ConstraintViolationException;
  *      io.kestra.core.runners.EgretPluginHost run &lt;path-to-task.json&gt;
  * task.json = {"type": "&lt;FQCN without kestra.&gt;", "properties": {…rendered…}, "mask": ["…"],
  *              "storage": {"&lt;kestra:// uri&gt;": ".egret/storage/&lt;n&gt;"}, "baseUri": "kestra:///…/",
- *              "maxTaskBytes": n, "context": {"namespace", "flowId", "executionId", "taskId", "taskRunId"}}
- *             (the last four: W9a spec §5; a run with no internal storage has no baseUri)
+ *              "maxTaskBytes": n, "context": {"namespace", "flowId", "executionId", "taskId", "taskRunId"},
+ *              "namespaceFiles": [{"uri", "namespace", "path", "revision", "size", "staged"}]}
+ *             (storage to context: W9a spec §5; a run with no internal storage has no baseUri;
+ *             namespaceFiles: W9b spec §10, the namespace files egret staged because a property named
+ *             them whole, which storage().namespace(ns) reads -- 2026-10-06)
  * stdout    = "&lt;LEVEL&gt; &lt;message&gt;" lines; one "::{"outputs": {…}}::" on success;
  *             one "::{"egretFailure": {"code": n, "message": "…"}}::" before a non-zero exit
  * exit      = 0 ok | 2 refused/invalid | 3 plugin threw | 4 needs what egret does not provide
- *             (namespace files W9b, KV W9c, Kestra's secret key or services)
+ *             (KV W9c, Kestra's secret key or services; namespace files are provided since W9b,
+ *             2026-10-06, read-only)
  * SIGTERM   = the shutdown hook calls task.kill(), waits for run() up to EGRET_KILL_WAIT_MS, exits
  *
  * java … EgretPluginHost describe &lt;plugins-dir&gt;   -&gt; catalog.json on stdout
@@ -371,7 +375,33 @@ public final class EgretPluginHost {
                 context.put(k, v);
             }
         }
-        return new ShimRunContext.StorageSpec(staged, baseUri, maxTaskBytes, context);
+        return new ShimRunContext.StorageSpec(staged, baseUri, maxTaskBytes, context, namespaceFiles(doc));
+    }
+
+    /** {@code task.json}'s {@code namespaceFiles} (W9b spec §10); absent means none. */
+    static List<EgretNamespace.Staged> namespaceFiles(Map<String, Object> doc) throws Refused {
+        Object v = doc.get("namespaceFiles");
+        if (v == null) {
+            return List.of();
+        }
+        if (!(v instanceof List<?> list)) {
+            throw new Refused("task.json \"namespaceFiles\" is not a list");
+        }
+        List<EgretNamespace.Staged> out = new ArrayList<>();
+        for (Object o : list) {
+            if (!(o instanceof Map<?, ?> m)
+                || !(m.get("uri") instanceof String uri)
+                || !(m.get("namespace") instanceof String namespace)
+                || !(m.get("path") instanceof String path)
+                || !(m.get("revision") instanceof Number revision)
+                || !(m.get("size") instanceof Number size)
+                || !(m.get("staged") instanceof String staged)) {
+                throw new Refused("task.json \"namespaceFiles\" holds an entry that is not {\"uri\", "
+                    + "\"namespace\", \"path\", \"staged\": strings, \"revision\", \"size\": numbers}");
+            }
+            out.add(new EgretNamespace.Staged(uri, namespace, path, revision.intValue(), size.longValue(), staged));
+        }
+        return List.copyOf(out);
     }
 
     /** The catalog's {@code classes} map: FQCN -> {properties, outputs}. */

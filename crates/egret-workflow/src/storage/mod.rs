@@ -15,6 +15,8 @@
 //!   execution-creating INSERT runs on a FILE input given as a URI (spec §7.1).
 //! - [`ion`]: the Ion reader (text or binary) behind the preview.
 //! - [`routes`]: the execution file API -- download, metas, preview (spec §8).
+//! - [`nsfiles`]: W9b's namespace files -- the path rule, the one access
+//!   decision, the metadata table and the objects behind it.
 //! - this module: the [`FileStore`] (the object store, its bucket, prefix and
 //!   caps), the process-wide slot it is installed in, and the index writers.
 //!
@@ -33,6 +35,9 @@ pub mod collect;
 pub mod index;
 pub mod inputs;
 pub mod ion;
+pub(crate) mod lock;
+pub(crate) mod multipart;
+pub mod nsfiles;
 pub mod prune;
 pub mod routes;
 pub mod scope;
@@ -57,6 +62,9 @@ pub struct Caps {
     pub max_file_bytes: u64,
     pub max_task_bytes: u64,
     pub max_read_bytes: u64,
+    /// W9b: the most namespace files one listing, search or operation sees
+    /// (`workflow.storage.max_namespace_files`, W9b spec §7).
+    pub max_namespace_files: u64,
 }
 
 impl From<&egret_config::WorkflowStorageConfig> for Caps {
@@ -65,6 +73,7 @@ impl From<&egret_config::WorkflowStorageConfig> for Caps {
             max_file_bytes: c.max_file_bytes,
             max_task_bytes: c.max_task_bytes,
             max_read_bytes: c.max_read_bytes,
+            max_namespace_files: c.max_namespace_files,
         }
     }
 }
@@ -75,7 +84,9 @@ impl Default for Caps {
     }
 }
 
-/// The object store an execution's files live in, and where in it.
+/// The object store an execution's files live in, and where in it. `Clone`
+/// shares the store (an `Arc`): W9b's detached moves and purges own a copy.
+#[derive(Clone)]
 pub struct FileStore {
     pub store: Arc<dyn egret_storage::ObjectStore>,
     pub bucket: String,
@@ -111,6 +122,52 @@ impl FileStore {
             self.prefix,
             workspace.hyphenated()
         ))
+    }
+
+    /// `s3://{bucket}/{prefix}{workspace}/{ns-as-path}/_files{path}[.v{revision}]`
+    /// (W9b spec §3). The workspace is the grant's. Revision 1 has no suffix;
+    /// a directory has no object, so egret never asks for one's key.
+    pub fn namespace_object_uri(
+        &self,
+        grant: &nsfiles::access::Grant,
+        path: &nsfiles::path::NsPath,
+        revision: u32,
+    ) -> String {
+        debug_assert!(!path.is_dir(), "a directory {path} has no object");
+        debug_assert!(revision >= 1, "revision {revision} of {path}");
+        let suffix = if revision >= 2 {
+            format!(".v{revision}")
+        } else {
+            String::new()
+        };
+        format!(
+            "s3://{}/{}{}/{}/{}{}{}",
+            self.bucket,
+            self.prefix,
+            grant.workspace().hyphenated(),
+            uri::namespace_as_path(grant.namespace()),
+            uri::NAMESPACE_FILES_SEGMENT,
+            path.as_str(),
+            suffix
+        )
+    }
+
+    /// `s3://{bucket}/{prefix}{workspace}/_nsfiles_staging/{id}`: where a
+    /// namespace file's body is uploaded before any lock is taken (W9b Task 8
+    /// fix round 1, the user's ruling of 2026-10-06; [`nsfiles::staging`]).
+    /// No other key can be under it: every other key of the workspace starts
+    /// `{workspace}/{first namespace segment}/`, and a namespace starts with
+    /// `[a-z0-9]` (`is_valid_namespace`, which `check_namespace` and publish
+    /// call), never `_`.
+    pub fn namespace_staging_uri(&self, workspace: Uuid, id: Uuid) -> String {
+        format!(
+            "s3://{}/{}{}/{}/{}",
+            self.bucket,
+            self.prefix,
+            workspace.hyphenated(),
+            nsfiles::staging::STAGING_SEGMENT,
+            id.hyphenated()
+        )
     }
 
     /// `s3://{bucket}/{prefix}{workspace}/{ns}/{flow-slug}/executions/{exec}/`,
@@ -398,6 +455,7 @@ mod tests {
                 max_file_bytes: 1 << 30,
                 max_task_bytes: 5 << 30,
                 max_read_bytes: 10 << 20,
+                max_namespace_files: 10_000,
             }
         );
     }

@@ -128,7 +128,9 @@ const BATCH: usize = 1;
 
 /// The registry the ratchet judges: the four handlers W3b ships, with `Sleep`
 /// capped — see the module doc, item 3 — and, since W9a Tasks 11 and 12, the
-/// nine core storage tasks over the test `MemStore` (`storage::install_mem_for_tests`,
+/// nine core storage tasks (and, since W9b Tasks 6 and 7, the four
+/// `core.namespace` tasks)
+/// over the test `MemStore` (`storage::install_mem_for_tests`,
 /// installed here, so the render snapshot of every `settle` in this process
 /// reads the same store the handlers write). `pool` is the database `run`
 /// drives: `Delete` and `PurgeCurrentExecutionFiles` delete index rows in it.
@@ -156,7 +158,16 @@ pub fn registry(pool: &PgPool) -> Handlers {
             files.clone(),
         ))));
     }
-    egret_workflow::worker::handlers::storage::register(&mut r, pool.clone(), Some(files));
+    egret_workflow::worker::handlers::storage::register(&mut r, pool.clone(), Some(files.clone()));
+    // W9b Task 6: the namespace tasks over the same store. Their render-time
+    // namespace lookups (and Task 4's functions) connect with the options of
+    // the pool the driver runs; an [`unconnected_pool`] installs nothing, so
+    // a caller that only reads the types cannot leave unreachable options
+    // behind for one that runs.
+    if !is_unconnected(pool) {
+        egret_workflow::storage::nsfiles::install_db_for_tests(pool);
+    }
+    egret_workflow::worker::handlers::namespace::register(&mut r, pool.clone(), Some(files));
     r.add(std::sync::Arc::new(
         egret_workflow::worker::handlers::log::Log::new(),
     ));
@@ -172,12 +183,27 @@ pub fn registry(pool: &PgPool) -> Handlers {
     r
 }
 
+/// Where [`unconnected_pool`] points: nothing listens on port 1. ONE
+/// definition, read by the pool and by [`is_unconnected`] (fix round 1, M1).
+const UNCONNECTED_URL: &str = "postgres://nobody@127.0.0.1:1/none";
+
 /// A pool that never connects, for a caller of [`registry`] that reads only
 /// its types.
 pub fn unconnected_pool() -> PgPool {
     sqlx::postgres::PgPoolOptions::new()
-        .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+        .connect_lazy(UNCONNECTED_URL)
         .expect("a lazy pool parses")
+}
+
+/// Whether `pool` is [`unconnected_pool`]'s: the same host, port and
+/// database as [`UNCONNECTED_URL`], parsed the way the pool parsed it.
+pub fn is_unconnected(pool: &PgPool) -> bool {
+    let theirs: sqlx::postgres::PgConnectOptions =
+        UNCONNECTED_URL.parse().expect("UNCONNECTED_URL parses");
+    let ours = pool.connect_options();
+    ours.get_host() == theirs.get_host()
+        && ours.get_port() == theirs.get_port()
+        && ours.get_database() == theirs.get_database()
 }
 
 // ---------------------------------------------------------------------------

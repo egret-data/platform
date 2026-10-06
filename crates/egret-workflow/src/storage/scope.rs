@@ -22,19 +22,43 @@
 //! [`Snapshot::take`]; the render thread is a plain OS thread
 //! (`runners::env::render_str`), and the tokio worker that spawned it waits in
 //! `join`. That needs the multi-thread runtime (global constraints).
+//!
+//! # Namespace files (W9b Task 4, 2026-10-05)
+//!
+//! Execution files are snapshot-only, for the reason above. **Namespace files
+//! are looked up at render**, because they can be: they commit outside any
+//! execution's transaction (W9b spec §6), so every connection sees every
+//! committed row, and a path assembled at render reads like any other. The
+//! render thread cannot borrow `settle`'s transaction, and `settle`'s callers
+//! hold no pool, so the snapshot opens **one** connection of its own, on its
+//! runtime `handle`, from `nsfiles::db_options()`, the first time a template
+//! calls a namespace function, and keeps it for the rest of the scope. Not a
+//! `PgPool`: a pool made in one `#[tokio::test]` runtime breaks in the next,
+//! while the connect options are plain data. A failed connect or query is an
+//! outage ([`Snapshot::outage`]), so the run is re-claimed with no attempt
+//! spent (spec §11). Every lookup goes through `nsfiles::access::authorize`
+//! (the running flow reads any namespace of its workspace) and
+//! `nsfiles::store::resolve`; nothing here creates anything.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use egret_core::Result;
 use regex::Regex;
-use sqlx::PgConnection;
+use sqlx::postgres::PgConnectOptions;
+use sqlx::{Connection, PgConnection};
 use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
+use super::nsfiles::access::{authorize, Access, Actor, Grant};
+use super::nsfiles::path::NsPath;
+use super::nsfiles::store::{self as ns_store, NsEntry, Want};
+use super::nsfiles::NsError;
 use super::{decode_utf8, readable_executions, resolve_readable_many, uri};
 use super::{FileStore, IndexedFile, Unreadable};
-use crate::runners::files::{FileMeta, FileScope, FileUnavailable, RenderFiles};
+use crate::runners::files::{
+    FileMeta, FileScope, FileUnavailable, NsFileArgs, NsFileMeta, RenderFiles, NSFILE_SCHEME,
+};
 
 /// A `kestra:///` URI in text: the scheme, then the whole run of characters
 /// that are not whitespace, a quote or a backslash (a backslash is never legal
@@ -53,6 +77,12 @@ pub struct Snapshot {
     /// The first store outage a read met (spec §11); see
     /// [`RenderFiles::infrastructure_failure`].
     outage: Mutex<Option<String>>,
+    /// W9b: the running flow's namespace, from the execution's flow.
+    flow_namespace: Option<String>,
+    /// W9b: where a namespace lookup connects (`nsfiles::db_options()`).
+    ns_db: Option<Arc<PgConnectOptions>>,
+    /// W9b: the one connection namespace lookups use, opened on the first.
+    ns_conn: Mutex<Option<PgConnection>>,
 }
 
 impl Snapshot {
@@ -62,6 +92,7 @@ impl Snapshot {
     /// `json` is walked: a string that starts with `kestra:///` is taken
     /// whole, and every other string, at any depth, is searched the same way.
     /// With no URI anywhere the database is not touched.
+    #[allow(clippy::too_many_arguments)]
     pub async fn take(
         conn: &mut PgConnection,
         store: Arc<FileStore>,
@@ -70,6 +101,7 @@ impl Snapshot {
         texts: &[&str],
         json: &[&serde_json::Value],
         task_prefix: Option<String>,
+        flow_namespace: Option<String>,
     ) -> Result<Self> {
         let mut found = BTreeSet::new();
         for text in texts {
@@ -92,6 +124,9 @@ impl Snapshot {
             handle: tokio::runtime::Handle::current(),
             task_prefix,
             outage: Mutex::new(None),
+            flow_namespace,
+            ns_db: super::nsfiles::db_options(),
+            ns_conn: Mutex::new(None),
         })
     }
 
@@ -124,7 +159,23 @@ impl Snapshot {
             handle: tokio::runtime::Handle::current(),
             task_prefix,
             outage: Mutex::new(None),
+            flow_namespace: None,
+            ns_db: None,
+            ns_conn: Mutex::new(None),
         }
+    }
+
+    /// For tests: [`Self::from_parts`] that reaches namespace files as
+    /// `flow_namespace`'s flow, connecting with `db`.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn with_namespace_files(
+        mut self,
+        flow_namespace: Option<String>,
+        db: Option<Arc<PgConnectOptions>>,
+    ) -> Self {
+        self.flow_namespace = flow_namespace;
+        self.ns_db = db;
+        self
     }
 
     /// Record an outage (the first one wins) and hand back its message.
@@ -155,6 +206,381 @@ fn not_in_snapshot(uri: &str) -> String {
              filter, is not looked up"
         ),
     }
+}
+
+impl Snapshot {
+    /// Whether this thread may block on [`Self::handle`]: what every read
+    /// checks first (W9a's store reads, W9b's namespace lookups).
+    fn may_block(&self, what: &str) -> std::result::Result<(), String> {
+        // `block_on` panics on a thread that is inside a runtime; the render
+        // thread never is, and a caller that rendered on a tokio worker gets
+        // an error rather than a panic.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(format!(
+                "{what} cannot be read on this thread: a file is read on egret's render \
+                 thread, not on a runtime worker"
+            ));
+        }
+        // C1: on a current-thread runtime the one thread that drives the IO is
+        // the one waiting for this render, so a store read would never finish
+        // (it does on MemStore, which proves nothing about S3).
+        if self.handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err(format!(
+                "{what} cannot be read: reading a file needs the multi-thread runtime, and \
+                 this render runs on a current-thread one, whose only thread is waiting for it"
+            ));
+        }
+        Ok(())
+    }
+
+    /// W9b: what a namespace function names -- its namespace (the URI's, the
+    /// authority, the `namespace` argument or the running flow's), the
+    /// path, the revision -- and the [`Grant`] to read it. Pure: no database.
+    fn ns_target(&self, args: &NsFileArgs<'_>) -> std::result::Result<NsTarget, FileUnavailable> {
+        let raw = args.path;
+        let refused = |m: String| FileUnavailable::Refused(m);
+        let own = self.flow_namespace.as_deref().ok_or_else(|| {
+            refused(format!(
+                "namespace file '{raw}' cannot be read: this render has no running flow, \
+                 whose namespace a namespace file is read as"
+            ))
+        })?;
+        let named = ns_ref(raw, own, args.namespace).map_err(refused)?;
+        if let Some(uri_revision) = named.uri_revision {
+            // The coordinator's ruling on concern 1 (2026-10-05, an
+            // application of R3): the URI names one revision of one
+            // namespace's file, so an argument that says otherwise is an
+            // error naming both, never silently ignored as Kestra's `kestra`
+            // branch does.
+            if let Some(given) = &args.revision {
+                return Err(refused(format!(
+                    "the 'revision' argument ({given}) cannot be given beside {raw}: a \
+                     kestra:// URI names exactly one revision (here {uri_revision})"
+                )));
+            }
+            if let Some(given) = args.namespace.filter(|g| *g != named.namespace) {
+                return Err(refused(format!(
+                    "the 'namespace' argument '{given}' differs from namespace '{}', \
+                     which {raw} names",
+                    named.namespace
+                )));
+            }
+        }
+        let NsRef {
+            namespace,
+            path,
+            uri_revision,
+        } = named;
+        // THE access decision: any namespace of this workspace, and the
+        // running flow's own namespace must itself be one that holds files.
+        let grant = authorize(
+            self.workspace,
+            Actor::Flow { namespace: own },
+            &namespace,
+            Access::Read,
+        )
+        .map_err(refused)?;
+        // A `kestra:///…/_files/p[.vN]` URI names exactly one revision (R1);
+        // a `revision` argument beside it was refused above.
+        let want = match (uri_revision, &args.revision) {
+            (Some(n), _) => Want::Revision(n),
+            (None, None) => Want::Latest,
+            (None, Some(given)) => match given.parse::<i64>() {
+                Ok(n) => match u32::try_from(n) {
+                    Ok(n) if n >= 1 => Want::Revision(n),
+                    _ => {
+                        return Err(FileUnavailable::Missing(format!(
+                            "revision {n} of namespace file '{path}' does not exist in \
+                             namespace '{namespace}'"
+                        )))
+                    }
+                },
+                Err(_) => {
+                    return Err(refused(format!(
+                        "the 'revision' argument must be a valid integer, and {given:?} is \
+                         not (namespace file '{path}' in namespace '{namespace}')"
+                    )))
+                }
+            },
+        };
+        // A path ending with '/' names a directory; any other names a file,
+        // and -- for a latest read -- the directory of that name when no file
+        // row is there (the coordinator's ruling E, `four_functions_ns.*.directory`).
+        let (file, dir) = if path.ends_with('/') && uri_revision.is_none() {
+            (None, Some(NsPath::parse_dir(&path).map_err(refused)?))
+        } else {
+            let file = NsPath::parse_file(&path).map_err(refused)?;
+            // A directory is always revision 1 (`NamespaceFile.java:138-148`),
+            // so a URI with no `.vN` names it as well as a path does (M8).
+            let dir = if want == Want::Latest || uri_revision == Some(1) {
+                NsPath::parse_dir(&path).ok()
+            } else {
+                None
+            };
+            (Some(file), dir)
+        };
+        let shown = match (&file, &dir) {
+            (Some(p), _) | (None, Some(p)) => p.as_str().to_string(),
+            (None, None) => path,
+        };
+        Ok(NsTarget {
+            grant,
+            file,
+            dir,
+            want,
+            shown,
+        })
+    }
+
+    /// Run `target`'s lookup on this scope's one namespace connection,
+    /// opening it first if this render has not yet. Blocks the render thread
+    /// on [`Self::handle`], as W9a's store reads do.
+    ///
+    /// W9b fix round 1 (I1): the connection lives for one render at most --
+    /// [`RenderFiles::end_render`] closes it -- and a lookup that fails on a
+    /// connection an earlier lookup of the same render opened (the server
+    /// may have ended it since) reconnects once before it is an outage.
+    fn ns_lookup(
+        &self,
+        target: &NsTarget,
+        read_cap: Option<u64>,
+    ) -> std::result::Result<(NsEntry, Option<Vec<u8>>), FileUnavailable> {
+        let what = format!(
+            "namespace file '{}' in namespace '{}'",
+            target.shown,
+            target.grant.namespace()
+        );
+        self.may_block(&what).map_err(FileUnavailable::Refused)?;
+        let mut held = self.ns_conn.lock().unwrap_or_else(|p| p.into_inner());
+        let found = self.handle.block_on(async {
+            let mut reused = held.is_some();
+            loop {
+                if held.is_none() {
+                    let Some(opts) = self.ns_db.as_deref() else {
+                        return Err(NsError::Author(format!(
+                            "{what} cannot be read: this egret process has no database \
+                             connection for namespace files"
+                        )));
+                    };
+                    let conn = PgConnection::connect_with(opts).await.map_err(db_err)?;
+                    *held = Some(conn);
+                }
+                let conn = held.as_mut().expect("opened above");
+                let looked = match find(conn, target).await {
+                    Ok(entry) => match read_cap {
+                        None => Ok((entry, None)),
+                        Some(cap) => match self.ns_read(target, &entry, cap).await {
+                            Ok(bytes) => Ok((entry, Some(bytes))),
+                            Err(e) => Err(e),
+                        },
+                    },
+                    Err(e) => Err(e),
+                };
+                match looked {
+                    Err(e) if is_db_outage(&e) => {
+                        // The connection may be the broken thing: never reuse it.
+                        if let Some(broken) = held.take() {
+                            let _ = broken.close().await;
+                        }
+                        if std::mem::take(&mut reused) {
+                            continue;
+                        }
+                        return Err(e);
+                    }
+                    other => return other,
+                }
+            }
+        });
+        found.map_err(|e| self.ns_unavailable(&what, e))
+    }
+
+    /// For tests: whether this scope holds a namespace connection now.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn holds_a_namespace_connection(&self) -> bool {
+        self.ns_conn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+    }
+
+    /// `entry`'s bytes, at most `cap + 1` of them (the `+1` is how a file
+    /// over the cap is told from one at it).
+    async fn ns_read(
+        &self,
+        target: &NsTarget,
+        entry: &NsEntry,
+        cap: u64,
+    ) -> std::result::Result<Vec<u8>, NsError> {
+        let ns = target.grant.namespace();
+        if entry.is_directory {
+            // `read._extra.directory`, measured: Kestra's sentence.
+            return Err(NsError::Author(format!(
+                "'{}' is a directory in namespace '{ns}', it has no content to read",
+                entry.path.lock_path()
+            )));
+        }
+        // The row knows the size: refuse without a download.
+        if entry.size > cap {
+            return Err(NsError::TooLarge(ns_over_cap(entry, ns, cap)));
+        }
+        let stream = ns_store::open(&self.store, &target.grant, entry).await?;
+        let mut bytes = Vec::new();
+        stream
+            .take(cap.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| {
+                NsError::Store(format!(
+                    "revision {} of namespace file '{}' in namespace '{ns}' could not be read: \
+                     internal storage is unavailable: {e}",
+                    entry.revision, entry.path
+                ))
+            })?;
+        Ok(bytes)
+    }
+
+    /// An outage (the database or the store unreachable) is recorded and
+    /// refused; a missing row is `Missing`; anything else is refused.
+    fn ns_unavailable(&self, what: &str, e: NsError) -> FileUnavailable {
+        if is_db_outage(&e) {
+            return FileUnavailable::Refused(self.outage(format!(
+                "{what} could not be looked up: the database is unavailable: {e}"
+            )));
+        }
+        match e {
+            NsError::NotFound(m) => FileUnavailable::Missing(m),
+            NsError::Store(m) => FileUnavailable::Refused(self.outage(m)),
+            other => FileUnavailable::Refused(other.to_string()),
+        }
+    }
+}
+
+/// What a namespace-file reference names, before any access decision: its
+/// namespace, its path as written, and -- for a `kestra:///…/_files/…[.vN]`
+/// URI, which names exactly one revision -- that revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NsRef {
+    pub(crate) namespace: String,
+    pub(crate) path: String,
+    pub(crate) uri_revision: Option<u32>,
+}
+
+/// THE parse of a namespace-file reference (W9b spec §3, §6), shared by the
+/// functions ([`Snapshot::ns_target`]) and script `inputFiles` staging
+/// (`nsfiles::stage::resolve_input_uri`, Task 5):
+///
+/// * `kestra:///…/_files/…[.vN]`: `uri::parse_any`'s namespace and path, and
+///   the revision the URI names; an execution URI is refused;
+/// * `nsfile:///path`: `own`'s (or `namespace_arg`'s) namespace;
+///   `nsfile://other.ns/path`: the authority's, which wins over
+///   `namespace_arg` (a caller that must refuse the pair does so first);
+/// * anything else is a bare path, in `namespace_arg`'s namespace or `own`'s.
+///
+/// Pure: no access decision (the caller's `authorize` makes it) and no path
+/// rule (the caller's `NsPath::parse_*`).
+pub(crate) fn ns_ref(
+    raw: &str,
+    own: &str,
+    namespace_arg: Option<&str>,
+) -> std::result::Result<NsRef, String> {
+    let or_own = |arg: Option<&str>| arg.unwrap_or(own).to_string();
+    if raw.starts_with(uri::SCHEME_PREFIX) {
+        return match uri::parse_any(raw) {
+            Ok(uri::StorageUri::NamespaceFile(n)) => Ok(NsRef {
+                namespace: n.namespace,
+                path: n.path,
+                uri_revision: Some(n.revision),
+            }),
+            Ok(uri::StorageUri::Execution(_)) => Err(format!(
+                "{raw} is an execution file URI, not a namespace file's"
+            )),
+            Err(reason) => Err(Unreadable::Malformed {
+                uri: raw.to_string(),
+                reason,
+            }
+            .to_string()),
+        };
+    }
+    if let Some(rest) = raw.strip_prefix(NSFILE_SCHEME) {
+        let (authority, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+        if path.is_empty() {
+            return Err(format!(
+                "{raw} names no file: an nsfile URI is nsfile:///<path> (the flow's own \
+                 namespace) or nsfile://<namespace>/<path>"
+            ));
+        }
+        let namespace = if authority.is_empty() {
+            or_own(namespace_arg)
+        } else {
+            authority.to_string()
+        };
+        return Ok(NsRef {
+            namespace,
+            path: path.to_string(),
+            uri_revision: None,
+        });
+    }
+    Ok(NsRef {
+        namespace: or_own(namespace_arg),
+        path: raw.to_string(),
+        uri_revision: None,
+    })
+}
+
+/// What a namespace function names, parsed and authorized ([`Snapshot::ns_target`]).
+struct NsTarget {
+    grant: Grant,
+    /// The file the path names; `None` when it ends with '/'.
+    file: Option<NsPath>,
+    /// The directory a latest lookup falls back to when no file row is there.
+    dir: Option<NsPath>,
+    want: Want,
+    /// The path in its stored form, for messages.
+    shown: String,
+}
+
+/// The file row, or -- for a latest lookup with no file row -- the live
+/// directory of that name (R3). Every query is `resolve`'s, scoped by the
+/// grant's workspace and namespace.
+async fn find(conn: &mut PgConnection, t: &NsTarget) -> std::result::Result<NsEntry, NsError> {
+    let missing = match &t.file {
+        Some(file) => match ns_store::resolve(conn, &t.grant, file, t.want).await {
+            Err(NsError::NotFound(m)) => NsError::NotFound(m),
+            other => return other,
+        },
+        None => NsError::NotFound(format!(
+            "directory '{}' does not exist in namespace '{}'",
+            t.shown,
+            t.grant.namespace()
+        )),
+    };
+    let Some(dir) = &t.dir else {
+        return Err(missing);
+    };
+    match ns_store::resolve(conn, &t.grant, dir, Want::Latest).await {
+        Ok(e) => Ok(e),
+        Err(NsError::NotFound(_)) => Err(missing),
+        Err(e) => Err(e),
+    }
+}
+
+fn db_err(e: sqlx::Error) -> NsError {
+    NsError::Db(egret_core::Error::Internal(anyhow::Error::new(e)))
+}
+
+/// A database the lookup could not reach or query, as opposed to a row
+/// egret would not have written (also `NsError::Db`, egret's own bug).
+fn is_db_outage(e: &NsError) -> bool {
+    matches!(e, NsError::Db(egret_core::Error::Internal(a)) if a.downcast_ref::<sqlx::Error>().is_some())
+}
+
+fn ns_over_cap(entry: &NsEntry, ns: &str, cap: u64) -> String {
+    format!(
+        "namespace file '{}' in namespace '{ns}' is larger than \
+         workflow.storage.max_read_bytes ({cap} bytes): read() returns the whole file as a \
+         string, so it reads only files up to that size",
+        entry.path
+    )
 }
 
 impl RenderFiles for Snapshot {
@@ -189,24 +615,7 @@ impl RenderFiles for Snapshot {
         if file.size > cap {
             return Err(over_cap());
         }
-        // `block_on` panics on a thread that is inside a runtime; the render
-        // thread never is, and a caller that rendered on a tokio worker gets
-        // an error rather than a panic.
-        if tokio::runtime::Handle::try_current().is_ok() {
-            return Err(format!(
-                "{uri} cannot be read on this thread: a file is read on egret's render \
-                 thread, not on a runtime worker"
-            ));
-        }
-        // C1: on a current-thread runtime the one thread that drives the IO is
-        // the one waiting for this render, so a store read would never finish
-        // (it does on MemStore, which proves nothing about S3).
-        if self.handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
-            return Err(format!(
-                "{uri} cannot be read: reading a file needs the multi-thread runtime, and \
-                 this render runs on a current-thread one, whose only thread is waiting for it"
-            ));
-        }
+        self.may_block(uri)?;
         let bytes = self.handle.block_on(async {
             let stream = match self.store.store.get_stream(&object).await {
                 Ok(stream) => stream,
@@ -261,6 +670,66 @@ impl RenderFiles for Snapshot {
     fn max_read_bytes(&self) -> Option<u64> {
         Some(self.store.caps.max_read_bytes)
     }
+
+    fn namespace_file(
+        &self,
+        args: &NsFileArgs<'_>,
+    ) -> std::result::Result<NsFileMeta, FileUnavailable> {
+        let target = self.ns_target(args)?;
+        let (entry, _) = self.ns_lookup(&target, None)?;
+        let path = entry.path.lock_path().to_string();
+        if entry.is_directory {
+            return Ok(NsFileMeta {
+                path,
+                size: 0,
+                is_directory: true,
+                uri: String::new(),
+            });
+        }
+        let uri = uri::namespace_file_uri(target.grant.namespace(), &entry.path, entry.revision)
+            .map_err(FileUnavailable::Refused)?;
+        Ok(NsFileMeta {
+            path,
+            size: entry.size,
+            is_directory: false,
+            uri,
+        })
+    }
+
+    fn read_namespace_file(&self, args: &NsFileArgs<'_>) -> std::result::Result<String, String> {
+        let message = |e: FileUnavailable| e.message().to_string();
+        let target = self.ns_target(args).map_err(message)?;
+        let cap = self.store.caps.max_read_bytes;
+        let (entry, bytes) = self.ns_lookup(&target, Some(cap)).map_err(message)?;
+        let bytes = bytes.unwrap_or_default();
+        // The stream guard, for an object larger than its row says.
+        if bytes.len() as u64 > cap {
+            return Err(ns_over_cap(&entry, target.grant.namespace(), cap));
+        }
+        let uri = uri::namespace_file_uri(target.grant.namespace(), &entry.path, entry.revision)?;
+        decode_utf8(&uri, bytes).map_err(|e| e.to_string())
+    }
+
+    fn flow_namespace(&self) -> Option<&str> {
+        self.flow_namespace.as_deref()
+    }
+
+    /// Close this render's namespace connection, if it opened one (I1):
+    /// `close()`, so the server sees a goodbye and not an unexpected EOF.
+    fn end_render(&self) {
+        let taken = self
+            .ns_conn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        if let Some(conn) = taken {
+            // Only a lookup on a thread that may block opened it, so this
+            // thread may block too; anywhere else the connection is dropped.
+            if self.may_block("a namespace connection").is_ok() {
+                let _ = self.handle.block_on(conn.close());
+            }
+        }
+    }
 }
 
 /// What the four functions answer when this process has no `[storage]`.
@@ -269,8 +738,8 @@ struct Unconfigured;
 fn unconfigured_message(uri: &str) -> String {
     format!(
         "{uri} cannot be read: egret has no internal storage configured (the `[storage]` \
-         section of its configuration), so read, fileSize, fileExists and isFileEmpty are \
-         unavailable"
+         section of its configuration), so read, fileSize, fileExists, isFileEmpty and \
+         fileURI are unavailable"
     )
 }
 
@@ -287,12 +756,25 @@ impl RenderFiles for Unconfigured {
     fn task_prefix(&self) -> Option<&str> {
         None
     }
+    fn namespace_file(
+        &self,
+        args: &NsFileArgs<'_>,
+    ) -> std::result::Result<NsFileMeta, FileUnavailable> {
+        Err(FileUnavailable::Refused(unconfigured_message(args.path)))
+    }
+    fn read_namespace_file(&self, args: &NsFileArgs<'_>) -> std::result::Result<String, String> {
+        Err(unconfigured_message(args.path))
+    }
+    fn flow_namespace(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// The scope a render inside a running execution gets: a [`Snapshot`] over
 /// the installed store, or -- with [`super::current`] `None` -- a scope whose
 /// every answer names `[storage]`. A wiring point (the module doc of
 /// `storage`): `worker::claim` calls this and nothing else does.
+#[allow(clippy::too_many_arguments)]
 pub async fn scope_for(
     conn: &mut PgConnection,
     store: Option<Arc<FileStore>>,
@@ -301,16 +783,22 @@ pub async fn scope_for(
     texts: &[&str],
     json: &[&serde_json::Value],
     task_prefix: Option<String>,
+    flow_namespace: Option<String>,
 ) -> Result<FileScope> {
     match store {
         None => Ok(FileScope(Arc::new(Unconfigured))),
-        Some(store) => {
-            Ok(
-                Snapshot::take(conn, store, workspace, execution, texts, json, task_prefix)
-                    .await?
-                    .into_scope(),
-            )
-        }
+        Some(store) => Ok(Snapshot::take(
+            conn,
+            store,
+            workspace,
+            execution,
+            texts,
+            json,
+            task_prefix,
+            flow_namespace,
+        )
+        .await?
+        .into_scope()),
     }
 }
 
@@ -720,6 +1208,43 @@ mod tests {
             err.contains(&uri) && err.contains("multi-thread runtime"),
             "{err}"
         );
+    }
+
+    /// W9b: a namespace lookup blocks the render thread on the runtime as a
+    /// store read does, so it refuses a current-thread runtime the same way
+    /// -- before it connects (the options here name nothing reachable, and
+    /// no outage is recorded).
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_namespace_function_on_a_current_thread_runtime_is_refused_saying_why() {
+        let opts: sqlx::postgres::PgConnectOptions = "postgres://nobody:nothing@127.0.0.1:1/none"
+            .parse()
+            .unwrap();
+        for call in ["read", "fileSize", "fileExists", "isFileEmpty", "fileURI"] {
+            let snap = Snapshot::from_parts(BTreeMap::new(), store(1 << 20), WS, None)
+                .with_namespace_files(Some("w9b.fn".into()), Some(Arc::new(opts.clone())));
+            let (out, failure) = render_recording(&format!("{{{{ {call}('cfg/x.txt') }}}}"), snap);
+            let err = out.unwrap_err();
+            assert!(
+                err.contains("'/cfg/x.txt'") && err.contains("multi-thread runtime"),
+                "{call}: {err}"
+            );
+            assert_eq!(failure, None, "{call}");
+        }
+    }
+
+    /// W9b: a process with no namespace-file database (egret-bin installs
+    /// one) refuses saying so, and that is not an outage.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_namespace_function_with_no_database_is_refused_and_is_not_an_outage() {
+        let snap = Snapshot::from_parts(BTreeMap::new(), store(1 << 20), WS, None)
+            .with_namespace_files(Some("w9b.fn".into()), None);
+        let (out, failure) = render_recording("{{ fileExists('cfg/x.txt') }}", snap);
+        let err = out.unwrap_err();
+        assert!(
+            err.contains("'/cfg/x.txt'") && err.contains("no database connection"),
+            "{err}"
+        );
+        assert_eq!(failure, None);
     }
 
     #[tokio::test(flavor = "multi_thread")]

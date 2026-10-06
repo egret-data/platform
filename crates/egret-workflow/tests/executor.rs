@@ -3946,6 +3946,10 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             "io.kestra.plugin.core.execution.Fail",
             "io.kestra.plugin.core.flow.Sleep",
             "io.kestra.plugin.core.log.Log",
+            "io.kestra.plugin.core.namespace.DeleteFiles",
+            "io.kestra.plugin.core.namespace.DownloadFiles",
+            "io.kestra.plugin.core.namespace.PurgeFiles",
+            "io.kestra.plugin.core.namespace.UploadFiles",
             "io.kestra.plugin.core.storage.Concat",
             "io.kestra.plugin.core.storage.DeduplicateItems",
             "io.kestra.plugin.core.storage.Delete",
@@ -3956,8 +3960,9 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             "io.kestra.plugin.core.storage.Split",
             "io.kestra.plugin.core.storage.Write",
         ],
-        "the thirteen handlers the driver runs (the four core storage tasks since \
-         W9a Task 11, the five whole-file ones since Task 12). If this list ever grew to cover \
+        "the seventeen handlers the driver runs (the four core storage tasks since \
+         W9a Task 11, the five whole-file ones since Task 12, the four namespace-file \
+         tasks since W9b Tasks 6 and 7). If this list ever grew to cover \
          everything the corpus declares, the derivation above would pass \
          because nothing stalls rather than because the reason holds"
     );
@@ -8322,4 +8327,23 @@ async fn the_execution_assertion_banks_discriminate_on_the_inputs_the_harvest_di
          produce the golden's CANCELLED for all three of these:\n  {}",
         wrong.join("\n  ")
     );
+}
+
+/// W9b Task 6 fix round 1 (M1): `driver::registry` installs the
+/// namespace-file connect options for every pool but `unconnected_pool()`'s,
+/// and recognises that one through the same `UNCONNECTED_URL` the pool is
+/// built from. Any other pool is not mistaken for it.
+#[tokio::test]
+async fn the_driver_recognises_only_its_unconnected_pool() {
+    assert!(driver::is_unconnected(&driver::unconnected_pool()));
+    for other in [
+        "postgres://egret:egret@localhost:5439/egret_test",
+        "postgres://nobody@127.0.0.1:1/other",
+        "postgres://nobody@127.0.0.1:2/none",
+    ] {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy(other)
+            .unwrap();
+        assert!(!driver::is_unconnected(&pool), "{other}");
+    }
 }

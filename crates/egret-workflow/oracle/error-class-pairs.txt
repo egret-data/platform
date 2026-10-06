@@ -54,14 +54,17 @@ isin-missing-attr-left              test:an_undefined_is_in_operand_raises_rathe
 # W9a Task 4: read/fileSize/fileExists/isFileEmpty are implemented; a corpus
 # render carries no file scope (no running execution), so they still fail,
 # now by name -- paired with the test that asserts that sentence.
-function-secret                     test:the_eight_refusals_name_themselves_and_their_owner
-function-kv                         test:the_eight_refusals_name_themselves_and_their_owner
+# W9b Task 4 (2026-10-05): fileURI is implemented too and joins them (that
+# test asserts its sentence beside the four's); the seven refusals left are
+# held by `kv_still_names_w9c_and_the_refused_list_shrinks_to_seven`.
+function-secret                     test:kv_still_names_w9c_and_the_refused_list_shrinks_to_seven
+function-kv                         test:kv_still_names_w9c_and_the_refused_list_shrinks_to_seven
 function-read                       test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
-function-fileuri                    test:the_eight_refusals_name_themselves_and_their_owner
+function-fileuri                    test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-filesize                   test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-fileexists                 test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-isfileempty                test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
-function-http                       test:the_eight_refusals_name_themselves_and_their_owner
+function-http                       test:kv_still_names_w9c_and_the_refused_list_shrinks_to_seven
 
 # --- W2 Task 4: wrong-typed input.
 filter-chunk-not-list               test:chunk_rejects_a_non_list
@@ -250,10 +253,10 @@ function-fromion-annotation-of-a-list       test:an_annotated_value_is_its_own_t
 # these is among them -- `Function or Macro [render] does not exist.` egret
 # binds all four to a refusal that names the function and its package instead,
 # so both sides fail and only the message differs.
-function-render                                     test:the_eight_refusals_name_themselves_and_their_owner
-function-renderonce                                 test:the_eight_refusals_name_themselves_and_their_owner
-function-errorlogs                                  test:the_eight_refusals_name_themselves_and_their_owner
-function-subflow                                    test:the_eight_refusals_name_themselves_and_their_owner
+function-render                                     test:kv_still_names_w9c_and_the_refused_list_shrinks_to_seven
+function-renderonce                                 test:kv_still_names_w9c_and_the_refused_list_shrinks_to_seven
+function-errorlogs                                  test:kv_still_names_w9c_and_the_refused_list_shrinks_to_seven
+function-subflow                                    test:kv_still_names_w9c_and_the_refused_list_shrinks_to_seven
 
 # W2 Task 8: `env`. `containsKey`, not a null check -- an absent `name`
 # throws and an explicitly null one falls through to the default.

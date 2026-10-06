@@ -85,6 +85,16 @@ use crate::repo::{
     MAX_PAGE_LIMIT,
 };
 use crate::spec::{parse, validate, Finding, ValidationReport};
+use crate::storage::multipart::{
+    is_length_limit, is_multipart, multipart_body_limit, multipart_refusal, HeaderBudget,
+    MultipartGate,
+};
+/// Moved to [`crate::storage::multipart`] (W9b Task 8); re-exported where
+/// W9a's tests and callers name them.
+pub use crate::storage::multipart::{
+    EXPORT_TOTAL_TIMEOUT, MAX_MULTIPART_HEADER_BYTES, MULTIPART_OVERHEAD_BYTES,
+    UPLOAD_IDLE_TIMEOUT, UPLOAD_TOTAL_TIMEOUT,
+};
 use egret_workflow_api::WorkflowRefPort;
 
 /// View flow drafts, their validation report, and their published versions.
@@ -204,6 +214,21 @@ pub struct WorkflowState {
     /// (`workflow.plugin_configurations`, the default runner). The workspace
     /// half, `workflow_containers`, is read from `workspaces` per publish.
     pub scripts: crate::scripts::ScriptSettings,
+    /// W9b Task 8: how long a namespace file upload's body may go without a
+    /// byte arriving before the upload is refused with 408 --
+    /// [`UPLOAD_IDLE_TIMEOUT`] in production; a field so a test can drive the
+    /// refusal in milliseconds (fix round 1, I-2).
+    pub upload_idle_timeout: std::time::Duration,
+    /// W9b Task 8 re-review m-2: how long a namespace file upload's body may
+    /// take in all before the upload is refused with 408 --
+    /// [`UPLOAD_TOTAL_TIMEOUT`] (12 hours) in production; a field so a test
+    /// can drive the refusal in milliseconds.
+    pub upload_total_timeout: std::time::Duration,
+    /// W9b Task 9 fix round 1, M-7: how long a namespace export's response
+    /// body may take in all before it is aborted -- [`EXPORT_TOTAL_TIMEOUT`]
+    /// (12 hours) in production; a field so a test can drive it in
+    /// milliseconds.
+    pub export_total_timeout: std::time::Duration,
 }
 
 impl FromRef<WorkflowState> for SessionService {
@@ -1755,206 +1780,17 @@ impl utoipa::PartialSchema for StartExecutionMultipart {
 
 impl utoipa::ToSchema for StartExecutionMultipart {}
 
-/// Does `e`, or anything in its `source()` chain, say a body limit was
-/// crossed? (`http_body_util::LengthLimitError`, however many boxes deep.)
-fn is_length_limit(e: &(dyn std::error::Error + 'static)) -> bool {
-    let mut cur = Some(e);
-    while let Some(err) = cur {
-        if err.is::<http_body_util::LengthLimitError>() {
-            return true;
-        }
-        cur = err.source();
-    }
-    false
-}
-
-/// What [`HeaderBudget`] observed, shared with the handler that drives the
-/// multipart parser.
-#[derive(Default)]
-struct MultipartGate {
-    /// Set by the handler while it awaits the next part's headers.
-    in_headers: std::sync::atomic::AtomicBool,
-    /// Bytes pulled since `in_headers` was last set.
-    pulled: std::sync::atomic::AtomicUsize,
-    /// The header budget was crossed.
-    header_overflow: std::sync::atomic::AtomicBool,
-    /// The route's body limit was crossed.
-    body_limit: std::sync::atomic::AtomicBool,
-}
-
-impl MultipartGate {
-    fn start_headers(&self) {
-        use std::sync::atomic::Ordering::SeqCst;
-        self.pulled.store(0, SeqCst);
-        self.in_headers.store(true, SeqCst);
-    }
-    fn end_headers(&self) {
-        self.in_headers
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-/// The body multer reads, in pieces of at most [`HEADER_BUDGET_PIECE_BYTES`]:
-/// while the handler awaits the next part's headers, more than
-/// [`MAX_MULTIPART_HEADER_BYTES`] pulled is an error (fix round 1, I1).
-///
-/// multer keeps the preamble and a part's headers in memory until it finds
-/// the boundary or `CRLFCRLF`, re-scanning its whole buffer on each pull, and
-/// axum's `Multipart` exposes none of multer's `Constraints` -- none of which
-/// bounds the headers anyway (they are per field and per stream). Without
-/// this, an unterminated header is held up to the whole body limit
-/// (`max_file_bytes` + 1 MiB, 1 GiB by default) per request. The pieces are
-/// what make the count tight: a part's headers can be followed in the same
-/// network chunk by its data, so at most one piece of data is counted with
-/// them.
-///
-/// **One piece per poll.** multer's `StreamBuffer::poll_stream` pulls every
-/// chunk the body has READY into its buffer before it parses anything -- a
-/// fast client (or an in-memory body) is drained whole into multer's memory
-/// on the first `next_field`. So after each piece this answers `Pending` once,
-/// waking itself: multer then parses what it holds, and its buffer grows by
-/// at most one piece per poll, while looking for headers and while a part's
-/// data is read alike.
-struct HeaderBudget {
-    inner: std::pin::Pin<
-        Box<
-            dyn futures_util::Stream<Item = std::result::Result<axum::body::Bytes, axum::Error>>
-                + Send,
-        >,
-    >,
-    pending: axum::body::Bytes,
-    gate: Arc<MultipartGate>,
-    /// A piece was just handed out: the next poll answers `Pending` (and wakes
-    /// itself) once. See the type's doc.
-    yielded: bool,
-}
-
-/// See [`HeaderBudget`].
-const HEADER_BUDGET_PIECE_BYTES: usize = 8 * 1024;
-
-impl futures_util::Stream for HeaderBudget {
-    type Item = std::result::Result<axum::body::Bytes, axum::Error>;
-
-    fn poll_next(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        use std::sync::atomic::Ordering::SeqCst;
-        use std::task::Poll;
-        let this = self.get_mut();
-        if this.yielded {
-            this.yielded = false;
-            cx.waker().wake_by_ref();
-            return Poll::Pending;
-        }
-        while this.pending.is_empty() {
-            match this.inner.as_mut().poll_next(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some(Err(e))) => {
-                    if is_length_limit(&e) {
-                        this.gate.body_limit.store(true, SeqCst);
-                    }
-                    return Poll::Ready(Some(Err(e)));
-                }
-                Poll::Ready(Some(Ok(b))) => this.pending = b,
-            }
-        }
-        let n = this.pending.len().min(HEADER_BUDGET_PIECE_BYTES);
-        let piece = this.pending.split_to(n);
-        if this.gate.in_headers.load(SeqCst)
-            && this.gate.pulled.fetch_add(n, SeqCst) + n > MAX_MULTIPART_HEADER_BYTES
-        {
-            this.gate.header_overflow.store(true, SeqCst);
-            return Poll::Ready(Some(Err(axum::Error::new(std::io::Error::other(
-                "a multipart part's headers are over the route's budget",
-            )))));
-        }
-        this.yielded = true;
-        Poll::Ready(Some(Ok(piece)))
-    }
-}
-
-/// A multipart error as the response, read through what the gate saw first:
-/// the header budget (400), the body limit (413, naming the limit -- M1),
-/// else the parser's own status, where a read failure it cannot classify
-/// (500 in axum) is the request's (400).
-fn multipart_refusal(
-    gate: &MultipartGate,
-    limit: usize,
-    status: StatusCode,
-    text: String,
-) -> axum::response::Response {
-    use std::sync::atomic::Ordering::SeqCst;
-    if gate.header_overflow.load(SeqCst) {
-        return refuse(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "a multipart part's headers (or the preamble before the first boundary) are over \
-                 {MAX_MULTIPART_HEADER_BYTES} bytes; a part needs its headers ended by a blank \
-                 line and the body its boundary"
-            ),
-        );
-    }
-    if gate.body_limit.load(SeqCst) {
-        return refuse(StatusCode::PAYLOAD_TOO_LARGE, body_too_large(limit));
-    }
-    if status.is_server_error() {
-        return refuse(
-            StatusCode::BAD_REQUEST,
-            format!("the multipart body could not be read: {text}"),
-        );
-    }
-    refuse(status, text)
-}
-
-/// M1: the refusal for a body over the route's limit -- about the REQUEST,
-/// not one file.
-fn body_too_large(limit: usize) -> String {
-    format!(
-        "the request body is over {limit} bytes: one start carries at most \
-         workflow.storage.max_file_bytes + 1 MiB in total"
-    )
-}
-
 /// The JSON body's cap on the start route: axum's own default, unchanged by
 /// W9a. The multipart cap is [`multipart_body_limit`].
 const MAX_JSON_START_BODY_BYTES: usize = 2 * 1024 * 1024;
-
-/// The room a multipart body has beyond one file of `max_file_bytes`: its
-/// text parts, boundaries and headers (W9a spec §7.1, "the route's body limit
-/// follows `max_file_bytes`").
-pub const MULTIPART_OVERHEAD_BYTES: u64 = 1024 * 1024;
-
-/// What the route lets multer pull while it looks for the next part's
-/// headers (and, for the first part, the preamble before the first
-/// boundary): multer keeps those bytes in memory until it finds `CRLFCRLF` or
-/// the boundary, so without a cap an unterminated header is buffered up to
-/// the whole body limit (W9a Task 7 fix round 1, I1).
-pub const MAX_MULTIPART_HEADER_BYTES: usize = 64 * 1024;
 
 /// One text part's cap. A text part is held in memory whole -- unlike a file,
 /// which is streamed -- so it has a cap of its own, far below the body's.
 pub const MAX_TEXT_PART_BYTES: usize = 1024 * 1024;
 
-/// `max_file_bytes` + [`MULTIPART_OVERHEAD_BYTES`], read from the installed
-/// store when the request arrives.
-fn multipart_body_limit(caps: crate::storage::Caps) -> usize {
-    usize::try_from(caps.max_file_bytes.saturating_add(MULTIPART_OVERHEAD_BYTES))
-        .unwrap_or(usize::MAX)
-}
-
-fn is_multipart(headers: &axum::http::HeaderMap) -> bool {
-    headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(';').next())
-        .is_some_and(|v| v.trim().eq_ignore_ascii_case("multipart/form-data"))
-}
-
 /// An error response in [`egret_core::http::ErrorBody`]'s shape, for the
 /// statuses `egret_core::Error` has no variant for (413, 503).
-fn refuse(status: StatusCode, error: String) -> axum::response::Response {
+pub(crate) fn refuse(status: StatusCode, error: String) -> axum::response::Response {
     use axum::response::IntoResponse as _;
     (
         status,
@@ -2619,6 +2455,38 @@ pub fn management_router() -> Router<WorkflowState> {
             get(crate::storage::routes::preview_execution_file),
         )
         .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/files",
+            get(crate::storage::nsfiles::routes::download_namespace_file)
+                // The upload applies its own limit (`max_file_bytes` + 1 MiB,
+                // W9a's multipart bound), so the router's default is off for
+                // it, as for the start route.
+                .post(crate::storage::nsfiles::routes::upload_namespace_file)
+                .layer(axum::extract::DefaultBodyLimit::disable())
+                .put(crate::storage::nsfiles::routes::move_namespace_file)
+                .delete(crate::storage::nsfiles::routes::delete_namespace_file),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/files/stats",
+            get(crate::storage::nsfiles::routes::namespace_file_stats),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/files/revisions",
+            get(crate::storage::nsfiles::routes::namespace_file_revisions),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/files/search",
+            get(crate::storage::nsfiles::routes::search_namespace_files),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/files/export",
+            get(crate::storage::nsfiles::routes::export_namespace_files),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/files/directory",
+            get(crate::storage::nsfiles::routes::list_namespace_directory)
+                .post(crate::storage::nsfiles::routes::create_namespace_directory),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/{id}/resume",
             post(resume_execution),
         )
@@ -2649,6 +2517,16 @@ pub fn management_router() -> Router<WorkflowState> {
         start_flow_execution,
         resume_execution,
         replay_execution,
+        crate::storage::nsfiles::routes::download_namespace_file,
+        crate::storage::nsfiles::routes::namespace_file_stats,
+        crate::storage::nsfiles::routes::namespace_file_revisions,
+        crate::storage::nsfiles::routes::search_namespace_files,
+        crate::storage::nsfiles::routes::export_namespace_files,
+        crate::storage::nsfiles::routes::list_namespace_directory,
+        crate::storage::nsfiles::routes::upload_namespace_file,
+        crate::storage::nsfiles::routes::create_namespace_directory,
+        crate::storage::nsfiles::routes::move_namespace_file,
+        crate::storage::nsfiles::routes::delete_namespace_file,
     ),
     components(schemas(
         FindingDto,
@@ -2671,6 +2549,9 @@ pub fn management_router() -> Router<WorkflowState> {
         LogPageDto,
         crate::storage::routes::FileMetasDto,
         crate::storage::routes::FilePreviewDto,
+        crate::storage::nsfiles::routes::NsFileStatsDto,
+        crate::storage::nsfiles::routes::NsFileRevisionDto,
+        crate::storage::nsfiles::routes::NsFileUploadForm,
     )),
     tags((name = "workflow", description = "Flow drafts and published versions (W1)"))
 )]

@@ -601,8 +601,9 @@ impl Surface {
                 "{uri} cannot be read: this render has no file scope"
             ));
         };
-        let bytes =
-            crate::runners::env::on_a_render_thread(|| files.0.read_bytes(uri, LOOP_READS_WHOLE))??;
+        let bytes = crate::runners::env::on_a_render_thread(&files, || {
+            files.0.read_bytes(uri, LOOP_READS_WHOLE)
+        })??;
         use crate::storage::ion::{loop_values, Stop};
         // The reader's bounds (`ion::for_each_value`) under the same cap the
         // file was read whole with.

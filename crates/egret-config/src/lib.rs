@@ -826,14 +826,28 @@ pub struct WorkflowStorageConfig {
     /// The most bytes `read()` returns into a render. Default 10 MiB.
     #[serde(default = "default_max_read_bytes")]
     pub max_read_bytes: u64,
+    /// W9b: the most namespace files one listing, search or namespace-file
+    /// operation may see; crossing it fails naming the cap (W9b spec §7).
+    /// Default 10 000. `EGRET_WORKFLOW__STORAGE__MAX_NAMESPACE_FILES`.
+    #[serde(default = "default_max_namespace_files")]
+    pub max_namespace_files: u64,
 }
+
+/// The longest `workflow.storage.prefix` may be, in bytes (W9b Task 3, the
+/// Task 2 review's R3, 2026-10-05). A namespace file's key is
+/// `{prefix}{workspace}/{ns-as-path}/_files{path}.v{N}`: 36 (workspace) + 1 +
+/// 150 (namespace) + 1 + 6 (`_files`) + 512 (path, W9b's `MAX_PATH_BYTES`) +
+/// 12 (`.v` and a `u32`) = 718 bytes after the prefix, so 200 keeps every key
+/// under S3's 1024-byte limit with room to spare.
+pub const MAX_WORKFLOW_STORAGE_PREFIX_BYTES: usize = 200;
 
 impl WorkflowStorageConfig {
     /// The boot check (W9a fix round 1 M4), called from [`Config::validate`]:
     /// `prefix` is a non-empty key prefix ending with `/` and not starting
     /// with one (an object key has no leading `/`, and without the trailing
-    /// one `workflow` and `workflowX/` would share keys), and every cap is at
-    /// least 1. Each refusal names its key.
+    /// one `workflow` and `workflowX/` would share keys) and at most
+    /// [`MAX_WORKFLOW_STORAGE_PREFIX_BYTES`] bytes, and every cap is at least
+    /// 1. Each refusal names its key.
     pub fn validate(&self) -> Result<(), String> {
         let p = &self.prefix;
         if p.is_empty() || !p.ends_with('/') || p.starts_with('/') {
@@ -842,10 +856,19 @@ impl WorkflowStorageConfig {
                  with '/' (e.g. \"workflow/\"; EGRET_WORKFLOW__STORAGE__PREFIX)"
             ));
         }
+        if p.len() > MAX_WORKFLOW_STORAGE_PREFIX_BYTES {
+            return Err(format!(
+                "workflow.storage.prefix is {} bytes long; it may be at most \
+                 {MAX_WORKFLOW_STORAGE_PREFIX_BYTES} bytes, so that a namespace file's object key \
+                 stays under S3's 1024-byte limit (EGRET_WORKFLOW__STORAGE__PREFIX)",
+                p.len()
+            ));
+        }
         for (key, value) in [
             ("max_file_bytes", self.max_file_bytes),
             ("max_task_bytes", self.max_task_bytes),
             ("max_read_bytes", self.max_read_bytes),
+            ("max_namespace_files", self.max_namespace_files),
         ] {
             if value == 0 {
                 return Err(format!("workflow.storage.{key} must be at least 1"));
@@ -862,6 +885,7 @@ impl Default for WorkflowStorageConfig {
             max_file_bytes: default_max_file_bytes(),
             max_task_bytes: default_max_task_bytes(),
             max_read_bytes: default_max_read_bytes(),
+            max_namespace_files: default_max_namespace_files(),
         }
     }
 }
@@ -925,6 +949,11 @@ impl AppsStorageConfig {
         }
         Ok(())
     }
+}
+
+/// 10 000 -- see [`WorkflowStorageConfig::max_namespace_files`].
+fn default_max_namespace_files() -> u64 {
+    10_000
 }
 
 /// `30` -- see [`WorkflowConfig::storage_retention_days`].
@@ -1978,6 +2007,7 @@ values = { allowed-images = [] }
                 max_file_bytes: 1_073_741_824,
                 max_task_bytes: 5_368_709_120,
                 max_read_bytes: 10_485_760,
+                max_namespace_files: 10_000,
             };
             assert_eq!(cfg.workflow.storage, want);
             assert_eq!(cfg.workflow.storage_retention_days, 30);
@@ -1990,6 +2020,7 @@ values = { allowed-images = [] }
             jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_FILE_BYTES", "11");
             jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_TASK_BYTES", "22");
             jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_READ_BYTES", "33");
+            jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_NAMESPACE_FILES", "44");
             jail.set_env("EGRET_WORKFLOW__STORAGE_RETENTION_DAYS", "0");
             let cfg: Config = Config::figment().extract()?;
             assert_eq!(
@@ -1999,6 +2030,7 @@ values = { allowed-images = [] }
                     max_file_bytes: 11,
                     max_task_bytes: 22,
                     max_read_bytes: 33,
+                    max_namespace_files: 44,
                 }
             );
             assert_eq!(cfg.workflow.storage_retention_days, 0);
@@ -2029,6 +2061,20 @@ values = { allowed-images = [] }
             let err = check(&|s| s.prefix = bad.into()).expect_err(bad);
             assert!(err.contains("workflow.storage.prefix"), "{bad:?}: {err}");
         }
+        // W9b Task 3 (R3 of Task 2's review): 200 bytes pass, 201 do not --
+        // counted in bytes ('é' is two), so a rule counting characters fails.
+        let at = format!("{}/", "é".repeat(99) + "a"); // 198 + 1 + 1 = 200 bytes
+        assert_eq!(at.len(), 200);
+        assert_eq!(check(&|s| s.prefix = at.clone()), Ok(()));
+        let over = format!("a{at}");
+        assert_eq!((over.len(), over.chars().count()), (201, 102));
+        let err = check(&|s| s.prefix = over.clone()).unwrap_err();
+        assert!(
+            err.contains("workflow.storage.prefix")
+                && err.contains("201 bytes")
+                && err.contains("at most 200"),
+            "{err}"
+        );
         let err = check(&|s| s.max_file_bytes = 0).unwrap_err();
         assert!(err.contains("workflow.storage.max_file_bytes"), "{err}");
         let err = check(&|s| s.max_task_bytes = 0).unwrap_err();
@@ -2036,6 +2082,12 @@ values = { allowed-images = [] }
         let err = check(&|s| s.max_read_bytes = 0).unwrap_err();
         assert!(err.contains("workflow.storage.max_read_bytes"), "{err}");
         assert_eq!(check(&|s| s.max_read_bytes = 1), Ok(()));
+        let err = check(&|s| s.max_namespace_files = 0).unwrap_err();
+        assert!(
+            err.contains("workflow.storage.max_namespace_files"),
+            "{err}"
+        );
+        assert_eq!(check(&|s| s.max_namespace_files = 1), Ok(()));
     }
 
     /// W9a spec §15: a container runner needs `[storage]` at boot; `none`

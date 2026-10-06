@@ -1527,6 +1527,7 @@ async fn input_for(
         &texts,
         &surface.snapshot_values(),
         task_prefix,
+        surface.flow().map(|f| f.namespace.clone()),
     )
     .await?;
     surface.attach_files(files);
@@ -1745,6 +1746,7 @@ pub(super) async fn settle(
         &texts,
         &surface.snapshot_values(),
         None,
+        surface.flow().map(|f| f.namespace.clone()),
     )
     .await?;
     surface.attach_files(files);

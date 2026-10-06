@@ -1594,6 +1594,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     {
         anyhow::bail!("the workflow file store was installed twice");
     }
+    // W9b: namespace-file lookups at render time (`fileURI`, `read` of a
+    // namespace file) run on their own connection, made from this pool's
+    // options, for the reason above: a render's entry points hold no pool.
+    if egret_workflow::storage::nsfiles::install_db((*db.pool.connect_options()).clone()).is_err() {
+        anyhow::bail!("the namespace file database options were installed twice");
+    }
 
     let bi = Some(egret_bi::BiState {
         db: db.clone(),
@@ -1857,6 +1863,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         },
         reaper_cancel.clone(),
     );
+    // W9b Task 8 fix round 1: the hourly sweep of namespace-file staging
+    // objects a crash left behind (older than 24 h). On every replica with a
+    // store, worker or not: the namespace file API uploads through staging
+    // wherever it is served, and two sweeps of one row are no-ops.
+    if let Some(fs) = egret_workflow::storage::current() {
+        egret_workflow::storage::nsfiles::staging::spawn_staging_sweeper(
+            db.pool.clone(),
+            fs,
+            egret_workflow::storage::nsfiles::staging::StagingSweepConfig::default(),
+            reaper_cancel.clone(),
+        );
+    }
     // SIGTERM or SIGINT (`shutdown_signal` observes both) stops every
     // background loop on `reaper_cancel` -- the automation ticker and the
     // workflow runtime -- at the signal, while the HTTP server drains.
@@ -2234,6 +2252,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             plugin_configurations: config.workflow.plugin_configurations.clone(),
             default_runner: container_runner,
         },
+        upload_idle_timeout: egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        upload_total_timeout: egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        export_total_timeout: egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
     });
 
     // Data Apps query gateway (`POST /api/apps/query`). Same query engine `Arc`,

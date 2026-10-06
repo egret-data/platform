@@ -48,6 +48,76 @@ pub struct ExecUri {
     pub tail: Tail,
 }
 
+/// W9b: the segment that marks a namespace file. One definition, in `runners`.
+pub const NAMESPACE_FILES_SEGMENT: &str = crate::runners::files::NAMESPACE_FILES_SEGMENT;
+
+/// A namespace file URI, `kestra:///{ns-as-path}/_files{path}[.v{revision}]`
+/// (W9b spec §3). It names one revision of one OBJECT.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NsFileUri {
+    /// The URI's namespace path with '/' -> '.', checked by `access::check_namespace`.
+    pub namespace: String,
+    /// `NsPath` form: a leading '/', no `.vN` suffix.
+    pub path: String,
+    /// 1 when the URI has no `.vN` suffix.
+    pub revision: u32,
+}
+
+impl NsFileUri {
+    /// The URI's text. `parse_any(u)? == NamespaceFile(n)` implies `n.to_uri() == u`.
+    pub fn to_uri(&self) -> String {
+        let suffix = if self.revision >= 2 {
+            format!(".v{}", self.revision)
+        } else {
+            String::new()
+        };
+        format!(
+            "{SCHEME_PREFIX}{}/{NAMESPACE_FILES_SEGMENT}{}{suffix}",
+            namespace_as_path(&self.namespace),
+            self.path
+        )
+    }
+}
+
+/// Either kind of `kestra:///` URI ([`parse_any`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StorageUri {
+    Execution(ExecUri),
+    NamespaceFile(NsFileUri),
+}
+
+/// `kestra:///{ns-as-path}/_files{path}[.v{revision}]`, read back through
+/// [`parse_any`] (as [`checked`] does for execution files): a namespace or
+/// path whose URI would not parse, or would read back as another file, is
+/// refused naming it. A directory has no URI (the user's ruling R3).
+pub fn namespace_file_uri(
+    namespace: &str,
+    path: &crate::storage::nsfiles::path::NsPath,
+    revision: u32,
+) -> Result<String, String> {
+    if path.is_dir() {
+        return Err(format!(
+            "'{}' is a directory: it has no file URI",
+            path.lock_path()
+        ));
+    }
+    let want = NsFileUri {
+        namespace: namespace.to_string(),
+        path: path.as_str().to_string(),
+        revision,
+    };
+    let built = want.to_uri();
+    let what = format!(
+        "namespace {namespace:?}, file {:?} and revision {revision}",
+        path.as_str()
+    );
+    match parse_any(&built) {
+        Ok(StorageUri::NamespaceFile(got)) if got == want && got.to_uri() == built => Ok(built),
+        Ok(_) => Err(refusal(&what, &built, "it reads back as a different file")),
+        Err(reason) => Err(refusal(&what, &built, &reason)),
+    }
+}
+
 /// Parse a `kestra://` execution-file URI.
 ///
 /// Refuses, each by a reason naming what is wrong: a scheme other than
@@ -67,11 +137,26 @@ pub struct ExecUri {
 /// `executions.<uuid>`): egret's builders read each URI back through this
 /// function ([`checked`]) and refuse one it would refuse or misread, as the
 /// author's error.
+///
+/// W9b: a namespace file URI ([`parse_any`]'s `NamespaceFile`) is refused,
+/// saying so.
 pub fn parse(uri: &str) -> Result<ExecUri, String> {
+    match parse_any(uri)? {
+        StorageUri::Execution(e) => Ok(e),
+        StorageUri::NamespaceFile(_) => Err(format!(
+            "it is a namespace file URI (…/{NAMESPACE_FILES_SEGMENT}/…), not an execution file"
+        )),
+    }
+}
+
+/// The checks every `kestra:///` URI shares, then its path's segments:
+/// the scheme, no empty, `.` or `..` segment, none of the refused characters.
+fn segments(uri: &str) -> Result<Vec<&str>, String> {
     let Some(path) = uri.strip_prefix(SCHEME_PREFIX) else {
         return Err(format!(
             "the scheme is not {SCHEME_PREFIX} (an execution file URI is \
-             kestra:///<namespace>/<flow>/executions/<execution>/...)"
+             kestra:///<namespace>/<flow>/executions/<execution>/..., a namespace file's \
+             kestra:///<namespace>/{NAMESPACE_FILES_SEGMENT}/<path>)"
         ));
     };
     let segments: Vec<&str> = path.split('/').collect();
@@ -93,22 +178,104 @@ pub fn parse(uri: &str) -> Result<ExecUri, String> {
         .find(|c| matches!(c, '\\' | '?' | '#') || c.is_control())
     {
         return Err(format!(
-            "it holds the character {c:?}, which no execution file URI may"
+            "it holds the character {c:?}, which no storage URI may"
         ));
     }
-    let mut saw_executions = false;
-    let mut found = None;
-    for (i, seg) in segments.iter().enumerate().skip(2) {
-        if *seg != EXECUTIONS {
-            continue;
-        }
-        saw_executions = true;
-        if let Some(exec) = segments.get(i + 1).and_then(|s| canonical_uuid(s)) {
-            found = Some((i, exec));
-            break;
+    Ok(segments)
+}
+
+/// A `kestra:///` URI of either kind (W9b spec §3).
+///
+/// The FIRST segment equal to `_files` at index >= 1 marks a namespace file
+/// (§3) **only when it comes before the first `executions/{uuid}` pair**
+/// (the user's ruling, 2026-10-05, W9b Task 2 fix round 1 I1): after that
+/// pair `_files` is part of an execution file's path, so W9a's
+/// `…/executions/<uuid>/tasks/<slug>/<run>/_files/report.csv` and a FILE
+/// input named `_files` stay execution files. Before it the reading is
+/// unambiguous: publish refuses a namespace with a `_files` segment, and no
+/// flow segment can be `_files` (a flow id may not start with `_`, and its
+/// slug holds no `_`). So `kestra:///a/_files/x/executions/<uuid>/f` is
+/// namespace `a`'s file `/x/executions/<uuid>/f`. The segments before the marker are the
+/// namespace (checked by `nsfiles::access::check_namespace`), the ones after
+/// it the path (checked by `NsPath::parse_file`); a trailing `.v{N}` with N >= 2,
+/// digits only and no leading zero, is the revision, and no suffix is
+/// revision 1. `parse_any(u)? == NamespaceFile(n)` implies `n.to_uri() == u`.
+pub fn parse_any(uri: &str) -> Result<StorageUri, String> {
+    let segments = segments(uri)?;
+    if let Some(i) = crate::runners::files::namespace_marker(&segments) {
+        return namespace_file(&segments, i).map(StorageUri::NamespaceFile);
+    }
+    execution_file(&segments).map(StorageUri::Execution)
+}
+
+fn namespace_file(segments: &[&str], marker: usize) -> Result<NsFileUri, String> {
+    if let Some(seg) = segments[..marker].iter().find(|s| s.contains('.')) {
+        return Err(format!(
+            "its namespace segment '{seg}' holds a '.' (a namespace's dots are '/' in a URI)"
+        ));
+    }
+    let namespace = segments[..marker].join(".");
+    crate::storage::nsfiles::access::check_namespace(&namespace)?;
+    let rest = &segments[marker + 1..];
+    let Some((last, dirs)) = rest.split_last() else {
+        return Err("it names a namespace's files, not a file under them".to_string());
+    };
+    let (name, revision) = split_revision(last);
+    let mut path = String::new();
+    for seg in dirs.iter().chain(std::iter::once(&name)) {
+        path.push('/');
+        path.push_str(seg);
+    }
+    let parsed = crate::storage::nsfiles::path::NsPath::parse_file(&path)?;
+    Ok(NsFileUri {
+        namespace,
+        path: parsed.as_str().to_string(),
+        revision,
+    })
+}
+
+/// `name.v{N}` -> (`name`, N) when N >= 2, digits only, no leading zero;
+/// anything else is the whole name, revision 1.
+fn split_revision(last: &str) -> (&str, u32) {
+    if let Some(i) = last.rfind(".v") {
+        let digits = &last[i + 2..];
+        let canonical = !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && !digits.starts_with('0');
+        if canonical {
+            if let Ok(n) = digits.parse::<u32>() {
+                if n >= 2 {
+                    return (&last[..i], n);
+                }
+            }
         }
     }
-    let Some((i, execution)) = found else {
+    (last, 1)
+}
+
+/// The FIRST `executions/{canonical uuid}` pair at index 2 or later: the
+/// index of its `executions` segment and the execution. W9a's execution
+/// search, and (W9b fix round 1, I1) the boundary after which a `_files`
+/// segment is part of an execution file's path, never the namespace-file
+/// marker (`runners::files::namespace_marker`).
+pub(crate) fn execution_pair(segments: &[&str]) -> Option<(usize, Uuid)> {
+    segments
+        .iter()
+        .enumerate()
+        .skip(2)
+        .filter(|(_, seg)| **seg == EXECUTIONS)
+        .find_map(|(i, _)| {
+            segments
+                .get(i + 1)
+                .and_then(|s| canonical_uuid(s))
+                .map(|exec| (i, exec))
+        })
+}
+
+/// W9a's `executions/{uuid}` search, over [`segments`]' answer.
+fn execution_file(segments: &[&str]) -> Result<ExecUri, String> {
+    let Some((i, execution)) = execution_pair(segments) else {
+        let saw_executions = segments.iter().skip(2).any(|s| *s == EXECUTIONS);
         return Err(if saw_executions {
             "the segment after 'executions' is not an execution id (a canonical UUID)".to_string()
         } else {
@@ -718,5 +885,238 @@ mod tests {
             fs.execution_prefix(caller, "a.b", "My_Flow", e),
             format!("s3://bkt/workflow/{caller}/a/b/my-flow/executions/{e}/")
         );
+    }
+
+    // -- W9b Task 2: namespace file URIs.
+
+    fn ns_file(uri: &str) -> NsFileUri {
+        match parse_any(uri).unwrap_or_else(|e| panic!("{uri}: {e}")) {
+            StorageUri::NamespaceFile(n) => n,
+            other => panic!("{uri}: {other:?}"),
+        }
+    }
+
+    fn nf(namespace: &str, path: &str, revision: u32) -> NsFileUri {
+        NsFileUri {
+            namespace: namespace.into(),
+            path: path.into(),
+            revision,
+        }
+    }
+
+    #[test]
+    fn the_files_marker_is_recognised_before_the_executions_search() {
+        let id = "0e9a7b4c-3f53-4f0b-9b3e-8d1f2a6c7e10";
+        let u = format!("kestra:///a/_files/x/executions/{id}/f");
+        assert_eq!(ns_file(&u), nf("a", &format!("/x/executions/{id}/f"), 1));
+        assert_eq!(ns_file(&u).to_uri(), u);
+        assert_eq!(
+            ns_file("kestra:///io/kestra/tests/_files/a/b.txt.v3"),
+            nf("io.kestra.tests", "/a/b.txt", 3)
+        );
+        // No namespace before the marker: not a marker, and not an execution file.
+        assert!(parse_any("kestra:///_files/x").is_err());
+        // No path after it.
+        let err = parse_any("kestra:///a/_files").unwrap_err();
+        assert!(err.contains("not a file under them"), "{err}");
+        assert!(parse_any("kestra:///a/_files/").is_err());
+        // W9a's parse refuses it, saying what it is.
+        let err = parse("kestra:///a/_files/x").unwrap_err();
+        assert!(err.contains("namespace file"), "{err}");
+        let err = parse(&u).unwrap_err();
+        assert!(err.contains("namespace file"), "{err}");
+        // The control: an execution URI is still one, through both.
+        let e = format!("kestra:///a/f/executions/{id}/inputs/i/x");
+        assert!(matches!(parse_any(&e), Ok(StorageUri::Execution(_))));
+        assert_eq!(parse(&e).unwrap().to_uri(), e);
+    }
+
+    /// `w9b-namespace-files.json` `egret_expected.uri`: every `fileURI` and
+    /// `namespaceFile_uri` row, parsed and built.
+    #[test]
+    fn namespace_file_uris_match_the_artifact() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("oracle-exec/w9b-namespace-files.json");
+        let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let cell = &fixture["egret_expected"]["uri"];
+        let (ns, file) = (
+            cell["namespace"].as_str().unwrap(),
+            cell["path"].as_str().unwrap(),
+        );
+        let ns_path = crate::storage::nsfiles::path::NsPath::parse_file(file).unwrap();
+        let mut rows = Vec::new();
+        for (key, v) in cell["fileURI"].as_object().unwrap() {
+            let rev = if key == "latest(3)" {
+                3
+            } else {
+                key.parse().unwrap()
+            };
+            rows.push((rev, v["value"].as_str().unwrap().to_string()));
+        }
+        for (key, v) in cell["namespaceFile_uri"].as_object().unwrap() {
+            rows.push((key.parse().unwrap(), v.as_str().unwrap().to_string()));
+        }
+        assert_eq!(rows.len(), 7, "every row was compared");
+        for (rev, uri) in rows {
+            assert_eq!(ns_file(&uri), nf(ns, file, rev), "{uri}");
+            assert_eq!(namespace_file_uri(ns, &ns_path, rev).unwrap(), uri);
+        }
+        // A directory has no file URI (R3, `uri.directory`).
+        let d = crate::storage::nsfiles::path::NsPath::parse_dir("/d").unwrap();
+        let err = namespace_file_uri(ns, &d, 1).unwrap_err();
+        assert!(err.contains("'/d' is a directory"), "{err}");
+        // A namespace whose URI would not read back is refused, naming it.
+        for bad in ["a..b", "a.", "a._files"] {
+            let err = namespace_file_uri(bad, &ns_path, 1).unwrap_err();
+            assert!(err.contains(&format!("namespace {bad:?}")), "{err}");
+        }
+        assert!(namespace_file_uri(ns, &ns_path, 0).is_err());
+    }
+
+    #[test]
+    fn a_v_suffix_is_a_revision_only_when_it_is_two_or_more_digits_only() {
+        assert_eq!(ns_file("kestra:///a/_files/x.v2"), nf("a", "/x", 2));
+        assert_eq!(
+            ns_file("kestra:///a/_files/d/x.txt.v10"),
+            nf("a", "/d/x.txt", 10)
+        );
+        // Not a revision, and a file may not be named so (the NsPath rule).
+        for bad in ["x.v1", "x.v0", "x.v02", "x.v2.v3", "x.v99999999999"] {
+            let u = format!("kestra:///a/_files/{bad}");
+            let err = parse_any(&u).expect_err(&u);
+            assert!(err.contains("'.v' and digits"), "{u}: {err}");
+        }
+        // Not a revision, and a legal file name (`path_rules["x.v"]` is accepted).
+        for name in ["x.v", "x.vx", "x.v2x", "x.V2"] {
+            let u = format!("kestra:///a/_files/{name}");
+            assert_eq!(ns_file(&u), nf("a", &format!("/{name}"), 1), "{u}");
+            assert_eq!(ns_file(&u).to_uri(), u);
+        }
+    }
+
+    #[test]
+    fn the_first_files_segment_is_the_marker() {
+        // A `_files` PATH segment is legal; only a namespace segment is refused.
+        assert_eq!(
+            ns_file("kestra:///a/_files/_files/x"),
+            nf("a", "/_files/x", 1)
+        );
+        assert_eq!(ns_file("kestra:///a/b/_files/x"), nf("a.b", "/x", 1));
+        // `_files.x` is not the marker: W9a's execution search, which refuses it.
+        let err = parse_any("kestra:///a/_files.x/y").unwrap_err();
+        assert!(err.contains("not an execution file"), "{err}");
+        // The namespace before the marker is checked: invalid, or a dotted segment.
+        assert!(parse_any("kestra:///A/_files/x").is_err());
+        let err = parse_any("kestra:///a.b/_files/x").unwrap_err();
+        assert!(err.contains("'a.b'"), "{err}");
+        // And the path after it.
+        assert!(parse_any("kestra:///a/_files/_flows/x").is_err());
+    }
+
+    #[test]
+    fn every_accepted_namespace_file_uri_round_trips() {
+        for u in [
+            "kestra:///a/_files/x",
+            "kestra:///a/b-c/d_e/_files/x/y z/%2e%2e.txt.v7",
+            "kestra:///a/_files/x/_files/y",
+            "kestra:///9/_files/é.txt",
+        ] {
+            assert_eq!(ns_file(u).to_uri(), u);
+        }
+    }
+
+    // -- W9b Task 2 fix round 1, I1: `_files` after `executions/{uuid}` is a path.
+
+    /// A W9a task output under a `_files` directory is an execution file, and
+    /// round-trips; so is the `verbatim_file_uri` W9a builds for it.
+    #[test]
+    fn a_files_segment_after_the_execution_pair_is_an_execution_files_path() {
+        let exec = Uuid::parse_str("0e9a7b4c-3f53-4f0b-9b3e-8d1f2a6c7e10").unwrap();
+        let run = Uuid::parse_str("5b1e2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d").unwrap();
+        let u = format!("kestra:///ns/flow/executions/{exec}/tasks/build/{run}/_files/report.csv");
+        match parse_any(&u).unwrap_or_else(|e| panic!("{u}: {e}")) {
+            StorageUri::Execution(e) => {
+                assert_eq!(e.execution, exec);
+                assert_eq!(e.to_uri(), u);
+                assert_eq!(
+                    e.tail,
+                    Tail::Task {
+                        task_slug: "build".into(),
+                        task_run: run.hyphenated().to_string(),
+                        file: "_files/report.csv".into(),
+                    }
+                );
+            }
+            other => panic!("{u}: {other:?}"),
+        }
+        assert_eq!(parse(&u).unwrap().to_uri(), u);
+        let prefix = task_prefix("ns", "flow", exec, "build", run).unwrap();
+        assert_eq!(verbatim_file_uri(&prefix, "_files/report.csv").unwrap(), u);
+        // Deeper, and `_files` twice: still the execution's.
+        let deep = verbatim_file_uri(&prefix, "a/_files/_files/x").unwrap();
+        assert!(
+            matches!(parse_any(&deep), Ok(StorageUri::Execution(_))),
+            "{deep}"
+        );
+        // A trigger's and an execution's own file named `_files`.
+        for tail in ["trigger/t/_files", "_files"] {
+            let t = format!("kestra:///ns/flow/executions/{exec}/{tail}");
+            assert!(matches!(parse_any(&t), Ok(StorageUri::Execution(_))), "{t}");
+            assert_eq!(parse(&t).unwrap().to_uri(), t);
+        }
+    }
+
+    /// An uploaded FILE input literally named `_files` (and an input whose id
+    /// is `_files`) is an execution file.
+    #[test]
+    fn a_file_input_named_files_is_an_execution_file() {
+        let exec = Uuid::parse_str("0e9a7b4c-3f53-4f0b-9b3e-8d1f2a6c7e10").unwrap();
+        for (input, file) in [("f", "_files"), ("_files", "x.txt"), ("_files", "_files")] {
+            let u = input_uri("a.b", "flow", exec, input, file)
+                .unwrap_or_else(|e| panic!("{input}/{file}: {e}"));
+            assert_eq!(
+                u,
+                format!("kestra:///a/b/flow/executions/{exec}/inputs/{input}/{file}")
+            );
+            let got = parse(&u).unwrap();
+            assert_eq!(
+                got.tail,
+                Tail::Input {
+                    input: input.into(),
+                    file: file.into()
+                }
+            );
+            assert_eq!(got.to_uri(), u);
+        }
+        // The spec's example is still a namespace file: its marker is before the pair.
+        assert_eq!(
+            ns_file(&format!("kestra:///a/_files/x/executions/{exec}/f")),
+            nf("a", &format!("/x/executions/{exec}/f"), 1)
+        );
+    }
+
+    /// No flow segment can be the marker: a flow id may not start with `_`
+    /// (publish's `invalid_flow_id`), and its slug holds no `_` at all.
+    #[test]
+    fn no_flow_slug_is_the_files_marker() {
+        for id in [
+            "_files",
+            "x_files",
+            "__files__",
+            "_Files",
+            "a._files",
+            "files_",
+        ] {
+            let slug = slugify_str(id);
+            assert!(!slug.contains('_'), "{id} -> {slug}");
+            assert_ne!(slug, NAMESPACE_FILES_SEGMENT);
+        }
+        // A namespace holding `executions.<uuid>` before `_files`: the pair
+        // comes first, so its URI would read as an execution URI -- refused
+        // at build, naming the namespace (W9a's documented non-totality).
+        let ns = "a.b.executions.0e9a7b4c-3f53-4f0b-9b3e-8d1f2a6c7e10";
+        let p = crate::storage::nsfiles::path::NsPath::parse_file("/x").unwrap();
+        let err = namespace_file_uri(ns, &p, 1).unwrap_err();
+        assert!(err.contains(&format!("namespace {ns:?}")), "{err}");
     }
 }

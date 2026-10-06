@@ -226,9 +226,9 @@ pub(crate) fn content_disposition(name: &str) -> String {
 /// The stream's io errors name the `kestra://` URI (the store's own error
 /// does not) and are logged: the status line has already gone, so the client
 /// only sees the body end early.
-struct NamedErrors<R> {
-    inner: R,
-    uri: Arc<str>,
+pub(crate) struct NamedErrors<R> {
+    pub(crate) inner: R,
+    pub(crate) uri: Arc<str>,
 }
 
 impl<R: AsyncRead + Unpin> AsyncRead for NamedErrors<R> {
@@ -239,7 +239,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for NamedErrors<R> {
     ) -> Poll<std::io::Result<()>> {
         match Pin::new(&mut self.inner).poll_read(cx, buf) {
             Poll::Ready(Err(e)) => {
-                tracing::error!(uri = %self.uri, error = %e, "an execution file download failed mid-body");
+                tracing::error!(uri = %self.uri, error = %e, "a file download failed mid-body");
                 Poll::Ready(Err(std::io::Error::new(
                     e.kind(),
                     format!("{}: reading from internal storage failed: {e}", self.uri),
@@ -288,9 +288,22 @@ pub(crate) async fn download_execution_file(
         inner: reader,
         uri: Arc::from(file.uri.as_str()),
     }));
-    let disposition = HeaderValue::from_str(&content_disposition(file_name(&file.uri)))
-        .map_err(|e| core_refusal(Error::Internal(anyhow::anyhow!("{}: {e}", file.uri))))?;
     let mut res = Response::new(body);
+    download_headers(&mut res, file_name(&file.uri))?;
+    Ok(res)
+}
+
+/// A download's headers, for every route that serves a stored file (W9a's
+/// execution files, W9b's namespace files): `application/octet-stream`,
+/// `Content-Disposition: attachment` naming `name` ([`content_disposition`]:
+/// sanitised, and percent-encoded in `filename*`), `X-Content-Type-Options:
+/// nosniff` -- so a browser saves the bytes and never renders them.
+// The `Err` is the response itself, built once per request, as every handler
+// here answers (`Result<_, Response>`); its callers return it with `?`.
+#[allow(clippy::result_large_err)]
+pub(crate) fn download_headers(res: &mut Response, name: &str) -> Result<(), Response> {
+    let disposition = HeaderValue::from_str(&content_disposition(name))
+        .map_err(|e| core_refusal(Error::Internal(anyhow::anyhow!("{name:?}: {e}"))))?;
     let h = res.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
@@ -301,7 +314,7 @@ pub(crate) async fn download_execution_file(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    Ok(res)
+    Ok(())
 }
 
 #[utoipa::path(

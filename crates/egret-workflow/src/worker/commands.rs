@@ -102,10 +102,13 @@
 //!   §6.2) -- `workflow.storage.max_file_bytes` and `max_task_bytes` bound
 //!   what a task stores. An `inputFiles` value that is a `kestra://` URI is
 //!   staged from the store ([`TaskCommands::stored_inputs`]).
-//! * **No `namespaceFiles`, no `targetOS`.** Each needs a seam this crate
-//!   does not have (namespace files are W9b, Windows workers none).
-//!   [`TaskCommands::input_files`] carries the inline case -- a script
-//!   written by the handler itself, or an author's literal contents.
+//! * **No `targetOS`.** It needs a seam this crate does not have (Windows
+//!   workers). [`TaskCommands::input_files`] carries the inline case -- a
+//!   script written by the handler itself, or an author's literal contents.
+//!   *(2026-10-05, W9b Task 5: `namespaceFiles` arrive as
+//!   [`TaskCommands::stored_inputs`], staged by the script handler from
+//!   namespace files -- `storage::nsfiles::stage` -- and streamed from the
+//!   store like any other stored input.)*
 //! * **No registry credentials, no `shmSize`, `deviceRequests`, `privileged`,
 //!   `networkMode`, volumes.** W5a Task 5 implements `pullPolicy`, `cpu.cpus`,
 //!   `memory.memory` and `delete` (see [`create_args`]); every other Kestra
@@ -2538,16 +2541,45 @@ pub(crate) fn staging_error(e: crate::storage::transfer::TarError) -> Error {
 /// absolute path, a `..` segment, and a glob. The character class would also
 /// have to be *widened* here — a `docker cp` destination is a path, not a
 /// pattern — and a rule that has to be widened is a rule that stops being read.
+///
+/// *(W9b Task 5 fix round 1, I2, the user's ruling of 2026-10-06.)* This is
+/// the rule for names STAGED in, so it is [`staged_name_problem`]: no glob
+/// clause. A staged name is written literally (a tar entry), never matched,
+/// so a namespace file `/reports/q[1].csv` stages as in Kestra.
 fn check_relative(rel: &str) -> Result<()> {
-    match relative_problem(rel) {
+    match staged_name_problem(rel) {
         None => Ok(()),
         Some(problem) => Err(Error::InvalidInput(problem)),
     }
 }
 
 /// The same rule as a **message or nothing**, so the collectors can use
-/// it without an [`Error`] it would only have to unwrap again.
+/// it without an [`Error`] it would only have to unwrap again: every rule of
+/// [`staged_name_problem`], and a name that looks like a glob.
 pub(crate) fn relative_problem(rel: &str) -> Option<String> {
+    if let Some(problem) = staged_name_problem(rel) {
+        return Some(problem);
+    }
+    if rel.contains(['*', '?', '[']) {
+        return Some(format!(
+            "{rel:?} looks like a glob, and this task takes literal names only. A glob \
+             that matched nothing would leave a declared output absent from the outputs \
+             map, which nothing notices until a later expression fails"
+        ));
+    }
+    None
+}
+
+/// The rule for a name STAGED into the working directory (W9b Task 5 fix
+/// round 1, I2, the user's ruling of 2026-10-06): [`relative_problem`]
+/// without its glob clause. Empty, absolute, a control character, a `..`
+/// segment and the `.`-directory spellings are still refused. A staged name
+/// is a tar entry, written literally and never matched, so `*` and `[` in it
+/// are characters -- a namespace file `/reports/q[1].csv` (legal for
+/// `NsPath`) stages as Kestra's `putFile` writes it. The transfer and both
+/// runners check staged names with this; the script handler still refuses a
+/// glob-looking `inputFiles` KEY at render, as before.
+pub(crate) fn staged_name_problem(rel: &str) -> Option<String> {
     if rel.is_empty() {
         return Some("a file name must not be empty".to_string());
     }
@@ -2578,13 +2610,6 @@ pub(crate) fn relative_problem(rel: &str) -> Option<String> {
             "{rel:?} names a DIRECTORY rather than a file. `outputFiles` collects files, \
              each into its own `kestra://` URI, and never a directory, so name the files \
              inside it instead"
-        ));
-    }
-    if rel.contains(['*', '?', '[']) {
-        return Some(format!(
-            "{rel:?} looks like a glob, and this task takes literal names only. A glob \
-             that matched nothing would leave a declared output absent from the outputs \
-             map, which nothing notices until a later expression fails"
         ));
     }
     None
@@ -3069,8 +3094,6 @@ mod tests {
             ("/etc/passwd", "absolute path"),
             ("../../etc/passwd", "climbs out"),
             ("a/../../b", "climbs out"),
-            ("*.csv", "glob"),
-            ("out[0].txt", "glob"),
         ] {
             let err = check_relative(bad).expect_err("{bad:?} must be refused");
             assert!(
@@ -3095,6 +3118,16 @@ mod tests {
         }
         for good in ["out.txt", "nested/out.txt", "a.b-c_d+e"] {
             check_relative(good).unwrap_or_else(|e| panic!("{good:?} must be allowed: {e}"));
+        }
+        // W9b Task 5 fix round 1, I2: a staged name is literal, so glob
+        // characters are characters here; the shared rule still calls them
+        // a glob for every other caller (outputs, collection).
+        for literal in ["*.csv", "out[0].txt", "reports/q[1].csv"] {
+            check_relative(literal)
+                .unwrap_or_else(|e| panic!("{literal:?} must stage literally: {e}"));
+            let problem = relative_problem(literal)
+                .unwrap_or_else(|| panic!("{literal:?} is still a glob to relative_problem"));
+            assert!(problem.contains("glob"), "{problem}");
         }
     }
 

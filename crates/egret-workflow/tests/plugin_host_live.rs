@@ -306,6 +306,8 @@ impl Fx {
                 },
                 secrets: Arc::new(StoreSource(self.store.clone())),
                 files: self.files.clone(),
+                // W9b Task 10: namespace files resolve on the test's database.
+                pool: self.files.as_ref().map(|_| self.db.pool.clone()),
             }),
         );
         h
@@ -806,6 +808,11 @@ async fn a_timed_out_query_is_cancelled_on_postgres(pool: sqlx::PgPool) {
 /// `EGRET_TEST_S3_*` (the gate: this test is RustFS-gated and FAILS without
 /// them, as it does without [`GATE`]).
 async fn rustfs_files() -> Arc<FileStore> {
+    rustfs_files_under("w9a-t9-test").await
+}
+
+/// [`rustfs_files`] under `root/<uuid>/`.
+async fn rustfs_files_under(root: &str) -> Arc<FileStore> {
     let need = |k: &str| {
         std::env::var(k).unwrap_or_else(|_| {
             panic!("set {k} (and the other EGRET_TEST_S3_*) to run the plugin storage live test")
@@ -825,16 +832,21 @@ async fn rustfs_files() -> Arc<FileStore> {
     Arc::new(FileStore {
         store: Arc::new(store),
         bucket: cfg.bucket,
-        prefix: format!("w9a-t9-test/{}/", Uuid::new_v4()),
+        prefix: format!("{root}/{}/", Uuid::new_v4()),
         caps: egret_workflow::storage::Caps::default(),
         retention_days: 30,
     })
 }
 
 /// Delete, by exact key, every object under `files`' throwaway prefix --
-/// never a prefix delete, never outside `w9a-t9-test/`. Returns the count.
+/// never a prefix delete, never outside `w9a-t9-test/` (W9a Task 9) or
+/// `w9b-t10-test/` (W9b Task 10). Returns the count.
 async fn forget(files: &FileStore) -> usize {
-    assert!(files.prefix.starts_with("w9a-t9-test/"), "{}", files.prefix);
+    assert!(
+        files.prefix.starts_with("w9a-t9-test/") || files.prefix.starts_with("w9b-t10-test/"),
+        "{}",
+        files.prefix
+    );
     let listed = files.store.list(&files.prefix, None).await.expect("list");
     for o in &listed.objects {
         assert!(o.key.starts_with(&files.prefix), "{}", o.key);
@@ -1131,5 +1143,151 @@ async fn plugins_read_and_write_storage_through_egret() {
         files.prefix
     );
     assert!(removed >= 4, "the run wrote files to RustFS: {removed}");
+    assert_eq!(left, 0);
+}
+
+// ---------------------------------------------------------------------------
+// W9b Task 10: plugins read namespace files through egret
+// ---------------------------------------------------------------------------
+
+/// Write `body` at `path` of namespace `ns` in `ws`, as the API does.
+async fn write_namespace_file(
+    pool: &sqlx::PgPool,
+    files: &FileStore,
+    ws: Uuid,
+    ns: &str,
+    path: &str,
+    body: &str,
+) {
+    use egret_workflow::storage::nsfiles::{access, path::NsPath, store, CreatedBy};
+    let grant = access::authorize(ws, access::Actor::Api, ns, access::Access::Write)
+        .expect("a writable namespace");
+    let mut reader = body.as_bytes();
+    store::put(
+        pool,
+        files,
+        &grant,
+        &NsPath::parse_file(path).expect("a path"),
+        &mut reader,
+        store::Conflict::Overwrite,
+        CreatedBy::User(Uuid::nil()),
+    )
+    .await
+    .expect("the namespace file is written");
+}
+
+/// **Kestra plugins read namespace files through egret** (W9b spec §10),
+/// end to end through the real worker, `DockerRunner`, the real host image,
+/// a throwaway Postgres and RustFS under `w9b-t10-test/<uuid>/`:
+///
+/// * `postgresql.Query` with `sql: "{{ read('q.sql') }}"`: a FUNCTION, read
+///   at render; no bridge;
+/// * `postgresql.CopyIn` with `from: "{{ fileURI('data.csv') }}"`: the
+///   BRIDGE -- egret stages the namespace file, lists it in `task.json`'s
+///   `namespaceFiles`, and the host's `EgretStorage` serves its
+///   `kestra:///…/_files/data.csv` URI to the plugin's `getFile`.
+///
+/// It installs the process's store, so it runs in a process of its own
+/// (W9a's RustFS test installs another): run it alone, by name, `--exact`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs EGRET_PLUGIN_HOST_LIVE=1, Docker, egret-plugin-host:dev and RustFS (EGRET_TEST_S3_*)"]
+async fn plugins_read_namespace_files_through_egret() {
+    gate();
+    let files = rustfs_files_under("w9b-t10-test").await;
+    if let Err(other) = egret_workflow::storage::install(files.clone()) {
+        panic!(
+            "another store is installed in this process ({}): run this test alone, by name, \
+             with --exact",
+            other.prefix
+        );
+    }
+    let db = common::db().await.expect("DATABASE_URL");
+    let pool = db.pool.clone();
+    // What egret-bin installs at boot: the render's namespace functions
+    // (`read`, `fileURI`) connect with these options.
+    egret_workflow::storage::nsfiles::install_db_for_tests(&pool);
+    let pg = start_postgres().await;
+    psql(&pg, "CREATE TABLE dst (i int, t text)").await;
+    let mut fx = fx(&pool).await;
+    fx.files = Some(files.clone());
+    fx.secret("pg", &[("username", "w5b"), ("password", PG_PASSWORD)])
+        .await;
+    write_namespace_file(
+        &pool,
+        &files,
+        fx.ws,
+        "w9b.t10",
+        "/q.sql",
+        "SELECT 40 AS answer",
+    )
+    .await;
+    write_namespace_file(
+        &pool,
+        &files,
+        fx.ws,
+        "w9b.t10",
+        "/q.sql",
+        "SELECT 41 + 1 AS answer",
+    )
+    .await;
+    write_namespace_file(
+        &pool,
+        &files,
+        fx.ws,
+        "w9b.t10",
+        "/data.csv",
+        "i,t\n1,a\n2,b\n",
+    )
+    .await;
+    let conn = pg_conn(pg.port);
+    let src = format!(
+        "id: ns_bridge\nnamespace: w9b.t10\ntasks:\n\
+         \x20 - id: q\n    type: kestra.io.kestra.plugin.jdbc.postgresql.Query\n{conn}    \
+         sql: \"{{{{ read('q.sql') }}}}\"\n    fetchType: FETCH_ONE\n\
+         \x20 - id: copyin\n    type: kestra.io.kestra.plugin.jdbc.postgresql.CopyIn\n{conn}    \
+         table: dst\n    from: \"{{{{ fileURI('data.csv') }}}}\"\n    format: CSV\n    header: true\n"
+    );
+    let exec = fx.run(&src, 15, Duration::from_secs(300)).await;
+    let (state, outputs, message) = fx.task_run(exec, "q").await;
+    println!("NS q: {state} {outputs:?} {message:?}");
+    assert_eq!(state, "SUCCESS", "{message:?}");
+    assert_eq!(
+        outputs.as_ref().unwrap()["row"]["answer"],
+        42,
+        "read('q.sql') rendered the latest revision"
+    );
+    let (state, outputs, message) = fx.task_run(exec, "copyin").await;
+    println!("NS copyin: {state} {outputs:?} {message:?}");
+    assert_eq!(state, "SUCCESS", "{message:?}");
+    assert_eq!(outputs.as_ref().unwrap()["rowCount"], 2);
+    assert_eq!(
+        psql(
+            &pg,
+            "SELECT string_agg(i || ':' || t, ',' ORDER BY i) FROM dst"
+        )
+        .await
+        .trim(),
+        "1:a,2:b",
+        "CopyIn read the namespace file egret staged"
+    );
+    assert_no_secret_stored(&pool, PG_PASSWORD).await;
+    drop(pg);
+
+    let removed = forget(&files).await;
+    let left = files
+        .store
+        .list(&files.prefix, None)
+        .await
+        .unwrap()
+        .objects
+        .len();
+    println!(
+        "RUSTFS: {removed} objects deleted by exact key under {}; {left} left",
+        files.prefix
+    );
+    assert!(
+        removed >= 3,
+        "the namespace files were in RustFS: {removed}"
+    );
     assert_eq!(left, 0);
 }

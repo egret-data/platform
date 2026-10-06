@@ -429,6 +429,7 @@ mod tests {
             max_file_bytes: file,
             max_task_bytes: task,
             max_read_bytes: 1 << 20,
+            ..Caps::default()
         }
     }
 

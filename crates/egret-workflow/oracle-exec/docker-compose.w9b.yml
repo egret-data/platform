@@ -1,0 +1,13 @@
+# W9b Task 1: the pinned artifact on host port 18080 instead of 8080.
+#
+#   docker compose -p w9boracle -f docker-compose.yml -f docker-compose.w9b.yml up -d postgres kestra
+#
+# Why this file exists: on the measuring host, 8080 was held by a running egret
+# dev server (another checkout), and `docker-compose.yml` publishes 8080:8080.
+# Compose concatenates `ports` across files, so the base mapping is replaced with
+# `!override` rather than appended to. Nothing else about the artifact changes:
+# same image digest, same configuration, same storage volume.
+services:
+  kestra:
+    ports: !override
+      - "18080:8080"

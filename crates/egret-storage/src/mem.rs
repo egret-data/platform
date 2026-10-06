@@ -143,6 +143,25 @@ mod tests {
         assert_eq!(s.keys(), vec!["s3://b/a/b2/1", "s3://b/a/c"]);
     }
 
+    /// W9b's namespace-file write copies a staging object onto a revision key:
+    /// the copy replaces the target, keeps the source, and a missing source is
+    /// `NotFound` naming it, with nothing written.
+    #[tokio::test]
+    async fn copy_replaces_the_target_keeps_the_source_and_refuses_a_missing_one() {
+        let s = MemStore::new();
+        s.put("s3://b/src", b"new".to_vec()).await.unwrap();
+        s.put("s3://b/dst", b"old".to_vec()).await.unwrap();
+        s.copy("s3://b/src", "s3://b/dst").await.unwrap();
+        assert_eq!(s.get("s3://b/dst").await.unwrap(), b"new");
+        assert_eq!(s.get("s3://b/src").await.unwrap(), b"new");
+        let e = s.copy("s3://b/none", "s3://b/x").await.unwrap_err();
+        assert!(
+            matches!(&e, StorageError::NotFound(k) if k == "s3://b/none"),
+            "{e}"
+        );
+        assert_eq!(s.head("s3://b/x").await.unwrap(), None);
+    }
+
     #[tokio::test]
     async fn head_of_an_absent_object_is_none_not_an_error() {
         assert_eq!(MemStore::new().head("s3://b/nope").await.unwrap(), None);

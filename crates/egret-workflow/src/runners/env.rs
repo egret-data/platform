@@ -372,6 +372,14 @@ impl RenderContext {
         self.files.as_ref()
     }
 
+    /// A render against this context has ended: the file scope releases what
+    /// it held for it ([`super::files::RenderFiles::end_render`]).
+    pub(crate) fn end_render(&self) {
+        if let Some(files) = &self.files {
+            files.0.end_render();
+        }
+    }
+
     /// Builds a context from a JSON object.
     ///
     /// **Key order here is incidental, not guaranteed.** `serde_json::Map`
@@ -2038,6 +2046,9 @@ fn render_guarded_with(
                 .name("egret-render".to_string())
                 .stack_size(RENDER_STACK_BYTES)
                 .spawn_scoped(scope, || {
+                    // W9b fix round 1 (I1): nothing the render opened outlives
+                    // it -- a drop guard, so a panic below cannot skip it.
+                    let _end = EndRender(cx);
                     render_on_this_thread(template, cx, forbidden, extend, passes)
                 })
                 .map_err(|e| {
@@ -2053,6 +2064,16 @@ fn render_guarded_with(
     })
 }
 
+/// Ends the render's namespace connection when dropped, so a panic in the
+/// render cannot skip it (W9b Task 4 re-review, R1-m1).
+struct EndRender<'a>(&'a RenderContext);
+
+impl Drop for EndRender<'_> {
+    fn drop(&mut self) {
+        self.0.end_render();
+    }
+}
+
 /// Run `f` on a thread of its own and wait for it, the way a render runs --
 /// for a caller that reads a file through a `FileScope` outside a template.
 ///
@@ -2061,13 +2082,30 @@ fn render_guarded_with(
 /// (`block_on` would panic there). This is the render's own arrangement --
 /// [`off_the_runtime`] around a scoped thread -- so the runtime keeps running
 /// while the read blocks. `Err` when the thread cannot start or panics.
-pub(crate) fn on_a_render_thread<T: Send>(f: impl FnOnce() -> T + Send) -> Result<T, String> {
+///
+/// **W9b Task 4 re-review, R1-m2.** It takes the `FileScope` the work reads
+/// through and ends that scope's render when `f` returns (or panics), as a
+/// template render does: a namespace connection a non-template read opens
+/// (Task 5's staging, Task 9's bridge) cannot outlive its work.
+pub(crate) fn on_a_render_thread<T: Send>(
+    files: &FileScope,
+    f: impl FnOnce() -> T + Send,
+) -> Result<T, String> {
+    struct EndScope<'a>(&'a FileScope);
+    impl Drop for EndScope<'_> {
+        fn drop(&mut self) {
+            self.0 .0.end_render();
+        }
+    }
     off_the_runtime(|| {
         std::thread::scope(|scope| {
             let worker = std::thread::Builder::new()
                 .name("egret-render".to_string())
                 .stack_size(RENDER_STACK_BYTES)
-                .spawn_scoped(scope, f)
+                .spawn_scoped(scope, || {
+                    let _end = EndScope(files);
+                    f()
+                })
                 .map_err(|e| format!("could not start a render thread: {e}"))?;
             worker
                 .join()
@@ -2366,7 +2404,11 @@ pub(crate) fn render_bound(
             let worker = std::thread::Builder::new()
                 .name("egret-render-bound".to_string())
                 .stack_size(RENDER_STACK_BYTES)
-                .spawn_scoped(scope, || bind_on_this_thread(template, cx))
+                .spawn_scoped(scope, || {
+                    // W9b fix round 1 (I1): as `render_guarded_with`.
+                    let _end = EndRender(cx);
+                    bind_on_this_thread(template, cx)
+                })
                 .map_err(|e| {
                     RenderError::Template(format!("could not start a render thread: {e}"))
                 })?;
@@ -2562,6 +2604,84 @@ mod tests {
 
     fn render(template: &str, ctx: JsonValue) -> Result<String, RenderError> {
         render_str(template, &cx(ctx))
+    }
+
+    /// R1-m1 and R1-m2: the render's end is unconditional. A scope whose
+    /// namespace lookup panics still has `end_render` called, on a template
+    /// render and on `on_a_render_thread`.
+    mod the_render_ends_even_when_it_panics {
+        use super::*;
+        use crate::runners::files::{
+            FileMeta, FileScope, FileUnavailable, NsFileArgs, NsFileMeta, RenderFiles,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct Panicky(AtomicUsize);
+
+        impl RenderFiles for Panicky {
+            fn lookup(&self, _: &str) -> Result<FileMeta, FileUnavailable> {
+                Err(FileUnavailable::Refused("none".into()))
+            }
+            fn read_utf8(&self, _: &str) -> Result<String, String> {
+                Err("none".into())
+            }
+            fn read_bytes(&self, _: &str, _: &str) -> Result<Vec<u8>, String> {
+                Err("none".into())
+            }
+            fn task_prefix(&self) -> Option<&str> {
+                None
+            }
+            fn namespace_file(&self, _: &NsFileArgs<'_>) -> Result<NsFileMeta, FileUnavailable> {
+                panic!("a lookup that panics");
+            }
+            fn end_render(&self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn scope() -> (Arc<Panicky>, FileScope) {
+            let fake = Arc::new(Panicky::default());
+            (fake.clone(), FileScope(fake))
+        }
+
+        #[test]
+        fn a_template_render_that_panics_still_ends() {
+            let (fake, files) = scope();
+            let cx = RenderContext::new().with_files(files);
+            let out = render_str("{{ fileExists('a.txt') }}", &cx);
+            assert!(
+                matches!(&out, Err(RenderError::Template(m)) if m == "the render panicked"),
+                "the lookup's panic is an error, not a hang: {out:?}"
+            );
+            assert_eq!(
+                fake.0.load(Ordering::SeqCst),
+                1,
+                "render_guarded_with ended it"
+            );
+        }
+
+        #[test]
+        fn a_bound_render_that_panics_still_ends() {
+            let (fake, files) = scope();
+            let cx = RenderContext::new().with_files(files);
+            let out = render_bound("{{ fileExists('a.txt') }}", &cx);
+            assert!(
+                matches!(&out, Err(RenderError::Template(m)) if m == "the render panicked"),
+                "the lookup's panic is an error, not a hang: {out:?}"
+            );
+            assert_eq!(fake.0.load(Ordering::SeqCst), 1, "render_bound ended it");
+        }
+
+        #[test]
+        fn on_a_render_thread_ends_the_scope_after_the_work_and_after_a_panic() {
+            let (fake, files) = scope();
+            assert_eq!(on_a_render_thread(&files, || 7), Ok(7));
+            assert_eq!(fake.0.load(Ordering::SeqCst), 1, "ended after the work");
+            let out = on_a_render_thread(&files, || -> u8 { panic!("the work panics") });
+            assert!(out.is_err());
+            assert_eq!(fake.0.load(Ordering::SeqCst), 2, "ended after a panic");
+        }
     }
 
     // -----------------------------------------------------------------
