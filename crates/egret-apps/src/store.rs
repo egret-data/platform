@@ -283,7 +283,8 @@ impl AppStore {
     /// One transaction, with the app row locked so the trash state it checks is
     /// the state it deletes (a concurrent restore waits, then finds no app):
     /// the caller-independent polymorphic rows that no foreign key reaches --
-    /// every user's bookmark of it and every object share on it -- then the app
+    /// every user's bookmark of it, every object share on it and every tag
+    /// assigned to it -- then the app
     /// row itself. Drafts, versions, sessions, grants and run pod tokens follow
     /// by `ON DELETE CASCADE` (migrations 0161, 0163, 0165); the `app_versions`
     /// append-only trigger lets a version go exactly when its app row is already
@@ -316,6 +317,11 @@ impl AppStore {
             .await
             .map_err(db_err)?;
         sqlx::query("DELETE FROM access_grants WHERE scope_type = 'object' AND scope_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        sqlx::query("DELETE FROM tag_assignments WHERE object_type = 'app' AND object_id = $1")
             .bind(id)
             .execute(&mut *tx)
             .await

@@ -1857,7 +1857,7 @@ const NOT_TRASHED: &str =
 /// Every table that holds something of an app, with the count of its rows there.
 /// Each is asserted non-zero BEFORE a delete, so a zero afterwards means "removed"
 /// and not "never seeded".
-const APP_TABLES: [(&str, &str); 8] = [
+const APP_TABLES: [(&str, &str); 9] = [
     ("apps", "SELECT count(*) FROM analytics.apps WHERE id = $1"),
     (
         "app_drafts",
@@ -1886,6 +1886,10 @@ const APP_TABLES: [(&str, &str); 8] = [
     (
         "access_grants",
         "SELECT count(*) FROM access_grants WHERE scope_type = 'object' AND scope_id = $1",
+    ),
+    (
+        "tag_assignments",
+        "SELECT count(*) FROM tag_assignments WHERE object_type = 'app' AND object_id = $1",
     ),
 ];
 
@@ -1922,8 +1926,8 @@ impl ObjectStore for FailingDeletePrefix {
 impl Fixture {
     /// An app with everything a delete has to take with it: a draft with a
     /// layout, two published versions and a restored one (a `restored_from`
-    /// self-reference), a grant, a run pod token, a run session, two bookmarks
-    /// and a share.
+    /// self-reference), a grant, a run pod token, a run session, two bookmarks,
+    /// a share and a tag.
     async fn seeded_app(&self, name: &str) -> String {
         let (id, _layout) = self.app_with_a_layout(name, None).await;
         let app = Uuid::parse_str(&id).unwrap();
@@ -1972,6 +1976,22 @@ impl Fixture {
         }
         let guest = self.user().await;
         self.share(&id, &guest, "ws_viewer").await;
+        // `tag_assignments` is polymorphic like bookmarks: egret-bi's object-tag
+        // routes accept kind `app`, and no foreign key reaches the app row.
+        let tag: Uuid =
+            sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $1) RETURNING id")
+                .bind(format!("t-{}", Uuid::new_v4().simple()))
+                .fetch_one(&self.db.pool)
+                .await
+                .expect("tag");
+        sqlx::query(
+            "INSERT INTO tag_assignments (tag_id, object_type, object_id) VALUES ($1, 'app', $2)",
+        )
+        .bind(tag)
+        .bind(app)
+        .execute(&self.db.pool)
+        .await
+        .expect("tag assignment");
         id
     }
 

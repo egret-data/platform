@@ -67,6 +67,7 @@ a profile, batch it then.
 4. In one transaction:
    - delete its `analytics.bookmarks` rows (`entity_type = 'app'`; polymorphic, no FK);
    - delete its `access_grants` rows (`scope_type = 'object'`, `scope_id = <id>`; polymorphic);
+   - delete its `tag_assignments` rows (`object_type = 'app'`; polymorphic);
    - delete the `analytics.apps` row. Drafts, versions, sessions, grants and pod tokens cascade
      (migrations 0161, 0163, 0165).
 5. After commit, delete the object-store prefix `…/{workspace}/{app}/` (`delete_prefix`).

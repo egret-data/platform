@@ -65,8 +65,8 @@ profile thì gộp lại sau.
 1. Tìm app trong workspace của người gọi (không có thì 404).
 2. Yêu cầu `app:manage` trên object.
 3. App phải đang trong thùng rác; ngược lại 409 kèm lời nhắc chuyển vào Thùng rác trước.
-4. Trong một transaction: xoá các dòng `analytics.bookmarks` và `access_grants` của nó (đa hình,
-   không có FK), rồi xoá dòng `analytics.apps`. Draft, version, session, grant và pod token xoá
+4. Trong một transaction: xoá các dòng `analytics.bookmarks`, `access_grants` và `tag_assignments`
+   của nó (đa hình, không có FK), rồi xoá dòng `analytics.apps`. Draft, version, session, grant và pod token xoá
    theo qua cascade.
 5. Sau khi commit, xoá prefix `…/{workspace}/{app}/` trong object store.
 6. Phát sự kiện `app:delete`. Trả 204.

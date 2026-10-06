@@ -49,6 +49,7 @@ vi.mock("@/components/sharing/ShareDialog", () => ({
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
 
 import { toast } from "sonner";
+import { ApiError } from "@/api/client";
 import Apps from "@/routes/explore/Apps";
 
 function Where() {
@@ -261,17 +262,31 @@ describe("Apps list — row menu", () => {
     await waitFor(() => expect(screen.getByTestId("where").textContent).toBe("/explore/acme/apps/copy1/edit"));
   });
 
-  it("a refused Duplicate shows the server's words and stays on the list", async () => {
+  it("a Duplicate refused with 403 says what is missing, and stays on the list", async () => {
     // The share-only collaborator: `can_write` on the row is true, and the server still wants
-    // workspace-level write. The item is offered; the refusal must be legible.
+    // workspace-level write. The server's whole answer is the word "forbidden" (seen live), which
+    // tells them nothing — so the page says which permission the copy needed.
     serve([app({ id: "src", name: "Source", can_manage: false })]);
-    m.duplicate.mockRejectedValue(new Error("forbidden: app:write on workspace"));
+    m.duplicate.mockRejectedValue(new ApiError(403, "forbidden"));
     renderApps();
     await openMenu("Source");
     await userEvent.click(screen.getByRole("menuitem", { name: "Duplicate" }));
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("forbidden: app:write on workspace"));
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        "You can edit this app, but making a copy needs permission to create apps in this workspace.",
+      ),
+    );
     expect(screen.queryByTestId("where")).toBeNull();
     expect(screen.getByText("Source")).toBeTruthy();
+  });
+
+  it("a Duplicate that fails for any other reason shows the server's words", async () => {
+    serve([app({ id: "src", name: "Source" })]);
+    m.duplicate.mockRejectedValue(new ApiError(409, "app is in the trash"));
+    renderApps();
+    await openMenu("Source");
+    await userEvent.click(screen.getByRole("menuitem", { name: "Duplicate" }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("app is in the trash"));
   });
 
   it("Rename… opens the dialog on that app and saves through PATCH", async () => {

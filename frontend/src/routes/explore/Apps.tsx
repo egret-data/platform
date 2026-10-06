@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import { type AppSummary, useAppMutations, useApps, useCreateApp } from "@/api/apps";
+import { ApiError } from "@/api/client";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { AppActionsMenu } from "@/components/apps/AppActionsMenu";
 import { RenameAppDialog } from "@/components/apps/RenameAppDialog";
@@ -245,11 +246,22 @@ export default function Apps() {
   /**
    * `can_write` on the row is necessary for Duplicate but not sufficient: the server also wants
    * workspace-level write, which a share-only collaborator lacks and which no field in the list
-   * reports. So the item is offered on `can_write` and a refusal arrives here, in the server's
-   * words. Navigation is chained on success only — a refused duplicate stays on the list.
+   * reports. So the item is offered on `can_write` and a refusal arrives here. The server's
+   * whole answer to that refusal is the word "forbidden", so a 403 is spelled out; anything else
+   * keeps the server's words. Navigation is chained on success only — a refused duplicate stays
+   * on the list.
    */
   const onDuplicate = (a: AppSummary) =>
-    guard(duplicate.mutateAsync(a.id).then((c) => nav(`/explore/${ws}/apps/${c.id}/edit`)));
+    duplicate
+      .mutateAsync(a.id)
+      .then((c) => nav(`/explore/${ws}/apps/${c.id}/edit`))
+      .catch((e) =>
+        toast.error(
+          e instanceof ApiError && e.status === 403
+            ? "You can edit this app, but making a copy needs permission to create apps in this workspace."
+            : errText(e),
+        ),
+      );
 
   async function doBulkTrash() {
     let moved = 0;
