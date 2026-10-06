@@ -26,4 +26,11 @@ export interface AppDetail {
   draft_revision: number;
   /** @nullable */
   latest_version_no?: number | null;
+  /**
+     * The caller holds `app:write` on THIS app (per object: a share on one app
+     * makes it true on that row only).
+     */
+  can_write: boolean;
+  /** The caller holds `app:manage` on THIS app (sharing, permanent delete). */
+  can_manage: boolean;
 }

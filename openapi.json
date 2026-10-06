@@ -13552,6 +13552,96 @@
           }
         }
       },
+      "delete": {
+        "tags": [
+          "apps"
+        ],
+        "operationId": "delete_app",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "App id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The app is permanently deleted, with its draft, versions, shares and every user's bookmark of it. Irreversible"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing app:manage on this app",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such app in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The app is not in the trash; move it to Trash first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
       "patch": {
         "tags": [
           "apps"
@@ -14062,6 +14152,105 @@
           },
           "428": {
             "description": "If-Match is missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/apps/{id}/duplicate": {
+      "post": {
+        "tags": [
+          "apps"
+        ],
+        "operationId": "duplicate",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "App to copy",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "A new app named `Copy of <name>`, owned by the caller, in the source's folder, whose revision-1 draft is the source's current draft (source and layout). Versions, shares and bookmarks are not copied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing app:write on this app, or app:write in the workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such app in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The app is in the trash",
             "content": {
               "application/json": {
                 "schema": {
@@ -30110,7 +30299,9 @@
           "created_at",
           "updated_at",
           "bookmarked",
-          "draft_revision"
+          "draft_revision",
+          "can_write",
+          "can_manage"
         ],
         "properties": {
           "id": {
@@ -30168,6 +30359,14 @@
               "null"
             ],
             "format": "int32"
+          },
+          "can_write": {
+            "type": "boolean",
+            "description": "The caller holds `app:write` on THIS app (per object: a share on one app\nmakes it true on that row only)."
+          },
+          "can_manage": {
+            "type": "boolean",
+            "description": "The caller holds `app:manage` on THIS app (sharing, permanent delete)."
           }
         }
       },
@@ -30271,7 +30470,9 @@
           "is_owner",
           "updated_at",
           "bookmarked",
-          "draft_revision"
+          "draft_revision",
+          "can_write",
+          "can_manage"
         ],
         "properties": {
           "id": {
@@ -30329,6 +30530,14 @@
             ],
             "format": "int32",
             "description": "`None` until the first publish."
+          },
+          "can_write": {
+            "type": "boolean",
+            "description": "The caller holds `app:write` on THIS app (per object: a share on one app\nmakes it true on that row only)."
+          },
+          "can_manage": {
+            "type": "boolean",
+            "description": "The caller holds `app:manage` on THIS app (sharing, permanent delete)."
           }
         }
       },

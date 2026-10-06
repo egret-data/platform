@@ -2528,10 +2528,8 @@ export const getControlPlaneAccessDeleteUserUrl = (id: string,) => {
  * @summary `DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,
 not the last active platform admin (`guard_not_last_admin`, shared with the
 disable branch of `update_user`). Cleans up the user's sessions, group
-memberships, and platform role/permission grants, reassigns the target's
-notebooks to the deleting admin (`p.user_id`, since `owner_user_id` is NOT
-NULL), then removes the row itself, in one transaction
-(`UserRepo::hard_delete`).
+memberships, and platform role/permission grants, then removes the row
+itself, in one transaction (`UserRepo::hard_delete`).
  */
 export const controlPlaneAccessDeleteUser = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessDeleteUserResponse> => {
 
@@ -2583,10 +2581,8 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
  * @summary `DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,
 not the last active platform admin (`guard_not_last_admin`, shared with the
 disable branch of `update_user`). Cleans up the user's sessions, group
-memberships, and platform role/permission grants, reassigns the target's
-notebooks to the deleting admin (`p.user_id`, since `owner_user_id` is NOT
-NULL), then removes the row itself, in one transaction
-(`UserRepo::hard_delete`).
+memberships, and platform role/permission grants, then removes the row
+itself, in one transaction (`UserRepo::hard_delete`).
  */
 export const useControlPlaneAccessDeleteUser = <TError = ErrorBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessDeleteUser>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}

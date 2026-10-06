@@ -443,7 +443,112 @@ export function useAppsGetOne<TData = Awaited<ReturnType<typeof appsGetOne>>, TE
 
 
 
-export type appsUpdateResponse200 = {
+export type appsDeleteAppResponse204 = {
+  data: void
+  status: 204
+}
+
+export type appsDeleteAppResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type appsDeleteAppResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type appsDeleteAppResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type appsDeleteAppResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type appsDeleteAppResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type appsDeleteAppResponseSuccess = (appsDeleteAppResponse204) & {
+  headers: Headers;
+};
+export type appsDeleteAppResponseError = (appsDeleteAppResponse401 | appsDeleteAppResponse403 | appsDeleteAppResponse404 | appsDeleteAppResponse409 | appsDeleteAppResponse500) & {
+  headers: Headers;
+};
+
+export type appsDeleteAppResponse = (appsDeleteAppResponseSuccess | appsDeleteAppResponseError)
+
+export const getAppsDeleteAppUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/apps/${encodeURIComponent(id)}`
+}
+
+export const appsDeleteApp = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<appsDeleteAppResponse> => {
+
+  return customInstance<appsDeleteAppResponse>(getAppsDeleteAppUrl(workspace,id),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getAppsDeleteAppMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof appsDeleteApp>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof appsDeleteApp>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['appsDeleteApp'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof appsDeleteApp>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  appsDeleteApp(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AppsDeleteAppMutationResult = NonNullable<Awaited<ReturnType<typeof appsDeleteApp>>>
+
+    export type AppsDeleteAppMutationError = ErrorBody
+
+    export const useAppsDeleteApp = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof appsDeleteApp>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof appsDeleteApp>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getAppsDeleteAppMutationOptions(options), queryClient);
+    }
+    export type appsUpdateResponse200 = {
   data: AppDetail
   status: 200
 }
@@ -1010,6 +1115,111 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getAppsDraftPutMutationOptions(options), queryClient);
+    }
+    export type appsDuplicateResponse201 = {
+  data: AppDetail
+  status: 201
+}
+
+export type appsDuplicateResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type appsDuplicateResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type appsDuplicateResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type appsDuplicateResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type appsDuplicateResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type appsDuplicateResponseSuccess = (appsDuplicateResponse201) & {
+  headers: Headers;
+};
+export type appsDuplicateResponseError = (appsDuplicateResponse401 | appsDuplicateResponse403 | appsDuplicateResponse404 | appsDuplicateResponse409 | appsDuplicateResponse500) & {
+  headers: Headers;
+};
+
+export type appsDuplicateResponse = (appsDuplicateResponseSuccess | appsDuplicateResponseError)
+
+export const getAppsDuplicateUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/apps/${encodeURIComponent(id)}/duplicate`
+}
+
+export const appsDuplicate = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<appsDuplicateResponse> => {
+
+  return customInstance<appsDuplicateResponse>(getAppsDuplicateUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getAppsDuplicateMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof appsDuplicate>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof appsDuplicate>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['appsDuplicate'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof appsDuplicate>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  appsDuplicate(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AppsDuplicateMutationResult = NonNullable<Awaited<ReturnType<typeof appsDuplicate>>>
+
+    export type AppsDuplicateMutationError = ErrorBody
+
+    export const useAppsDuplicate = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof appsDuplicate>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof appsDuplicate>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getAppsDuplicateMutationOptions(options), queryClient);
     }
     export type appsSetFolderResponse204 = {
   data: void

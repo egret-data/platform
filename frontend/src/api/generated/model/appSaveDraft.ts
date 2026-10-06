@@ -9,4 +9,6 @@
 export interface AppSaveDraft {
   /** marimo source, at most 1 MiB (1 048 576 bytes). */
   source: string;
+  /** The complete new layout state; omit or send `null` to clear it. */
+  layout?: unknown;
 }
