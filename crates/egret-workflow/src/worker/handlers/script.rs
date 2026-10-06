@@ -786,7 +786,7 @@ impl TaskHandler for Script {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::container::testing::Spy;
     use super::*;
     use crate::executor::RunState;
@@ -1355,8 +1355,9 @@ mod tests {
         );
     }
 
-    /// An object store whose every call fails as an unreachable S3 does.
-    struct DownStore;
+    /// An object store whose every call fails as an unreachable S3 does
+    /// (also the plugin bridge's outage test, W9b Task 10).
+    pub(crate) struct DownStore;
     #[async_trait::async_trait]
     impl egret_storage::ObjectStore for DownStore {
         async fn put(

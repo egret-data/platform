@@ -776,7 +776,7 @@ pub async fn handlers_for(
             features: features.clone(),
             files: crate::storage::current(),
             // W9b Task 5: namespace files are staged on this pool.
-            pool: Some(pool),
+            pool: Some(pool.clone()),
         }),
     );
     crate::worker::handlers::kestra::register(
@@ -791,6 +791,8 @@ pub async fn handlers_for(
             // W9a Task 9: the plugin storage bridge stages from, and collects
             // into, the installed store.
             files: crate::storage::current(),
+            // W9b Task 10: namespace-file values are resolved on this pool.
+            pool: Some(pool),
         }),
     );
     Ok((handlers.with_orphan_sweep(sweep), Some(kind)))

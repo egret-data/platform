@@ -604,6 +604,34 @@ pub async fn resolve_input_uri(
     flow_namespace: &str,
     uri: &str,
 ) -> Result<Result<StoredInput, String>, NsError> {
+    Ok(resolve_ns_file(conn, fs, workspace, flow_namespace, uri)
+        .await?
+        .map(|r| r.input))
+}
+
+/// What [`resolve_ns_file`] found: the [`StoredInput`] the runner streams,
+/// and which file and revision it is (the plugin bridge's `namespaceFiles`
+/// entry, W9b Task 10).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedNsFile {
+    pub input: StoredInput,
+    /// The namespace the grant was given for.
+    pub namespace: String,
+    /// The path in its stored form, with its leading '/'.
+    pub path: String,
+    pub revision: u32,
+}
+
+/// [`resolve_input_uri`], keeping the namespace, path and revision it
+/// resolved: the one resolver of a namespace-file URI, shared by a script
+/// task's `inputFiles` (Task 5) and the plugin bridge (Task 10).
+pub async fn resolve_ns_file(
+    conn: &mut PgConnection,
+    fs: &FileStore,
+    workspace: Uuid,
+    flow_namespace: &str,
+    uri: &str,
+) -> Result<Result<ResolvedNsFile, String>, NsError> {
     let named = match crate::storage::scope::ns_ref(uri, flow_namespace, None) {
         Ok(n) => n,
         Err(why) => return Ok(Err(why)),
@@ -635,10 +663,15 @@ pub async fn resolve_input_uri(
             grant.namespace()
         )));
     }
-    Ok(Ok(StoredInput {
-        uri: uri.to_string(),
-        object_uri: fs.namespace_object_uri(&grant, &entry.path, entry.revision),
-        size: entry.size,
+    Ok(Ok(ResolvedNsFile {
+        input: StoredInput {
+            uri: uri.to_string(),
+            object_uri: fs.namespace_object_uri(&grant, &entry.path, entry.revision),
+            size: entry.size,
+        },
+        namespace: grant.namespace().to_string(),
+        path: entry.path.as_str().to_string(),
+        revision: entry.revision,
     }))
 }
 

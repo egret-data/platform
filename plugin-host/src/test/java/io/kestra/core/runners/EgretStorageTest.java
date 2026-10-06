@@ -1,6 +1,7 @@
 package io.kestra.core.runners;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -254,12 +255,23 @@ class EgretStorageTest {
         assertArrayEquals(STAGED_BYTES, read(shim.storage().getFile(URI.create(STAGED))));
     }
 
+    /**
+     * W9b Task 10 (2026-10-06): this was {@code namespace_files_are_w9b_and_exit_4}. Namespace files are
+     * provided now: {@code storage().namespace(ns)} no longer throws {@link EgretUnsupported}; with nothing
+     * staged it is an empty, read-only namespace ({@code EgretNamespaceTest} covers what it reads).
+     */
     @Test
-    void namespace_files_are_w9b_and_exit_4() {
+    void storage_namespace_no_longer_throws_egret_unsupported() throws Exception {
         var storage = shim().storage();
-        var e = assertThrows(EgretUnsupported.class, storage::namespace);
-        assertTrue(e.getMessage().contains("W9b"), e.getMessage());
-        assertEquals(4, EgretPluginHost.exitCodeFor(e));
+        var own = assertDoesNotThrow(() -> storage.namespace());
+        var named = assertDoesNotThrow(() -> storage.namespace("w9a.plugins"));
+        var other = assertDoesNotThrow(() -> storage.namespace("w9b.other"));
+        for (var ns : List.of(own, named, other)) {
+            assertTrue(ns instanceof EgretNamespace, ns.getClass().getName());
+            assertEquals(List.of(), ns.all());
+        }
+        assertEquals("w9a.plugins", own.namespace());
+        assertEquals("w9b.other", other.namespace());
     }
 
     @Test

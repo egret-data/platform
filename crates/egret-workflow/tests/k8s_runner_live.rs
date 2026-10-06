@@ -2348,6 +2348,8 @@ async fn plugin_handlers() -> egret_workflow::worker::Handlers {
             },
             secrets: Arc::new(NoSecrets),
             files: Some(suite_files()),
+            // W9b Task 10: no namespace-file value in these tasks.
+            pool: None,
         }),
     );
     h
