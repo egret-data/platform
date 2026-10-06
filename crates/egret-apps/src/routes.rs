@@ -102,6 +102,7 @@ pub fn apps_router() -> Router<AppsApiState> {
         .route("/ws/{workspace}/apps/{id}", get(get_one).patch(update))
         .route("/ws/{workspace}/apps/{id}/trash", post(trash))
         .route("/ws/{workspace}/apps/{id}/restore", post(restore))
+        .route("/ws/{workspace}/apps/{id}/duplicate", post(duplicate))
         .route("/ws/{workspace}/apps/{id}/folder", patch(set_folder))
         .route(
             "/ws/{workspace}/apps/{id}/bookmark",
@@ -753,6 +754,40 @@ async fn restore(
 }
 
 #[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/apps/{id}/duplicate",
+    tag = "apps",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "App to copy")),
+    responses(
+        (status = 201, description = "A new app named `Copy of <name>`, owned by the caller, in the source's folder, whose revision-1 draft is the source's current draft (source and layout). Versions, shares and bookmarks are not copied", body = AppDetail),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing app:write on this app, or app:write in the workspace", body = ErrorBody),
+        (status = 404, description = "No such app in this workspace", body = ErrorBody),
+        (status = 409, description = "The app is in the trash", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn duplicate(
+    State(st): State<AppsApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> AppsResult<(StatusCode, Json<AppDetail>)> {
+    let (obj, row) = app_object_ref(&st, &ctx, id).await?;
+    // Write, not read: the copy is made from the DRAFT, which a reader may not
+    // see (`draft_get`). And workspace write, as `create`: the result is a new app.
+    require_object(&*st.pdp, &ctx, APP_WRITE, obj).await?;
+    egret_core::authz::require(&*st.pdp, &ctx, APP_WRITE).await?;
+    refuse_if_trashed(&row)?;
+    let copy = st
+        .store
+        .duplicate(ctx.workspace_id, ctx.principal.user_id, id)
+        .await?;
+    emit(&st, &ctx, "app:duplicate", copy.id, json!({ "from": id }));
+    let caps = caps(&st, &ctx, &copy).await?;
+    Ok((StatusCode::CREATED, Json(AppDetail::of(copy, &ctx, caps))))
+}
+
+#[utoipa::path(
     patch,
     path = "/api/ws/{workspace}/apps/{id}/folder",
     tag = "apps",
@@ -1225,6 +1260,7 @@ async fn version_restore(
         update,
         trash,
         restore,
+        duplicate,
         set_folder,
         bookmark_add,
         bookmark_remove,

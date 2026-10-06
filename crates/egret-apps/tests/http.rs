@@ -16,6 +16,7 @@ use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_core::{UserId, WorkspaceId};
 use egret_metastore::Db;
+use egret_storage::{MemStore, ObjectStore};
 use egret_workspace::members::MemberRepo;
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
@@ -34,8 +35,8 @@ const TEST_PREFIX: &str = "apps/";
 /// is made through the store's own `create` (via `Fixture::create_app`'s HTTP call)
 /// or `publish`/`save_draft`, all against this one router's one `MemStore` -- so a
 /// fresh, empty one here is enough; nothing needs pre-seeding.
-fn test_object_store() -> Arc<dyn egret_storage::ObjectStore> {
-    Arc::new(egret_storage::MemStore::new())
+fn test_object_store() -> Arc<dyn ObjectStore> {
+    Arc::new(MemStore::new())
 }
 
 /// `(method, path template with {id}, body, extra headers)`.
@@ -53,6 +54,10 @@ struct User {
 
 struct Fixture {
     db: Db,
+    /// The router's object store, kept across `rebuild` so content written
+    /// before a grant is still there after it, and so a test can read what a
+    /// route wrote (`Fixture::store`, `MemStore::keys`).
+    mem: Arc<MemStore>,
     router: axum::Router,
     audit_rx: Receiver<AuditEvent>,
     owner: UserId,
@@ -69,7 +74,10 @@ struct Resp {
     body: Value,
 }
 
-async fn build_router(db: &Db) -> (axum::Router, Receiver<AuditEvent>) {
+async fn build_router(
+    db: &Db,
+    objects: Arc<dyn ObjectStore>,
+) -> (axum::Router, Receiver<AuditEvent>) {
     let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
         egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
             .await
@@ -79,7 +87,7 @@ async fn build_router(db: &Db) -> (axum::Router, Receiver<AuditEvent>) {
     let st = AppsApiState {
         store: AppStore::new(
             db.clone(),
-            test_object_store(),
+            objects,
             TEST_BUCKET.to_string(),
             TEST_PREFIX.to_string(),
         ),
@@ -129,6 +137,7 @@ impl Fixture {
             .expect("ws B")
             .id;
         let mut fx = Self {
+            mem: Arc::new(MemStore::new()),
             router: axum::Router::new(),
             audit_rx: tokio::sync::mpsc::channel(1).1,
             owner,
@@ -153,9 +162,19 @@ impl Fixture {
 
     /// Rebuild the router (and its PDP snapshot) after adding grants.
     async fn rebuild(&mut self) {
-        let (router, rx) = build_router(&self.db).await;
+        let (router, rx) = build_router(&self.db, self.mem.clone()).await;
         self.router = router;
         self.audit_rx = rx;
+    }
+
+    /// An `AppStore` over the router's own objects.
+    fn store(&self) -> AppStore {
+        AppStore::new(
+            self.db.clone(),
+            self.mem.clone(),
+            TEST_BUCKET.to_string(),
+            TEST_PREFIX.to_string(),
+        )
     }
 
     /// A user with a live session and no workspace role.
@@ -514,6 +533,7 @@ async fn an_app_of_another_workspace_is_404_on_every_route_like_a_random_id() {
             Some(json!({ "mode": "edit" })),
             vec![],
         ),
+        ("POST", "/{id}/duplicate".to_string(), None, vec![]),
         ("GET", "/{id}/versions".to_string(), None, vec![]),
         ("GET", format!("/{{id}}/versions/{b_ver}"), None, vec![]),
         (
@@ -915,6 +935,8 @@ async fn a_trashed_app_is_read_only_until_restored() {
             None,
         )
         .await,
+        fx.call("POST", &fx.path(&format!("/{id}/duplicate")), e, None)
+            .await,
     ];
     for (i, r) in refused.iter().enumerate() {
         assert_eq!(r.status, StatusCode::CONFLICT, "#{i}: {}", r.body);
@@ -1184,6 +1206,7 @@ async fn with_the_apps_feature_disabled_every_route_is_403() {
             Some(json!({ "source": "x" })),
         ),
         ("POST", format!("/{id}/publish"), Some(json!({}))),
+        ("POST", format!("/{id}/duplicate"), None),
         ("GET", format!("/{id}/versions"), None),
         ("GET", format!("/{id}/versions/{vid}"), None),
         ("POST", format!("/{id}/versions/{vid}/restore"), None),
@@ -1595,4 +1618,229 @@ async fn create_and_update_report_the_callers_capabilities() {
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
     assert_eq!(r.body["can_write"], json!(true), "{}", r.body);
     assert_eq!(r.body["can_manage"], json!(false), "{}", r.body);
+}
+
+// ── Duplicate (list actions spec §3.2) ──────────────────────────────────────
+
+const DUP_SOURCE: &str = "import marimo\n# the source being copied \u{2713}\n";
+
+impl Fixture {
+    /// An app in `folder` whose draft is at revision 2 with `DUP_SOURCE` and a
+    /// layout; returns its id and the layout as stored.
+    async fn app_with_a_layout(&self, name: &str, folder: Option<Uuid>) -> (String, String) {
+        let r = self
+            .call(
+                "POST",
+                &self.path(""),
+                &self.editor,
+                Some(json!({ "name": name, "description": "what it is for", "folder_id": folder })),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::CREATED, "create: {}", r.body);
+        let id = r.body["id"].as_str().unwrap().to_string();
+        let layout = json!({ "type": "grid", "data": { "columns": 12, "cells": [{ "position": [0, 0, 6, 4] }] } });
+        let r = self
+            .send(
+                "PUT",
+                &self.path(&format!("/{id}/draft")),
+                &self.editor,
+                Some(json!({ "source": DUP_SOURCE, "layout": layout })),
+                &[("If-Match", "1")],
+                true,
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "save: {}", r.body);
+        (id, layout.to_string())
+    }
+
+    async fn duplicate(&self, id: &str, who: &User) -> Resp {
+        self.call("POST", &self.path(&format!("/{id}/duplicate")), who, None)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn a_duplicate_is_a_new_app_with_the_sources_draft_and_nothing_else() {
+    let mut fx = Fixture::new().await;
+    let folder = fx.insert_folder(fx.ws, "app").await;
+    let (src, layout) = fx.app_with_a_layout("Sales", Some(folder)).await;
+    // Things a copy must NOT inherit: a version, a share, a bookmark.
+    fx.publish_app(&src).await;
+    let guest = fx.user().await;
+    fx.share(&src, &guest, "ws_viewer").await;
+    let admin = fx.member(fx.ws, "ws_admin").await;
+    fx.rebuild().await;
+    let r = fx
+        .call("POST", &fx.path(&format!("/{src}/bookmark")), &admin, None)
+        .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT);
+    fx.mutations();
+
+    let r = fx.duplicate(&src, &admin).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let copy = r.body["id"].as_str().unwrap().to_string();
+    assert_ne!(copy, src);
+    assert_eq!(r.body["name"], json!("Copy of Sales"));
+    assert_eq!(r.body["description"], json!("what it is for"));
+    assert_eq!(r.body["folder_id"], json!(folder));
+    assert_eq!(r.body["owner_user_id"], json!(admin.id.0));
+    assert_eq!(r.body["is_owner"], json!(true));
+    assert_eq!(r.body["draft_revision"], json!(1));
+    assert_eq!(r.body["latest_version_no"], Value::Null);
+    assert_eq!(r.body["bookmarked"], json!(false));
+    assert_eq!(r.body["deleted_at"], Value::Null);
+    assert_eq!(r.body["can_write"], json!(true));
+
+    // Byte for byte, read back through the store.
+    let store = fx.store();
+    let copy_id = Uuid::parse_str(&copy).unwrap();
+    let src_id = Uuid::parse_str(&src).unwrap();
+    let d = store.draft(fx.ws, copy_id).await.unwrap().expect("draft");
+    let s = store.draft(fx.ws, src_id).await.unwrap().expect("draft");
+    assert_eq!(d.source.as_bytes(), DUP_SOURCE.as_bytes());
+    assert_eq!(d.source.as_bytes(), s.source.as_bytes());
+    assert_eq!(d.layout_json.as_deref(), Some(layout.as_str()));
+    assert_eq!(d.layout_json, s.layout_json);
+    assert_eq!((d.revision, s.revision), (1, 2));
+
+    assert!(store.versions(copy_id).await.unwrap().is_empty());
+    let shares: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access_grants WHERE scope_type = 'object' AND scope_id = $1",
+    )
+    .bind(copy_id)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(shares, 0);
+    let bookmarks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM analytics.bookmarks WHERE entity_type = 'app' AND entity_id = $1",
+    )
+    .bind(copy_id)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(bookmarks, 0);
+
+    // Audited once, naming where it came from.
+    let mut detail = None;
+    let mut n = 0;
+    while let Ok(ev) = fx.audit_rx.try_recv() {
+        if let AuditEvent::Mutation {
+            action,
+            resource_id,
+            detail: d,
+            ..
+        } = ev
+        {
+            assert_eq!(action, "app:duplicate");
+            assert_eq!(resource_id.as_deref(), Some(copy.as_str()));
+            detail = Some(d);
+            n += 1;
+        }
+    }
+    assert_eq!(n, 1);
+    assert_eq!(detail.unwrap(), json!({ "from": src }));
+}
+
+#[tokio::test]
+async fn editing_a_duplicate_leaves_the_source_alone() {
+    let fx = Fixture::new().await;
+    let (src, layout) = fx.app_with_a_layout("a", None).await;
+    let r = fx.duplicate(&src, &fx.editor).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let copy = r.body["id"].as_str().unwrap().to_string();
+
+    // Source only, so the copy's layout is cleared too.
+    let r = fx
+        .put_draft(&copy, &fx.editor, Some("1"), "changed in the copy")
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+
+    let store = fx.store();
+    let s = store
+        .draft(fx.ws, Uuid::parse_str(&src).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(s.source, DUP_SOURCE);
+    assert_eq!(s.layout_json.as_deref(), Some(layout.as_str()));
+    assert_eq!(s.revision, 2);
+    let d = store
+        .draft(fx.ws, Uuid::parse_str(&copy).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (d.source.as_str(), d.layout_json, d.revision),
+        ("changed in the copy", None, 2)
+    );
+}
+
+#[tokio::test]
+async fn a_duplicate_of_an_app_with_no_layout_has_none() {
+    let fx = Fixture::new().await;
+    let src = fx.create_app("plain").await;
+    let r = fx.duplicate(&src, &fx.editor).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let copy = Uuid::parse_str(r.body["id"].as_str().unwrap()).unwrap();
+    let store = fx.store();
+    let s = store
+        .draft(fx.ws, Uuid::parse_str(&src).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let d = store.draft(fx.ws, copy).await.unwrap().unwrap();
+    assert_eq!(d.source, s.source);
+    assert_eq!(d.layout_json, None);
+}
+
+#[tokio::test]
+async fn duplicating_needs_write_on_the_source_and_in_the_workspace() {
+    let mut fx = Fixture::new().await;
+    let (src, _) = fx.app_with_a_layout("a", None).await;
+    // Write on the source through a share, but no workspace `app:write`: the
+    // copy would be a new app in a workspace the caller may not create in.
+    let guest = fx.user().await;
+    fx.share(&src, &guest, "ws_editor").await;
+    fx.rebuild().await;
+    let before = fx.app_count(fx.ws).await;
+    let keys = fx.mem.keys();
+    fx.mutations();
+
+    for (who, what) in [(&fx.viewer, "reader"), (&guest, "share-only writer")] {
+        let r = fx.duplicate(&src, who).await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{what}: {}", r.body);
+    }
+    assert_eq!(fx.app_count(fx.ws).await, before);
+    assert_eq!(fx.mem.keys(), keys, "no object written");
+    assert!(fx.mutations().is_empty());
+}
+
+#[tokio::test]
+async fn a_trashed_app_cannot_be_duplicated() {
+    let fx = Fixture::new().await;
+    let src = fx.create_app("a").await;
+    let r = fx
+        .call("POST", &fx.path(&format!("/{src}/trash")), &fx.editor, None)
+        .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT);
+    let before = fx.app_count(fx.ws).await;
+
+    let r = fx.duplicate(&src, &fx.editor).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+    assert_eq!(r.body, json!({ "error": TRASHED }));
+    assert_eq!(fx.app_count(fx.ws).await, before);
+}
+
+#[tokio::test]
+async fn a_long_name_is_truncated_to_the_name_limit() {
+    let fx = Fixture::new().await;
+    // 200 characters, multi-byte, so a byte-based cut would be wrong twice over.
+    let name = "é".repeat(200);
+    let src = fx.create_app(&name).await;
+    let r = fx.duplicate(&src, &fx.editor).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let got = r.body["name"].as_str().unwrap();
+    assert_eq!(got.chars().count(), 200);
+    assert_eq!(got, format!("Copy of {}", "é".repeat(192)));
 }
