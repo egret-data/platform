@@ -8,6 +8,7 @@
 //!   [`access::Grant`] `authorize` returned; the workspace is the grant's.
 //! - [`glob`]: Kestra's `PathMatcherPredicate` and Commons-IO's wildcard
 //!   (Task 5; Tasks 6 and 7 reuse them).
+//! - [`routes`]: the namespace file API (spec §9, Task 8).
 //! - [`stage`]: `namespaceFiles` on script tasks and `inputFiles` values that
 //!   name a namespace file (spec §7, Task 5).
 //!
@@ -18,6 +19,7 @@
 pub mod access;
 pub mod glob;
 pub mod path;
+pub mod routes;
 pub mod stage;
 pub mod store;
 

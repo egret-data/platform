@@ -511,6 +511,13 @@ pub async fn open(
 // number again and upload to its key, which the purge would then delete -- a
 // row naming nothing (plan item 7). The two kinds of lock on one key conflict.
 
+/// How a 409 over kept history names the one tool that removes it (W9b Task
+/// 8): the namespace file API has no purge route, so "purge it first" alone
+/// would send an API caller looking for one.
+pub const PURGE_FILES_IS_THE_TOOL: &str =
+    "only a flow's io.kestra.plugin.core.namespace.PurgeFiles task removes history, \
+     run from this namespace or a parent of it; the API has no purge route";
+
 /// What [`put`] does when the path already holds a live file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Conflict {
@@ -745,7 +752,7 @@ async fn check_kinds(
         if !other.is_directory {
             return Err(NsError::Conflict(format!(
                 "{subject} in namespace '{ns}': '{}' is a deleted file whose history is kept; \
-                 purge it first",
+                 purge it first ({PURGE_FILES_IS_THE_TOOL})",
                 other.path
             )));
         }
@@ -753,7 +760,7 @@ async fn check_kinds(
         if under.len() > 1 {
             return Err(NsError::Conflict(format!(
                 "{subject} in namespace '{ns}': '{}' is a deleted directory whose files' history \
-                 is kept; purge them first",
+                 is kept; purge them first ({PURGE_FILES_IS_THE_TOOL})",
                 other.path
             )));
         }
@@ -771,9 +778,12 @@ async fn check_kinds(
     for parent in path.parents() {
         if let Some(file) = latest(conn, grant, parent.lock_path()).await? {
             let what = if file.deleted {
-                "a deleted file whose history is kept; purge it first"
+                format!(
+                    "a deleted file whose history is kept; purge it first \
+                     ({PURGE_FILES_IS_THE_TOOL})"
+                )
             } else {
-                "a file"
+                "a file".to_string()
             };
             return Err(NsError::Conflict(format!(
                 "{subject} in namespace '{ns}': its parent '{}' is {what}",
@@ -1255,9 +1265,11 @@ async fn move_locked(
             .await?
             .unwrap_or_else(|| first.clone());
         let what = if e.deleted {
-            "holds the history of a deleted path; purge it first"
+            format!(
+                "holds the history of a deleted path; purge it first ({PURGE_FILES_IS_THE_TOOL})"
+            )
         } else {
-            "already exists"
+            "already exists".to_string()
         };
         return Err(NsError::Conflict(format!(
             "{subject} in namespace '{ns}': '{}' {what}; nothing was moved",
@@ -1268,9 +1280,12 @@ async fn move_locked(
     for parent in to.parents() {
         if let Some(file) = latest(conn, grant, parent.lock_path()).await? {
             let what = if file.deleted {
-                "a deleted file whose history is kept"
+                format!(
+                    "a deleted file whose history is kept; purge it first \
+                     ({PURGE_FILES_IS_THE_TOOL})"
+                )
             } else {
-                "a file"
+                "a file".to_string()
             };
             return Err(NsError::Conflict(format!(
                 "{subject} in namespace '{ns}': its parent '{}' is {what}; nothing was moved",

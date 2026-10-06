@@ -409,3 +409,11 @@ harness = false
 [[test]]
 name = "nsfiles_s3_live"
 harness = false
+
+# W9b Task 8: the namespace file API on MinIO (a 64 MiB upload and streamed
+# download through the routes), under a throwaway prefix and a fence refusing
+# any delete outside it; IGNORED without the gate. Its own binary: the routes
+# read the process's one installed store.
+[[test]]
+name = "nsfiles_api_s3_live"
+harness = false

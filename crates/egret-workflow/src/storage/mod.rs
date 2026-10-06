@@ -36,6 +36,7 @@ pub mod index;
 pub mod inputs;
 pub mod ion;
 pub(crate) mod lock;
+pub(crate) mod multipart;
 pub mod nsfiles;
 pub mod prune;
 pub mod routes;
