@@ -16,10 +16,12 @@ const m = {
   removeBookmark: vi.fn(),
 };
 const setFolderMock = vi.fn();
+const capsMock = vi.fn();
 let folders: { id: string; name: string }[] = [];
 
 vi.mock("@/api/apps", () => ({
   useApps: (...a: unknown[]) => useAppsMock(...a),
+  useAppCapabilities: (...a: unknown[]) => capsMock(...a),
   useCreateApp: () => ({ mutateAsync: createMutateAsync, isPending: false }),
   useAppMutations: () => ({
     update: { mutateAsync: m.update, isPending: false },
@@ -108,6 +110,8 @@ beforeEach(() => {
   createMutateAsync.mockReset();
   for (const fn of Object.values(m)) fn.mockReset().mockResolvedValue(undefined);
   setFolderMock.mockReset().mockResolvedValue({});
+  // An author by default; the workspace-level tests override it.
+  capsMock.mockReset().mockReturnValue({ data: { can_create: true } });
   folders = [];
   // `useCollapsed` persists collapse state in localStorage; without this a test that collapses
   // a folder leaks that collapse into every later test in the file.
@@ -543,35 +547,72 @@ describe("Apps list — bulk select over mixed-permission rows", () => {
  * here", with the empty list (no row to ask) defaulting to offered.
  */
 describe("Apps list — workspace-level affordances", () => {
-  it("are withheld when the caller can write no app in the list", () => {
+  const cannotCreate = () => capsMock.mockReturnValue({ data: { can_create: false } });
+  const folderHeader = () => screen.getByRole("button", { name: "Toggle Finance" }).closest("tr")!;
+
+  it("come from the server's workspace answer, asked for this workspace", () => {
+    serve([]);
+    renderApps();
+    expect(capsMock).toHaveBeenCalledWith("acme");
+  });
+
+  it("are offered to someone who may create, even with no writable row on screen", () => {
     folders = [{ id: "f1", name: "Finance" }];
     serve([app({ id: "r1", name: "Read only", folder_id: "f1", ...READ_ONLY })]);
+    renderApps();
+    expect(screen.getByRole("button", { name: "+ App" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "New folder" })).toBeTruthy();
+    expect(within(folderHeader()).getAllByRole("button").length).toBeGreaterThan(1);
+  });
+
+  it("are withheld from a share-only collaborator, who keeps the menu of the row they can write", async () => {
+    // The case the page used to guess wrong: a writable row was read as "may create", so this
+    // collaborator was shown + App and New folder and refused on use.
+    cannotCreate();
+    folders = [{ id: "f1", name: "Finance" }];
+    serve([app({ id: "w1", name: "Shared with me", folder_id: "f1", can_manage: false })]);
     renderApps();
     expect(screen.queryByRole("button", { name: "+ App" })).toBeNull();
     expect(screen.queryByRole("button", { name: "New folder" })).toBeNull();
     // The folder header still collapses; it has lost only its own actions menu.
-    const header = screen.getByRole("button", { name: "Toggle Finance" }).closest("tr")!;
-    expect(within(header).getAllByRole("button")).toHaveLength(1);
+    expect(within(folderHeader()).getAllByRole("button")).toHaveLength(1);
+    await openMenu("Shared with me");
+    expect(menuItems()).toContain("Rename…");
+    // Moving to an EXISTING folder is theirs (it changes only their app); a new folder is not.
+    expect(menuItems()).toContain('Move to "Finance"');
+    expect(menuItems()).not.toContain("Move to new folder…");
   });
 
-  it("are offered when at least one row is writable, even if it is not the first", () => {
-    folders = [{ id: "f1", name: "Finance" }];
-    serve([
-      app({ id: "r1", name: "Read only", folder_id: "f1", updated_at: "2026-10-03T00:00:00Z", ...READ_ONLY }),
-      app({ id: "w1", name: "Writable", folder_id: "f1", updated_at: "2026-10-01T00:00:00Z" }),
-    ]);
+  it("are withheld on an empty list from someone who may not create", () => {
+    // An empty list has no row to read a flag from; the old page defaulted to showing Create.
+    cannotCreate();
+    serve([]);
     renderApps();
-    expect(screen.getByRole("button", { name: "+ App" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "New folder" })).toBeTruthy();
-    const header = screen.getByRole("button", { name: "Toggle Finance" }).closest("tr")!;
-    expect(within(header).getAllByRole("button").length).toBeGreaterThan(1);
+    expect(screen.queryByRole("button", { name: "+ App" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create your first app" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "New folder" })).toBeNull();
+    expect(screen.getByText("No apps yet.")).toBeTruthy();
   });
 
-  it("are offered on an empty list, where there is no row to answer", () => {
+  it("are offered on an empty list to someone who may create", () => {
     serve([]);
     renderApps();
     expect(screen.getByRole("button", { name: "+ App" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Create your first app" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "New folder" })).toBeTruthy();
+  });
+
+  it("are withheld until the server has answered, and if it cannot", () => {
+    // No answer is not a yes: a control that appears and is then refused is the defect.
+    serve([app({ id: "w1", name: "Writable" })]);
+    capsMock.mockReturnValue({ data: undefined, isLoading: true });
+    const first = renderApps();
+    expect(screen.queryByRole("button", { name: "+ App" })).toBeNull();
+    first.unmount();
+    capsMock.mockReturnValue({ data: undefined, isError: true });
+    renderApps();
+    expect(screen.queryByRole("button", { name: "+ App" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "New folder" })).toBeNull();
   });
 
   it("survive a search that matches nothing", async () => {
@@ -593,6 +634,18 @@ describe("Apps list — dragging to a folder", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Trash" }));
     expect(rowOf("Writable").getAttribute("draggable")).toBe("false");
+  });
+
+  it("a collaborator who may not create can still drop their writable row on a folder", () => {
+    // Moving an app is a mutation of THAT app (its own `can_write`, which is what makes the row
+    // draggable at all), not of the workspace.
+    capsMock.mockReturnValue({ data: { can_create: false } });
+    folders = [{ id: "f1", name: "Finance" }];
+    serve([app({ id: "w1", name: "Shared with me", can_manage: false })]);
+    renderApps();
+    const header = screen.getByRole("button", { name: "Toggle Finance" }).closest("tr")!;
+    fireEvent.drop(header, { dataTransfer: { getData: () => "w1" } });
+    expect(setFolderMock).toHaveBeenCalledWith({ id: "w1", folder_id: "f1" });
   });
 
   it("dropping a row on a folder header moves it there", () => {

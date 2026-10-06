@@ -1188,6 +1188,7 @@ async fn with_the_apps_feature_disabled_every_route_is_403() {
     .expect("disable apps");
     let routes: Vec<(&str, String, Option<Value>)> = vec![
         ("GET", String::new(), None),
+        ("GET", "/capabilities".to_string(), None),
         ("POST", String::new(), Some(json!({ "name": "x" }))),
         ("GET", format!("/{id}"), None),
         ("DELETE", format!("/{id}"), None),
@@ -1503,6 +1504,81 @@ impl Fixture {
         .await
         .status
     }
+}
+
+/// The workspace-level answer the list page needs and no row can carry: may this
+/// caller create an app here? It agrees with what `POST` then answers, for every
+/// caller -- including in a workspace with no apps at all, where there is no row
+/// to read a flag from.
+#[tokio::test]
+async fn capabilities_say_whether_the_caller_may_create_apps_here() {
+    let mut fx = Fixture::new().await;
+    // No app exists yet: the empty-list case.
+    let admin = fx.member(fx.ws, "ws_admin").await;
+    let editor = fx.member(fx.ws, "ws_editor").await;
+    let reader = fx.member(fx.ws, "ws_viewer").await;
+    fx.rebuild().await;
+
+    for (who, expected, create) in [
+        (&admin, true, StatusCode::CREATED),
+        (&editor, true, StatusCode::CREATED),
+        (&reader, false, StatusCode::FORBIDDEN),
+    ] {
+        let r = fx.call("GET", &fx.path("/capabilities"), who, None).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert_eq!(r.body, json!({ "can_create": expected }));
+        let c = fx
+            .call("POST", &fx.path(""), who, Some(json!({ "name": "probe" })))
+            .await;
+        assert_eq!(c.status, create, "the flag and the refusal must agree");
+    }
+}
+
+/// A write share on one app is not permission to create apps: the collaborator's
+/// row says `can_write`, and the workspace answer still says no. This is the
+/// case the page used to guess wrong, by reading "some row is writable" as "may
+/// create".
+#[tokio::test]
+async fn a_write_share_on_one_app_does_not_grant_create() {
+    let mut fx = Fixture::new().await;
+    let shared = fx.create_app("shared").await;
+    let collaborator = fx.member(fx.ws, "ws_viewer").await;
+    fx.share(&shared, &collaborator, "ws_editor").await;
+    fx.rebuild().await;
+
+    assert_eq!(
+        fx.listed_caps(&shared, &collaborator).await,
+        (json!(true), json!(false))
+    );
+    let r = fx
+        .call("GET", &fx.path("/capabilities"), &collaborator, None)
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body, json!({ "can_create": false }));
+    let c = fx
+        .call(
+            "POST",
+            &fx.path(""),
+            &collaborator,
+            Some(json!({ "name": "x" })),
+        )
+        .await;
+    assert_eq!(c.status, StatusCode::FORBIDDEN);
+}
+
+/// Like the list, it is a workspace read: a caller with no role in the workspace
+/// gets the same 403 the list gives them, not an answer about it.
+#[tokio::test]
+async fn capabilities_need_the_same_read_the_list_does() {
+    let mut fx = Fixture::new().await;
+    let stranger = fx.user().await;
+    fx.rebuild().await;
+    let list = fx.call("GET", &fx.path(""), &stranger, None).await;
+    let caps = fx
+        .call("GET", &fx.path("/capabilities"), &stranger, None)
+        .await;
+    assert_eq!(list.status, StatusCode::FORBIDDEN);
+    assert_eq!(caps.status, list.status);
 }
 
 #[tokio::test]

@@ -30,7 +30,8 @@ export function AppActionsMenu({ ws, app, trashed, folders, onRename, onDuplicat
   onRename: (a: AppSummary) => void;
   onDuplicate: (a: AppSummary) => void;
   onMove: (a: AppSummary, folderId: string | null) => void;
-  onNewFolder: (a: AppSummary) => void;
+  /** Absent when the caller may not create folders in this workspace: the item is withheld. */
+  onNewFolder?: (a: AppSummary) => void;
   onShare: (a: AppSummary) => void;
   onTrash: (a: AppSummary) => void;
   onRestore: (a: AppSummary) => void;
@@ -82,7 +83,7 @@ export function AppActionsMenu({ ws, app, trashed, folders, onRename, onDuplicat
             folders={folders}
             currentFolderId={app.folder_id ?? null}
             onMove={(fid) => onMove(app, fid)}
-            onNewFolder={() => onNewFolder(app)}
+            onNewFolder={onNewFolder ? () => onNewFolder(app) : undefined}
           />
         </>
       )}

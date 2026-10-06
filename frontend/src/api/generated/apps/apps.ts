@@ -25,6 +25,7 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AppCapabilities,
   AppConflict,
   AppCreate,
   AppDetail,
@@ -307,7 +308,130 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getAppsCreateMutationOptions(options), queryClient);
     }
-    export type appsGetOneResponse200 = {
+    export type appsCapabilitiesResponse200 = {
+  data: AppCapabilities
+  status: 200
+}
+
+export type appsCapabilitiesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type appsCapabilitiesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type appsCapabilitiesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type appsCapabilitiesResponseSuccess = (appsCapabilitiesResponse200) & {
+  headers: Headers;
+};
+export type appsCapabilitiesResponseError = (appsCapabilitiesResponse401 | appsCapabilitiesResponse403 | appsCapabilitiesResponse500) & {
+  headers: Headers;
+};
+
+export type appsCapabilitiesResponse = (appsCapabilitiesResponseSuccess | appsCapabilitiesResponseError)
+
+export const getAppsCapabilitiesUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/apps/capabilities`
+}
+
+export const appsCapabilities = async (workspace: string, options?: Parameters<typeof customInstance>[1]): Promise<appsCapabilitiesResponse> => {
+
+  return customInstance<appsCapabilitiesResponse>(getAppsCapabilitiesUrl(workspace),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getAppsCapabilitiesQueryKey = (workspace: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/apps/capabilities`
+    ] as const;
+    }
+
+
+export const getAppsCapabilitiesQueryOptions = <TData = Awaited<ReturnType<typeof appsCapabilities>>, TError = ErrorBody>(workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof appsCapabilities>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getAppsCapabilitiesQueryKey(workspace);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof appsCapabilities>>> = ({ signal }) => appsCapabilities(workspace, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof appsCapabilities>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type AppsCapabilitiesQueryResult = NonNullable<Awaited<ReturnType<typeof appsCapabilities>>>
+export type AppsCapabilitiesQueryError = ErrorBody
+
+
+export function useAppsCapabilities<TData = Awaited<ReturnType<typeof appsCapabilities>>, TError = ErrorBody>(
+ workspace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof appsCapabilities>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof appsCapabilities>>,
+          TError,
+          Awaited<ReturnType<typeof appsCapabilities>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useAppsCapabilities<TData = Awaited<ReturnType<typeof appsCapabilities>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof appsCapabilities>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof appsCapabilities>>,
+          TError,
+          Awaited<ReturnType<typeof appsCapabilities>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useAppsCapabilities<TData = Awaited<ReturnType<typeof appsCapabilities>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof appsCapabilities>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useAppsCapabilities<TData = Awaited<ReturnType<typeof appsCapabilities>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof appsCapabilities>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getAppsCapabilitiesQueryOptions(workspace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type appsGetOneResponse200 = {
   data: AppDetail
   status: 200
 }

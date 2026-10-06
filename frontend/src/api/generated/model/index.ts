@@ -27,6 +27,7 @@ export * from './adminUsersListUsersParams';
 export * from './adminWorkspacesListWsParams';
 export * from './affectedProfile';
 export * from './alertsListParams';
+export * from './appCapabilities';
 export * from './appConflict';
 export * from './appCreate';
 export * from './appDetail';

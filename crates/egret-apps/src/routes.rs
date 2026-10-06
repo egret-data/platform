@@ -107,6 +107,8 @@ pub fn apps_router() -> Router<AppsApiState> {
             "/ws/{workspace}/apps/{id}",
             get(get_one).patch(update).delete(delete_app),
         )
+        // A literal segment, so it is matched before `{id}`: "capabilities" is not an app id.
+        .route("/ws/{workspace}/apps/capabilities", get(capabilities))
         .route("/ws/{workspace}/apps/{id}/trash", post(trash))
         .route("/ws/{workspace}/apps/{id}/restore", post(restore))
         .route("/ws/{workspace}/apps/{id}/duplicate", post(duplicate))
@@ -158,6 +160,20 @@ pub struct AppSummary {
     pub can_write: bool,
     /// The caller holds `app:manage` on THIS app (sharing, permanent delete).
     pub can_manage: bool,
+}
+
+/// What the caller may do in this workspace that no single app can answer for.
+///
+/// The per-row `can_write` / `can_manage` say what the caller may do TO an app.
+/// Creating one -- and creating, renaming or deleting an app folder, which
+/// egret-bi's folder routes gate on the same action -- is a workspace question:
+/// an empty list has no row to read it from, and a collaborator holding a write
+/// share on one app has a writable row and still may not create.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AppCapabilities {
+    /// The caller holds `app:write` in the workspace: `POST /apps` will not be
+    /// refused for lack of permission.
+    pub can_create: bool,
 }
 
 /// One app, as returned by get / create / update.
@@ -555,6 +571,33 @@ pub(crate) fn if_match(headers: &HeaderMap) -> AppsResult<i64> {
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/apps/capabilities",
+    tag = "apps",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "What the caller may do with apps in this workspace", body = AppCapabilities),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing app:read, or the apps feature is disabled", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn capabilities(
+    State(st): State<AppsApiState>,
+    WsContext(ctx): WsContext,
+) -> AppsResult<Json<AppCapabilities>> {
+    // The same read the list needs: this describes the workspace to someone who may see it.
+    egret_core::authz::require(&*st.pdp, &ctx, APP_READ).await?;
+    // The same check `create` makes, so the flag and the refusal cannot disagree.
+    let can_create = match egret_core::authz::require(&*st.pdp, &ctx, APP_WRITE).await {
+        Ok(()) => true,
+        Err(Error::Forbidden) => false,
+        Err(e) => return Err(e.into()),
+    };
+    Ok(Json(AppCapabilities { can_create }))
+}
 
 #[utoipa::path(
     get,
@@ -1298,6 +1341,7 @@ async fn version_restore(
 #[openapi(
     paths(
         list,
+        capabilities,
         create,
         get_one,
         update,
@@ -1318,6 +1362,7 @@ async fn version_restore(
     ),
     components(schemas(
         AppSummary,
+        AppCapabilities,
         AppDetail,
         AppCreate,
         AppUpdate,

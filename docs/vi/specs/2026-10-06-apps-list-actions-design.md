@@ -50,6 +50,19 @@ chung cho cả danh sách sẽ sai với cộng tác viên chỉ được chia s
 Chi phí: hai lần hỏi PDP cho mỗi hàng. Chấp nhận được với cỡ danh sách này; nếu hiện lên trong
 profile thì gộp lại sau.
 
+### 3.1a Quyền cấp workspace (thêm 2026-10-06, sau bản đầu của trang này)
+
+`GET /api/ws/{workspace}/apps/capabilities` → `{ "can_create": bool }`.
+
+`can_create` là `app:write` ở cấp workspace — đúng phép kiểm mà `POST /apps` thực hiện, và cũng
+là phép kiểm các route thư mục của egret-bi dùng khi tạo, đổi tên, xoá thư mục app. Nó cần cùng
+quyền `app:read` ở workspace như danh sách.
+
+Nó tồn tại vì không hàng nào trả lời được câu này. Ban đầu trang suy ra từ các hàng ("ghi được
+ít nhất một app ở đây"), điều này sai với cộng tác viên chỉ được chia sẻ — có hàng ghi được
+nhưng vẫn không có quyền tạo — và không có câu trả lời cho danh sách rỗng. Đã thấy khi kiểm
+sống: người đó được cho thấy `+ App` và New folder rồi bị từ chối khi dùng.
+
 ### 3.2 `POST /api/ws/{workspace}/apps/{id}/duplicate` (A2, A6, A7)
 
 1. Tìm app trong workspace của người gọi (không có thì 404, cùng một body).
@@ -123,6 +136,15 @@ người đọc không có. Open là ngoại lệ — nó không thay đổi gì
 
 Chỉ bật khi có ít nhất một hàng đang hiện có `can_write`. Ô chọn chỉ xuất hiện trên hàng ghi
 được, để "Move n to Trash" không bao giờ đếm một hàng mà server sẽ từ chối.
+
+### 4.3a Điều khiển cấp workspace
+
+`+ App`, nút tạo ở trạng thái rỗng, New folder, và đổi tên / xoá / chia sẻ thư mục chỉ hiện khi
+server trả `can_create`. Trong lúc câu trả lời đang tải, hoặc request lỗi, chúng vẫn ẩn: chưa
+có câu trả lời không phải là "có".
+
+Thả một hàng vào thư mục **không** thuộc nhóm này. Nó di chuyển một app, tức là `can_write` của
+chính app đó — cũng là thứ khiến hàng kéo được.
 
 ### 4.4 Lớp API
 

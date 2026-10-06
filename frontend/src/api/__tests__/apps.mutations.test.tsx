@@ -15,7 +15,7 @@ vi.mock("@/api/client", async (importActual) => {
   };
 });
 
-import { useApps, useAppMutations } from "../apps";
+import { useAppCapabilities, useApps, useAppMutations } from "../apps";
 import { getAppsGetOneQueryKey, getAppsListQueryKey } from "../generated/apps/apps";
 
 function setup() {
@@ -57,6 +57,21 @@ describe("useApps", () => {
     // Assert
     await waitFor(() => expect(result.current.data).toEqual([]));
     expect(apiFetch.mock.calls[0][0]).toBe("/ws/w/apps?trashed=true");
+  });
+});
+
+describe("useAppCapabilities", () => {
+  it("reads the workspace answer from its own route", async () => {
+    // Arrange
+    apiFetch.mockImplementation(async () => json(200, { can_create: false }));
+    const { wrapper } = setup();
+
+    // Act
+    const { result } = renderHook(() => useAppCapabilities("w"), { wrapper });
+
+    // Assert
+    await waitFor(() => expect(result.current.data).toEqual({ can_create: false }));
+    expect(apiFetch.mock.calls[0][0]).toBe("/ws/w/apps/capabilities");
   });
 });
 
