@@ -1,7 +1,7 @@
-//! W9b Task 6: `io.kestra.plugin.core.namespace.{UploadFiles, DownloadFiles}`
-//! through the real worker (W9b spec §8.1, §8.2), against
-//! `oracle-exec/w9b-namespace-files.json`'s `tasks.UploadFiles` and
-//! `tasks.DownloadFiles`. Requires DATABASE_URL.
+//! W9b Tasks 6 and 7: `io.kestra.plugin.core.namespace.{UploadFiles,
+//! DownloadFiles, DeleteFiles, PurgeFiles}` through the real worker (W9b spec
+//! §8.1-§8.4), against `oracle-exec/w9b-namespace-files.json`'s `tasks.*` and
+//! `purge` cells. Requires DATABASE_URL.
 //!
 //! The store is [`Probe`] over a `MemStore`, installed once for this binary
 //! with `max_namespace_files` = [`CAP`]: nothing here touches MinIO. Every
@@ -20,7 +20,10 @@ use egret_metastore::Db;
 use egret_storage::{ObjectStore, StorageError};
 use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor};
 use egret_workflow::storage::nsfiles::path::NsPath;
-use egret_workflow::storage::nsfiles::store::{put, Conflict, Written};
+use egret_workflow::storage::nsfiles::store::{
+    list_live, open, put, resolve, revisions, soft_delete, Conflict, Want, Written,
+};
+use egret_workflow::storage::nsfiles::NsError;
 use egret_workflow::storage::nsfiles::{self, CreatedBy};
 use egret_workflow::storage::{self, uri, FileStore};
 use egret_workflow::worker::handlers::namespace::{self as nst, DownloadFiles, UploadFiles};
@@ -412,7 +415,7 @@ fn masked_values(v: &Value) -> Value {
 /// (`tasks.UploadFiles.publish_without_namespace`).
 #[tokio::test(flavor = "multi_thread")]
 async fn declared_properties_and_outputs_match_the_artifact() {
-    assert_eq!(nst::DECLARED.len(), 2);
+    assert_eq!(nst::DECLARED.len(), 4);
     for (type_id, props, outputs) in nst::DECLARED {
         let class = type_id.rsplit('.').next().unwrap();
         let schema = &cell(class)["schema"];
@@ -433,10 +436,29 @@ async fn declared_properties_and_outputs_match_the_artifact() {
             .collect();
         assert_eq!(*outputs, outs.as_slice(), "{class}: outputs");
     }
+    for class in ["UploadFiles", "DeleteFiles"] {
+        assert_eq!(
+            cell(class)["schema"]["properties"]["namespace"]["kestra"]["required"],
+            json!(true),
+            "the control: Kestra's own answer differs for {class}, and DECLARED follows \
+             the top level"
+        );
+    }
+    // The four classes, each once.
+    let classes: BTreeSet<&str> = nst::DECLARED.iter().map(|c| c.0).collect();
     assert_eq!(
-        cell("UploadFiles")["schema"]["properties"]["namespace"]["kestra"]["required"],
-        json!(true),
-        "the control: Kestra's own answer differs, and DECLARED follows the top level"
+        classes,
+        BTreeSet::from([
+            nst::UPLOAD_FILES,
+            nst::DOWNLOAD_FILES,
+            nst::DELETE_FILES,
+            nst::PURGE_FILES
+        ])
+    );
+    // PurgeFiles' default behavior is the `purge` cell's.
+    assert_eq!(
+        cell("PurgeFiles")["schema"]["properties"]["behavior"]["default"],
+        fixture()["egret_expected"]["purge"]["default_behavior"]["schema_default"]
     );
 
     let _turn = SERIAL.lock().await;
@@ -825,7 +847,12 @@ async fn seed_download_premise(db: &Db, fs: &FileStore, ws: Uuid) {
 }
 
 fn download_task(id: &str) -> String {
-    let yaml = raw_flow("w9b.tasks/download");
+    task_of("w9b.tasks/download", id)
+}
+
+/// Task `id` of the fixture's raw flow `flow`, as written.
+fn task_of(flow: &str, id: &str) -> String {
+    let yaml = raw_flow(flow);
     let start = format!("  - id: {id}\n");
     let from = yaml.find(&start).unwrap_or_else(|| panic!("no task {id}"));
     let rest = &yaml[from + start.len()..];
@@ -1514,4 +1541,873 @@ async fn download_files_destination_is_a_directory_joined_with_one_slash() {
             .contains("/dlup/m.txt"),
         "the reference: Kestra concatenates"
     );
+}
+
+// ---------------------------------------------------------------------------
+// DeleteFiles (Task 7)
+// ---------------------------------------------------------------------------
+
+/// The live entries directly in `dir` of `ns` (`None` = the root), by name
+/// as a listing shows it (`top.txt`, `sub`).
+async fn listing(pool: &sqlx::PgPool, ws: Uuid, ns: &str, dir: Option<&str>) -> Vec<String> {
+    let grant = authorize(ws, Actor::Api, ns, Access::Read).unwrap();
+    let dir = dir.map(|d| NsPath::parse_dir(d).unwrap());
+    let mut conn = pool.acquire().await.unwrap();
+    let prefix = dir.as_ref().map_or("/", NsPath::as_str).to_string();
+    list_live(&mut conn, &grant, dir.as_ref(), false, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| {
+            e.path.as_str()[prefix.len()..]
+                .trim_end_matches('/')
+                .to_string()
+        })
+        .collect()
+}
+
+/// Whether `path` (a file, or a directory ending `/`) is live in `ns`.
+async fn live(pool: &sqlx::PgPool, ws: Uuid, ns: &str, path: &str) -> bool {
+    let grant = authorize(ws, Actor::Api, ns, Access::Read).unwrap();
+    let p = if path.ends_with('/') {
+        NsPath::parse_dir(path).unwrap()
+    } else {
+        NsPath::parse_file(path).unwrap()
+    };
+    let mut conn = pool.acquire().await.unwrap();
+    match resolve(&mut conn, &grant, &p, Want::Latest).await {
+        Ok(_) => true,
+        Err(NsError::NotFound(_)) => false,
+        Err(e) => panic!("{ns} {path}: {e:?}"),
+    }
+}
+
+/// The objects under `ns`'s `_files` prefix in `ws`, relative to it, with
+/// their sizes.
+async fn objects(fs: &FileStore, ws: Uuid, ns: &str) -> BTreeMap<String, i64> {
+    let grant = authorize(ws, Actor::Api, ns, Access::Read).unwrap();
+    let probe_key = fs.namespace_object_uri(&grant, &NsPath::parse_file("/x").unwrap(), 1);
+    let key = probe_key
+        .strip_prefix("s3://")
+        .and_then(|k| k.split_once('/'))
+        .unwrap()
+        .1;
+    let prefix = key.strip_suffix('x').unwrap();
+    assert!(prefix.ends_with("/_files/"), "{prefix}");
+    fs.store
+        .list(prefix, None)
+        .await
+        .unwrap()
+        .objects
+        .into_iter()
+        .map(|o| (o.key[prefix.len()..].to_string(), o.size))
+        .collect()
+}
+
+/// A fixture `objects_after` listing (`f ./main/<ns-as-path>/_files/<rel> <size>`)
+/// to its files: rel -> size; `d` lines are directories, not objects.
+fn fixture_objects(lines: &Value) -> BTreeMap<String, i64> {
+    lines
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| {
+            let l = l.as_str().unwrap();
+            let rest = l.strip_prefix("f ")?;
+            let (path, size) = rest.rsplit_once(' ').unwrap();
+            let rel = path.split_once("/_files/").unwrap().1;
+            Some((rel.to_string(), size.parse().unwrap()))
+        })
+        .collect()
+}
+
+/// `tasks.DeleteFiles.premise`: `w9b.tasks` as Kestra's upload flow left it,
+/// and `w9b.elsewhere`'s `/e.txt`, which egret's refused `up_other_ns`
+/// never writes.
+async fn seed_delete_premise(db: &Db, fs: &FileStore, ws: Uuid) {
+    seed_download_premise(db, fs, ws).await;
+    seed(db, fs, ws, "w9b.elsewhere", "/e.txt", b"elsewhere").await;
+}
+
+fn delete_task(id: &str) -> String {
+    task_of("w9b.tasks/delete", id)
+}
+
+/// `runs.del_glob_parent`, `del_string`, `del_none`: SUCCESS with `{}`; the
+/// matches are soft-deleted and every file object stays (`objects_after`).
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_files_soft_deletes_matches_and_keeps_objects() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    seed_delete_premise(&db, &fs, ws).await;
+    let before = objects(&fs, ws, NS).await;
+    let ids = ["del_glob_parent", "del_string", "del_none"];
+    let tasks: Vec<String> = ids.iter().map(|t| delete_task(t)).collect();
+    let ex = run(&db, ws, &flow("delete", NS, &tasks)).await;
+    let c = cell("DeleteFiles");
+    for t in ids {
+        assert_eq!(c["runs"][t]["state"], "SUCCESS", "{t}");
+        assert_eq!(
+            succeeded(&db.pool, ex, t).await,
+            c["runs"][t]["outputs"],
+            "{t}"
+        );
+    }
+    // Soft: every file object stays, exactly the artifact's files.
+    let after = objects(&fs, ws, NS).await;
+    assert_eq!(after, fixture_objects(&c["objects_after"]));
+    assert_eq!(after, before, "a soft delete removes no object");
+    // What was deleted, and what was not.
+    for (path, want) in [
+        ("/globbed/g/one.txt", false),
+        ("/up/m.txt", false),
+        ("/globbed/top.txt", true),
+        ("/up/sub/n.txt", true),
+        ("/rootm.txt", true),
+        ("/up2m.txt", true),
+    ] {
+        assert_eq!(live(&db.pool, ws, NS, path).await, want, "{path}");
+    }
+    // Every row stays: a delete adds no revision and removes none.
+    assert_eq!(
+        rows(&db.pool, ws, NS).await,
+        [
+            "/globbed/g/one.txt",
+            "/globbed/top.txt",
+            "/rootm.txt",
+            "/up/m.txt",
+            "/up/sub/n.txt",
+            "/up2m.txt"
+        ]
+        .into_iter()
+        .map(|p| (p.to_string(), vec![1]))
+        .collect::<BTreeMap<_, _>>()
+    );
+}
+
+/// `deleteParentFolder` (no `namespace`: the flow's own, ruling D): each
+/// parent of a deleted file is soft-deleted, deepest first, only when
+/// nothing live is left directly in it. `/p/q/r/` empties first, which
+/// empties `/p/q/`; `/p/` keeps `keep.txt`. Without the flag no directory
+/// is touched.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_parent_folder_removes_parents_left_empty_deepest_first() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let own = "w9b.dpf";
+    for path in ["/p/q/r/x.txt", "/p/keep.txt", "/s/t/y.txt"] {
+        seed(&db, &fs, ws, own, path, b"x").await;
+    }
+    let with = "  - id: with\n    type: io.kestra.plugin.core.namespace.DeleteFiles\n    \
+                files: \"/p/q/**\"\n    deleteParentFolder: true\n";
+    let without = "  - id: without\n    type: io.kestra.plugin.core.namespace.DeleteFiles\n    \
+                   files: [\"/s/**\"]\n    deleteParentFolder: \"{{ 1 == 2 }}\"\n";
+    let ex = run(&db, ws, &flow("dpf", own, &[with.into(), without.into()])).await;
+    assert_eq!(succeeded(&db.pool, ex, "with").await, json!({}));
+    assert_eq!(succeeded(&db.pool, ex, "without").await, json!({}));
+    for (path, want) in [
+        ("/p/q/r/x.txt", false),
+        ("/p/q/r/", false),
+        ("/p/q/", false),
+        ("/p/", true),
+        ("/p/keep.txt", true),
+        ("/s/t/y.txt", false),
+        ("/s/t/", true),
+        ("/s/", true),
+    ] {
+        assert_eq!(live(&db.pool, ws, own, path).await, want, "{path}");
+    }
+    assert_eq!(listing(&db.pool, ws, own, Some("/p/")).await, ["keep.txt"]);
+}
+
+/// `runs.del_other_ns` (chosen): another namespace is refused by the write
+/// rule, naming it, and nothing is deleted in either namespace.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_files_in_another_namespace_is_refused_and_deletes_nothing() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    seed_delete_premise(&db, &fs, ws).await;
+    let want = &cell("DeleteFiles")["runs"]["del_other_ns"];
+    let ex = run(&db, ws, &flow("delete", NS, &[delete_task("del_other_ns")])).await;
+    let message = message_of(
+        &db.pool,
+        ex,
+        "del_other_ns",
+        want["state"].as_str().unwrap(),
+    )
+    .await;
+    let named = want["error_names"].as_str().unwrap();
+    assert!(message.contains(&format!("'{named}'")), "{message}");
+    assert!(
+        message.contains("writes only its own namespace"),
+        "{message}"
+    );
+    assert_eq!(want["deleted"], json!([]));
+    assert!(live(&db.pool, ws, "w9b.elsewhere", "/e.txt").await);
+    assert_eq!(
+        listing(&db.pool, ws, "w9b.elsewhere", None).await,
+        ["e.txt"]
+    );
+    assert_eq!(rows(&db.pool, ws, NS).await.len(), 6);
+    for path in ["/up/m.txt", "/globbed/g/one.txt"] {
+        assert!(live(&db.pool, ws, NS, path).await, "{path}");
+    }
+}
+
+/// R1 (`tasks.DeleteFiles.rows_after`, chosen): after the whole delete flow,
+/// a deleted file's revisions stay listed, flagged deleted, and readable by
+/// number; `w9b.elsewhere` keeps `e.txt`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_files_revisions_stay_listed_and_readable_by_number() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    seed_delete_premise(&db, &fs, ws).await;
+    run(&db, ws, &raw_flow("w9b.tasks/delete")).await;
+    let want = &cell("DeleteFiles")["rows_after"];
+    assert_eq!(
+        json!(listing(&db.pool, ws, NS, Some("/globbed/")).await),
+        want["/globbed (listing)"]
+    );
+    assert_eq!(want["/globbed/g"], json!(404));
+    assert!(!live(&db.pool, ws, NS, "/globbed/g/").await);
+    assert_eq!(
+        json!(listing(&db.pool, ws, NS, Some("/up/")).await),
+        want["/up (listing)"]
+    );
+    let grant = authorize(ws, Actor::Api, NS, Access::Read).unwrap();
+    let m = NsPath::parse_file("/up/m.txt").unwrap();
+    let mut conn = db.pool.acquire().await.unwrap();
+    let revs = revisions(&mut conn, &grant, &m).await.unwrap();
+    let w = &want["/up/m.txt revisions"];
+    assert_eq!(w["status"], json!(200));
+    assert_eq!(
+        json!(revs.iter().map(|e| e.revision).collect::<Vec<_>>()),
+        w["revisions"]
+    );
+    assert_eq!(
+        json!(revs
+            .iter()
+            .filter(|e| e.deleted)
+            .map(|e| e.revision)
+            .collect::<Vec<_>>()),
+        w["deleted"]
+    );
+    let w = &want["/up/m.txt?revision=1"];
+    assert_eq!(w["status"], json!(200));
+    let e = resolve(&mut conn, &grant, &m, Want::Revision(1))
+        .await
+        .unwrap();
+    let mut text = String::new();
+    tokio::io::AsyncReadExt::read_to_string(&mut open(&fs, &grant, &e).await.unwrap(), &mut text)
+        .await
+        .unwrap();
+    assert_eq!(json!(text), w["value"]);
+    // The control: a LATEST read of it is not-found.
+    assert!(matches!(
+        resolve(&mut conn, &grant, &m, Want::Latest).await,
+        Err(NsError::NotFound(_))
+    ));
+    assert_eq!(
+        json!(listing(&db.pool, ws, "w9b.elsewhere", None).await),
+        want["w9b.elsewhere"]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PurgeFiles (Task 7)
+// ---------------------------------------------------------------------------
+
+/// `n` revisions of `path` in `ns`, each two bytes (`r1`, `r2`, ...).
+async fn seed_revisions(db: &Db, fs: &FileStore, ws: Uuid, ns: &str, path: &str, n: u32) {
+    for i in 1..=n {
+        seed(db, fs, ws, ns, path, format!("r{i}").as_bytes()).await;
+    }
+}
+
+fn purge_task(id: &str, props: &str) -> String {
+    let mut t = format!("  - id: {id}\n    type: io.kestra.plugin.core.namespace.PurgeFiles\n");
+    for line in props.lines().filter(|l| !l.is_empty()) {
+        t.push_str(&format!("    {line}\n"));
+    }
+    t
+}
+
+/// The `size` a SUCCESSful purge task reported.
+async fn purged(pool: &sqlx::PgPool, ex: Uuid, task: &str) -> Value {
+    succeeded(pool, ex, task).await["size"].clone()
+}
+
+/// Revisions of each namespace's one file `path`, by namespace.
+async fn revisions_by_ns(
+    pool: &sqlx::PgPool,
+    ws: Uuid,
+    namespaces: &[&str],
+    path: &str,
+) -> BTreeMap<String, Vec<i32>> {
+    let mut out = BTreeMap::new();
+    for ns in namespaces {
+        let r = rows(pool, ws, ns).await;
+        out.insert(ns.to_string(), r.get(path).cloned().unwrap_or_default());
+    }
+    out
+}
+
+fn as_revisions(v: &Value) -> BTreeMap<String, Vec<i32>> {
+    serde_json::from_value(v.clone()).unwrap()
+}
+
+/// Spec §8.4 (approved: default the flow's own namespace; children on a dot
+/// boundary) and `purge.includeChildNamespaces_a.b_vs_a.bc` (chosen): from
+/// `a.b`, the rows of `a.b` and `a.b.c` are purged; `a.bc` and `a` are not.
+#[tokio::test(flavor = "multi_thread")]
+async fn purge_files_defaults_to_own_namespace_and_its_children_on_a_dot_boundary() {
+    let _turn = SERIAL.lock().await;
+    let all = ["a", "a.b", "a.b.c", "a.bc"];
+    // The fixture's run: `namespaces: ["a.b"]`, children included by default.
+    {
+        let Some((db, ws, fs)) = setup().await else {
+            return;
+        };
+        for ns in all {
+            seed_revisions(&db, &fs, ws, ns, "/f.txt", 2).await;
+        }
+        let want = &fixture()["egret_expected"]["purge"]["includeChildNamespaces_a.b_vs_a.bc"];
+        let ex = run(&db, ws, &raw_flow("a.b/purge-children")).await;
+        assert_eq!(purged(&db.pool, ex, "purge").await, want["output"]["size"]);
+        let got = revisions_by_ns(&db.pool, ws, &all, "/f.txt").await;
+        for (ns, revs) in as_revisions(&want["revisions_after"]) {
+            assert_eq!(got[&ns], revs, "{ns}");
+        }
+        assert_eq!(got["a"], [1, 2]);
+    }
+    // No `namespaces` at all: the flow's own, and its children.
+    {
+        let (db, ws, fs) = setup().await.unwrap();
+        for ns in all {
+            seed_revisions(&db, &fs, ws, ns, "/f.txt", 2).await;
+        }
+        let ex = run(&db, ws, &flow("pd", "a.b", &[purge_task("purge", "")])).await;
+        assert_eq!(purged(&db.pool, ex, "purge").await, json!(2));
+        assert_eq!(
+            revisions_by_ns(&db.pool, ws, &all, "/f.txt").await,
+            BTreeMap::from([
+                ("a".to_string(), vec![1, 2]),
+                ("a.b".to_string(), vec![2]),
+                ("a.b.c".to_string(), vec![2]),
+                ("a.bc".to_string(), vec![1, 2]),
+            ])
+        );
+    }
+    // `includeChildNamespaces: false`: the flow's own only.
+    {
+        let (db, ws, fs) = setup().await.unwrap();
+        for ns in all {
+            seed_revisions(&db, &fs, ws, ns, "/f.txt", 2).await;
+        }
+        let task = purge_task("purge", "includeChildNamespaces: false");
+        let ex = run(&db, ws, &flow("pd", "a.b", &[task])).await;
+        assert_eq!(purged(&db.pool, ex, "purge").await, json!(1));
+        let got = revisions_by_ns(&db.pool, ws, &all, "/f.txt").await;
+        assert_eq!(
+            (got["a.b"].clone(), got["a.b.c"].clone()),
+            (vec![2], vec![1, 2])
+        );
+    }
+}
+
+/// A listed namespace outside the purge rule (a sibling sharing the
+/// prefix, a parent) fails the task naming it, and NOTHING is purged --
+/// not even the flow's own namespace, listed first.
+#[tokio::test(flavor = "multi_thread")]
+async fn purge_files_refuses_a_listed_namespace_outside_the_purge_rule() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let all = ["w9b", "w9b.pr", "w9b.prx"];
+    for ns in all {
+        seed_revisions(&db, &fs, ws, ns, "/f.txt", 2).await;
+    }
+    for (listed, refused) in [
+        (r#"["w9b.pr", "w9b.prx"]"#, "w9b.prx"),
+        (r#"["w9b.pr", "w9b"]"#, "w9b"),
+    ] {
+        let task = purge_task("purge", &format!("namespaces: {listed}"));
+        let ex = run(&db, ws, &flow("pr", "w9b.pr", &[task])).await;
+        let message = message_of(&db.pool, ex, "purge", "FAILED").await;
+        assert!(
+            message.contains(&format!("namespace '{refused}'"))
+                && message.contains("purges only its own namespace"),
+            "{listed}: {message}"
+        );
+        for ns in all {
+            assert_eq!(
+                rows(&db.pool, ws, ns).await["/f.txt"],
+                [1, 2],
+                "{listed}: {ns}"
+            );
+        }
+    }
+}
+
+/// `purge.namespacePattern.with_namespaces_too` (chosen): both set is
+/// refused naming both, before anything is purged; an EMPTY `namespaces`
+/// beside a pattern is absent, as Kestra's `isEmpty` reads it.
+#[tokio::test(flavor = "multi_thread")]
+async fn namespaces_and_namespace_pattern_are_exclusive() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    seed_revisions(&db, &fs, ws, "w9b.pp.a", "/f.txt", 2).await;
+    let want = &fixture()["egret_expected"]["purge"]["namespacePattern"]["with_namespaces_too"];
+    assert_eq!(want["refused"], json!(true));
+    let both = task_of("w9b.pp/purge-pattern", "both");
+    assert!(both.contains("allowFailure: true"), "{both}");
+    let ex = run(&db, ws, &flow("both", "w9b.pp", &[both])).await;
+    let message = message_of(&db.pool, ex, "both", "WARNING").await;
+    for name in want["names"].as_array().unwrap() {
+        assert!(
+            message.contains(&format!("`{}`", name.as_str().unwrap())),
+            "{message}"
+        );
+    }
+    assert_eq!(rows(&db.pool, ws, "w9b.pp.a").await["/f.txt"], [1, 2]);
+    let task = purge_task("purge", "namespaces: []\nnamespacePattern: \"w9b.pp.*\"");
+    let ex = run(&db, ws, &flow("empty", "w9b.pp", &[task])).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(1));
+    assert_eq!(rows(&db.pool, ws, "w9b.pp.a").await["/f.txt"], [2]);
+}
+
+/// R2 (`purge.namespacePattern`, chosen): Kestra's wildcard over the
+/// namespaces holding files that are the flow's own or its children.
+/// `w9b.pp.*` from `w9b.pp` purges `w9b.pp.a`, `w9b.pp.b` and
+/// `w9b.pp.noflow` (files, no flow) and never `w9b.ppx.c`; `*` never reaches
+/// `w9b.ppx.c` either (a filter, not a refusal); `?` is one character;
+/// `w9b.pp.a.b` takes `w9b.pp.a.b` and not `w9b.pp.a-b` (a regex would take
+/// both); the match is case-sensitive.
+#[tokio::test(flavor = "multi_thread")]
+async fn namespace_pattern_is_a_wildcard_over_own_and_child_namespaces_holding_files() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let want = &fixture()["egret_expected"]["purge"]["namespacePattern"];
+    assert_eq!(want["pattern"], json!("w9b.pp.*"));
+    let all = ["w9b.pp.a", "w9b.pp.b", "w9b.pp.noflow", "w9b.ppx.c"];
+    for ns in all {
+        seed_revisions(&db, &fs, ws, ns, "/f.txt", 2).await;
+    }
+    let ex = run(
+        &db,
+        ws,
+        &flow("pp", "w9b.pp", &[task_of("w9b.pp/purge-pattern", "purge")]),
+    )
+    .await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, want["output"]["size"]);
+    assert_eq!(
+        revisions_by_ns(&db.pool, ws, &all, "/f.txt").await,
+        as_revisions(&want["revisions_after"])
+    );
+
+    // `*` from w9b.pp: every candidate, and w9b.ppx.c is not one.
+    seed(&db, &fs, ws, "w9b.pp.b", "/f.txt", b"r3").await;
+    let ex = run(
+        &db,
+        ws,
+        &flow(
+            "pp",
+            "w9b.pp",
+            &[purge_task("purge", "namespacePattern: \"*\"")],
+        ),
+    )
+    .await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(1));
+    assert_eq!(rows(&db.pool, ws, "w9b.ppx.c").await["/f.txt"], [1, 2]);
+    assert_eq!(rows(&db.pool, ws, "w9b.pp.b").await["/f.txt"], [3]);
+
+    // A dot is a dot: `w9b.pp.a.b` and `w9b.pp.a-b` are both children.
+    for ns in ["w9b.pp.a.b", "w9b.pp.a-b"] {
+        seed_revisions(&db, &fs, ws, ns, "/f.txt", 2).await;
+    }
+    let task = purge_task("purge", "namespacePattern: w9b.pp.a.b");
+    let ex = run(&db, ws, &flow("pp", "w9b.pp", &[task])).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(1));
+    assert_eq!(rows(&db.pool, ws, "w9b.pp.a.b").await["/f.txt"], [2]);
+    assert_eq!(rows(&db.pool, ws, "w9b.pp.a-b").await["/f.txt"], [1, 2]);
+
+    // `?` is exactly one character; case matters.
+    seed(&db, &fs, ws, "w9b.pp.a", "/f.txt", b"r3").await;
+    seed(&db, &fs, ws, "w9b.pp.noflow", "/f.txt", b"r3").await;
+    for (pattern, size) in [("W9B.PP.?", 0), ("w9b.pp.?", 1)] {
+        let task = purge_task("purge", &format!("namespacePattern: \"{pattern}\""));
+        let ex = run(&db, ws, &flow("pp", "w9b.pp", &[task])).await;
+        assert_eq!(
+            purged(&db.pool, ex, "purge").await,
+            json!(size),
+            "{pattern}"
+        );
+    }
+    assert_eq!(rows(&db.pool, ws, "w9b.pp.a").await["/f.txt"], [3]);
+    assert_eq!(rows(&db.pool, ws, "w9b.pp.noflow").await["/f.txt"], [2, 3]);
+    assert_eq!(rows(&db.pool, ws, "w9b.pp.a-b").await["/f.txt"], [1, 2]);
+}
+
+/// `keepAmount: N` keeps each path's N highest revisions; `size` counts
+/// the revisions purged; the default behavior is `keepAmount: 1`; 0 keeps
+/// nothing, as Kestra's `skip(0)`. Purged objects are gone, kept ones stay.
+#[tokio::test(flavor = "multi_thread")]
+async fn keep_amount_keeps_the_n_highest_revisions_and_size_counts_revisions_purged() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let own = "w9b.ka";
+    seed_revisions(&db, &fs, ws, own, "/k.txt", 4).await;
+    seed_revisions(&db, &fs, ws, own, "/one.txt", 1).await;
+    seed_revisions(&db, &fs, ws, own, "/d/n.txt", 2).await;
+    let keep = |n: u32| {
+        purge_task(
+            "purge",
+            &format!("behavior:\n  type: version\n  keepAmount: {n}"),
+        )
+    };
+    let ex = run(&db, ws, &flow("ka", own, &[keep(3)])).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(1));
+    assert_eq!(rows(&db.pool, ws, own).await["/k.txt"], [2, 3, 4]);
+    let ex = run(&db, ws, &flow("ka", own, &[purge_task("purge", "")])).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(3));
+    assert_eq!(
+        rows(&db.pool, ws, own).await,
+        BTreeMap::from([
+            ("/d/n.txt".to_string(), vec![2]),
+            ("/k.txt".to_string(), vec![4]),
+            ("/one.txt".to_string(), vec![1]),
+        ])
+    );
+    assert_eq!(
+        objects(&fs, ws, own).await.into_keys().collect::<Vec<_>>(),
+        ["d/n.txt.v2", "k.txt.v4", "one.txt"]
+    );
+    let ex = run(&db, ws, &flow("ka", own, &[keep(0)])).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(3));
+    assert_eq!(rows(&db.pool, ws, own).await, BTreeMap::new());
+    assert_eq!(objects(&fs, ws, own).await, BTreeMap::new());
+}
+
+/// `purge.before` (measured): `filePattern` with a leading `/` matches
+/// nothing; `before` purges revisions created before the instant and never
+/// a path's latest, even when it is older too.
+#[tokio::test(flavor = "multi_thread")]
+async fn before_purges_older_revisions_and_never_the_latest() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let want = &fixture()["egret_expected"]["purge"]["before"];
+    let own = "w9b.pb";
+    // The setup as recorded, each revision's creation time set to Kestra's.
+    let mut per_path: BTreeMap<String, i32> = BTreeMap::new();
+    for step in want["setup"].as_array().unwrap() {
+        assert_eq!(step["ns"], json!(own));
+        let path = step["path"].as_str().unwrap();
+        seed(&db, &fs, ws, own, path, b"xx").await;
+        let rev = per_path.entry(path.to_string()).or_default();
+        *rev += 1;
+        let at: chrono::DateTime<chrono::Utc> = step["at"].as_str().unwrap().parse().unwrap();
+        let n = sqlx::query(
+            "UPDATE workflow.namespace_files SET created_at = $5 \
+              WHERE workspace_id = $1 AND namespace = $2 AND path = $3 AND revision = $4",
+        )
+        .bind(ws)
+        .bind(own)
+        .bind(path)
+        .bind(*rev)
+        .bind(at)
+        .execute(&db.pool)
+        .await
+        .unwrap()
+        .rows_affected();
+        assert_eq!(n, 1);
+    }
+    let ex = run(&db, ws, &raw_flow("w9b.pb/purge-before")).await;
+    let none = &want["filePattern_with_leading_slash"];
+    assert_eq!(none["pattern"], json!("/q.txt"));
+    for t in ["purge_mid", "purge_end_q2"] {
+        assert_eq!(purged(&db.pool, ex, t).await, none["output"]["size"], "{t}");
+    }
+    let ex = run(&db, ws, &raw_flow("w9b.pb/purge-before2")).await;
+    assert_eq!(
+        purged(&db.pool, ex, "purge_mid_q").await,
+        want["filePattern_q.txt_before_t_mid"]["output"]["size"]
+    );
+    assert_eq!(
+        purged(&db.pool, ex, "purge_end_q2").await,
+        want["filePattern_q2*_before_after_every_write"]["output"]["size"]
+    );
+    assert_eq!(
+        rows(&db.pool, ws, own).await,
+        BTreeMap::from([
+            ("/q.txt".to_string(), vec![3]),
+            ("/q2.txt".to_string(), vec![2]),
+        ])
+    );
+    assert_eq!(
+        objects(&fs, ws, own).await,
+        fixture_objects(&want["objects_after"])
+    );
+}
+
+/// `purge.keepAmount_1_on_soft_deleted` (chosen; Kestra keeps the deleted
+/// latest revision, size 4): a path whose latest revision is soft-deleted
+/// is purged entirely -- size 5, its revisions unreadable, its objects
+/// gone -- and a rewrite starts again at revision 1.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_soft_deleted_path_is_purged_entirely() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let want = &fixture()["egret_expected"]["purge"]["keepAmount_1_on_soft_deleted"];
+    assert_eq!(want["kestra"]["output"]["size"], json!(4));
+    let own = "w9b.pk";
+    seed_revisions(&db, &fs, ws, own, "/p.txt", 3).await;
+    seed_revisions(&db, &fs, ws, own, "/live.txt", 3).await;
+    assert_eq!(
+        objects(&fs, ws, own).await,
+        fixture_objects(&want["objects_before"])
+    );
+    let write = authorize(ws, Actor::Api, own, Access::Write).unwrap();
+    let p = NsPath::parse_file("/p.txt").unwrap();
+    assert_eq!(soft_delete(&db.pool, &write, &p).await.unwrap().len(), 1);
+    let ex = run(&db, ws, &raw_flow("w9b.pk/purge")).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, want["output"]["size"]);
+    assert_eq!(
+        json!(objects(&fs, ws, own).await.into_keys().collect::<Vec<_>>()),
+        want["objects_after"]
+    );
+    let grant = authorize(ws, Actor::Api, own, Access::Read).unwrap();
+    let mut conn = db.pool.acquire().await.unwrap();
+    let live_revs = revisions(&mut conn, &grant, &NsPath::parse_file("/live.txt").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        json!(live_revs.iter().map(|e| e.revision).collect::<Vec<_>>()),
+        want["revisions_after"]["/live.txt"]["revisions"]
+    );
+    assert_eq!(want["revisions_after"]["/p.txt"]["status"], json!(404));
+    assert!(matches!(
+        revisions(&mut conn, &grant, &p).await,
+        Err(NsError::NotFound(_))
+    ));
+    for (n, status) in want["p_revision_reads_after"].as_object().unwrap() {
+        assert_eq!(status, &json!(404));
+        let n: u32 = n.parse().unwrap();
+        assert!(
+            matches!(
+                resolve(&mut conn, &grant, &p, Want::Revision(n)).await,
+                Err(NsError::NotFound(_))
+            ),
+            "revision {n}"
+        );
+    }
+    drop(conn);
+    let rewrite = &want["rewrite_after_purge"];
+    seed(&db, &fs, ws, own, "/p.txt", b"rewrite").await;
+    assert_eq!(
+        json!(rows(&db.pool, ws, own).await["/p.txt"]),
+        rewrite["revisions"]
+    );
+    assert_eq!(
+        json!(objects(&fs, ws, own).await.into_keys().collect::<Vec<_>>()),
+        rewrite["objects"]
+    );
+}
+
+/// `filePattern` is Commons-IO's wildcard on the path without its leading
+/// `/`: `*` spans `/`, `?` is one character, case-sensitive.
+#[tokio::test(flavor = "multi_thread")]
+async fn file_pattern_is_a_commons_io_wildcard() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let own = "w9b.fp";
+    for path in ["/a/x.txt", "/a/y.csv", "/b.txt", "/a/sub/z.txt"] {
+        seed_revisions(&db, &fs, ws, own, path, 2).await;
+    }
+    for (pattern, size) in [
+        ("/b.txt", 0),
+        ("*.CSV", 0),
+        ("a/*.txt", 2),
+        ("?.txt", 1),
+        ("*.csv", 1),
+    ] {
+        let task = purge_task("purge", &format!("filePattern: \"{pattern}\""));
+        let ex = run(&db, ws, &flow("fp", own, &[task])).await;
+        assert_eq!(
+            purged(&db.pool, ex, "purge").await,
+            json!(size),
+            "{pattern}"
+        );
+    }
+    assert_eq!(
+        rows(&db.pool, ws, own).await,
+        ["/a/sub/z.txt", "/a/x.txt", "/a/y.csv", "/b.txt"]
+            .into_iter()
+            .map(|p| (p.to_string(), vec![2]))
+            .collect::<BTreeMap<_, _>>()
+    );
+}
+
+/// After purges of every kind (keepAmount, a soft-deleted path, a
+/// directory's files), every surviving row has its object, and every
+/// object left has its row: a purge deletes exact keys.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_purge_leaves_no_row_without_its_object() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let own = "w9b.pn";
+    seed_revisions(&db, &fs, ws, own, "/a.txt", 3).await;
+    seed_revisions(&db, &fs, ws, own, "/a.txt.d/b.txt", 2).await;
+    seed_revisions(&db, &fs, ws, own, "/gone.txt", 2).await;
+    seed_revisions(&db, &fs, ws, "w9b.pn.c", "/c.txt", 2).await;
+    let write = authorize(ws, Actor::Api, own, Access::Write).unwrap();
+    soft_delete(&db.pool, &write, &NsPath::parse_file("/gone.txt").unwrap())
+        .await
+        .unwrap();
+    let ex = run(&db, ws, &flow("pn", own, &[purge_task("purge", "")])).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(6));
+    let mut kept = BTreeSet::new();
+    for ns in [own, "w9b.pn.c"] {
+        let grant = authorize(ws, Actor::Api, ns, Access::Read).unwrap();
+        for (path, revs) in rows(&db.pool, ws, ns).await {
+            for rev in revs {
+                let p = NsPath::parse_file(&path).unwrap();
+                let key = fs.namespace_object_uri(&grant, &p, rev as u32);
+                assert!(
+                    fs.store.head(&key).await.unwrap().is_some(),
+                    "{ns} {path} r{rev}"
+                );
+                kept.insert(format!("{ns} {path} r{rev}"));
+            }
+        }
+        assert_eq!(
+            objects(&fs, ws, ns).await.len(),
+            rows(&db.pool, ws, ns)
+                .await
+                .values()
+                .map(Vec::len)
+                .sum::<usize>(),
+            "{ns}: an object per row, no more"
+        );
+    }
+    assert_eq!(
+        kept,
+        BTreeSet::from([
+            format!("{own} /a.txt r3"),
+            format!("{own} /a.txt.d/b.txt r2"),
+            "w9b.pn.c /c.txt r2".to_string(),
+        ])
+    );
+}
+
+/// Every list is bounded, and crossing a bound is the author's error naming
+/// it, before anything is deleted or purged: DeleteFiles' live listing and
+/// PurgeFiles' revisions (both `max_namespace_files`, 10 in this binary),
+/// PurgeFiles' listed namespaces (`MAX_NAMESPACES`).
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_and_purge_bounds_are_author_errors_naming_the_cap() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let own = "w9b.cap";
+    for i in 0..11 {
+        seed(&db, &fs, ws, own, &format!("/f{i:02}.txt"), b"x").await;
+    }
+    let del = "  - id: del\n    type: io.kestra.plugin.core.namespace.DeleteFiles\n    \
+               files: [\"**\"]\n";
+    let ex = run(&db, ws, &flow("cap", own, &[del.into()])).await;
+    let message = message_of(&db.pool, ex, "del", "FAILED").await;
+    assert!(
+        message.contains("workflow.storage.max_namespace_files") && message.contains("10"),
+        "{message}"
+    );
+    assert!(live(&db.pool, ws, own, "/f00.txt").await);
+    // 11 revisions over two namespaces: refused, nothing purged.
+    let other = "w9b.cap2";
+    seed_revisions(&db, &fs, ws, other, "/g.txt", 2).await;
+    let write = authorize(ws, Actor::Api, own, Access::Write).unwrap();
+    for i in 2..11 {
+        soft_delete(
+            &db.pool,
+            &write,
+            &NsPath::parse_file(&format!("/f{i:02}.txt")).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+    let task = purge_task("purge", "namespaces: [w9b.cap2, w9b.cap]");
+    let ex = run(&db, ws, &flow("cap", own, &[task])).await;
+    // `w9b.cap2` is not a child of `w9b.cap`: the rule first.
+    let message = message_of(&db.pool, ex, "purge", "FAILED").await;
+    assert!(message.contains("'w9b.cap2'"), "{message}");
+    let ex = run(&db, ws, &flow("cap", "w9b", &[task_of_purge_two()])).await;
+    let message = message_of(&db.pool, ex, "purge", "FAILED").await;
+    assert!(
+        message.contains("workflow.storage.max_namespace_files")
+            && message.contains("nothing was purged"),
+        "{message}"
+    );
+    assert_eq!(rows(&db.pool, ws, own).await.len(), 11);
+    assert_eq!(rows(&db.pool, ws, other).await["/g.txt"], [1, 2]);
+    // The control: one namespace alone (11 rows) is still over; with 10 it runs.
+    soft_delete(&db.pool, &write, &NsPath::parse_file("/f00.txt").unwrap())
+        .await
+        .unwrap();
+    let grant = authorize(ws, Actor::Api, own, Access::Purge).unwrap();
+    egret_workflow::storage::nsfiles::store::purge_revisions(
+        &db.pool,
+        &fs,
+        &grant,
+        &NsPath::parse_file("/f00.txt").unwrap(),
+        &[1],
+    )
+    .await
+    .unwrap();
+    let ex = run(&db, ws, &flow("cap", own, &[purge_task("purge", "")])).await;
+    assert_eq!(purged(&db.pool, ex, "purge").await, json!(9));
+    // MAX_NAMESPACES + 1 listed: refused naming the bound.
+    let many: Vec<String> = (0..=egret_workflow::storage::nsfiles::stage::MAX_NAMESPACES)
+        .map(|i| format!("w9b.cap.n{i}"))
+        .collect();
+    let task = purge_task("purge", &format!("namespaces: {}", json!(many)));
+    let ex = run(&db, ws, &flow("cap", own, &[task])).await;
+    let message = message_of(&db.pool, ex, "purge", "FAILED").await;
+    assert!(
+        message.contains(&format!(
+            "more than the {}",
+            egret_workflow::storage::nsfiles::stage::MAX_NAMESPACES
+        )),
+        "{message}"
+    );
+}
+
+/// `w9b.cap` and `w9b.cap2` from their parent `w9b`, children included.
+fn task_of_purge_two() -> String {
+    purge_task(
+        "purge",
+        "namespaces: [w9b.cap, w9b.cap2]\nincludeChildNamespaces: false",
+    )
 }

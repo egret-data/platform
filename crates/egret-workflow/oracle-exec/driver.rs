@@ -128,7 +128,8 @@ const BATCH: usize = 1;
 
 /// The registry the ratchet judges: the four handlers W3b ships, with `Sleep`
 /// capped — see the module doc, item 3 — and, since W9a Tasks 11 and 12, the
-/// nine core storage tasks (and, since W9b Task 6, `UploadFiles` and `DownloadFiles`)
+/// nine core storage tasks (and, since W9b Tasks 6 and 7, the four
+/// `core.namespace` tasks)
 /// over the test `MemStore` (`storage::install_mem_for_tests`,
 /// installed here, so the render snapshot of every `settle` in this process
 /// reads the same store the handlers write). `pool` is the database `run`

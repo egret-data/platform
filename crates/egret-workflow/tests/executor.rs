@@ -3946,7 +3946,9 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             "io.kestra.plugin.core.execution.Fail",
             "io.kestra.plugin.core.flow.Sleep",
             "io.kestra.plugin.core.log.Log",
+            "io.kestra.plugin.core.namespace.DeleteFiles",
             "io.kestra.plugin.core.namespace.DownloadFiles",
+            "io.kestra.plugin.core.namespace.PurgeFiles",
             "io.kestra.plugin.core.namespace.UploadFiles",
             "io.kestra.plugin.core.storage.Concat",
             "io.kestra.plugin.core.storage.DeduplicateItems",
@@ -3958,9 +3960,9 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             "io.kestra.plugin.core.storage.Split",
             "io.kestra.plugin.core.storage.Write",
         ],
-        "the fifteen handlers the driver runs (the four core storage tasks since \
-         W9a Task 11, the five whole-file ones since Task 12, the two namespace-file \
-         tasks since W9b Task 6). If this list ever grew to cover \
+        "the seventeen handlers the driver runs (the four core storage tasks since \
+         W9a Task 11, the five whole-file ones since Task 12, the four namespace-file \
+         tasks since W9b Tasks 6 and 7). If this list ever grew to cover \
          everything the corpus declares, the derivation above would pass \
          because nothing stalls rather than because the reason holds"
     );

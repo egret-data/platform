@@ -322,20 +322,55 @@ pub async fn search(
     capped(entries(rows)?, cap, &what)
 }
 
-/// The namespaces of `workspace` that hold at least one row (PurgeFiles'
-/// namespacePattern, Task 7).
+/// The namespaces of `workspace` that hold at least one row and are `root`
+/// or one of its children on a dot boundary (`root + "."`-prefixed; `a.bc`
+/// is not a child of `a.b`), in byte order: `PurgeFiles`' candidates (W9b
+/// Task 7; spec §8.4, the user's ruling R2 and the coordinator's ruling B).
+/// Fetches at most `cap + 1` names; the `+1` is the caller's refusal.
 pub async fn namespaces_with_files(
     conn: &mut PgConnection,
     workspace: Uuid,
+    root: &str,
+    cap: u64,
 ) -> Result<Vec<String>, NsError> {
     sqlx::query_scalar(
-        "SELECT DISTINCT namespace FROM workflow.namespace_files \
-          WHERE workspace_id = $1 ORDER BY namespace",
+        "SELECT DISTINCT namespace COLLATE \"C\" AS namespace FROM workflow.namespace_files \
+          WHERE workspace_id = $1 \
+            AND (namespace = $2 OR left(namespace, length($2) + 1) = $2 || '.') \
+          ORDER BY 1 LIMIT $3",
     )
     .bind(workspace)
+    .bind(root)
+    .bind(limit(cap))
     .fetch_all(&mut *conn)
     .await
     .map_err(db_err)
+}
+
+/// Every FILE row of the grant's namespace -- every revision, live or
+/// soft-deleted -- by path (byte order), then revision ascending:
+/// `PurgeFiles`' listing (W9b Task 7). Directories are not listed: they hold
+/// no object and no revision to purge. Fetches at most `cap + 1` rows; the
+/// `+1` is the caller's refusal.
+pub async fn file_revisions(
+    conn: &mut PgConnection,
+    grant: &Grant,
+    cap: u64,
+) -> Result<Vec<NsEntry>, NsError> {
+    let rows: Vec<Row> = sqlx::query_as(concat!(
+        "SELECT ",
+        entry_cols!(),
+        " FROM workflow.namespace_files \
+          WHERE workspace_id = $1 AND namespace = $2 AND NOT is_directory \
+          ORDER BY path COLLATE \"C\", revision LIMIT $3"
+    ))
+    .bind(grant.workspace())
+    .bind(grant.namespace())
+    .bind(limit(cap))
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    entries(rows)
 }
 
 /// Stream the entry's object. A missing object is NsError::Author naming the

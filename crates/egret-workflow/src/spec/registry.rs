@@ -260,6 +260,18 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         aliases: &[],
         references: &[],
     },
+    // ── W9b Task 7: `DeleteFiles` and `PurgeFiles`, registered by the same
+    // `handlers::namespace::register`. ──
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::namespace::DELETE_FILES,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::namespace::PURGE_FILES,
+        aliases: &[],
+        references: &[],
+    },
 ];
 
 /// The row for `t`, matching the canonical spelling **or any alias**.

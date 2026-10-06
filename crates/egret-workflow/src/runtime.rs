@@ -726,7 +726,8 @@ pub async fn handlers_for(
         pool.clone(),
         crate::storage::current(),
     );
-    // W9b Task 6: `UploadFiles` and `DownloadFiles`, which need the pool too.
+    // W9b Tasks 6 and 7: `UploadFiles`, `DownloadFiles`, `DeleteFiles` and
+    // `PurgeFiles`, which need the pool too.
     crate::worker::handlers::namespace::register(
         &mut handlers,
         pool.clone(),

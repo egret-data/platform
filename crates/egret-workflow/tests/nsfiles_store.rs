@@ -221,11 +221,14 @@ async fn the_same_path_in_two_workspaces_resolves_to_the_grants_row_only() {
         .unwrap()
         .is_empty());
     assert!(search(&mut c, &gc, "x", 10).await.unwrap().is_empty());
-    assert!(namespaces_with_files(&mut c, c_ws)
+    assert!(namespaces_with_files(&mut c, c_ws, "w9b", 10)
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(namespaces_with_files(&mut c, a).await.unwrap(), [NS]);
+    assert_eq!(
+        namespaces_with_files(&mut c, a, "w9b", 10).await.unwrap(),
+        [NS]
+    );
 }
 
 #[tokio::test]
