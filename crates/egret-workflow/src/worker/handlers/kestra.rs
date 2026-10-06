@@ -2142,14 +2142,17 @@ mod tests {
             ws,
             OWN,
             QUERY,
+            // `exec` first (properties keep their order): W9a's file takes
+            // `.egret/storage/0`, so a namespace file numbered on its own
+            // count would collide with it.
             query_with(serde_json::json!({
+                "exec": "{{ outputs.q.a }}",
                 "own": "nsfile:///own.txt",
                 "again": "nsfile:///own.txt",
                 "other": "nsfile://w9b.s2/sub/y.txt",
                 "uri": "{{ fileURI('x.txt') }}",
                 "first": "kestra:///w9b/stage/_files/own.txt",
                 "kfile": "kestra:///w9b/s1/_files/only1.txt",
-                "exec": "{{ outputs.q.a }}",
                 "text": "x nsfile:///own.txt",
             })),
         );
@@ -2165,6 +2168,7 @@ mod tests {
             .as_str()
             .expect("the execution file is in `storage`")
             .to_string();
+        assert_eq!(exec_rel, ".egret/storage/0", "the first leaf, first staged");
         assert_eq!(doc["storage"].as_object().unwrap().len(), 1, "{doc}");
         let listed = doc["namespaceFiles"].as_array().expect("a list");
         let by_uri: BTreeMap<&str, &Value> = listed
@@ -2389,7 +2393,8 @@ mod tests {
 
     /// **An outage while resolving or streaming a namespace file is egret's**:
     /// a worker `Err`, no task failure, no attempt spent -- the database (a
-    /// closed pool; no runner called) and the store (the runner's staging).
+    /// closed pool, and a lookup that fails past the acquire; no runner
+    /// called) and the store (the runner's staging).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_namespace_file_outage_is_a_worker_error() {
         let Some(pool) = ns::pool().await else { return };
@@ -2413,6 +2418,24 @@ mod tests {
         assert!(matches!(err, Error::Internal(_)), "{err:?}");
         assert!(err.to_string().contains("staging namespace files"), "{err}");
         assert!(spy.seen.lock().unwrap().is_empty(), "no runner call");
+
+        // A connection is taken but the lookup itself fails (the server's
+        // `postgres` database has no `workflow` schema): `resolve`'s own
+        // database error, past the acquire.
+        let broken = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with((*pool.connect_options()).clone().database("postgres"))
+            .await
+            .expect("the same server's `postgres` database");
+        let spy = Spy::ok(ok(serde_json::json!({})));
+        let err = with_ns(COPY_IN, spy.clone(), files.clone(), Some(broken.clone()))
+            .run(&t)
+            .await
+            .expect_err("a failed lookup is egret's outage");
+        assert!(matches!(err, Error::Internal(_)), "{err:?}");
+        assert!(err.to_string().contains("staging namespace files"), "{err}");
+        assert!(spy.seen.lock().unwrap().is_empty(), "no runner call");
+        broken.close().await;
 
         let down = Arc::new(crate::storage::FileStore {
             store: Arc::new(crate::worker::handlers::script::tests::DownStore),
