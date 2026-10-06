@@ -308,7 +308,10 @@ impl<S> IdleTimeout<S> {
 
 /// `idle` as the 408 says it: whole hours, whole seconds, or milliseconds.
 pub(crate) fn idle_text(idle: Duration) -> String {
-    if idle >= Duration::from_secs(3600) && idle.as_secs() % 3600 == 0 && idle.subsec_nanos() == 0 {
+    if idle >= Duration::from_secs(3600)
+        && idle.as_secs().is_multiple_of(3600)
+        && idle.subsec_nanos() == 0
+    {
         format!("{} hours", idle.as_secs() / 3600)
     } else if idle >= Duration::from_secs(1) && idle.subsec_millis() == 0 {
         format!("{} seconds", idle.as_secs())
