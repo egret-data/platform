@@ -1921,6 +1921,26 @@ async fn purge_files_defaults_to_own_namespace_and_its_children_on_a_dot_boundar
             (vec![2], vec![1, 2])
         );
     }
+    // A listed child takes ITS children on a dot: `a.b.cd` is a child of
+    // `a.b`, not of `a.b.c`.
+    {
+        let (db, ws, fs) = setup().await.unwrap();
+        let all = ["a.b.c", "a.b.c.d", "a.b.cd"];
+        for ns in all {
+            seed_revisions(&db, &fs, ws, ns, "/f.txt", 2).await;
+        }
+        let task = purge_task("purge", "namespaces: [a.b.c]");
+        let ex = run(&db, ws, &flow("pd", "a.b", &[task])).await;
+        assert_eq!(purged(&db.pool, ex, "purge").await, json!(2));
+        assert_eq!(
+            revisions_by_ns(&db.pool, ws, &all, "/f.txt").await,
+            BTreeMap::from([
+                ("a.b.c".to_string(), vec![2]),
+                ("a.b.c.d".to_string(), vec![2]),
+                ("a.b.cd".to_string(), vec![1, 2]),
+            ])
+        );
+    }
 }
 
 /// A listed namespace outside the purge rule (a sibling sharing the

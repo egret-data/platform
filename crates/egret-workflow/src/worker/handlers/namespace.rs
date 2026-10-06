@@ -1819,14 +1819,16 @@ mod tests {
 
     #[test]
     fn purge_namespaces_take_children_on_a_dot_and_patterns_only_from_candidates() {
-        let candidates: Vec<String> = ["a.b", "a.b.c", "a.b.c.d", "a.b-c"]
+        // As the store answers them: own and its children, `a.b.cd` among
+        // them -- a child of `a.b`, but not of `a.b.c`.
+        let candidates: Vec<String> = ["a.b", "a.b.c", "a.b.c.d", "a.b.cd"]
             .into_iter()
             .map(String::from)
             .collect();
         let ns = |v: Vec<String>| v.join(" ");
         assert_eq!(
             ns(purge_namespaces("a.b", None, None, true, &candidates)),
-            "a.b a.b.c a.b.c.d"
+            "a.b a.b.c a.b.c.d a.b.cd"
         );
         assert_eq!(
             ns(purge_namespaces("a.b", None, None, false, &candidates)),
@@ -1846,7 +1848,7 @@ mod tests {
         // A pattern selects among the candidates, never beyond them.
         assert_eq!(
             ns(purge_namespaces("a.b", None, Some("*"), false, &candidates)),
-            "a.b a.b-c a.b.c a.b.c.d"
+            "a.b a.b.c a.b.c.d a.b.cd"
         );
         assert_eq!(
             ns(purge_namespaces(
