@@ -16,9 +16,14 @@ CREATE TABLE workflow.namespace_files (
   -- who wrote it: a user (the API) or an execution (a task); no FK, the row outlives its writer
   created_by_user      uuid,
   created_by_execution uuid,
+  -- (W9b Task 6 fix round 1, 2026-10-06) the task run of an execution's write, so a task run
+  -- re-claimed after an infrastructure failure recognises the files its earlier attempt wrote
+  created_by_task_run  uuid,
   CONSTRAINT workflow_namespace_files_revision_key UNIQUE (workspace_id, namespace, path, revision),
   CONSTRAINT workflow_namespace_files_directory_shape
     CHECK (is_directory = (right(path, 1) = '/') AND (NOT is_directory OR (revision = 1 AND size = 0))),
   CONSTRAINT workflow_namespace_files_one_writer
-    CHECK (num_nonnulls(created_by_user, created_by_execution) <= 1)
+    CHECK (num_nonnulls(created_by_user, created_by_execution) <= 1),
+  CONSTRAINT workflow_namespace_files_task_run_of_an_execution
+    CHECK (created_by_task_run IS NULL OR created_by_execution IS NOT NULL)
 );

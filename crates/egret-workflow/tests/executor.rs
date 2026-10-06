@@ -8326,3 +8326,22 @@ async fn the_execution_assertion_banks_discriminate_on_the_inputs_the_harvest_di
         wrong.join("\n  ")
     );
 }
+
+/// W9b Task 6 fix round 1 (M1): `driver::registry` installs the
+/// namespace-file connect options for every pool but `unconnected_pool()`'s,
+/// and recognises that one through the same `UNCONNECTED_URL` the pool is
+/// built from. Any other pool is not mistaken for it.
+#[tokio::test]
+async fn the_driver_recognises_only_its_unconnected_pool() {
+    assert!(driver::is_unconnected(&driver::unconnected_pool()));
+    for other in [
+        "postgres://egret:egret@localhost:5439/egret_test",
+        "postgres://nobody@127.0.0.1:1/other",
+        "postgres://nobody@127.0.0.1:2/none",
+    ] {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy(other)
+            .unwrap();
+        assert!(!driver::is_unconnected(&pool), "{other}");
+    }
+}

@@ -55,6 +55,14 @@ pub enum NsError {
 pub enum CreatedBy {
     User(Uuid),
     Execution(Uuid),
+    /// A task run of an execution (W9b Task 6 fix round 1, I1): the row
+    /// records both, so `UploadFiles` re-claimed after an infrastructure
+    /// failure recognises the files its earlier attempt wrote
+    /// ([`store::latest_written`]).
+    TaskRun {
+        execution: Uuid,
+        task_run: Uuid,
+    },
 }
 
 static DB_OPTIONS: OnceLock<Arc<PgConnectOptions>> = OnceLock::new();

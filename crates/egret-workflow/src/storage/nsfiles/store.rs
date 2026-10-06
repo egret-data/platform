@@ -77,6 +77,19 @@ macro_rules! latest_under {
 
 type Row = (Uuid, String, String, i32, bool, i64, bool, DateTime<Utc>);
 
+/// [`Row`], then `created_by_task_run` ([`latest_written`]).
+type RowWithTaskRun = (
+    Uuid,
+    String,
+    String,
+    i32,
+    bool,
+    i64,
+    bool,
+    DateTime<Utc>,
+    Option<Uuid>,
+);
+
 /// egret's bug, not the author's and not an outage: a 500.
 fn internal(message: String) -> NsError {
     NsError::Db(egret_core::Error::Internal(anyhow::anyhow!(message)))
@@ -495,11 +508,43 @@ where
     }
 }
 
-fn writer(by: CreatedBy) -> (Option<Uuid>, Option<Uuid>) {
+/// `(created_by_user, created_by_execution, created_by_task_run)`.
+fn writer(by: CreatedBy) -> (Option<Uuid>, Option<Uuid>, Option<Uuid>) {
     match by {
-        CreatedBy::User(u) => (Some(u), None),
-        CreatedBy::Execution(e) => (None, Some(e)),
+        CreatedBy::User(u) => (Some(u), None, None),
+        CreatedBy::Execution(e) => (None, Some(e), None),
+        CreatedBy::TaskRun {
+            execution,
+            task_run,
+        } => (None, Some(execution), Some(task_run)),
     }
+}
+
+/// The latest row of `path` (live or not) and the task run that wrote it
+/// (`None` for a user's or a bare execution's write). `UploadFiles` reads it
+/// before each write: a latest revision its own task run wrote, of the
+/// source's size, is a write an earlier attempt of that run already
+/// committed (W9b Task 6 fix round 1, I1).
+pub async fn latest_written(
+    conn: &mut PgConnection,
+    grant: &Grant,
+    path: &NsPath,
+) -> Result<Option<(NsEntry, Option<Uuid>)>, NsError> {
+    let row: Option<RowWithTaskRun> = sqlx::query_as(concat!(
+        "SELECT ",
+        entry_cols!(),
+        ", created_by_task_run FROM workflow.namespace_files \
+              WHERE workspace_id = $1 AND namespace = $2 AND path = $3 \
+              ORDER BY revision DESC LIMIT 1"
+    ))
+    .bind(grant.workspace())
+    .bind(grant.namespace())
+    .bind(path.as_str())
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    row.map(|(w, n, p, r, d, s, del, at, run)| Ok((entry((w, n, p, r, d, s, del, at))?, run)))
+        .transpose()
 }
 
 fn need_write(grant: &Grant) -> Result<(), NsError> {
@@ -661,12 +706,12 @@ async fn ensure_directories(
     if dirs.is_empty() {
         return Ok(());
     }
-    let (user, execution) = writer(by);
+    let (user, execution, task_run) = writer(by);
     sqlx::query(
         "INSERT INTO workflow.namespace_files \
            (workspace_id, namespace, path, revision, is_directory, size, \
-            created_by_user, created_by_execution) \
-         SELECT $1, $2, dir, 1, true, 0, $4, $5 FROM unnest($3::text[]) AS dir \
+            created_by_user, created_by_execution, created_by_task_run) \
+         SELECT $1, $2, dir, 1, true, 0, $4, $5, $6 FROM unnest($3::text[]) AS dir \
          ON CONFLICT ON CONSTRAINT workflow_namespace_files_revision_key \
            DO UPDATE SET deleted = false WHERE workflow.namespace_files.deleted",
     )
@@ -675,6 +720,7 @@ async fn ensure_directories(
     .bind(&dirs)
     .bind(user)
     .bind(execution)
+    .bind(task_run)
     .execute(&mut *conn)
     .await
     .map_err(db_err)?;
@@ -691,7 +737,7 @@ async fn insert_row(
     deleted: bool,
     by: CreatedBy,
 ) -> Result<NsEntry, NsError> {
-    let (user, execution) = writer(by);
+    let (user, execution, task_run) = writer(by);
     let revision = i32::try_from(revision)
         .map_err(|_| internal(format!("revision {revision} of '{path}' is out of range")))?;
     let size = i64::try_from(size)
@@ -699,8 +745,8 @@ async fn insert_row(
     let row: Row = sqlx::query_as(concat!(
         "INSERT INTO workflow.namespace_files \
            (workspace_id, namespace, path, revision, is_directory, size, deleted, \
-            created_by_user, created_by_execution) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING ",
+            created_by_user, created_by_execution, created_by_task_run) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING ",
         entry_cols!()
     ))
     .bind(grant.workspace())
@@ -712,6 +758,7 @@ async fn insert_row(
     .bind(deleted)
     .bind(user)
     .bind(execution)
+    .bind(task_run)
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;

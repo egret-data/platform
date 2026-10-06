@@ -27,17 +27,34 @@
 //!   directory, which a native handler does not have. A whole `kestra:///`
 //!   string is one file, resolved through the render snapshot -- W9a's one
 //!   readability decision.
-//! - **Every `files` and `filesMap` URI is resolved before the first write**,
-//!   and one that does not resolve fails the task naming it, writing nothing
-//!   (Kestra skips it silently). A `filesMap` value that is not a
-//!   `kestra://` URI is the file's contents.
+//! - **Every `files` and `filesMap` source is resolved before the first
+//!   write**, and one that does not resolve fails the task naming it, writing
+//!   nothing (Kestra skips it silently). A `kestra:///…/_files/…` or
+//!   `nsfile://…` source is a namespace file of the workspace, read through
+//!   `authorize` (Read) as staging reads it (Task 5's `resolve_input_uri`)
+//!   and copied into the flow's own namespace -- under `files` at its
+//!   namespace path, under `filesMap` at its key (fix round 1, M2). A
+//!   `filesMap` value that is neither is the file's contents.
 //! - **`destination` is a directory**: a missing leading `/` is added, one
 //!   trailing `/` dropped, and each name joined with exactly one `/`
 //!   (`up2` + `m.txt` -> `/up2/m.txt`; Kestra wrote `/up2m.txt`). A file
 //!   `files` matched keeps its path under its task run (`content.txt`, or
-//!   `sub/x.txt` for an `outputDirectory` file). The same `(path, source)`
-//!   named twice in `files` (a URI and a glob that also matches it) is
-//!   written once.
+//!   `sub/x.txt` for an `outputDirectory` file).
+//! - **One source per destination path** (the coordinator's ruling of
+//!   2026-10-06, R3; fix round 1, I2): the same source named twice (a URI and
+//!   a glob that also matches it) is written once; two DIFFERENT sources
+//!   that land on one path (two Writes' `content.txt` under `**.txt`) refuse
+//!   the task before anything is written, naming the path and both sources.
+//!   Kestra writes both, in its listing's order.
+//! - **Per file, not atomic across files; a re-claim is idempotent** (fix
+//!   round 1, I1). Each file commits on its own (§4.2), so an author error
+//!   on entry k (a conflict under ERROR, a 409 of another kind, an object
+//!   gone behind its row) leaves entries 1..k-1 written, as Kestra's
+//!   per-file `putFile` does. An infrastructure failure re-claims the same
+//!   task run, and it skips each file whose latest revision that task run
+//!   wrote (`created_by_task_run`) with the source's size, under every
+//!   conflict mode: no second OVERWRITE revision and no ERROR against its
+//!   own write. Another task run of the same execution is not "itself".
 //! - **`DownloadFiles` joins `destination` and the path with exactly one
 //!   `/`** (`dl/` or `dl` + `/up/m.txt` -> `…/{taskRunId}/dl/up/m.txt`; `""`
 //!   -> `…/{taskRunId}/up/m.txt`). Kestra concatenates (`dl` would give
@@ -51,12 +68,15 @@
 //! `max_namespace_files + 1` readable execution files ([`readable_execution_files`]),
 //! `DownloadFiles` at most `max_namespace_files + 1` namespace rows
 //! (`list_live`); the `+1` is the refusal, naming the cap. `DownloadFiles`
-//! refuses matches whose rows hold more than `max_task_bytes` together.
+//! refuses matches whose rows hold more than `max_task_bytes` together;
+//! `UploadFiles` refuses more resolved sources than `max_namespace_files`,
+//! or more bytes than `max_task_bytes`, before its first write (fix round
+//! 1, M3).
 //! `NsError::{Store, Db}` and a store that fails are infrastructure: `Err`,
 //! so the lease lapses and the run is re-claimed with no attempt spent;
 //! everything else is a failed task naming the path, the property or the cap.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use egret_core::{Error, Result};
@@ -73,8 +93,10 @@ use crate::models::Property;
 use crate::storage::nsfiles::access::{authorize, Access, Actor};
 use crate::storage::nsfiles::glob::PathMatcher;
 use crate::storage::nsfiles::path::NsPath;
-use crate::storage::nsfiles::stage::ListProp;
-use crate::storage::nsfiles::store::{list_live, open, put, Conflict, NsEntry, Written};
+use crate::storage::nsfiles::stage::{resolve_input_uri, ListProp};
+use crate::storage::nsfiles::store::{
+    latest_written, list_live, open, put, Conflict, NsEntry, Written,
+};
 use crate::storage::nsfiles::{CreatedBy, NsError};
 use crate::storage::uri::{self, Tail};
 use crate::storage::{readable_executions, FileStore, StoredFile};
@@ -266,10 +288,86 @@ struct UploadSpec {
 /// Where one file of an `UploadFiles` comes from.
 #[derive(Debug)]
 enum Source {
-    /// A readable execution file.
-    Execution { uri: String },
-    /// A `filesMap` value that is not a URI: the file's contents.
-    Contents(String),
+    /// A readable execution file (the snapshot, or the glob listing).
+    Execution { uri: String, size: u64 },
+    /// A namespace file of the workspace, read through `authorize` (Read)
+    /// and `store::resolve` (Task 5's `resolve_input_uri`): `uri` as given,
+    /// `object` its revision's key.
+    Namespace {
+        uri: String,
+        object: String,
+        size: u64,
+    },
+    /// A `filesMap` value that is not a URI: the file's contents. `shown`
+    /// names the entry.
+    Contents { shown: String, text: String },
+}
+
+impl Source {
+    fn size(&self) -> u64 {
+        match self {
+            Self::Execution { size, .. } | Self::Namespace { size, .. } => *size,
+            Self::Contents { text, .. } => text.len() as u64,
+        }
+    }
+
+    /// What a message calls it.
+    fn shown(&self) -> String {
+        match self {
+            Self::Execution { uri, .. } | Self::Namespace { uri, .. } => uri.clone(),
+            Self::Contents { shown, .. } => format!("the contents given in {shown}"),
+        }
+    }
+
+    /// Two entries with the same identity are the same source.
+    fn identity(&self) -> String {
+        match self {
+            Self::Execution { uri, .. } => format!("execution {uri}"),
+            Self::Namespace { object, .. } => format!("namespace {object}"),
+            Self::Contents { shown, .. } => format!("contents {shown}"),
+        }
+    }
+}
+
+/// The resolved writes, one per destination path, in the order planned.
+#[derive(Debug, Default)]
+struct Plan {
+    entries: Vec<(NsPath, Source)>,
+    by_path: BTreeMap<String, usize>,
+}
+
+impl Plan {
+    /// The same source named twice for one path is written once; two
+    /// DIFFERENT sources for one path are refused before anything is written
+    /// (the coordinator's ruling of 2026-10-06, an application of R3: their
+    /// order would be the listing's, not the flow's, and under ERROR the task
+    /// would conflict with its own write).
+    fn add(&mut self, path: NsPath, source: Source) -> std::result::Result<(), String> {
+        if let Some(&i) = self.by_path.get(path.as_str()) {
+            let first = &self.entries[i].1;
+            if first.identity() == source.identity() {
+                return Ok(());
+            }
+            return Err(format!(
+                "'{path}' would be written from two different sources, {} and {}: give one \
+                 of them another destination, or upload them in two tasks",
+                first.shown(),
+                source.shown()
+            ));
+        }
+        self.by_path
+            .insert(path.as_str().to_string(), self.entries.len());
+        self.entries.push((path, source));
+        Ok(())
+    }
+}
+
+/// A namespace-file reference: `nsfile://…`, or a `kestra:///…/_files/…`
+/// URI (W9b spec §3).
+fn is_namespace_ref(s: &str) -> bool {
+    s.starts_with(crate::runners::files::NSFILE_SCHEME)
+        || (s.starts_with("kestra://")
+            && matches!(uri::parse_any(s), Ok(uri::StorageUri::NamespaceFile(_))))
 }
 
 /// `core.namespace.UploadFiles`: execution files (or literal contents) into
@@ -352,6 +450,40 @@ fn destination_dir(destination: &str) -> String {
 fn upload_path(dir: &str, name: &str) -> std::result::Result<NsPath, String> {
     let name = name.strip_prefix('/').unwrap_or(name);
     NsPath::parse_file(&format!("{dir}/{name}"))
+}
+
+/// An execution file planned under `dir`, at its `Tail`'s path.
+fn plan_execution_file(
+    plan: &mut Plan,
+    dir: &str,
+    shown: &str,
+    file: String,
+    size: u64,
+) -> std::result::Result<(), String> {
+    let parsed = uri::parse(&file).map_err(|why| format!("{shown}: {file}: {why}"))?;
+    let path = upload_path(dir, tail_file(&parsed.tail))
+        .map_err(|why| format!("{shown} ({file}): {why}"))?;
+    plan.add(path, Source::Execution { uri: file, size })
+}
+
+enum OpenFailed {
+    /// No object behind the row: the author's error, naming the source.
+    Gone,
+    /// The store failed: infrastructure.
+    Down(Error),
+}
+
+/// A source's object, streamed.
+async fn open_source(
+    fs: &FileStore,
+    shown: &str,
+    object: &str,
+) -> std::result::Result<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>, OpenFailed> {
+    match fs.store.get_stream(object).await {
+        Ok(b) => Ok(b),
+        Err(egret_storage::StorageError::NotFound(_)) => Err(OpenFailed::Gone),
+        Err(e) => Err(OpenFailed::Down(store_down(UPLOAD_FILES, shown, &e))),
+    }
 }
 
 #[async_trait::async_trait]
@@ -442,37 +574,33 @@ impl TaskHandler for UploadFiles {
         let dir = destination_dir(destination.as_deref().unwrap_or("/"));
 
         // Every entry resolved, and its path checked, before the first write.
-        let mut planned: Vec<(NsPath, Source)> = Vec::new();
-        let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
-        let mut plan_execution_file =
-            |planned: &mut Vec<(NsPath, Source)>, shown: &str, file: &str| {
-                let parsed = uri::parse(file).map_err(|why| format!("{shown}: {file}: {why}"))?;
-                let path = upload_path(&dir, tail_file(&parsed.tail))
-                    .map_err(|why| format!("{shown} ({file}): {why}"))?;
-                if seen.insert((path.as_str().to_string(), file.to_string())) {
-                    planned.push((
-                        path,
-                        Source::Execution {
-                            uri: file.to_string(),
-                        },
-                    ));
-                }
-                Ok::<_, String>(())
-            };
+        let mut plan = Plan::default();
+        // Namespace-file references, resolved together below on one
+        // connection: (what names it, the reference, the name under `dir`,
+        // `None` = the referenced path).
+        let mut ns_refs: Vec<(String, String, Option<String>)> = Vec::new();
         let mut globs = Vec::new();
         for (i, item) in files.unwrap_or_default().into_iter().enumerate() {
+            let shown = format!("`files[{i}]`");
+            if is_namespace_ref(&item) {
+                ns_refs.push((shown, item, None));
+                continue;
+            }
             if !item.starts_with("kestra://") {
                 globs.push(item);
                 continue;
             }
             // W9a's one readability decision: the render snapshot.
-            if let Err(e) = scope.0.lookup(&item) {
-                return fail(format!(
-                    "`files[{i}]` names {item}, which cannot be uploaded: {}",
-                    e.message()
-                ));
-            }
-            if let Err(why) = plan_execution_file(&mut planned, &format!("`files[{i}]`"), &item) {
+            let size = match scope.0.lookup(&item) {
+                Ok(meta) => meta.size,
+                Err(e) => {
+                    return fail(format!(
+                        "{shown} names {item}, which cannot be uploaded: {}",
+                        e.message()
+                    ))
+                }
+            };
+            if let Err(why) = plan_execution_file(&mut plan, &dir, &shown, item, size) {
                 return fail(why);
             }
         }
@@ -501,52 +629,171 @@ impl TaskHandler for UploadFiles {
                     .map(|p| format!("/{}", tail_file(&p.tail)))
             })
             .await;
-            for (file, _) in matched {
-                if let Err(why) = plan_execution_file(&mut planned, "`files`", &file) {
+            for (file, size) in matched {
+                if let Err(why) = plan_execution_file(&mut plan, &dir, "`files`", file, size) {
                     return fail(why);
                 }
             }
         }
         for (name, value) in files_map.unwrap_or_default() {
             let shown = format!("`filesMap.{name}`");
+            if is_namespace_ref(&value) {
+                ns_refs.push((shown, value, Some(name)));
+                continue;
+            }
             let path = match upload_path(&dir, &name) {
                 Ok(p) => p,
                 Err(why) => return fail(format!("{shown}: {why}")),
             };
-            if value.starts_with("kestra://") {
-                if let Err(e) = scope.0.lookup(&value) {
-                    return fail(format!(
-                        "{shown} names {value}, which cannot be uploaded: {}",
-                        e.message()
-                    ));
+            let source = if value.starts_with("kestra://") {
+                match scope.0.lookup(&value) {
+                    Ok(meta) => Source::Execution {
+                        uri: value,
+                        size: meta.size,
+                    },
+                    Err(e) => {
+                        return fail(format!(
+                            "{shown} names {value}, which cannot be uploaded: {}",
+                            e.message()
+                        ))
+                    }
                 }
-                planned.push((path, Source::Execution { uri: value }));
             } else {
-                planned.push((path, Source::Contents(value)));
+                Source::Contents { shown, text: value }
+            };
+            if let Err(why) = plan.add(path, source) {
+                return fail(why);
             }
         }
+        if !ns_refs.is_empty() {
+            // Task 5's path: `authorize` (Read, any namespace of the
+            // workspace) and `store::resolve`, on a connection returned
+            // before anything is written.
+            let mut conn = self.pool.acquire().await.map_err(|e| db_err(T, e))?;
+            for (shown, reference, name) in ns_refs {
+                let input =
+                    match resolve_input_uri(&mut conn, fs, task.workspace_id, &own, &reference)
+                        .await
+                    {
+                        Ok(Ok(input)) => input,
+                        Ok(Err(why)) => {
+                            return fail(format!(
+                                "{shown} names {reference}, which cannot be uploaded: {why}"
+                            ))
+                        }
+                        Err(e) => return split(T, e).map(Outcome::failed_with),
+                    };
+                // Under `files` the file keeps its namespace path; under
+                // `filesMap` it takes the key.
+                let name = match name {
+                    Some(n) => n,
+                    None => match crate::storage::scope::ns_ref(&reference, &own, None)
+                        .and_then(|r| NsPath::parse_file(&r.path))
+                    {
+                        Ok(p) => p.as_str().to_string(),
+                        Err(why) => return fail(format!("{shown} ({reference}): {why}")),
+                    },
+                };
+                let path = match upload_path(&dir, &name) {
+                    Ok(p) => p,
+                    Err(why) => return fail(format!("{shown} ({reference}): {why}")),
+                };
+                let source = Source::Namespace {
+                    uri: reference,
+                    object: input.object_uri,
+                    size: input.size,
+                };
+                if let Err(why) = plan.add(path, source) {
+                    return fail(why);
+                }
+            }
+        }
+        // Spec §8.1 bounds (fix round 1, M3): counted on what was resolved,
+        // before the first write.
+        let cap = fs.caps.max_namespace_files;
+        if plan.entries.len() as u64 > cap {
+            return fail(format!(
+                "{} files would be uploaded, more than the {cap} one task writes \
+                 (workflow.storage.max_namespace_files)",
+                plan.entries.len()
+            ));
+        }
+        let total: u64 = plan.entries.iter().map(|(_, s)| s.size()).sum();
+        let max_task = fs.caps.max_task_bytes;
+        if total > max_task {
+            return fail(format!(
+                "the {} files to upload hold {total} bytes, more than the {max_task} one task \
+                 may write (workflow.storage.max_task_bytes)",
+                plan.entries.len()
+            ));
+        }
 
-        let by = CreatedBy::Execution(task.execution_id);
-        for (path, source) in planned {
+        let by = CreatedBy::TaskRun {
+            execution: task.execution_id,
+            task_run: task.run_id,
+        };
+        for (path, source) in plan.entries {
+            // I1: a re-claim of this task run after an infrastructure failure
+            // skips what its earlier attempt committed, under every conflict
+            // mode: no second OVERWRITE revision, no ERROR against itself.
+            let earlier = {
+                let mut conn = self.pool.acquire().await.map_err(|e| db_err(T, e))?;
+                match latest_written(&mut conn, &grant, &path).await {
+                    Ok(e) => e,
+                    Err(e) => return split(T, e).map(Outcome::failed_with),
+                }
+            };
+            if let Some((e, Some(run))) = earlier {
+                if run == task.run_id && !e.deleted && !e.is_directory && e.size == source.size() {
+                    task.log
+                        .line(
+                            LogLevel::Info,
+                            &format!(
+                                "namespace file '{path}' was already written by an earlier \
+                                 attempt of this task run (revision {}): not written again",
+                                e.revision
+                            ),
+                        )
+                        .await;
+                    continue;
+                }
+            }
             let written = match &source {
-                Source::Execution { uri: file } => {
+                Source::Execution { uri: file, .. } => {
                     let object = match fs.object_uri(task.workspace_id, file) {
                         Ok(o) => o,
                         Err(why) => return fail(why),
                     };
-                    let mut body = match fs.store.get_stream(&object).await {
+                    let mut body = match open_source(fs, file, &object).await {
                         Ok(b) => b,
-                        Err(egret_storage::StorageError::NotFound(_)) => {
+                        Err(OpenFailed::Gone) => {
                             return fail(format!(
                                 "{file} is indexed but its contents are gone from internal \
                                  storage, so '{path}' was not written"
                             ))
                         }
-                        Err(e) => return Err(store_down(T, file, &e)),
+                        Err(OpenFailed::Down(e)) => return Err(e),
                     };
                     put(&self.pool, fs, &grant, &path, &mut body, conflict, by).await
                 }
-                Source::Contents(text) => {
+                Source::Namespace {
+                    uri: reference,
+                    object,
+                    ..
+                } => {
+                    let mut body = match open_source(fs, reference, object).await {
+                        Ok(b) => b,
+                        Err(OpenFailed::Gone) => {
+                            return fail(format!(
+                                "{reference} is recorded but its contents are gone from \
+                                 internal storage, so '{path}' was not written"
+                            ))
+                        }
+                        Err(OpenFailed::Down(e)) => return Err(e),
+                    };
+                    put(&self.pool, fs, &grant, &path, &mut body, conflict, by).await
+                }
+                Source::Contents { text, .. } => {
                     let mut body: &[u8] = text.as_bytes();
                     put(&self.pool, fs, &grant, &path, &mut body, conflict, by).await
                 }
@@ -795,6 +1042,40 @@ mod tests {
             ("/dl/", "x.txt", "dl/x.txt"),
         ] {
             assert_eq!(download_rel(dest, rel), want, "{dest:?} + {rel:?}");
+        }
+    }
+
+    /// M4: a run with no render scope (so no running flow's namespace) is
+    /// refused by both, naming why, before anything is read or written.
+    #[tokio::test]
+    async fn a_run_that_is_not_a_flows_task_run_is_refused_naming_it() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+            .unwrap();
+        let fs = crate::storage::install_mem_for_tests();
+        let cases: [(Arc<dyn TaskHandler>, Value); 2] = [
+            (
+                Arc::new(UploadFiles::new(pool.clone(), Some(fs.clone()))),
+                serde_json::json!({ "filesMap": { "a.txt": "contents" } }),
+            ),
+            (
+                Arc::new(DownloadFiles::new(pool, Some(fs))),
+                serde_json::json!({ "namespace": "a.b", "files": ["**"] }),
+            ),
+        ];
+        for (handler, spec) in cases {
+            let task = super::super::testing::input(handler.type_id(), spec);
+            assert!(task.render.files().is_none(), "the precondition");
+            let out = handler
+                .run(&task)
+                .await
+                .expect("an author's failure, not Err");
+            let message = out.message.unwrap_or_default();
+            assert!(
+                message.contains("not a task run of a flow's execution"),
+                "{}: {message}",
+                handler.type_id()
+            );
         }
     }
 

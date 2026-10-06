@@ -40,6 +40,10 @@ const NS: &str = "w9b.tasks";
 /// While set, `get_stream` fails as an unreachable S3 does (spec §11).
 static OUTAGE: AtomicBool = AtomicBool::new(false);
 
+/// The next `put_stream` to a key ending with this fails once, as an
+/// unreachable S3 does: the injectable fault of fix round 1's I1 test.
+static FAIL_PUT_ONCE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 struct Probe(egret_storage::MemStore);
 
 #[async_trait::async_trait]
@@ -80,6 +84,15 @@ impl ObjectStore for Probe {
         body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
         size_hint: Option<u64>,
     ) -> Result<u64, StorageError> {
+        {
+            let mut fault = FAIL_PUT_ONCE.lock().unwrap();
+            if fault.as_deref().is_some_and(|suffix| uri.ends_with(suffix)) {
+                *fault = None;
+                return Err(StorageError::S3(format!(
+                    "{uri}: dispatch failure: connection refused"
+                )));
+            }
+        }
         self.0.put_stream(uri, body, size_hint).await
     }
     async fn head(&self, uri: &str) -> Result<Option<u64>, StorageError> {
@@ -87,11 +100,42 @@ impl ObjectStore for Probe {
     }
 }
 
+/// The one object store of this binary: the installed `FileStore` and every
+/// small-capped one ([`capped`]) read and write the same objects.
+fn probe() -> Arc<Probe> {
+    static P: std::sync::OnceLock<Arc<Probe>> = std::sync::OnceLock::new();
+    P.get_or_init(|| Arc::new(Probe(egret_storage::MemStore::new())))
+        .clone()
+}
+
+/// A `FileStore` over the same objects as the installed one, with `caps`:
+/// what a handler built directly with it sees (`storage::install` is
+/// first-wins, so a cap under test cannot be installed a second time).
+fn capped(caps: storage::Caps) -> Arc<FileStore> {
+    Arc::new(FileStore {
+        store: probe(),
+        bucket: "egret-test".to_string(),
+        prefix: "workflow/".to_string(),
+        caps,
+        retention_days: 30,
+    })
+}
+
+/// The shipping registry, but with `UploadFiles` and `DownloadFiles` over
+/// `fs`.
+fn registry_over(pool: &sqlx::PgPool, fs: Arc<FileStore>) -> Handlers {
+    let mut r = Handlers::with_core_tasks(storage::current());
+    egret_workflow::worker::handlers::storage::register(&mut r, pool.clone(), storage::current());
+    r.add_publishable(Arc::new(UploadFiles::new(pool.clone(), Some(fs.clone()))));
+    r.add_publishable(Arc::new(DownloadFiles::new(pool.clone(), Some(fs))));
+    r
+}
+
 fn installed() -> Arc<FileStore> {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = storage::install(Arc::new(FileStore {
-            store: Arc::new(Probe(egret_storage::MemStore::new())),
+            store: probe(),
             bucket: "egret-test".to_string(),
             prefix: "workflow/".to_string(),
             caps: storage::Caps {
@@ -108,6 +152,7 @@ async fn setup() -> Option<(Db, Uuid, Arc<FileStore>)> {
     let db = common::db().await?;
     nsfiles::install_db_for_tests(&db.pool);
     OUTAGE.store(false, Ordering::SeqCst);
+    *FAIL_PUT_ONCE.lock().unwrap() = None;
     let fs = installed();
     let (ws, _) = common::seed_workspace(&db).await;
     Some((db, ws, fs))
@@ -1037,4 +1082,394 @@ fn masking_hides_only_the_ids_and_the_generated_name() {
         "kestra:///w9b/tasks/upload/executions/<exec>/tasks/w/<taskrun>/1307.txt"
     );
     assert!(uri::parse(k).is_err(), "Kestra's ids are not egret's UUIDs");
+}
+
+// ---------------------------------------------------------------------------
+// fix round 1 (2026-10-06)
+// ---------------------------------------------------------------------------
+
+/// The task run of `task` in `ex`.
+async fn run_id_of(pool: &sqlx::PgPool, ex: Uuid, task: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2")
+        .bind(ex)
+        .bind(task)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// I1: `a` commits, the store fails while `b` uploads (an infrastructure
+/// error: no attempt spent), and the re-claimed run ends SUCCESS with exactly
+/// one revision of each -- under ERROR (no conflict with its own write) and
+/// under OVERWRITE (no second revision). The fault fails only that one put.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reclaim_after_a_partial_upload_skips_what_its_earlier_attempt_wrote() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let reg = registry(&db.pool);
+    for mode in ["ERROR", "OVERWRITE"] {
+        let dir = format!("/{}", mode.to_lowercase());
+        let up = format!(
+            "  - id: up\n    type: io.kestra.plugin.core.namespace.UploadFiles\n    \
+             conflict: {mode}\n    destination: {dir}\n    filesMap:\n      \
+             a.txt: \"{{{{ outputs.w.uri }}}}\"\n      b.txt: \"contents b\"\n"
+        );
+        let ex = start_execution(
+            &db.pool,
+            ws,
+            None,
+            &flow("partial", NS, &[write_task(), up]),
+            json!({}),
+        )
+        .await
+        .unwrap();
+        tick_until_claimable(&db.pool, ex, "up").await;
+        *FAIL_PUT_ONCE.lock().unwrap() = Some(format!("/_files{dir}/b.txt"));
+        let err = tick(&db.pool, 1, &reg).await;
+        assert!(
+            FAIL_PUT_ONCE.lock().unwrap().is_none(),
+            "{mode}: the fault fired"
+        );
+        let err = err.expect_err("a store failure is a worker error");
+        assert!(
+            err.to_string().contains("internal storage is unavailable"),
+            "{mode}: {err}"
+        );
+        let a = format!("{dir}/a.txt");
+        let b = format!("{dir}/b.txt");
+        assert_eq!(
+            rows(&db.pool, ws, NS).await,
+            BTreeMap::from([(a.clone(), vec![1])]),
+            "{mode}: a committed, b did not"
+        );
+        let (state, _, _) = result_of(&db.pool, ex, "up").await;
+        assert_eq!(state, "RUNNING", "{mode}");
+        assert_eq!(attempts(&db.pool, ex, "up").await, 1, "{mode}");
+        let run: Option<Uuid> = sqlx::query_scalar(
+            "SELECT created_by_task_run FROM workflow.namespace_files \
+              WHERE workspace_id = $1 AND namespace = $2 AND path = $3",
+        )
+        .bind(ws)
+        .bind(NS)
+        .bind(&a)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(run, Some(run_id_of(&db.pool, ex, "up").await), "{mode}");
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(reap(&db.pool, std::time::Duration::ZERO).await.unwrap(), 1);
+        let ticked = tick(&db.pool, 1, &reg).await;
+        assert!(ticked.is_ok(), "{mode}: {ticked:?}");
+        let (state, _, message) = result_of(&db.pool, ex, "up").await;
+        assert_eq!(state, "SUCCESS", "{mode}: {message:?}");
+        assert_eq!(
+            rows(&db.pool, ws, NS).await,
+            BTreeMap::from([(a.clone(), vec![1]), (b.clone(), vec![1])]),
+            "{mode}: one revision each"
+        );
+        assert_eq!(ns_bytes(&fs, ws, NS, &b, 1).await, b"contents b");
+        // Clean the namespace for the next mode.
+        sqlx::query("DELETE FROM workflow.namespace_files WHERE workspace_id = $1")
+            .bind(ws)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+}
+
+/// I2 (the coordinator's ruling, 2026-10-06, R3): two Writes name their
+/// files `content.txt`, so `**.txt` plans two DIFFERENT sources for
+/// `/o/content.txt`; the task is refused before anything is written, naming
+/// the path and both sources.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_different_sources_for_one_path_are_refused_before_anything_is_written() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, _fs)) = setup().await else {
+        return;
+    };
+    let w = |id: &str, content: &str| {
+        format!(
+            "  - id: {id}\n    type: io.kestra.plugin.core.storage.Write\n    \
+             content: {content}\n    extension: \".txt\"\n"
+        )
+    };
+    for mode in ["ERROR", "OVERWRITE"] {
+        let up = format!(
+            "  - id: up\n    type: io.kestra.plugin.core.namespace.UploadFiles\n    \
+             conflict: {mode}\n    files: [\"**.txt\"]\n    destination: /o\n"
+        );
+        let ex = run(
+            &db,
+            ws,
+            &flow("collide", NS, &[w("zz", "first"), w("aa", "second"), up]),
+        )
+        .await;
+        let zz = succeeded(&db.pool, ex, "zz").await["uri"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let aa = succeeded(&db.pool, ex, "aa").await["uri"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let message = message_of(&db.pool, ex, "up", "FAILED").await;
+        assert!(
+            message.contains("'/o/content.txt'")
+                && message.contains(&zz)
+                && message.contains(&aa)
+                && message.contains("two different sources"),
+            "{mode}: {message}"
+        );
+        assert_eq!(rows(&db.pool, ws, NS).await, BTreeMap::new(), "{mode}");
+    }
+}
+
+/// M2: a namespace-file source -- `nsfile:///…`, `nsfile://other.ns/…` in
+/// `files` (kept at its namespace path), a `kestra:///…/_files/…` URI in
+/// `filesMap` (at its key) -- is read through `authorize` (Read) and copied
+/// into the flow's own namespace; one that names nothing, or a refused
+/// namespace, fails the task naming it and writes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn upload_files_copies_namespace_files_and_names_one_that_does_not_resolve() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    seed(&db, &fs, ws, NS, "/src/s.txt", b"S").await;
+    seed(&db, &fs, ws, "w9b.s1", "/x.txt", b"X").await;
+    let up = "  - id: up\n    type: io.kestra.plugin.core.namespace.UploadFiles\n    \
+              files: [\"nsfile:///src/s.txt\", \"nsfile://w9b.s1/x.txt\"]\n    \
+              filesMap:\n      k.txt: \"kestra:///w9b/tasks/_files/src/s.txt\"\n    \
+              destination: /cp\n";
+    let ex = run(&db, ws, &flow("copy", NS, &[up.into()])).await;
+    assert_eq!(succeeded(&db.pool, ex, "up").await, json!({}));
+    let rows_now = rows(&db.pool, ws, NS).await;
+    for (path, bytes) in [
+        ("/cp/src/s.txt", &b"S"[..]),
+        ("/cp/x.txt", b"X"),
+        ("/cp/k.txt", b"S"),
+    ] {
+        assert_eq!(rows_now.get(path), Some(&vec![1]), "{path}: {rows_now:?}");
+        assert_eq!(ns_bytes(&fs, ws, NS, path, 1).await, bytes, "{path}");
+    }
+    for (id, item, names) in [
+        ("missing", "nsfile:///nope.txt", "'/nope.txt'"),
+        ("refused", "nsfile://w9b._files/x.txt", "'w9b._files'"),
+    ] {
+        let up = format!(
+            "  - id: up\n    type: io.kestra.plugin.core.namespace.UploadFiles\n    \
+             files: [\"{item}\"]\n    filesMap:\n      first.txt: contents\n    destination: /{id}\n"
+        );
+        let ex = run(&db, ws, &flow(id, NS, &[up])).await;
+        let message = message_of(&db.pool, ex, "up", "FAILED").await;
+        assert!(
+            message.contains(item) && message.contains(names),
+            "{id}: {message}"
+        );
+        let written: Vec<String> = rows(&db.pool, ws, NS)
+            .await
+            .into_keys()
+            .filter(|p| p.starts_with(&format!("/{id}/")))
+            .collect();
+        assert!(
+            written.is_empty(),
+            "{id}: nothing written, not even first.txt: {written:?}"
+        );
+    }
+}
+
+/// M3: the resolved sources are bounded by `max_namespace_files` and their
+/// bytes by `max_task_bytes`, each refused naming the cap before any write.
+#[tokio::test(flavor = "multi_thread")]
+async fn upload_files_bounds_the_count_and_the_bytes_before_writing() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, _fs)) = setup().await else {
+        return;
+    };
+    let small = capped(storage::Caps {
+        max_namespace_files: 2,
+        max_task_bytes: 5,
+        ..storage::Caps::default()
+    });
+    let reg = registry_over(&db.pool, small);
+    let up = |id: &str, map: &str| {
+        format!(
+            "  - id: {id}\n    type: io.kestra.plugin.core.namespace.UploadFiles\n    \
+             allowFailure: true\n    filesMap:\n{map}"
+        )
+    };
+    let source = flow(
+        "bounds",
+        NS,
+        &[
+            up("count", "      a: x\n      b: y\n      c: z\n"),
+            up("bytes", "      d: abc\n      e: def\n"),
+            up("fits", "      f: abc\n      g: de\n"),
+        ],
+    );
+    let ex = start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    drain_with(&db.pool, &reg).await;
+    let count = message_of(&db.pool, ex, "count", "WARNING").await;
+    assert!(
+        count.contains("workflow.storage.max_namespace_files") && count.contains("3 files"),
+        "{count}"
+    );
+    let bytes = message_of(&db.pool, ex, "bytes", "WARNING").await;
+    assert!(
+        bytes.contains("workflow.storage.max_task_bytes") && bytes.contains("6 bytes"),
+        "{bytes}"
+    );
+    succeeded(&db.pool, ex, "fits").await;
+    assert_eq!(
+        rows(&db.pool, ws, NS).await,
+        BTreeMap::from([("/f".to_string(), vec![1]), ("/g".to_string(), vec![1])]),
+        "only the control wrote"
+    );
+}
+
+/// I3 (a): matches whose rows hold more than `max_task_bytes` together are
+/// refused naming the cap before any copy; the control under it succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn download_files_over_max_task_bytes_is_refused_naming_it() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    seed(&db, &fs, ws, NS, "/a.txt", b"abc").await;
+    seed(&db, &fs, ws, NS, "/b.txt", b"def").await;
+    let reg = registry_over(
+        &db.pool,
+        capped(storage::Caps {
+            max_task_bytes: 5,
+            ..storage::Caps::default()
+        }),
+    );
+    let dl = |id: &str, files: &str| {
+        format!(
+            "  - id: {id}\n    type: io.kestra.plugin.core.namespace.DownloadFiles\n    \
+             allowFailure: true\n    namespace: {NS}\n    files: {files}\n"
+        )
+    };
+    let ex = start_execution(
+        &db.pool,
+        ws,
+        None,
+        &flow(
+            "dl-bytes",
+            NS,
+            &[dl("over", "[\"/*.txt\"]"), dl("under", "\"/a.txt\"")],
+        ),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    drain_with(&db.pool, &reg).await;
+    let message = message_of(&db.pool, ex, "over", "WARNING").await;
+    assert!(
+        message.contains("workflow.storage.max_task_bytes") && message.contains("6 bytes"),
+        "{message}"
+    );
+    let over = run_id_of(&db.pool, ex, "over").await;
+    let indexed: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workflow.execution_files WHERE task_run_id = $1")
+            .bind(over)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(indexed, 0);
+    let under = succeeded(&db.pool, ex, "under").await;
+    assert_eq!(under["files"].as_object().unwrap().len(), 1, "the control");
+}
+
+/// I3 (b): more namespace rows than `max_namespace_files` is a failed task
+/// naming the cap (`list_live`'s `cap + 1`), not an error of the worker.
+#[tokio::test(flavor = "multi_thread")]
+async fn download_files_past_the_listing_cap_is_refused_naming_it() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    seed(&db, &fs, ws, NS, "/a.txt", b"a").await;
+    seed(&db, &fs, ws, NS, "/b.txt", b"b").await;
+    let reg = registry_over(
+        &db.pool,
+        capped(storage::Caps {
+            max_namespace_files: 1,
+            ..storage::Caps::default()
+        }),
+    );
+    let dl = format!(
+        "  - id: dl\n    type: io.kestra.plugin.core.namespace.DownloadFiles\n    \
+         namespace: {NS}\n    files: [\"/a.txt\"]\n"
+    );
+    let ex = start_execution(&db.pool, ws, None, &flow("dl-cap", NS, &[dl]), json!({}))
+        .await
+        .unwrap();
+    drain_with(&db.pool, &reg).await;
+    let message = message_of(&db.pool, ex, "dl", "FAILED").await;
+    assert!(
+        message.contains("workflow.storage.max_namespace_files") && message.contains("more than 1"),
+        "{message}"
+    );
+}
+
+/// I3 (c): an object whose size is not its row's is not copied: a failed
+/// task naming the path and the revision.
+#[tokio::test(flavor = "multi_thread")]
+async fn download_files_of_an_object_whose_size_differs_from_its_row_fails_naming_it() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    seed(&db, &fs, ws, NS, "/a.txt", b"abc").await;
+    let grant = authorize(ws, Actor::Api, NS, Access::Read).unwrap();
+    let key = fs.namespace_object_uri(&grant, &NsPath::parse_file("/a.txt").unwrap(), 1);
+    fs.store.put(&key, b"abcdef".to_vec()).await.unwrap();
+    let dl = format!(
+        "  - id: dl\n    type: io.kestra.plugin.core.namespace.DownloadFiles\n    \
+         namespace: {NS}\n    files: [\"/a.txt\"]\n"
+    );
+    let ex = run(&db, ws, &flow("dl-drift", NS, &[dl])).await;
+    let message = message_of(&db.pool, ex, "dl", "FAILED").await;
+    assert!(
+        message.contains("revision 1 of namespace file '/a.txt'") && message.contains("(3)"),
+        "{message}"
+    );
+}
+
+/// I4: `destination: dl` (no trailing `/`) is a directory joined with one
+/// `/` -- the chosen cell `tasks.DownloadFiles.runs.dl_dest_no_slash`
+/// (Kestra concatenates: `dlup/m.txt`).
+#[tokio::test(flavor = "multi_thread")]
+async fn download_files_destination_is_a_directory_joined_with_one_slash() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    seed_download_premise(&db, &fs, ws).await;
+    let want = &cell("DownloadFiles")["runs"]["dl_dest_no_slash"];
+    assert_eq!(want["basis"], "chosen");
+    let task = &want["task"];
+    let dl = format!(
+        "  - id: {}\n    type: {}\n    namespace: {}\n    files: {}\n    destination: {}\n",
+        task["id"].as_str().unwrap(),
+        task["type"].as_str().unwrap(),
+        task["namespace"].as_str().unwrap(),
+        task["files"],
+        task["destination"].as_str().unwrap(),
+    );
+    let ex = run(&db, ws, &flow("download", NS, &[dl])).await;
+    let ours = succeeded(&db.pool, ex, task["id"].as_str().unwrap()).await;
+    assert_eq!(masked_values(&ours), masked_values(&want["outputs"]));
+    assert!(
+        masked_values(&want["kestra"]["value"])
+            .to_string()
+            .contains("/dlup/m.txt"),
+        "the reference: Kestra concatenates"
+    );
 }

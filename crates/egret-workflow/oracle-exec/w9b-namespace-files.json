@@ -7286,6 +7286,36 @@
        "value": "{\"/up/m.txt\":\"kestra:///w9b/tasks/download/executions/5V5Q8dPtgnvRU6Px3gfrrk/tasks/dl/11BQXVXuQS4uUojNiAPZ8e/up/m.txt\",\"/up/sub/n.txt\":\"kestra:///w9b/tasks/download/executions/5V5Q8dPtgnvRU6Px3gfrrk/tasks/dl/11BQXVXuQS4uUojNiAPZ8e/up/sub/n.txt\"} :: map content"
       },
       "compare": "the URIs are compared after masking the execution id and the task-run id (`…/executions/<exec>/tasks/<task-slug>/<taskrun>/…`); the namespace path, the flow id, the task slug, the destination and the file path are compared exactly"
+     },
+     "dl_dest_no_slash": {
+      "task": {
+       "id": "dl_dest_no_slash",
+       "type": "io.kestra.plugin.core.namespace.DownloadFiles",
+       "namespace": "w9b.tasks",
+       "files": [
+        "/up/m.txt"
+       ],
+       "destination": "dl"
+      },
+      "state": "SUCCESS",
+      "outputs": {
+       "files": {
+        "/up/m.txt": "kestra:///w9b/tasks/download/executions/<exec>/tasks/dl-dest-no-slash/<taskrun>/dl/up/m.txt"
+       }
+      },
+      "premise": "tasks.DownloadFiles.premise (seeded with store::put); not a task of the measured download flow",
+      "compare": "the URIs are compared after masking the execution id and the task-run id (`…/executions/<exec>/tasks/<task-slug>/<taskrun>/…`); the namespace path, the flow id, the task slug, the destination and the file path are compared exactly",
+      "basis": "chosen",
+      "why": "coordinator ruling 2026-10-06 (W9b Task 6 fix round 1, I4), consistent with UploadFiles' destination ruling (Task 1 fix round 1): `destination` is a directory, joined to the file's path with exactly one '/', so `dl` + `up/m.txt` -> `…/{taskRunId}/dl/up/m.txt`; Kestra concatenates (`dlup/m.txt`)",
+      "kestra": {
+       "value": {
+        "files": {
+         "/up/m.txt": "kestra:///w9b/tasks/download/executions/<exec>/tasks/dl-dest-no-slash/<taskrun>/dlup/m.txt"
+        }
+       },
+       "basis": "code",
+       "note": "DownloadFiles.java: runContext.storage().putFile(is, renderedDestination + file.path()), and file.path() has no leading '/' (runs.dl, runs.dl_dest measured); `dl` without '/' not measured on the artifact"
+      }
      }
     },
     "findings": [
@@ -10243,6 +10273,11 @@
     "path": "read._extra.kestra_with_other_namespace_arg",
     "pointer": "/read/_extra/kestra_with_other_namespace_arg",
     "why": "coordinator ruling 2026-10-05 on W9b Task 4 concern 1 (an application of the user's R3, 'fix the odd, keep the sensible'): a kestra:///…/_files/… URI names exactly one revision of one namespace's file, so on the namespace route a `revision` argument beside it, or a `namespace` argument that differs from the URI's namespace, is an error naming both the argument and the URI; Kestra's `kestra` branch ignores both (by the code: FileURIFunction KESTRA_SCHEME -> path.toString(), ReadFileFunction reads the URI's object), so egret refuses the silent wrong answer. The execution route keeps Kestra's ignore"
+   },
+   {
+    "path": "tasks.DownloadFiles.runs.dl_dest_no_slash",
+    "pointer": "/tasks/DownloadFiles/runs/dl_dest_no_slash",
+    "why": "coordinator ruling 2026-10-06 (W9b Task 6 fix round 1, I4), consistent with UploadFiles' destination ruling (Task 1 fix round 1): `destination` is a directory, joined to the file's path with exactly one '/', so `dl` + `up/m.txt` -> `…/{taskRunId}/dl/up/m.txt`; Kestra concatenates (`dlup/m.txt`)"
    }
   ]
  },
