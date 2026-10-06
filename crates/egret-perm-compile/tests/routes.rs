@@ -69,6 +69,20 @@ const TAG_FANOUT_LOCK: i64 = 0x5004_A009;
 /// the "cannot disagree" property untested, which is the one thing the
 /// rolled-back-write design needs a guard for.
 ///
+/// **And the universe is more than the set of profiles.** That test also
+/// compares the two compile SUMMARIES, and a recompile reconciles every profile
+/// in full: any profile whose desired state is committed but not yet compiled
+/// gets its missing policy created by whoever recompiles it next. A test that
+/// commits desired state in one step and compiles it in another (as
+/// `egret_perm::sync_assignment_grants` followed by `recompile_service` does)
+/// therefore opens a window in which a preview creates that policy, rolls it
+/// back, and the write a moment later finds it already there: same profiles,
+/// `created` one apart. That was a real flake (one failure in a handful of full
+/// runs, never when the target ran alone). So such a pair of steps takes this
+/// lock too, for exactly as long as the two are apart. A test that commits
+/// desired state which compiles to NOTHING (an assignment to a workspace with no
+/// members) opens no window and needs no lock.
+///
 /// A dedicated, NON-pooled connection: a session advisory lock is released
 /// when the session ends, and a pooled connection returned to the pool keeps
 /// its session — and its lock — alive.
@@ -2648,19 +2662,29 @@ async fn explain_agrees_with_the_compiled_policy_for_a_collision_suffixed_member
         assert_eq!(res.rows_affected(), 1, "the membership row must exist");
     }
 
-    egret_perm::sync_assignment_grants(&f.perm, f.catalog_id, &[ws_id])
+    // `sync_assignment_grants` COMMITS the implicit grant, and the recompile that
+    // materialises its policy is a second transaction. Between the two this
+    // profile has desired state with no policy behind it — and a tag-rule
+    // recompile reconciles EVERY profile, this one included. So both steps run
+    // under the universe lock, like the helpers that mint a profile: see
+    // `TAG_FANOUT_LOCK`. Released before `explain` is asked, which changes nothing.
+    let grant_id: Uuid = {
+        let _universe = exclusive(&f).await;
+        egret_perm::sync_assignment_grants(&f.perm, f.catalog_id, &[ws_id])
+            .await
+            .expect("assign catalog to workspace");
+        let grant_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment'",
+        )
+        .bind(f.catalog_id)
+        .fetch_one(&f.db.pool)
         .await
-        .expect("assign catalog to workspace");
-    let grant_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment'",
-    )
-    .bind(f.catalog_id)
-    .fetch_one(&f.db.pool)
-    .await
-    .expect("implicit grant");
-    egret_perm_compile::recompile_service(&f.perm, &f.policy, f.service_id)
-        .await
-        .expect("recompile the profile");
+        .expect("implicit grant");
+        egret_perm_compile::recompile_service(&f.perm, &f.policy, f.service_id)
+            .await
+            .expect("recompile the profile");
+        grant_id
+    };
 
     // Ground truth: the compiled policy names BOTH usernames.
     let policy_jsonb: Value = sqlx::query_scalar(
