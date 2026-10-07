@@ -33,6 +33,10 @@
   - `Put` on an expired key treats it as **missing**: it starts fresh, carrying over no description and no TTL (item 8);
   - a namespace of another workspace answers as an empty one: listings `200 []`, key reads 404 (item 9);
   - items 4, 5, 12, 13 and 14 are recorded in the spec as decisions.
+- **The user's rulings on Task 1's findings (2026-10-07), now in the spec's header:**
+  - `Put` stays a **real deep merge**, with the semantics of the fixture's `put_merge` cells (the artifact's `Put.mergeValues`); on the artifact a flow's value reaches `Put` as JSON text, so the merge is unreachable there (spec §2, §8.5; Tasks 3, 5);
+  - the API's `PUT` body: **exactly one Ion value** is stored as that value's type, anything else as the raw text, typed STRING; a blob, clob or s-expression is 400 naming the type; a timestamp with a time is a DATETIME in UTC, a day-precision one a DATE (spec §2, §9; Task 6, `api.put_bodies`);
+  - `PurgeKV`'s **`before` follows Kestra**: a revision is purged when the `created_at` of the key's next revision is at or before `before`; the latest is never purged by `before` (spec §2, §8.6; Tasks 3, 5, `purge.version_before`).
 - **Dedicated containers for this branch:** Postgres `egret-w9c-postgres` on :5440 (postgres:16, egret/egret, db egret_test), Valkey `egret-w9c-valkey` :6400, MinIO `egret-w9c-minio` :9001 (egret/egretsecret, bucket warehouse). The env for every cargo test includes `EGRET_TEST_STARROCKS_URL=mysql://localhost:9030`.
 - **Destructive tests run only on MemStore or under a throwaway prefix `w9c-tN-test/<uuid>/`. Never touch the shared dev DB or bucket. Never touch a kind cluster named `egret`.** On MinIO, a test builds a `FileStore` with that `prefix` and removes it with `delete_prefix` at the end. Never delete at the bucket root or under `workflow/`. Postgres means `egret-w9c-postgres` only. Task 1's `_kv` count runs **one read-only `SELECT`** on the dev database and touches nothing else there.
 - **No DB connection or lock may be held across slow I/O (client bodies, S3 streaming, plugin runs, renders). Ask this for every write path.** Each task has a **hold audit** step. It names every place a pool connection or an advisory lock is held, and what I/O happens while it is. The server-paced windows the spec accepts are named where they occur, with their bound:
@@ -610,9 +614,15 @@ pub async fn delete_many(pool: &PgPool, fs: &FileStore, grant: &Grant, keys: &[K
 /// TooLarge naming the key and the cap), let `judge` pick the row ids to purge FROM THOSE FRESH
 /// ROWS (item 13), DELETE … WHERE id = ANY($ids) RETURNING revision, commit, delete each removed
 /// revision's object (a failure is a WARN orphan, not an error), unlock. Answers the rows removed.
+/// (Amended 2026-10-07, the user's ruling: the re-read also computes each row's `superseded_at`,
+/// the created_at of the key's NEXT revision, which `before` judges; see Step 3.)
 pub async fn purge_key<F>(pool: &PgPool, fs: &FileStore, grant: &Grant, key: &KvKey, cap: u64, judge: F)
     -> Result<u64, NsError>
-where F: FnOnce(&[KvEntry]) -> Vec<i64> + Send + 'static;
+where F: FnOnce(&[PurgeRow]) -> Vec<i64> + Send + 'static;
+/// One row of purge_key's re-read, in revision order. `superseded_at`: when this revision stopped
+/// being the latest, i.e. the created_at of the key's next revision; None for the latest row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PurgeRow { pub entry: KvEntry, pub superseded_at: Option<chrono::DateTime<chrono::Utc>> }
 
 // src/storage/kv/merge.rs
 /// Kestra's Put (Put.java:72-121), against w9c `put_merge`: a map deep-merges into a map; a list of
@@ -679,6 +689,9 @@ async fn concurrent_writers_get_distinct_revisions_and_keys() { /* 8 writers x 5
 }
 #[tokio::test] async fn an_api_grant_waits_at_most_its_lock_wait() { /* with_lock_wait(100ms): Conflict "busy", the connection released */ }
 #[tokio::test] async fn a_failed_copy_rolls_back_and_forgets_the_staging_object() {}
+#[tokio::test] async fn purge_key_hands_the_judge_each_rows_successors_created_at() {
+    // three revisions: superseded_at = [Some(r2.created_at), Some(r3.created_at), None]; a soft-deleted latest: None
+}
 #[tokio::test] async fn purge_key_judges_under_the_lock() {
     // judge sees the rows read AFTER the lock: a rewrite between listing and purge keeps its new revision
 }
@@ -704,6 +717,7 @@ async fn a_purge_and_a_writer_never_leave_a_row_without_an_object() { /* every s
   - **Staging:** `set` uses `staging::record(pool, fs, ws)` and `fs.store.put(&staged.uri, bytes)`: a value is in memory and at most `max_read_bytes`, so it is one PUT. Then `detached` runs commit + `forget`, as `nsfiles::store::put` (`store.rs:1065-1106`) does.
   - **The `head` check:** `Ok(Some(n)) if n == size` or a `Store` error logged with the key (`store.rs:1192-1210`'s shape).
   - **`expires_at`:** `now() + make_interval(secs => $n)`, with `$n = ttl.num_milliseconds() as f64 / 1000.0`; `NULL` without a ttl.
+  - **`PurgeKV`'s `before` (the user's ruling, 2026-10-07: it follows Kestra).** Kestra compares its `updated` column, the time a revision stopped being the latest. egret keeps no such column and derives it: a revision stopped being the latest when the key's **next revision** was created, so its instant is that next row's `created_at`. `purge_key`'s re-read under the lock computes it with a window function, in the same statement: `SELECT …, lead(created_at) OVER (ORDER BY revision) AS superseded_at FROM workflow.kv_entries WHERE workspace_id = $1 AND namespace = $2 AND key = $3 ORDER BY revision` (one `concat!`; the window runs over the one key's rows only). The `before` judge then purges each row with `superseded_at IS NOT NULL AND superseded_at <= before`, never by the row's own `created_at`. The latest row has no next row, so its `superseded_at` is None and `before` never purges it, a soft-deleted latest included (Kestra kept `kd`'s deleted revision 3). The rows a `before` or `keepAmount` purge removes are always the lowest revisions, so a gap left by an earlier purge never sits between a surviving row and its true successor. Fixture: `purge.version_before` (measured: `size` 3; `k3`, `kd`, `kx3` keep r2 and r3; `ke` keeps r1 because its r2 was written after `t_mid`).
   - **The sweep's page query** (one `concat!`): `SELECT e.id, e.workspace_id, e.namespace, e.key FROM workflow.kv_entries e WHERE e.expires_at <= now() AND e.id > $1 AND e.revision = (SELECT max(l.revision) FROM workflow.kv_entries l WHERE l.workspace_id = e.workspace_id AND l.namespace = e.namespace AND l.key = e.key) ORDER BY e.id LIMIT $2`. Under the lock: re-read the latest row; if it is still `expires_at <= now()`, `DELETE … WHERE id = ANY($ids_of_every_row_read) RETURNING revision`.
   - **`egret-bin`:** beside the staging sweeper (`main.rs:1871`), inside the same `if let Some(fs) = egret_workflow::storage::current()`, call `egret_workflow::storage::kv::sweep::spawn_kv_expiry_sweeper(db.pool.clone(), fs.clone(), Default::default(), reaper_cancel.clone())`, with a comment naming §11.
 - [ ] **Step 4: Run the tests to see them pass**, the MinIO suite with the four `EGRET_TEST_S3_*` vars, then the per-task gate.
@@ -724,7 +738,8 @@ async fn a_purge_and_a_writer_never_leave_a_row_without_an_object() { /* every s
   - (g) the sweep without its re-read under the lock (the rewritten-key test dies);
   - (h) the sweep with `interval` instead of `interval_at` (the first-pass test dies);
   - (i) `delete_many` committing per key (all-or-nothing dies);
-  - (j) the re-claim skip removed from `set` (the re-claim test dies).
+  - (j) the re-claim skip removed from `set` (the re-claim test dies);
+  - (k) `superseded_at` computed as the row's own `created_at` instead of `lead(created_at)` (the successor test dies, and Task 5's `purge.version_before` cell).
 - [ ] **Step 7: Commit** `feat(workflow): W9c Task 3 — KV writes under a per-key lock, Put's merge, purge and the expiry sweep`.
 
 ---
@@ -927,7 +942,7 @@ pub const DECLARED: &[super::namespace::DeclaredClass];
 #[tokio::test(flavor = "multi_thread")] async fn purge_kv_default_purges_expired_keys_of_own_and_children() { /* "a.b": a.b.c yes, a.bc no */ }
 #[tokio::test(flavor = "multi_thread")] async fn purge_kv_expired_only_false_is_refused_naming_keep_amount_zero() {}
 #[tokio::test(flavor = "multi_thread")] async fn purge_kv_version_with_neither_property_is_refused_naming_both() {}
-#[tokio::test(flavor = "multi_thread")] async fn purge_kv_version_keep_amount_before_and_zero() { /* never the latest under `before`; a deleted key entirely */ }
+#[tokio::test(flavor = "multi_thread")] async fn purge_kv_version_keep_amount_before_and_zero() { /* keepAmount: a deleted key entirely; before: superseded at or before it (w9c purge.version_before, measured), never the latest, a deleted latest kept */ }
 #[tokio::test(flavor = "multi_thread")] async fn purge_kv_key_pattern_and_namespace_pattern_are_wildcards() { /* "w9c.pp.*"; "." literal */ }
 #[tokio::test(flavor = "multi_thread")] async fn purge_kv_refuses_a_listed_namespace_outside_the_rule_before_purging_anything() {}
 #[tokio::test(flavor = "multi_thread")] async fn purge_kv_pages_past_one_page() { /* max_namespace_files 3, 8 keys */ }
@@ -959,7 +974,7 @@ pub const DECLARED: &[super::namespace::DeclaredClass];
   - `Delete`: `delete(pool, &grant, &key, by)`. `Deleted | Already` → `{deleted: true}`; `Missing` → `{deleted: false}`, or with `errorOnMissing` a failure carrying Kestra's message.
   - `PurgeKV`, on `detached`, mirroring `PurgeFiles`' `purge_namespaces`/`run_purge` (`namespace.rs:1384-1560`):
     - the namespace set: `namespaces` xor `namespacePattern` (default `[own]`), plus children when `includeChildNamespaces`. Candidates come from `namespaces_with_kv`, filtered to own and `own + "."` children; a listed one outside the rule is refused before anything is purged; at most `MAX_NAMESPACES`;
-    - per namespace, `rows_page` pages of `max_namespace_files + 1`. Each **complete** key in a page goes to `purge_key` with a `judge` built from `behavior`: key/expired-only → every id when the fresh latest is expired; version → `keepAmount`/`before` as `revisions_to_purge` (`namespace.rs:1348`), a deleted latest → every id;
+    - per namespace, `rows_page` pages of `max_namespace_files + 1`. Each **complete** key in a page goes to `purge_key` with a `judge` built from `behavior`: key/expired-only → every id when the fresh latest is expired; version → `keepAmount` as `revisions_to_purge` (`namespace.rs:1348`), a deleted latest → every id; `before` → every row whose `superseded_at` (Task 3's `PurgeRow`) is at or before `before`, never the latest, a deleted latest included (the user's ruling, 2026-10-07: as Kestra; w9c `purge.version_before`);
     - `keyPattern` with `wildcard_match` on the key;
     - `size` as `purge.size` measured.
   - **Registry:** six `TaskTypeSpec` rows, FQCN only, after W9b's block with a `// ── W9c Task 5 …` comment. Register in `runtime::handlers_for` and `oracle-exec/driver.rs::registry()` (`:170`, beside `namespace::register`).
@@ -1016,7 +1031,10 @@ pub struct KvRevisionDto { pub revision: u32, pub r#type: String, pub size: u64,
 // src/storage/kv/value.rs
 /// The PUT body (KVController.java:124-141): parsed as ONE Ion value (storage::ion), its type as
 /// KVType.from infers it (w9c api); not Ion, or more than one value: the raw text, STRING.
-pub fn parse_api_body(body: &[u8]) -> KvValue;
+/// (Amended 2026-10-07, the user's ruling, spec §9: a timestamp with a time is a DATETIME in UTC,
+/// even at midnight; a day-precision one is a DATE; a blob, clob or sexp at any depth is Err naming
+/// the type, answered 400; an annotated value is the raw text. w9c api.put_bodies.)
+pub fn parse_api_body(body: &[u8]) -> Result<KvValue, String>;
 ```
 
 - [ ] **Step 1: Write the failing tests** (`tests/kv_api.rs`, `tests/common` app, MemStore, `install_db_for_tests`):
@@ -1026,7 +1044,7 @@ pub fn parse_api_body(body: &[u8]) -> KvValue;
     // workflow:read only: 4 GETs 200/404, 3 writes 403 and nothing written; with manage: 200
 }
 #[tokio::test] async fn every_row_of_the_status_table() { /* §9: 400 key rule, _kv/_files namespace, bad ttl, non-integer revision, bad bulk body; 404; 409; 413; 408; 503 */ }
-#[tokio::test] async fn put_parses_ion_and_falls_back_to_the_raw_string() { /* w9c api PUT cells, the stored type of each */ }
+#[tokio::test] async fn put_parses_ion_and_falls_back_to_the_raw_string() { /* w9c api PUT cells, the stored type of each; blob and sexp 400 naming the type */ }
 #[tokio::test] async fn put_takes_description_and_ttl_headers() {}
 #[tokio::test] async fn a_put_body_over_max_read_bytes_is_413_naming_the_cap_and_nothing_is_written() {}
 #[tokio::test] async fn a_put_body_that_stalls_or_takes_too_long_is_408_and_nothing_is_written() { /* app_with_upload_idle / _total */ }
@@ -1059,7 +1077,7 @@ pub fn parse_api_body(body: &[u8]) -> KvValue;
     1. `grant` and the key;
     2. `st.storage` present (`no_store`);
     3. the body through `TotalTimeout::new(IdleTimeout::new(…))` and `http_body_util::Limited::new(body, max_read_bytes + 1)`, collected into memory (a 408 for either clock, a 413 at the limit);
-    4. `parse_api_body`;
+    4. `parse_api_body` (Err: 400 naming the type, nothing staged);
     5. `ttl` header via `parse_ttl` (400);
     6. `store::set(pool, fs, &grant, &key, NewValue { overwrite: true, .. }, CreatedBy::User(ctx.principal.user_id.0))`.
 

@@ -22,7 +22,7 @@
   {
    "id": "put_never_merges_from_a_flow",
    "basis": "measured",
-   "finding": "On the artifact, Put stores the flow's value as a JSON STRING: `value: {b: {d: 3}}` (block YAML or flow style) is stored as `\"{\\\"b\\\":{\\\"d\\\":3}}\"` (kv() className java.lang.String), and so is an entry list `[{key: x.y, value: 1}]` and even `{{ {'b': 2} }}`. Put.mergeValues is never reached with a Map from a flow. The merge semantics in egret_expected.put_merge come from the artifact's Put.mergeValues run in jshell on typed values. NEEDS A USER RULING: implement the deep merge (spec, user's scope decision) or reproduce the artifact (Put = Set of the JSON text).",
+   "finding": "On the artifact, Put stores the flow's value as a JSON STRING: `value: {b: {d: 3}}` (block YAML or flow style) is stored as `\"{\\\"b\\\":{\\\"d\\\":3}}\"` (kv() className java.lang.String), and so is an entry list `[{key: x.y, value: 1}]` and even `{{ {'b': 2} }}`. Put.mergeValues is never reached with a Map from a flow. The merge semantics in egret_expected.put_merge come from the artifact's Put.mergeValues run in jshell on typed values. RULED 2026-10-07 by the user: Put stays a real deep merge (egret merges; the artifact's divergence is a spec §2 row).",
    "raw": "raw_records.put_merge, raw_records.put_yaml_block, raw_records.put_merge_jshell"
   },
   {
@@ -88,7 +88,7 @@
   {
    "id": "api_ion_quirks",
    "basis": "measured",
-   "finding": "PUT …/kv/{key} parses an Ion STREAM and keeps the FIRST value: `hello world` -> `\"hello\"`, `1 2` -> `1`, `PT1.5S` -> `\"PT1\"`. A timestamp at 00:00:00.000Z becomes a DATE; one with an offset is stored as `ZonedDateTime::\"…\"` (type JSON); `2025-01-01T03:04:05` (no offset) is a 500 that leaves a row with no object; a blob is stored as a blob and read back base64; an s-expression becomes a list; `x::1` falls back to the string. The brief's cells are in egret_expected.api.put_bodies; `non_ion` is chosen (raw string) and NEEDS A USER RULING; the rest are recorded for Task 6.",
+   "finding": "PUT …/kv/{key} parses an Ion STREAM and keeps the FIRST value: `hello world` -> `\"hello\"`, `1 2` -> `1`, `PT1.5S` -> `\"PT1\"`. A timestamp at 00:00:00.000Z becomes a DATE; one with an offset is stored as `ZonedDateTime::\"…\"` (type JSON); `2025-01-01T03:04:05` (no offset) is a 500 that leaves a row with no object; a blob is stored as a blob and read back base64; an s-expression becomes a list; `x::1` falls back to the string. The brief's cells are in egret_expected.api.put_bodies; RULED 2026-10-07 by the user: one Ion value is stored as its type, anything else as the raw text (STRING), and a blob or s-expression is refused 400 naming the type; non_ion, ion_two_values, long_dur, ts_offset_millis, ion_dt_local_like, ion_blob, ion_sexp, ion_timestamp and ts_midnight_millis are chosen accordingly.",
    "raw": "egret_expected.api.put_bodies"
   },
   {
@@ -2550,7 +2550,7 @@
   },
   "put_merge": {
    "_how": "seeded through PUT …/kv/{key} (Ion bodies below), then one Put task per key in one execution. egret's answer is the artifact's Put.mergeValues(existing, value) run in jshell on typed values (raw_records.put_merge_jshell); Kestra's runtime answer (a JSON STRING) is under `kestra`",
-   "_finding": "NEEDS A USER RULING: on the artifact Put stores the value's JSON text as a STRING for every flow-supplied map or list (block YAML too); see findings.put_never_merges_from_a_flow",
+   "_finding": "RULED 2026-10-07 (Put stays a real deep merge): on the artifact Put stores the value's JSON text as a STRING for every flow-supplied map or list (block YAML too), so its merge is unreachable from a flow; egret merges. See findings.put_never_merges_from_a_flow",
    "map_map": {
     "existing": "{a:1,b:{c:2,x:1}}",
     "value": {
@@ -2572,7 +2572,7 @@
      "outcome": "ok",
      "ion_bytes": "\"{\\\"b\\\":{\\\"d\\\":3,\\\"x\\\":2},\\\"e\\\":4}\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "nested": {
@@ -2597,7 +2597,7 @@
      "outcome": "ok",
      "ion_bytes": "\"{\\\"a\\\":{\\\"b\\\":{\\\"c\\\":9,\\\"e\\\":3}}}\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "arr_in_map": {
@@ -2620,7 +2620,7 @@
      "outcome": "ok",
      "ion_bytes": "\"{\\\"a\\\":[3]}\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "map_over_scalar": {
@@ -2638,7 +2638,7 @@
      "outcome": "ok",
      "ion_bytes": "\"{\\\"a\\\":1}\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "scalar_over_map": {
@@ -2654,7 +2654,7 @@
      "outcome": "ok",
      "ion_bytes": "\"5\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "map_over_string": {
@@ -2672,7 +2672,7 @@
      "outcome": "ok",
      "ion_bytes": "\"{\\\"a\\\":1}\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "map_over_list": {
@@ -2690,7 +2690,7 @@
      "outcome": "ok",
      "ion_bytes": "\"{\\\"a\\\":1}\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "dot_existing": {
@@ -2711,7 +2711,7 @@
      "outcome": "ok",
      "ion_bytes": "\"[{\\\"key\\\":\\\"a.b\\\",\\\"value\\\":9}]\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "dot_missing_level": {
@@ -2734,7 +2734,7 @@
      "outcome": "ok",
      "ion_bytes": "\"[{\\\"key\\\":\\\"x.y.z\\\",\\\"value\\\":1}]\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "dot_through_scalar": {
@@ -2754,7 +2754,7 @@
      "outcome": "ok",
      "ion_bytes": "\"[{\\\"key\\\":\\\"a.b\\\",\\\"value\\\":2}]\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "dot_two": {
@@ -2778,7 +2778,7 @@
      "outcome": "ok",
      "ion_bytes": "\"[{\\\"key\\\":\\\"a.c\\\",\\\"value\\\":2},{\\\"key\\\":\\\"d\\\",\\\"value\\\":{\\\"e\\\":1}}]\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "single_value": {
@@ -2797,7 +2797,7 @@
      "outcome": "ok",
      "ion_bytes": "\"[{\\\"value\\\":[1,2]}]\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "single_value_null": {
@@ -2813,7 +2813,7 @@
      "outcome": "ok",
      "ion_bytes": "\"[{}]\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "dot_on_scalar_existing": {
@@ -2832,7 +2832,7 @@
      "outcome": "ok",
      "ion_bytes": "\"[{\\\"key\\\":\\\"a\\\",\\\"value\\\":1}]\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "null_in_map": {
@@ -2851,7 +2851,7 @@
      "outcome": "ok",
      "ion_bytes": "\"{}\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "list_plain": {
@@ -2870,7 +2870,7 @@
      "outcome": "ok",
      "ion_bytes": "\"[1,2]\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "mixed_entries": {
@@ -2892,7 +2892,7 @@
      "outcome": "ok",
      "ion_bytes": "\"[{\\\"key\\\":\\\"a\\\",\\\"value\\\":1},{\\\"value\\\":2}]\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "blank_key": {
@@ -2911,7 +2911,7 @@
      "outcome": "ok",
      "ion_bytes": "\"[{\\\"key\\\":\\\" \\\",\\\"value\\\":1}]\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "extra_field": {
@@ -2933,7 +2933,7 @@
      "outcome": "ok",
      "ion_bytes": "\"[{\\\"key\\\":\\\"a\\\",\\\"value\\\":1,\\\"other\\\":1}]\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "two_unkeyed": {
@@ -2954,7 +2954,7 @@
      "outcome": "ok",
      "ion_bytes": "\"[{\\\"value\\\":1},{\\\"value\\\":2}]\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "dot_key_in_map": {
@@ -2973,7 +2973,7 @@
      "outcome": "ok",
      "ion_bytes": "\"{\\\"x.y\\\":1}\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "missing_false": {
@@ -2991,7 +2991,7 @@
      "outcome": "ok",
      "ion_bytes": "\"{\\\"a\\\":1}\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "missing_entries": {
@@ -3011,7 +3011,7 @@
      "outcome": "ok",
      "ion_bytes": "\"[{\\\"key\\\":\\\"a.b\\\",\\\"value\\\":1}]\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)",
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text",
     "note": "Kestra's flattenToNestedMap returns a HashMap here: with several keys the order is hash order; egret keeps the entries' order"
    },
@@ -3063,7 +3063,7 @@
      "description_after": "my description",
      "expires_after": "unchanged"
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report); description and expiry ARE kept by Kestra (measured)"
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5); description and expiry ARE kept by Kestra (measured)"
    },
    "over_expired": {
     "existing": "{a:1}, description 'old desc', ttl PT1S, expired",
@@ -3114,7 +3114,7 @@
       }
      ]
     },
-    "why": "user ruling 2026-10-07 (item 8): Put on an expired key treats it as missing and starts fresh, carrying no description and no expiry. Kestra ALSO starts fresh (no description, no expiry: measured) but its read soft-deleted revision 1 (reads never write in egret); the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report)"
+    "why": "user ruling 2026-10-07 (item 8): Put on an expired key treats it as missing and starts fresh, carrying no description and no expiry. Kestra ALSO starts fresh (no description, no expiry: measured) but its read soft-deleted revision 1 (reads never write in egret); the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)"
    },
    "templated": {
     "existing": "{a:1}",
@@ -3129,7 +3129,7 @@
     "kestra": {
      "ion_bytes": "\"{\\\"b\\\":2}\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report); `{{ {'b': 2} }}` is a single expression, so egret's typed render yields a map"
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5); `{{ {'b': 2} }}` is a single expression, so egret's typed render yields a map"
    },
    "templated_leaf": {
     "existing": "{a:1}",
@@ -3146,7 +3146,7 @@
     "kestra": {
      "ion_bytes": "\"{\\\"b\\\":\\\"2\\\"}\""
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). NEEDS A USER RULING (Task 1 report); the leaf `{{ 1 + 1 }}` renders typed to 2"
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5); the leaf `{{ 1 + 1 }}` renders typed to 2"
    },
    "string_over_map": {
     "existing": "{a:1}",
@@ -5715,56 +5715,32 @@
     },
     "outcome": "ok",
     "outputs": {
-     "size": 8
+     "size": 3
     },
     "surviving_revisions": {
      "k1": [
       1
      ],
      "k3": [
+      2,
+      3
+     ],
+     "kd": [
+      2,
       3
      ],
      "ke": [
+      1,
       2
      ],
      "kx3": [
+      2,
       3
      ]
     },
-    "basis": "chosen",
+    "basis": "measured",
     "compare": "outcome exact; size exact; surviving revisions per key exact",
-    "kestra": {
-     "outcome": "ok",
-     "outputs": {
-      "size": 3
-     },
-     "surviving_revisions": {
-      "k1": [
-       1
-      ],
-      "k3": [
-       2,
-       3
-      ],
-      "kd": [
-       2,
-       3
-      ],
-      "ke": [
-       1,
-       2
-      ],
-      "kx3": [
-       2,
-       3
-      ]
-     },
-     "info_logs": [
-      "purging 1 namespaces: [w9c.pg2.versionbefore]",
-      "purged 3 keys"
-     ]
-    },
-    "why": "spec §8.6: purges revisions CREATED at or before `before`, never the latest, and a soft-deleted key entirely. Kestra filters on the row's `updated` column, i.e. when the revision STOPPED being the latest, so it keeps r2 (superseded after t_mid) and ke r1"
+    "note": "user ruling 2026-10-07: `before` follows Kestra. A revision is purged when it stopped being the latest (the next revision's created_at) at or before `before`; the latest is never purged by `before`, a soft-deleted latest included. Here: r1 of k3, kd and kx3 (superseded by r2 before t_mid) are purged; their r2 (superseded by r3 after t_mid) and r3 stay; ke r1 stays because ke r2 was written after t_mid (it expires at 02:09:56.77 with ttl PT1S); k1 r1 is the latest. size 3 = the revisions purged"
    },
    "version_neither": {
     "props": {
@@ -6246,15 +6222,25 @@
     "ion_timestamp": {
      "body": "2025-01-01T00:00:00Z",
      "put_status": 200,
-     "ion_bytes": "2025-01-01",
+     "ion_bytes": "2025-01-01T00:00:00.000Z",
      "get": {
       "status": 200,
-      "type": "DATE",
-      "value": "2025-01-01"
+      "type": "DATETIME",
+      "value": "2025-01-01T00:00:00Z"
      },
-     "basis": "measured",
+     "basis": "chosen",
      "compare": "put_status exact; ion_bytes byte-exact; get.status, get.type, get.value exact (`updated` masked)",
-     "note": "an Ion timestamp at exactly 00:00:00.000 UTC is stored and read back as a DATE (`2025-01-01`); any other time stays a DATETIME (ts_time, ts_minute)"
+     "kestra": {
+      "body": "2025-01-01T00:00:00Z",
+      "put_status": 200,
+      "ion_bytes": "2025-01-01",
+      "get": {
+       "status": 200,
+       "type": "DATE",
+       "value": "2025-01-01"
+      }
+     },
+     "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. `2025-01-01T00:00:00Z` is one Ion timestamp with a time, so it is a DATETIME whatever the hour: stored `2025-01-01T00:00:00.000Z` and read back as the DATETIME `2025-01-01T00:00:00Z`. Kestra turns a timestamp at exactly 00:00:00.000 UTC into a DATE (`2025-01-01`), so the type of a value would depend on its clock time. A day-precision timestamp (`2025-01-01T`, `2025-01-02`) stays a DATE (ion_timestamp_day, ion_date_only: measured, Kestra agrees)"
     },
     "ion_timestamp_day": {
      "body": "2025-01-01T",
@@ -6302,7 +6288,7 @@
        "value": "hello"
       }
      },
-     "why": "spec §9 (approved 2026-10-07): a body that is not ONE Ion value falls back to the raw string. Kestra parses `hello world` as an Ion STREAM of two symbols and keeps the first (`hello`): the rest of the body is silently dropped. NEEDS A USER RULING (Task 1 report)"
+     "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. `hello world` is two Ion symbols, not one value, so it is stored whole as the STRING `hello world`. Kestra parses an Ion STREAM and keeps the first value (`hello`), silently dropping the rest of the body"
     },
     "ion_list": {
      "body": "[1,2]",
@@ -6417,45 +6403,69 @@
     },
     "ion_sexp": {
      "body": "(a b)",
-     "put_status": 200,
-     "ion_bytes": "[\"a\",\"b\"]",
-     "get": {
-      "status": 200,
-      "type": "JSON",
-      "value": [
-       "a",
-       "b"
-      ]
+     "put_status": 400,
+     "message_contains": [
+      "sexp"
+     ],
+     "basis": "chosen",
+     "compare": "put_status exact; message contains each fragment; nothing written (a GET answers 404)",
+     "kestra": {
+      "body": "(a b)",
+      "put_status": 200,
+      "ion_bytes": "[\"a\",\"b\"]",
+      "get": {
+       "status": 200,
+       "type": "JSON",
+       "value": [
+        "a",
+        "b"
+       ]
+      }
      },
-     "basis": "measured",
-     "compare": "put_status exact; ion_bytes byte-exact; get.status, get.type, get.value exact (`updated` masked)",
-     "scope": "beyond the brief's list: recorded for Task 6; quirks noted in findings.api_ion_quirks may be ruled otherwise"
+     "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. An s-expression is one Ion value of a type the KV store does not model, so egret refuses it with 400 naming `sexp`, and writes nothing. Kestra stores it as a JSON list `[\"a\",\"b\"]`, losing the s-expression type silently"
     },
     "ion_blob": {
      "body": "{{aGVsbG8=}}",
-     "put_status": 200,
-     "ion_bytes": "{{aGVsbG8=}}",
-     "get": {
-      "status": 200,
-      "type": "STRING",
-      "value": "hello"
+     "put_status": 400,
+     "message_contains": [
+      "blob"
+     ],
+     "basis": "chosen",
+     "compare": "put_status exact; message contains each fragment; nothing written (a GET answers 404)",
+     "kestra": {
+      "body": "{{aGVsbG8=}}",
+      "put_status": 200,
+      "ion_bytes": "{{aGVsbG8=}}",
+      "get": {
+       "status": 200,
+       "type": "STRING",
+       "value": "hello"
+      }
      },
-     "basis": "measured",
-     "compare": "put_status exact; ion_bytes byte-exact; get.status, get.type, get.value exact (`updated` masked)",
-     "scope": "beyond the brief's list: recorded for Task 6; quirks noted in findings.api_ion_quirks may be ruled otherwise"
+     "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. A blob is one Ion value of a type the KV store does not model (it holds STRING, NUMBER, BOOLEAN, DATETIME, DATE, DURATION and JSON), so egret refuses it with 400 naming `blob`, and writes nothing. Kestra stores the blob and reads it back as the STRING `hello`, a type the caller did not send"
     },
     "ion_two_values": {
      "body": "1 2",
      "put_status": 200,
-     "ion_bytes": "1",
+     "ion_bytes": "\"1 2\"",
      "get": {
       "status": 200,
-      "type": "NUMBER",
-      "value": 1
+      "type": "STRING",
+      "value": "1 2"
      },
-     "basis": "measured",
+     "basis": "chosen",
      "compare": "put_status exact; ion_bytes byte-exact; get.status, get.type, get.value exact (`updated` masked)",
-     "scope": "beyond the brief's list: recorded for Task 6; quirks noted in findings.api_ion_quirks may be ruled otherwise"
+     "kestra": {
+      "body": "1 2",
+      "put_status": 200,
+      "ion_bytes": "1",
+      "get": {
+       "status": 200,
+       "type": "NUMBER",
+       "value": 1
+      }
+     },
+     "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. `1 2` is two Ion values, so the whole text is stored as the STRING `1 2`; Kestra keeps the first value (NUMBER 1) and silently drops the rest. Storing half the body as a number is the surprise; the raw text loses nothing"
     },
     "ion_annot": {
      "body": "x::1",
@@ -6540,28 +6550,48 @@
     "ts_offset_millis": {
      "body": "2025-01-01T03:04:05.123+07:00",
      "put_status": 200,
-     "ion_bytes": "ZonedDateTime::\"2025-01-01T03:04:05.123+07:00\"",
+     "ion_bytes": "2024-12-31T20:04:05.123Z",
      "get": {
       "status": 200,
-      "type": "JSON",
-      "value": "2025-01-01T03:04:05.123+07:00"
+      "type": "DATETIME",
+      "value": "2024-12-31T20:04:05.123Z"
      },
-     "basis": "measured",
+     "basis": "chosen",
      "compare": "put_status exact; ion_bytes byte-exact; get.status, get.type, get.value exact (`updated` masked)",
-     "scope": "beyond the brief's list: recorded for Task 6; quirks noted in findings.api_ion_quirks may be ruled otherwise"
+     "kestra": {
+      "body": "2025-01-01T03:04:05.123+07:00",
+      "put_status": 200,
+      "ion_bytes": "ZonedDateTime::\"2025-01-01T03:04:05.123+07:00\"",
+      "get": {
+       "status": 200,
+       "type": "JSON",
+       "value": "2025-01-01T03:04:05.123+07:00"
+      }
+     },
+     "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. One Ion timestamp with a time is a DATETIME. A DATETIME is an instant stored in UTC at millisecond precision (spec §4.2, as Set's `dt_offset` cell does with +07:00), so 03:04:05.123+07:00 is stored as 2024-12-31T20:04:05.123Z and read back as the DATETIME `2024-12-31T20:04:05.123Z`. Kestra stores the annotated `ZonedDateTime::\"…\"` string and reads it back typed JSON, a type no other writer produces"
     },
     "ts_midnight_millis": {
      "body": "2025-01-01T00:00:00.000Z",
      "put_status": 200,
-     "ion_bytes": "2025-01-01",
+     "ion_bytes": "2025-01-01T00:00:00.000Z",
      "get": {
       "status": 200,
-      "type": "DATE",
-      "value": "2025-01-01"
+      "type": "DATETIME",
+      "value": "2025-01-01T00:00:00Z"
      },
-     "basis": "measured",
+     "basis": "chosen",
      "compare": "put_status exact; ion_bytes byte-exact; get.status, get.type, get.value exact (`updated` masked)",
-     "scope": "beyond the brief's list: recorded for Task 6; quirks noted in findings.api_ion_quirks may be ruled otherwise"
+     "kestra": {
+      "body": "2025-01-01T00:00:00.000Z",
+      "put_status": 200,
+      "ion_bytes": "2025-01-01",
+      "get": {
+       "status": 200,
+       "type": "DATE",
+       "value": "2025-01-01"
+      }
+     },
+     "why": "as ion_timestamp: ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. A timestamp with a time is a DATETIME even at exactly midnight UTC; Kestra stores a DATE"
     },
     "ts_minute": {
      "body": "2025-01-01T03:04Z",
@@ -6753,16 +6783,26 @@
     },
     "ion_dt_local_like": {
      "body": "2025-01-01T03:04:05",
-     "put_status": 500,
-     "ion_bytes": "",
+     "put_status": 200,
+     "ion_bytes": "\"2025-01-01T03:04:05\"",
      "get": {
-      "status": 404,
-      "type": "https://kestra.io/docs/api-reference/problems/not-found",
-      "value": null
+      "status": 200,
+      "type": "STRING",
+      "value": "2025-01-01T03:04:05"
      },
-     "basis": "measured",
+     "basis": "chosen",
      "compare": "put_status exact; ion_bytes byte-exact; get.status, get.type, get.value exact (`updated` masked)",
-     "scope": "beyond the brief's list: recorded for Task 6; quirks noted in findings.api_ion_quirks may be ruled otherwise"
+     "kestra": {
+      "body": "2025-01-01T03:04:05",
+      "put_status": 500,
+      "ion_bytes": "",
+      "get": {
+       "status": 404,
+       "type": "https://kestra.io/docs/api-reference/problems/not-found",
+       "value": null
+      }
+     },
+     "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. Ion's text grammar requires an offset on a timestamp that has a time, so `2025-01-01T03:04:05` is not an Ion value; it is stored as the raw text, the STRING `2025-01-01T03:04:05`. Storing it as a DATETIME would need a guessed zone. Kestra answers 500 and leaves a row with no object behind it (a later GET answers 404)"
     },
     "bool_upper": {
      "body": "TRUE",
@@ -6793,15 +6833,25 @@
     "long_dur": {
      "body": "PT1.5S",
      "put_status": 200,
-     "ion_bytes": "\"PT1\"",
+     "ion_bytes": "\"PT1.5S\"",
      "get": {
       "status": 200,
       "type": "STRING",
-      "value": "PT1"
+      "value": "PT1.5S"
      },
-     "basis": "measured",
+     "basis": "chosen",
      "compare": "put_status exact; ion_bytes byte-exact; get.status, get.type, get.value exact (`updated` masked)",
-     "scope": "beyond the brief's list: recorded for Task 6; quirks noted in findings.api_ion_quirks may be ruled otherwise"
+     "kestra": {
+      "body": "PT1.5S",
+      "put_status": 200,
+      "ion_bytes": "\"PT1\"",
+      "get": {
+       "status": 200,
+       "type": "STRING",
+       "value": "PT1"
+      }
+     },
+     "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. `PT1.5S` is not one Ion value (Ion reads the symbol `PT1`, then more), so the whole text is stored as the STRING `PT1.5S`; Kestra keeps the first value and stores `\"PT1\"`, a truncated value the caller never sent. It stays a STRING, not a DURATION: the raw-text fallback never infers a type"
     }
    },
    "headers": {
@@ -7671,7 +7721,7 @@
   "get_keys": "measured (order included), except a namespace with no KV (chosen)",
   "delete": "measured, except expired keys (chosen)",
   "purge": "per cell; see each cell's basis",
-  "api": "measured, except 422->400 statuses, the non-Ion body, explicit-revision reads, the revisions route and the namespace listing (chosen)",
+  "api": "measured, except 422->400 statuses, the PUT bodies ruled 2026-10-07 (more than one Ion value or no Ion value: the raw text as a STRING; a blob or s-expression: 400; a timestamp with a time: DATETIME in UTC), explicit-revision reads, the revisions route and the namespace listing (chosen)",
   "layout": "chosen per step only because egret writes no `.metadata` sidecar; object names, rows and statuses are measured",
   "kv_segment_namespaces": "measured",
   "function_kv_oracle": "measured (the expression oracle's golden)",
@@ -8224,11 +8274,6 @@
     "why": "spec §8.6 (W9b's rule): a soft-deleted key is purged entirely"
    },
    {
-    "path": "purge.version_before",
-    "pointer": "/purge/version_before",
-    "why": "spec §8.6: purges revisions CREATED at or before `before`, never the latest, and a soft-deleted key entirely. Kestra filters on the row's `updated` column, i.e. when the revision STOPPED being the latest, so it keeps r2 (superseded after t_mid) and ke r1"
-   },
-   {
     "path": "purge.version_neither",
     "pointer": "/purge/version_neither",
     "why": "spec §8.6 (W9b's rule applied by the user's decision 2026-10-07): a version purge needs keepAmount or before; neither is refused, naming both and saying keepAmount: 0 purges everything"
@@ -8271,7 +8316,47 @@
    {
     "path": "api.put_bodies.non_ion",
     "pointer": "/api/put_bodies/non_ion",
-    "why": "spec §9 (approved 2026-10-07): a body that is not ONE Ion value falls back to the raw string. Kestra parses `hello world` as an Ion STREAM of two symbols and keeps the first (`hello`): the rest of the body is silently dropped. NEEDS A USER RULING (Task 1 report)"
+    "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. `hello world` is two Ion symbols, not one value, so it is stored whole as the STRING `hello world`. Kestra parses an Ion STREAM and keeps the first value (`hello`), silently dropping the rest of the body"
+   },
+   {
+    "path": "api.put_bodies.ion_two_values",
+    "pointer": "/api/put_bodies/ion_two_values",
+    "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. `1 2` is two Ion values, so the whole text is stored as the STRING `1 2`; Kestra keeps the first value (NUMBER 1) and silently drops the rest. Storing half the body as a number is the surprise; the raw text loses nothing"
+   },
+   {
+    "path": "api.put_bodies.long_dur",
+    "pointer": "/api/put_bodies/long_dur",
+    "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. `PT1.5S` is not one Ion value (Ion reads the symbol `PT1`, then more), so the whole text is stored as the STRING `PT1.5S`; Kestra keeps the first value and stores `\"PT1\"`, a truncated value the caller never sent. It stays a STRING, not a DURATION: the raw-text fallback never infers a type"
+   },
+   {
+    "path": "api.put_bodies.ts_offset_millis",
+    "pointer": "/api/put_bodies/ts_offset_millis",
+    "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. One Ion timestamp with a time is a DATETIME. A DATETIME is an instant stored in UTC at millisecond precision (spec §4.2, as Set's `dt_offset` cell does with +07:00), so 03:04:05.123+07:00 is stored as 2024-12-31T20:04:05.123Z and read back as the DATETIME `2024-12-31T20:04:05.123Z`. Kestra stores the annotated `ZonedDateTime::\"…\"` string and reads it back typed JSON, a type no other writer produces"
+   },
+   {
+    "path": "api.put_bodies.ion_dt_local_like",
+    "pointer": "/api/put_bodies/ion_dt_local_like",
+    "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. Ion's text grammar requires an offset on a timestamp that has a time, so `2025-01-01T03:04:05` is not an Ion value; it is stored as the raw text, the STRING `2025-01-01T03:04:05`. Storing it as a DATETIME would need a guessed zone. Kestra answers 500 and leaves a row with no object behind it (a later GET answers 404)"
+   },
+   {
+    "path": "api.put_bodies.ion_blob",
+    "pointer": "/api/put_bodies/ion_blob",
+    "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. A blob is one Ion value of a type the KV store does not model (it holds STRING, NUMBER, BOOLEAN, DATETIME, DATE, DURATION and JSON), so egret refuses it with 400 naming `blob`, and writes nothing. Kestra stores the blob and reads it back as the STRING `hello`, a type the caller did not send"
+   },
+   {
+    "path": "api.put_bodies.ion_sexp",
+    "pointer": "/api/put_bodies/ion_sexp",
+    "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. An s-expression is one Ion value of a type the KV store does not model, so egret refuses it with 400 naming `sexp`, and writes nothing. Kestra stores it as a JSON list `[\"a\",\"b\"]`, losing the s-expression type silently"
+   },
+   {
+    "path": "api.put_bodies.ion_timestamp",
+    "pointer": "/api/put_bodies/ion_timestamp",
+    "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. `2025-01-01T00:00:00Z` is one Ion timestamp with a time, so it is a DATETIME whatever the hour: stored `2025-01-01T00:00:00.000Z` and read back as the DATETIME `2025-01-01T00:00:00Z`. Kestra turns a timestamp at exactly 00:00:00.000 UTC into a DATE (`2025-01-01`), so the type of a value would depend on its clock time. A day-precision timestamp (`2025-01-01T`, `2025-01-02`) stays a DATE (ion_timestamp_day, ion_date_only: measured, Kestra agrees)"
+   },
+   {
+    "path": "api.put_bodies.ts_midnight_millis",
+    "pointer": "/api/put_bodies/ts_midnight_millis",
+    "why": "as ion_timestamp: ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. A timestamp with a time is a DATETIME even at exactly midnight UTC; Kestra stores a DATE"
    },
    {
     "path": "api.put_bodies.empty",
