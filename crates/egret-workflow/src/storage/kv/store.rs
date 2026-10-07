@@ -70,13 +70,15 @@ use uuid::Uuid;
 use super::key::KvKey;
 use super::kv_lock_text;
 use super::merge;
-use super::value::{check_readable, decode, KvData, KvType, KvValue, Unstorable};
+use super::value::{
+    check_readable, decode, max_ttl, KvData, KvType, KvValue, Unstorable, MAX_TTL_DAYS,
+};
 use crate::storage::lock::{
     is_lock_timeout, is_lock_timeout_error, lock_timeout_value, LockedSession,
 };
 use crate::storage::nsfiles::access::{require, Access, Grant, Resource};
 use crate::storage::nsfiles::staging;
-use crate::storage::nsfiles::store::{detached, writer, Want};
+use crate::storage::nsfiles::store::{writer, Want};
 use crate::storage::nsfiles::{CreatedBy, NsError};
 use crate::storage::FileStore;
 
@@ -115,6 +117,18 @@ macro_rules! cols {
         "id, workspace_id, namespace, key, revision, value_type, size, description, \
          expires_at, deleted, created_at, \
          (expires_at IS NOT NULL AND expires_at <= now()) AS expired, \
+         created_by_task_run, deleted_by_task_run"
+    };
+}
+
+/// [`cols`] for a WRITER, under the key's lock (Task 3 review I4): `expired`
+/// is judged at `clock_timestamp()`, the moment of the statement, not the
+/// transaction's start (`now()`), which is before the lock wait.
+macro_rules! wcols {
+    () => {
+        "id, workspace_id, namespace, key, revision, value_type, size, description, \
+         expires_at, deleted, created_at, \
+         (expires_at IS NOT NULL AND expires_at <= clock_timestamp()) AS expired, \
          created_by_task_run, deleted_by_task_run"
     };
 }
@@ -588,6 +602,18 @@ pub async fn read_value(fs: &FileStore, grant: &Grant, e: &KvEntry) -> Result<Kv
     if bytes.len() as u64 > cap {
         return Err(too_large(bytes.len() as u64));
     }
+    if bytes.len() as u64 != e.size {
+        // Review M3: the row was read, then its key's revisions were purged
+        // (or swept) and the number reused, so the object is another
+        // value's. Never decoded under this row's type: a retry reads the
+        // new row.
+        tracing::warn!(value = %what, read = bytes.len(), recorded = e.size, "a KV object is not the size its row records");
+        return Err(NsError::Store(format!(
+            "key '{}' in namespace '{}' changed while it was read; retry later",
+            e.key,
+            grant.namespace()
+        )));
+    }
     let kind = e.value_type;
     let decoded = tokio::task::spawn_blocking(move || decode(kind, &bytes, cap))
         .await
@@ -656,6 +682,13 @@ pub enum Deleted {
 /// table is about 6 400 slots on a stock server.
 pub const MAX_BULK_DELETE_KEYS: usize = 1_000;
 
+/// How many [`delete_many`] calls of one process hold their locks at once
+/// (review M2, spec §15).
+pub const BULK_DELETES_AT_ONCE: usize = 2;
+
+static BULK_DELETES: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(BULK_DELETES_AT_ONCE);
+
 /// One row of [`purge_key`]'s re-read, in revision order. `superseded_at`:
 /// when this revision stopped being the latest, i.e. the created_at of the
 /// key's next revision; None for the latest row.
@@ -663,6 +696,28 @@ pub const MAX_BULK_DELETE_KEYS: usize = 1_000;
 pub struct PurgeRow {
     pub entry: KvEntry,
     pub superseded_at: Option<DateTime<Utc>>,
+}
+
+/// Runs `work` on a detached task and awaits it, as W9b's `detached`: a
+/// dropped caller's future no longer stops a write part-way. Its own
+/// mapping (Task 3 review M5; W9b's helper and its `Db` mapping are left as
+/// they are): a panic inside is egret's bug, an `Author` error that fails
+/// the task once instead of a `Db` outage re-claimed forever; a cancelled
+/// task (the runtime shutting down) is `Store`, retried.
+async fn detached<T, F>(what: &'static str, work: F) -> Result<T, NsError>
+where
+    F: std::future::Future<Output = Result<T, NsError>> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::spawn(work).await {
+        Ok(result) => result,
+        Err(e) if e.is_cancelled() => Err(NsError::Store(format!(
+            "a KV {what} was cancelled; retry later"
+        ))),
+        Err(e) => Err(wrong_grant(egret_core::Error::Internal(anyhow::anyhow!(
+            "a KV {what} stopped: {e}"
+        )))),
+    }
 }
 
 /// A bounded wait for a key's lock ran out (the API's 5 s): the caller's to
@@ -694,6 +749,13 @@ fn store_failed(
 /// `pg_advisory_xact_lock` on the key, its wait bounded by the grant's
 /// [`Grant::lock_wait`] (`SET LOCAL lock_timeout`): past it, [`busy`].
 async fn lock_key(conn: &mut PgConnection, grant: &Grant, key: &KvKey) -> Result<(), NsError> {
+    bound_lock_wait(conn, grant).await?;
+    lock_one(conn, grant, key).await
+}
+
+/// `SET LOCAL lock_timeout` to the grant's [`Grant::lock_wait`], once per
+/// transaction.
+async fn bound_lock_wait(conn: &mut PgConnection, grant: &Grant) -> Result<(), NsError> {
     if let Some(wait) = grant.lock_wait() {
         sqlx::query("SELECT set_config('lock_timeout', $1, true)")
             .bind(lock_timeout_value(wait))
@@ -701,6 +763,11 @@ async fn lock_key(conn: &mut PgConnection, grant: &Grant, key: &KvKey) -> Result
             .await
             .map_err(db_err)?;
     }
+    Ok(())
+}
+
+/// The key's xact lock, under whatever `lock_timeout` the transaction has.
+async fn lock_one(conn: &mut PgConnection, grant: &Grant, key: &KvKey) -> Result<(), NsError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(kv_lock_text(grant, key))
         .execute(&mut *conn)
@@ -723,7 +790,7 @@ async fn latest_row(
 ) -> Result<Option<KvEntry>, NsError> {
     let row: Option<Row> = sqlx::query_as(concat!(
         "SELECT ",
-        cols!(),
+        wcols!(),
         " FROM workflow.kv_entries \
           WHERE workspace_id = $1 AND namespace = $2 AND key = $3 \
           ORDER BY revision DESC LIMIT 1"
@@ -773,16 +840,21 @@ async fn insert_row(
         Expiry::Ttl(secs) => (secs, None),
         Expiry::Keep(at) => (None, at),
     };
+    // `created_at` and `now + ttl` are one `clock_timestamp()` read under
+    // the key's lock (Task 3 review I4): a writer that waited for the lock
+    // is not born expired, and `created_at` rises with the revision, which
+    // `superseded_at` (PurgeKV's `before`) relies on.
     let row: Row = sqlx::query_as(concat!(
-        "INSERT INTO workflow.kv_entries \
-           (workspace_id, namespace, key, revision, value_type, size, description, expires_at, \
-            created_by_user, created_by_execution, created_by_task_run) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, \
-                 CASE WHEN $8::float8 IS NOT NULL THEN now() + make_interval(secs => $8::float8) \
-                      ELSE $9::timestamptz END, \
-                 $10, $11, $12) \
+        "WITH t AS (SELECT clock_timestamp() AS at) \
+         INSERT INTO workflow.kv_entries \
+           (workspace_id, namespace, key, revision, value_type, size, description, created_at, \
+            expires_at, created_by_user, created_by_execution, created_by_task_run) \
+         SELECT $1, $2, $3, $4, $5, $6, $7, t.at, \
+                CASE WHEN $8::float8 IS NOT NULL THEN t.at + make_interval(secs => $8::float8) \
+                     ELSE $9::timestamptz END, \
+                $10, $11, $12 FROM t \
          RETURNING ",
-        cols!()
+        wcols!()
     ))
     .bind(grant.workspace())
     .bind(grant.namespace())
@@ -871,8 +943,8 @@ fn refused_value(grant: &Grant, key: &KvKey, e: Unstorable) -> NsError {
     })
 }
 
-/// `ttl` as `make_interval`'s seconds; a ttl of zero or less is refused, as
-/// the tasks refuse it (w9c `ttl`).
+/// `ttl` as `make_interval`'s seconds. The caller validated it with
+/// `parse_ttl`; a negative one or one past [`MAX_TTL_DAYS`] is refused.
 fn ttl_secs(
     grant: &Grant,
     key: &KvKey,
@@ -880,10 +952,19 @@ fn ttl_secs(
 ) -> Result<Option<f64>, NsError> {
     match ttl {
         None => Ok(None),
-        Some(t) if t > chrono::TimeDelta::zero() => Ok(Some(t.num_milliseconds() as f64 / 1000.0)),
-        Some(_) => Err(NsError::Author(format!(
-            "key '{key}' in namespace '{}': ttl: must be a positive duration",
-            grant.namespace()
+        // Zero is the API header's "expired at once" (w9c
+        // `api.headers.h_ttl_zero`); zero and the sign are each caller's
+        // `parse_ttl` mode to judge (Task 3 review I1), not this function's.
+        Some(t) if t >= chrono::TimeDelta::zero() && t <= max_ttl() => {
+            Ok(Some(t.num_milliseconds() as f64 / 1000.0))
+        }
+        // Only a caller that skipped `parse_ttl` gets here: the author's,
+        // never a database error (Task 3 review I3).
+        Some(t) => Err(NsError::Author(format!(
+            "key '{key}' in namespace '{}': ttl: {}s is outside 0 to {MAX_TTL_DAYS} days \
+             (1,000 years)",
+            grant.namespace(),
+            t.num_seconds()
         ))),
     }
 }
@@ -1015,9 +1096,9 @@ pub async fn put_merge(
         let cap = fs.caps.max_read_bytes;
         let (g, k) = (grant.clone(), key.clone());
         let checked = tokio::task::spawn_blocking(move || {
-            let merged = merge::merge(current.as_ref(), &patch).map_err(|m| {
-                NsError::Author(format!("key '{k}' in namespace '{}': {m}", g.namespace()))
-            })?;
+            // The bare message, exact as the fixture's `put_merge` cells (review
+            // M1): any key or namespace prefix belongs to the task layer.
+            let merged = merge::merge(current.as_ref(), &patch).map_err(NsError::Author)?;
             let value = KvValue {
                 kind: KvType::of_data(&merged),
                 data: merged,
@@ -1070,7 +1151,7 @@ async fn flag_deleted(
     let (user, execution, task_run) = writer(by);
     sqlx::query(
         "UPDATE workflow.kv_entries \
-            SET deleted = true, deleted_at = now(), deleted_by_user = $3, \
+            SET deleted = true, deleted_at = clock_timestamp(), deleted_by_user = $3, \
                 deleted_by_execution = $4, deleted_by_task_run = $5 \
           WHERE workspace_id = $1 AND namespace = $2 AND id = ANY($6)",
     )
@@ -1148,14 +1229,23 @@ pub async fn delete_many(
     }
     let (pool, grant) = (pool.clone(), grant.clone());
     detached("KV delete", async move {
+        // Review M2: at most BULK_DELETES_AT_ONCE bulk deletes hold their
+        // (up to 1,000) advisory locks at once in this process, so they
+        // cannot fill Postgres's shared lock table (spec §15). Waiting for a
+        // permit holds no connection.
+        let _permit = BULK_DELETES
+            .acquire()
+            .await
+            .map_err(|e| internal(format!("the bulk delete semaphore is closed: {e}")))?;
         let mut tx = pool.begin().await.map_err(db_err)?;
+        bound_lock_wait(&mut tx, &grant).await?;
         for key in &keys {
-            lock_key(&mut tx, &grant, key).await?;
+            lock_one(&mut tx, &grant, key).await?;
         }
         let names: Vec<&str> = keys.iter().map(KvKey::as_str).collect();
         let rows: Vec<Row> = sqlx::query_as(concat!(
             "SELECT DISTINCT ON (key) ",
-            cols!(),
+            wcols!(),
             " FROM workflow.kv_entries \
               WHERE workspace_id = $1 AND namespace = $2 AND key = ANY($3) \
               ORDER BY key, revision DESC"

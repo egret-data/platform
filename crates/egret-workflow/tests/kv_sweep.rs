@@ -371,3 +371,44 @@ async fn a_failed_object_delete_leaves_an_orphan_and_the_rows_go() {
     assert!(revisions(&db, ws, ns, "b").await.is_empty());
     assert_eq!(objects(&mem, ws).len(), 2, "the orphans");
 }
+
+/// Review M4: `spawn_kv_expiry_sweeper` itself, in real time with a 1 s
+/// interval: `every` reaches the timer (nothing at 0.5 s), the pass sweeps
+/// (gone by 2.5 s), and `cancel` stops it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_spawned_sweeper_sweeps_after_its_interval_and_stops_on_cancel() {
+    let _g = SERIAL.lock().await;
+    let Some(db) = common::db().await else { return };
+    drain(&db).await;
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (fs, mem) = mem_fs();
+    let ns = "w9c.spawned";
+    write(&db, &fs, ws, ns, "k", 2, true).await;
+    expire(&db, ws, ns, "k").await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let handle = egret_workflow::storage::kv::sweep::spawn_kv_expiry_sweeper(
+        db.pool.clone(),
+        Arc::new(fs.clone()),
+        KvSweepConfig {
+            every: std::time::Duration::from_secs(1),
+            batch: 1000,
+        },
+        cancel.clone(),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(revisions(&db, ws, ns, "k").await, [1, 2], "swept at start");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2500);
+    while !revisions(&db, ws, ns, "k").await.is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "not swept within 2.5 s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(objects(&mem, ws).is_empty());
+    cancel.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+        .await
+        .expect("the sweeper stopped on cancel")
+        .unwrap();
+}

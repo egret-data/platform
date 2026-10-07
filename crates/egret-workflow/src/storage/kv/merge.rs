@@ -120,12 +120,55 @@ fn merge_entries(current: Option<&KvData>, entries: &[KvData]) -> Result<KvData,
     if let Some(value) = replace {
         return Ok(value);
     }
+    refuse_conflicts(&updates)?;
     let nested = flatten_to_nested(updates)?;
     match current {
         None => Ok(KvData::Struct(nested)),
         Some(KvData::Struct(a)) => Ok(KvData::Struct(deep_merge(a, &nested))),
         Some(_) => Err(NOT_A_MAP.into()),
     }
+}
+
+/// The message of two keyed entries whose dotted paths conflict.
+pub(crate) fn conflict_message(first: &str, second: &str) -> String {
+    format!(
+        "the keyed `value` entries '{first}' and '{second}' conflict: one sets a field that the \
+         other also sets or writes inside; Kestra's result then depends on the order of its \
+         HashMap, so egret refuses them"
+    )
+}
+
+/// The user's ruling (2026-10-07, Task 3 review I2): keyed entries whose
+/// dotted paths conflict -- one key's path is a leaf that is also the path,
+/// or a path through which, another key writes (`q` and `q.r`; `a` and
+/// `a.`) -- are refused, naming both keys in entry order. On Kestra the
+/// outcome of such a patch depends on its `HashMap`'s iteration order, not
+/// on the entries. Non-conflicting entries keep Kestra's semantics. Linear
+/// in the total path length.
+fn refuse_conflicts(updates: &[(String, KvData)]) -> Result<(), String> {
+    // A path set as a leaf, and a proper prefix some key writes through,
+    // each with the first key that made it.
+    let mut leaves: HashMap<Vec<&str>, &str> = HashMap::new();
+    let mut through: HashMap<Vec<&str>, &str> = HashMap::new();
+    for (key, _) in updates {
+        let path = java_split_dots(key);
+        if path.is_empty() {
+            continue; // refused by flatten_to_nested, naming the key
+        }
+        if let Some(other) = leaves.get(&path).or_else(|| through.get(&path)) {
+            return Err(conflict_message(other, key));
+        }
+        for end in 1..path.len() {
+            if let Some(other) = leaves.get(&path[..end]) {
+                return Err(conflict_message(other, key));
+            }
+        }
+        for end in 1..path.len() {
+            through.entry(path[..end].to_vec()).or_insert(key);
+        }
+        leaves.insert(path, key);
+    }
+    Ok(())
 }
 
 /// Java's `Character.isWhitespace`, which `String.isBlank` asks of every
@@ -176,12 +219,12 @@ fn level_mut<'a>(root: &'a mut Fields, path: &[usize]) -> &'a mut Fields {
     level
 }
 
-/// `MapUtils.flattenToNestedMap`, Kestra's quirks kept:
-/// - a missing level is a new map;
-/// - a level already holding a non-map stays where it is, and the rest of
-///   the path is built in the CURRENT map (Kestra logs "Conflict at key"
-///   and `continue`s);
-/// - a last segment already present is ignored (the first entry wins).
+/// `MapUtils.flattenToNestedMap`: a missing level is a new map. Its two
+/// conflict quirks (a level over a non-map stays in the current map; a last
+/// segment already present is ignored) depend on Kestra's `HashMap` order
+/// and are unreachable here: [`refuse_conflicts`] refuses every patch that
+/// would reach them (the user's ruling, 2026-10-07). They are kept as Kestra
+/// wrote them.
 ///
 /// A key of dots only names no field: Kestra fails it with an
 /// `ArrayIndexOutOfBoundsException`; egret refuses it with a message.
@@ -442,7 +485,8 @@ mod tests {
                 other => panic!("{name}: outcome {other}"),
             }
         }
-        // 44 cells: 33 merged, 6 refused by the merge, 2 templates (the
+        // 46 cells: 32 merged, 9 refused by the merge (3 of them the user's
+        // ruling on conflicting dotted keys, 2026-10-07), 2 templates (the
         // render's, Task 5) and 3 missing keys with errorOnMissing (the
         // store's refusal, tests/kv_store.rs).
         skipped.sort_unstable();
@@ -456,7 +500,7 @@ mod tests {
                 "templated_leaf"
             ]
         );
-        assert_eq!((merged, refused), (33, 6));
+        assert_eq!((merged, refused), (32, 9));
     }
 
     #[test]
@@ -546,28 +590,66 @@ mod tests {
     }
 
     #[test]
-    fn dotted_keys_follow_kestras_split_and_conflict_rules() {
+    fn dotted_keys_that_conflict_are_refused_naming_both() {
         let cur = data(&json!({"a": 1}));
-        // A later level over a scalar entry stays in the current map
-        // (Kestra's "Conflict at key", logged and skipped).
+        // The user's ruling (2026-10-07, review I2): a leaf that another key
+        // writes inside, in either order, and two keys naming one field.
+        for (patch, first, second) in [
+            (
+                json!([{"key": "q", "value": 1}, {"key": "q.r", "value": 2}]),
+                "q",
+                "q.r",
+            ),
+            (
+                json!([{"key": "q.r", "value": 1}, {"key": "q", "value": 5}]),
+                "q.r",
+                "q",
+            ),
+            (
+                json!([{"key": "a.b", "value": 2}, {"key": "a", "value": {"z": 1}}]),
+                "a.b",
+                "a",
+            ),
+            (
+                json!([{"key": "a", "value": {"z": 1}}, {"key": "a.b", "value": 2}]),
+                "a",
+                "a.b",
+            ),
+            (
+                json!([{"key": "x", "value": 1}, {"key": "a.b.c", "value": 1}, {"key": "a", "value": 2}]),
+                "a.b.c",
+                "a",
+            ),
+            (
+                json!([{"key": "a", "value": 1}, {"key": "a.", "value": 2}]),
+                "a",
+                "a.",
+            ),
+            (
+                json!([{"key": "m.n", "value": 1}, {"key": "m.n", "value": 2}, {"key": "m", "value": 3}]),
+                "m.n",
+                "m",
+            ),
+        ] {
+            assert_eq!(
+                merge(Some(&cur), &data(&patch)),
+                Err(conflict_message(first, second)),
+                "{patch}"
+            );
+            assert_eq!(
+                merge(None, &data(&patch)),
+                Err(conflict_message(first, second))
+            );
+        }
+        // Non-conflicting siblings and a shared parent are not conflicts.
         assert_eq!(
             merge(
                 Some(&cur),
-                &data(&json!([{"key": "q", "value": 1}, {"key": "q.r", "value": 2}]))
+                &data(&json!([{"key": "p.x", "value": 1}, {"key": "p.y", "value": 2}, {"key": "p.z.w", "value": 3}]))
             )
             .unwrap()
             .to_json(),
-            json!({"a": 1, "q": 1, "r": 2})
-        );
-        // A last segment already set: the first entry wins.
-        assert_eq!(
-            merge(
-                Some(&cur),
-                &data(&json!([{"key": "q.r", "value": 1}, {"key": "q", "value": 5}]))
-            )
-            .unwrap()
-            .to_json(),
-            json!({"a": 1, "q": {"r": 1}})
+            json!({"a": 1, "p": {"x": 1, "y": 2, "z": {"w": 3}}})
         );
         // The same key twice: the later value, in the first place.
         assert_eq!(

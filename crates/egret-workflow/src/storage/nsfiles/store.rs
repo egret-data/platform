@@ -674,7 +674,7 @@ async fn release(session: LockedSession, what: &str) {
 /// stops a move or a purge part-way. Once started, it runs to completion --
 /// its rollback included -- and only the answer is lost. A panic inside is
 /// egret's bug, answered as `Internal`.
-pub(crate) async fn detached<T, F>(what: &'static str, work: F) -> Result<T, NsError>
+async fn detached<T, F>(what: &'static str, work: F) -> Result<T, NsError>
 where
     F: std::future::Future<Output = Result<T, NsError>> + Send + 'static,
     T: Send + 'static,

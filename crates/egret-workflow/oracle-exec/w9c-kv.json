@@ -3877,17 +3877,22 @@
      }
     ],
     "errorOnMissing": null,
-    "outcome": "ok",
-    "result": {
-     "a": {
-      "z": 1,
-      "b": 2
+    "outcome": "error",
+    "result": null,
+    "message": "the keyed `value` entries 'a' and 'a.b' conflict: one sets a field that the other also sets or writes inside; Kestra's result then depends on the order of its HashMap, so egret refuses them",
+    "basis": "chosen",
+    "compare": "outcome exact; message exact; nothing written",
+    "kestra": {
+     "outcome": "ok",
+     "result": {
+      "a": {
+       "z": 1,
+       "b": 2
+      }
      }
     },
-    "value_class": "java.util.LinkedHashMap",
-    "ion_bytes": "{a:{z:1,b:2}}",
-    "basis": "code",
-    "compare": "outcome exact; value JSON-equal with key order exact; message exact",
+    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. Kestra collects the entries in a HashMap and nests them in its iteration order (MapUtils.flattenToNestedMap), so which entry wins depends on hash order, not on the entries; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review, w9c-kestra.jar)",
+    "premise": "the value reaches Put typed (egret's typed render keeps a YAML list of maps a list of maps)",
     "note": "jshell only (no runtime cell): Put.mergeValues on the artifact's classes"
    },
    "over_expired_eom_true": {
@@ -3961,7 +3966,81 @@
     },
     "why": "spec §8.5: a soft-deleted key is missing to Put, which starts fresh and carries over no description and no expiry from a revision that is not live (the user's ruling 2026-10-07 for an expired key, applied alike to a deleted one); the deleted revision 1 stays as it was"
    },
-   "_independent": "each cell has its own key in w9c.put, seeded once; no cell reads another's key"
+   "_independent": "each cell has its own key in w9c.put, seeded once; no cell reads another's key",
+   "code_dot_prefix_conflict_reversed": {
+    "existing": {
+     "x": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": "a.b",
+      "value": 2
+     },
+     {
+      "key": "a",
+      "value": {
+       "z": 1
+      }
+     }
+    ],
+    "errorOnMissing": null,
+    "outcome": "error",
+    "result": null,
+    "message": "the keyed `value` entries 'a.b' and 'a' conflict: one sets a field that the other also sets or writes inside; Kestra's result then depends on the order of its HashMap, so egret refuses them",
+    "basis": "chosen",
+    "compare": "outcome exact; message exact; nothing written",
+    "kestra": {
+     "outcome": "ok",
+     "result": {
+      "x": 1,
+      "a": {
+       "z": 1,
+       "b": 2
+      }
+     }
+    },
+    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. Kestra collects the entries in a HashMap and nests them in its iteration order (MapUtils.flattenToNestedMap), so which entry wins depends on hash order, not on the entries; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review, w9c-kestra.jar)",
+    "premise": "the value reaches Put typed (egret's typed render keeps a YAML list of maps a list of maps)",
+    "note": "jshell (Task 3 review): Kestra's answer is the same as for the entries in the other order, its hash order"
+   },
+   "code_dot_leaf_after_path": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": "q.r",
+      "value": 1
+     },
+     {
+      "key": "q",
+      "value": 5
+     }
+    ],
+    "errorOnMissing": null,
+    "outcome": "error",
+    "result": null,
+    "message": "the keyed `value` entries 'q.r' and 'q' conflict: one sets a field that the other also sets or writes inside; Kestra's result then depends on the order of its HashMap, so egret refuses them",
+    "basis": "chosen",
+    "compare": "outcome exact; message exact; nothing written",
+    "kestra": {
+     "outcome": "ok",
+     "result": {
+      "a": 1,
+      "q": 5,
+      "r": 1
+     }
+    },
+    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. Kestra collects the entries in a HashMap and nests them in its iteration order (MapUtils.flattenToNestedMap), so which entry wins depends on hash order, not on the entries; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review, w9c-kestra.jar)",
+    "premise": "the value reaches Put typed (egret's typed render keeps a YAML list of maps a list of maps)",
+    "note": "jshell (Task 3 review): Kestra sets q first (hash order), then cannot descend into the scalar and writes r at the top"
+   }
   },
   "expiry": {
    "_how": "w9c.exp: every key Set with ttl PT2S (kvDescription d) and read after 3.5 s; `single` = one fresh key per reader, each reader in its own execution; `chain` = ONE key read by every reader in a fixed order",
@@ -9543,6 +9622,21 @@
     "path": "api.put_bodies.annot_blob",
     "pointer": "/api/put_bodies/annot_blob",
     "why": "user ruling 2026-10-07 (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type, at any depth. Precedence (Task 1 re-review N3): the refusal comes before the annotation rule, so an annotated blob is refused naming `blob`, not kept as the raw text as an annotated int is (ion_annot)"
+   },
+   {
+    "path": "put_merge.code_dot_prefix_conflict",
+    "pointer": "/put_merge/code_dot_prefix_conflict",
+    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. Kestra collects the entries in a HashMap and nests them in its iteration order (MapUtils.flattenToNestedMap), so which entry wins depends on hash order, not on the entries; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review, w9c-kestra.jar)"
+   },
+   {
+    "path": "put_merge.code_dot_prefix_conflict_reversed",
+    "pointer": "/put_merge/code_dot_prefix_conflict_reversed",
+    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. Kestra collects the entries in a HashMap and nests them in its iteration order (MapUtils.flattenToNestedMap), so which entry wins depends on hash order, not on the entries; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review, w9c-kestra.jar)"
+   },
+   {
+    "path": "put_merge.code_dot_leaf_after_path",
+    "pointer": "/put_merge/code_dot_leaf_after_path",
+    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. Kestra collects the entries in a HashMap and nests them in its iteration order (MapUtils.flattenToNestedMap), so which entry wins depends on hash order, not on the entries; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review, w9c-kestra.jar)"
    }
   ]
  },

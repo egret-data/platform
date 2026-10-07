@@ -44,6 +44,9 @@
 - **(2026-10-07, the user's ruling on Task 2's re-review 2)**
   - **(2026-10-07) Every number in a KV value has at most 1,000 digits.** Integers, decimals and floats all count. A decimal counts the digits of its coefficient, written in plain notation as egret stores it; in binary Ion the length field is counted. A longer number is refused with an error naming the limit (413 on the API), never truncated. The limit is enforced before the Ion parser sees the number, on every write (a flow's value, `Put`'s merged result, the API's body) and every read (§2, §4.2, §15).
 
+- **(2026-10-07, the user's ruling on Task 3's review)**
+  - **(2026-10-07) Conflicting dotted keys in a `Put` are refused.** When one keyed entry's dotted path is a leaf that another entry of the same patch also sets or writes inside (`[{key: q.r, …}, {key: q, …}]`, `[{key: a.b, …}, {key: a, value: {z: 1}}]`, `a` and `a.`), the patch is refused with an author error naming both keys. Kestra nests the entries in its `HashMap`'s iteration order, so its outcome depends on hash order, not on the entries. Patches without such a conflict keep the artifact's semantics (§2, §8.5).
+
 **Delivery:** one PR (docs and code), eight tasks in §12, implemented by a plan written after this spec.
 
 ## 1. What exists and what does not
@@ -107,6 +110,8 @@ Kestra (source `96893b589`; artifact `2.0.0-rc13`, nightly `169ca7f2`, the image
 | the API answers 422 for a refused key, ttl or body, and 500 for a malformed bulk body | 400 (§9) | W9b's status conventions; measured 2026-10-07 (Task 1) |
 | an Ion decimal the API's `PUT` stored is read by Kestra's Ion mapper; whether a reader and `Put.mergeValues` then hold a `BigDecimal` (exact) or a `Double` is **not measured** (no Task 1 cell reads a large or high-precision decimal) | a decimal stays a decimal through every read, merge and write, no digit lost (`123456789012345678901234567890.5` is exact); a reader sees its plain digits (`0.0000001`, never `1E-7`); a float stays a float and an integer an integer (§4.2) | the user's ruling (2026-10-07, Task 2's review): decimals are preserved exactly; the plain form is egret's choice |
 | a number's length: Jackson 2.15+ refuses a JSON number over 1,000 characters by default (`StreamReadConstraints.maxNumberLength`); whether Kestra's version and its Ion path apply it is **not measured** | every number in a KV value has at most 1,000 digits (an int's digits, a decimal's coefficient in plain notation, a float's mantissa; an exponent on its own); a longer one is refused, naming the limit, before the Ion parser sees it, never truncated (§4.2) | the user's ruling (2026-10-07, Task 2's re-review 2): `ion-rs` 1.0.1 silently keeps only (digits mod 65,535) of a longer decimal's coefficient, and parses a long number in quadratic time |
+| `Put` with keyed entries whose dotted paths conflict (`q` and `q.r`; `a` and `a.b` with `a` a map) nests them in `HashMap` iteration order: `[{q.r: 1}, {q: 5}]` over `{a: 1}` gives `{a: 1, q: 5, r: 1}` | refused with an author error naming both keys; nothing is written (§8.5) | measured 2026-10-07 (Task 3 review, jshell on the artifact); the user's ruling (2026-10-07): the outcome depends on hash order, not on the entries |
+| a ttl past Postgres's timestamp range is not measured | a ttl over 1,000 years (365,250 days) is the author's error naming `ttl`, in `Set` and the API's header (§4.5) | Task 3 review I3: unbounded, `now() + ttl` failed as a database error, an outage re-claimed forever |
 
 ## 3. Storage layout and keys
 
@@ -177,7 +182,7 @@ Following W9b's R1:
 - **Live** means the latest row is not deleted and `expires_at` is null or later than the database's `now()`. Every latest read (`kv()`, `Get`, `GetKeys`, the API's list, get and inheritance) answers only from live rows.
 - **Expired means missing.** An expired key reads exactly as a key that was never written: `kv()` and `Get` honour `errorOnMissing`, `GetKeys` and the listings leave it out, `Set` with `overwrite: false` may write over it. An explicit-revision read of an expired revision is not-found too.
 - **Reads never write.** Nothing on a read path inserts, updates or deletes; the sweep (§11) and `PurgeKV` remove expired keys.
-- **Expiry is fixed at write:** `expires_at = now() + ttl`, by the database's clock in the commit's transaction. `Put` keeps the latest revision's `expires_at` and description (Kestra, `Put.java:121`) when that revision is live. An expired key is missing to `Put` as to every reader: `Put` starts fresh, with no description and no expiry (§8.5; the user's ruling, 2026-10-07).
+- **Expiry is fixed at write:** `expires_at = created_at + ttl`, both one `clock_timestamp()` read by the database under the key's lock (Task 3 review I4: `now()`, the transaction's start, is before the lock wait, so a writer that waited longer than its ttl would be born expired). The writers judge a latest row's expiry at `clock_timestamp()` too. A ttl is at most 1,000 years (365,250 days); a longer one is the author's error naming `ttl` (Task 3 review I3). A ttl of zero is accepted from the API's header (expired at once) and refused by the `Set` task (`parse_ttl`'s two modes, w9c `api.headers.h_ttl_zero`, `ttl.PT0S`). `Put` keeps the latest revision's `expires_at` and description (Kestra, `Put.java:121`) when that revision is live. An expired key is missing to `Put` as to every reader: `Put` starts fresh, with no description and no expiry (§8.5; the user's ruling, 2026-10-07).
 - A read resolves the latest live row, then reads that revision's object (bounded by `max_read_bytes`, §4.2). **A missing object behind a row is an author error naming the key and the revision**, with no fallback (W9b's rule). An unreachable store or database is an infrastructure error (§11).
 
 ### 4.6 Inheritance
@@ -247,6 +252,7 @@ Native handlers in the worker, like W9b's `core.namespace` tasks; each gets a ro
 - `key`, `value` (any type), `namespace` (write rule), `errorOnMissing` (default false). `value` is rendered by §8.1's one render rule, so a YAML map reaches the merge as a map.
 - **The merge rules** follow the artifact (`Put.java:72-121`): a map deep-merges into a map; a list of `{key, value}` entries patches dotted paths; a single `[{value}]` entry replaces the whole value. The exact semantics are **measured in Task 1** and pinned by fixture cells: nested maps, arrays inside maps, a type clash between a map and a scalar, a missing key with each `errorOnMissing`, and a dotted path through a missing level. egret implements against the fixture.
 - *(Measured 2026-10-07, Task 1: on the artifact a flow's `value` reaches `Put` as JSON text, so `Put` stores a STRING and never merges (§2). The fixture's merge semantics come from the artifact's `Put.mergeValues`, run on typed values. Maps merge recursively. A list inside a map is appended to. A null in the patch leaves the field as it was. A scalar replaces a map, and a map a scalar. A dotted entry builds missing levels and replaces a scalar on its path. A keyed entry over a non-map value fails with ``Cannot apply keyed `value` updates to a non-JSON existing KV value.`` Ruled 2026-10-07 by the user: egret merges, and §2 records the divergence.)*
+- *(The user's ruling, 2026-10-07, Task 3 review I2: keyed entries whose dotted paths conflict, one a leaf that another sets or writes inside, are refused naming both keys; on Kestra the result depends on hash order.)*
 - **Under the key's lock.** `Put` runs §4.3 step 1 for its patch and stages nothing, since the merged bytes exist only under the lock. Then, in the commit transaction, holding the lock:
   - read the latest live row, and its object (bounded by `max_read_bytes`). A key that was never written, is soft-deleted or has **expired** is missing: `errorOnMissing` decides, and a write starts fresh (the user's ruling, 2026-10-07; §4.5);
   - merge;
@@ -336,6 +342,7 @@ No message names a storage key or another workspace. A namespace another workspa
   - `Delete` answers `deleted: true` when this task run deleted the latest revision (§8.4).
   - `PurgeKV` recomputes from the rows as they are; its `size` counts what the re-claim purged itself.
   - The skip keys on the task run, so it also covers a `RETRY_FAILED_TASK` retry, as W9b's does.
+  - **The residue (Task 3 review M6).** The skip keys on the latest row, so a re-claim acts again over another writer's later change, as W9b's does: when another writer deleted the key after the first attempt's `Set`, the re-claimed `Set` writes it again; when another writer rewrote the key after the first attempt's `Delete`, the re-claimed `Delete` deletes that newer value. An own write that has since expired is still "already written" (rewriting would extend its life past what the first attempt gave); once the sweep removed it, a re-claim writes again.
 - **A flow's write waits** for a busy key as long as it takes (W9b's rule): what it waits behind is server-paced, either one copy or one `Put`'s bounded read and write. An API write waits 5 s (§9).
 - **Failure classification** (KV reuses W9b's `NsError` and its split):
 
@@ -420,6 +427,9 @@ A KV bridge for plugins (§10); a cross-namespace paged listing (`GET /kv` acros
 - Deleting a workspace cascades its `workflow.kv_entries` rows away and leaves its `_kv` objects in storage, as W9b's namespace files are left.
 - At render, every database error of a `kv()` lookup is an outage, re-claimed with no attempt spent, and a lookup is bounded only by the OS's TCP timeout; this is W9b's render limit, shared (W9b §15).
 - A namespace with a `_kv` segment is refused (§3).
+- A ttl is at most 1,000 years (365,250 days); a longer one is refused naming `ttl` (§4.5; Task 3 review I3).
+- At most two bulk deletes of one process hold their (up to 1,000) key locks at once; a third waits for a permit, holding no connection. Across replicas the advisory lock table is still shared: about seven concurrent 1,000-key bulk deletes on different replicas could fill a stock server's ~6,400-slot lock table (§9; Task 3 review M2).
+- A conflicting dotted-key `Put` patch is refused where Kestra answers by hash order (§8.5; the user's ruling, 2026-10-07).
 - A key named `inheritance` cannot be read by the API's `GET …/kv/{key}`: that path is the inheritance listing, as in Kestra. Its write, delete and revisions routes work, and so do the tasks and `kv()` (§9; the user's ruling, 2026-10-07).
 - The API's bulk delete takes at most 1,000 keys per request (413 past it); a larger set takes several requests, each all or nothing (§9; the user's ruling, 2026-10-07).
 - Server-paced store calls run under a key's lock, and a writer of that key waits behind them:

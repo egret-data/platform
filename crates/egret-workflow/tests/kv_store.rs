@@ -428,14 +428,43 @@ async fn a_read_never_writes() {
 
 /// Round trips through the database, counted from sqlx's own statement
 /// events (target `sqlx::query`, one per executed statement).
-struct CountStatements(Arc<AtomicUsize>);
+/// Counts `sqlx::query` events on the threads that registered a counter
+/// (W9c Task 3 fix round 1). It is the binary's GLOBAL subscriber, installed
+/// once: a thread-scoped `set_default` subscriber lost events whenever
+/// another test's thread had hit sqlx's callsites first (their cached
+/// interest ignored it), which the writes' longer tests made frequent.
+struct CountStatements;
+
+thread_local! {
+    static COUNTER: std::cell::RefCell<Option<Arc<AtomicUsize>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountStatements {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
         if event.metadata().target() == "sqlx::query" {
-            self.0.fetch_add(1, Ordering::SeqCst);
+            COUNTER.with(|c| {
+                if let Some(n) = c.borrow().as_ref() {
+                    n.fetch_add(1, Ordering::SeqCst);
+                }
+            });
         }
     }
+}
+
+/// A counter of this thread's statements, the global subscriber installed.
+fn count_statements() -> Arc<AtomicUsize> {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::registry().with(CountStatements),
+        )
+        .expect("no other global subscriber in this binary");
+    });
+    let count = Arc::new(AtomicUsize::new(0));
+    COUNTER.with(|c| *c.borrow_mut() = Some(count.clone()));
+    count
 }
 
 const INH_OWN: &str = "w9c.inh.a.b";
@@ -561,12 +590,7 @@ async fn the_walk_answers_the_deepest_live_level_and_skips_an_expired_one() {
     assert_eq!(table.len(), 25);
 
     // One statement per walk, whatever the depth.
-    let count = Arc::new(AtomicUsize::new(0));
-    let subscriber = {
-        use tracing_subscriber::layer::SubscriberExt as _;
-        tracing_subscriber::registry().with(CountStatements(count.clone()))
-    };
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let count = count_statements();
     resolve_first_live(&mut c, &walk, &key("root"))
         .await
         .unwrap();
@@ -2242,17 +2266,53 @@ mod writes {
             .unwrap()
             .abs();
         assert!(drift < 1000, "{drift} µs");
-        // A ttl of zero or less is refused (w9c `ttl`).
-        for bad in [chrono::TimeDelta::zero(), chrono::TimeDelta::seconds(-1)] {
+        // Task 3 review I1: zero is the API header's "expired at once" (w9c
+        // `api.headers.h_ttl_zero`: 200, one row with an expiry); its sign
+        // and zero rules are `parse_ttl`'s modes, not `set`'s.
+        let f = fixture();
+        let cell = &f["egret_expected"]["api"]["headers"]["h_ttl_zero"];
+        let mut nv = new(json!("v"));
+        nv.ttl = Some(parse_ttl(cell["ttl"].as_str().unwrap(), Ttl::Header).unwrap());
+        let e = written(set(&db.pool, &fs, &g, &key("h_ttl_zero"), nv, USER).await);
+        assert_eq!(e.expires_at, Some(e.created_at), "expired at once");
+        let rows: Vec<Value> = rows_of(&db, ws, NS3, "h_ttl_zero")
+            .await
+            .iter()
+            .map(|e| {
+                json!({"key": e.key.as_str(), "revision": e.revision, "latest": true,
+                       "deleted": e.deleted, "expires": e.expires_at.map(|_| "<ts>"),
+                       "description": e.description})
+            })
+            .collect();
+        assert_eq!(Value::Array(rows), cell["rows"]);
+        assert_eq!(latest_value(&db, &fs, ws, NS3, "h_ttl_zero").await, None);
+        // Task 3 review I3: past 1,000 years (a caller that skipped
+        // `parse_ttl`) is the author's, never a database error.
+        for bad in [
+            chrono::TimeDelta::days(200_000_000),
+            chrono::TimeDelta::seconds(-1),
+        ] {
             let mut nv = new(json!("v"));
             nv.ttl = Some(bad);
-            match set(&db.pool, &fs, &g, &key("ttl0"), nv, USER).await {
+            match set(&db.pool, &fs, &g, &key("ttl_big"), nv, USER).await {
                 Err(NsError::Author(m)) => {
-                    assert!(m.contains("ttl: must be a positive duration"), "{m}")
+                    assert!(m.contains("ttl") && m.contains("365250 days"), "{m}")
                 }
                 other => panic!("{other:?}"),
             }
         }
+        for raw in ["P200000000D"] {
+            for mode in [Ttl::Task, Ttl::Header] {
+                assert!(
+                    parse_ttl(raw, mode).unwrap_err().contains("ttl"),
+                    "{mode:?}"
+                );
+            }
+        }
+        // At the bound: written.
+        let mut nv = new(json!("v"));
+        nv.ttl = Some(parse_ttl("P365250D", Ttl::Task).unwrap());
+        written(set(&db.pool, &fs, &g, &key("ttl_max"), nv, USER).await);
     }
 
     /// w9c `put_merge.keep_meta`.
@@ -2412,10 +2472,8 @@ mod writes {
                         Err(NsError::Author(m) | NsError::NotFound(m)) => m,
                         other => panic!("{name}: {other:?}"),
                     };
-                    assert!(
-                        m.ends_with(cell["message"].as_str().unwrap()),
-                        "{name}: {m}"
-                    );
+                    // Message exact (review M1): the store adds no prefix.
+                    assert_eq!(json!(m), cell["message"], "{name}");
                     assert_eq!(
                         rows_of(&db, ws, ns, k.as_str()).await,
                         before,
@@ -2426,7 +2484,7 @@ mod writes {
             }
             examined += 1;
         }
-        assert_eq!(examined, 42);
+        assert_eq!(examined, 44);
     }
 
     /// W9b's R1.
@@ -2709,6 +2767,12 @@ mod writes {
             (0, 0)
         );
         assert_eq!(revs(&rows_of(&db, ws, NS3, "w").await), [1]);
+        // Review M7: the holder's lock is let go before it returns to the pool.
+        sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+            .bind(lock_text(ws, NS3, "w"))
+            .execute(&mut *holder)
+            .await
+            .unwrap();
     }
 
     /// The hold audit's "nothing held" claim for `set`: while its body is
@@ -3108,5 +3172,172 @@ mod writes {
             set(&db.pool, &fs, &g, &key("k"), new(json!(1)), USER).await,
             Err(NsError::Conflict(_))
         ));
+        // Review M7: both locks let go before the holder returns to the pool.
+        let released: (bool, bool) =
+            sqlx::query_as("SELECT pg_advisory_unlock($1), pg_advisory_unlock($2)")
+                .bind(files_hash)
+                .bind(kv_hash)
+                .fetch_one(&mut *holder)
+                .await
+                .unwrap();
+        assert_eq!(released, (true, true));
+    }
+
+    /// Holds the key's lock on its own connection for `hold`, then lets it go.
+    async fn hold_lock(db: &Db, text: String, hold: Duration) -> tokio::task::JoinHandle<()> {
+        let mut c = db.pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+            .bind(&text)
+            .execute(&mut *c)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(hold).await;
+            sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+                .bind(&text)
+                .execute(&mut *c)
+                .await
+                .unwrap();
+        })
+    }
+
+    /// Task 3 review I4: a write that waited 3 s for the lock with a 2 s ttl
+    /// is live when it commits (`now()` is the transaction's start, before
+    /// the wait; the clock is read under the lock).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_set_that_waited_longer_than_its_ttl_commits_live() {
+        let Some(db) = common::db().await else { return };
+        let (ws, _) = common::seed_workspace(&db).await;
+        let (fs, _) = hooked_fs(DEFAULT_CAP);
+        let g = wgrant(ws, NS3);
+        let holder = hold_lock(&db, lock_text(ws, NS3, "slow"), Duration::from_secs(3)).await;
+        let mut nv = new(json!("v"));
+        nv.ttl = Some(chrono::TimeDelta::seconds(2));
+        let started = std::time::Instant::now();
+        let e = written(set(&db.pool, &fs, &g, &key("slow"), nv, USER).await);
+        assert!(
+            started.elapsed() >= Duration::from_millis(2900),
+            "it did not wait"
+        );
+        holder.await.unwrap();
+        assert!(!e.expired, "born expired: {e:?}");
+        assert_eq!(
+            latest_value(&db, &fs, ws, NS3, "slow").await,
+            Some(json!("v"))
+        );
+    }
+
+    /// I4: `overwrite: false` over a key that expired while the writer
+    /// waited for the lock writes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn overwrite_false_over_a_key_that_expired_during_the_wait_writes() {
+        let Some(db) = common::db().await else { return };
+        let (ws, _) = common::seed_workspace(&db).await;
+        let (fs, _) = hooked_fs(DEFAULT_CAP);
+        let g = wgrant(ws, NS3);
+        let mut nv = new(json!("first"));
+        nv.ttl = Some(chrono::TimeDelta::seconds(2));
+        written(set(&db.pool, &fs, &g, &key("exp"), nv, USER).await);
+        // Live when the second writer begins, expired when it gets the lock.
+        let holder = hold_lock(&db, lock_text(ws, NS3, "exp"), Duration::from_secs(3)).await;
+        let mut nv = new(json!("second"));
+        nv.overwrite = false;
+        let e = written(set(&db.pool, &fs, &g, &key("exp"), nv, USER).await);
+        holder.await.unwrap();
+        assert_eq!(e.revision, 2);
+        assert_eq!(
+            latest_value(&db, &fs, ws, NS3, "exp").await,
+            Some(json!("second"))
+        );
+    }
+
+    /// I4: `created_at` rises with the revision even when a writer began its
+    /// transaction before the one that took the lock first. Another session
+    /// holds the key's lock and writes revision 1 as a writer does, a second
+    /// after the waiting writer began; the waiter's revision 2 is later.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn created_at_rises_with_the_revision() {
+        let Some(db) = common::db().await else { return };
+        let (ws, _) = common::seed_workspace(&db).await;
+        let (fs, _) = hooked_fs(DEFAULT_CAP);
+        let g = wgrant(ws, NS3);
+        let text = lock_text(ws, NS3, "mono");
+        let mut first = db.pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&text)
+            .execute(&mut *first)
+            .await
+            .unwrap();
+        let waiter = {
+            let (p, fs, g) = (db.pool.clone(), fs.clone(), g.clone());
+            tokio::spawn(async move { set(&p, &fs, &g, &key("mono"), new(json!("2")), USER).await })
+        };
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        sqlx::query(
+            "INSERT INTO workflow.kv_entries (workspace_id, namespace, key, revision, value_type, \
+               size, created_at) VALUES ($1, $2, 'mono', 1, 'STRING', 3, clock_timestamp())",
+        )
+        .bind(ws)
+        .bind(NS3)
+        .execute(&mut *first)
+        .await
+        .unwrap();
+        fs.store
+            .put(&fs.namespace_kv_uri(&g, &key("mono"), 1), b"\"1\"".to_vec())
+            .await
+            .unwrap();
+        first.commit().await.unwrap();
+        let e = written(waiter.await.unwrap());
+        assert_eq!(e.revision, 2);
+        let rows = rows_of(&db, ws, NS3, "mono").await;
+        assert!(
+            rows[0].created_at < rows[1].created_at,
+            "revision 1 at {}, revision 2 at {}",
+            rows[0].created_at,
+            rows[1].created_at
+        );
+    }
+
+    /// Review M3: an object that is not the size its row records (a revision
+    /// number reused after a purge) is never decoded under the row's type.
+    #[tokio::test]
+    async fn a_read_of_an_object_of_another_size_is_a_store_error() {
+        let Some(db) = common::db().await else { return };
+        let (ws, _) = common::seed_workspace(&db).await;
+        let (fs, store) = hooked_fs(DEFAULT_CAP);
+        let g = wgrant(ws, NS3);
+        let nv = NewValue {
+            value: KvValue {
+                kind: KvType::Number,
+                data: KvData::Number(KvNumber::Int("12345".into())),
+            },
+            description: None,
+            ttl: None,
+            overwrite: true,
+        };
+        written(set(&db.pool, &fs, &g, &key("aba"), nv, USER).await);
+        let mut c = conn(&db).await;
+        let e = resolve(&mut c, &grant(ws, NS3), &key("aba"), Want::Latest)
+            .await
+            .unwrap();
+        drop(c);
+        // Purged and rewritten under the same number, as another type.
+        store
+            .mem
+            .put(
+                &fs.namespace_kv_uri(&g, &key("aba"), 1),
+                b"\"a string\"".to_vec(),
+            )
+            .await
+            .unwrap();
+        match read_value(&fs, &grant(ws, NS3), &e).await {
+            Err(NsError::Store(m)) => {
+                assert!(
+                    m.contains("'aba'") && m.contains("changed while it was read"),
+                    "{m}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

@@ -924,6 +924,16 @@ fn java_duration(seconds: i64) -> String {
     out
 }
 
+/// The longest ttl, in days: 1,000 years (Task 3 review I3, spec §4.5,
+/// §15). `now() + ttl` then stays far inside Postgres's timestamp range
+/// (year 294276).
+pub const MAX_TTL_DAYS: i64 = 365_250;
+
+/// [`MAX_TTL_DAYS`] as a duration.
+pub fn max_ttl() -> chrono::TimeDelta {
+    chrono::TimeDelta::days(MAX_TTL_DAYS)
+}
+
 /// Where a ttl comes from: the two measured behaviours differ (Task 1 review I3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ttl {
@@ -959,6 +969,19 @@ pub fn parse_ttl(raw: &str, mode: Ttl) -> Result<chrono::TimeDelta, String> {
         });
     };
     let d = if negative { -d } else { d };
+    if d > max_ttl() {
+        // Task 3 review I3: past Postgres's timestamp range `now() + ttl`
+        // fails as a database error, an outage the run would be re-claimed
+        // for forever. A ttl is the author's, so it is bounded here.
+        return Err(match mode {
+            Ttl::Task => format!(
+                "ttl: '{raw}' is longer than {MAX_TTL_DAYS} days (1,000 years), the longest ttl"
+            ),
+            Ttl::Header => format!(
+                "ttl '{raw}' is longer than {MAX_TTL_DAYS} days (1,000 years), the longest ttl"
+            ),
+        });
+    }
     match mode {
         Ttl::Task if d <= chrono::TimeDelta::zero() => {
             Err("ttl: must be a positive duration".to_string())
@@ -2053,5 +2076,21 @@ mod tests {
             panic!()
         };
         assert_eq!(digits.len(), 1000, "16^830 - 1 has 1,000 digits");
+    }
+
+    /// Task 3 review I3: a ttl past 1,000 years is the author's, in both
+    /// modes, naming `ttl`; at the bound it is accepted.
+    #[test]
+    fn a_ttl_over_1000_years_is_refused_in_both_modes() {
+        for mode in [Ttl::Task, Ttl::Header] {
+            for raw in ["P200000000D", "P365251D", "PT31557600001S"] {
+                let err = parse_ttl(raw, mode).unwrap_err();
+                assert!(
+                    err.contains("ttl") && err.contains("365250 days"),
+                    "{mode:?} {raw}: {err}"
+                );
+            }
+            assert_eq!(parse_ttl("P365250D", mode), Ok(max_ttl()));
+        }
     }
 }
