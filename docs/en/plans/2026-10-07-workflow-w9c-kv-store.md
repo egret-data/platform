@@ -27,6 +27,12 @@
   - **Inheritance follows Kestra.** `kv()` with no namespace, or a `Get` whose namespace is the flow's own, walks up the parents on a dot boundary. An explicit namespace does not walk. The API has a list-inherited route.
   - **`secret()` inside a `Set` or `Put` value is refused at publish**, with a message saying the secret's value would be exposed through the KV store.
   - **Approved design points:** versions and soft delete follow W9b's R1; `PurgeKV` purges expired keys only, or by version (`before`/`keepAmount`), with `keyPattern`, by row id with keyset paging, and a version purge needs `keepAmount` or `before`; `Set` takes `key`, `value`, `overwrite` (default true), `ttl`, `kvType`, `kvDescription`, with strict BOOLEAN; `Get` outputs `value`, `GetKeys` takes `prefix` and is bounded by `max_namespace_files`, `Delete` outputs `deleted`; `Put` deep-merges under the key's lock; `kv()`'s `errorOnMissing` defaults to true and the tasks' to false; the API lives under `/api/ws/{ws}/workflows/namespaces/{ns}/kv…`, reads need `workflow:read` and writes `workflow:manage`, and a lock wait over 5 s answers 409.
+- **The user's rulings on this plan's gaps (2026-10-07), now in the spec's header:**
+  - the API's bulk `DELETE` takes at most **1,000 keys** per request, in one all-or-nothing transaction, and more answers 413 naming the cap (item 6);
+  - the server-paced store calls under a key's lock are **accepted** (item 7; the hold rule below);
+  - `Put` on an expired key treats it as **missing**: it starts fresh, carrying over no description and no TTL (item 8);
+  - a namespace of another workspace answers as an empty one: listings `200 []`, key reads 404 (item 9);
+  - items 4, 5, 12, 13 and 14 are recorded in the spec as decisions.
 - **Dedicated containers for this branch:** Postgres `egret-w9c-postgres` on :5440 (postgres:16, egret/egret, db egret_test), Valkey `egret-w9c-valkey` :6400, MinIO `egret-w9c-minio` :9001 (egret/egretsecret, bucket warehouse). The env for every cargo test includes `EGRET_TEST_STARROCKS_URL=mysql://localhost:9030`.
 - **Destructive tests run only on MemStore or under a throwaway prefix `w9c-tN-test/<uuid>/`. Never touch the shared dev DB or bucket. Never touch a kind cluster named `egret`.** On MinIO, a test builds a `FileStore` with that `prefix` and removes it with `delete_prefix` at the end. Never delete at the bucket root or under `workflow/`. Postgres means `egret-w9c-postgres` only. Task 1's `_kv` count runs **one read-only `SELECT`** on the dev database and touches nothing else there.
 - **No DB connection or lock may be held across slow I/O (client bodies, S3 streaming, plugin runs, renders). Ask this for every write path.** Each task has a **hold audit** step. It names every place a pool connection or an advisory lock is held, and what I/O happens while it is. The server-paced windows the spec accepts are named where they occur, with their bound:
@@ -34,7 +40,7 @@
   - `Put`'s bounded store read and store write, each at most `max_read_bytes`;
   - a purge's or the sweep's object deletes, under a session lock.
 
-  A client body, a render or a plugin run under a connection or a lock is a review failure.
+  **These three windows are an explicit allowance (the user's ruling, 2026-10-07; spec §4.3, §15)**, and they are the only ones. Client-paced I/O under a connection or a lock (a request body), a render and a plugin run stay forbidden; any of them is a review failure. API writers keep the 5 s lock wait, then 409 (`API_LOCK_WAIT`).
 - **Wait while `pgrep -x cargo` shows a build. Run clippy as `rtk proxy cargo clippy`.** Never two cargo test processes at once (memory `no-concurrent-test-suites-and-tail-buffering`). Keep at least 10 G free on the disk holding the target dir (memory `egret-target-dir-fills-the-disk`). An `E0432` that looks like a missing export is retried first with a private `CARGO_TARGET_DIR` (memory `shared-cargo-target-across-checkouts`).
 - **Migration number: the next free number on main. It is 0175 today; re-check at rebase.** Its comments are final at its first commit, because sqlx hashes comments (`VersionMismatch`). The file is not edited after Task 2's commit except by a fix-round commit on this branch before merge, and the report says so.
 - **The ratchet must not regress (294/108/108/0).** The line is `294 golden entries, 108 mismatching, 108 baselined, 0 broken` (`oracle-exec/README.md:9531`). `valids/retry-with-flowable-errors` also needs the `AllowFailure` flowable, so W9c alone cannot bank it, and `valids/kv` has no golden entry. A change is a finding to explain, not to bank.
@@ -42,7 +48,7 @@
 - **Known gate noise: worker-lease / flow_trigger_windows / task_logs wall-clock flakes. Re-run those alone.** The executor golden test has its own load flake: under host load, `executor_matches_golden` has reported 109 with `valids/retry-expo` stuck `RETRYING`. A gate that shows **that signature** re-runs the executor binary alone and reports both runs. Every other failure belongs to the task until measured otherwise (memory `pre-existing-is-a-hypothesis`).
 - **Reading the fixture.** In `w9c-kv.json`'s `egret_expected`, egret's answer is a cell's **top-level** value. A cell with `"basis": "chosen"` carries Kestra's measured answer under `kestra`, the reason under `why`, and the premises it rests on under `premise`, and is listed in `egret_expected_basis.chosen_cells` (dotted `path` and RFC 6901 `pointer`). A cell's `compare` names what is compared exactly and what is masked (ids, timestamps, generated names). A test asserts the top level, never `kestra`, and compares as `compare` says.
 - **Layout (§3):** object key `{workflow.storage.prefix}{workspace_id}/{ns-as-path}/_kv/{key}.ion` for revision 1, `…/{key}.ion.v{N}` for N ≥ 2. Staging is W9b's: `{prefix}{ws}/_nsfiles_staging/{uuid}`, in `workflow.namespace_file_staging`. **No URI names a KV value**: `storage::uri` does not change.
-- **Caps:** `max_read_bytes` (10 MiB) bounds every encoded value, written and read. `max_namespace_files` (10 000) bounds a listing, `GetKeys`, a bulk delete body and a purge page. `PurgeKV` covers at most 64 namespaces (`nsfiles::stage::MAX_NAMESPACES`). No new config key.
+- **Caps:** `max_read_bytes` (10 MiB) bounds every encoded value, written and read. `max_namespace_files` (10 000) bounds a listing, `GetKeys` and a purge page. The API's bulk delete body is bounded by `kv::store::MAX_BULK_DELETE_KEYS` (**1,000**, the user's ruling, 2026-10-07), a constant and not a config key. `PurgeKV` covers at most 64 namespaces (`nsfiles::stage::MAX_NAMESPACES`). No new config key.
 - **One access function, one key rule.**
   - `nsfiles::access::authorize(…, Resource::Kv, access)` is the only code that decides whether a namespace's KV may be read, written or purged. Every `storage::kv::store` function takes the `Grant` and calls `require(grant, Resource::Kv, access)`, so a namespace-file grant cannot reach KV and a Read grant cannot write. A second predicate anywhere is a review failure.
   - `storage::kv::key::check_key` (behind `KvKey::parse`) is the one key rule for the function, the tasks and the API.
@@ -101,17 +107,17 @@
 
 ## Where the spec is silent or does not fit the code, and what this plan does
 
-Each item is reported to the user with the plan. An implementer who finds that the code says otherwise stops and reports.
+Each item was reported to the user with the plan. **Ruled 2026-10-07:** items 6, 7, 8 and 9 by the user. Items 4, 5, 10, 12, 13 and 14 are recorded in the spec (EN and VI) as decisions or corrections. An implementer who finds that the code says otherwise stops and reports.
 
 1. **`authorize` gains a parameter, and that touches every W9b caller.** `git grep -n "authorize(" -- crates/egret-workflow` lists 66 call lines at `e04e452d` (comments and the definition excluded), 23 of them in `access.rs`. Each gains `Resource::NamespaceFiles`. `require` (`access.rs:180`; 14 lines in `storage/nsfiles` with the definition) gains a `Resource` too, so a KV grant cannot reach a namespace-file store function either (Task 2).
 2. **Two private modules have to open.** `executor::retry` is `mod retry;` (`executor/mod.rs:48`), so its Java-`Duration.parse` (`retry.rs:518`) is unreachable from `storage`; it becomes `pub(crate) mod retry;`. `runners::ionfmt` is `mod ionfmt;` (`runners/mod.rs:44`) and its JSON-to-Ion writer `write_ion_json` (`ionfmt.rs:266`) is private; both become `pub(crate)`. `ion-rs` stays a reader only: `Cargo.toml:191-197` records that its writer cannot produce Kestra's layout (Tasks 2, 5).
 3. **egret has no `renderTyped`.** Every render answers a `String` (`runners::render_str`). Task 5 adds `runners::env::render_typed`: a value that is exactly one `{{ … }}` expression is rendered as `{{ (…) | toJson }}` (`filters.rs:181`) and parsed back, so its type survives; anything else renders as a string. Task 1's `typed_render` cells decide which templates come back typed.
 4. **The first sweep pass.** W9b's staging sweeper uses `tokio::time::interval` (`staging.rs:199`), whose first tick fires at once. §11 says the KV sweep's first pass comes "after an hour", so `spawn_kv_expiry_sweeper` uses `interval_at(Instant::now() + every, every)` (Task 3).
 5. **A key named `inheritance` cannot be read by `GET …/kv/{key}`.** The key rule allows it, and the static route `…/kv/inheritance` takes it, as in Kestra (`KVController.java:73`, `:103`). The plan follows Kestra: the static route wins, a test pins that `PUT` and `DELETE` of that key work and that its `GET` answers the inheritance listing, and Task 8 records it as a known limit. Task 1 measures what Kestra answers for that key.
-6. **The bulk `DELETE` takes one advisory lock per key in one transaction**, up to `max_namespace_files` (10 000) locks (§9). Advisory locks use Postgres's shared lock table, which by default holds `max_locks_per_transaction` (64) × `max_connections` slots, about 6 400 on a stock server. A body at the cap can therefore fail with *out of shared memory*. Task 6 measures a 10 000-key bulk delete on `:5440` with defaults. If it fails, it **stops and reports**: lowering the bound or batching it is the user's decision.
-7. **The global hold rule versus the spec's server-paced windows.** `Put` holds a pool connection and the key's transaction lock across one store read and one store write, each at most `max_read_bytes` (§8.5). `Set` and the API's `PUT` hold them across one server-side copy and a `head` (§4.3). `PurgeKV` and the sweep hold a session lock across object deletes (§8.6, §11). The spec names each window as server-paced, and no client body, render or plugin run is ever inside one. The plan keeps them and names them in each hold audit, but they are S3 I/O under a lock. Report them, so the user can confirm the rule allows them.
-8. **`Put` over an expired latest revision.** §8.5 keeps the latest revision's description and `expires_at`, but §4.5 makes an expired key a missing one. The plan treats an expired key as missing for `Put` (no description or expiry carried; `errorOnMissing` decides). Task 1's `put_merge.over_expired` cell records Kestra's answer beside it, as a chosen cell if they differ.
-9. **"Another workspace's namespace → 404"** (§9's table) against §13's "byte-identical to an empty namespace's". A listing of a namespace with no keys is `200 []`. So the plan answers another workspace's namespace exactly as an empty one on every route: the listings `200 []`, a key read or `revisions` `404`. A test compares the bytes.
+6. **The bulk `DELETE` takes one advisory lock per key in one transaction** (§9). Advisory locks use Postgres's shared lock table, which by default holds `max_locks_per_transaction` (64) × `max_connections` slots, about 6 400 on a stock server, so a body of `max_namespace_files` (10 000) keys could fail with *out of shared memory*. **Ruled 2026-10-07: the bulk delete takes at most 1,000 keys per request** (`MAX_BULK_DELETE_KEYS`). It stays one all-or-nothing transaction, and a body over the cap answers 413 naming it. Tasks 3 and 6 test 1,000 accepted and 1,001 refused.
+7. **The global hold rule versus the spec's server-paced windows.** `Put` holds a pool connection and the key's transaction lock across one store read and one store write, each at most `max_read_bytes` (§8.5). `Set` and the API's `PUT` hold them across one server-side copy and a `head` (§4.3). `PurgeKV` and the sweep hold a session lock across object deletes (§8.6, §11). **Ruled 2026-10-07: accepted** (spec §4.3, §15), as the explicit allowance in the Global Constraints' hold rule. Each hold audit still names every window.
+8. **`Put` over an expired latest revision.** **Ruled 2026-10-07: an expired key is missing to `Put`.** `Put` starts fresh and carries over no description and no expiry; `errorOnMissing` decides. Spec §8.5 now agrees with §4.5. Task 1's `put_merge.over_expired` cell records Kestra's answer beside it, as a chosen cell if they differ.
+9. **Another workspace's namespace.** **Ruled 2026-10-07:** it answers exactly as an empty namespace. The listings answer `200 []`; a key read or `revisions` answers `404`. Spec §9 now agrees with §13, and a test compares the bytes.
 10. **§10 says `ShimRunContext.java:52`'s class doc mentions W9c. It does not** (`:52` reads "KV, secrets, encryption, ACLs and the application context throw `EgretUnsupported`"). W9c is named at `ShimRunContext.java:341`, `EgretUnsupported.java:4`, `EgretPluginHost.java:58`, `EgretPluginHostTest.java:125-126` and `kestra.rs:79`, `:379`, `:1317-1321`. Task 7 changes exactly those.
 11. **The render's connection and the object read.** W9b's `Snapshot::ns_lookup` (`scope.rs:343-396`) holds the scope's connection mutex across the object read. `kv()` releases the mutex before reading the object. The connection itself belongs to the render scope (it is not pooled) and stays open until `end_render`, as W9b's does; no advisory lock is taken on a read (Task 4).
 12. **§4.1's index on `(workspace_id, namespace, key, revision DESC)`** duplicates the unique constraint's index, which leads with the same columns and is scanned backwards for the latest row (W9b's item 8). The plan adds no duplicate, records `EXPLAIN` on 10 000 rows, and adds the partial `expires_at` index the spec asks for (Task 2).
@@ -588,7 +594,9 @@ pub enum Deleted { Deleted, Missing, Already }
 pub async fn delete(pool: &PgPool, grant: &Grant, key: &KvKey, by: CreatedBy) -> Result<Deleted, NsError>;
 /// §9's bulk delete: keys sorted and de-duplicated, ONE transaction taking each key's lock in
 /// ascending order (each wait bounded by the grant's lock_wait), all or nothing. Answers the keys
-/// that were live and are now deleted. More than max_namespace_files keys: TooLarge, nothing taken.
+/// that were live and are now deleted. More than MAX_BULK_DELETE_KEYS keys: TooLarge naming the cap,
+/// nothing taken (the user's ruling, 2026-10-07).
+pub const MAX_BULK_DELETE_KEYS: usize = 1_000;
 pub async fn delete_many(pool: &PgPool, fs: &FileStore, grant: &Grant, keys: &[KvKey], by: CreatedBy)
     -> Result<Vec<KvKey>, NsError>;
 /// §8.6, per key: require(Kv, Purge); on `detached`, take the key's SESSION lock (LockedSession,
@@ -659,6 +667,7 @@ async fn concurrent_writers_get_distinct_revisions_and_keys() { /* 8 writers x 5
     // CreatedBy::TaskRun { run }: Set twice -> Written then Already (one row); overwrite false twice
     // -> no Conflict against itself; Put twice -> one merge; Delete twice -> Deleted then Already
 }
+#[tokio::test] async fn delete_many_takes_1000_keys_and_refuses_1001_naming_the_cap() { /* 1,001: TooLarge, no lock taken, no row changed */ }
 #[tokio::test] async fn delete_many_is_all_or_nothing_and_answers_the_live_keys() {
     // one key's lock held by another session past lock_wait: Conflict naming that key, NO key deleted
 }
@@ -1024,9 +1033,10 @@ pub fn parse_api_body(body: &[u8]) -> KvValue;
 #[tokio::test] async fn a_key_named_inheritance_is_written_and_deleted_and_its_get_is_the_listing() { /* item 5 */ }
 #[tokio::test] async fn delete_answers_true_then_false() {}
 #[tokio::test] async fn bulk_delete_is_all_or_nothing_and_lists_the_live_keys() {}
-#[tokio::test] async fn bulk_delete_of_max_namespace_files_keys_succeeds_on_a_stock_server() {
-    // item 6: 10 000 keys at the default cap on :5440 with default max_locks_per_transaction.
-    // If it fails with "out of shared memory": STOP and report; do not lower the cap here.
+#[tokio::test] async fn bulk_delete_of_1000_keys_is_accepted_and_1001_is_413_naming_the_cap() {
+    // item 6, the user's ruling (2026-10-07): 1,000 live keys on :5440 with the server's default
+    // max_locks_per_transaction -> 200, all 1,000 listed and deleted; 1,001 -> 413 naming 1,000,
+    // and no key deleted
 }
 #[tokio::test] async fn another_workspaces_namespace_answers_byte_for_byte_as_an_empty_one() { /* item 9, every route */ }
 #[tokio::test] async fn listings_past_max_namespace_files_are_413() {}
@@ -1050,7 +1060,7 @@ pub fn parse_api_body(body: &[u8]) -> KvValue;
     The route gets `DefaultBodyLimit::disable()`, as the namespace-file upload does (`routes.rs:2463-2464`).
   - `GET …/kv/{key}`: `resolve` on a pool connection, connection released, then `read_value`, then `KvDetailDto`.
   - `inheritance`: grants for `ancestors(ns)[1..]`, then `list_inherited`.
-  - Bulk `DELETE`: `axum::Json<KvKeysBody>`, a malformed body answered through `bad_request`; each key parsed (400 naming it); more than `max_namespace_files` → 413; then `delete_many`.
+  - Bulk `DELETE`: `axum::Json<KvKeysBody>`, a malformed body answered through `bad_request`; each key parsed (400 naming it); more than `MAX_BULK_DELETE_KEYS` (1,000) → 413 naming the cap, before any lock; then `delete_many`.
   - Audit follows item 14.
   - utoipa documents every response, as `upload_namespace_file` does (`nsfiles/routes.rs:908-932`), including the 409 "busy" and the `inheritance` key collision (item 5).
 - [ ] **Step 4: Run the tests to see them pass.** Then:
@@ -1066,6 +1076,7 @@ pub fn parse_api_body(body: &[u8]) -> KvValue;
   - (d) the body read after `grant` takes a pool connection it keeps (the stall test dies);
   - (e) `GET` of a deleted key served latest (404 dies);
   - (f) the bulk delete committing per key (all-or-nothing dies);
+  - (f2) the bulk cap checked with `>=` (the 1,000-accepted test dies) or removed (the 1,001 test dies);
   - (g) the list route answering 404 for another workspace (byte-identity dies).
 - [ ] **Step 7: Commit** `feat(workflow): W9c Task 6 — the KV API`.
 
@@ -1134,8 +1145,8 @@ namespaceKv(): egret gives flows the KV store through the `io.kestra.plugin.core
     - a KV value is at most `max_read_bytes`;
     - the hourly expiry sweep on every process with a store;
     - the plugin host's new `namespaceKv` message;
-    - the known limits of spec §15, plus item 5 (a key named `inheritance`).
-  - **The W9c spec, EN and VI:** the dated corrections this plan's reports list, including items 5, 6, 8, 9, 10, 13 and 14 as ruled.
+    - the known limits of spec §15 (the key `inheritance`, the 1,000-key bulk cap and the accepted lock windows included).
+  - **The W9c spec, EN and VI:** the dated corrections the task reports list. Items 4-10, 12, 13 and 14 are already in the spec (the user's rulings of 2026-10-07); add only what the implementation measured otherwise.
   - **Sweep** (N examined / M corrected per population, `/usr/bin/grep` with file arguments): (1) `\bW9c\b` in `crates/egret-workflow/src`, `plugin-host/src` and both programme specs; (2) `namespaceKv` in docs and doc comments; (3) `"the namespace KV store"`.
 - [ ] **Step 5: Full local CI**, compared with Task 1's baselines:
   - `cargo fmt --all --check`;

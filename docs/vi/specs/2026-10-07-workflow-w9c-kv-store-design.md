@@ -21,6 +21,17 @@
   - `kv()` dùng kết nối theo-render của W9b và `authorize(Read)`. `errorOnMissing` của nó mặc định true; của các task mặc định false.
   - API nằm dưới `/api/ws/{ws}/workflows/namespaces/{ns}/kv…`. Nó có list, list kế thừa, get (kèm type), revisions, put (qua staging, có giới hạn body và timeout), delete và bulk delete. Đọc cần `workflow:read`, ghi cần `workflow:manage`. Chờ lock quá 5 s trả 409. Status theo quy ước của W9b.
   - Hình dạng của plan (§12) và cách kiểm thử (§13), với bài học của W9b làm ràng buộc toàn cục.
+- **(2026-10-07, phán quyết của người dùng về các khoảng trống của plan)**
+  - **Bulk delete.** `DELETE` hàng loạt của API nhận tối đa **1.000 key mỗi request**. Nó vẫn là một transaction tất cả hoặc không gì cả. Một body vượt trần trả 413, nêu trần (§9). Một advisory lock cho mỗi key, trong một transaction, ở mức `max_namespace_files` key có thể làm cạn bảng lock dùng chung của Postgres (`max_locks_per_transaction` × `max_connections`, khoảng 6 400 chỗ trên một server mặc định).
+  - **Các lời gọi store do server điều nhịp dưới lock của key được chấp nhận.** Đó là lần đọc và ghi có giới hạn của `Put`, lần copy và `head` của `Set` và `PUT` của API, và các lần xoá object của `PurgeKV` và đợt quét hết hạn. I/O do client điều nhịp dưới lock (một body request), một lần render và một lần chạy plugin vẫn bị cấm. Người ghi qua API giữ thời gian chờ lock 5 s, rồi 409 (§4.3, §15).
+  - **`Put` trên một key đã hết hạn coi nó là không có.** Nó bắt đầu mới và không mang theo description hay hạn nào (§4.5, §8.5).
+  - **Một namespace của workspace khác** trả lời y như một namespace rỗng. Các danh sách trả `200 []`; đọc một key và `revisions` trả 404 (§9, §13).
+  - **Các quyết định ghi lại từ plan:**
+    - một key tên `inheritance` không đọc được bằng `GET …/kv/{key}`, như ở Kestra (§9, §15);
+    - lượt quét đầu tiên đến sau một chu kỳ kể từ lúc khởi động (`interval_at`; §11);
+    - `PurgeKV` đọc lại và xét các dòng của một key dưới lock session của key (§8.6);
+    - không có index dòng-mới-nhất thứ hai (§4.1);
+    - cách viết của audit (§9).
 
 **Giao hàng:** một PR (docs và code), tám task trong §12, cài theo một plan viết sau spec này.
 
@@ -66,7 +77,7 @@ Kestra (source `96893b589`; artifact `2.0.0-rc13`, nightly `169ca7f2`, image mà
 | `PurgeKV` không có `namespaces` xoá mọi namespace; trong source, con được khớp theo tiền tố chuỗi | mặc định là namespace của chính flow (và các con của nó); con khớp theo ranh giới dấu chấm (§8.6) | quy tắc purge (§5) |
 | `PurgeKV` `behavior: {type: key, expiredOnly: false}` xoá cứng mọi key khớp | bị từ chối, nêu `behavior: {type: version, keepAmount: 0}` là dạng xoá mọi revision (§8.6) | phán quyết của người dùng rằng `PurgeKV` xoá "chỉ cái hết hạn, hoặc theo version"; xoá toàn bộ có một cách viết tường minh, như ở W9b |
 | `PurgeKV` `behavior: {type: version}` không có cả `keepAmount` lẫn `before`: **đo ở Task 1** | bị từ chối, nêu cả hai thuộc tính (§8.6) | quy tắc của W9b (2026-10-06, review Task 7 C2), áp dụng ở đây theo quyết định của người dùng |
-| bulk `DELETE` bỏ qua lỗi IO từng key | một transaction, tất cả hoặc không gì cả; câu trả lời liệt kê các key đã còn sống (§9) | một câu trả lời nói "đã xoá" nghĩa là đã xoá |
+| bulk `DELETE` bỏ qua lỗi IO từng key | một transaction, tất cả hoặc không gì cả, tối đa 1.000 key; câu trả lời liệt kê các key đã còn sống (§9) | một câu trả lời nói "đã xoá" nghĩa là đã xoá |
 | `RunContext.namespaceKv` phục vụ plugin | plugin host từ chối nó với một lý do chỉ tới các task `core.kv.*` (§10) | quyết định của người dùng (2026-10-07): không plugin nào trong catalog gọi nó |
 
 ## 3. Bố cục storage và key
@@ -87,7 +98,7 @@ Kestra (source `96893b589`; artifact `2.0.0-rc13`, nightly `169ca7f2`, image mà
 - `description text` (nullable); `expires_at timestamptz` (nullable; null thì không bao giờ hết hạn).
 - `deleted bool` mặc định false; `deleted_at timestamptz` và `deleted_by_user`, `deleted_by_execution`, `deleted_by_task_run` (nullable, đặt cùng lúc với `deleted`).
 - `created_at timestamptz` mặc định `now()`; `created_by_user`, `created_by_execution`, `created_by_task_run` với CHECK một-người-ghi của W9b (`CreatedBy::{User, Execution, TaskRun}`).
-- `UNIQUE (workspace_id, namespace, key, revision)`; một index trên `(workspace_id, namespace, key, revision DESC)` cho dòng mới nhất; một index một phần trên `expires_at` với `expires_at IS NOT NULL` cho đợt quét.
+- `UNIQUE (workspace_id, namespace, key, revision)`, index của nó cũng phục vụ dòng mới nhất; một index một phần trên `expires_at` với `expires_at IS NOT NULL` cho đợt quét. *(2026-10-07, phán quyết của người dùng: index của ràng buộc unique bắt đầu bằng `(workspace_id, namespace, key)` và được quét ngược để lấy dòng mới nhất, như của W9b. Một index riêng trên `(workspace_id, namespace, key, revision DESC)` sẽ trùng lặp, nên không tạo.)*
 
 Các cột `deleted_by_*` vượt ra ngoài danh sách cột người dùng đã nêu: chúng cho một `Delete` được claim lại sau sự cố nhận ra lần xoá trước của chính nó (§8.4, §11). **Một giá trị KV chỉ tồn tại khi dòng của nó tồn tại.** Dòng mới nhất của một key là revision cao nhất của nó; dòng đó là trạng thái của key.
 
@@ -116,7 +127,12 @@ Mọi lần ghi (`Set`, `Put`, `PUT` của API) có hình dạng này. Bài họ
    - commit.
 4. **Quên** staging object và dòng của nó trên mọi lối ra (đã ghi, bỏ qua, bị từ chối, thất bại).
 
-`Put` bỏ bước 2 và khác ở bước 3: nó đọc, merge và ghi dưới lock (§8.5). Một `Delete` lấy cùng lock và cập nhật dòng mới nhất (§4.4). Lock tuần tự hoá mọi người ghi của một key, và khoảng thời gian nó bao do server điều nhịp: một lần copy phía server, hoặc lần đọc và ghi có giới hạn của `Put`.
+`Put` bỏ bước 2 và khác ở bước 3: nó đọc, merge và ghi dưới lock (§8.5). Một `Delete` lấy cùng lock và cập nhật dòng mới nhất (§4.4). Lock tuần tự hoá mọi người ghi của một key, và khoảng thời gian nó bao do server điều nhịp: một lần copy phía server, hoặc lần đọc và ghi có giới hạn của `Put`. *(2026-10-07, phán quyết của người dùng.)* Các lời gọi store do server điều nhịp này dưới lock của key được **chấp nhận**:
+- lần đọc và ghi của `Put`, mỗi lần tối đa `max_read_bytes`;
+- lần copy và `head` của `Set` và `PUT` của API;
+- các lần xoá object của `PurgeKV` và đợt quét, dưới lock session.
+
+I/O do client điều nhịp dưới lock vẫn bị cấm: body của request được đọc và stage trước khi lấy lock nào (§9). Một người ghi qua API vẫn chờ lock tối đa 5 s, rồi trả 409.
 
 ### 4.4 Revision và xoá mềm
 
@@ -133,7 +149,7 @@ Theo R1 của W9b:
 - **Còn sống** nghĩa là dòng mới nhất không bị xoá và `expires_at` là null hoặc muộn hơn `now()` của database. Mọi lần đọc bản mới nhất (`kv()`, `Get`, `GetKeys`, list, get và inheritance của API) chỉ trả lời từ các dòng còn sống.
 - **Hết hạn nghĩa là không có.** Một key hết hạn đọc y như một key chưa từng được ghi: `kv()` và `Get` tuân theo `errorOnMissing`, `GetKeys` và các danh sách bỏ nó ra, `Set` với `overwrite: false` được ghi đè lên nó. Đọc một revision chỉ rõ đã hết hạn cũng là không tìm thấy.
 - **Đọc không bao giờ ghi.** Không gì trên đường đọc chèn, cập nhật hay xoá; đợt quét (§11) và `PurgeKV` xoá các key hết hạn.
-- **Hạn được cố định lúc ghi:** `expires_at = now() + ttl`, theo đồng hồ của database trong transaction của lần commit. `Put` giữ `expires_at` và description của revision mới nhất (Kestra, `Put.java:121`).
+- **Hạn được cố định lúc ghi:** `expires_at = now() + ttl`, theo đồng hồ của database trong transaction của lần commit. `Put` giữ `expires_at` và description của revision mới nhất (Kestra, `Put.java:121`) khi revision đó còn sống. Với `Put`, cũng như với mọi người đọc, một key hết hạn là không có: `Put` bắt đầu mới, không có description và không có hạn (§8.5; phán quyết của người dùng, 2026-10-07).
 - Một lần đọc phân giải dòng còn sống mới nhất, rồi đọc object của revision đó (chặn bởi `max_read_bytes`, §4.2). **Một object thiếu phía sau một dòng là lỗi tác giả nêu key và revision**, không có lùi về (quy tắc của W9b). Store hay database không với tới được là lỗi hạ tầng (§11).
 
 ### 4.6 Kế thừa
@@ -201,12 +217,12 @@ Handler native trong worker, như các task `core.namespace` của W9b; mỗi c�
 - `key`, `value` (mọi type), `namespace` (quy tắc ghi), `errorOnMissing` (mặc định false).
 - **Quy tắc merge** theo artifact (`Put.java:72-121`): một map deep-merge vào một map; một list các mục `{key, value}` vá các đường dẫn có chấm; một mục `[{value}]` đơn thay cả giá trị. Ngữ nghĩa chính xác được **đo ở Task 1** và ghim bằng các ô fixture: map lồng nhau, mảng trong map, xung đột type giữa một map và một scalar, một key không có với từng `errorOnMissing`, và một đường dẫn có chấm đi qua một tầng không có. egret cài theo fixture.
 - **Dưới lock của key.** `Put` chạy bước 1 của §4.3 cho bản vá của nó và không stage gì, vì các byte đã merge chỉ tồn tại dưới lock. Rồi, trong transaction commit, giữ lock:
-  - đọc dòng còn sống mới nhất, và object của nó (chặn bởi `max_read_bytes`);
+  - đọc dòng còn sống mới nhất, và object của nó (chặn bởi `max_read_bytes`). Một key chưa từng ghi, đã xoá mềm hay đã **hết hạn** là không có: `errorOnMissing` quyết định, và lần ghi bắt đầu mới (phán quyết của người dùng, 2026-10-07; §4.5);
   - merge;
   - kiểm kích thước đã mã hoá của kết quả merge với `max_read_bytes`: một kết quả lớn hơn làm task thất bại, nêu trần, và không gì được ghi;
   - ghi object đã merge thẳng vào key của revision;
   - `head` nó;
-  - chèn dòng, giữ description và `expires_at` của revision mới nhất, với type của giá trị đã merge;
+  - chèn dòng, giữ description và `expires_at` của revision còn sống mới nhất (một key không có thì không mang theo cái nào), với type của giá trị đã merge;
   - commit.
 
   Lock bao một lần đọc store có giới hạn do server điều nhịp và một lần ghi store, không bao giờ một body của người gọi.
@@ -222,14 +238,14 @@ Handler native trong worker, như các task `core.namespace` của W9b; mỗi c�
   - `{type: version, keepAmount, before}` giữ `keepAmount` revision cao nhất của mỗi key khớp, và xoá các revision tạo vào hoặc trước `before`, không bao giờ cái mới nhất. Một key đã xoá mềm bị xoá hoàn toàn (quy tắc của W9b). `keepAmount: 0` xoá mọi revision. Một behaviour `version` không có cả hai thuộc tính bị từ chối, nêu cả hai và nói rằng `keepAmount: 0` xoá tất cả.
 - **Thực thi, như `PurgeFiles` của W9b:**
   - Dòng được đọc theo trang keyset `max_namespace_files + 1` theo `(key, revision)`.
-  - Các key trọn vẹn của mỗi trang được xét và xoá theo từng key, dưới lock session của key (`LockedSession`). Mỗi lần xoá xoá dòng theo id, commit, rồi xoá object, rồi mở khoá. Lock vẫn được giữ khi xoá object, nên một người ghi không thể dùng lại key object của một số revision vừa được giải phóng ở giữa.
+  - Các key trọn vẹn của mỗi trang được xoá theo từng key, dưới lock session của key (`LockedSession`). *(2026-10-07, phán quyết của người dùng.)* Dưới lock đó các dòng của key được **đọc lại và xét theo trạng thái lúc ấy**, như đợt quét làm (§11), nên một key được ghi lại sau lần liệt kê được xét theo các dòng mới của nó. Mỗi lần xoá xoá dòng theo id, commit, rồi xoá object, rồi mở khoá. Lock vẫn được giữ khi xoá object, nên một người ghi không thể dùng lại key object của một số revision vừa được giải phóng ở giữa.
   - Một key giữ nhiều revision hơn trần làm task thất bại, nêu nó, với các key trước nó đã được xoá.
   - Lần purge chạy tới cùng trên một task tách rời.
 - **Output** `{size}`: số đếm Kestra báo, revision hay key, **đo ở Task 1**.
 
 ## 9. API KV
 
-Dưới `/api/ws/{ws}/workflows/namespaces/{ns}/kv`, phản chiếu `KVController`, với quy ước route của W9b (`WsContext`, rồi `egret_core::authz::require` với `WF_READ` hay `WF_MANAGE`, rồi `authorize(…, Actor::Api, …)`; `no_store()` trả 503 khi không có `[storage]`; mỗi lần ghi phát một audit mutation `workflow_namespace_kv:{ns}/{key}`; không có quyền mới).
+Dưới `/api/ws/{ws}/workflows/namespaces/{ns}/kv`, phản chiếu `KVController`, với quy ước route của W9b (`WsContext`, rồi `egret_core::authz::require` với `WF_READ` hay `WF_MANAGE`, rồi `authorize(…, Actor::Api, …)`; `no_store()` trả 503 khi không có `[storage]`; mỗi lần ghi phát một audit mutation; không có quyền mới). *(2026-10-07, phán quyết của người dùng về cách viết của audit, theo dạng của W9b.)* Action là `workflow_namespace_kv:{put|delete|delete_many}` và resource type là `workflow_namespace_kv`. Resource id là `{ns}/{key}`, hoặc `{ns}` cho một bulk delete, liệt kê các key trong detail của nó.
 
 | route | quyền | trả lời |
 |---|---|---|
@@ -239,7 +255,7 @@ Dưới `/api/ws/{ws}/workflows/namespaces/{ns}/kv`, phản chiếu `KVControlle
 | `GET …/kv/{key}/revisions` | `workflow:read` | mọi revision: `revision`, `type`, `size`, `description`, `expiresAt`, `created`, `deleted`, `expired`; 404 khi key không có dòng nào |
 | `PUT …/kv/{key}` | `workflow:manage` | body `text/plain`, parse như Ion và lùi về chuỗi thô (Kestra, `:124-141`); header `description` và `ttl` (ISO-8601); luôn ghi đè; §4.3; 200 không có body |
 | `DELETE …/kv/{key}` | `workflow:manage` | §4.4; `true` khi một key còn sống đã bị xoá, `false` khi không có (200 cả hai trường hợp) |
-| `DELETE …/kv` | `workflow:manage` | body `{keys: […]}`, tối đa `max_namespace_files` key; một transaction lấy lock của từng key theo thứ tự tăng dần, tất cả hoặc không gì cả; `{keys: […]}` liệt kê các key đã còn sống và nay đã bị xoá |
+| `DELETE …/kv` | `workflow:manage` | body `{keys: […]}`, tối đa **1.000** key (phán quyết của người dùng, 2026-10-07; hơn thế là 413 nêu trần); một transaction lấy lock của từng key theo thứ tự tăng dần, tất cả hoặc không gì cả; `{keys: […]}` liệt kê các key đã còn sống và nay đã bị xoá |
 
 - **Body của `PUT`** bị chặn bởi `max_read_bytes` (nó được parse trong bộ nhớ để gán kiểu, §4.2), và giá trị đã mã hoá cũng vậy (phán quyết của người dùng, 2026-10-07). Nó được đọc với các timeout body của W9b: không byte nào trong 30 giây, hoặc hơn 12 giờ tổng cộng, trả 408 và không ghi gì. Body được đọc và stage trước khi lấy lock nào.
 - **Chờ lock:** một lần ghi qua API chờ lock của key tối đa 5 s (`API_LOCK_WAIT`), rồi trả 409 "the key is busy (another write holds it); try again", nêu key, không giữ gì.
@@ -248,23 +264,25 @@ Dưới `/api/ws/{ws}/workflows/namespaces/{ns}/kv`, phản chiếu `KVControlle
 | lỗi | status |
 |---|---|
 | quy tắc key, một namespace bị từ chối (không hợp lệ, segment rỗng, segment `_files` hay `_kv`), một `ttl` sai dạng hay âm, một `revision` không phải số nguyên, một body bulk sai dạng | 400 |
-| không có dòng còn sống: một key không biết, đọc bản mới nhất của một key đã xoá mềm, một key hay revision đã hết hạn, một revision không biết, namespace của workspace khác | 404 |
+| không có dòng còn sống: một key không biết, đọc bản mới nhất của một key đã xoá mềm, một key hay revision đã hết hạn, một revision không biết, đọc một key hay `revisions` trong namespace của workspace khác (như trong một namespace rỗng) | 404 |
 | lock của key bị giữ lâu hơn 5 s | 409 |
-| một body `PUT` hay giá trị đã mã hoá của nó vượt `max_read_bytes`, một giá trị đã lưu vượt `max_read_bytes` khi `GET`, một danh sách hay body bulk vượt `max_namespace_files` | 413 |
+| một body `PUT` hay giá trị đã mã hoá của nó vượt `max_read_bytes`, một giá trị đã lưu vượt `max_read_bytes` khi `GET`, một danh sách vượt `max_namespace_files`, một body bulk quá 1.000 key | 413 |
 | một body đứng 30 s hay kéo dài quá 12 h | 408 |
 | store hay database không với tới được | 503, ghi log với một thông báo cố định; lỗi của database không bao giờ được gửi đi |
 
-Không thông báo nào nêu key storage hay workspace khác. Một namespace mà workspace khác giữ trả lời y như một namespace chưa từng chứa gì. **Không route GET nào ghi** (§4.5). utoipa mô tả mọi route; client frontend được sinh lại bằng `npm run gen:api`. UI là của W7.
+Không thông báo nào nêu key storage hay workspace khác. Một namespace mà workspace khác giữ trả lời y như một namespace chưa từng chứa gì. *(2026-10-07, phán quyết của người dùng.)* Các danh sách (`GET …/kv`, `…/kv/inheritance`) trả `200 []`, và đọc một key hay `revisions` trả 404, giống từng byte như với một namespace rỗng (§13).
+
+**Một key tên `inheritance`** là hợp lệ, nhưng `GET …/kv/inheritance` là route kế thừa, nên giá trị của nó không đọc được bằng `GET …/kv/{key}`. Đây cũng là va chạm của Kestra (`KVController.java:73`, `:103`). `PUT`, `DELETE` và `…/revisions` của nó vẫn chạy, và các task cùng `kv()` đọc được nó (§15; phán quyết của người dùng, 2026-10-07). **Không route GET nào ghi** (§4.5). utoipa mô tả mọi route; client frontend được sinh lại bằng `npm run gen:api`. UI là của W7.
 
 ## 10. Plugin host
 
-- Không có cầu KV: `ShimRunContext.namespaceKv` tiếp tục ném `EgretUnsupported`, với một thông báo mới: *namespaceKv(): egret gives flows the KV store through the `io.kestra.plugin.core.kv` tasks and the `kv()` function, not through a plugin's RunContext; use a `core.kv` task before or after this one.* `EgretPluginHostTest.java:125-126` ghim thông báo mới, và các chỗ doc nhắc tới (`ShimRunContext.java:52`, `EgretUnsupported.java:4`, `EgretPluginHost.java:58`) bỏ "W9c".
+- Không có cầu KV: `ShimRunContext.namespaceKv` tiếp tục ném `EgretUnsupported`, với một thông báo mới: *namespaceKv(): egret gives flows the KV store through the `io.kestra.plugin.core.kv` tasks and the `kv()` function, not through a plugin's RunContext; use a `core.kv` task before or after this one.* `EgretPluginHostTest.java:125-126` ghim thông báo mới, và thông báo ở `ShimRunContext.java:341` cùng các chỗ doc nhắc tới (`EgretUnsupported.java:4`, `EgretPluginHost.java:58`) bỏ "W9c". *(Sửa ngày 2026-10-07: câu này ban đầu dẫn `ShimRunContext.java:52`, mà doc lớp không nêu gói nào và giữ nguyên.)*
 - Thông báo exit-4 của handler (`worker/handlers/kestra.rs:379`) bỏ "the KV store — W9c": *the plugin needs a Kestra service egret does not provide to plugins*, theo sau là lý do của host, nêu `namespaceKv` và các task `core.kv`. Doc module (`:79`) và test ghim (`:1317-1321`) đi theo.
 - Không gì được stage cho KV, nên `task.json` và kiểm tra số byte của task (`check_task_bytes`) không đổi.
 
 ## 11. Vòng đời và phân loại lỗi
 
-- **Đợt quét hết hạn.** Mọi process egret có store khởi động `spawn_kv_expiry_sweeper` bên cạnh staging sweeper của W9b. Nó chạy mỗi giờ, lần đầu sau một giờ, trên mọi workspace:
+- **Đợt quét hết hạn.** Mọi process egret có store khởi động `spawn_kv_expiry_sweeper` bên cạnh staging sweeper của W9b. Nó chạy mỗi giờ, lần đầu sau một giờ, trên mọi workspace. *(2026-10-07, phán quyết của người dùng.)* Nó dùng `interval_at(now + every, every)`, không dùng `interval`, vì tick đầu tiên của `interval` chạy ngay (staging sweeper của W9b dùng `interval`):
   - Nó liệt kê, theo trang keyset 1000 theo row id, các key có dòng mới nhất với `expires_at <= now()` (index một phần).
   - Với mỗi key, nó lấy lock session của key bằng `pg_try_advisory_lock` và bỏ qua key khi nó bận; lượt sau thử lại.
   - Dưới lock nó đọc lại dòng mới nhất. Nếu dòng đó vẫn hết hạn, nó xoá các dòng của key theo các id đã đọc, commit, xoá object, rồi mở khoá.
@@ -334,7 +352,7 @@ Không lỗi nào nêu một secret, một key storage hay workspace khác.
 - **Test phá huỷ** chỉ trên `MemStore` hoặc một prefix MinIO dùng-một-lần (§12).
 - **Render:** `kv()` trong `runIf`, `If`, `Switch` và một thuộc tính task; một sự cố đặt `infrastructure_failure` và claim lại; một lần render không có execution từ chối nó theo tên.
 - **Publish:** `secret()` trong giá trị `Set` và `Put` bị từ chối với `secret_in_kv_value` và thông báo của nó; một namespace `_kv` bị từ chối; `valids/kv.yaml` vẫn publish được.
-- **API:** `workflow:read` so với `workflow:manage`; mọi dòng của bảng status; 409 bận sau 5 s; các giới hạn body và các 408; 404 cho namespace của workspace khác, giống từng byte với câu trả lời của một namespace rỗng.
+- **API:** `workflow:read` so với `workflow:manage`; mọi dòng của bảng status; 409 bận sau 5 s; các giới hạn body và các 408; một bulk delete 1.000 key được nhận và 1.001 key bị từ chối với 413; namespace của workspace khác giống từng byte với một namespace rỗng (danh sách `200 []`, đọc key 404).
 - **Plugin host:** thông báo mới của `namespaceKv` và exit-4, được ghim.
 - **Oracle:** các ô egret của fixture chạy lại với bản build; ratchet đo trước và sau và ghi vào `oracle-exec/README.md`.
 - **End to end** trên một cụm kind tạm: một flow `Set`, đọc bằng `kv()` và `Get`, `Put`, `Delete` và purge; một TTL hết hạn và được quét; API từ bên ngoài.
@@ -356,3 +374,11 @@ Một cầu KV cho plugin (§10); một danh sách phân trang xuyên namespace 
 - Xoá một workspace cascade xoá các dòng `workflow.kv_entries` của nó và để lại các object `_kv` của nó trong storage, như namespace file của W9b bị để lại.
 - Lúc render, mọi lỗi database của một lần tra `kv()` là sự cố, được claim lại mà không tốn attempt, và một lần tra chỉ bị chặn bởi TCP timeout của hệ điều hành; đây là giới hạn render của W9b, dùng chung (W9b §15).
 - Một namespace có segment `_kv` bị từ chối (§3).
+- Một key tên `inheritance` không đọc được bằng `GET …/kv/{key}` của API: đường dẫn đó là danh sách kế thừa, như ở Kestra. Các route ghi, xoá và revisions của nó vẫn chạy, các task và `kv()` cũng vậy (§9; phán quyết của người dùng, 2026-10-07).
+- Bulk delete của API nhận tối đa 1.000 key mỗi request (413 nếu vượt); một tập lớn hơn cần nhiều request, mỗi request tất cả hoặc không gì cả (§9; phán quyết của người dùng, 2026-10-07).
+- Các lời gọi store do server điều nhịp chạy dưới lock của một key, và một người ghi key đó chờ phía sau chúng:
+  - lần đọc và ghi có giới hạn của `Put`;
+  - lần copy và `head` của `Set` và `PUT` của API;
+  - các lần xoá object của `PurgeKV` và đợt quét.
+
+  Một flow chờ bao lâu cũng được; một người ghi qua API chờ 5 s, rồi nhận 409. Được chấp nhận theo phán quyết của người dùng, 2026-10-07 (§4.3).

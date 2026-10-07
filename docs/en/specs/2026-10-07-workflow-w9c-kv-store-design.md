@@ -19,6 +19,17 @@
   - `kv()` uses W9b's per-render connection and `authorize(Read)`. Its `errorOnMissing` defaults to true; the tasks' defaults to false.
   - The API lives under `/api/ws/{ws}/workflows/namespaces/{ns}/kv…`. It has list, list inherited, get (with type), revisions, put (through staging, with a body bound and timeouts), delete and bulk delete. Reads need `workflow:read` and writes `workflow:manage`. A lock wait over 5 s answers 409. Statuses follow W9b's conventions.
   - The plan's shape (§12) and the testing approach (§13), with W9b's lessons as global constraints.
+- **(2026-10-07, the user's rulings on the plan's gaps)**
+  - **Bulk delete.** The API's bulk `DELETE` takes at most **1,000 keys per request**. It stays one all-or-nothing transaction. A body over the cap answers 413 naming it (§9). One advisory lock per key, in one transaction, at `max_namespace_files` keys could exhaust Postgres's shared lock table (`max_locks_per_transaction` × `max_connections`, about 6 400 slots on a stock server).
+  - **Server-paced store calls under the key's lock are accepted.** These are `Put`'s bounded read and write, the copy and `head` of `Set` and the API's `PUT`, and the object deletes of `PurgeKV` and the expiry sweep. Client-paced I/O under a lock (a request body), a render and a plugin run stay forbidden. API writers keep the 5 s lock wait, then 409 (§4.3, §15).
+  - **`Put` on an expired key treats it as missing.** It starts fresh and carries over no description and no expiry (§4.5, §8.5).
+  - **A namespace of another workspace** answers exactly as an empty namespace. The listings answer `200 []`; a key read and `revisions` answer 404 (§9, §13).
+  - **Decisions recorded from the plan:**
+    - a key named `inheritance` cannot be read by `GET …/kv/{key}`, as in Kestra (§9, §15);
+    - the expiry sweep's first pass comes one interval after start (`interval_at`; §11);
+    - `PurgeKV` re-reads and judges a key's rows under the key's session lock (§8.6);
+    - no second latest-row index (§4.1);
+    - the audit's spelling (§9).
 
 **Delivery:** one PR (docs and code), eight tasks in §12, implemented by a plan written after this spec.
 
@@ -64,7 +75,7 @@ Kestra (source `96893b589`; artifact `2.0.0-rc13`, nightly `169ca7f2`, the image
 | `PurgeKV` with no `namespaces` purges every namespace; children match by string prefix in the source | default is the flow's own namespace (and its children); children match on a dot boundary (§8.6) | the purge rule (§5) |
 | `PurgeKV` `behavior: {type: key, expiredOnly: false}` hard-purges every matched key | refused, naming `behavior: {type: version, keepAmount: 0}` as the form that purges every revision (§8.6) | the user's ruling that `PurgeKV` purges "expired only, or by version"; a total purge has one explicit spelling, as in W9b |
 | `PurgeKV` `behavior: {type: version}` with neither `keepAmount` nor `before`: **measured in Task 1** | refused, naming both properties (§8.6) | W9b's rule (2026-10-06, Task 7 review C2), applied here by the user's decision |
-| bulk `DELETE` ignores per-key IO errors | one transaction, all or nothing; the answer lists the keys that were live (§9) | an answer that says "deleted" means deleted |
+| bulk `DELETE` ignores per-key IO errors | one transaction, all or nothing, at most 1,000 keys; the answer lists the keys that were live (§9) | an answer that says "deleted" means deleted |
 | `RunContext.namespaceKv` serves plugins | the plugin host refuses it with a reason pointing at the `core.kv.*` tasks (§10) | the user's decision (2026-10-07): no catalog plugin calls it |
 
 ## 3. Storage layout and keys
@@ -85,7 +96,7 @@ Kestra (source `96893b589`; artifact `2.0.0-rc13`, nightly `169ca7f2`, the image
 - `description text` (nullable); `expires_at timestamptz` (nullable; null never expires).
 - `deleted bool` default false; `deleted_at timestamptz` and `deleted_by_user`, `deleted_by_execution`, `deleted_by_task_run` (nullable, set together with `deleted`).
 - `created_at timestamptz` default `now()`; `created_by_user`, `created_by_execution`, `created_by_task_run` with W9b's one-writer CHECK (`CreatedBy::{User, Execution, TaskRun}`).
-- `UNIQUE (workspace_id, namespace, key, revision)`; an index on `(workspace_id, namespace, key, revision DESC)` for the latest row; a partial index on `expires_at` where `expires_at IS NOT NULL` for the sweep.
+- `UNIQUE (workspace_id, namespace, key, revision)`, whose index also serves the latest row; a partial index on `expires_at` where `expires_at IS NOT NULL` for the sweep. *(2026-10-07, the user's ruling: the unique constraint's index leads with `(workspace_id, namespace, key)` and is scanned backwards for the latest row, as W9b's is. A separate index on `(workspace_id, namespace, key, revision DESC)` would duplicate it, so none is created.)*
 
 The `deleted_by_*` columns are beyond the column list the user named: they let a `Delete` re-claimed after an outage recognise its own earlier delete (§8.4, §11). **A KV value exists only once its row exists.** The latest row of a key is its highest revision; that row is the key's state.
 
@@ -114,7 +125,12 @@ Every write (`Set`, `Put`, the API's `PUT`) has this shape. W9b's lesson holds: 
    - commit.
 4. **Forget** the staging object and its row on every way out (written, skipped, refused, failed).
 
-`Put` skips step 2 and differs in step 3: it reads, merges and writes under the lock (§8.5). A `Delete` takes the same lock and updates the latest row (§4.4). The lock serialises every writer of one key, and the window it covers is server-paced: one server-side copy, or `Put`'s bounded read and write.
+`Put` skips step 2 and differs in step 3: it reads, merges and writes under the lock (§8.5). A `Delete` takes the same lock and updates the latest row (§4.4). The lock serialises every writer of one key, and the window it covers is server-paced: one server-side copy, or `Put`'s bounded read and write. *(2026-10-07, the user's ruling.)* These server-paced store calls under the key's lock are **accepted**:
+- `Put`'s read and write, each at most `max_read_bytes`;
+- the copy and `head` of `Set` and the API's `PUT`;
+- the object deletes of `PurgeKV` and the sweep, under the session lock.
+
+Client-paced I/O under a lock stays forbidden: a request body is read and staged before any lock (§9). An API writer still waits at most 5 s for the lock, then answers 409.
 
 ### 4.4 Revisions and soft delete
 
@@ -131,7 +147,7 @@ Following W9b's R1:
 - **Live** means the latest row is not deleted and `expires_at` is null or later than the database's `now()`. Every latest read (`kv()`, `Get`, `GetKeys`, the API's list, get and inheritance) answers only from live rows.
 - **Expired means missing.** An expired key reads exactly as a key that was never written: `kv()` and `Get` honour `errorOnMissing`, `GetKeys` and the listings leave it out, `Set` with `overwrite: false` may write over it. An explicit-revision read of an expired revision is not-found too.
 - **Reads never write.** Nothing on a read path inserts, updates or deletes; the sweep (§11) and `PurgeKV` remove expired keys.
-- **Expiry is fixed at write:** `expires_at = now() + ttl`, by the database's clock in the commit's transaction. `Put` keeps the latest revision's `expires_at` and description (Kestra, `Put.java:121`).
+- **Expiry is fixed at write:** `expires_at = now() + ttl`, by the database's clock in the commit's transaction. `Put` keeps the latest revision's `expires_at` and description (Kestra, `Put.java:121`) when that revision is live. An expired key is missing to `Put` as to every reader: `Put` starts fresh, with no description and no expiry (§8.5; the user's ruling, 2026-10-07).
 - A read resolves the latest live row, then reads that revision's object (bounded by `max_read_bytes`, §4.2). **A missing object behind a row is an author error naming the key and the revision**, with no fallback (W9b's rule). An unreachable store or database is an infrastructure error (§11).
 
 ### 4.6 Inheritance
@@ -199,12 +215,12 @@ Native handlers in the worker, like W9b's `core.namespace` tasks; each gets a ro
 - `key`, `value` (any type), `namespace` (write rule), `errorOnMissing` (default false).
 - **The merge rules** follow the artifact (`Put.java:72-121`): a map deep-merges into a map; a list of `{key, value}` entries patches dotted paths; a single `[{value}]` entry replaces the whole value. The exact semantics are **measured in Task 1** and pinned by fixture cells: nested maps, arrays inside maps, a type clash between a map and a scalar, a missing key with each `errorOnMissing`, and a dotted path through a missing level. egret implements against the fixture.
 - **Under the key's lock.** `Put` runs §4.3 step 1 for its patch and stages nothing, since the merged bytes exist only under the lock. Then, in the commit transaction, holding the lock:
-  - read the latest live row, and its object (bounded by `max_read_bytes`);
+  - read the latest live row, and its object (bounded by `max_read_bytes`). A key that was never written, is soft-deleted or has **expired** is missing: `errorOnMissing` decides, and a write starts fresh (the user's ruling, 2026-10-07; §4.5);
   - merge;
   - check the merged result's encoded size against `max_read_bytes`: a larger result fails the task, naming the cap, and nothing is written;
   - write the merged object directly to the revision's key;
   - `head` it;
-  - insert the row, keeping the latest revision's description and `expires_at`, with the type of the merged value;
+  - insert the row, keeping the latest live revision's description and `expires_at` (a missing key carries over neither), with the type of the merged value;
   - commit.
 
   The lock covers one bounded, server-paced store read and one store write, never a caller's body.
@@ -220,14 +236,14 @@ Native handlers in the worker, like W9b's `core.namespace` tasks; each gets a ro
   - `{type: version, keepAmount, before}` keeps the `keepAmount` highest revisions of each matched key, and purges revisions created at or before `before`, never the latest. A soft-deleted key is purged entirely (W9b's rule). `keepAmount: 0` purges every revision. A `version` behaviour with neither property is refused, naming both and saying that `keepAmount: 0` purges everything.
 - **Execution, as W9b's `PurgeFiles`:**
   - Rows are read in keyset pages of `max_namespace_files + 1` by `(key, revision)`.
-  - Each page's complete keys are judged and purged per key, under the key's session lock (`LockedSession`). Each purge deletes the rows by id, commits, then deletes the objects, then unlocks. The lock is still held when the objects are deleted, so a writer cannot reuse a freed revision number's object key in between.
+  - Each page's complete keys are purged per key, under the key's session lock (`LockedSession`). *(2026-10-07, the user's ruling.)* Under that lock the key's rows are **re-read and judged as they are then**, as the sweep does (§11), so a key rewritten since the listing is judged on its new rows. Each purge deletes the rows by id, commits, then deletes the objects, then unlocks. The lock is still held when the objects are deleted, so a writer cannot reuse a freed revision number's object key in between.
   - A key holding more revisions than the cap fails the task, naming it, with the keys before it purged.
   - The purge runs to completion on a detached task.
 - **Output** `{size}`: the count Kestra reports, revisions or keys, **measured in Task 1**.
 
 ## 9. The KV API
 
-Under `/api/ws/{ws}/workflows/namespaces/{ns}/kv`, mirroring `KVController`, with W9b's route conventions (`WsContext`, then `egret_core::authz::require` with `WF_READ` or `WF_MANAGE`, then `authorize(…, Actor::Api, …)`; `no_store()` answers 503 when `[storage]` is absent; each write emits one audit mutation `workflow_namespace_kv:{ns}/{key}`; no new permission).
+Under `/api/ws/{ws}/workflows/namespaces/{ns}/kv`, mirroring `KVController`, with W9b's route conventions (`WsContext`, then `egret_core::authz::require` with `WF_READ` or `WF_MANAGE`, then `authorize(…, Actor::Api, …)`; `no_store()` answers 503 when `[storage]` is absent; each write emits one audit mutation; no new permission). *(2026-10-07, the user's ruling on the audit's spelling, W9b's form.)* The action is `workflow_namespace_kv:{put|delete|delete_many}` and the resource type `workflow_namespace_kv`. The resource id is `{ns}/{key}`, or `{ns}` for a bulk delete, which lists the keys in its detail.
 
 | route | permission | answer |
 |---|---|---|
@@ -237,7 +253,7 @@ Under `/api/ws/{ws}/workflows/namespaces/{ns}/kv`, mirroring `KVController`, wit
 | `GET …/kv/{key}/revisions` | `workflow:read` | every revision: `revision`, `type`, `size`, `description`, `expiresAt`, `created`, `deleted`, `expired`; 404 when the key has no row |
 | `PUT …/kv/{key}` | `workflow:manage` | body `text/plain`, parsed as Ion and falling back to the raw string (Kestra, `:124-141`); headers `description` and `ttl` (ISO-8601); always overwrites; §4.3; 200 with no body |
 | `DELETE …/kv/{key}` | `workflow:manage` | §4.4; `true` when a live key was deleted, `false` when there was none (200 either way) |
-| `DELETE …/kv` | `workflow:manage` | body `{keys: […]}`, at most `max_namespace_files` keys; one transaction taking each key's lock in ascending order, all or nothing; `{keys: […]}` lists the keys that were live and are now deleted |
+| `DELETE …/kv` | `workflow:manage` | body `{keys: […]}`, at most **1,000** keys (the user's ruling, 2026-10-07; more is 413 naming the cap); one transaction taking each key's lock in ascending order, all or nothing; `{keys: […]}` lists the keys that were live and are now deleted |
 
 - **The `PUT` body** is bounded by `max_read_bytes` (it is parsed in memory to type it, §4.2), and so is the encoded value (the user's ruling, 2026-10-07). It is read with W9b's body timeouts: no byte for 30 seconds, or more than 12 hours in all, answers 408 and writes nothing. The body is read and staged before any lock is taken.
 - **Lock wait:** an API write waits at most 5 s (`API_LOCK_WAIT`) for the key's lock, then answers 409 "the key is busy (another write holds it); try again", naming the key, holding nothing.
@@ -246,23 +262,25 @@ Under `/api/ws/{ws}/workflows/namespaces/{ns}/kv`, mirroring `KVController`, wit
 | error | status |
 |---|---|
 | the key rule, a refused namespace (invalid, empty segment, `_files` or `_kv` segment), a malformed or negative `ttl`, a non-integer `revision`, a malformed bulk body | 400 |
-| no live row: an unknown key, a latest read of a soft-deleted key, an expired key or revision, an unknown revision, another workspace's namespace | 404 |
+| no live row: an unknown key, a latest read of a soft-deleted key, an expired key or revision, an unknown revision, a key or `revisions` read in another workspace's namespace (as in an empty one) | 404 |
 | the key's lock held longer than 5 s | 409 |
-| a `PUT` body or its encoded value over `max_read_bytes`, a stored value over `max_read_bytes` on `GET`, a listing or bulk body over `max_namespace_files` | 413 |
+| a `PUT` body or its encoded value over `max_read_bytes`, a stored value over `max_read_bytes` on `GET`, a listing over `max_namespace_files`, a bulk body over 1,000 keys | 413 |
 | a body that stalls for 30 s or takes over 12 h | 408 |
 | the store or the database unreachable | 503, logged with a fixed message; the database's error is never sent |
 
-No message names a storage key or another workspace. A namespace another workspace holds answers exactly as a namespace that never held anything. **No GET route writes** (§4.5). utoipa documents every route; the frontend client is regenerated with `npm run gen:api`. The UI is W7's.
+No message names a storage key or another workspace. A namespace another workspace holds answers exactly as a namespace that never held anything. *(2026-10-07, the user's ruling.)* The listings (`GET …/kv`, `…/kv/inheritance`) answer `200 []`, and a key read or `revisions` answers 404, byte for byte as for an empty namespace (§13).
+
+**A key named `inheritance`** is legal, but `GET …/kv/inheritance` is the inheritance route, so its value cannot be read by `GET …/kv/{key}`. This is Kestra's collision too (`KVController.java:73`, `:103`). Its `PUT`, `DELETE` and `…/revisions` work, and the tasks and `kv()` read it (§15; the user's ruling, 2026-10-07). **No GET route writes** (§4.5). utoipa documents every route; the frontend client is regenerated with `npm run gen:api`. The UI is W7's.
 
 ## 10. The plugin host
 
-- No KV bridge: `ShimRunContext.namespaceKv` keeps throwing `EgretUnsupported`, with a new message: *namespaceKv(): egret gives flows the KV store through the `io.kestra.plugin.core.kv` tasks and the `kv()` function, not through a plugin's RunContext; use a `core.kv` task before or after this one.* `EgretPluginHostTest.java:125-126` pins the new message, and the doc mentions (`ShimRunContext.java:52`, `EgretUnsupported.java:4`, `EgretPluginHost.java:58`) drop "W9c".
+- No KV bridge: `ShimRunContext.namespaceKv` keeps throwing `EgretUnsupported`, with a new message: *namespaceKv(): egret gives flows the KV store through the `io.kestra.plugin.core.kv` tasks and the `kv()` function, not through a plugin's RunContext; use a `core.kv` task before or after this one.* `EgretPluginHostTest.java:125-126` pins the new message, and the message at `ShimRunContext.java:341` and the doc mentions (`EgretUnsupported.java:4`, `EgretPluginHost.java:58`) drop "W9c". *(Corrected 2026-10-07: this sentence first cited `ShimRunContext.java:52`, whose class doc names no package and stays unchanged.)*
 - The handler's exit-4 message (`worker/handlers/kestra.rs:379`) drops "the KV store — W9c": *the plugin needs a Kestra service egret does not provide to plugins*, followed by the host's reason, which names `namespaceKv` and the `core.kv` tasks. The module doc (`:79`) and the pinning test (`:1317-1321`) follow.
 - Nothing is staged for KV, so `task.json` and the task-bytes check (`check_task_bytes`) are unchanged.
 
 ## 11. Lifecycle and failure classification
 
-- **The expiry sweep.** Every egret process with a store starts `spawn_kv_expiry_sweeper` beside W9b's staging sweeper. It runs hourly, the first pass after an hour, over every workspace:
+- **The expiry sweep.** Every egret process with a store starts `spawn_kv_expiry_sweeper` beside W9b's staging sweeper. It runs hourly, the first pass after an hour, over every workspace. *(2026-10-07, the user's ruling.)* It uses `interval_at(now + every, every)`, not `interval`, whose first tick is immediate (W9b's staging sweeper uses `interval`):
   - It lists, in keyset pages of 1000 by row id, the keys whose latest row has `expires_at <= now()` (the partial index).
   - For each key, it takes the key's session lock with `pg_try_advisory_lock` and skips the key when it is busy; the next pass retries.
   - Under the lock it re-reads the latest row. If that row is still expired, it deletes the key's rows by the ids it read, commits, deletes the objects, then unlocks.
@@ -332,7 +350,7 @@ No error names a secret, a storage key or another workspace.
 - **Destructive tests** on `MemStore` or a throwaway MinIO prefix only (§12).
 - **Render:** `kv()` in `runIf`, `If`, `Switch` and a task property; an outage sets `infrastructure_failure` and re-claims; a render with no execution refuses it by name.
 - **Publish:** `secret()` in `Set` and `Put` values refused with `secret_in_kv_value` and its message; a `_kv` namespace refused; `valids/kv.yaml` still publishes.
-- **API:** `workflow:read` versus `workflow:manage`; every row of the status table; the 5 s busy 409; the body bounds and the 408s; 404 for another workspace's namespace, byte-identical to an empty namespace's.
+- **API:** `workflow:read` versus `workflow:manage`; every row of the status table; the 5 s busy 409; the body bounds and the 408s; a bulk delete of 1,000 keys accepted and 1,001 refused with 413; another workspace's namespace byte-identical to an empty namespace's (listings `200 []`, key reads 404).
 - **Plugin host:** the new `namespaceKv` and exit-4 messages, pinned.
 - **Oracle:** the fixture's egret cells re-run against the build; the ratchet measured before and after and recorded in `oracle-exec/README.md`.
 - **End to end** on a temporary kind cluster: a flow that `Set`s, reads with `kv()` and `Get`, `Put`s, `Delete`s and purges; a TTL that expires and is swept; the API from outside.
@@ -354,3 +372,11 @@ A KV bridge for plugins (§10); a cross-namespace paged listing (`GET /kv` acros
 - Deleting a workspace cascades its `workflow.kv_entries` rows away and leaves its `_kv` objects in storage, as W9b's namespace files are left.
 - At render, every database error of a `kv()` lookup is an outage, re-claimed with no attempt spent, and a lookup is bounded only by the OS's TCP timeout; this is W9b's render limit, shared (W9b §15).
 - A namespace with a `_kv` segment is refused (§3).
+- A key named `inheritance` cannot be read by the API's `GET …/kv/{key}`: that path is the inheritance listing, as in Kestra. Its write, delete and revisions routes work, and so do the tasks and `kv()` (§9; the user's ruling, 2026-10-07).
+- The API's bulk delete takes at most 1,000 keys per request (413 past it); a larger set takes several requests, each all or nothing (§9; the user's ruling, 2026-10-07).
+- Server-paced store calls run under a key's lock, and a writer of that key waits behind them:
+  - `Put`'s bounded read and write;
+  - the copy and `head` of `Set` and the API's `PUT`;
+  - `PurgeKV`'s and the sweep's object deletes.
+
+  A flow waits as long as it takes; an API writer waits 5 s, then gets 409. Accepted by the user's ruling, 2026-10-07 (§4.3).
