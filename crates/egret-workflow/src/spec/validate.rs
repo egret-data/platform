@@ -339,10 +339,15 @@ fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
 /// `timeout` and the other keys egret's `Task` model reads are walked like
 /// everything else, because the plugin render never sees them. A task
 /// object is recognised as a plugin task by its (`id`, `type`) pair.
+///
+/// W9c Task 4 (W9c spec §7): a `Set` or `Put` task's `value` is scanned on
+/// its own, and a call there is `secret_in_kv_value`, reported instead of
+/// `secret_outside_plugin_task` for that property.
 fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
     use crate::runners::secrets::{
         refused_argument_message, text_uses_secret, written_refused_arguments,
     };
+    use crate::worker::handlers::kv;
     use std::collections::HashSet;
 
     /// What `models::Task` reads itself; everything else on a leaf is its spec.
@@ -413,6 +418,25 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
             }
         }
 
+        /// W9c spec §7: every string of a `Set` or `Put` task's `value`, keys
+        /// too, that calls `secret()` is [`CODE_SECRET_IN_KV_VALUE`], INSTEAD
+        /// of the generic refusal, which this property never reports.
+        ///
+        /// [`CODE_SECRET_IN_KV_VALUE`]: crate::plugins::CODE_SECRET_IN_KV_VALUE
+        fn kv_value(&mut self, task: &str, v: &serde_json::Value, path: String) {
+            let mut found = Vec::new();
+            strings(v, path, &mut found);
+            for (p, text) in found {
+                if text_uses_secret(text) {
+                    self.report.errors.push(Finding {
+                        code: crate::plugins::CODE_SECRET_IN_KV_VALUE,
+                        message: crate::plugins::secret_in_kv_value_message(task, &p),
+                        path: p,
+                    });
+                }
+            }
+        }
+
         fn value(&mut self, v: &serde_json::Value, path: String) {
             match v {
                 serde_json::Value::String(s) => self.outside(path, s),
@@ -431,10 +455,17 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
                     let ty = map.get("type").and_then(serde_json::Value::as_str);
                     let is_plugin =
                         matches!((id, ty), (Some(i), Some(t)) if self.plugin.contains(&(i, t)));
+                    // W9c spec §7: a `Set` or `Put` task's `value`.
+                    let kv_value_of = match (id, ty) {
+                        (Some(i), Some(t)) if t == kv::SET || t == kv::PUT => Some(i),
+                        _ => None,
+                    };
                     for (k, v) in map {
                         let here = join(&path, k);
                         self.outside(path.clone(), k);
-                        if is_plugin && !TASK_KEYS.contains(&k.as_str()) {
+                        if let (Some(task), "value") = (kv_value_of, k.as_str()) {
+                            self.kv_value(task, v, here);
+                        } else if is_plugin && !TASK_KEYS.contains(&k.as_str()) {
                             let mut found = Vec::new();
                             strings(v, here, &mut found);
                             for (p, text) in found {
@@ -4114,5 +4145,150 @@ mod tests {
             );
         }
         assert!(parse(&flow_trigger_flow(2, "    window:\n      every: PT1H\n")).is_ok());
+    }
+
+    // ─── W9c Task 4: `secret()` in a KV value (W9c spec §7) ──────────────────
+
+    /// A `Set` or `Put` task `s` whose `value` is `value_yaml` (YAML, already
+    /// indented under the key).
+    fn kv_task(ty: &str, value_yaml: &str) -> String {
+        format!(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: {ty}\n    key: k\n    value:{value_yaml}"
+        )
+    }
+
+    /// `tasks.<id>.value…` of every finding of `code`.
+    fn paths_of(src: &str, code: &str) -> Vec<String> {
+        validate(&parse(src).unwrap())
+            .errors
+            .into_iter()
+            .filter(|f| f.code == code)
+            .map(|f| f.path)
+            .collect()
+    }
+
+    #[test]
+    fn a_secret_in_a_set_or_put_value_is_refused_with_its_own_code_and_message() {
+        use crate::plugins::{
+            secret_in_kv_value_message, CODE_SECRET_IN_KV_VALUE, CODE_SECRET_OUTSIDE_PLUGIN_TASK,
+        };
+        use crate::worker::handlers::kv::{PUT, SET};
+        const SECRET: &str = "\"{{ secret('X') }}\"";
+        for ty in [SET, PUT] {
+            for (shape, value, path) in [
+                ("the whole value", format!(" {SECRET}\n"), "tasks.s.value"),
+                (
+                    "a nested map leaf",
+                    format!("\n      a:\n        b: {SECRET}\n"),
+                    "tasks.s.value.a.b",
+                ),
+                (
+                    "a list item",
+                    format!("\n      - plain\n      - {SECRET}\n"),
+                    "tasks.s.value[1]",
+                ),
+                (
+                    "a map key",
+                    format!("\n      {SECRET}: 1\n"),
+                    "tasks.s.value",
+                ),
+            ] {
+                let src = kv_task(ty, &value);
+                let f = parse(&src).unwrap();
+                let report = validate(&f);
+                let found: Vec<_> = report
+                    .errors
+                    .iter()
+                    .filter(|e| e.code == CODE_SECRET_IN_KV_VALUE)
+                    .collect();
+                assert_eq!(found.len(), 1, "{ty} {shape}: {:?}", report.errors);
+                assert_eq!(found[0].path, path, "{ty} {shape}");
+                assert_eq!(
+                    found[0].message,
+                    secret_in_kv_value_message("s", path),
+                    "{ty} {shape}"
+                );
+                assert!(
+                    found[0].message.contains("task 's'")
+                        && found[0].message.contains(path)
+                        && found[0].message.contains(
+                            "the secret's value would be stored in the KV store, where anyone \
+                             who can read this namespace's KV (`workflow:read`) could read it, \
+                             unmasked; pass the secret to the task that needs it instead."
+                        ),
+                    "{}",
+                    found[0].message
+                );
+                // Instead of the generic refusal, never beside it.
+                assert!(
+                    !report
+                        .errors
+                        .iter()
+                        .any(|e| e.code == CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+                    "{ty} {shape}: {:?}",
+                    report.errors
+                );
+            }
+            // The control: a value with no secret() is clean.
+            let src = kv_task(ty, " \"{{ 'plain' }}\"\n");
+            assert!(paths_of(&src, CODE_SECRET_IN_KV_VALUE).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_secret_elsewhere_on_a_set_task_keeps_the_generic_refusal() {
+        use crate::plugins::{CODE_SECRET_IN_KV_VALUE, CODE_SECRET_OUTSIDE_PLUGIN_TASK};
+        use crate::worker::handlers::kv::{PUT, SET};
+        for ty in [SET, PUT] {
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: {ty}\n    \
+                 key: \"{{{{ secret('X') }}}}\"\n    value: v\n"
+            );
+            assert_eq!(
+                paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+                vec!["tasks.s.key".to_string()],
+                "{ty}"
+            );
+            assert!(paths_of(&src, CODE_SECRET_IN_KV_VALUE).is_empty(), "{ty}");
+        }
+        // A `value` property on any other task is not a KV value.
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.debug.Return\n    \
+                   format: x\n    value: \"{{ secret('X') }}\"\n";
+        assert_eq!(
+            paths_of(src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+            vec!["tasks.s.value".to_string()]
+        );
+        assert!(paths_of(src, CODE_SECRET_IN_KV_VALUE).is_empty());
+    }
+
+    /// The corpus's two KV flows carry no `secret()`: the scan adds no
+    /// finding to either, and `valids/kv` validates clean for publish and
+    /// for the run.
+    #[test]
+    fn valids_kv_and_retry_with_flowable_errors_still_publish_and_plan() {
+        for (name, src) in [
+            (
+                "kv",
+                include_str!("../../oracle-exec/corpus/valids/kv.yaml"),
+            ),
+            (
+                "retry-with-flowable-errors",
+                include_str!("../../oracle-exec/corpus/valids/retry-with-flowable-errors.yaml"),
+            ),
+        ] {
+            let f = parse(src).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let errors = validate(&f).errors;
+            assert!(
+                !errors.iter().any(|e| e.code.starts_with("secret_")),
+                "{name}: {errors:?}"
+            );
+            if name == "kv" {
+                assert!(errors.is_empty(), "{name}: {errors:?}");
+                assert!(
+                    crate::spec::validate_for_run(&f).errors.is_empty(),
+                    "{name}"
+                );
+            }
+        }
     }
 }

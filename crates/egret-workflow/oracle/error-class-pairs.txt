@@ -57,14 +57,18 @@ isin-missing-attr-left              test:an_undefined_is_in_operand_raises_rathe
 # W9b Task 4 (2026-10-05): fileURI is implemented too and joins them (that
 # test asserts its sentence beside the four's); the seven refusals left are
 # held by `kv_still_names_w9c_and_the_refused_list_shrinks_to_seven`.
-function-secret                     test:kv_still_names_w9c_and_the_refused_list_shrinks_to_seven
-function-kv                         test:kv_still_names_w9c_and_the_refused_list_shrinks_to_seven
+# W9c Task 4 (2026-10-07): kv is implemented over the KV store; a corpus render
+# has no file scope, so `function-kv` still fails, by the sentence
+# `kv_without_a_scope_refuses_by_name` asserts. The six refusals left are held
+# by `the_refused_list_is_six_and_kv_is_not_in_it`.
+function-secret                     test:the_refused_list_is_six_and_kv_is_not_in_it
+function-kv                         test:kv_without_a_scope_refuses_by_name
 function-read                       test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-fileuri                    test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-filesize                   test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-fileexists                 test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-isfileempty                test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
-function-http                       test:kv_still_names_w9c_and_the_refused_list_shrinks_to_seven
+function-http                       test:the_refused_list_is_six_and_kv_is_not_in_it
 
 # --- W2 Task 4: wrong-typed input.
 filter-chunk-not-list               test:chunk_rejects_a_non_list
@@ -253,10 +257,10 @@ function-fromion-annotation-of-a-list       test:an_annotated_value_is_its_own_t
 # these is among them -- `Function or Macro [render] does not exist.` egret
 # binds all four to a refusal that names the function and its package instead,
 # so both sides fail and only the message differs.
-function-render                                     test:kv_still_names_w9c_and_the_refused_list_shrinks_to_seven
-function-renderonce                                 test:kv_still_names_w9c_and_the_refused_list_shrinks_to_seven
-function-errorlogs                                  test:kv_still_names_w9c_and_the_refused_list_shrinks_to_seven
-function-subflow                                    test:kv_still_names_w9c_and_the_refused_list_shrinks_to_seven
+function-render                                     test:the_refused_list_is_six_and_kv_is_not_in_it
+function-renderonce                                 test:the_refused_list_is_six_and_kv_is_not_in_it
+function-errorlogs                                  test:the_refused_list_is_six_and_kv_is_not_in_it
+function-subflow                                    test:the_refused_list_is_six_and_kv_is_not_in_it
 
 # W2 Task 8: `env`. `containsKey`, not a null check -- an absent `name`
 # throws and an explicitly null one falls through to the default.

@@ -2873,6 +2873,32 @@ pub(super) fn big_number_text(value: &MjValue) -> Option<String> {
         .map(|big| big.canonical.clone())
 }
 
+/// W9c Task 4: a `java.math.BigDecimal` [`BigNumber`] of `plain`, a KV
+/// value's decimal (`storage::kv::value::KvNumber::Decimal`, plain digits
+/// with their scale): a bare `{{ x }}` prints `plain`, a serialiser writes
+/// `BigDecimal.toString()`. `None` when `plain` is not a decimal literal.
+///
+/// Not arithmetic, as no [`BigNumber`] is: `{{ kv('d') + 1 }}` fails the
+/// render naming the operator, never computes on an `f64` (W9c spec §15).
+pub(crate) fn big_decimal(plain: &str) -> Option<MjValue> {
+    let (text, canonical) = big_decimal_strings(plain)?;
+    Some(MjValue::from_object(BigNumber {
+        text,
+        canonical,
+        class_name: "java.math.BigDecimal",
+    }))
+}
+
+/// W9c Task 4: a `java.math.BigInteger` [`BigNumber`] of `digits`
+/// (`-?[0-9]+`), a KV value's integer beyond every Rust integer primitive.
+pub(crate) fn big_integer(digits: &str) -> MjValue {
+    MjValue::from_object(BigNumber {
+        text: digits.to_string(),
+        canonical: digits.to_string(),
+        class_name: "java.math.BigInteger",
+    })
+}
+
 /// `NumberFilter` — `NumberUtils.create*`, selected by the `type` argument.
 ///
 /// Only a `String` input is accepted (a number input **throws**, which reads

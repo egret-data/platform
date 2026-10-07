@@ -174,6 +174,24 @@ pub const CODE_SECRET_OUTSIDE_PLUGIN_TASK: &str = "secret_outside_plugin_task";
 /// A `secret()` call on a `kestra.*` task that passes `namespace` or `full`
 /// in the source (fix round 1, I2; spec §6).
 pub const CODE_SECRET_ARGUMENT_REFUSED: &str = "secret_argument_refused";
+/// W9c Task 4 (W9c spec §7): `secret()` written anywhere in the `value` of
+/// an `io.kestra.plugin.core.kv.Set` or `Put`. Reported INSTEAD of
+/// [`CODE_SECRET_OUTSIDE_PLUGIN_TASK`] for that property, so the author reads
+/// the reason that applies; it holds even if `secret()` is later allowed
+/// outside `kestra.*` tasks.
+pub const CODE_SECRET_IN_KV_VALUE: &str = "secret_in_kv_value";
+
+/// [`CODE_SECRET_IN_KV_VALUE`]'s message (W9c spec §7's sentence, verbatim),
+/// naming the task id and the property path (`tasks.<id>.value…`).
+pub fn secret_in_kv_value_message(task_id: &str, path: &str) -> String {
+    format!(
+        "secret() is refused in the value of task '{task_id}' ({path}): the secret's value \
+         would be stored in the KV store, where anyone who can read this namespace's KV \
+         (`workflow:read`) could read it, unmasked; pass the secret to the task that needs it \
+         instead."
+    )
+}
+
 /// A top-level `pluginDefaults:` (spec §4.1), on any flow.
 pub const CODE_REMOVED_PLUGIN_DEFAULTS: &str = "removed_plugin_defaults";
 /// The one message for [`CODE_REMOVED_PLUGIN_DEFAULTS`], verbatim from spec

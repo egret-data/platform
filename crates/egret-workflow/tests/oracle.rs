@@ -484,7 +484,9 @@ fn error_class_entries_are_exactly_the_committed_allowlist() {
 /// file functions' pairings to
 /// `without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution`;
 /// W9b Task 4 renamed it `kv_still_names_w9c_and_the_refused_list_shrinks_to_seven`
-/// and moved `fileURI`'s pairing to the four's test.)
+/// and moved `fileURI`'s pairing to the four's test; W9c Task 4 renamed it
+/// `the_refused_list_is_six_and_kv_is_not_in_it` and moved `kv`'s pairing to
+/// `kv_without_a_scope_refuses_by_name`.)
 ///
 /// **Leave it empty.** The constant stays because it is what stops a new
 /// `unported:` being added to `oracle/error-class-pairs.txt` quietly: growing

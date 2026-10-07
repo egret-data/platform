@@ -37,6 +37,9 @@
 //!
 //! W9a Task 4 implemented four of the null-backed eight over the render's
 //! file scope: read fileSize fileExists isFileEmpty
+//!
+//! W9b Task 4 implemented fileURI over namespace files, and W9c Task 4 kv
+//! over the KV store, both through the same scope
 //! ```
 //!
 //! # Seven of Task 8's "service-backed" functions reach no service
@@ -133,6 +136,7 @@ use super::filters::{is_java_null, java_class_name, pebble_error, Args, DateArgs
 use super::ionfmt::read_ion;
 use super::javafmt::{parse_iso, Zdt, Zone};
 use super::jqsandbox::MAX_VALUE_DEPTH;
+use crate::storage::kv::value::{KvData, KvNumber};
 
 /// Registers the 19 pure functions onto `env`.
 ///
@@ -188,8 +192,10 @@ pub(super) fn register(env: &mut Environment<'static>) {
     env.add_function("fileURI", |state: &State, rest: Rest<MjValue>| {
         file_function(FileFunction::Uri, state, rest)
     });
+    // W9c Task 4: `kv`, over the KV store, through the same scope.
+    env.add_function("kv", kv_function);
 
-    // W2 Task 8's refusals, seven since W9b Task 4. See [`not_implemented`]
+    // W2 Task 8's refusals, six since W9c Task 4. See [`not_implemented`]
     // for the message shape and why the oracle cannot check it.
     for (name, refusal) in REFUSED {
         env.add_function(
@@ -231,7 +237,7 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
      fields of the pod spec, readable by anyone with `get pods` in the task namespace, and \
      no other render (inputs, runIf, Log, triggers) resolves secrets.";
 
-/// The seven names egret registers only to refuse, with what each is waiting
+/// The six names egret registers only to refuse, with what each is waiting
 /// for and who owns it.
 ///
 /// **Two different kinds of absence, deliberately treated the same.** The
@@ -270,10 +276,12 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
 /// **Updated 2026-10-05 (W9b Task 4): seven names now.** `fileURI` is
 /// implemented ([`file_function`]) over namespace files, beside the four,
 /// which reach namespace files too; `kv` still names W9c.
+///
+/// **Updated 2026-10-07 (W9c Task 4): six names now.** `kv` is implemented
+/// ([`kv_function`]) over the KV store.
 const REFUSED: &[(&str, Refusal)] = &[
     // Registered with a null backing on the built engine.
     ("secret", Refusal::Confined(SECRET_REFUSAL)),
-    ("kv", not_yet("the namespace KV store", "W9c")),
     ("http", not_yet("an outbound HTTP client", "W9")),
     // Not registered at all on the built engine: `@Inject @Nullable`, guarded.
     (
@@ -480,6 +488,185 @@ fn file_function(
         FileFunction::Uri if path.starts_with("kestra://") => MjValue::from(path),
         FileFunction::Uri => MjValue::from(meta.uri),
         FileFunction::Read => unreachable!("answered above"),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// W9c Task 4: kv
+// ---------------------------------------------------------------------------
+
+/// `KvFunction` (W9c spec §6): `kv(key, namespace?, errorOnMissing?)`,
+/// positional or named (`KvFunction.java:34-36`).
+///
+/// - `key` is required: absent is Kestra's sentence; `null` is the empty key,
+///   which the key rule refuses with Kestra's sentence (w9c
+///   `kv_function.null_key`); any other non-string is refused naming it.
+/// - `namespace` absent or `null`: the running flow's namespace, walking up
+///   its parents on a dot boundary; given: that namespace only, no walk,
+///   even when it is the flow's own (`KvFunction.java:61-66`).
+/// - `errorOnMissing` defaults to **true** (`:53`); absent or `null` is the
+///   default; a non-boolean is refused naming the argument (w9c
+///   `kv_function.eom_*`, where Kestra throws a raw `ClassCastException`),
+///   before anything is looked up.
+///
+/// It answers from the render's [`FileScope`](super::files::FileScope), as
+/// [`file_function`] does: no scope means no running execution (a Flow
+/// trigger's `conditions`, a corpus render), refused by name. A key that is
+/// missing (never written, soft-deleted, expired) is Kestra's sentence when
+/// `errorOnMissing`, else `null`. The value reaches the template exactly
+/// ([`kv_value`]).
+fn kv_function(state: &State, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    use super::files::{KvAnswer, KvArgs};
+
+    const DECLARED: [&str; 3] = ["key", "namespace", "errorOnMissing"];
+    let args = Args::new(rest);
+    // Pebble's own argument checks (`ArgumentsNode`), with Kestra's sentences
+    // (w9c `kv_function.too_many_args`, `unknown_named`).
+    if args.positional_only().len() > DECLARED.len() {
+        return Err(pebble_error(format!(
+            "The argument at position {} is not allowed. Only {} argument(s) are allowed.",
+            DECLARED.len() + 1,
+            DECLARED.len()
+        )));
+    }
+    if let Some(unknown) = args.named_keys().find(|k| !DECLARED.contains(k)) {
+        return Err(pebble_error(format!(
+            "The following named argument does not exist: {unknown}"
+        )));
+    }
+    let Some(key) = args.get("key", 0) else {
+        return Err(pebble_error("The 'kv' function expects an argument 'key'."));
+    };
+    let key = if is_java_null(&key) {
+        String::new()
+    } else {
+        match key.as_str() {
+            Some(k) => k.to_string(),
+            None => {
+                return Err(pebble_error(format!(
+                    "The 'kv' function expects the 'key' argument to be a string, and {} is not.",
+                    shown_argument(&key)
+                )))
+            }
+        }
+    };
+    let namespace = match args.get("namespace", 1).filter(|v| !is_java_null(v)) {
+        None => None,
+        Some(v) => match v.as_str() {
+            Some(ns) => Some(ns.to_string()),
+            None => {
+                return Err(pebble_error(format!(
+                    "The 'kv' function expects the 'namespace' argument to be a string, and {} \
+                     is not.",
+                    shown_argument(&v)
+                )))
+            }
+        },
+    };
+    let error_on_missing = match args.get("errorOnMissing", 2).filter(|v| !is_java_null(v)) {
+        None => true,
+        Some(v) if v.kind() == ValueKind::Bool => v.is_true(),
+        Some(v) => {
+            return Err(pebble_error(format!(
+                "The 'kv' function expects the 'errorOnMissing' argument to be a boolean (true \
+                 or false), and {} is not.",
+                shown_argument(&v)
+            )))
+        }
+    };
+    let scope = state.lookup(super::files::FILE_SCOPE).and_then(|v| {
+        v.downcast_object_ref::<super::files::FileScopeObject>()
+            .map(|held| held.0.clone())
+    });
+    let Some(scope) = scope else {
+        return Err(pebble_error(
+            "The 'kv' function needs a running execution: it reads the KV store as the running \
+             flow, and only a task run's render has one (a Flow trigger's conditions and \
+             inputs, for one, do not).",
+        ));
+    };
+    let answer = scope
+        .0
+        .kv(&KvArgs {
+            key: &key,
+            namespace: namespace.as_deref(),
+        })
+        .map_err(pebble_error)?;
+    match answer {
+        KvAnswer::Value(data) => kv_value(&data),
+        KvAnswer::Missing(message) if error_on_missing => Err(pebble_error(message)),
+        KvAnswer::Missing(_) => Ok(MjValue::from(())),
+    }
+}
+
+/// An argument as a refusal names it: a string quoted, anything else as it
+/// renders.
+fn shown_argument(v: &MjValue) -> String {
+    match v.as_str() {
+        Some(s) => format!("'{s}'"),
+        None => v.to_string(),
+    }
+}
+
+/// The value `kv()` hands the template: the KV store's [`KvData`] converted
+/// leaf by leaf, **never through `to_json()`** (which would make a decimal
+/// an `f64`; the user's ruling, 2026-10-07, decimals preserved exactly):
+///
+/// - a decimal is a `java.math.BigDecimal` [`filters::big_decimal`]: a bare
+///   `{{ x }}` prints its plain digits, a serialiser `BigDecimal.toString()`;
+/// - an int within `i64`/`u64`/`i128`/`u128` is that integer
+///   ([`env::integer_from_literal`]), beyond it a `java.math.BigInteger`
+///   [`filters::big_integer`];
+/// - a float is an `f64`; a string, a boolean and null are themselves; a list
+///   a list; a map an ordered map, its fields in their stored order.
+///
+/// Neither `BigNumber` is arithmetic, so `{{ kv('d') + 1 }}` fails the render
+/// naming the operator (W9c spec §15), where Kestra computes in `BigDecimal`.
+///
+/// A value nesting containers deeper than [`crate::storage::ion::MAX_DEPTH`]
+/// is refused before anything is built: the check walks with an explicit
+/// stack, so the conversion's recursion is bounded by it (Task 3 re-review
+/// 2, H1). The store never hands out a deeper one; this guards the seam.
+fn kv_value(data: &KvData) -> Result<MjValue, MjError> {
+    let limit = crate::storage::ion::MAX_DEPTH;
+    if data.nests_deeper_than(limit) {
+        return Err(pebble_error(format!(
+            "The 'kv' function failed: the value nests containers deeper than {limit} levels, \
+             which egret does not render"
+        )));
+    }
+    kv_value_bounded(data)
+}
+
+/// [`kv_value`] once the depth is checked.
+fn kv_value_bounded(data: &KvData) -> Result<MjValue, MjError> {
+    Ok(match data {
+        KvData::Null => MjValue::from(()),
+        KvData::Bool(b) => MjValue::from(*b),
+        KvData::Number(KvNumber::Int(digits)) => {
+            env::integer_from_literal(digits).unwrap_or_else(|| super::filters::big_integer(digits))
+        }
+        KvData::Number(KvNumber::Decimal(plain)) => {
+            super::filters::big_decimal(plain).ok_or_else(|| {
+                pebble_error(format!(
+                    "The 'kv' function failed: the stored decimal '{plain}' is not a decimal"
+                ))
+            })?
+        }
+        KvData::Number(KvNumber::Float(f)) => MjValue::from(*f),
+        KvData::String(s) => MjValue::from(s.clone()),
+        KvData::List(items) => MjValue::from(
+            items
+                .iter()
+                .map(kv_value_bounded)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        KvData::Struct(fields) => MjValue::from_object(env::OrderedMap::new(
+            fields
+                .iter()
+                .map(|(name, item)| Ok((name.clone(), kv_value_bounded(item)?)))
+                .collect::<Result<Vec<_>, MjError>>()?,
+        )),
     })
 }
 
@@ -3354,16 +3541,21 @@ mod tests {
     /// It earns its place only for a *different* mutation — a refusal that
     /// forwards to minijinja's unknown-name error while still being
     /// registered — and it costs one line.
+    ///
+    /// **W9c Task 4** took `kv` out: it reads the KV store over the render's
+    /// scope now. The test that held seven names is replaced by this one,
+    /// which pins six and proves a read through a fake scope.
     #[test]
-    fn kv_still_names_w9c_and_the_refused_list_shrinks_to_seven() {
-        // W9b Task 4: `fileURI` left the list; it is a function now.
-        assert!(
-            !REFUSED.iter().any(|(name, _)| *name == "fileURI"),
-            "fileURI is implemented, not refused"
-        );
-        assert_eq!(REFUSED.len(), 7);
+    fn the_refused_list_is_six_and_kv_is_not_in_it() {
+        // W9b Task 4: `fileURI` left the list; W9c Task 4: `kv`.
+        for gone in ["fileURI", "kv"] {
+            assert!(
+                !REFUSED.iter().any(|(name, _)| *name == gone),
+                "{gone} is implemented, not refused"
+            );
+        }
+        assert_eq!(REFUSED.len(), 6);
         let expected = [
-            ("kv", "the namespace KV store", "W9c"),
             ("http", "an outbound HTTP client", "W9"),
             ("render", "an execution context to render against", "W3"),
             ("renderOnce", "an execution context to render against", "W3"),
@@ -3406,6 +3598,20 @@ mod tests {
                 );
             }
         }
+
+        // `kv` is a function now: with a scope it answers the stored value,
+        // and without one it is refused by its own sentence (the corpus's
+        // `function-kv` render has none), never "unknown".
+        let cx = kv_fn::FakeKv::default()
+            .with("k", crate::storage::kv::value::KvData::String("v".into()))
+            .cx();
+        assert_eq!(kv_fn::render("{{ kv('k') }}", &cx).unwrap(), "v");
+        let message = err("{{ kv(key='my-key') }}");
+        assert!(
+            message.contains("The 'kv' function needs a running execution"),
+            "{message}"
+        );
+        assert!(!message.contains("is unknown"), "{message}");
     }
 
     /// `env` — the two refusals, and the accepted neighbour of each.
@@ -4459,6 +4665,401 @@ mod tests {
                 render_bound(&format!("SELECT {{{{ fileSize('{OWN}') }}}}"), &cx).unwrap();
             assert_eq!(sql, "SELECT ?");
             assert_eq!(binds, vec![serde_json::json!(11)]);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // W9c Task 4: `kv()`, over a fake scope.
+    // -----------------------------------------------------------------
+
+    pub(super) mod kv_fn {
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        use crate::runners::env::{render_str, RenderContext};
+        use crate::runners::files::{
+            FileMeta, FileScope, FileUnavailable, KvAnswer, KvArgs, RenderFiles,
+        };
+        use crate::storage::kv::value::{decode, KvData, KvNumber, KvType};
+
+        /// A `RenderFiles` answering `kv()` from a map by key, and a spy of
+        /// what each call asked. A key not in the map is missing, with the
+        /// sentence a real scope writes for namespace `w9c.fn`.
+        #[derive(Default)]
+        pub(in super::super) struct FakeKv {
+            values: BTreeMap<String, Result<KvAnswer, String>>,
+            calls: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl FakeKv {
+            pub(in super::super) fn with(mut self, key: &str, data: KvData) -> Self {
+                self.values.insert(key.into(), Ok(KvAnswer::Value(data)));
+                self
+            }
+            fn refusing(mut self, key: &str, why: &str) -> Self {
+                self.values.insert(key.into(), Err(why.into()));
+                self
+            }
+            fn spy(&self) -> Arc<Mutex<Vec<String>>> {
+                self.calls.clone()
+            }
+            pub(in super::super) fn cx(self) -> RenderContext {
+                RenderContext::new().with_files(FileScope(Arc::new(self)))
+            }
+        }
+
+        impl RenderFiles for FakeKv {
+            fn lookup(&self, uri: &str) -> Result<FileMeta, FileUnavailable> {
+                Err(FileUnavailable::Refused(format!("{uri} not in the fake")))
+            }
+            fn read_utf8(&self, uri: &str) -> Result<String, String> {
+                Err(format!("{uri} not in the fake"))
+            }
+            fn read_bytes(&self, uri: &str, _whole: &str) -> Result<Vec<u8>, String> {
+                Err(format!("{uri} not in the fake"))
+            }
+            fn task_prefix(&self) -> Option<&str> {
+                None
+            }
+            fn kv(&self, args: &KvArgs<'_>) -> Result<KvAnswer, String> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("{} ns={:?}", args.key, args.namespace));
+                self.values.get(args.key).cloned().unwrap_or_else(|| {
+                    Ok(KvAnswer::Missing(format!(
+                        "The key '{}' does not exist in the namespace 'w9c.fn'.",
+                        args.key
+                    )))
+                })
+            }
+        }
+
+        pub(in super::super) fn render(
+            template: &str,
+            cx: &RenderContext,
+        ) -> Result<String, String> {
+            render_str(template, cx).map_err(|e| e.to_string())
+        }
+
+        fn fixture() -> serde_json::Value {
+            serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/oracle-exec/w9c-kv.json"
+            )))
+            .unwrap()
+        }
+
+        fn int(s: &str) -> KvData {
+            KvData::Number(KvNumber::Int(s.into()))
+        }
+
+        fn dec(s: &str) -> KvData {
+            KvData::Number(KvNumber::Decimal(s.into()))
+        }
+
+        /// `{a: 1}`, w9c `kv_function._setup`'s `k`.
+        fn a_one() -> KvData {
+            KvData::Struct(vec![("a".into(), int("1"))])
+        }
+
+        /// `KvFunction.java:34-36`: `key`, `namespace`, `errorOnMissing`, in
+        /// that order, positionally or by name, or mixed; `namespace`
+        /// absent or null asks for the walk (`None`).
+        #[test]
+        fn kv_takes_key_namespace_and_error_on_missing_positionally_or_by_name() {
+            let fake = FakeKv::default().with("k", KvData::String("v".into()));
+            let spy = fake.spy();
+            let cx = fake.cx();
+            for (call, asked) in [
+                ("{{ kv('k') }}", "k ns=None"),
+                ("{{ kv(key='k') }}", "k ns=None"),
+                ("{{ kv('k', null) }}", "k ns=None"),
+                ("{{ kv('k', 'w9c.other') }}", "k ns=Some(\"w9c.other\")"),
+                (
+                    "{{ kv(namespace='w9c.other', key='k') }}",
+                    "k ns=Some(\"w9c.other\")",
+                ),
+                (
+                    "{{ kv('k', namespace='w9c.other') }}",
+                    "k ns=Some(\"w9c.other\")",
+                ),
+                (
+                    "{{ kv('k', 'w9c.other', true) }}",
+                    "k ns=Some(\"w9c.other\")",
+                ),
+                ("{{ kv(key='k', errorOnMissing=false) }}", "k ns=None"),
+            ] {
+                spy.lock().unwrap().clear();
+                assert_eq!(render(call, &cx).unwrap(), "v", "{call}");
+                assert_eq!(*spy.lock().unwrap(), vec![asked.to_string()], "{call}");
+            }
+            // The third argument, either way, on a missing key.
+            for call in [
+                "{{ kv('missing', 'w9c.fn', false) }}",
+                "{{ kv('missing', errorOnMissing=false) }}",
+                "{{ kv(errorOnMissing=false, key='missing') }}",
+            ] {
+                assert_eq!(render(call, &cx).unwrap(), "", "{call}");
+            }
+            for call in [
+                "{{ kv('missing', 'w9c.fn', true) }}",
+                "{{ kv('missing', errorOnMissing=true) }}",
+            ] {
+                assert!(
+                    render(call, &cx)
+                        .unwrap_err()
+                        .contains("The key 'missing' does not exist in the namespace 'w9c.fn'."),
+                    "{call}"
+                );
+            }
+        }
+
+        /// w9c `kv_function.no_key`, `no_key_ns_only` (measured), and Pebble's
+        /// own argument checks (`too_many_args`, `unknown_named`, whose
+        /// sentences are the artifact's raw messages); `null_key` hands the
+        /// scope the empty key, which the key rule refuses with Kestra's
+        /// sentence.
+        #[test]
+        fn kv_without_a_key_is_kestras_sentence() {
+            let fake = FakeKv::default().with("k", KvData::String("v".into()));
+            let spy = fake.spy();
+            let cx = fake.cx();
+            for call in ["{{ kv() }}", "{{ kv(namespace='w9c.fn') }}"] {
+                let e = render(call, &cx).unwrap_err();
+                assert!(
+                    e.contains("The 'kv' function expects an argument 'key'."),
+                    "{call}: {e}"
+                );
+            }
+            let e = render("{{ kv('k', 'w9c.fn', false, 1) }}", &cx).unwrap_err();
+            assert!(
+                e.contains(
+                    "The argument at position 4 is not allowed. Only 3 argument(s) are allowed."
+                ),
+                "{e}"
+            );
+            let e = render("{{ kv(key='k', foo=1) }}", &cx).unwrap_err();
+            assert!(
+                e.contains("The following named argument does not exist: foo"),
+                "{e}"
+            );
+            assert!(spy.lock().unwrap().is_empty(), "nothing was looked up");
+            let _ = render("{{ kv(null) }}", &cx);
+            assert_eq!(*spy.lock().unwrap(), vec![" ns=None".to_string()]);
+            let e = render("{{ kv(1) }}", &cx).unwrap_err();
+            assert!(e.contains("'key'") && e.contains("string"), "{e}");
+            let e = render("{{ kv('k', 1) }}", &cx).unwrap_err();
+            assert!(e.contains("'namespace'") && e.contains("string"), "{e}");
+        }
+
+        /// `KvFunction.java:53`: `errorOnMissing` defaults to TRUE. Missing
+        /// is an error carrying the scope's sentence; `false` is `null`
+        /// (w9c `kv_function.missing_*`, `field_missing_safe`). The cell
+        /// `missing_eom_false_is_null` writes Pebble's `is null`, a test
+        /// egret's renderer does not bind (`env.rs`'s fence keeps it
+        /// unknown, as it does `is none`); `== null` asks the same of the
+        /// value.
+        #[test]
+        fn kv_error_on_missing_defaults_to_true() {
+            let cx = FakeKv::default().cx();
+            let e = render("{{ kv('missing') }}", &cx).unwrap_err();
+            assert!(
+                e.contains("The key 'missing' does not exist in the namespace 'w9c.fn'."),
+                "{e}"
+            );
+            let e = render("{{ kv('missing', errorOnMissing=null) }}", &cx).unwrap_err();
+            assert!(e.contains("does not exist"), "null is the default: {e}");
+            for (call, want) in [
+                ("{{ kv('missing', errorOnMissing=false) }}", ""),
+                ("{{ kv('missing', errorOnMissing=false) == null }}", "true"),
+                (
+                    "{{ kv('missing', errorOnMissing=false) ?? 'dflt' }}",
+                    "dflt",
+                ),
+                ("{{ kv('missing', errorOnMissing=false).a ?? 'n' }}", "n"),
+            ] {
+                assert_eq!(render(call, &cx).unwrap(), want, "{call}");
+            }
+            // A refusal is not missing: errorOnMissing=false does not hide it.
+            let cx = FakeKv::default().refusing("r", "refused, naming r").cx();
+            let e = render("{{ kv('r', errorOnMissing=false) }}", &cx).unwrap_err();
+            assert!(e.contains("refused, naming r"), "{e}");
+        }
+
+        /// w9c `types.<T>.kv_prints` (and `kv_tojson` where measured): the
+        /// artifact's own bytes, decoded as the store decodes them, then
+        /// rendered through `kv()`. 39 rows, every type.
+        #[test]
+        fn kv_returns_each_type_as_kestras_kv_printed_it() {
+            let f = fixture();
+            let types = f["egret_expected"]["types"].as_object().unwrap();
+            let (mut examined, mut tojson) = (0, 0);
+            for (name, cell) in types {
+                if name.starts_with('_') {
+                    continue;
+                }
+                let kind = KvType::parse(cell["api"]["type"].as_str().unwrap()).unwrap();
+                let bytes = cell["ion_bytes"].as_str().unwrap();
+                let data = decode(kind, bytes.as_bytes(), 1 << 20).unwrap();
+                let cx = FakeKv::default().with("x", data).cx();
+                assert_eq!(
+                    render("{{ kv('x') }}", &cx).unwrap(),
+                    cell["kv_prints"].as_str().unwrap(),
+                    "{name}"
+                );
+                if let Some(want) = cell.get("kv_tojson").and_then(|v| v.as_str()) {
+                    assert_eq!(
+                        render("{{ kv('x') | toJson }}", &cx).unwrap(),
+                        want,
+                        "{name} | toJson"
+                    );
+                    tojson += 1;
+                }
+                examined += 1;
+            }
+            assert_eq!(examined, 39, "every types row");
+            assert!(tojson > 20, "{tojson} toJson rows");
+        }
+
+        /// The user's ruling (2026-10-07): decimals reach the template
+        /// exactly. A decimal is a `java.math.BigDecimal` that prints every
+        /// digit; an int past `u128` a `java.math.BigInteger`; a float an
+        /// `f64`.
+        #[test]
+        fn kv_renders_a_decimal_and_a_big_int_exactly() {
+            let cx = FakeKv::default()
+                .with("d", dec("123456789012345678901234567890.5"))
+                .with("big", int("123456789012345678901234567890123456789012"))
+                .with("f", KvData::Number(KvNumber::Float(1.5)))
+                .with("tiny", dec("0.0000001"))
+                .with("scaled", dec("1.50"))
+                .cx();
+            for (call, want) in [
+                ("{{ kv('d') }}", "123456789012345678901234567890.5"),
+                ("{{ kv('d') | className }}", "java.math.BigDecimal"),
+                ("{{ [kv('d')] }}", "[123456789012345678901234567890.5]"),
+                ("{{ kv('d') | toJson }}", "123456789012345678901234567890.5"),
+                (
+                    "{{ kv('big') }}",
+                    "123456789012345678901234567890123456789012",
+                ),
+                ("{{ kv('big') | className }}", "java.math.BigInteger"),
+                ("{{ kv('f') }}", "1.5"),
+                ("{{ kv('tiny') }}", "0.0000001"),
+                // BigDecimal.toString() past the -6 adjusted exponent.
+                ("{{ kv('tiny') | toJson }}", "1E-7"),
+                ("{{ kv('scaled') }}", "1.50"),
+            ] {
+                assert_eq!(render(call, &cx).unwrap(), want, "{call}");
+            }
+        }
+
+        /// Fix round 3, re-review P4 (W9c spec §15): arithmetic on an exact
+        /// decimal, or on an int past `i128`, fails the render naming the
+        /// operator (minijinja's `InvalidOperation`), and nothing is
+        /// rounded; an int within `i128` and a float compute.
+        #[test]
+        fn arithmetic_on_an_exact_decimal_or_big_int_is_a_named_refusal() {
+            let cx = FakeKv::default()
+                .with("d", dec("1.5"))
+                .with("big", int(&"9".repeat(40)))
+                .with("i", int("41"))
+                .with("f", KvData::Number(KvNumber::Float(1.5)))
+                .cx();
+            for (call, op) in [
+                ("{{ kv('d') + 1 }}", "+"),
+                ("{{ kv('big') * 2 }}", "*"),
+                ("{{ 1 - kv('d') }}", "-"),
+            ] {
+                let e = render(call, &cx).expect_err(call);
+                assert!(
+                    e.contains(&format!("tried to use {op} operator"))
+                        && e.contains("unsupported types"),
+                    "{call}: {e}"
+                );
+            }
+            assert_eq!(render("{{ kv('i') + 1 }}", &cx).unwrap(), "42");
+            assert_eq!(render("{{ kv('f') + 1 }}", &cx).unwrap(), "2.5");
+        }
+
+        /// w9c `kv_function.eom_*` (chosen: Kestra throws a raw
+        /// `ClassCastException`): a non-boolean `errorOnMissing` is refused
+        /// naming the argument and its type, present key or missing, before
+        /// anything is looked up.
+        #[test]
+        fn a_non_boolean_error_on_missing_is_refused_as_measured() {
+            let f = fixture();
+            let cells = f["egret_expected"]["kv_function"].as_object().unwrap();
+            let fake = FakeKv::default().with("k", a_one());
+            let spy = fake.spy();
+            let cx = fake.cx();
+            let mut examined = 0;
+            for (name, cell) in cells {
+                if !name.starts_with("eom_") {
+                    continue;
+                }
+                let e = render(cell["expr"].as_str().unwrap(), &cx).unwrap_err();
+                for fragment in cell["message_contains"].as_array().unwrap() {
+                    assert!(e.contains(fragment.as_str().unwrap()), "{name}: {e}");
+                }
+                examined += 1;
+            }
+            assert_eq!(examined, 4);
+            assert!(spy.lock().unwrap().is_empty(), "refused before the lookup");
+            // The control: a boolean passes.
+            assert_eq!(render("{{ kv('k', 'w9c.fn', true).a }}", &cx).unwrap(), "1");
+        }
+
+        /// w9c `kv_function.no_execution` (spec §6): a render with no scope
+        /// (a Flow trigger's conditions, the corpus) refuses `kv()` by name
+        /// -- the pairing of the expression oracle's `function-kv`.
+        #[test]
+        fn kv_without_a_scope_refuses_by_name() {
+            for call in ["{{ kv('k') }}", "{{ kv(key='my-key') }}"] {
+                let e = render(call, &RenderContext::new()).unwrap_err();
+                assert!(
+                    e.contains(
+                        "The 'kv' function needs a running execution: it reads the KV store as \
+                         the running flow"
+                    ),
+                    "{call}: {e}"
+                );
+                assert!(!e.contains("is unknown"), "{e}");
+            }
+        }
+
+        /// Task 3 re-review 2, H1, at the render: a value nested 10,000
+        /// deep (built by hand, with a loop, never `serde_json::json!`) is
+        /// refused naming the limit, with no stack overflow; one at
+        /// `MAX_DEPTH` renders.
+        #[test]
+        fn a_value_nested_10000_deep_is_refused_at_render_with_no_abort() {
+            let nest = |depth: usize| {
+                let mut v = KvData::Null;
+                for _ in 0..depth {
+                    v = KvData::List(vec![v]);
+                }
+                v
+            };
+            let limit = crate::storage::ion::MAX_DEPTH;
+            let cx = FakeKv::default()
+                .with("deep", nest(10_000))
+                .with("edge", nest(limit))
+                .with("over", nest(limit + 1))
+                .cx();
+            for key in ["deep", "over"] {
+                let e = render(&format!("{{{{ kv('{key}') }}}}"), &cx).unwrap_err();
+                assert!(
+                    e.contains(&format!("deeper than {limit} levels")),
+                    "{key}: {e}"
+                );
+            }
+            let edge = render("{{ kv('edge') }}", &cx).unwrap();
+            assert_eq!(
+                edge,
+                format!("{}null{}", "[".repeat(limit), "]".repeat(limit))
+            );
         }
     }
 }

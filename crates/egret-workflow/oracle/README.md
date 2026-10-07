@@ -3703,6 +3703,12 @@ with `without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 The refusals' test is now `kv_still_names_w9c_and_the_refused_list_shrinks_to_seven`
 (seven names; `kv` names W9c).
 
+**W9c Task 4 (2026-10-07):** `kv` is implemented over the KV store and left the
+refusals; a corpus render has no file scope, so `function-kv` still fails, by
+the sentence `kv_without_a_scope_refuses_by_name` asserts, which is now its
+pairing. The refusals' test is now `the_refused_list_is_six_and_kv_is_not_in_it`
+(six names).
+
 ### `fetchContext`'s key order is `HashMap`'s, and that is a recorded divergence
 
 Measured: `{"b":1,"a":2}` comes back `{"a":2,"b":1}` and

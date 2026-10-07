@@ -592,3 +592,79 @@ async fn a_working_directory_namespace_files_round_trips_through_the_model() {
     let value = serde_json::to_value(&bare).unwrap();
     assert!(value.get("namespaceFiles").is_none(), "{value}");
 }
+
+/// W9c Task 4 (W9c spec §7): a `Set` or `Put` whose `value` calls `secret()`
+/// is refused at publish with its own message, naming the task and the
+/// property, and not with the generic `secret()` refusal for that property.
+/// Its unit twin is `spec::validate`'s
+/// `a_secret_in_a_set_or_put_value_is_refused_with_its_own_code_and_message`.
+#[tokio::test]
+async fn a_secret_in_a_kv_value_is_refused_at_publish_by_its_own_message() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    for (id, ty) in [
+        ("set", "io.kestra.plugin.core.kv.Set"),
+        ("put", "io.kestra.plugin.core.kv.Put"),
+    ] {
+        let f = common::draft(
+            &repo,
+            ws,
+            user,
+            &format!(
+                "id: {id}\nnamespace: a.b\ntasks:\n  - id: s\n    type: {ty}\n    key: k\n    \
+                 value:\n      token: \"{{{{ secret('API') }}}}\"\n"
+            ),
+        )
+        .await;
+        let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, f.id, "")
+            .await
+            .expect_err("a secret in a KV value must not publish");
+        let want = egret_workflow::plugins::secret_in_kv_value_message("s", "tasks.s.value.token");
+        match err {
+            egret_core::Error::InvalidInput(m) => {
+                assert!(m.contains(&want), "{ty}: {m}");
+                assert!(
+                    !m.contains("resolves only on `kestra.*` plugin tasks"),
+                    "{ty}: the generic refusal too: {m}"
+                );
+            }
+            other => panic!("{ty}: {other:?}"),
+        }
+    }
+}
+
+/// W9c Task 4: the corpus's `valids/kv` (two `kv()` calls in `Return`
+/// tasks) publishes. `valids/retry-with-flowable-errors` carries no
+/// `secret()` either, and today stops at the unknown `kv.Set` type only,
+/// which Task 5 registers; the secret scan adds nothing to it.
+#[tokio::test]
+async fn valids_kv_publishes_and_retry_with_flowable_errors_stops_only_at_its_set_type() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let kv = common::draft(
+        &repo,
+        ws,
+        user,
+        include_str!("../oracle-exec/corpus/valids/kv.yaml"),
+    )
+    .await;
+    egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, kv.id, "")
+        .await
+        .expect("valids/kv publishes");
+    let retry = common::draft(
+        &repo,
+        ws,
+        user,
+        include_str!("../oracle-exec/corpus/valids/retry-with-flowable-errors.yaml"),
+    )
+    .await;
+    match egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, retry.id, "").await {
+        Err(egret_core::Error::InvalidInput(m)) => assert_eq!(
+            m, "task 'set_kv' has unknown type 'io.kestra.plugin.core.kv.Set'",
+            "only the type Task 5 registers"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
