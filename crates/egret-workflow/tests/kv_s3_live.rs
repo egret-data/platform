@@ -221,9 +221,9 @@ fn everything() -> Result<(), String> {
         if head(&fs, &g, "big", 1).await? != Some(cap) {
             return Err("the object is not the cap's size".into());
         }
-        match latest(&db, &fs, &g, "big").await? {
-            Some(KvData::String(s)) if s == text => {}
-            other => return Err(format!("read back {:?}", other.map(|d| d.shape()))),
+        match &latest(&db, &fs, &g, "big").await? {
+            Some(KvData::String(s)) if *s == text => {}
+            other => return Err(format!("read back {:?}", other.as_ref().map(|d| d.shape()))),
         }
         match set(
             &db.pool,

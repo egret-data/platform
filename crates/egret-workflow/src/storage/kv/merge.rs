@@ -366,12 +366,14 @@ fn flatten_to_nested(updates: Fields) -> Result<Fields, String> {
                         Slot::Leaf(KvData::Struct(_)) => {
                             // A map set as a leaf: the path goes inside it
                             // (Kestra's `instanceof Map`).
-                            let Slot::Leaf(KvData::Struct(fields)) =
-                                std::mem::replace(slot, Slot::Map(next))
+                            let Slot::Leaf(mut leaf) = std::mem::replace(slot, Slot::Map(next))
                             else {
                                 unreachable!("matched above")
                             };
-                            levels.push(Level::of(fields));
+                            let KvData::Struct(fields) = &mut leaf else {
+                                unreachable!("matched above")
+                            };
+                            levels.push(Level::of(std::mem::take(fields)));
                             at = next;
                         }
                         // Kestra's "Conflict at key": the path stays here.
@@ -436,9 +438,15 @@ fn merge_values(a: Option<KvData>, b: &KvData) -> KvData {
     match (a, b) {
         (a, KvData::Null) => a.unwrap_or(KvData::Null),
         (None | Some(KvData::Null), b) => b.clone(),
-        (Some(KvData::Struct(x)), KvData::Struct(y)) => KvData::Struct(deep_merge(x, y)),
-        (Some(KvData::List(x)), KvData::List(y)) => KvData::List(merge_lists(x, y)),
-        (_, b) => b.clone(),
+        // (`KvData` has a `Drop`: the current value's children are taken,
+        // not moved out of it.)
+        (Some(mut a), b) => match (&mut a, b) {
+            (KvData::Struct(x), KvData::Struct(y)) => {
+                KvData::Struct(deep_merge(std::mem::take(x), y))
+            }
+            (KvData::List(x), KvData::List(y)) => KvData::List(merge_lists(std::mem::take(x), y)),
+            _ => b.clone(),
+        },
     }
 }
 
@@ -962,11 +970,11 @@ mod tests {
             ),
         )]);
         let started = std::time::Instant::now();
-        let KvData::Struct(m) = merge(Some(&a), &b).unwrap() else {
+        let KvData::Struct(m) = &merge(Some(&a), &b).unwrap() else {
             panic!()
         };
         assert_eq!(m.len(), n + n / 2);
-        let KvData::Struct(l) = merge(Some(&la), &lb).unwrap() else {
+        let KvData::Struct(l) = &merge(Some(&la), &lb).unwrap() else {
             panic!()
         };
         assert!(matches!(&l[0].1, KvData::List(items) if items.len() == n + n / 2));
@@ -980,7 +988,7 @@ mod tests {
                 })
                 .collect(),
         );
-        let KvData::Struct(e) = merge(Some(&a), &entries).unwrap() else {
+        let KvData::Struct(e) = &merge(Some(&a), &entries).unwrap() else {
             panic!()
         };
         assert!(matches!(&e[n].1, KvData::Struct(f) if f.len() == n));

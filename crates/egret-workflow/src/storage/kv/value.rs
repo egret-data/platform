@@ -352,7 +352,81 @@ pub enum KvData {
     Struct(Vec<(String, KvData)>),
 }
 
+/// Dismantles the tree with an explicit stack (Task 3 re-review 2, H1): a
+/// derived drop recurses once per level, and a value nested ~5,000 deep
+/// overflowed a 2 MiB stack and aborted the process. Each container's
+/// children are moved onto a heap stack before it is freed, so a drop
+/// takes O(1) stack at any depth.
+impl Drop for KvData {
+    fn drop(&mut self) {
+        fn take_children(d: &mut KvData, stack: &mut Vec<KvData>) {
+            match d {
+                KvData::List(items) => stack.append(items),
+                KvData::Struct(fields) => {
+                    stack.extend(std::mem::take(fields).into_iter().map(|(_, v)| v))
+                }
+                _ => {}
+            }
+        }
+        if !matches!(self, KvData::List(_) | KvData::Struct(_)) {
+            return;
+        }
+        let mut stack = Vec::new();
+        take_children(self, &mut stack);
+        while let Some(mut child) = stack.pop() {
+            take_children(&mut child, &mut stack);
+            // `child` drops here, childless.
+        }
+    }
+}
+
+/// The deepest nesting of containers a KV value may hold:
+/// [`crate::storage::ion::MAX_DEPTH`], which reads enforce.
+pub(crate) fn too_deep() -> Unstorable {
+    Unstorable::Invalid(format!(
+        "the value nests containers deeper than {} levels, which egret does not store",
+        crate::storage::ion::MAX_DEPTH
+    ))
+}
+
+/// Whether `v` nests containers deeper than `limit`, walked with an
+/// explicit stack: O(1) call stack at any depth (H1).
+fn json_deeper_than(v: &Value, limit: usize) -> bool {
+    let mut stack: Vec<(&Value, usize)> = vec![(v, 0)];
+    while let Some((v, depth)) = stack.pop() {
+        let children: Box<dyn Iterator<Item = &Value>> = match v {
+            Value::Array(items) => Box::new(items.iter()),
+            Value::Object(map) => Box::new(map.values()),
+            _ => continue,
+        };
+        if depth + 1 > limit {
+            return true;
+        }
+        stack.extend(children.map(|c| (c, depth + 1)));
+    }
+    false
+}
+
 impl KvData {
+    /// Whether this value nests containers deeper than `limit`, walked with
+    /// an explicit stack (H1): the store's writers ask it before they clone
+    /// or encode, so a value built by hand cannot reach a recursive path.
+    pub fn nests_deeper_than(&self, limit: usize) -> bool {
+        let mut stack: Vec<(&KvData, usize)> = vec![(self, 0)];
+        while let Some((d, depth)) = stack.pop() {
+            let children: Box<dyn Iterator<Item = &KvData>> = match d {
+                KvData::List(items) => Box::new(items.iter()),
+                KvData::Struct(fields) => Box::new(fields.iter().map(|(_, v)| v)),
+                _ => continue,
+            };
+            if depth + 1 > limit {
+                return true;
+            }
+            stack.extend(children.map(|c| (c, depth + 1)));
+        }
+        false
+    }
+
     /// A flow's value, with `serde_json`'s semantics (the user's ruling,
     /// 2026-10-07): a number written with only digits is an int, any other
     /// (a fraction, an exponent) a float, as Kestra's Jackson reads a JSON
@@ -362,8 +436,22 @@ impl KvData {
     /// A number of more than [`MAX_NUMBER_DIGITS`] digits (its mantissa as
     /// written, or its exponent) is refused, `TooLarge`, before it becomes a
     /// float that would drop its digits silently (the user's ruling,
-    /// 2026-10-07). This is the only refusal.
+    /// 2026-10-07).
+    ///
+    /// A value nesting containers deeper than
+    /// [`crate::storage::ion::MAX_DEPTH`] is refused, `Invalid`, before
+    /// anything is built (Task 3 re-review 2, H1): the check walks with an
+    /// explicit stack, so no deeper value is ever built from JSON, and the
+    /// conversion's own recursion is bounded by it.
     pub fn from_json(v: &Value) -> Result<Self, Unstorable> {
+        if json_deeper_than(v, crate::storage::ion::MAX_DEPTH) {
+            return Err(too_deep());
+        }
+        Self::from_json_bounded(v)
+    }
+
+    /// [`KvData::from_json`] once the depth is checked.
+    fn from_json_bounded(v: &Value) -> Result<Self, Unstorable> {
         Ok(match v {
             Value::Null => KvData::Null,
             Value::Bool(b) => KvData::Bool(*b),
@@ -380,12 +468,12 @@ impl KvData {
             Value::Array(items) => KvData::List(
                 items
                     .iter()
-                    .map(Self::from_json)
+                    .map(Self::from_json_bounded)
                     .collect::<Result<_, _>>()?,
             ),
             Value::Object(map) => KvData::Struct(
                 map.iter()
-                    .map(|(name, item)| Ok((name.clone(), Self::from_json(item)?)))
+                    .map(|(name, item)| Ok((name.clone(), Self::from_json_bounded(item)?)))
                     .collect::<Result<_, Unstorable>>()?,
             ),
         })
@@ -805,21 +893,23 @@ fn read_back(kind: KvType, bytes: &[u8], cap: u64) -> Result<KvData, Unstorable>
         Some(Ok(data)) => data,
     };
     let invalid = |m: String| Invalid(m);
-    match (kind, data) {
+    // (`KvData` has a `Drop`, so nothing is moved out of it: matched by
+    // reference, the whole value returned or a new one built.)
+    match (kind, &data) {
         // A rendered `null` is stored as Ion `null`, typed STRING (`KvType::of`).
-        (KvType::String, d @ (KvData::String(_) | KvData::Null)) => Ok(d),
-        (KvType::Number, d @ KvData::Number(_)) => Ok(d),
-        (KvType::Boolean, d @ KvData::Bool(_)) => Ok(d),
-        (KvType::Json, d @ (KvData::Struct(_) | KvData::List(_))) => Ok(d),
-        (KvType::Datetime, KvData::String(s)) => instant(&s)
+        (KvType::String, KvData::String(_) | KvData::Null)
+        | (KvType::Number, KvData::Number(_))
+        | (KvType::Boolean, KvData::Bool(_))
+        | (KvType::Json, KvData::Struct(_) | KvData::List(_)) => Ok(data),
+        (KvType::Datetime, KvData::String(s)) => instant(s)
             .map(|t| KvData::String(java_instant(t)))
             .ok_or_else(|| invalid(format!("the stored DATETIME value '{s}' is not an instant"))),
-        (KvType::Date, KvData::String(s)) => date(&s)
+        (KvType::Date, KvData::String(s)) => date(s)
             .map(|d| KvData::String(d.format("%Y-%m-%d").to_string()))
             .ok_or_else(|| invalid(format!("the stored DATE value '{s}' is not a date"))),
-        (KvType::Duration, KvData::String(s)) => {
-            Ok(KvData::String(kestra_duration(&s).unwrap_or(s)))
-        }
+        (KvType::Duration, KvData::String(s)) => Ok(KvData::String(
+            kestra_duration(s).unwrap_or_else(|| s.clone()),
+        )),
         (_, d) => Err(invalid(format!(
             "the stored {kind} value is {}, not a {kind}",
             d.shape()
@@ -995,6 +1085,81 @@ pub fn parse_ttl(raw: &str, mode: Ttl) -> Result<chrono::TimeDelta, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `f` on a thread with a 2 MiB stack, tokio's blocking-pool size
+    /// (Task 3 re-review 2, H1).
+    fn on_a_2mib_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    /// H1: a JSON value nested 10,000 deep is refused by `from_json` (and
+    /// `KvValue::from_json`) before anything is built, as `Invalid`, with no
+    /// abort; exactly `MAX_DEPTH` is taken. (The `serde_json::Value` itself
+    /// is leaked: its own drop recurses, which is not egret's code.)
+    #[test]
+    fn a_json_value_deeper_than_max_depth_is_refused_by_from_json() {
+        use crate::storage::ion::MAX_DEPTH;
+        on_a_2mib_stack(|| {
+            let nest = |n: usize| {
+                let mut v = json!(true);
+                for i in 0..n {
+                    // (Not `json!`: it serializes an expression, recursively.)
+                    v = if i % 2 == 0 {
+                        Value::Array(vec![v])
+                    } else {
+                        Value::Object([("k".to_string(), v)].into_iter().collect())
+                    };
+                }
+                v
+            };
+            let deep = nest(10_000);
+            for got in [
+                KvData::from_json(&deep).map(|_| ()),
+                KvValue::from_json(KvType::Json, &deep).map(|_| ()),
+            ] {
+                match got {
+                    Err(Unstorable::Invalid(m)) => assert!(
+                        m.contains(&format!("deeper than {MAX_DEPTH} levels"))
+                            && m.contains("does not store"),
+                        "{m}"
+                    ),
+                    other => panic!("{other:?}"),
+                }
+            }
+            std::mem::forget(deep);
+            let at = nest(MAX_DEPTH);
+            let d = KvData::from_json(&at).unwrap();
+            assert!(!d.nests_deeper_than(MAX_DEPTH) && d.nests_deeper_than(MAX_DEPTH - 1));
+            assert!(KvData::from_json(&nest(MAX_DEPTH + 1)).is_err());
+        });
+    }
+
+    /// H1: a `KvData` nested 100,000 deep, built by hand, drops on a 2 MiB
+    /// stack: the `Drop` dismantles it with a heap stack. Lists and structs
+    /// alternate.
+    #[test]
+    fn dropping_a_100000_deep_kv_data_does_not_overflow() {
+        on_a_2mib_stack(|| {
+            let mut d = KvData::Bool(true);
+            for i in 0..100_000 {
+                d = if i % 2 == 0 {
+                    KvData::List(vec![d, KvData::Null])
+                } else {
+                    KvData::Struct(vec![
+                        ("k".into(), d),
+                        ("s".into(), KvData::String("x".into())),
+                    ])
+                };
+            }
+            assert!(d.nests_deeper_than(99_999) && !d.nests_deeper_than(100_000));
+            drop(d);
+        });
+    }
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!(concat!(
@@ -1368,7 +1533,7 @@ mod tests {
             "the API path too"
         );
         let KvData::List(items) =
-            decode(KvType::Json, b"[1d900,1d900,1d900,1d900,1d900]", CAP).unwrap()
+            &decode(KvType::Json, b"[1d900,1d900,1d900,1d900,1d900]", CAP).unwrap()
         else {
             panic!()
         };
@@ -1464,10 +1629,10 @@ mod tests {
         };
         // A flow's patch `{b: 2, e: 0.5}`: an int and a float.
         let patch = KvData::from_json(&json!({"b": 2, "e": 0.5})).unwrap();
-        let KvData::Struct(patch) = patch else {
+        let KvData::Struct(patch) = &patch else {
             unreachable!()
         };
-        fields.extend(patch);
+        fields.extend(patch.iter().cloned());
         assert_eq!(
             written(KvType::Json, data),
             "{a:1.5,c:{d:123456789012345678901234567890.5},b:2,e:0.5e0}"
@@ -1597,7 +1762,7 @@ mod tests {
         // The control: under the budget, written and read.
         let fits = zeros(150_000);
         let bytes = check_readable(&fits, CAP).unwrap();
-        let KvData::List(items) = decode(KvType::Json, &bytes, CAP).unwrap() else {
+        let KvData::List(items) = &decode(KvType::Json, &bytes, CAP).unwrap() else {
             panic!()
         };
         assert_eq!(items.len(), 150_000);
@@ -2009,16 +2174,20 @@ mod tests {
                 check_readable(v, 4096)
             );
         }
-        let mut deep = json!(1);
+        // Built by hand: `from_json` refuses this depth itself (H1).
+        let mut deep = int("1");
         for _ in 0..150 {
-            deep = json!([deep]);
+            deep = KvData::List(vec![deep]);
         }
         let invalid = [
             KvValue {
                 kind: KvType::Duration,
                 data: KvData::Bool(true),
             },
-            KvValue::from_json(KvType::Json, &deep).unwrap(),
+            KvValue {
+                kind: KvType::Json,
+                data: deep,
+            },
         ];
         for v in &invalid {
             assert!(
@@ -2067,7 +2236,7 @@ mod tests {
             decode(KvType::Number, b"-1d-999", 4096).unwrap(),
             dec(&format!("-0.{}1", "0".repeat(998)))
         );
-        let KvData::Number(KvNumber::Int(digits)) = decode(
+        let KvData::Number(KvNumber::Int(digits)) = &decode(
             KvType::Number,
             format!("0x{}", "f".repeat(830)).as_bytes(),
             4096,

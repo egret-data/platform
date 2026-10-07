@@ -1474,7 +1474,7 @@ async fn a_large_decode_runs_off_the_async_runtime_and_a_ticker_keeps_ticking() 
         "read_value of {} bytes took {took:?}; the ticker ticked {ticked} times",
         bytes.len()
     );
-    let KvData::List(items) = read else {
+    let KvData::List(items) = &read else {
         panic!("{read:?}")
     };
     assert_eq!(items.len(), 150_000);
@@ -3756,5 +3756,67 @@ mod writes {
         }
         gone.sort_unstable();
         assert_eq!(gone, [0, 1]);
+    }
+
+    /// Task 3 re-review 2, H1: a value or a patch nested 10,000 deep, built
+    /// by hand (no constructor builds one), is refused by `set` and
+    /// `put_merge` before anything clones or encodes it, as `Author`, with no
+    /// abort, on a 2 MiB stack (the runtime's workers and blocking pool), and
+    /// nothing is staged or written.
+    #[test]
+    fn a_value_nested_10000_deep_is_refused_by_set_and_put_merge() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .thread_stack_size(2 * 1024 * 1024)
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let Some(db) = common::db().await else { return };
+                        let (ws, _) = common::seed_workspace(&db).await;
+                        let (fs, store) = hooked_fs(DEFAULT_CAP);
+                        let g = wgrant(ws, NS3);
+                        let deep = || {
+                            let mut d = KvData::Bool(true);
+                            for _ in 0..10_000 {
+                                d = KvData::Struct(vec![("d".into(), d)]);
+                            }
+                            d
+                        };
+                        let nv = NewValue {
+                            value: KvValue {
+                                kind: KvType::Json,
+                                data: deep(),
+                            },
+                            description: None,
+                            ttl: None,
+                            overwrite: true,
+                        };
+                        match set(&db.pool, &fs, &g, &key("deep"), nv, USER).await {
+                            Err(NsError::Author(m)) => assert!(
+                                m.contains("'deep'")
+                                    && m.contains("deeper than 100 levels")
+                                    && m.contains("does not store"),
+                                "{m}"
+                            ),
+                            other => panic!("{other:?}"),
+                        }
+                        match put_merge(&db.pool, &fs, &g, &key("deep"), deep(), false, USER).await
+                        {
+                            Err(NsError::Author(m)) => assert!(
+                                m.contains("the patch nests containers deeper than 102 levels"),
+                                "{m}"
+                            ),
+                            other => panic!("{other:?}"),
+                        }
+                        assert!(rows_of(&db, ws, NS3, "deep").await.is_empty());
+                        assert_eq!(store.staging_puts.load(Ordering::SeqCst), 0);
+                    })
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

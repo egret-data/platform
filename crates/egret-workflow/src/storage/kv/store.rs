@@ -72,10 +72,11 @@ use uuid::Uuid;
 use super::key::KvKey;
 use super::kv_lock_text;
 use super::merge;
+use super::value::too_deep;
 use super::value::{
     check_readable, decode, max_ttl, KvData, KvType, KvValue, Unstorable, MAX_TTL_DAYS,
 };
-use crate::storage::ion::ELEMENT_BYTES;
+use crate::storage::ion::{ELEMENT_BYTES, MAX_DEPTH};
 use crate::storage::lock::{
     is_lock_timeout, is_lock_timeout_error, lock_timeout_value, LockedSession,
 };
@@ -1098,6 +1099,13 @@ pub async fn set(
     by: CreatedBy,
 ) -> Result<KvWritten, NsError> {
     need(grant, Access::Write)?;
+    // Task 3 re-review 2, H1: before anything clones or encodes the value
+    // (each recursive per level), with an O(1)-stack walk. A value from
+    // `from_json` or the Ion reader is already bounded; this guards one
+    // built by hand.
+    if new.value.data.nests_deeper_than(MAX_DEPTH) {
+        return Err(refused_value(grant, key, too_deep()));
+    }
     let ttl = ttl_secs(grant, key, new.ttl)?;
     let NewValue {
         value,
@@ -1179,6 +1187,18 @@ pub async fn put_merge(
     by: CreatedBy,
 ) -> Result<KvWritten, NsError> {
     need(grant, Access::Write)?;
+    // H1 (Task 3 re-review 2), before the merge clones, encodes or nests
+    // anything, with an O(1)-stack walk: a patch nests at most a value's
+    // `MAX_DEPTH` plus the two levels of an entry list (`[{value: …}]`).
+    // Deeper, its merged value could not be stored anyway.
+    if patch.nests_deeper_than(MAX_DEPTH + 2) {
+        return Err(NsError::Author(format!(
+            "key '{key}' in namespace '{}': the patch nests containers deeper than {} levels \
+             (a KV value's {MAX_DEPTH}, plus an entry list's two), which egret does not store",
+            grant.namespace(),
+            MAX_DEPTH + 2
+        )));
+    }
     // C1 (Task 3 re-review 1), before the key's lock: a patch's dotted
     // segments in all are at most the dense-value limit (spec §8.5). The
     // merge is linear in the segments, so this bounds its work under the
