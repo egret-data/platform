@@ -7799,7 +7799,20 @@
      },
      "why": "user ruling R-c (2026-10-07, spec header, §2, §9): an Ion timestamp of month precision has no KV type, so it is stored as the raw text, a STRING"
     },
-    "_independent": "each body is PUT to its own fresh key in w9c.api; no cell reads another's key"
+    "_independent": "each body is PUT to its own fresh key in w9c.api; no cell reads another's key",
+    "annot_blob": {
+     "body": "x::{{aGVsbG8=}}",
+     "put_status": 400,
+     "message_contains": [
+      "blob"
+     ],
+     "basis": "chosen",
+     "compare": "put_status exact; message contains each fragment; nothing written (a GET answers 404)",
+     "kestra": {
+      "not_measured": "not measured on the artifact (the case was added in Task 1's fix round 1, after the oracle was torn down)"
+     },
+     "why": "user ruling 2026-10-07 (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type, at any depth. Precedence (Task 1 re-review N3): the refusal comes before the annotation rule, so an annotated blob is refused naming `blob`, not kept as the raw text as an annotated int is (ion_annot)"
+    }
    },
    "headers": {
     "h_desc": {
@@ -9525,6 +9538,11 @@
     "path": "put_merge.over_deleted_with_description",
     "pointer": "/put_merge/over_deleted_with_description",
     "why": "spec §8.5: a soft-deleted key is missing to Put, which starts fresh and carries over no description and no expiry from a revision that is not live (the user's ruling 2026-10-07 for an expired key, applied alike to a deleted one); the deleted revision 1 stays as it was"
+   },
+   {
+    "path": "api.put_bodies.annot_blob",
+    "pointer": "/api/put_bodies/annot_blob",
+    "why": "user ruling 2026-10-07 (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type, at any depth. Precedence (Task 1 re-review N3): the refusal comes before the annotation rule, so an annotated blob is refused naming `blob`, not kept as the raw text as an annotated int is (ion_annot)"
    }
   ]
  },

@@ -1055,7 +1055,8 @@ pub struct KvRevisionDto { pub revision: u32, pub r#type: String, pub size: u64,
 /// even at midnight; a day-precision one is a DATE; a blob, clob or sexp at any depth is Err naming
 /// the type, answered 400; an annotated value at any depth makes the whole body the raw text.
 /// Fix round 1, the user's rulings R-b and R-c: an empty or whitespace-only body is Err "empty body"
-/// (400); a year- or month-precision timestamp is the raw text, STRING. w9c api.put_bodies.)
+/// (400); a year- or month-precision timestamp is the raw text, STRING. The blob/clob/sexp refusal
+/// comes before the annotation rule: `x::{{aGVsbG8=}}` is Err naming `blob` (re-review N3). w9c api.put_bodies.)
 pub fn parse_api_body(body: &[u8]) -> Result<KvValue, String>;
 ```
 
