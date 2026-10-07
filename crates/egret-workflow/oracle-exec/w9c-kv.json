@@ -3891,7 +3891,7 @@
       }
      }
     },
-    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. Kestra collects the entries in a HashMap and nests them in its iteration order (MapUtils.flattenToNestedMap), so which entry wins depends on hash order, not on the entries; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review, w9c-kestra.jar)",
+    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. A MAP-valued leaf is no exception: MapUtils.flattenToNestedMap (MapUtils.java:193-219) nests the entries in HashMap bucket order ((h ^ h>>>16) & 15), not entry order. When the leaf's key comes first (`a` bucket 1, `a.b` bucket 4) the dotted key writes into the leaf's map: {x:1,a:{z:1,b:2}} in both entry orders; when the dotted key comes first (`m.b` bucket 0, `m` bucket 13) the leaf hits 'Conflict at key … ignoring it' and is dropped: {x:1,m:{b:2}} in both entry orders (jshell on w9c-kestra.jar, Task 3 fix round 2). The result depends on the key's hash, so egret refuses; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review I2, w9c-kestra.jar)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML list of maps a list of maps)",
     "note": "jshell only (no runtime cell): Put.mergeValues on the artifact's classes"
    },
@@ -4002,7 +4002,7 @@
       }
      }
     },
-    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. Kestra collects the entries in a HashMap and nests them in its iteration order (MapUtils.flattenToNestedMap), so which entry wins depends on hash order, not on the entries; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review, w9c-kestra.jar)",
+    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. A MAP-valued leaf is no exception: MapUtils.flattenToNestedMap (MapUtils.java:193-219) nests the entries in HashMap bucket order ((h ^ h>>>16) & 15), not entry order. When the leaf's key comes first (`a` bucket 1, `a.b` bucket 4) the dotted key writes into the leaf's map: {x:1,a:{z:1,b:2}} in both entry orders; when the dotted key comes first (`m.b` bucket 0, `m` bucket 13) the leaf hits 'Conflict at key … ignoring it' and is dropped: {x:1,m:{b:2}} in both entry orders (jshell on w9c-kestra.jar, Task 3 fix round 2). The result depends on the key's hash, so egret refuses; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review I2, w9c-kestra.jar)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML list of maps a list of maps)",
     "note": "jshell (Task 3 review): Kestra's answer is the same as for the entries in the other order, its hash order"
    },
@@ -4040,6 +4040,44 @@
     "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. Kestra collects the entries in a HashMap and nests them in its iteration order (MapUtils.flattenToNestedMap), so which entry wins depends on hash order, not on the entries; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review, w9c-kestra.jar)",
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML list of maps a list of maps)",
     "note": "jshell (Task 3 review): Kestra sets q first (hash order), then cannot descend into the scalar and writes r at the top"
+   },
+   "code_dot_map_leaf_dropped": {
+    "existing": {
+     "x": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": "m",
+      "value": {
+       "z": 1
+      }
+     },
+     {
+      "key": "m.b",
+      "value": 2
+     }
+    ],
+    "errorOnMissing": null,
+    "outcome": "error",
+    "result": null,
+    "message": "the keyed `value` entries 'm' and 'm.b' conflict: one sets a field that the other also sets or writes inside; Kestra's result then depends on the order of its HashMap, so egret refuses them",
+    "basis": "chosen",
+    "compare": "outcome exact; message exact; nothing written",
+    "kestra": {
+     "outcome": "ok",
+     "result": {
+      "x": 1,
+      "m": {
+       "b": 2
+      }
+     }
+    },
+    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. A MAP-valued leaf is no exception: MapUtils.flattenToNestedMap (MapUtils.java:193-219) nests the entries in HashMap bucket order ((h ^ h>>>16) & 15), not entry order. When the leaf's key comes first (`a` bucket 1, `a.b` bucket 4) the dotted key writes into the leaf's map: {x:1,a:{z:1,b:2}} in both entry orders; when the dotted key comes first (`m.b` bucket 0, `m` bucket 13) the leaf hits 'Conflict at key … ignoring it' and is dropped: {x:1,m:{b:2}} in both entry orders (jshell on w9c-kestra.jar, Task 3 fix round 2). The result depends on the key's hash, so egret refuses; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review I2, w9c-kestra.jar)",
+    "premise": "the value reaches Put typed (egret's typed render keeps a YAML list of maps a list of maps)",
+    "note": "jshell (Task 3 fix round 2): `m.b` is in an earlier bucket than `m`, so Kestra drops the map leaf {z:1}; the same answer for the entries in the other order"
    }
   },
   "expiry": {
@@ -9626,17 +9664,22 @@
    {
     "path": "put_merge.code_dot_prefix_conflict",
     "pointer": "/put_merge/code_dot_prefix_conflict",
-    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. Kestra collects the entries in a HashMap and nests them in its iteration order (MapUtils.flattenToNestedMap), so which entry wins depends on hash order, not on the entries; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review, w9c-kestra.jar)"
+    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. A MAP-valued leaf is no exception: MapUtils.flattenToNestedMap (MapUtils.java:193-219) nests the entries in HashMap bucket order ((h ^ h>>>16) & 15), not entry order. When the leaf's key comes first (`a` bucket 1, `a.b` bucket 4) the dotted key writes into the leaf's map: {x:1,a:{z:1,b:2}} in both entry orders; when the dotted key comes first (`m.b` bucket 0, `m` bucket 13) the leaf hits 'Conflict at key … ignoring it' and is dropped: {x:1,m:{b:2}} in both entry orders (jshell on w9c-kestra.jar, Task 3 fix round 2). The result depends on the key's hash, so egret refuses; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review I2, w9c-kestra.jar)"
    },
    {
     "path": "put_merge.code_dot_prefix_conflict_reversed",
     "pointer": "/put_merge/code_dot_prefix_conflict_reversed",
-    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. Kestra collects the entries in a HashMap and nests them in its iteration order (MapUtils.flattenToNestedMap), so which entry wins depends on hash order, not on the entries; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review, w9c-kestra.jar)"
+    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. A MAP-valued leaf is no exception: MapUtils.flattenToNestedMap (MapUtils.java:193-219) nests the entries in HashMap bucket order ((h ^ h>>>16) & 15), not entry order. When the leaf's key comes first (`a` bucket 1, `a.b` bucket 4) the dotted key writes into the leaf's map: {x:1,a:{z:1,b:2}} in both entry orders; when the dotted key comes first (`m.b` bucket 0, `m` bucket 13) the leaf hits 'Conflict at key … ignoring it' and is dropped: {x:1,m:{b:2}} in both entry orders (jshell on w9c-kestra.jar, Task 3 fix round 2). The result depends on the key's hash, so egret refuses; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review I2, w9c-kestra.jar)"
    },
    {
     "path": "put_merge.code_dot_leaf_after_path",
     "pointer": "/put_merge/code_dot_leaf_after_path",
     "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. Kestra collects the entries in a HashMap and nests them in its iteration order (MapUtils.flattenToNestedMap), so which entry wins depends on hash order, not on the entries; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review, w9c-kestra.jar)"
+   },
+   {
+    "path": "put_merge.code_dot_map_leaf_dropped",
+    "pointer": "/put_merge/code_dot_map_leaf_dropped",
+    "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. A MAP-valued leaf is no exception: MapUtils.flattenToNestedMap (MapUtils.java:193-219) nests the entries in HashMap bucket order ((h ^ h>>>16) & 15), not entry order. When the leaf's key comes first (`a` bucket 1, `a.b` bucket 4) the dotted key writes into the leaf's map: {x:1,a:{z:1,b:2}} in both entry orders; when the dotted key comes first (`m.b` bucket 0, `m` bucket 13) the leaf hits 'Conflict at key … ignoring it' and is dropped: {x:1,m:{b:2}} in both entry orders (jshell on w9c-kestra.jar, Task 3 fix round 2). The result depends on the key's hash, so egret refuses; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review I2, w9c-kestra.jar)"
    }
   ]
  },

@@ -485,7 +485,7 @@ mod tests {
                 other => panic!("{name}: outcome {other}"),
             }
         }
-        // 46 cells: 32 merged, 9 refused by the merge (3 of them the user's
+        // 47 cells: 32 merged, 10 refused by the merge (4 of them the user's
         // ruling on conflicting dotted keys, 2026-10-07), 2 templates (the
         // render's, Task 5) and 3 missing keys with errorOnMissing (the
         // store's refusal, tests/kv_store.rs).
@@ -500,7 +500,7 @@ mod tests {
                 "templated_leaf"
             ]
         );
-        assert_eq!((merged, refused), (32, 9));
+        assert_eq!((merged, refused), (32, 10));
     }
 
     #[test]

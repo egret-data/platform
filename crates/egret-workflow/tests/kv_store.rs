@@ -2484,7 +2484,7 @@ mod writes {
             }
             examined += 1;
         }
-        assert_eq!(examined, 44);
+        assert_eq!(examined, 45);
     }
 
     /// W9b's R1.
