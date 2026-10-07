@@ -42,6 +42,22 @@
 //! - `{% do %}` is left untouched on purpose: minijinja refuses a `do` whose
 //!   expression is not a call, and turning `{% do a > b %}` into a call
 //!   would turn that refusal into an answer.
+//! - **A `{% raw %}` block is copied through whole**, found the way
+//!   minijinja's lexer finds it (`skip_basic_tag`), whatever its whitespace
+//!   control. egret's own raw protection (`env::replace_raw_tags`, Kestra's
+//!   `RAW_PATTERN`) does not know the `+` form, so `{%+ raw %}` reaches this
+//!   pass; skipping just that block keeps every comparison around it
+//!   compiled (W9c Task 4 cleanup, N1).
+//!
+//! # The one refusal of its own: a `kestra_` assignment target
+//!
+//! The calls this pass and [`super::rewrite`] write are named `kestra_…`
+//! and are looked up like any other name, so a template variable of that
+//! name would stand in for the function: `{% set kestra_gt = 1 %}{{ a > b }}`
+//! would call `1`. The prefix is therefore reserved: a `set`, `for` or
+//! `with` that assigns a name starting with `kestra_` is refused at compile
+//! time with [`RewriteError::ReservedName`] (W9c Task 4 cleanup, N2). An
+//! attribute (`x.kestra_gt`) is not a variable and is not refused.
 //!
 //! The functions answer with minijinja's own `PartialEq`/`Ord` for every pair
 //! that is not a `BigNumber` against a number, after the same undefined checks
@@ -49,6 +65,7 @@
 //! changes the spelling and not the answer.
 
 use super::compare::{CmpOp, CHAIN_FUNCTION};
+use super::rewrite::RewriteError;
 
 /// The deepest bracket nesting this pass follows. minijinja's parser refuses
 /// past 150 levels of `parse_expr`/`parse_primary` (`MAX_RECURSION`), and
@@ -57,12 +74,21 @@ use super::compare::{CmpOp, CHAIN_FUNCTION};
 /// minijinja to refuse, and this pass's own recursion stays bounded.
 const MAX_GROUP_DEPTH: usize = 160;
 
+/// The prefix of every function name egret's rewriters write, which a
+/// template may therefore not assign (see the module doc).
+pub(crate) const RESERVED_PREFIX: &str = "kestra_";
+
 /// Compiles every comparison in `source` (the rewriter's output) to a call.
 ///
-/// Infallible by design: anything this pass does not understand is left as
-/// it was.
-pub(crate) fn compile_comparisons(source: &str) -> String {
-    compile(source).unwrap_or_else(|| source.to_string())
+/// Its one refusal is a `kestra_` assignment target
+/// ([`RewriteError::ReservedName`]). Anything else this pass does not
+/// understand is left as it was.
+pub(crate) fn compile_comparisons(source: &str) -> Result<String, RewriteError> {
+    match compile(source) {
+        Some(Ok(out)) => Ok(out),
+        Some(Err(name)) => Err(RewriteError::ReservedName { name }),
+        None => Ok(source.to_string()),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,8 +114,9 @@ struct Tok {
 }
 
 /// The whole template: copy the data, rewrite each `{{ }}` and `{% %}`.
-/// `None` when the lexer cannot follow minijinja's.
-fn compile(src: &str) -> Option<String> {
+/// `None` when the lexer cannot follow minijinja's; `Some(Err(name))` for a
+/// reserved assignment target in a region that parsed.
+fn compile(src: &str) -> Option<Result<String, String>> {
     let bytes = src.as_bytes();
     let mut out = String::with_capacity(src.len() + src.len() / 4);
     let mut i = 0usize;
@@ -99,7 +126,7 @@ fn compile(src: &str) -> Option<String> {
             .find(|&k| bytes[k] == b'{' && matches!(bytes[k + 1], b'{' | b'%' | b'#'))
         else {
             out.push_str(&src[i..]);
-            return Some(out);
+            return Some(Ok(out));
         };
         out.push_str(&src[i..found]);
         let marker = bytes[found + 1];
@@ -116,6 +143,19 @@ fn compile(src: &str) -> Option<String> {
             i = end;
             continue;
         }
+        if marker == b'%' {
+            // `handle_start_marker(Block)`: a raw tag starts a block that
+            // minijinja reads as data up to its `endraw`, so it is copied
+            // through whole and the pass goes on after it.
+            if let Some(open) = skip_basic_tag(&src[content_start..], "raw", false) {
+                // No `endraw`: minijinja refuses ("unexpected end of raw
+                // block"), so the template is left for it to refuse.
+                let end = raw_block_end(src, content_start + open)?;
+                out.push_str(&src[found..end]);
+                i = end;
+                continue;
+            }
+        }
         let close: &str = if marker == b'{' { "}}" } else { "%}" };
         let (toks, content_end, region_end) = lex_region(src, content_start, close)?;
         if marker == b'%'
@@ -123,9 +163,8 @@ fn compile(src: &str) -> Option<String> {
                 .first()
                 .is_some_and(|t| t.kind == Kind::Ident && &src[t.start..t.end] == "raw")
         {
-            // minijinja skips a raw block whole. egret's own `{% raw %}`
-            // protection has already replaced every well-formed one, so this
-            // is a stray: leave the whole template alone.
+            // A `raw` that is not a raw tag (`{% raw x %}`): minijinja
+            // refuses it, so leave the whole template for it to refuse.
             return None;
         }
         out.push_str(&src[found..content_start]);
@@ -136,12 +175,16 @@ fn compile(src: &str) -> Option<String> {
             end: toks.len(),
             depth: 0,
             sites: Vec::new(),
+            reserved: None,
         };
         let parsed = if marker == b'{' {
             parser.whole_expression()
         } else {
             parser.block()
         };
+        if let (Ok(()), Some(at)) = (parsed, parser.reserved) {
+            return Some(Err(parser.text_at(at).to_string()));
+        }
         match parsed {
             Ok(()) => emit(
                 src,
@@ -285,6 +328,39 @@ fn lex_region(src: &str, start: usize, close: &str) -> Option<(Vec<Tok>, usize, 
     }
 }
 
+/// minijinja's `skip_basic_tag` with `%}` as the block end: `name` after
+/// optional whitespace (and, with `skip_ws_control`, an optional leading
+/// `-`/`+`), then optional whitespace, an optional `-`/`+` and `%}`. The
+/// length it spans, or `None`.
+fn skip_basic_tag(s: &str, name: &str, skip_ws_control: bool) -> Option<usize> {
+    let mut ptr = s;
+    if skip_ws_control {
+        if let Some(rest) = ptr.strip_prefix(['-', '+']) {
+            ptr = rest;
+        }
+    }
+    ptr = ptr.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    ptr = ptr.strip_prefix(name)?;
+    ptr = ptr.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    if let Some(rest) = ptr.strip_prefix(['-', '+']) {
+        ptr = rest;
+    }
+    ptr.strip_prefix("%}").map(|rest| s.len() - rest.len())
+}
+
+/// `handle_raw_tag`: from just past a raw tag, the end of the first
+/// `{%` … `endraw` … `%}` tag, or `None` if there is none.
+fn raw_block_end(src: &str, body: usize) -> Option<usize> {
+    let mut ptr = body;
+    while let Some(block) = src[ptr..].find("{%") {
+        ptr += block + 2;
+        if let Some(len) = skip_basic_tag(&src[ptr..], "endraw", true) {
+            return Some(ptr + len);
+        }
+    }
+    None
+}
+
 fn finish(
     toks: Vec<Tok>,
     stack: &[usize],
@@ -394,6 +470,8 @@ struct Parser<'a> {
     end: usize,
     depth: usize,
     sites: Vec<Site>,
+    /// The first assignment target named with [`RESERVED_PREFIX`].
+    reserved: Option<usize>,
 }
 
 type Parsed = Result<(), ()>;
@@ -422,6 +500,21 @@ impl Parser<'_> {
 
     fn at_end(&self) -> bool {
         self.pos >= self.end
+    }
+
+    /// Records the first variable in tokens `from..to` (an assignment
+    /// target) that is named with [`RESERVED_PREFIX`]. An attribute after a
+    /// `.` is not a variable.
+    fn check_targets(&mut self, from: usize, to: usize) {
+        for at in from..to.min(self.end) {
+            if self.reserved.is_none()
+                && self.toks[at].kind == Kind::Ident
+                && self.text_at(at).starts_with(RESERVED_PREFIX)
+                && !(at > from && self.toks[at - 1].kind == Kind::Op("."))
+            {
+                self.reserved = Some(at);
+            }
+        }
     }
 
     fn expect_end(&self) -> Parsed {
@@ -458,6 +551,7 @@ impl Parser<'_> {
                 let target_end = self.find_top_level(|p, at| {
                     p.kind_at(at) == Some(Kind::Ident) && p.text_at(at) == "in"
                 })?;
+                self.check_targets(self.pos, target_end);
                 self.pos = target_end + 1;
                 self.or()?;
                 if self.is_ident("if") {
@@ -472,6 +566,7 @@ impl Parser<'_> {
             // `parse_set`.
             "set" => match self.find_top_level(|p, at| p.kind_at(at) == Some(Kind::Op("="))) {
                 Ok(eq) => {
+                    self.check_targets(self.pos, eq);
                     self.pos = eq + 1;
                     self.ifexpr()?;
                     while self.is_op(",") {
@@ -487,10 +582,14 @@ impl Parser<'_> {
                     // A set block: the target, then an optional filter chain.
                     match self.find_top_level(|p, at| p.kind_at(at) == Some(Kind::Op("|"))) {
                         Ok(pipe) => {
+                            self.check_targets(self.pos, pipe);
                             self.pos = pipe + 1;
                             self.filter_chain()
                         }
-                        Err(()) => Ok(()),
+                        Err(()) => {
+                            self.check_targets(self.pos, self.end);
+                            Ok(())
+                        }
                     }
                 }
             },
@@ -505,11 +604,13 @@ impl Parser<'_> {
                         self.pos += 1;
                     }
                     first = false;
+                    let target = self.pos;
                     match self.kind() {
                         Some(Kind::Open(b'(')) => self.pos = self.toks[self.pos].pair + 1,
                         Some(Kind::Ident) => self.pos += 1,
                         _ => return Err(()),
                     }
+                    self.check_targets(target, self.pos);
                     if !self.is_op("=") {
                         return Err(());
                     }

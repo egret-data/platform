@@ -1908,7 +1908,7 @@ pub(crate) fn environment() -> Environment<'static> {
 /// template to the parser goes through this one function, so a probe
 /// ([`referenced_roots`], [`name_in_code`]) sees what a render runs.
 fn compile_source(protected: &str) -> Result<String, RewriteError> {
-    Ok(super::compare::compile_comparisons(&rewrite(protected)?))
+    super::compare::compile_comparisons(&rewrite(protected)?)
 }
 
 /// Renders a template string against `cx`, mirroring

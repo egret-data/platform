@@ -503,6 +503,11 @@ mod tests {
         render_str(template, &RenderContext::new()).map_err(|e| e.to_string())
     }
 
+    /// The pass on a template with no reserved assignment target.
+    fn compiled(source: &str) -> String {
+        compile_comparisons(source).expect("no reserved assignment target")
+    }
+
     /// One template, rendered twice by the same environment: once from the
     /// first pass's output alone (what egret ran before this round), once
     /// with the comparisons compiled. Errors compare as their full text.
@@ -512,7 +517,7 @@ mod tests {
     ) -> (Result<String, String>, Result<String, String>, String) {
         let env = environment();
         let first = super::super::rewrite::rewrite(template).expect("the first pass rewrites");
-        let compiled = compile_comparisons(&first);
+        let compiled = compile_comparisons(&first).expect("no reserved assignment target");
         // Through `RenderContext`, as a render does: `serde_json`'s
         // `arbitrary_precision` makes `from_serialize` hand over every number
         // as a one-key map.
@@ -729,7 +734,7 @@ mod tests {
             ("x > y {{ 1 }} a == b", "x > y {{ 1 }} a == b"),
             ("{# a > b #}{{ 1 }}", "{# a > b #}{{ 1 }}"),
         ] {
-            assert_eq!(compile_comparisons(source), want, "{source}");
+            assert_eq!(compiled(source), want, "{source}");
         }
     }
 
@@ -743,12 +748,12 @@ mod tests {
             "{{ 'it''s' }}",
             "{{ '\\' > ' }}",
         ] {
-            assert_eq!(compile_comparisons(source), source, "{source}");
+            assert_eq!(compiled(source), source, "{source}");
         }
         assert_eq!(render("{{ 'a > b' ~ 'c' }}").unwrap(), "a > bc");
         assert_eq!(render("{{ ('a > b' ~ 'c') == 'a > bc' }}").unwrap(), "true");
         assert_eq!(
-            compile_comparisons("{{ 'a > b' == 'c' }}"),
+            compiled("{{ 'a > b' == 'c' }}"),
             "{{ kestra_eq( 'a > b' , 'c') }}"
         );
     }
@@ -770,7 +775,7 @@ mod tests {
             "{{ a > b) }}",
             "{{ 'unterminated > }}",
         ] {
-            assert_eq!(compile_comparisons(source), source, "{source}");
+            assert_eq!(compiled(source), source, "{source}");
         }
         // And the refusal is word for word the one before.
         let ctx = json!({});
@@ -835,15 +840,15 @@ mod tests {
             )
         };
         let source = deep(40);
-        let compiled = compile_comparisons(&source);
-        assert_eq!(compiled.matches("kestra_").count(), 81);
+        let deep_compiled = compiled(&source);
+        assert_eq!(deep_compiled.matches("kestra_").count(), 81);
         assert_eq!(render(&source).unwrap(), "true");
         let past = deep(400);
-        assert_eq!(compile_comparisons(&past), past);
+        assert_eq!(compiled(&past), past);
         // On a small stack, the pass alone.
         let handle = std::thread::Builder::new()
             .stack_size(256 * 1024)
-            .spawn(move || compile_comparisons(&deep(MAX_DEPTH_PROBE)))
+            .spawn(move || compiled(&deep(MAX_DEPTH_PROBE)))
             .unwrap();
         handle
             .join()
@@ -851,6 +856,218 @@ mod tests {
     }
 
     const MAX_DEPTH_PROBE: usize = 155;
+
+    /// N1 (W9c Task 4 cleanup): a raw block is skipped where it stands,
+    /// whatever its whitespace control, and the comparisons around it are
+    /// still compiled. egret's raw protection does not know `{%+ raw %}`, so
+    /// this pass is what sees it.
+    #[test]
+    fn a_raw_block_is_skipped_where_it_stands() {
+        // The review's example: before, the `+` form turned the pass off for
+        // the whole template and this rendered `xtrue|false`.
+        assert_eq!(
+            render(
+                "{% set big = '1.5' | number(type='BIGDECIMAL') %}\
+                 {%+ raw %}x{% endraw %}{{ big > 100 }}|{{ big == 1.50 }}"
+            )
+            .unwrap(),
+            "xfalse|true"
+        );
+        for open in [
+            "{% raw %}",
+            "{%+ raw %}",
+            "{%+ raw -%}",
+            "{%- raw +%}",
+            "{%+raw%}",
+        ] {
+            for close in [
+                "{% endraw %}",
+                "{%+ endraw %}",
+                "{%- endraw -%}",
+                "{%endraw+%}",
+            ] {
+                let source = format!("{open}{{{{ a > b }}}}{close}{{{{ a > b }}}}");
+                assert_eq!(
+                    compiled(&source),
+                    format!("{open}{{{{ a > b }}}}{close}{{{{ kestra_gt( a , b) }}}}"),
+                    "{source}"
+                );
+            }
+        }
+        // The body is data up to the FIRST endraw tag, as minijinja reads it.
+        assert_eq!(
+            compiled("{%+ raw %}{% if a > b %}{%+ endraw %}{% if a > b %}{% endif %}"),
+            "{%+ raw %}{% if a > b %}{%+ endraw %}{% if kestra_gt( a , b) %}{% endif %}"
+        );
+        // No endraw, or a `raw` that is not a raw tag: minijinja refuses, so
+        // the template is left whole for it to refuse, in its own words.
+        for source in [
+            "{%+ raw %}{{ a > b }}",
+            "{{ a > b }}{%+ raw %}",
+            "{% raw x %}{{ a > b }}{% endraw %}",
+        ] {
+            assert_eq!(compiled(source), source, "{source}");
+            let (old, new, _) = old_and_new(source, &json!({"a": 1, "b": 2}));
+            assert!(old.is_err(), "{source}: {old:?}");
+            assert_eq!(new, old, "{source}");
+        }
+    }
+
+    /// N2 (W9c Task 4 cleanup): a template variable named like one of the
+    /// rewriters' functions would shadow it, so a `kestra_` assignment
+    /// target is refused at compile time; nothing else named `kestra…` is.
+    #[test]
+    fn a_kestra_prefixed_assignment_target_is_refused() {
+        for (template, name) in [
+            ("{% set kestra_gt = 1 %}{{ 1 > 2 }}", "kestra_gt"),
+            ("{%- set kestra_lt = 1 -%}", "kestra_lt"),
+            ("{% set x, kestra_ne = 1, 2 %}", "kestra_ne"),
+            ("{% set kestra_is_in %}x{% endset %}", "kestra_is_in"),
+            ("{% set kestra_eq | upper %}x{% endset %}", "kestra_eq"),
+            (
+                "{% for kestra_eq in [1] %}{{ 1 == 1 }}{% endfor %}",
+                "kestra_eq",
+            ),
+            (
+                "{% for k, kestra_compare_chain in {'a': 1} | items %}{% endfor %}",
+                "kestra_compare_chain",
+            ),
+            (
+                "{% with kestra_null_coalesce = 1 %}{% endwith %}",
+                "kestra_null_coalesce",
+            ),
+            ("{% with x = 1, kestra_in = 2 %}{% endwith %}", "kestra_in"),
+            ("{% with (a, kestra_x) = (1, 2) %}{% endwith %}", "kestra_x"),
+            // In a template with no comparison at all, too.
+            (
+                "{% set kestra_undefined_coalesce = 1 %}",
+                "kestra_undefined_coalesce",
+            ),
+        ] {
+            let error = render(template).unwrap_err();
+            assert_eq!(
+                error,
+                format!(
+                    "`{name}` cannot be assigned: names starting with `kestra_` are reserved \
+                     for egret's own functions (a `set`, `for` or `with` target)"
+                ),
+                "{template}"
+            );
+        }
+        for (template, want) in [
+            ("{% set kestra = 1 %}{{ kestra > 0 }}", "true"),
+            ("{% set my_kestra_gt = 1 %}{{ my_kestra_gt > 0 }}", "true"),
+            (
+                "{% for kestrax in [1] %}{{ kestrax == 1 }}{% endfor %}",
+                "true",
+            ),
+            (
+                "{% set m = {'kestra_gt': 1} %}{{ m.kestra_gt > 0 }}",
+                "true",
+            ),
+            ("{{ 'kestra_gt' }}{# set kestra_gt = 1 #}", "kestra_gt"),
+            (
+                "{% raw %}{% set kestra_gt = 1 %}{% endraw %}",
+                "{% set kestra_gt = 1 %}",
+            ),
+        ] {
+            assert_eq!(render(template).unwrap(), want, "{template}");
+        }
+        // What minijinja refuses to parse keeps minijinja's own refusal.
+        let (old, new, _) = old_and_new("{% set kestra_gt = %}", &json!({}));
+        assert!(old.is_err());
+        assert_eq!(new, old);
+    }
+
+    /// N4 (W9c Task 4 cleanup): the rows the differential could not hold.
+    /// A `BigNumber` against a non-number takes minijinja's own answer
+    /// (`exact_of` gives `None`), so old and new agree; against a
+    /// non-finite float it answers as a finite float of the same sign would.
+    #[test]
+    fn a_big_number_against_a_non_number_or_a_non_finite_float() {
+        let ctx = context();
+        let bigs = [
+            "('1.5' | number(type='BIGDECIMAL'))",
+            "('-2.50' | number(type='BIGDECIMAL'))",
+            "('123456789012345678901234567890123456789012' | number(type='BIGINTEGER'))",
+        ];
+        let non_numbers = [
+            "'a'",
+            "''",
+            "'1.5'",
+            "none",
+            "true",
+            "false",
+            "[]",
+            "['a']",
+            "{}",
+            "{'a': 1}",
+            "nothere",
+            "(1 if false)",
+            "cs",
+            "cn",
+            "cm",
+        ];
+        let (mut checked, mut errors) = (0usize, 0usize);
+        for big in bigs {
+            for other in non_numbers {
+                for op in OPS {
+                    for template in [
+                        format!("{{{{ {big} {op} {other} }}}}"),
+                        format!("{{{{ {other} {op} {big} }}}}"),
+                    ] {
+                        let (old, new, compiled) = old_and_new(&template, &ctx);
+                        assert!(compiled.contains("kestra_"), "{template}");
+                        assert_eq!(new, old, "{template} (compiled: {compiled})");
+                        checked += 1;
+                        errors += usize::from(old.is_err());
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, bigs.len() * non_numbers.len() * OPS.len() * 2);
+        assert!(
+            errors > 0 && errors < checked,
+            "{errors} of {checked} refused"
+        );
+
+        // Against inf, -inf and NaN of either sign: the same answer as a
+        // finite float on the same side of zero.
+        let stand_ins = [(bigs[0], "1.5"), (bigs[1], "-2.5"), (bigs[2], "1e300")];
+        let non_finite = ["1e400", "-1e400", "(1e400 - 1e400)", "-(1e400 - 1e400)"];
+        for (big, float) in stand_ins {
+            for x in non_finite {
+                for op in ["==", "!=", "<", "<=", ">", ">="] {
+                    for (left, right) in [
+                        (
+                            format!("{{{{ {big} {op} {x} }}}}"),
+                            format!("{{{{ {float} {op} {x} }}}}"),
+                        ),
+                        (
+                            format!("{{{{ {x} {op} {big} }}}}"),
+                            format!("{{{{ {x} {op} {float} }}}}"),
+                        ),
+                    ] {
+                        assert_eq!(render(&left), render(&right), "{left} vs {right}");
+                    }
+                }
+            }
+        }
+        for (template, want) in [
+            ("{{ ('1.5' | number(type='BIGDECIMAL')) < 1e400 }}", "true"),
+            ("{{ ('1.5' | number(type='BIGDECIMAL')) > -1e400 }}", "true"),
+            (
+                "{{ ('1.5' | number(type='BIGDECIMAL')) == (1e400 - 1e400) }}",
+                "false",
+            ),
+            (
+                "{{ ('1.5' | number(type='BIGDECIMAL')) != (1e400 - 1e400) }}",
+                "true",
+            ),
+        ] {
+            assert_eq!(render(template).unwrap(), want, "{template}");
+        }
+    }
 
     #[test]
     fn exact_values_order_and_equal_as_numbers() {

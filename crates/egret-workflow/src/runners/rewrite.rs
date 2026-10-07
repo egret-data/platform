@@ -253,6 +253,15 @@ pub enum RewriteError {
          can nest the template parser deeper than the render stack holds"
     )]
     ExpressionTooLong { bytes: usize, limit: usize },
+    /// A `set`, `for` or `with` assigns a name starting with `kestra_`, the
+    /// prefix of the functions egret's rewriters call (`kestra_gt`,
+    /// `kestra_is_in`, …), which the variable would shadow. Raised by the
+    /// second pass, `super::cmp_rewrite` (W9c Task 4 cleanup, N2).
+    #[error(
+        "`{name}` cannot be assigned: names starting with `kestra_` are reserved for egret's \
+         own functions (a `set`, `for` or `with` target)"
+    )]
+    ReservedName { name: String },
 }
 
 /// What one byte of an expression can cost the **template parser's** stack.
