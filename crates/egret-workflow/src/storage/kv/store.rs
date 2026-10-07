@@ -30,8 +30,10 @@
 //! # Connections
 //!
 //! Every read takes a `&mut PgConnection` it does not keep; [`read_value`]
-//! takes none -- call it after the row was read and the connection let go,
-//! so no connection is held across the object's download.
+//! holds none while it reads (it takes one, for one statement, only when an
+//! object is not its row's size) -- call it after the row was read and the
+//! connection let go, so no connection is held across the object's
+//! download.
 //!
 //! # Writes
 //!
@@ -73,6 +75,7 @@ use super::merge;
 use super::value::{
     check_readable, decode, max_ttl, KvData, KvType, KvValue, Unstorable, MAX_TTL_DAYS,
 };
+use crate::storage::ion::ELEMENT_BYTES;
 use crate::storage::lock::{
     is_lock_timeout, is_lock_timeout_error, lock_timeout_value, LockedSession,
 };
@@ -541,11 +544,107 @@ pub async fn namespaces_with_kv(
 /// (`KvData::to_json` is what a reader sees). size > max_read_bytes:
 /// TooLarge naming the cap (no download). A missing object: Author naming
 /// the key and the revision (no fallback, §4.5). Any other store error:
-/// Store. Takes NO connection: call it after the row was read and the
-/// connection let go. The decode runs on the blocking pool, never on the
-/// async worker (review I1): a value of `max_read_bytes` takes the Ion
-/// reader hundreds of milliseconds.
-pub async fn read_value(fs: &FileStore, grant: &Grant, e: &KvEntry) -> Result<KvData, NsError> {
+/// Store. Holds NO connection while it reads: call it after the row was
+/// read and the connection let go. The decode runs on the blocking pool,
+/// never on the async worker (review I1): a value of `max_read_bytes` takes
+/// the Ion reader hundreds of milliseconds.
+///
+/// An object that is not the size its row records (Task 3 re-review 1) is
+/// never decoded. `pool` serves one statement, only then: the row is read
+/// again by id. Gone or changed (its revisions were purged and the number
+/// reused while it was read): `Store`, retried, and the retry reads the new
+/// row. Unchanged, with the object still another size: `Author`, not
+/// retried, as for a missing object (see [`other_size`]).
+pub async fn read_value(
+    pool: &PgPool,
+    fs: &FileStore,
+    grant: &Grant,
+    e: &KvEntry,
+) -> Result<KvData, NsError> {
+    match read_sized(fs, grant, e).await? {
+        Ok(data) => Ok(data),
+        Err(read) => {
+            let mut conn = pool.acquire().await.map_err(db_err)?;
+            Err(other_size(&mut conn, fs, grant, e, read).await)
+        }
+    }
+}
+
+/// The object a row was read for is `read` bytes, not the row's size.
+/// The row read again by id on `conn`: gone or changed -> `Store` (a race
+/// with a purge and a rewrite; a retry reads the new row). Unchanged, and a
+/// `head` still finds another size (or no object) -> `Author` "does not
+/// match its record", not retried: the object was altered outside egret, or
+/// lost, and every retry would read it again.
+async fn other_size(
+    conn: &mut PgConnection,
+    fs: &FileStore,
+    grant: &Grant,
+    e: &KvEntry,
+    read: u64,
+) -> NsError {
+    let what = format!(
+        "revision {} of key '{}' in namespace '{}'",
+        e.revision,
+        e.key,
+        grant.namespace()
+    );
+    tracing::warn!(value = %what, read, recorded = e.size, "a KV object is not the size its row records");
+    let changed = || {
+        NsError::Store(format!(
+            "key '{}' in namespace '{}' changed while it was read; retry later",
+            e.key,
+            grant.namespace()
+        ))
+    };
+    let row: Result<Option<(i32, i64)>, _> = sqlx::query_as(
+        "SELECT revision, size FROM workflow.kv_entries \
+          WHERE workspace_id = $1 AND namespace = $2 AND id = $3",
+    )
+    .bind(grant.workspace())
+    .bind(grant.namespace())
+    .bind(e.id)
+    .fetch_optional(&mut *conn)
+    .await;
+    let unchanged = match row {
+        Ok(row) => row.is_some_and(|(revision, size)| {
+            i64::from(revision) == i64::from(e.revision) && u64::try_from(size) == Ok(e.size)
+        }),
+        Err(err) => return db_err(err),
+    };
+    if !unchanged {
+        return changed();
+    }
+    let object = fs.namespace_kv_uri(grant, &e.key, e.revision);
+    match fs.store.head(&object).await {
+        // It matches now: it changed between the read and the head.
+        Ok(Some(n)) if n == e.size => changed(),
+        Ok(found) => {
+            tracing::error!(value = %what, key = %object, read, now = ?found, recorded = e.size, "a KV object does not match its unchanged row");
+            NsError::Author(format!(
+                "{what}: the stored value does not match its record ({} bytes recorded, {read} \
+                 read); it was changed outside egret",
+                e.size
+            ))
+        }
+        Err(err) => {
+            tracing::error!(value = %what, key = %object, error = %err, "internal storage failed to check a KV value");
+            NsError::Store(format!(
+                "key '{}' in namespace '{}': internal storage is unavailable; retry later",
+                e.key,
+                grant.namespace()
+            ))
+        }
+    }
+}
+
+/// [`read_value`] up to the size check: `Ok(Err(n))` when the object is `n`
+/// bytes, not the row's size (never decoded).
+async fn read_sized(
+    fs: &FileStore,
+    grant: &Grant,
+    e: &KvEntry,
+) -> Result<Result<KvData, u64>, NsError> {
     need(grant, Access::Read)?;
     // An entry another grant resolved names another namespace's object: egret's
     // bug, refused before the store is asked.
@@ -605,14 +704,9 @@ pub async fn read_value(fs: &FileStore, grant: &Grant, e: &KvEntry) -> Result<Kv
     if bytes.len() as u64 != e.size {
         // Review M3: the row was read, then its key's revisions were purged
         // (or swept) and the number reused, so the object is another
-        // value's. Never decoded under this row's type: a retry reads the
-        // new row.
-        tracing::warn!(value = %what, read = bytes.len(), recorded = e.size, "a KV object is not the size its row records");
-        return Err(NsError::Store(format!(
-            "key '{}' in namespace '{}' changed while it was read; retry later",
-            e.key,
-            grant.namespace()
-        )));
+        // value's -- or the object was altered. Never decoded under this
+        // row's type; the caller judges which (`other_size`).
+        return Ok(Err(bytes.len() as u64));
     }
     let kind = e.value_type;
     let decoded = tokio::task::spawn_blocking(move || decode(kind, &bytes, cap))
@@ -631,7 +725,9 @@ pub async fn read_value(fs: &FileStore, grant: &Grant, e: &KvEntry) -> Result<Kv
                 )))
             }
         })?;
-    decoded.map_err(|why| NsError::Author(format!("{what}: {why}")))
+    decoded
+        .map(Ok)
+        .map_err(|why| NsError::Author(format!("{what}: {why}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -712,10 +808,10 @@ where
     match tokio::spawn(work).await {
         Ok(result) => result,
         Err(e) if e.is_cancelled() => Err(NsError::Store(format!(
-            "a KV {what} was cancelled; retry later"
+            "a {what} was cancelled; retry later"
         ))),
         Err(e) => Err(wrong_grant(egret_core::Error::Internal(anyhow::anyhow!(
-            "a KV {what} stopped: {e}"
+            "a {what} stopped: {e}"
         )))),
     }
 }
@@ -725,6 +821,16 @@ where
 fn busy(grant: &Grant, key: &KvKey) -> NsError {
     NsError::Conflict(format!(
         "key '{key}' in namespace '{}': the key is busy (another write holds it); try again",
+        grant.namespace()
+    ))
+}
+
+/// A bulk delete's wait for a [`BULK_DELETES`] permit ran out (the API's
+/// 5 s): a 409, as [`busy`].
+fn bulk_busy(grant: &Grant) -> NsError {
+    NsError::Conflict(format!(
+        "namespace '{}': other bulk deletes are running (at most {BULK_DELETES_AT_ONCE} at \
+         once); try again",
         grant.namespace()
     ))
 }
@@ -1073,6 +1179,23 @@ pub async fn put_merge(
     by: CreatedBy,
 ) -> Result<KvWritten, NsError> {
     need(grant, Access::Write)?;
+    // C1 (Task 3 re-review 1), before the key's lock: a patch's dotted
+    // segments in all are at most the dense-value limit (spec §8.5). The
+    // merge is linear in the segments, so this bounds its work under the
+    // lock whatever the patch's size; and a segment the nesting builds is at
+    // least three of the tokens `check_readable` counts against the same
+    // limit, so only a patch whose keys share long prefixes is refused where
+    // its merged value would have been stored.
+    let budget = usize::try_from(fs.caps.max_read_bytes / ELEMENT_BYTES).unwrap_or(usize::MAX);
+    let segments = merge::patch_path_segments(&patch);
+    if segments > budget {
+        return Err(NsError::TooLarge(format!(
+            "key '{key}' in namespace '{}': the keyed `value` entries hold {segments} dotted \
+             segments in all, more than the {budget} (workflow.storage.max_read_bytes / \
+             {ELEMENT_BYTES}, the dense-value limit) a Put patch may hold",
+            grant.namespace()
+        )));
+    }
     let (pool, fs, grant, key) = (pool.clone(), fs.clone(), grant.clone(), key.clone());
     detached("KV put", async move {
         let mut tx = pool.begin().await.map_err(db_err)?;
@@ -1083,7 +1206,12 @@ pub async fn put_merge(
         }
         let live = latest.as_ref().filter(|e| e.live());
         let current = match live {
-            Some(e) => Some(read_value(&fs, &grant, e).await?),
+            // Under the key's lock no purge can reuse the revision, so
+            // `other_size` reads the row unchanged on this transaction.
+            Some(e) => match read_sized(&fs, &grant, e).await? {
+                Ok(data) => Some(data),
+                Err(read) => return Err(other_size(&mut tx, &fs, &grant, e, read).await),
+            },
             None if error_on_missing => {
                 return Err(NsError::NotFound(format!(
                     "No value found for key '{key}' in namespace '{}' and `errorOnMissing` is \
@@ -1233,10 +1361,18 @@ pub async fn delete_many(
         // (up to 1,000) advisory locks at once in this process, so they
         // cannot fill Postgres's shared lock table (spec §15). Waiting for a
         // permit holds no connection.
-        let _permit = BULK_DELETES
-            .acquire()
-            .await
-            .map_err(|e| internal(format!("the bulk delete semaphore is closed: {e}")))?;
+        // Re-review 1: the permit wait is bounded by the grant's lock wait,
+        // as each key's lock is, so an API caller gets its 409 in time; a
+        // flow's grant waits as its lock path does.
+        let permit = BULK_DELETES.acquire();
+        let permit = match grant.lock_wait() {
+            Some(wait) => tokio::time::timeout(wait, permit)
+                .await
+                .map_err(|_| bulk_busy(&grant))?,
+            None => permit.await,
+        };
+        let _permit =
+            permit.map_err(|e| internal(format!("the bulk delete semaphore is closed: {e}")))?;
         let mut tx = pool.begin().await.map_err(db_err)?;
         bound_lock_wait(&mut tx, &grant).await?;
         for key in &keys {

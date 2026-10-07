@@ -399,7 +399,7 @@ async fn a_read_never_writes() {
         let _ = resolve(&mut c, &g, &key(k), Want::Latest).await;
         for n in 1..=2 {
             if let Ok(e) = resolve(&mut c, &g, &key(k), Want::Revision(n)).await {
-                read_value(&fs, &g, &e).await.unwrap();
+                read_value(&db.pool, &fs, &g, &e).await.unwrap();
             }
         }
         let _ = resolve_first_live(&mut c, &[gc.clone(), g.clone()], &key(k)).await;
@@ -407,7 +407,7 @@ async fn a_read_never_writes() {
     }
     for e in revisions(&mut c, &g, &key("old")).await.unwrap() {
         // An expired revision's value, read directly: still no write.
-        read_value(&fs, &g, &e).await.unwrap();
+        read_value(&db.pool, &fs, &g, &e).await.unwrap();
     }
     list_live(&mut c, &g, None, 10).await.unwrap();
     list_live(&mut c, &gc, Some("o"), 10).await.unwrap();
@@ -569,14 +569,14 @@ async fn the_walk_answers_the_deepest_live_level_and_skips_an_expired_one() {
             None => match resolve_first_live(&mut c, &walk, &key(k)).await.unwrap() {
                 Some(e) => {
                     let g = walk.iter().find(|g| g.namespace() == e.namespace).unwrap();
-                    Some(read_value(&fs, g, &e).await.unwrap().to_json())
+                    Some(read_value(&db.pool, &fs, g, &e).await.unwrap().to_json())
                 }
                 None => None,
             },
             Some(ns) => {
                 let g = grant(ws, ns);
                 match resolve(&mut c, &g, &key(k), Want::Latest).await {
-                    Ok(e) => Some(read_value(&fs, &g, &e).await.unwrap().to_json()),
+                    Ok(e) => Some(read_value(&db.pool, &fs, &g, &e).await.unwrap().to_json()),
                     Err(NsError::NotFound(_)) => None,
                     Err(other) => panic!("{cell}: {other:?}"),
                 }
@@ -789,7 +789,7 @@ async fn a_grant_of_the_other_resource_or_a_mixed_walk_is_refused() {
         .unwrap();
     let (fs, _) = mem_fs();
     for wrong in [grant(other, NS), grant(ws, "w9c")] {
-        let err = read_value(&fs, &wrong, &e).await.unwrap_err();
+        let err = read_value(&db.pool, &fs, &wrong, &e).await.unwrap_err();
         assert!(
             matches!(&err, NsError::Author(m) if m.contains("egret bug")
                 && m.contains("holding a grant")),
@@ -932,7 +932,7 @@ async fn a_row_whose_object_is_missing_is_an_author_error_naming_key_and_revisio
     let g = grant(ws, NS);
     let e = resolve(&mut c, &g, &key("k"), Want::Latest).await.unwrap();
     drop(c);
-    let err = read_value(&fs, &g, &e).await.unwrap_err();
+    let err = read_value(&db.pool, &fs, &g, &e).await.unwrap_err();
     match &err {
         NsError::Author(m) => {
             assert_eq!(
@@ -951,7 +951,10 @@ async fn a_row_whose_object_is_missing_is_an_author_error_naming_key_and_revisio
     let e1 = resolve(&mut c, &g, &key("k"), Want::Revision(1))
         .await
         .unwrap();
-    assert_eq!(read_value(&fs, &g, &e1).await.unwrap().to_json(), "one");
+    assert_eq!(
+        read_value(&db.pool, &fs, &g, &e1).await.unwrap().to_json(),
+        "one"
+    );
 }
 
 /// A MemStore that counts streamed reads, and can fail them.
@@ -1029,7 +1032,7 @@ async fn a_stored_value_over_max_read_bytes_is_too_large_naming_the_cap_without_
         .unwrap();
     drop(c);
     assert_eq!(e.size, 5002);
-    let err = read_value(&fs, &g, &e).await.unwrap_err();
+    let err = read_value(&db.pool, &fs, &g, &e).await.unwrap_err();
     match &err {
         NsError::TooLarge(m) => assert_eq!(
             m,
@@ -1053,7 +1056,7 @@ async fn a_stored_value_over_max_read_bytes_is_too_large_naming_the_cap_without_
         .await
         .unwrap();
     drop(c);
-    let err = read_value(&fs, &g, &e).await.unwrap_err();
+    let err = read_value(&db.pool, &fs, &g, &e).await.unwrap_err();
     assert!(
         matches!(&err, NsError::TooLarge(m) if m.contains("4097 bytes") && m.contains("max_read_bytes")),
         "{err:?}"
@@ -1065,7 +1068,10 @@ async fn a_stored_value_over_max_read_bytes_is_too_large_naming_the_cap_without_
     let e = resolve(&mut c, &g, &key("small"), Want::Latest)
         .await
         .unwrap();
-    assert_eq!(read_value(&fs, &g, &e).await.unwrap().to_json(), "s");
+    assert_eq!(
+        read_value(&db.pool, &fs, &g, &e).await.unwrap().to_json(),
+        "s"
+    );
 }
 
 #[tokio::test]
@@ -1078,7 +1084,7 @@ async fn a_store_outage_on_read_is_a_store_error_that_names_no_storage_key() {
     let mut c = conn(&db).await;
     let e = resolve(&mut c, &g, &key("k"), Want::Latest).await.unwrap();
     drop(c);
-    match read_value(&fs, &g, &e).await.unwrap_err() {
+    match read_value(&db.pool, &fs, &g, &e).await.unwrap_err() {
         NsError::Store(m) => {
             assert!(m.contains("'k'") && m.contains(NS), "{m}");
             for leak in [
@@ -1455,7 +1461,12 @@ async fn a_large_decode_runs_off_the_async_runtime_and_a_ticker_keeps_ticking() 
     tokio::task::yield_now().await;
     let started = std::time::Instant::now();
     let before = ticks.load(Ordering::Relaxed);
-    let read = read_value(&fs, &g, &e).await.unwrap();
+    // No database: the object is its row's size, so `read_value` never
+    // asks the pool (it would, only to judge a mismatch).
+    let unused = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused@127.0.0.1:1/unused")
+        .unwrap();
+    let read = read_value(&unused, &fs, &g, &e).await.unwrap();
     let took = started.elapsed();
     let ticked = ticks.load(Ordering::Relaxed) - before;
     ticker.abort();
@@ -1600,6 +1611,12 @@ mod writes {
         /// The next PUT of a `_kv` object is held.
         kv_put_hold: Mutex<Option<Hold>>,
         fail_copy: AtomicBool,
+        /// The next `copy` panics (fix round 2, concern 4).
+        panic_copy: AtomicBool,
+        /// The next PUT of a `_kv` object panics.
+        panic_kv_put: AtomicBool,
+        /// The next `get_stream` is held before it reads.
+        get_hold: Mutex<Option<Hold>>,
         /// Milliseconds every delete of a `_kv` object sleeps first.
         delete_delay_ms: AtomicU64,
         staging_puts: AtomicUsize,
@@ -1616,6 +1633,9 @@ mod writes {
                 self.staging_puts.fetch_add(1, Ordering::SeqCst);
                 self.staging_hold.lock().unwrap().take()
             } else {
+                if self.panic_kv_put.swap(false, Ordering::SeqCst) {
+                    panic!("an injected panic in a KV object PUT");
+                }
                 self.kv_put_hold.lock().unwrap().take()
             };
             if let Some(h) = hold {
@@ -1634,6 +1654,9 @@ mod writes {
             self.mem.delete(uri).await
         }
         async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError> {
+            if self.panic_copy.swap(false, Ordering::SeqCst) {
+                panic!("an injected panic in a KV copy");
+            }
             if self.fail_copy.load(Ordering::SeqCst) {
                 return Err(StorageError::S3(format!(
                     "copy {src} -> {dst} failed (secret-detail)"
@@ -1656,6 +1679,10 @@ mod writes {
             &self,
             uri: &str,
         ) -> Result<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>, StorageError> {
+            let hold = self.get_hold.lock().unwrap().take();
+            if let Some(h) = hold {
+                h.pass().await;
+            }
             self.mem.get_stream(uri).await
         }
         async fn head(&self, uri: &str) -> Result<Option<u64>, StorageError> {
@@ -1710,7 +1737,7 @@ mod writes {
             Err(e) => panic!("{e:?}"),
         };
         drop(c);
-        Some(read_value(fs, &g, &e).await.unwrap().to_json())
+        Some(read_value(&db.pool, fs, &g, &e).await.unwrap().to_json())
     }
 
     async fn staging_rows(db: &Db, ws: Uuid) -> i64 {
@@ -2200,7 +2227,9 @@ mod writes {
             .unwrap();
         drop(c);
         assert_eq!(
-            read_value(&fs, &grant(ws, NS3), &e).await.unwrap(),
+            read_value(&db.pool, &fs, &grant(ws, NS3), &e)
+                .await
+                .unwrap(),
             KvData::Number(KvNumber::Int("7".repeat(1000)))
         );
         // The Invalid arm: a DURATION holding a bool is the author's (400).
@@ -2629,8 +2658,13 @@ mod writes {
         .unwrap()
     }
 
+    /// `delete_many`'s permits are one per process: the tests that call it
+    /// take turns, so none of them sees another's permits.
+    static BULK_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn delete_many_takes_1000_keys_and_refuses_1001_naming_the_cap() {
+        let _serial = BULK_SERIAL.lock().await;
         let Some(db) = common::db().await else { return };
         let (ws, _) = common::seed_workspace(&db).await;
         let (fs, _) = hooked_fs(DEFAULT_CAP);
@@ -2655,6 +2689,7 @@ mod writes {
     /// Mutation (i).
     #[tokio::test]
     async fn delete_many_is_all_or_nothing_and_answers_the_live_keys() {
+        let _serial = BULK_SERIAL.lock().await;
         let Some(db) = common::db().await else { return };
         let (ws, _) = common::seed_workspace(&db).await;
         let (fs, _) = hooked_fs(DEFAULT_CAP);
@@ -3298,15 +3333,9 @@ mod writes {
         );
     }
 
-    /// Review M3: an object that is not the size its row records (a revision
-    /// number reused after a purge) is never decoded under the row's type.
-    #[tokio::test]
-    async fn a_read_of_an_object_of_another_size_is_a_store_error() {
-        let Some(db) = common::db().await else { return };
-        let (ws, _) = common::seed_workspace(&db).await;
-        let (fs, store) = hooked_fs(DEFAULT_CAP);
-        let g = wgrant(ws, NS3);
-        let nv = NewValue {
+    /// A `Number` value, stored as `12345`.
+    fn number_value() -> NewValue {
+        NewValue {
             value: KvValue {
                 kind: KvType::Number,
                 data: KvData::Number(KvNumber::Int("12345".into())),
@@ -3314,14 +3343,25 @@ mod writes {
             description: None,
             ttl: None,
             overwrite: true,
-        };
-        written(set(&db.pool, &fs, &g, &key("aba"), nv, USER).await);
+        }
+    }
+
+    /// Review M3 and re-review 1: an object that is not the size its row
+    /// records is never decoded under the row's type (mutation t). Its row
+    /// unchanged, the mismatch is permanent (the object altered outside
+    /// egret): `Author`, never retried, on a read and under `Put`'s lock.
+    #[tokio::test]
+    async fn an_object_altered_under_an_unchanged_row_is_the_authors_not_retried() {
+        let Some(db) = common::db().await else { return };
+        let (ws, _) = common::seed_workspace(&db).await;
+        let (fs, store) = hooked_fs(DEFAULT_CAP);
+        let g = wgrant(ws, NS3);
+        written(set(&db.pool, &fs, &g, &key("aba"), number_value(), USER).await);
         let mut c = conn(&db).await;
         let e = resolve(&mut c, &grant(ws, NS3), &key("aba"), Want::Latest)
             .await
             .unwrap();
         drop(c);
-        // Purged and rewritten under the same number, as another type.
         store
             .mem
             .put(
@@ -3330,7 +3370,58 @@ mod writes {
             )
             .await
             .unwrap();
-        match read_value(&fs, &grant(ws, NS3), &e).await {
+        for _ in 0..2 {
+            match read_value(&db.pool, &fs, &grant(ws, NS3), &e).await {
+                Err(NsError::Author(m)) => assert!(
+                    m.contains("revision 1 of key 'aba'")
+                        && m.contains("does not match its record")
+                        && m.contains("5 bytes recorded, 10 read"),
+                    "{m}"
+                ),
+                other => panic!("{other:?}"),
+            }
+        }
+        match put_merge(&db.pool, &fs, &g, &key("aba"), KvData::Null, false, USER).await {
+            Err(NsError::Author(m)) => assert!(m.contains("does not match its record"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(revs(&rows_of(&db, ws, NS3, "aba").await), [1]);
+    }
+
+    /// Re-review 1: the row was purged and the revision number reused WHILE
+    /// it was read, so the object is the new value's. The row read again by
+    /// id is gone: `Store`, retried, and the retry reads the new value.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_racing_a_purge_and_a_rewrite_is_retried_and_the_retry_reads_the_new_value() {
+        let Some(db) = common::db().await else { return };
+        let (ws, _) = common::seed_workspace(&db).await;
+        let (fs, store) = hooked_fs(DEFAULT_CAP);
+        let g = wgrant(ws, NS3);
+        written(set(&db.pool, &fs, &g, &key("aba"), number_value(), USER).await);
+        let mut c = conn(&db).await;
+        let e = resolve(&mut c, &grant(ws, NS3), &key("aba"), Want::Latest)
+            .await
+            .unwrap();
+        drop(c);
+        let hold = Hold::new();
+        *store.get_hold.lock().unwrap() = Some(hold.clone());
+        let reader = {
+            let (p, fs) = (db.pool.clone(), fs.clone());
+            tokio::spawn(async move { read_value(&p, &fs, &grant(ws, NS3), &e).await })
+        };
+        hold.entered.wait().await;
+        assert_eq!(
+            purge_key(&db.pool, &fs, &pgrant(ws, NS3), &key("aba"), 10, |rows| {
+                rows.iter().map(|r| r.entry.id).collect()
+            })
+            .await
+            .unwrap(),
+            1
+        );
+        let e2 = written(set(&db.pool, &fs, &g, &key("aba"), new(json!("a string")), USER).await);
+        assert_eq!(e2.revision, 1, "the number is reused");
+        hold.release.wait().await;
+        match reader.await.unwrap() {
             Err(NsError::Store(m)) => {
                 assert!(
                     m.contains("'aba'") && m.contains("changed while it was read"),
@@ -3339,5 +3430,331 @@ mod writes {
             }
             other => panic!("{other:?}"),
         }
+        assert_eq!(
+            latest_value(&db, &fs, ws, NS3, "aba").await,
+            Some(json!("a string"))
+        );
+    }
+
+    /// C1 (re-review 1): a 50 000-segment key took 88 s and then aborted the
+    /// process on a blocking-pool thread's 2 MiB stack. `put_merge` runs the
+    /// merge on that pool: the key is refused in milliseconds, naming the
+    /// limit, and nothing is written. A key of exactly `MAX_DEPTH` segments
+    /// is written and reads back.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_put_key_deeper_than_max_depth_is_refused_at_once_and_one_at_it_is_written() {
+        use egret_workflow::storage::ion::MAX_DEPTH;
+        let Some(db) = common::db().await else { return };
+        let (ws, _) = common::seed_workspace(&db).await;
+        let (fs, _) = hooked_fs(DEFAULT_CAP);
+        let g = wgrant(ws, NS3);
+        let entry = |k: String| data_of(json!([{"key": k, "value": 1}]));
+        for n in [MAX_DEPTH + 1, 50_000] {
+            let started = std::time::Instant::now();
+            let got = put_merge(
+                &db.pool,
+                &fs,
+                &g,
+                &key("deep"),
+                entry(vec!["a"; n].join(".")),
+                false,
+                USER,
+            )
+            .await;
+            let took = started.elapsed();
+            match got {
+                Err(NsError::Author(m)) => assert!(
+                    m.contains(&format!("{n} dotted segments"))
+                        && m.contains(&format!("more than the {MAX_DEPTH} levels")),
+                    "{m}"
+                ),
+                other => panic!("{n}: {other:?}"),
+            }
+            assert!(took < Duration::from_secs(1), "{n} segments took {took:?}");
+            assert!(rows_of(&db, ws, NS3, "deep").await.is_empty());
+        }
+        written(
+            put_merge(
+                &db.pool,
+                &fs,
+                &g,
+                &key("deep"),
+                entry(vec!["a"; MAX_DEPTH].join(".")),
+                false,
+                USER,
+            )
+            .await,
+        );
+        let mut got = latest_value(&db, &fs, ws, NS3, "deep").await.unwrap();
+        for _ in 0..MAX_DEPTH {
+            got = got["a"].take();
+        }
+        assert_eq!(got, json!(1));
+    }
+
+    /// C1's budget: a patch's dotted segments in all are at most the
+    /// dense-value limit, `max_read_bytes / 64` (100 at a cap of 6 400
+    /// bytes), refused before the lock as `TooLarge` naming it. Ten keys
+    /// sharing a 9-segment prefix: at 100 segments the patch is written; at
+    /// 101 it is refused, although its merged value (one map more) is
+    /// storable -- a cap one segment larger writes it -- so the budget, not
+    /// the value's own limit, refuses it.
+    #[tokio::test]
+    async fn a_put_patch_over_the_segment_budget_is_refused_and_one_at_it_is_written() {
+        let Some(db) = common::db().await else { return };
+        let (ws, _) = common::seed_workspace(&db).await;
+        let (fs, _) = hooked_fs(100 * 64);
+        let g = wgrant(ws, NS3);
+        let patch = |last: &str| {
+            data_of(Value::Array(
+                (0..10)
+                    .map(|i| {
+                        let leaf = if i == 9 {
+                            format!("k9{last}")
+                        } else {
+                            format!("k{i}")
+                        };
+                        json!({"key": format!("a.b.c.d.e.f.g.h.i.{leaf}"), "value": 1})
+                    })
+                    .collect(),
+            ))
+        };
+        let over = patch(".x");
+        match put_merge(&db.pool, &fs, &g, &key("budget"), over.clone(), false, USER).await {
+            Err(NsError::TooLarge(m)) => assert!(
+                m.contains("101 dotted segments")
+                    && m.contains("more than the 100")
+                    && m.contains("max_read_bytes"),
+                "{m}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert!(rows_of(&db, ws, NS3, "budget").await.is_empty());
+        let (roomy, _) = hooked_fs(101 * 64);
+        written(put_merge(&db.pool, &roomy, &g, &key("roomy"), over, false, USER).await);
+        written(put_merge(&db.pool, &fs, &g, &key("budget"), patch(""), false, USER).await);
+        let mut got = latest_value(&db, &fs, ws, NS3, "budget").await.unwrap();
+        for step in ["a", "b", "c", "d", "e", "f", "g", "h", "i"] {
+            got = got[step].take();
+        }
+        assert_eq!(got.as_object().unwrap().len(), 10);
+        assert_eq!(got["k9"], json!(1));
+    }
+
+    fn data_of(v: Value) -> KvData {
+        KvData::from_json(&v).unwrap()
+    }
+
+    /// Concern 4 (re-review 1): a panic inside a KV writer's detached block
+    /// is egret's bug, `Author` (fails once), never a `Db` outage re-claimed
+    /// forever. `set`'s staging object is left for the staging sweeper, and
+    /// the key's lock is let go.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panic_inside_a_kv_write_is_an_egret_bug_never_retried() {
+        let Some(db) = common::db().await else { return };
+        let (ws, _) = common::seed_workspace(&db).await;
+        let (fs, store) = hooked_fs(DEFAULT_CAP);
+        let g = wgrant(ws, NS3);
+        written(set(&db.pool, &fs, &g, &key("p"), new(json!({"a": 1})), USER).await);
+        store.panic_copy.store(true, Ordering::SeqCst);
+        match set(&db.pool, &fs, &g, &key("p"), new(json!({"a": 2})), USER).await {
+            Err(NsError::Author(m)) => assert!(
+                m.contains("internal error (an egret bug, not retried)")
+                    && m.contains("a KV write stopped"),
+                "{m}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            (staging_rows(&db, ws).await, staging_objects(&store.mem)),
+            (1, 1),
+            "the staging object is the sweeper's"
+        );
+        store.panic_kv_put.store(true, Ordering::SeqCst);
+        match put_merge(
+            &db.pool,
+            &fs,
+            &g,
+            &key("p"),
+            data_of(json!({"b": 1})),
+            false,
+            USER,
+        )
+        .await
+        {
+            Err(NsError::Author(m)) => assert!(
+                m.contains("internal error (an egret bug, not retried)")
+                    && m.contains("a KV put stopped"),
+                "{m}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(revs(&rows_of(&db, ws, NS3, "p").await), [1]);
+        let api = api_wgrant(ws, NS3, Duration::from_secs(2));
+        assert_eq!(
+            written(set(&db.pool, &fs, &api, &key("p"), new(json!({"a": 3})), USER).await).revision,
+            2,
+            "the lock was let go"
+        );
+    }
+
+    /// How many backends wait for the advisory lock of `text`.
+    async fn waiting_on(db: &Db, text: &str) -> i64 {
+        sqlx::query_scalar(
+            "WITH k AS (SELECT hashtextextended($1, 0) AS h) \
+             SELECT count(*) FROM pg_locks, k \
+              WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1 \
+                AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                AND classid::bigint = ((k.h >> 32) & 4294967295) \
+                AND objid::bigint = (k.h & 4294967295)",
+        )
+        .bind(text)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+    }
+
+    /// Waits until `n` backends wait on `text`'s lock (at most 10 s).
+    async fn until_waiting(db: &Db, text: &str, n: i64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let now = waiting_on(db, text).await;
+            if now >= n {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{now} waiting, not {n}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Takes `text`'s session lock on a connection of its own.
+    async fn lock_on_the_side(db: &Db, text: &str) -> sqlx::pool::PoolConnection<sqlx::Postgres> {
+        let mut c = db.pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+            .bind(text)
+            .execute(&mut *c)
+            .await
+            .unwrap();
+        c
+    }
+
+    async fn unlock_on_the_side(mut c: sqlx::pool::PoolConnection<sqlx::Postgres>, text: &str) {
+        let released: bool =
+            sqlx::query_scalar("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+                .bind(text)
+                .fetch_one(&mut *c)
+                .await
+                .unwrap();
+        assert!(released);
+    }
+
+    fn bulk_delete(
+        p: &PgPool,
+        fs: &storage::FileStore,
+        g: &Grant,
+        ks: &[&str],
+    ) -> tokio::task::JoinHandle<Result<Vec<KvKey>, NsError>> {
+        let (p, fs, g) = (p.clone(), fs.clone(), g.clone());
+        let ks: Vec<KvKey> = ks.iter().map(|k| key(k)).collect();
+        tokio::spawn(async move { delete_many(&p, &fs, &g, &ks, USER).await })
+    }
+
+    /// Concern 4 (re-review 1, review M2): at most `BULK_DELETES_AT_ONCE`
+    /// (2) bulk deletes hold key locks at once. Three wait on one held key
+    /// with a long lock wait: exactly 2 backends wait on its lock, the third
+    /// on a permit, holding no connection. Released, all three finish.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn at_most_two_bulk_deletes_wait_on_key_locks_at_once() {
+        let _serial = BULK_SERIAL.lock().await;
+        let Some(db) = common::db().await else { return };
+        let (ws, _) = common::seed_workspace(&db).await;
+        let (fs, _) = hooked_fs(DEFAULT_CAP);
+        let p = pool(&db, 6, "w9c-t3-bulk").await;
+        written(
+            set(
+                &db.pool,
+                &fs,
+                &wgrant(ws, NS3),
+                &key("held"),
+                new(json!(1)),
+                USER,
+            )
+            .await,
+        );
+        let text = lock_text(ws, NS3, "held");
+        let side = lock_on_the_side(&db, &text).await;
+        let g = api_wgrant(ws, NS3, Duration::from_secs(60));
+        let calls: Vec<_> = (0..3)
+            .map(|_| bulk_delete(&p, &fs, &g, &["held"]))
+            .collect();
+        until_waiting(&db, &text, 2).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(waiting_on(&db, &text).await, 2, "waiting on the key's lock");
+        unlock_on_the_side(side, &text).await;
+        let mut gone = Vec::new();
+        for call in calls {
+            gone.push(call.await.unwrap().unwrap().len());
+        }
+        gone.sort_unstable();
+        assert_eq!(gone, [0, 0, 1]);
+    }
+
+    /// Re-review 1: an API bulk delete waits for a permit at most its lock
+    /// wait, then answers 409, while two others hold both permits.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_third_api_bulk_delete_gets_409_while_two_hold_the_permits() {
+        let _serial = BULK_SERIAL.lock().await;
+        let Some(db) = common::db().await else { return };
+        let (ws, _) = common::seed_workspace(&db).await;
+        let (fs, _) = hooked_fs(DEFAULT_CAP);
+        let p = pool(&db, 6, "w9c-t3-bulk409").await;
+        for k in ["held", "free"] {
+            written(
+                set(
+                    &db.pool,
+                    &fs,
+                    &wgrant(ws, NS3),
+                    &key(k),
+                    new(json!(1)),
+                    USER,
+                )
+                .await,
+            );
+        }
+        let text = lock_text(ws, NS3, "held");
+        let side = lock_on_the_side(&db, &text).await;
+        let long = api_wgrant(ws, NS3, Duration::from_secs(60));
+        let holders: Vec<_> = (0..2)
+            .map(|_| bulk_delete(&p, &fs, &long, &["held"]))
+            .collect();
+        until_waiting(&db, &text, 2).await;
+        let short = api_wgrant(ws, NS3, Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        let third = tokio::time::timeout(
+            Duration::from_secs(5),
+            bulk_delete(&p, &fs, &short, &["free"]),
+        )
+        .await
+        .expect("the third bulk delete waited past its lock wait")
+        .unwrap();
+        let took = started.elapsed();
+        match third {
+            Err(NsError::Conflict(m)) => {
+                assert!(m.contains(NS3) && m.contains("bulk deletes"), "{m}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(took >= Duration::from_millis(300), "{took:?}");
+        assert!(latest_value(&db, &fs, ws, NS3, "free").await.is_some());
+        unlock_on_the_side(side, &text).await;
+        let mut gone = Vec::new();
+        for h in holders {
+            gone.push(h.await.unwrap().unwrap().len());
+        }
+        gone.sort_unstable();
+        assert_eq!(gone, [0, 1]);
     }
 }

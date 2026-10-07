@@ -195,7 +195,7 @@ async fn latest(
         Err(e) => return Err(e.to_string()),
     };
     drop(c);
-    read_value(fs, g, &e)
+    read_value(&db.pool, fs, g, &e)
         .await
         .map(Some)
         .map_err(|e| e.to_string())

@@ -19,13 +19,27 @@
 //! decimal (the user's ruling, 2026-10-07). The merge never goes through
 //! JSON.
 //!
-//! Every step is linear in the sizes of its inputs (each map level is
-//! indexed, a list's membership test is hashed), so a merge of values at
-//! `max_read_bytes` stays bounded while the key's lock is held.
+//! What a merge costs, while the key's lock is held (Task 3 re-review 1,
+//! C1):
+//! - A keyed entry's dotted path is at most [`MAX_DEPTH`] segments, refused
+//!   before anything is built: the merged value could not nest deeper and
+//!   still be read. A patch's segments IN ALL are bounded by the caller
+//!   (`store::put_merge`, by the dense-value limit), before the lock.
+//! - The conflict check and the nesting walk each path once, over a trie of
+//!   the paths (a segment is one hash lookup keyed by its parent's id), so
+//!   they are linear in the total length of the keys.
+//! - The deep merge moves the current value rather than copying a level per
+//!   step: linear in the sizes of the current value and the patch, each map
+//!   level indexed. A list's membership test hashes Java's `equals` key of
+//!   each item, which sorts a map's field names: `n log n` in a map's width.
+//! - Recursion (the deep merge, the build of the nesting, a drop) is as deep
+//!   as the values: the current one is at most [`MAX_DEPTH`] (reads enforce
+//!   it), the nesting at most [`MAX_DEPTH`] plus a leaf's own depth.
 
 use std::collections::{HashMap, HashSet};
 
 use super::value::{KvData, KvNumber};
+use crate::storage::ion::MAX_DEPTH;
 
 /// `Put.java`: an unkeyed entry beside any other.
 const UNKEYED: &str =
@@ -56,9 +70,58 @@ pub fn merge(current: Option<&KvData>, patch: &KvData) -> Result<KvData, String>
         }
     }
     match (current, patch) {
-        (Some(KvData::Struct(a)), KvData::Struct(b)) => Ok(KvData::Struct(deep_merge(a, b))),
+        (Some(KvData::Struct(a)), KvData::Struct(b)) => {
+            Ok(KvData::Struct(deep_merge(a.clone(), b)))
+        }
         _ => Ok(patch.clone()),
     }
+}
+
+/// The dotted segments of every keyed entry of an entry-list patch, in all,
+/// as Java's `split` counts them (a key repeated counts each time); 0 for
+/// any other patch. `store::put_merge` bounds it before it takes the key's
+/// lock (C1). Linear in the keys' length; builds nothing.
+pub(crate) fn patch_path_segments(patch: &KvData) -> usize {
+    let KvData::List(entries) = patch else {
+        return 0;
+    };
+    if !is_entry_list(entries) {
+        return 0;
+    }
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            KvData::Struct(f) => match field(f, "key") {
+                Some(KvData::String(key)) => Some(segment_count(key)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .sum()
+}
+
+/// `java_split_dots(key).len()`, without building the split.
+fn segment_count(key: &str) -> usize {
+    let kept = key.trim_end_matches('.');
+    if kept.is_empty() {
+        0
+    } else {
+        kept.matches('.').count() + 1
+    }
+}
+
+/// C1: a keyed entry whose path is deeper than [`MAX_DEPTH`]. The key is
+/// quoted shortened: it may be 100 KB.
+fn too_deep(key: &str, segments: usize) -> String {
+    const SHOWN: usize = 40;
+    let shown = match key.char_indices().nth(SHOWN) {
+        Some((end, _)) => format!("{}...", &key[..end]),
+        None => key.to_string(),
+    };
+    format!(
+        "the keyed `value` entry '{shown}' has {segments} dotted segments, more than the \
+         {MAX_DEPTH} levels a KV value may nest"
+    )
 }
 
 fn field<'a>(fields: &'a [(String, KvData)], name: &str) -> Option<&'a KvData> {
@@ -107,6 +170,12 @@ fn merge_entries(current: Option<&KvData>, entries: &[KvData]) -> Result<KvData,
                 if key.chars().all(java_whitespace) {
                     return Err(BAD_KEY.into());
                 }
+                // C1: before the conflict check and the nesting build
+                // anything.
+                let segments = segment_count(key);
+                if segments > MAX_DEPTH {
+                    return Err(too_deep(key, segments));
+                }
                 match seen.get(key) {
                     Some(&i) => updates[i].1 = value,
                     None => {
@@ -124,7 +193,7 @@ fn merge_entries(current: Option<&KvData>, entries: &[KvData]) -> Result<KvData,
     let nested = flatten_to_nested(updates)?;
     match current {
         None => Ok(KvData::Struct(nested)),
-        Some(KvData::Struct(a)) => Ok(KvData::Struct(deep_merge(a, &nested))),
+        Some(KvData::Struct(a)) => Ok(KvData::Struct(deep_merge(a.clone(), &nested))),
         Some(_) => Err(NOT_A_MAP.into()),
     }
 }
@@ -143,30 +212,47 @@ pub(crate) fn conflict_message(first: &str, second: &str) -> String {
 /// or a path through which, another key writes (`q` and `q.r`; `a` and
 /// `a.`) -- are refused, naming both keys in entry order. On Kestra the
 /// outcome of such a patch depends on its `HashMap`'s iteration order, not
-/// on the entries. Non-conflicting entries keep Kestra's semantics. Linear
-/// in the total path length.
+/// on the entries. Non-conflicting entries keep Kestra's semantics.
+///
+/// The paths go into a trie: a node is a path, its child one segment
+/// further, looked up by `(parent id, segment)`. Each segment of each key is
+/// one lookup, so the check is linear in the total length of the keys (C1;
+/// the previous version hashed every prefix as a vector, quadratic in a
+/// path's depth).
 fn refuse_conflicts(updates: &[(String, KvData)]) -> Result<(), String> {
-    // A path set as a leaf, and a proper prefix some key writes through,
-    // each with the first key that made it.
-    let mut leaves: HashMap<Vec<&str>, &str> = HashMap::new();
-    let mut through: HashMap<Vec<&str>, &str> = HashMap::new();
+    /// The first key that set the node's path as a leaf, and the first that
+    /// wrote through it.
+    #[derive(Default)]
+    struct Node<'a> {
+        leaf: Option<&'a str>,
+        through: Option<&'a str>,
+    }
+    let mut nodes: Vec<Node> = vec![Node::default()];
+    let mut children: HashMap<(usize, &str), usize> = HashMap::new();
+    let mut child = |nodes: &mut Vec<Node>, parent: usize, segment| {
+        *children.entry((parent, segment)).or_insert_with(|| {
+            nodes.push(Node::default());
+            nodes.len() - 1
+        })
+    };
     for (key, _) in updates {
         let path = java_split_dots(key);
-        if path.is_empty() {
+        let Some((last, steps)) = path.split_last() else {
             continue; // refused by flatten_to_nested, naming the key
-        }
-        if let Some(other) = leaves.get(&path).or_else(|| through.get(&path)) {
-            return Err(conflict_message(other, key));
-        }
-        for end in 1..path.len() {
-            if let Some(other) = leaves.get(&path[..end]) {
+        };
+        let mut at = 0;
+        for segment in steps {
+            at = child(&mut nodes, at, *segment);
+            if let Some(other) = nodes[at].leaf {
                 return Err(conflict_message(other, key));
             }
+            nodes[at].through.get_or_insert(key);
         }
-        for end in 1..path.len() {
-            through.entry(path[..end].to_vec()).or_insert(key);
+        let end = child(&mut nodes, at, *last);
+        if let Some(other) = nodes[end].leaf.or(nodes[end].through) {
+            return Err(conflict_message(other, key));
         }
-        leaves.insert(path, key);
+        nodes[end].leaf = Some(key);
     }
     Ok(())
 }
@@ -206,17 +292,39 @@ fn java_split_dots(key: &str) -> Vec<&str> {
     parts
 }
 
-/// The fields of the map at `path` (indices from the root, each naming a
-/// map field).
-fn level_mut<'a>(root: &'a mut Fields, path: &[usize]) -> &'a mut Fields {
-    let mut level = root;
-    for &i in path {
-        level = match &mut level[i].1 {
-            KvData::Struct(f) => f,
-            _ => unreachable!("a path only ever steps into a map"),
-        };
+/// One field of a map [`flatten_to_nested`] is building: a map it built
+/// (by its index in the arena), or a leaf's value.
+enum Slot {
+    Map(usize),
+    Leaf(KvData),
+}
+
+/// A map [`flatten_to_nested`] is building, its names indexed.
+#[derive(Default)]
+struct Level {
+    fields: Vec<(String, Slot)>,
+    names: HashMap<String, usize>,
+}
+
+impl Level {
+    /// A leaf's map, opened so a later key's path can go inside it.
+    fn of(fields: Fields) -> Self {
+        let names = fields
+            .iter()
+            .enumerate()
+            .map(|(i, (n, _))| (n.clone(), i))
+            .collect();
+        let fields = fields
+            .into_iter()
+            .map(|(n, v)| (n, Slot::Leaf(v)))
+            .collect();
+        Self { fields, names }
     }
-    level
+
+    fn push(&mut self, name: &str, slot: Slot) {
+        self.names.insert(name.to_string(), self.fields.len());
+        self.fields.push((name.to_string(), slot));
+    }
 }
 
 /// `MapUtils.flattenToNestedMap`: a missing level is a new map. Its two
@@ -228,84 +336,79 @@ fn level_mut<'a>(root: &'a mut Fields, path: &[usize]) -> &'a mut Fields {
 ///
 /// A key of dots only names no field: Kestra fails it with an
 /// `ArrayIndexOutOfBoundsException`; egret refuses it with a message.
+///
+/// The maps are built in an arena, each step one lookup in its parent's
+/// index, then turned into [`KvData`] once: linear in the total length of
+/// the keys (C1; the previous version re-walked the path from the root and
+/// hashed it at every segment, quadratic in a path's depth).
 fn flatten_to_nested(updates: Fields) -> Result<Fields, String> {
-    let mut root: Fields = Vec::new();
-    // Each visited map's name -> index, by its path from the root.
-    let mut index: HashMap<Vec<usize>, HashMap<String, usize>> = HashMap::new();
-    fn find(
-        root: &mut Fields,
-        index: &mut HashMap<Vec<usize>, HashMap<String, usize>>,
-        path: &[usize],
-        name: &str,
-    ) -> Option<usize> {
-        let names = index.entry(path.to_vec()).or_insert_with(|| {
-            level_mut(root, path)
-                .iter()
-                .enumerate()
-                .map(|(i, (n, _))| (n.clone(), i))
-                .collect()
-        });
-        names.get(name).copied()
-    }
-    fn push(
-        root: &mut Fields,
-        index: &mut HashMap<Vec<usize>, HashMap<String, usize>>,
-        path: &[usize],
-        name: &str,
-        value: KvData,
-    ) -> usize {
-        let level = level_mut(root, path);
-        level.push((name.to_string(), value));
-        let i = level.len() - 1;
-        if let Some(names) = index.get_mut(path) {
-            names.insert(name.to_string(), i);
-        }
-        i
-    }
+    let mut levels: Vec<Level> = vec![Level::default()];
     for (key, value) in updates {
         let segments = java_split_dots(&key);
-        let Some((last, levels)) = segments.split_last() else {
+        let Some((last, steps)) = segments.split_last() else {
             return Err(format!(
                 "the keyed `value` entry '{key}' names no field: its key holds only dots"
             ));
         };
-        let mut path: Vec<usize> = Vec::new();
-        for segment in levels {
-            match find(&mut root, &mut index, &path, segment) {
+        let mut at = 0;
+        for segment in steps {
+            let next = levels.len();
+            match levels[at].names.get(*segment).copied() {
                 None => {
-                    let i = push(
-                        &mut root,
-                        &mut index,
-                        &path,
-                        segment,
-                        KvData::Struct(Vec::new()),
-                    );
-                    path.push(i);
+                    levels[at].push(segment, Slot::Map(next));
+                    levels.push(Level::default());
+                    at = next;
                 }
                 Some(i) => {
-                    if matches!(level_mut(&mut root, &path)[i].1, KvData::Struct(_)) {
-                        path.push(i);
+                    let slot = &mut levels[at].fields[i].1;
+                    match slot {
+                        Slot::Map(id) => at = *id,
+                        Slot::Leaf(KvData::Struct(_)) => {
+                            // A map set as a leaf: the path goes inside it
+                            // (Kestra's `instanceof Map`).
+                            let Slot::Leaf(KvData::Struct(fields)) =
+                                std::mem::replace(slot, Slot::Map(next))
+                            else {
+                                unreachable!("matched above")
+                            };
+                            levels.push(Level::of(fields));
+                            at = next;
+                        }
+                        // Kestra's "Conflict at key": the path stays here.
+                        Slot::Leaf(_) => {}
                     }
-                    // else: Kestra's "Conflict at key", the path stays here.
                 }
             }
         }
-        if find(&mut root, &mut index, &path, last).is_none() {
-            push(&mut root, &mut index, &path, last, value);
+        if !levels[at].names.contains_key(*last) {
+            levels[at].push(last, Slot::Leaf(value));
         }
     }
-    Ok(root)
+    Ok(build(&mut levels, 0))
 }
 
-/// `MapUtils.deepMerge(a, b)`.
-fn deep_merge(a: &[(String, KvData)], b: &[(String, KvData)]) -> Fields {
+/// The arena's map `id` as fields, its child maps built recursively (as deep
+/// as the longest path, at most [`MAX_DEPTH`], plus a leaf map's depth).
+fn build(levels: &mut [Level], id: usize) -> Fields {
+    std::mem::take(&mut levels[id].fields)
+        .into_iter()
+        .map(|(name, slot)| match slot {
+            Slot::Leaf(value) => (name, value),
+            Slot::Map(child) => (name, KvData::Struct(build(levels, child))),
+        })
+        .collect()
+}
+
+/// `MapUtils.deepMerge(a, b)`, `a` moved in: each level is moved, never
+/// copied again.
+fn deep_merge(a: Fields, b: &[(String, KvData)]) -> Fields {
     if a.is_empty() {
         return b.to_vec();
     }
     if b.is_empty() {
-        return a.to_vec();
+        return a;
     }
-    let mut out: Fields = a.to_vec();
+    let mut out = a;
     let mut names: HashMap<String, usize> = out
         .iter()
         .enumerate()
@@ -314,8 +417,8 @@ fn deep_merge(a: &[(String, KvData)], b: &[(String, KvData)]) -> Fields {
     for (name, value_b) in b {
         match names.get(name) {
             Some(&i) => {
-                let merged = merge_values(Some(&out[i].1), value_b);
-                out[i].1 = merged;
+                let current = std::mem::replace(&mut out[i].1, KvData::Null);
+                out[i].1 = merge_values(Some(current), value_b);
             }
             None => {
                 // `result.put(key, mergeValues(null, valueB))`: a null in the
@@ -329,9 +432,9 @@ fn deep_merge(a: &[(String, KvData)], b: &[(String, KvData)]) -> Fields {
 }
 
 /// `MapUtils.mergeValues(valueA, valueB)`.
-fn merge_values(a: Option<&KvData>, b: &KvData) -> KvData {
+fn merge_values(a: Option<KvData>, b: &KvData) -> KvData {
     match (a, b) {
-        (a, KvData::Null) => a.cloned().unwrap_or(KvData::Null),
+        (a, KvData::Null) => a.unwrap_or(KvData::Null),
         (None | Some(KvData::Null), b) => b.clone(),
         (Some(KvData::Struct(x)), KvData::Struct(y)) => KvData::Struct(deep_merge(x, y)),
         (Some(KvData::List(x)), KvData::List(y)) => KvData::List(merge_lists(x, y)),
@@ -341,12 +444,12 @@ fn merge_values(a: Option<&KvData>, b: &KvData) -> KvData {
 
 /// `MapUtils.mergeCollections`: `a`, then each item of `b` that `a` does not
 /// contain (by Java's `equals`, [`java_key`]); `b`'s own duplicates stay.
-fn merge_lists(a: &[KvData], b: &[KvData]) -> Vec<KvData> {
-    let mut out = a.to_vec();
+fn merge_lists(a: Vec<KvData>, b: &[KvData]) -> Vec<KvData> {
     if b.is_empty() {
-        return out;
+        return a;
     }
     let held: HashSet<String> = a.iter().map(java_key).collect();
+    let mut out = a;
     out.extend(
         b.iter()
             .filter(|item| !held.contains(&java_key(item)))
@@ -411,7 +514,8 @@ fn write_key(d: &KvData, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::kv::value::{decode, encode, KvType, KvValue};
+    use crate::storage::ion::MAX_DEPTH;
+    use crate::storage::kv::value::{check_readable, decode, encode, KvType, KvValue};
     use serde_json::{json, Value};
 
     fn data(v: &Value) -> KvData {
@@ -688,6 +792,139 @@ mod tests {
                 merge(Some(&cur), &data(&json!([{"key": not_blank, "value": 1}]))).is_ok(),
                 "{not_blank:?}"
             );
+        }
+    }
+
+    /// `f` on a thread with a 2 MiB stack, the size of tokio's blocking-pool
+    /// threads, where `put_merge` runs the merge (Task 3 re-review 1, C1).
+    /// `f` drops what it builds before it returns, so the drop runs there
+    /// too.
+    fn on_a_blocking_pool_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    fn entry_list(keys: impl IntoIterator<Item = String>) -> KvData {
+        KvData::List(
+            keys.into_iter()
+                .map(|k| {
+                    KvData::Struct(vec![
+                        ("key".into(), KvData::String(k)),
+                        ("value".into(), KvData::Number(KvNumber::Int("1".into()))),
+                    ])
+                })
+                .collect(),
+        )
+    }
+
+    fn nesting(d: &KvData) -> usize {
+        let mut depth = 0;
+        let mut at = d;
+        while let KvData::Struct(f) = at {
+            depth += 1;
+            at = &f.last().unwrap().1;
+        }
+        depth
+    }
+
+    /// C1: a dotted key of 50 000 segments took 88 s and then overflowed a
+    /// 2 MiB stack while it was dropped, aborting the process. It is refused
+    /// before anything is built, naming the limit; so is one of
+    /// `MAX_DEPTH + 1` segments.
+    #[test]
+    fn a_dotted_key_deeper_than_max_depth_is_refused_at_once() {
+        for n in [MAX_DEPTH + 1, 50_000] {
+            let (got, took) = on_a_blocking_pool_stack(move || {
+                let patch = entry_list([vec!["a"; n].join(".")]);
+                let started = std::time::Instant::now();
+                let got = merge(Some(&data(&json!({"x": 1}))), &patch);
+                (got, started.elapsed())
+            });
+            let err = got.unwrap_err();
+            assert!(
+                err.contains(&format!("{n} dotted segments"))
+                    && err.contains(&format!("more than the {MAX_DEPTH}")),
+                "{err}"
+            );
+            assert!(err.len() < 400, "the message quotes the whole key: {err}");
+            assert!(
+                took < std::time::Duration::from_millis(250),
+                "{n} segments took {took:?}"
+            );
+        }
+    }
+
+    /// C1's control: a key of exactly `MAX_DEPTH` segments merges, into a
+    /// missing key and into a map, and the result is storable.
+    #[test]
+    fn a_dotted_key_of_exactly_max_depth_merges_and_is_storable() {
+        on_a_blocking_pool_stack(|| {
+            let patch = entry_list([vec!["a"; MAX_DEPTH].join(".")]);
+            for current in [None, Some(data(&json!({"x": 1})))] {
+                let got = merge(current.as_ref(), &patch).unwrap();
+                assert_eq!(nesting(&got), MAX_DEPTH);
+                let v = KvValue {
+                    kind: KvType::of_data(&got),
+                    data: got,
+                };
+                check_readable(&v, 10 * 1024 * 1024).unwrap();
+            }
+        });
+    }
+
+    /// C1: many keys near the depth limit, as many segments in all as the
+    /// patch budget allows at the default cap (163 840), stay fast: the
+    /// conflict check and the nesting are linear in the segments. Two
+    /// shapes: one long shared prefix, and no prefix shared at all.
+    #[test]
+    fn many_keys_near_the_depth_limit_merge_fast() {
+        let keys = (10 * 1024 * 1024 / 64) / MAX_DEPTH;
+        let took = on_a_blocking_pool_stack(move || {
+            let shared = vec!["p"; MAX_DEPTH - 1].join(".");
+            let deep = vec!["a"; MAX_DEPTH - 1].join(".");
+            let started = std::time::Instant::now();
+            let one = merge(
+                None,
+                &entry_list((0..keys).map(|i| format!("{shared}.k{i}"))),
+            )
+            .unwrap();
+            assert_eq!(nesting(&one), MAX_DEPTH);
+            let other = merge(
+                Some(&data(&json!({"x": 1}))),
+                &entry_list((0..keys).map(|i| format!("k{i}.{deep}"))),
+            )
+            .unwrap();
+            let KvData::Struct(f) = &other else { panic!() };
+            assert_eq!(f.len(), keys + 1);
+            drop((one, other));
+            started.elapsed()
+        });
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "{keys} keys of {MAX_DEPTH} segments took {took:?}"
+        );
+    }
+
+    /// The budget's count: every keyed entry's dotted segments, as Java's
+    /// split counts them; 0 for a patch that is not an entry list.
+    #[test]
+    fn patch_path_segments_counts_as_java_splits() {
+        let patch = data(&json!([
+            {"key": "a.b", "value": 1},
+            {"key": "c.", "value": 1},
+            {"key": ".d", "value": 1},
+            {"key": "e..f", "value": 1},
+            {"key": "...", "value": 1}
+        ]));
+        assert_eq!(patch_path_segments(&patch), 2 + 1 + 2 + 3);
+        assert_eq!(patch_path_segments(&data(&json!({"a.b.c": 1}))), 0);
+        assert_eq!(patch_path_segments(&data(&json!([{"value": 1}]))), 0);
+        for k in ["a", "a.", ".a", "a..b", "...", "a.b.c", ""] {
+            assert_eq!(segment_count(k), java_split_dots(k).len(), "{k:?}");
         }
     }
 
