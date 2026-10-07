@@ -711,7 +711,18 @@ struct Digits {
     /// The digits of the number's current part (coefficient, exponent, a
     /// timestamp field), or of the current run inside a block comment.
     run: u64,
+    /// The digits after the last `$` while they run, else `None`: a symbol
+    /// ID (W9c re-review 3, M2).
+    symbol_id: Option<u32>,
 }
+
+/// The most digits a symbol ID `$<digits>` may have under a digit limit:
+/// `ion-rs` 1.0.1 PANICS on a symbol ID past `usize::MAX` (an `unwrap` of
+/// `ParseIntError`), which only the reader thread's join catches.
+/// `usize::MAX` has 20 digits, so a 20-digit ID (`$99999999999999999999`)
+/// can already overflow; no symbol table holds 10^19 symbols, so the scan
+/// refuses every ID of 20 digits or more unread.
+const MAX_SYMBOL_ID_DIGITS: u32 = 19;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Radix {
@@ -726,6 +737,7 @@ impl Digits {
             limit,
             radix: None,
             run: 0,
+            symbol_id: None,
         }
     }
 
@@ -744,6 +756,23 @@ impl Digits {
 
     /// `b` in `Normal`, after an identifier character when `after_word`.
     fn normal(&mut self, b: u8, after_word: bool) -> Result<(), Trip> {
+        // A symbol ID: any `$` starts one (`a$1` too, an over-count: under
+        // an s-expression `ion-rs` may split there), its digits counted.
+        if b == b'$' {
+            self.symbol_id = Some(0);
+        } else if let Some(n) = self.symbol_id {
+            if b.is_ascii_digit() {
+                if n + 1 > MAX_SYMBOL_ID_DIGITS {
+                    return Err(Trip::Malformed(format!(
+                        "a symbol ID ($ and more than {MAX_SYMBOL_ID_DIGITS} digits) names no \
+                         symbol any table holds, and egret refuses it unread"
+                    )));
+                }
+                self.symbol_id = Some(n + 1);
+            } else {
+                self.symbol_id = None;
+            }
+        }
         let Some(radix) = self.radix else {
             if b.is_ascii_digit() && !after_word {
                 self.radix = Some(Radix::Decimal);
@@ -2852,8 +2881,8 @@ mod tests {
             format!("2025-01-02T03:04:05.{}Z", d(990)),
             // Not numbers: digits after an identifier character, in a
             // string, a quoted symbol, a long string, a line comment, a lob.
-            // (`$` + digits is a symbol ID, not a number: `ion-rs` 1.0.1
-            // panics on one past `usize`, caught as `Crashed`.)
+            // (`$` + digits is a symbol ID, not a number: see
+            // `a_digit_limit_refuses_a_symbol_id_past_usize_unread`.)
             format!("a{}", d(5000)),
             format!("\"{}\"", d(5000)),
             format!("'{}'", d(5000)),
@@ -2909,5 +2938,38 @@ mod tests {
             digit_limited(&dec, Some(1000)).1,
             Stop::TooLarge(_)
         ));
+    }
+
+    /// W9c re-review 3, M2: with a digit limit, `$` and 20 digits or more
+    /// is refused by the scan (`Failed`, not Ion), so `ion-rs` 1.0.1 never
+    /// sees it and never panics. Without a limit (W9a) the reader still
+    /// meets it, and its thread's join turns the panic into `Crashed`.
+    #[test]
+    fn a_digit_limit_refuses_a_symbol_id_past_usize_unread() {
+        for text in [
+            "$99999999999999999999".to_string(), // 20 digits, past usize::MAX
+            format!("${}", "7".repeat(5000)),
+            format!("{{a:${}}}", "1".repeat(25)),
+            format!("${}::1", "1".repeat(21)),
+            format!("(a $1${})", "2".repeat(30)),
+        ] {
+            let (rows, stop) = digit_limited(text.as_bytes(), Some(1000));
+            let Stop::Failed(why) = &stop else {
+                panic!("{}: {stop:?}", &text[..8])
+            };
+            assert!(why.contains("more than 19 digits"), "{why}");
+            assert!(rows.is_empty());
+        }
+        // Without a limit: W9a's reader is unchanged, and ion-rs panics.
+        let (_, stop) = digit_limited(b"$99999999999999999999", None);
+        assert!(matches!(stop, Stop::Crashed(_)), "{stop:?}");
+        // The control: a symbol ID that names a symbol reads.
+        let (rows, stop) = digit_limited(b"$4", Some(1000));
+        // 19 digits passes the scan (ion-rs then refuses an unknown ID, or
+        // reads it, but never panics).
+        let (_, stop19) = digit_limited(b"$9999999999999999999", Some(1000));
+        assert!(!matches!(stop19, Stop::Crashed(_)), "{stop19:?}");
+        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert_eq!(rows, vec![json!("name")]);
     }
 }

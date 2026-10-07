@@ -233,6 +233,10 @@ impl KvNumber {
         } else {
             sign_len + shift.saturating_add(2)
         };
+        // The digit limit on READ too (re-review 3, M1): the scan counts the
+        // digits as written, and `1d999999` (8 bytes) or a 432-byte binary
+        // coefficient expand past it here. Refused before the text is built.
+        within_digit_limit(plain_len - sign_len - u64::from(exponent < 0))?;
         budget.charge(plain_len)?;
         let text = if exponent >= 0 {
             if d.is_zero() {
@@ -440,8 +444,13 @@ impl KvData {
             V::Bool(b) => KvData::Bool(*b),
             // An int's digits are at most a few times the bytes that hold it
             // in the element already; charged once built.
+            // The digit limit on read (re-review 3, M1): `0x` + 1,000 hex
+            // digits is 1,205 decimal digits. The text is bounded by the
+            // scan (at most 1,000 written digits or 432 binary bytes), so it
+            // is built, then measured, then refused before it is charged.
             V::Int(i) => {
                 let digits = i.to_string();
+                within_digit_limit(digits.trim_start_matches('-').len() as u64)?;
                 budget.charge(digits.len() as u64)?;
                 KvData::Number(KvNumber::Int(digits))
             }
@@ -619,10 +628,14 @@ fn check_json_digits(text: &str) -> Result<(), Unstorable> {
         .split_once(['e', 'E'])
         .map_or((text, ""), |(m, e)| (m, e));
     let digits = |s: &str| s.bytes().filter(u8::is_ascii_digit).count() as u64;
-    let longest = digits(mantissa).max(digits(exponent));
-    if longest > MAX_NUMBER_DIGITS {
+    within_digit_limit(digits(mantissa).max(digits(exponent)))
+}
+
+/// A number of `digits` digits, refused (`TooLarge`) past [`MAX_NUMBER_DIGITS`].
+fn within_digit_limit(digits: u64) -> Result<(), Unstorable> {
+    if digits > MAX_NUMBER_DIGITS {
         return Err(Unstorable::TooLarge(format!(
-            "a number of {longest} digits is more than a KV value holds: a KV value's numbers \
+            "a number of {digits} digits is more than a KV value holds: a KV value's numbers \
              have at most {MAX_NUMBER_DIGITS} digits, and a longer one is refused, never \
              truncated"
         )));
@@ -1298,7 +1311,9 @@ mod tests {
             let err = decode(KvType::Json, ion.as_bytes(), 4096)
                 .or_else(|_| decode(KvType::Number, ion.as_bytes(), 4096))
                 .unwrap_err();
-            assert!(err.contains("max_read_bytes"), "{ion}: {err}");
+            // Refused by the digit limit before the budget is charged
+            // (re-review 3, M1): no text is built either way.
+            assert!(err.contains("at most 1000 digits"), "{ion}: {err}");
         }
         assert_eq!(
             decode(KvType::Number, b"1d9", 4096).unwrap(),
@@ -1307,30 +1322,35 @@ mod tests {
     }
 
     /// Review NI1: the expansion budget is the WHOLE value's, not each
-    /// decimal's. At the 10 MiB cap two decimals of nine million digits each
-    /// (18 MB of text from 23 bytes of Ion) are refused; two of four million
-    /// (8 MB) read.
+    /// decimal's. Under a 5 000-byte cap six decimals of 901 plain digits
+    /// each (each under the digit limit and under the cap alone; 5 406 in
+    /// all, from 36 bytes of Ion) are refused; five (4 505) read.
     #[test]
     fn the_decoded_text_of_a_whole_value_is_bounded_by_the_cap() {
-        const CAP: u64 = 10 << 20;
-        let err = decode(KvType::Json, b"[1d9000000,1d9000000]", CAP).unwrap_err();
+        const CAP: u64 = 5000;
+        let six = b"[1d900,1d900,1d900,1d900,1d900,1d900]";
+        let err = decode(KvType::Json, six, CAP).unwrap_err();
         assert_eq!(
             err,
             "the stored JSON value decodes to more than workflow.storage.max_read_bytes \
-             (10485760 bytes) of digits and text; egret's KV store writes none, so the object \
+             (5000 bytes) of digits and text; egret's KV store writes none, so the object \
              was not written by it"
         );
-        let element = one_element(b"[1d9000000,1d9000000]", CAP).unwrap();
+        let element = one_element(six, CAP).unwrap();
         assert!(
-            KvData::from_element(&element, CAP).is_err(),
+            matches!(
+                KvData::from_element(&element, CAP),
+                Err(Unstorable::TooLarge(_))
+            ),
             "the API path too"
         );
-        let KvData::List(items) = decode(KvType::Json, b"[1d4000000,1d4000000]", CAP).unwrap()
+        let KvData::List(items) =
+            decode(KvType::Json, b"[1d900,1d900,1d900,1d900,1d900]", CAP).unwrap()
         else {
             panic!()
         };
-        assert_eq!(items.len(), 2);
-        assert!(matches!(&items[1], KvData::Number(KvNumber::Decimal(t)) if t.len() == 4_000_001));
+        assert_eq!(items.len(), 5);
+        assert!(matches!(&items[4], KvData::Number(KvNumber::Decimal(t)) if t.len() == 901));
         // Strings and field names share the same budget: 3 x 2 000 bytes of
         // text under a 5 000-byte budget is refused, 2 x 2 000 reads.
         let s = "x".repeat(2000);
@@ -1814,10 +1834,9 @@ mod tests {
             .contains("more than 1000 digits"));
         // A decimal whose plain form (as egret writes it) is over the limit
         // is refused at write too, though its Ion coefficient is one digit.
-        let wide = api_body("1d1000");
         let v = KvValue {
             kind: KvType::Number,
-            data: wide,
+            data: dec(&format!("1{}", "0".repeat(1000))),
         };
         assert!(matches!(
             check_readable(&v, 1 << 20),
@@ -1985,5 +2004,54 @@ mod tests {
                 check_readable(v, 1 << 20)
             );
         }
+    }
+
+    /// Re-review 3, M1: reads enforce the digit limit too. What the scan
+    /// passes as written but expands past 1,000 digits once parsed is
+    /// refused by the conversion, `TooLarge`, before its text is built:
+    /// `1d1000` (1,001 plain digits), `1d999999` (a million, from 8 bytes),
+    /// `0x` + 1,000 hex digits (1,205 decimal digits) and a 432-byte binary
+    /// decimal (about 1,038). Each control at the limit reads.
+    #[test]
+    fn a_read_refuses_a_number_that_expands_past_1000_digits() {
+        let mut binary = crate::storage::ion::BINARY_VERSION_MARKER.to_vec();
+        // A decimal (0x5E), length 432 (VarUInt 0x03 0xB0): exponent 0
+        // (VarInt 0x80), then a 431-byte coefficient.
+        binary.extend([0x5E, 0x03, 0xB0, 0x80]);
+        binary.extend(std::iter::repeat_n(0x7F, 431));
+        let hex = format!("0x{}", "f".repeat(1000));
+        for (name, bytes) in [
+            ("1d1000", b"1d1000".to_vec()),
+            ("1d999999", b"1d999999".to_vec()),
+            ("hex", hex.into_bytes()),
+            ("binary decimal", binary),
+        ] {
+            let element = one_element(&bytes, 1 << 20).unwrap_or_else(|s| panic!("{name}: {s:?}"));
+            let err = KvData::from_element(&element, 1 << 20).unwrap_err();
+            assert!(
+                matches!(&err, Unstorable::TooLarge(m) if m.contains("at most 1000 digits")),
+                "{name}: {err:?}"
+            );
+            let err = read_back(KvType::Number, &bytes, 1 << 20).unwrap_err();
+            assert!(matches!(err, Unstorable::TooLarge(_)), "{name}: {err:?}");
+        }
+        // The controls: exactly 1,000 digits, by exponent and by hex.
+        assert_eq!(
+            decode(KvType::Number, b"1d999", 4096).unwrap(),
+            dec(&format!("1{}", "0".repeat(999)))
+        );
+        assert_eq!(
+            decode(KvType::Number, b"-1d-999", 4096).unwrap(),
+            dec(&format!("-0.{}1", "0".repeat(998)))
+        );
+        let KvData::Number(KvNumber::Int(digits)) = decode(
+            KvType::Number,
+            format!("0x{}", "f".repeat(830)).as_bytes(),
+            4096,
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(digits.len(), 1000, "16^830 - 1 has 1,000 digits");
     }
 }

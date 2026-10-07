@@ -1081,10 +1081,10 @@ pub const DECLARED: &[super::namespace::DeclaredClass];
 
 > **Amended 2026-10-07 (Task 2 fix round 3, re-review P1).** **The body is read with `value::for_each_kv_value(body, max_read_bytes, sink)`** (W9a's hardened reader: depth guard, value budget, symbol charge, and the 1,000-digit limit of the user's ruling, 2026-10-07), **never `ion_rs::Element::read_one`**, which has none of them. The sink takes the first value (`element.clone()`) and answers `Break` at a second, as `value.rs`'s test helper `one_element` does. How reading stopped decides the answer, before anything else:
 > - `Stop::End` with exactly one value → the rules below;
-> - `Stop::Failed` (not Ion) or `Stop::Full` (more than one value) → the raw text, typed STRING; `Stop::End` with no value is `Empty` (R-b);
-> - `Stop::TooLarge(m)` (the byte cap, the dense-value limit, the symbol charge, a number over 1,000 digits) → `ApiBodyError::TooLarge(m)`, 413; `Stop::TooDeep(m)` → `ApiBodyError::TooDeep(m)`, 400; `Stop::Crashed(m)` → `ApiBodyError::Crashed(m)`, 400 naming that the body could not be read, logged at WARN (fix round 3 found one: a symbol ID past `usize`, `$99999999999999999999`, panics `ion-rs` 1.0.1's reader, which the reader's thread catches as `Crashed`). **None of these falls back to the raw text.**
+> - `Stop::Failed` (not Ion) or `Stop::Full` (more than one value) → the raw text, typed STRING; `Stop::End` with no value is `Empty` (R-b). *(Amended 2026-10-07, re-review 3, M3:)* a raw-text fallback whose bytes are not UTF-8 (a malformed **binary** body, `Trip::Malformed`, or any other non-UTF-8 bytes) cannot be a STRING: it answers **400 "not UTF-8 text"** and nothing is written;
+> - `Stop::TooLarge(m)` (the byte cap, the dense-value limit, the symbol charge, a number over 1,000 digits) → `ApiBodyError::TooLarge(m)`, 413; `Stop::TooDeep(m)` → `ApiBodyError::TooDeep(m)`, 400; `Stop::Crashed(m)` → `ApiBodyError::Crashed(m)`, 400 naming that the body could not be read, logged at WARN. (Fix round 3 found a symbol ID past `usize`, `$99999999999999999999`, panics `ion-rs` 1.0.1's reader; since re-review 3, M2, the KV scan refuses any `$` with 20 or more digits unread as `Stop::Failed`, so that body is the raw text and `Crashed` is left for a panic not yet known.) **None of these falls back to the raw text.**
 >
-> `ApiBodyError::Unmodelled(Unmodelled)` **never holds `Annotation`**: `parse_api_body` matches `Some(Unmodelled::Annotation)` first and answers the raw text, so only `Blob`, `Clob` and `SExp` reach the error (a test asserts the variant cannot be built from an annotated body). `KvData::from_element` returns `Result<KvData, Unstorable>`; its `TooLarge` (the decoded-text budget) is `ApiBodyError::TooLarge`, and its `Invalid` cannot occur after `unmodelled` returned `None` (map it to `Crashed`). A body such as `[1d4000000]` is read but refused when written (Task 3's `set` → `check_readable`: egret writes the decimal's 4,000,001 plain digits, over the digit limit), 413.
+> `ApiBodyError::Unmodelled(Unmodelled)` **never holds `Annotation`**: `parse_api_body` matches `Some(Unmodelled::Annotation)` first and answers the raw text, so only `Blob`, `Clob` and `SExp` reach the error (a test asserts the variant cannot be built from an annotated body). `KvData::from_element` returns `Result<KvData, Unstorable>`; its `TooLarge` (the decoded-text budget) is `ApiBodyError::TooLarge`, and its `Invalid` cannot occur after `unmodelled` returned `None` (map it to `Crashed`). A body such as `[1d4000000]` is refused when read (re-review 3, M1: `from_element` refuses a number whose plain digits exceed 1,000, `TooLarge`, before building them), 413.
 >
 > **Amended 2026-10-07 (Task 2 fix rounds).** See Task 3's note for the interfaces. `parse_api_body` runs `unmodelled(&element)` on the one parsed value: `Blob`, `Clob` or `SExp` → 400 naming `Unmodelled::name()` (the type before the annotation: `annot_blob`); `Annotation` → the raw text, typed STRING (`ion_annot`, `nested_annot`); otherwise `KvData::from_element(&element, max_read_bytes)`, whose budget is shared by the whole value (fix round 2, NI1), so a body such as `[1d9000000,1d9000000]` is refused (413 naming `max_read_bytes`), never expanded. The type is inferred from the `Element`: an int, decimal or float is NUMBER; a list or struct JSON; a timestamp DATETIME or DATE by the rulings; a string or symbol STRING or DURATION as measured. `GET`'s `value` is `data.to_json()`. The inheritance route calls `list_inherited(conn, &ns, &grants, cap)` with `grants` for `ancestors(ns)[1..]`. A PUT's write goes through Task 3's `set`, hence `check_readable`: over the cap or the dense-value limit is 413.
 
@@ -1135,11 +1135,12 @@ pub struct KvRevisionDto { pub revision: u32, pub r#type: String, pub size: u64,
 /// the conversion KvData::from_element(&element, cap), so an Ion decimal stays a KvNumber::Decimal and a
 /// body whose decoded text exceeds `cap` is Err (413). Err distinguishes 400 from 413.)
 pub fn parse_api_body(body: &[u8], cap: u64) -> Result<KvValue, ApiBodyError>;
-/// 400 Empty; 400 Unmodelled (Blob, Clob or SExp only: never Annotation, the raw-text case); 413
+/// 400 Empty; 400 NotUtf8 ("not UTF-8 text": a raw-text fallback whose bytes are not UTF-8,
+/// re-review 3 M3); 400 Unmodelled (Blob, Clob or SExp only: never Annotation, the raw-text case); 413
 /// TooLarge (the reader's byte cap, dense-value limit, symbol charge, 1,000-digit limit, and
 /// from_element's text budget); 400 TooDeep (past storage::ion::MAX_DEPTH); 400 Crashed (the
 /// reader's thread panicked on the body, e.g. a symbol ID past usize; logged at WARN). Amended 2026-10-07, fix round 3 (re-review P1).
-pub enum ApiBodyError { Empty, Unmodelled(Unmodelled), TooLarge(String), TooDeep(String), Crashed(String) }
+pub enum ApiBodyError { Empty, NotUtf8, Unmodelled(Unmodelled), TooLarge(String), TooDeep(String), Crashed(String) }
 ```
 
 - [ ] **Step 1: Write the failing tests** (`tests/kv_api.rs`, `tests/common` app, MemStore, `install_db_for_tests`):
@@ -1155,14 +1156,20 @@ pub enum ApiBodyError { Empty, Unmodelled(Unmodelled), TooLarge(String), TooDeep
 #[tokio::test] async fn a_dense_or_expanding_body_is_413_and_nothing_is_written() {
     // [0,0,…] 200 000 zeros: 413 naming the dense-value limit; [1d9000000,1d9000000]: 413 naming
     // max_read_bytes, refused before any expansion (fix round 2, NI1); [1d4000000]: 413 naming the
-    // 1,000-digit limit at write (fix round 3: egret would write 4,000,001 plain digits)
+    // 1,000-digit limit on read (re-review 3, M1: 4,000,001 plain digits, refused before they are built)
 }
 #[tokio::test] async fn a_reader_refusal_is_never_stored_as_raw_text() {
     // fix round 3, re-review P1: a 101-deep list -> 400 (TooDeep), a 70,001-digit decimal -> 413 naming
     // 1000 digits (not 200 with 4,466 digits stored, nor the raw text), a binary Ion int of 2,000 bytes
-    // -> 413, a symbol table over the cap -> 413, `$99999999999999999999` -> 400 (Crashed); each writes nothing. The controls: `{a:` (not Ion)
+    // -> 413, a symbol table over the cap -> 413; each writes nothing. `$99999999999999999999` is refused
+    // unread by the scan (re-review 3, M2) and stored as the raw text, never a panic. The controls: `{a:` (not Ion)
     // and `1 2` (two values) are stored as the raw text, STRING; a 1,000-digit int and decimal round-trip
     // exactly; `x::1` is the raw text and never ApiBodyError::Unmodelled
+}
+#[tokio::test] async fn a_raw_text_fallback_that_is_not_utf8_is_400() {
+    // re-review 3, M3: a malformed binary body (E0 01 00 EA then a reserved type code) and the bytes
+    // FF FE 00 each answer 400 "not UTF-8 text", and nothing is written; the control `{a:` (UTF-8, not
+    // Ion) is stored as the raw STRING
 }
 #[tokio::test] async fn an_ion_decimal_is_stored_and_answered_exactly() {
     // PUT {a:1.5}: bytes {a:1.5}, GET value {"a":1.5}; PUT 123456789012345678901234567890.5: GET's JSON
@@ -1225,7 +1232,8 @@ pub enum ApiBodyError { Empty, Unmodelled(Unmodelled), TooLarge(String), TooDeep
   - (g) the list route answering 404 for another workspace (byte-identity dies);
   - (h) `parse_api_body` converting with a fresh budget per decimal (the expanding-body test dies);
   - (i) `parse_api_body` reading with `ion_rs::Element::read_one` instead of `for_each_kv_value` (the reader-refusal test dies: the 70,001-digit decimal is stored truncated);
-  - (j) `Stop::TooLarge` and `Stop::TooDeep` falling back to the raw text (the reader-refusal test dies: 200 instead of 413/400).
+  - (j) `Stop::TooLarge` and `Stop::TooDeep` falling back to the raw text (the reader-refusal test dies: 200 instead of 413/400);
+  - (k) the raw-text fallback decoding with `String::from_utf8_lossy` (the not-UTF-8 test dies: 200 instead of 400).
 - [ ] **Step 7: Commit** `feat(workflow): W9c Task 6 — the KV API`.
 
 ---
