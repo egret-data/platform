@@ -7,6 +7,11 @@
 //!   `? :`, `isIn`) into syntax minijinja already understands, or into calls
 //!   to functions `env` registers. It has no context and evaluates nothing —
 //!   see `rewrite`'s module doc for why a regex cannot do this job.
+//! - `cmp_rewrite` is the rewrite's second pass (W9c Task 4 fix round 1): it
+//!   reads `rewrite`'s output with minijinja's own grammar and turns every
+//!   comparison into a call to `compare`, whose functions compare a
+//!   `BigDecimal`/`BigInteger` exactly and every other pair as minijinja
+//!   does.
 //! - `filters` is all 35 of Kestra's filters, registered onto that engine.
 //!   Two of its names (`indent`, `string`) override minijinja built-ins
 //!   rather than adding to them.
@@ -37,6 +42,8 @@
 //!   `render_str_with` that resolves it for `kestra.*` plugin tasks only. The
 //!   shared environment keeps refusing it (see `secrets`' module doc).
 
+mod cmp_rewrite;
+mod compare;
 pub mod env;
 pub mod files;
 mod filters;

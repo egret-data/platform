@@ -577,7 +577,7 @@ pub async fn read_value(
 /// `head` still finds another size (or no object) -> `Author` "does not
 /// match its record", not retried: the object was altered outside egret, or
 /// lost, and every retry would read it again.
-async fn other_size(
+pub(crate) async fn other_size(
     conn: &mut PgConnection,
     fs: &FileStore,
     grant: &Grant,
@@ -641,7 +641,7 @@ async fn other_size(
 
 /// [`read_value`] up to the size check: `Ok(Err(n))` when the object is `n`
 /// bytes, not the row's size (never decoded).
-async fn read_sized(
+pub(crate) async fn read_sized(
     fs: &FileStore,
     grant: &Grant,
     e: &KvEntry,

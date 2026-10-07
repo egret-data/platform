@@ -213,7 +213,9 @@ literal removed the accidental reason egret used to fail for and left
 minijinja's own semantics showing, and where `is defined` -- the one of the five
 a crate can reach -- is closed by overriding a single test -- and **130 of 1336**
 after W2a, which added 48, BANKED **fourteen** (every pair W2 Task 8 had recorded
-as unfixable) and RECORDED four.
+as unfixable) and RECORDED four -- and **129 of 1336** after W9c Task 4's fix
+round 1 (2026-10-08), which BANKED one, `filter-number-bigdecimal-comparison`
+(see "The same hole" below), and changed no other answer.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -3574,6 +3576,23 @@ returns the same object. It predates Task 7 and it is unchanged — but it now
 has two entries (`filter-number-bigdecimal-is-not-a-number-here`,
 `filter-number-bigdecimal-comparison`) where before this round nothing in the
 corpus could see it.
+
+**2026-10-08, W9c Task 4 fix round 1 (the user's ruling: comparisons on exact
+numbers compare exactly; option A).** The comparison half of that hole is
+closed, on this path and on `kv()`'s, which returns the same object. minijinja
+still cannot compare the object, so the operators no longer reach minijinja:
+`runners::cmp_rewrite` reads the rewriter's output with minijinja's own grammar
+and turns every `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in` and chain into
+a call to `runners::compare`, which compares a `BigDecimal`/`BigInteger`
+against a number exactly and answers every other pair with minijinja's own
+`PartialEq`/`Ord`. `filter-number-bigdecimal-comparison` is BANKED; the corpus
+moved by exactly that one entry, which is the evidence that no other answer
+changed. Arithmetic stays a named refusal, so
+`filter-number-bigdecimal-is-not-a-number-here` stays baselined. A float is
+compared by its exact binary value, where Pebble 4.1.2 compares any two
+numbers by `doubleValue()` -- W9c spec §15 records the difference.
+`fromIon` decimals are still `f64` (their scale is still what gave way); this
+round does not revisit that.
 
 ### C-B: an `e` exponent with a dot was classified as a decimal
 

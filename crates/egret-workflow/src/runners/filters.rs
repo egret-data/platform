@@ -96,7 +96,9 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
-use minijinja::value::{Enumerator, Object, ObjectRepr, Rest, Value as MjValue, ValueKind};
+use minijinja::value::{
+    DynObject, Enumerator, Object, ObjectRepr, Rest, Value as MjValue, ValueKind,
+};
 use minijinja::{Environment, Error as MjError, ErrorKind};
 use unicode_normalization::UnicodeNormalization;
 
@@ -1756,6 +1758,7 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
                 | "java.lang.Long"
                 | "java.lang.Double"
                 | "java.math.BigInteger"
+                | "java.math.BigDecimal"
         ) {
             return Err(pebble_error(format!(
                 "class {first_class} cannot be cast to class java.lang.Comparable"
@@ -1784,6 +1787,14 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
         "java.lang.Integer" | "java.lang.Long" | "java.math.BigInteger"
     );
     items.sort_by(|a, b| {
+        // W9c Task 4 fix round 1: `BigDecimal.compareTo` and
+        // `BigInteger.compareTo` are exact. A `BigDecimal` list used to be
+        // refused as not `Comparable` (it is), and a `BigInteger` past `i128`
+        // fell to the TEXT order below, where `9` sorts after `10`. The class
+        // check above has already made the two elements one class.
+        if super::compare::exact_cmp(a, b).is_some() {
+            return super::compare::values_cmp(a, b);
+        }
         if integers {
             // `i128` holds every `i64` and every `u64`, so no integer this
             // crate can carry loses a bit on the way in.
@@ -2848,6 +2859,29 @@ impl Object for BigNumber {
     fn render(self: &Arc<Self>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.text)
     }
+
+    /// W9c Task 4 fix round 1: two `BigNumber`s compare by value, wherever
+    /// minijinja compares two of them itself (`1.5 == 1.50`, `-1.5 > -2.5`).
+    /// minijinja asks this ONLY for two objects of the same type; a
+    /// `BigNumber` against a number never reaches it, which is why the
+    /// comparison operators are compiled to `super::compare`'s functions.
+    fn custom_cmp(self: &Arc<Self>, other: &DynObject) -> Option<std::cmp::Ordering> {
+        let other = other.downcast_ref::<Self>()?;
+        super::compare::plain_text_cmp(&self.text, &other.text)
+    }
+}
+
+/// W9c Task 4 fix round 1: is this value a [`BigNumber`]?
+pub(super) fn is_big_number(value: &MjValue) -> bool {
+    value.downcast_object_ref::<BigNumber>().is_some()
+}
+
+/// W9c Task 4 fix round 1: a [`BigNumber`]'s `toPlainString()` text, the
+/// exact value `super::compare` compares, or `None` for anything else.
+pub(super) fn big_number_plain(value: &MjValue) -> Option<&str> {
+    value
+        .downcast_object_ref::<BigNumber>()
+        .map(|big| big.text.as_str())
 }
 
 /// The Java class of a [`BigNumber`], or `None` for anything else.

@@ -509,6 +509,15 @@ fn file_function(
 ///   `kv_function.eom_*`, where Kestra throws a raw `ClassCastException`),
 ///   before anything is looked up.
 ///
+/// **The two `null` answers are read from Kestra's source, not chosen** (the
+/// artifact does not measure them; fix round 1, review concern 5), at
+/// `KvFunction.java` (`96893b589`):
+/// - `:51` `String namespace = (String) args.get(NAMESPACE_ARG);` and `:61`
+///   `if (namespace == null)` take the walk, so a `null` namespace walks
+///   exactly as an absent one;
+/// - `:53` `Optional.ofNullable((Boolean) args.get(ERROR_ON_MISSING_ARG))
+///   .orElse(true)`, so a `null` `errorOnMissing` is `true`.
+///
 /// It answers from the render's [`FileScope`](super::files::FileScope), as
 /// [`file_function`] does: no scope means no running execution (a Flow
 /// trigger's `conditions`, a corpus render), refused by name. A key that is
@@ -622,6 +631,8 @@ fn shown_argument(v: &MjValue) -> String {
 ///
 /// Neither `BigNumber` is arithmetic, so `{{ kv('d') + 1 }}` fails the render
 /// naming the operator (W9c spec §15), where Kestra computes in `BigDecimal`.
+/// Both COMPARE exactly (fix round 1, the user's ruling of 2026-10-07):
+/// `kv('d') > 0.9`, `== 1.5`, `in [1.5]` go through `super::compare`.
 ///
 /// A value nesting containers deeper than [`crate::storage::ion::MAX_DEPTH`]
 /// is refused before anything is built: the check walks with an explicit
@@ -3169,12 +3180,13 @@ mod tests {
                 "{source} through toIon"
             );
         }
-        // The `number(type='BIGDECIMAL')` path still returns the object and
-        // still has the hole. Recorded in `oracle/baseline.txt`; asserted here
-        // so it is a fact rather than a sentence, and so it fails loudly on
-        // the day `BigNumber` becomes a number.
+        // The `number(type='BIGDECIMAL')` path still returns the object, so
+        // arithmetic on it is still refused (recorded in
+        // `oracle/baseline.txt`). Its COMPARISONS are exact since W9c Task 4
+        // fix round 1 (2026-10-08): every comparison is compiled to a
+        // `super::compare` call, so `> 1` is no longer unconditionally true.
         assert!(render("{{ '1.5' | number(type='BIGDECIMAL') + 1 }}", "{}").is_err());
-        assert_eq!(ok("{{ '1' | number(type='BIGDECIMAL') > 1 }}"), "true");
+        assert_eq!(ok("{{ '1' | number(type='BIGDECIMAL') > 1 }}"), "false");
 
         // Three writer facts that path DOES get right, all fixed here: a
         // scale-0 `BigDecimal` needs Ion's `.` or it reads back as an integer;
@@ -4981,6 +4993,97 @@ mod tests {
             }
             assert_eq!(render("{{ kv('i') + 1 }}", &cx).unwrap(), "42");
             assert_eq!(render("{{ kv('f') + 1 }}", &cx).unwrap(), "2.5");
+        }
+
+        /// W9c Task 4 fix round 1, review I1 (the user's ruling, 2026-10-07:
+        /// comparisons on exact numbers compare exactly). Every row of the
+        /// review's table with its correct answer, then `>=`/`<=`/`!=`
+        /// between two exact numbers, an int on the other side, an int past
+        /// `u128`, and the float rule (a float is its exact binary value).
+        #[test]
+        fn comparisons_on_an_exact_decimal_or_big_int_are_exact() {
+            let u128_max = u128::MAX.to_string();
+            let past_u128 = format!("{}0", u128_max);
+            let cx = FakeKv::default()
+                .with("d", dec("1.5"))
+                .with("d150", dec("1.50"))
+                .with("d10", dec("10.5"))
+                .with("d9", dec("9.5"))
+                .with("m1", dec("-1.5"))
+                .with("m2", dec("-2.5"))
+                .with("t", dec("0.75"))
+                .with("d01", dec("0.1"))
+                .with("big", int(&past_u128))
+                .with("big2", int(&past_u128))
+                .with("bigneg", int(&format!("-{past_u128}")))
+                .cx();
+            let rows: Vec<(String, &str)> = vec![
+                // The review's table, row for row.
+                ("{{ kv('d') > 100 }}".into(), "false"),
+                ("{{ kv('d') < 100 }}".into(), "true"),
+                ("{{ kv('d') >= 2 }}".into(), "false"),
+                ("{{ kv('d') <= 2 }}".into(), "true"),
+                (
+                    "{% if kv('d') > 100 %}BIG{% else %}small{% endif %}".into(),
+                    "small",
+                ),
+                ("{{ kv('d') == 1.5 }}".into(), "true"),
+                ("{{ kv('d') != 1.5 }}".into(), "false"),
+                ("{{ kv('d') in [1.5] }}".into(), "true"),
+                ("{{ kv('d10') > kv('d9') }}".into(), "true"),
+                ("{{ kv('m1') > kv('m2') }}".into(), "true"),
+                ("{{ kv('d') == kv('d150') }}".into(), "true"),
+                // The review's failure scenario: a threshold.
+                ("{{ kv('t') > 0.9 }}".into(), "false"),
+                ("{{ kv('t') == 0.75 }}".into(), "true"),
+                // Between two exact numbers, every operator.
+                ("{{ kv('d') >= kv('d150') }}".into(), "true"),
+                ("{{ kv('d') <= kv('d150') }}".into(), "true"),
+                ("{{ kv('d') != kv('d150') }}".into(), "false"),
+                ("{{ kv('d9') >= kv('d10') }}".into(), "false"),
+                ("{{ kv('m2') <= kv('m1') }}".into(), "true"),
+                (
+                    "{{ kv('m2') < kv('m1') < kv('d') < kv('d10') }}".into(),
+                    "true",
+                ),
+                ("{{ kv('m1') > kv('m2') > kv('d') }}".into(), "false"),
+                // An int on the other side, either side.
+                ("{{ kv('d') > 1 }}".into(), "true"),
+                ("{{ 2 > kv('d') }}".into(), "true"),
+                ("{{ kv('m1') < -1 }}".into(), "true"),
+                ("{{ kv('m1') > -2 }}".into(), "true"),
+                ("{{ 1 in [kv('d'), 1] }}".into(), "true"),
+                ("{{ kv('d150') in [1, 1.5] }}".into(), "true"),
+                ("{{ kv('d') not in [1, 2] }}".into(), "true"),
+                // An int past `u128`, which no Rust integer holds.
+                (format!("{{{{ kv('big') > {u128_max} }}}}"), "true"),
+                ("{{ kv('big') > 1e30 }}".into(), "true"),
+                ("{{ kv('big') < 1e300 }}".into(), "true"),
+                ("{{ kv('big') == kv('big2') }}".into(), "true"),
+                ("{{ kv('bigneg') < -1 }}".into(), "true"),
+                ("{{ kv('bigneg') < kv('big') }}".into(), "true"),
+                ("{{ kv('big') in [kv('big2')] }}".into(), "true"),
+                // A float is its exact binary value (spec §15): the decimal
+                // 0.1 is below the double nearest 0.1.
+                ("{{ kv('d01') == 0.1 }}".into(), "false"),
+                ("{{ kv('d01') < 0.1 }}".into(), "true"),
+                ("{{ kv('d') == 1.5 }}".into(), "true"),
+                // `sort` orders them by value.
+                (
+                    "{{ [kv('d10'), kv('m1'), kv('d150'), kv('m2'), kv('d9')] | sort }}".into(),
+                    "[-2.5,-1.5,1.50,9.5,10.5]",
+                ),
+                // `isIn` is Kestra's `InExpression`, which compares
+                // `toString()`s: `1.5` matches, `1.50` does not.
+                ("{{ kv('d') isIn [1.5] }}".into(), "true"),
+                ("{{ kv('d150') isIn [1.5] }}".into(), "false"),
+            ];
+            for (template, want) in &rows {
+                assert_eq!(render(template, &cx).unwrap(), *want, "{template}");
+            }
+            // Arithmetic stays a named refusal.
+            let e = render("{{ kv('d') + 1 }}", &cx).unwrap_err();
+            assert!(e.contains("tried to use + operator"), "{e}");
         }
 
         /// w9c `kv_function.eom_*` (chosen: Kestra throws a raw

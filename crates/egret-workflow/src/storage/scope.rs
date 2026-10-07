@@ -512,12 +512,13 @@ impl Snapshot {
     /// 3. One statement on the render's namespace connection
     ///    ([`Self::on_ns_conn`]): [`kv_store::resolve_first_live`]. Then the
     ///    connection mutex is released.
-    /// 4. [`kv_store::read_value`], holding no connection of this scope: it
-    ///    downloads, then decodes on the blocking pool. It takes a pool for
-    ///    one statement only when the object is not the size its row
-    ///    records; that pool is private to this call, opens nothing unless
-    ///    that statement runs (`connect_lazy_with`, at most one connection),
-    ///    and is closed before this returns.
+    /// 4. [`kv_store::read_sized`], holding no connection of this scope: it
+    ///    downloads, then decodes on the blocking pool.
+    /// 5. Only when the object is not the size its row records:
+    ///    [`kv_store::other_size`] re-reads the row by id on the render's OWN
+    ///    connection, through [`Self::on_ns_conn`] again (W9c Task 4 fix
+    ///    round 1, review M2: it replaced a lazy one-connection pool private
+    ///    to the call, so a mismatch no longer opens a second connection).
     ///
     /// Nothing here writes: an expired or soft-deleted level is missing
     /// there, and the walk goes on (spec §4.5, §4.6).
@@ -577,23 +578,31 @@ impl Snapshot {
                     entry.namespace
                 )
             })?;
-        let opts = self
-            .ns_db
-            .as_deref()
-            .expect("the lookup above connected with these options");
-        let read = self.handle.block_on(async {
-            let pool = sqlx::postgres::PgPoolOptions::new()
-                .max_connections(1)
-                .min_connections(0)
-                .idle_timeout(None)
-                .max_lifetime(None)
-                .connect_lazy_with(opts.clone());
-            let read = kv_store::read_value(&pool, &self.store, grant, &entry).await;
-            pool.close().await;
-            read
-        });
-        read.map(KvAnswer::Value)
-            .map_err(|e| self.kv_unavailable(&what, e))
+        let read = match self
+            .handle
+            .block_on(kv_store::read_sized(&self.store, grant, &entry))
+        {
+            Ok(read) => read,
+            Err(e) => return Err(self.kv_unavailable(&what, e)),
+        };
+        let other = match read {
+            Ok(data) => return Ok(KvAnswer::Value(data)),
+            Err(other) => other,
+        };
+        // The size-mismatch path: one statement, on this render's own
+        // connection (the mutex is free again: step 3 released it).
+        let judged: std::result::Result<std::convert::Infallible, NsError> =
+            self.on_ns_conn(&what, |mut conn| {
+                let (store, entry) = (&self.store, &entry);
+                Box::pin(async move {
+                    let e = kv_store::other_size(&mut conn, store, grant, entry, other).await;
+                    (conn, Err(e))
+                })
+            });
+        match judged {
+            Ok(never) => match never {},
+            Err(e) => Err(self.kv_unavailable(&what, e)),
+        }
     }
 }
 

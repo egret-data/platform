@@ -1105,7 +1105,11 @@ fn ion_number(token: &str) -> Option<Result<MjValue, String>> {
     // wrong SPELLING is recorded; a wrong COMPARISON is not acceptable, so the
     // scale is what gives way. Five entries record what that costs, and
     // `filter-number-bigdecimal-is-not-a-number-here` records the same hole on
-    // the `number(type='BIGDECIMAL')` path, which still has it.
+    // the `number(type='BIGDECIMAL')` path, which still has it for
+    // arithmetic. (2026-10-08, W9c Task 4 fix round 1: its COMPARISONS are
+    // exact now -- `super::cmp_rewrite` compiles every comparison to a
+    // `super::compare` call -- but arithmetic is still refused, so the
+    // reasoning above still holds for this path.)
     let signed = if negative {
         format!("-{cleaned}")
     } else {

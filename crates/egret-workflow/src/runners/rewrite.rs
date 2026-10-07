@@ -182,7 +182,19 @@
 //! separated the two. The other three were added in Task 3 for exactly that
 //! reason. Semantics live in `runners::env::kestra_is_in`.
 //!
-//! # Comparison operators are left alone
+//! # Comparison operators are left alone -- by THIS pass
+//!
+//! **2026-10-08 (W9c Task 4 fix round 1, the user's option A):** this module
+//! still writes every comparison through verbatim, and a SECOND pass,
+//! [`super::cmp_rewrite`], then compiles each one in its output into a call
+//! to `super::compare` (`a > b` -> `kestra_gt(a, b)`), so a `BigDecimal` or
+//! `BigInteger` compares exactly and every other pair answers exactly as
+//! minijinja's own operator did. It is a separate pass, over minijinja
+//! syntax, on purpose: what minijinja makes of THIS module's output is what
+//! egret's comparisons have always meant, so that output is the thing to
+//! parse, with minijinja's grammar, to keep their grouping; and this
+//! module's byte-exact tests still describe this module alone. `env`'s
+//! `compile_source` runs the two in order.
 //!
 //! `>`, `>=`, `<`, `<=` already parse in minijinja and this module does not
 //! touch them. Kestra overrides all four (`GreaterThanExpression` and its

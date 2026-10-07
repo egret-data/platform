@@ -287,8 +287,15 @@ fn task_id(name: &str) -> String {
 }
 
 /// One fixture cell checked against its run: `outcome` exact; an `ok` cell's
-/// `outputs.value`; an error cell's `message` (contained: egret's task
-/// message wraps the render error) or each of `message_contains`.
+/// `outputs.value`; an error cell's `message` or each of `message_contains`,
+/// as the cell's `compare` says.
+///
+/// **Where `compare` says "message exact" with Kestra's render wrapper
+/// stripped, egret's own wrapper is stripped too and the two are compared with `==`**
+/// (W9c Task 4 fix round 1, review M4): egret's render error reads
+/// `invalid operation: <message> (in <string>:<line>)`. Containment would let
+/// a regression that APPENDED a sentence pass. A cell whose `compare` allows
+/// "exact or containing" keeps containment.
 async fn check_cell(db: &Db, ex: Uuid, name: &str, cell: &Value) {
     let id = task_id(name);
     match cell["outcome"].as_str().unwrap() {
@@ -299,8 +306,21 @@ async fn check_cell(db: &Db, ex: Uuid, name: &str, cell: &Value) {
         ),
         "error" => {
             let message = error_of(db, ex, &id).await;
+            // "message exact (Kestra's render wrapper … stripped)" and
+            // "message exact (Pebble wrapper stripped)": a RENDER error.
+            let exact = cell["compare"]
+                .as_str()
+                .is_some_and(|c| c.contains("message exact (") && c.contains("wrapper"));
             if let Some(want) = cell["message"].as_str() {
-                assert!(message.contains(want), "{name}: {message}\n  want: {want}");
+                if exact {
+                    assert_eq!(
+                        strip_egret_wrapper(&message),
+                        Some(want),
+                        "{name}: {message}"
+                    );
+                } else {
+                    assert!(message.contains(want), "{name}: {message}\n  want: {want}");
+                }
             }
             for fragment in cell["message_contains"].as_array().into_iter().flatten() {
                 let fragment = fragment.as_str().unwrap();
@@ -312,6 +332,17 @@ async fn check_cell(db: &Db, ex: Uuid, name: &str, cell: &Value) {
         }
         other => panic!("{name}: outcome {other}"),
     }
+}
+
+/// egret's render-error wrapper, `invalid operation: … (in <string>:N)`,
+/// taken off; `None` when the message does not have exactly that shape.
+fn strip_egret_wrapper(message: &str) -> Option<&str> {
+    let inner = message.strip_prefix("invalid operation: ")?;
+    let at = inner.rfind(" (in <string>:")?;
+    let line = inner[at + " (in <string>:".len()..].strip_suffix(')')?;
+    line.bytes()
+        .all(|b| b.is_ascii_digit())
+        .then_some(&inner[..at])
 }
 
 /// w9c `kv_function._setup`: `k` = `{a:1}` in `w9c.fn`, `k` = `'other'` in
@@ -386,6 +417,8 @@ async fn seed_inheritance(db: &Db, fs: &FileStore, ws: Uuid) {
 ///   test egret's renderer does not bind (`runners::env`'s fence keeps it
 ///   unknown, a renderer gap that is not the KV store's); its value is
 ///   asserted with `== null` here and in `kv_fn::kv_error_on_missing_defaults_to_true`.
+///   W9c spec §15 records the gap for flow authors (fix round 1, review M1):
+///   `is null` fails the render; `== null` and `??` work.
 #[tokio::test(flavor = "multi_thread")]
 async fn kv_matches_the_artifact() {
     let _turn = SERIAL.lock().await;
@@ -398,6 +431,8 @@ async fn kv_matches_the_artifact() {
     // kv_function, as a flow of w9c.fn.
     seed_kv_function(&db, &fs, ws).await;
     let cells = expected["kv_function"].as_object().unwrap();
+    // `missing_eom_false_is_null`: Pebble's `is null` is unbound here; see
+    // W9c spec §15 ("`is null`") and the doc comment above.
     const NOT_RUN: [&str; 2] = ["no_execution", "missing_eom_false_is_null"];
     let mut tasks = Vec::new();
     let mut run_cells = Vec::new();
@@ -950,10 +985,10 @@ async fn settles_at(db: &Db, tag: &str, want: i64) -> i64 {
 
 /// The hold audit, measured (Task 4 step 5): between two `kv()` calls of one
 /// render the scope holds exactly its one namespace connection, idle, in no
-/// transaction and with no advisory lock; the object read's private pool
-/// is closed when `kv()` returns, even when it was used (an object that is
-/// not the size its row records takes it for one statement); and the
-/// render's end closes the connection.
+/// transaction and with no advisory lock; an object that is not the size its
+/// row records is judged by one statement on that same connection (since
+/// fix round 1, review M2; it used to take a private pool), so it is still
+/// the only one; and the render's end closes the connection.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_scope_holds_no_lock_and_releases_its_connection_at_end_render() {
     let _turn = SERIAL.lock().await;
@@ -1013,7 +1048,7 @@ async fn the_scope_holds_no_lock_and_releases_its_connection_at_end_render() {
     assert_eq!(
         observed.3 .1,
         (1, 0, 0),
-        "{}: the private pool was closed, only the render's connection is left",
+        "{}: the mismatch was judged on the render's own connection, the only one",
         observed.3 .0
     );
     assert!(observed.4, "the render keeps its connection until it ends");
@@ -1117,6 +1152,73 @@ async fn retry_with_flowable_errors_reads_its_counter() {
     assert_eq!(value_of(&db, ex, "read").await, "1");
     assert_eq!(value_of(&db, ex, "compare").await, "ko");
     assert_eq!(value_of(&db, ex, "incr").await, "2");
+}
+
+/// W9c Task 4 fix round 1, review I1's failure scenario, through the real
+/// render: an operator stores a threshold `0.75` (an Ion decimal, a
+/// `BigDecimal`), and a flow's `runIf: "{{ kv('threshold') > 0.9 }}"` used to
+/// be ALWAYS true, because minijinja ranked the object above every number. It
+/// is false now, and the control `< 0.9` runs; an `If` on `== 0.75` takes
+/// `then`, and a `Return` prints the comparisons.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_if_comparing_a_stored_decimal_compares_its_value() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let ns = "w9c.threshold";
+    for (key, digits) in [("threshold", "0.75"), ("big", &"9".repeat(45)[..])] {
+        let data = if key == "big" {
+            KvData::Number(KvNumber::Int(digits.into()))
+        } else {
+            KvData::Number(KvNumber::Decimal(digits.into()))
+        };
+        kv_store::set(
+            &db.pool,
+            &fs,
+            &grant(ws, ns, Access::Write),
+            &KvKey::parse(key).unwrap(),
+            NewValue {
+                value: KvValue {
+                    kind: KvType::Number,
+                    data,
+                },
+                description: None,
+                ttl: None,
+                overwrite: true,
+            },
+            CreatedBy::Execution(Uuid::nil()),
+        )
+        .await
+        .unwrap();
+    }
+    let source = format!(
+        "id: threshold\nnamespace: {ns}\ntasks:\n\
+         \x20 - id: above\n    type: io.kestra.plugin.core.log.Log\n    \
+         runIf: \"{{{{ kv('threshold') > 0.9 }}}}\"\n    message: above\n\
+         \x20 - id: below\n    type: io.kestra.plugin.core.log.Log\n    \
+         runIf: \"{{{{ kv('threshold') < 0.9 }}}}\"\n    message: below\n\
+         \x20 - id: branch\n    type: io.kestra.plugin.core.flow.If\n    \
+         condition: \"{{{{ kv('threshold') == 0.75 }}}}\"\n    then:\n\
+         \x20     - id: then_task\n        type: io.kestra.plugin.core.log.Log\n        message: then\n    \
+         else:\n\
+         \x20     - id: else_task\n        type: io.kestra.plugin.core.log.Log\n        message: else\n\
+         \x20 - id: prop\n    type: io.kestra.plugin.core.debug.Return\n    \
+         format: \"{{{{ kv('threshold') }}}} {{{{ kv('threshold') >= 0.75 }}}} {{{{ kv('big') > 1e44 }}}} {{{{ kv('big') in [kv('big')] }}}}\"\n"
+    );
+    let ex = run(&db, ws, &source).await;
+    assert_eq!(result_of(&db.pool, ex, "above").await.0, "SKIPPED");
+    assert_eq!(result_of(&db.pool, ex, "below").await.0, "SUCCESS");
+    assert_eq!(result_of(&db.pool, ex, "then_task").await.0, "SUCCESS");
+    let else_created: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'else_task'",
+    )
+    .bind(ex)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(else_created, 0, "the If took `then`");
+    assert_eq!(value_of(&db, ex, "prop").await, "0.75 true true true");
 }
 
 /// Task 4 step 5's measurement: the median of 50 `kv()` renders on the

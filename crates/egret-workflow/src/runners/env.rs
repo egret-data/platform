@@ -439,7 +439,7 @@ impl RenderContext {
     }
 
     /// The context as one minijinja value: an order-preserving map object.
-    fn to_minijinja(&self) -> MjValue {
+    pub(crate) fn to_minijinja(&self) -> MjValue {
         MjValue::from_object(OrderedMap::new(self.bindings.clone()))
     }
 
@@ -1827,7 +1827,10 @@ pub(crate) fn environment() -> Environment<'static> {
     // - `kestra_null_coalesce`, `kestra_undefined_coalesce` and `kestra_is_in`
     //   stay: `super::rewrite` compiles Kestra's `??`, `???` and `isIn`
     //   operators into calls to them, so they are a seam this crate cannot do
-    //   without. They are egret-only and the fixture says so.
+    //   without. They are egret-only and the fixture says so. Since W9c Task 4
+    //   fix round 1 (2026-10-08) nine more are the same kind of seam:
+    //   `super::cmp_rewrite` compiles every comparison operator into a call to
+    //   one of `super::compare`'s `kestra_eq` .. `kestra_compare_chain`.
     //
     // `pprint` and `debug` were already removed in Task 3 for a different
     // reason (both dump internal state); they are two of the 62 and are now
@@ -1892,8 +1895,20 @@ pub(crate) fn environment() -> Environment<'static> {
     env.add_function("kestra_null_coalesce", kestra_null_coalesce);
     env.add_function("kestra_undefined_coalesce", kestra_undefined_coalesce);
     env.add_function("kestra_is_in", kestra_is_in);
+    // W9c Task 4 fix round 1: the comparison operators, which
+    // [`compile_source`]'s second pass compiles into calls to these.
+    super::compare::register(&mut env);
 
     env
+}
+
+/// What the engine parses: Kestra's operators reshaped by [`rewrite`], then
+/// every comparison compiled to a `super::compare` call
+/// (`super::cmp_rewrite`, W9c Task 4 fix round 1). Every path that hands a
+/// template to the parser goes through this one function, so a probe
+/// ([`referenced_roots`], [`name_in_code`]) sees what a render runs.
+fn compile_source(protected: &str) -> Result<String, RewriteError> {
+    Ok(super::compare::compile_comparisons(&rewrite(protected)?))
 }
 
 /// Renders a template string against `cx`, mirroring
@@ -2162,7 +2177,7 @@ fn off_the_runtime<T>(f: impl FnOnce() -> T) -> T {
 /// which message a refusal carries.
 pub fn referenced_roots(template: &str) -> Result<std::collections::BTreeSet<String>, RenderError> {
     let (protected, _replacers) = replace_raw_tags(template);
-    let rewritten = rewrite(&protected)?;
+    let rewritten = compile_source(&protected)?;
     let env = environment();
     let tmpl = env
         .template_from_str(&rewritten)
@@ -2187,7 +2202,7 @@ pub fn referenced_roots(template: &str) -> Result<std::collections::BTreeSet<Str
 #[allow(clippy::let_and_return)]
 pub(crate) fn name_in_code(template: &str, name: &str) -> bool {
     let (protected, _replacers) = replace_raw_tags(template);
-    let Ok(rewritten) = rewrite(&protected) else {
+    let Ok(rewritten) = compile_source(&protected) else {
         return true;
     };
     let env = environment();
@@ -2283,7 +2298,7 @@ fn render_once(
     variables: &MjValue,
 ) -> Result<String, RenderError> {
     let (protected, replacers) = replace_raw_tags(source);
-    let rewritten = rewrite(&protected)?;
+    let rewritten = compile_source(&protected)?;
     let template = env
         .template_from_str(&rewritten)
         .map_err(|e| RenderError::Template(e.to_string()))?;
@@ -2969,7 +2984,7 @@ mod tests {
         // A row cannot be deleted to make a failure go away: these three are
         // `host.Oracle dump`'s own counts for the built engine, plus Pebble's
         // core/escaper/i18n extensions.
-        assert_eq!(rows, 177, "row count");
+        assert_eq!(rows, 186, "row count");
         assert_eq!(counts.get("filter"), Some(&63), "engine filter count");
         assert_eq!(counts.get("function"), Some(&37), "engine function count");
         assert_eq!(counts.get("test"), Some(&8), "engine test count");
