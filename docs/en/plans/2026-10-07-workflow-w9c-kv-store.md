@@ -382,6 +382,9 @@ impl KvType {
     pub fn parse(s: &str) -> Option<Self>;
     /// The type of a rendered typed value with no kvType: string -> STRING, number -> NUMBER,
     /// boolean -> BOOLEAN, object or array -> JSON (§4.2). `null` -> None: the caller refuses it.
+    /// (Amended 2026-10-07, Task 1: Kestra stores a rendered `null` as Ion `null`, typed STRING (w9c
+    /// `typed_render.tr_null`), and kvType coerces only a String, so the stored type is the coerced
+    /// value's own (spec §4.2 amended); `of(null)` is STRING, not a refusal.)
     pub fn of(v: &serde_json::Value) -> Option<Self>;
 }
 /// A value as egret stores and reads it back: DATETIME, DATE and DURATION are JSON strings in
@@ -389,10 +392,12 @@ impl KvType {
 #[derive(Clone, Debug, PartialEq)]
 pub struct KvValue { pub kind: KvType, pub json: serde_json::Value }
 /// The object's bytes, byte-equal to w9c `types.<T>.ion_bytes`: DURATION as its raw ISO text,
+/// (amended 2026-10-07, Task 1: DURATION is an Ion STRING, `"P1D"` with its quotes, like any string)
 /// everything else as Ion text through runners::ionfmt::write_ion_json, except where the fixture
 /// shows a timestamp (DATETIME, DATE), written as the Ion timestamp literal it shows.
 pub fn encode(v: &KvValue) -> Vec<u8>;
 /// The bytes back to the JSON value of `kind`: DURATION is UTF-8 text; the others are exactly one
+/// (amended 2026-10-07, Task 1: DURATION is one Ion string too; it prints as w9c `types._rule_read` says)
 /// Ion value through storage::ion::read_values_capped (bounded by `cap`), then normalised for
 /// DATETIME/DATE as `encode` wrote them. Err names what is wrong, never a storage key.
 pub fn decode(kind: KvType, bytes: &[u8], cap: u64) -> Result<serde_json::Value, String>;
@@ -435,7 +440,8 @@ pub async fn resolve_first_live(conn: &mut PgConnection, grants: &[Grant], key: 
 /// `ns` and its parents, deepest first, cut at dots: "a.b.c" -> ["a.b.c", "a.b", "a"].
 pub fn ancestors(ns: &str) -> Vec<&str>;
 /// Live latest rows of the namespace, in the order w9c `get_keys` measured (byte order by
-/// default), whose key starts with `prefix` (left(key, length($3)) = $3). At most cap + 1 are
+/// default; amended 2026-10-07, Task 1: the order the latest revisions were written, i.e. the latest
+/// row's id ascending, NOT byte order), whose key starts with `prefix` (left(key, length($3)) = $3). At most cap + 1 are
 /// fetched; the +1 is TooLarge naming workflow.storage.max_namespace_files and the count seen.
 pub async fn list_live(conn: &mut PgConnection, grant: &Grant, prefix: Option<&str>, cap: u64) -> Result<Vec<KvEntry>, NsError>;
 /// The API's inheritance listing: `grants` are the ANCESTORS (not the namespace itself), deepest
@@ -522,10 +528,10 @@ pub async fn read_value(fs: &FileStore, grant: &Grant, e: &KvEntry) -> Result<se
   - **`_kv`:** `check_kv_segment` mirrors `check_files_segment` (`:114-122`) with `KV_SEGMENT`. `check_namespace` calls it after `check_files_segment`. `validate_namespace` (`validate.rs:627`) gains a third clause: when the pattern passes and `_files` passes, `check_kv_segment` → finding code `namespace_kv_segment`, path `namespace`. `validate_namespace` runs in `validate_for_run` (`:471`), so a stored flow with a `_kv` segment also stops at run, as `_files` does; Task 1's count says whom that affects.
   - **`store.rs` reads:** one `concat!` query each, with `WHERE workspace_id = $1 AND namespace = $2` in every statement. `expired` is computed in SQL as `(expires_at IS NOT NULL AND expires_at <= now())`.
     - The latest row: `ORDER BY revision DESC LIMIT 1`, then `live()` judged **after** taking it. Filtering first would resurrect an older revision.
-    - `list_live`: `SELECT … FROM (SELECT DISTINCT ON (key) … ORDER BY key, revision DESC) latest WHERE NOT deleted AND NOT expired ORDER BY key COLLATE "C" LIMIT $n`, so the cap counts live keys.
+    - `list_live`: `SELECT … FROM (SELECT DISTINCT ON (key) … ORDER BY key, revision DESC) latest WHERE NOT deleted AND NOT expired ORDER BY key COLLATE "C" LIMIT $n`, so the cap counts live keys. *(Amended 2026-10-07, Task 1: `ORDER BY latest.id`, not `key COLLATE "C"`: Kestra lists keys in the order their latest revision was written, w9c `get_keys`.)*
     - `resolve_first_live`: `namespace = ANY($2)` with `DISTINCT ON (namespace)`, then the deepest live level is picked in Rust in `grants` order. Assert that every grant has one workspace and `Resource::Kv`.
   - **`read_value`:** `e.size > cap` → `TooLarge` before any download; `get_stream(..).take(cap + 1)`; `NotFound` → `Author("revision {n} of key '{k}' in namespace '{ns}' is recorded but its value is gone from internal storage")`; other store errors are logged with the `s3://` key at `ERROR` and answered as `Store`, naming the key and namespace only. Then `value::decode(e.value_type, &bytes, cap)`, whose error is `Author` naming the key and revision.
-  - **`value::encode`:** call `runners::ionfmt::write_ion_json` (make `ionfmt` and the function `pub(crate)`), and special-case only what `types` shows: DURATION's raw text, and the timestamp literals.
+  - **`value::encode`:** call `runners::ionfmt::write_ion_json` (make `ionfmt` and the function `pub(crate)`), and special-case only what `types` shows: DURATION's raw text, and the timestamp literals. *(Amended 2026-10-07, Task 1: DURATION needs no special case: it is an Ion string. The cases the fixture shows are Double as Ion float text (`1.5e0`, `1e0`, `1.0e20`), the API's Ion decimals, and timestamps at millisecond precision in UTC.)*
   - **`parse_ttl`:** make `executor::retry` `pub(crate)` and call its `parse_duration`; a leading `-` gets its own message.
 - [ ] **Step 4: Run the tests to see them pass**, then the per-task gate.
 - [ ] **Step 5: Hold audit.** This task writes nothing. Confirm that `read_value` takes no connection and that every read function takes a `&mut PgConnection` it does not keep. State both in the report.
