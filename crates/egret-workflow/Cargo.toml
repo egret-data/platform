@@ -334,6 +334,9 @@ egret-query.workspace = true
 # `egret_storage::MemStore`) for its unit and integration tests, the pattern
 # `egret-storage`'s own Cargo.toml uses.
 egret-workflow = { path = ".", features = ["test-util"] }
+# W9c Task 3: `tokio::time::pause` for the KV expiry sweeper's first-pass
+# test (`#[tokio::test(start_paused = true)]`).
+tokio = { workspace = true, features = ["test-util"] }
 egret-secrets.workspace = true
 egret-analytics-api.workspace = true
 # `EGRET_TEST_STARROCKS_URL` is a URL, parsed the same way `egret-dataapi`'s live
@@ -422,4 +425,11 @@ harness = false
 # read the process's one installed store.
 [[test]]
 name = "nsfiles_api_s3_live"
+harness = false
+
+# W9c Task 3: the KV writes, purge and expiry sweep on MinIO (a value of
+# exactly max_read_bytes), under a throwaway prefix and a fence refusing any
+# delete outside it; IGNORED without the gate.
+[[test]]
+name = "kv_s3_live"
 harness = false

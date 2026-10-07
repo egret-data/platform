@@ -674,7 +674,7 @@ async fn release(session: LockedSession, what: &str) {
 /// stops a move or a purge part-way. Once started, it runs to completion --
 /// its rollback included -- and only the answer is lost. A panic inside is
 /// egret's bug, answered as `Internal`.
-async fn detached<T, F>(what: &'static str, work: F) -> Result<T, NsError>
+pub(crate) async fn detached<T, F>(what: &'static str, work: F) -> Result<T, NsError>
 where
     F: std::future::Future<Output = Result<T, NsError>> + Send + 'static,
     T: Send + 'static,
@@ -686,7 +686,7 @@ where
 }
 
 /// `(created_by_user, created_by_execution, created_by_task_run)`.
-fn writer(by: CreatedBy) -> (Option<Uuid>, Option<Uuid>, Option<Uuid>) {
+pub(crate) fn writer(by: CreatedBy) -> (Option<Uuid>, Option<Uuid>, Option<Uuid>) {
     match by {
         CreatedBy::User(u) => (Some(u), None, None),
         CreatedBy::Execution(e) => (None, Some(e), None),

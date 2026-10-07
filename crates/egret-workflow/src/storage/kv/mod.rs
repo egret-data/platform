@@ -5,7 +5,10 @@
 //!   reading them back ([`value::decode`]) and `ttl` ([`value::parse_ttl`])
 //!   (spec §4.2).
 //! - [`store`]: the metadata table `workflow.kv_entries` (migration 0175) and
-//!   the objects behind it. Every function takes the
+//!   the objects behind it: reads, and the writes under each key's lock
+//!   (`set`, `put_merge`, `delete`, `delete_many`, `purge_key`).
+//! - [`merge`]: `Put`'s deep merge (spec §8.5).
+//! - [`sweep`]: the hourly expiry sweep (spec §11). Every function takes the
 //!   [`crate::storage::nsfiles::access::Grant`] that `authorize(…,
 //!   Resource::Kv, …)` returned and checks it with `require`; the workspace
 //!   is the grant's.
@@ -16,14 +19,14 @@
 //! ([`super::FileStore::namespace_kv_uri`]).
 
 pub mod key;
+pub mod merge;
 pub mod store;
+pub mod sweep;
 pub mod value;
 
 /// The advisory-lock text of one key, bound as a value:
 /// `w9c:{ws-hyphenated}:{ns}:{key}` (spec §4.3). Every writer of the key
 /// takes `pg_advisory_xact_lock(hashtextextended(<this>, 0))`.
-// The writers arrive in Task 3; the text is fixed here beside the key rule.
-#[allow(dead_code)]
 pub(crate) fn kv_lock_text(
     grant: &crate::storage::nsfiles::access::Grant,
     key: &key::KvKey,
