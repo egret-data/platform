@@ -225,11 +225,52 @@ where
     R: Read + Send,
     F: FnMut(&ion_rs::Element) -> ControlFlow<()> + Send,
 {
+    for_each_value_limited(bytes, max_value_bytes, None, sink)
+}
+
+/// [`for_each_value`] with a limit on the digits of every number, or none
+/// (`None`: exactly [`for_each_value`], W9a's readers -- the preview, `Loop`
+/// and the item tasks -- are unchanged). W9c's KV store passes its limit
+/// (`storage::kv::value::MAX_NUMBER_DIGITS`, the user's ruling, 2026-10-07:
+/// every number in a KV value has at most 1,000 digits).
+///
+/// The limit is enforced **by the scan, before `ion-rs` parses the number**:
+/// the byte that takes a number past it is never handed over, and the
+/// answer is [`Stop::TooLarge`] naming the limit. Nothing is truncated.
+/// Parsed, a long number is wrong or slow: `ion-rs` 1.0.1 silently drops
+/// all but (digits mod 65,535) of a text decimal's coefficient digits, and
+/// parses and prints a long int or coefficient in quadratic time (W9c Task
+/// 2 re-review 2, N1 and N2).
+///
+/// - **Text.** A number is a token that starts with a digit where no
+///   identifier is running (so `a1`, `$10` are not numbers); its digits are
+///   counted as written, in any radix (hex digits after `0x`), each part on
+///   its own: the coefficient (both sides of the point, `_` and `.`
+///   joining) and the exponent (after `e`, `d`, any letter, `+`, `-` or
+///   `:`), each at most the limit. A timestamp is such a token too, its
+///   fraction counted with the seconds before it. A decimal's leading zeros
+///   are digits as written (`0.000…1`). Inside a block comment, which
+///   `ion-rs` reads as an s-expression operator when no `*/` closes it, every
+///   run of identifier characters and points counts.
+/// - **Binary.** An int, decimal or timestamp whose length field is longer
+///   than [`max_number_bytes`] of the limit is refused unread.
+pub(crate) fn for_each_value_limited<R, F>(
+    bytes: R,
+    max_value_bytes: u64,
+    max_number_digits: Option<u64>,
+    sink: F,
+) -> Stop
+where
+    R: Read + Send,
+    F: FnMut(&ion_rs::Element) -> ControlFlow<()> + Send,
+{
     std::thread::scope(|scope| {
         let spawned = std::thread::Builder::new()
             .name("egret-ion-reader".into())
             .stack_size(READER_STACK_BYTES)
-            .spawn_scoped(scope, move || read_guarded(bytes, max_value_bytes, sink));
+            .spawn_scoped(scope, move || {
+                read_guarded(bytes, max_value_bytes, max_number_digits, sink)
+            });
         match spawned {
             Err(e) => Stop::Crashed(format!("the Ion reader's thread did not start: {e}")),
             // Joined here, so a panic is this answer and not the scope's.
@@ -252,6 +293,7 @@ const READER_STACK_BYTES: usize = 16 << 20;
 fn read_guarded<R: Read>(
     bytes: R,
     max_value_bytes: u64,
+    max_number_digits: Option<u64>,
     mut sink: impl FnMut(&ion_rs::Element) -> ControlFlow<()>,
 ) -> Stop {
     let trip: Arc<Mutex<Option<Trip>>> = Arc::default();
@@ -260,7 +302,7 @@ fn read_guarded<R: Read>(
     let guarded = FillWhole {
         inner: DepthGuard {
             inner: bytes,
-            scan: Scan::Undecided,
+            scan: Scan::Undecided { max_number_digits },
             max_value_bytes,
             since_yield: since_yield.clone(),
             max_values: max_value_bytes / ELEMENT_BYTES,
@@ -562,7 +604,11 @@ impl<R> DepthGuard<R> {
 /// The depth scan, text or binary as the first byte says (binary Ion starts
 /// with its version marker, `E0`; text Ion never does).
 enum Scan {
-    Undecided,
+    Undecided {
+        /// The digit limit the scan, once decided, enforces (see
+        /// [`for_each_value_limited`]).
+        max_number_digits: Option<u64>,
+    },
     Text(TextScan),
     Binary(BinaryScan),
 }
@@ -580,22 +626,28 @@ impl Scan {
                     && s.stack.first().is_none_or(|f| f.end <= s.pos);
                 count
             }
-            Scan::Undecided => Count::default(),
+            Scan::Undecided { .. } => Count::default(),
         }
     }
 
     fn feed(&mut self, b: u8) -> Result<(), Trip> {
-        if let Scan::Undecided = self {
+        if let Scan::Undecided { max_number_digits } = *self {
             *self = if b == 0xE0 {
-                Scan::Binary(BinaryScan::default())
+                Scan::Binary(BinaryScan {
+                    max_number_digits,
+                    ..BinaryScan::default()
+                })
             } else {
-                Scan::Text(TextScan::default())
+                Scan::Text(TextScan {
+                    digits: max_number_digits.map(Digits::new),
+                    ..TextScan::default()
+                })
             };
         }
         match self {
             Scan::Text(t) => t.feed(b),
             Scan::Binary(s) => s.feed(b),
-            Scan::Undecided => unreachable!("decided above"),
+            Scan::Undecided { .. } => unreachable!("decided above"),
         }
     }
 }
@@ -645,6 +697,110 @@ struct TextScan {
     /// Bit `i` set: the container open at level `i + 1` is an s-expression
     /// (`MAX_DEPTH` levels fit; the bits above `depth` are stale).
     sexps: u128,
+    /// The digit limit's count, when the caller set one
+    /// ([`for_each_value_limited`]); `None` counts nothing.
+    digits: Option<Digits>,
+}
+
+/// The digits of the number being scanned, against a limit (see
+/// [`for_each_value_limited`] for what counts).
+struct Digits {
+    limit: u64,
+    /// The number's radix while one is being scanned, else `None`.
+    radix: Option<Radix>,
+    /// The digits of the number's current part (coefficient, exponent, a
+    /// timestamp field), or of the current run inside a block comment.
+    run: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Radix {
+    Decimal,
+    Hex,
+    Binary,
+}
+
+impl Digits {
+    fn new(limit: u64) -> Self {
+        Digits {
+            limit,
+            radix: None,
+            run: 0,
+        }
+    }
+
+    /// One more digit of the current part: past the limit, refused.
+    fn digit(&mut self) -> Result<(), Trip> {
+        self.run += 1;
+        if self.run > self.limit {
+            return Err(Trip::TooLarge(format!(
+                "a number has more than {} digits, and egret reads numbers of at most {} \
+                 digits here: a longer one is refused, never truncated",
+                self.limit, self.limit
+            )));
+        }
+        Ok(())
+    }
+
+    /// `b` in `Normal`, after an identifier character when `after_word`.
+    fn normal(&mut self, b: u8, after_word: bool) -> Result<(), Trip> {
+        let Some(radix) = self.radix else {
+            if b.is_ascii_digit() && !after_word {
+                self.radix = Some(Radix::Decimal);
+                self.run = 0;
+                return self.digit();
+            }
+            return Ok(());
+        };
+        let counts = match radix {
+            Radix::Decimal | Radix::Binary => b.is_ascii_digit(),
+            Radix::Hex => b.is_ascii_hexdigit(),
+        };
+        match b {
+            // `1_000`, `1.5`: one part.
+            b'_' | b'.' => {}
+            _ if counts => self.digit()?,
+            b'x' | b'X' if radix == Radix::Decimal => {
+                self.radix = Some(Radix::Hex);
+                self.run = 0;
+            }
+            b'b' | b'B' if radix == Radix::Decimal => {
+                self.radix = Some(Radix::Binary);
+                self.run = 0;
+            }
+            // An exponent, a sign, a timestamp's separators: a new part.
+            _ if b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b':') => self.run = 0,
+            // Anything else ends the number.
+            _ => {
+                self.radix = None;
+                self.run = 0;
+            }
+        }
+        Ok(())
+    }
+
+    /// `b` inside a block comment: every run of identifier characters and
+    /// points counts (see [`for_each_value_limited`]).
+    fn comment(&mut self, b: u8) -> Result<(), Trip> {
+        self.radix = None;
+        if b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$' | b'.') {
+            self.digit()
+        } else {
+            self.run = 0;
+            Ok(())
+        }
+    }
+}
+
+/// The longest binary Ion int, decimal or timestamp a digit limit lets the
+/// reader parse: the bytes a magnitude of `digits` decimal digits takes
+/// (`digits` × log2(10) bits, rounded up: 416 bytes for 1,000), plus 16 for
+/// a decimal's exponent or a timestamp's other fields.
+pub(crate) fn max_number_bytes(digits: u64) -> u64 {
+    digits
+        .saturating_mul(3322)
+        .div_ceil(8000)
+        .saturating_add(16)
 }
 
 /// What a scan reports for the ELEMENT budget (W9a Task 12 fix round 3):
@@ -762,6 +918,9 @@ impl TextScan {
         // default) under an s-expression in one top-level value is refused;
         // Kestra writes no s-expressions.
         let word = b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+        if let Some(digits) = &mut self.digits {
+            digits.normal(b, self.in_word)?;
+        }
         if b.is_ascii_whitespace() || b == b',' {
             self.count.top |= self.depth == 0;
         } else if !(word && self.in_word && !self.in_sexp()) {
@@ -842,12 +1001,22 @@ impl TextScan {
                 _ => Text::LineComment,
             },
             Text::BlockComment(star) => match b {
-                b'/' if star => Text::Normal,
+                b'/' if star => {
+                    if let Some(digits) = &mut self.digits {
+                        digits.run = 0;
+                    }
+                    Text::Normal
+                }
                 b'[' | b'(' | b'{' => {
                     self.open(b)?;
                     Text::BlockComment(false)
                 }
-                _ => Text::BlockComment(b == b'*'),
+                _ => {
+                    if let Some(digits) = &mut self.digits {
+                        digits.comment(b)?;
+                    }
+                    Text::BlockComment(b == b'*')
+                }
             },
             Text::Brace => match b {
                 // `{{`: a lob, not a level.
@@ -902,6 +1071,10 @@ struct BinaryScan {
     /// See [`Count`]: exact here -- one per type descriptor, and one per
     /// byte of an annotation wrapper's annotations.
     count: Count,
+    /// The digit limit, when the caller set one: an int, decimal or
+    /// timestamp longer than [`max_number_bytes`] of it is refused unread
+    /// ([`for_each_value_limited`]).
+    max_number_digits: Option<u64>,
 }
 
 struct Frame {
@@ -933,6 +1106,9 @@ enum Binary {
 #[derive(Clone, Copy)]
 enum Then {
     Skip,
+    /// An int, a decimal or a timestamp: skipped, its length checked
+    /// against the digit limit.
+    Number,
     Open(Kind),
 }
 
@@ -985,6 +1161,15 @@ impl BinaryScan {
     fn after_length(&mut self, len: u64, then: Then) -> Result<Binary, Trip> {
         match then {
             Then::Skip => self.skip(len),
+            Then::Number => match self.max_number_digits {
+                Some(digits) if len > max_number_bytes(digits) => Err(Trip::TooLarge(format!(
+                    "a binary Ion number is {len} bytes long, more than the {} bytes a number \
+                     of at most {digits} digits takes, and egret reads numbers of at most \
+                     {digits} digits here: a longer one is refused, never truncated",
+                    max_number_bytes(digits)
+                ))),
+                _ => self.skip(len),
+            },
             Then::Open(kind) => self.open(kind, len),
         }
     }
@@ -999,6 +1184,9 @@ impl BinaryScan {
             // null/pad, int, float, decimal, timestamp, symbol, string, clob, blob.
             0 | 2..=10 => match l {
                 15 => Binary::Item,
+                // An int, a decimal or a timestamp: a length field (one
+                // under 14 is shorter than any digit limit takes).
+                14 if matches!(t, 2 | 3 | 5 | 6) => Binary::Length(0, Then::Number),
                 14 => Binary::Length(0, Then::Skip),
                 _ => self.skip(l)?,
             },
@@ -2604,5 +2792,122 @@ mod tests {
                 [1, 2]
             ])
         );
+    }
+
+    /// Every value of `bytes` under a digit limit (W9c's KV path, or `None`:
+    /// W9a's), as JSON, with how reading stopped.
+    fn digit_limited(bytes: &[u8], limit: Option<u64>) -> (Vec<Value>, Stop) {
+        let mut rows = Vec::new();
+        let stop = for_each_value_limited(bytes, 1 << 20, limit, |e| {
+            rows.push(to_json(e));
+            ControlFlow::Continue(())
+        });
+        (rows, stop)
+    }
+
+    /// W9c (the user's ruling, 2026-10-07): with a digit limit, a number
+    /// longer than it is refused by the scan -- `TooLarge` naming the limit,
+    /// and the value never reaches the sink -- in every form a number takes
+    /// in text; at the limit it reads; what is not a number is not counted.
+    /// Without a limit (W9a's readers) nothing changes.
+    #[test]
+    fn a_digit_limit_refuses_a_longer_number_before_the_reader_parses_it() {
+        const LIMIT: Option<u64> = Some(1000);
+        let d = |n: usize| "7".repeat(n);
+        let over = [
+            format!("1{}", d(1000)),                    // an int of 1,001 digits
+            format!("-1{}", d(1000)),                   // negative
+            format!("1.{}", d(1000)),                   // a decimal: 1 + 1,000
+            format!("{}.{}", d(600), d(401)),           // both sides of the point
+            format!("{}d5", d(1001)),                   // with an exponent
+            format!("1.{}e0", d(1000)),                 // a float's mantissa
+            format!("1_{}", d(1000)),                   // underscores join
+            format!("0x{}", "f".repeat(1001)),          // hex digits, as written
+            format!("1d{}", d(1001)),                   // the exponent, on its own
+            format!("0.{}1", "0".repeat(999)),          // leading zeros are written
+            format!("[1,{{a:x::{}}}]", d(1001)),        // nested, annotated
+            format!("2025-01-02T03:04:05.{}Z", d(999)), // a timestamp's fraction
+            format!("(/* {} )", d(1001)),               // an unclosed comment, read as code
+            format!("/* {} */ 1", d(1001)),             // a closed one: the price
+        ];
+        for text in &over {
+            let (rows, stop) = digit_limited(text.as_bytes(), LIMIT);
+            let Stop::TooLarge(why) = &stop else {
+                panic!("{}: {stop:?}", &text[..12])
+            };
+            assert!(why.contains("more than 1000 digits"), "{why}");
+            assert!(rows.is_empty(), "{}: never handed on", &text[..12]);
+            // W9a's readers: no limit, so the same bytes are not refused for it.
+            let (_, stop) = digit_limited(text.as_bytes(), None);
+            assert!(!matches!(stop, Stop::TooLarge(_)), "{}", &text[..12]);
+        }
+        let at = [
+            d(1000),
+            format!("-{}", d(1000)),
+            format!("{}.{}", d(500), d(500)),
+            format!("1.{}", d(999)),
+            format!("1.{}e0", d(999)),
+            format!("{}d111", d(1000)),
+            format!("0x{}", "f".repeat(1000)),
+            format!("2025-01-02T03:04:05.{}Z", d(990)),
+            // Not numbers: digits after an identifier character, in a
+            // string, a quoted symbol, a long string, a line comment, a lob.
+            // (`$` + digits is a symbol ID, not a number: `ion-rs` 1.0.1
+            // panics on one past `usize`, caught as `Crashed`.)
+            format!("a{}", d(5000)),
+            format!("\"{}\"", d(5000)),
+            format!("'{}'", d(5000)),
+            format!("'''{}'''", d(5000)),
+            format!("// {}\n1", d(5000)),
+            format!("{{{{{}}}}}", "MTIz".repeat(1000)),
+            format!("[{}, {}]", d(1000), d(1000)),
+        ];
+        for text in &at {
+            let (rows, stop) = digit_limited(text.as_bytes(), LIMIT);
+            assert!(matches!(stop, Stop::End), "{}: {stop:?}", &text[..12]);
+            assert!(!rows.is_empty(), "{}", &text[..12]);
+        }
+        // Exact: the 1,000 digits are all there.
+        let (rows, _) = digit_limited(d(1000).as_bytes(), LIMIT);
+        assert_eq!(rows[0].to_string(), d(1000));
+    }
+
+    /// W9c: in binary, an int, decimal or timestamp whose length field is
+    /// over `max_number_bytes(1000)` (432) is refused unread; 432 reads.
+    #[test]
+    fn a_digit_limit_refuses_a_long_binary_number_by_its_length() {
+        assert_eq!(max_number_bytes(1000), 432);
+        let int = |t: u8, len: usize| {
+            let mut out = BINARY_VERSION_MARKER.to_vec();
+            out.extend(binary_header(t, len));
+            out.extend(std::iter::repeat_n(0x01, len));
+            out
+        };
+        for t in [2u8, 3] {
+            let (rows, stop) = digit_limited(&int(t, 433), Some(1000));
+            let Stop::TooLarge(why) = &stop else {
+                panic!("{t}: {stop:?}")
+            };
+            assert!(
+                why.contains("433 bytes long") && why.contains("at most 1000 digits"),
+                "{why}"
+            );
+            assert!(rows.is_empty());
+            let (rows, stop) = digit_limited(&int(t, 432), Some(1000));
+            assert!(matches!(stop, Stop::End), "{stop:?}");
+            assert_eq!(rows.len(), 1);
+            // No limit: W9a reads it.
+            let (rows, stop) = digit_limited(&int(t, 433), None);
+            assert!(matches!(stop, Stop::End) && rows.len() == 1, "{stop:?}");
+        }
+        // A decimal: exponent 0 (VarInt 0x80), then the coefficient.
+        let mut dec = BINARY_VERSION_MARKER.to_vec();
+        dec.extend(binary_header(5, 433));
+        dec.push(0x80);
+        dec.extend(std::iter::repeat_n(0x01, 432));
+        assert!(matches!(
+            digit_limited(&dec, Some(1000)).1,
+            Stop::TooLarge(_)
+        ));
     }
 }

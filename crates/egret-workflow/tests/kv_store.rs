@@ -1392,7 +1392,7 @@ async fn a_large_decode_runs_off_the_async_runtime_and_a_ticker_keeps_ticking() 
     let items: Vec<Value> = (0..150_000)
         .map(|i| Value::String(format!("{i:0>60}")))
         .collect();
-    let bytes = encode(&KvValue::from_json(KvType::Json, &Value::Array(items))).unwrap();
+    let bytes = encode(&KvValue::from_json(KvType::Json, &Value::Array(items)).unwrap()).unwrap();
     assert!(bytes.len() > 9_000_000 && (bytes.len() as u64) < fs.caps.max_read_bytes);
     let k = key("big");
     fs.store

@@ -18,6 +18,72 @@ use std::ops::ControlFlow;
 
 use serde_json::Value;
 
+use crate::storage::ion::Stop;
+
+/// The most digits a number in a KV value has (the user's ruling,
+/// 2026-10-07): an int's digits, a decimal's coefficient digits as written
+/// (both sides of the point, in plain notation as egret writes it, so
+/// `1d5000` written out is 5,001), a float's mantissa digits as written,
+/// and an exponent's digits on their own. Enforced before `ion-rs` parses
+/// a number ([`for_each_kv_value`]) and on a flow's numbers
+/// ([`KvData::from_json`]); a longer number is refused, never truncated.
+pub const MAX_NUMBER_DIGITS: u64 = 1000;
+
+/// Why a value cannot be stored or read back (review P2): the variant is the
+/// class, the text the message, so a caller maps the variant and never
+/// reads the text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unstorable {
+    /// Over a bound: the cap (`workflow.storage.max_read_bytes`) in bytes,
+    /// the dense-value limit, the decoded-text budget, a symbol table over
+    /// the cap, or a number over [`MAX_NUMBER_DIGITS`]. `NsError::TooLarge`
+    /// (413 on the API).
+    TooLarge(String),
+    /// Anything else: data not of its type, not one Ion value, nesting past
+    /// `storage::ion::MAX_DEPTH`, a type the KV store does not model, a
+    /// reader that crashed. `NsError::Author` (400 on the API).
+    Invalid(String),
+}
+
+impl Unstorable {
+    /// The message, whatever the class.
+    pub fn message(&self) -> &str {
+        match self {
+            Unstorable::TooLarge(m) | Unstorable::Invalid(m) => m,
+        }
+    }
+
+    /// The same class, its message rewritten by `f`.
+    fn map(self, f: impl FnOnce(String) -> String) -> Self {
+        match self {
+            Unstorable::TooLarge(m) => Unstorable::TooLarge(f(m)),
+            Unstorable::Invalid(m) => Unstorable::Invalid(f(m)),
+        }
+    }
+}
+
+impl std::fmt::Display for Unstorable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+/// THE way the KV store reads Ion: `storage::ion::for_each_value_limited`
+/// under `cap` (`workflow.storage.max_read_bytes`) with the digit limit
+/// [`MAX_NUMBER_DIGITS`], so a long number is refused before `ion-rs`
+/// parses it (re-review 2, N1: `ion-rs` truncates a decimal past 65,535
+/// digits silently; N2: it parses a long number in quadratic time).
+/// [`decode`] (hence [`check_readable`] and every write) reads through it,
+/// and so must the API's `PUT` body (Task 6) -- never
+/// `ion_rs::Element::read_one`, which has no depth guard, no value budget,
+/// no symbol charge and no digit limit.
+pub(crate) fn for_each_kv_value<F>(bytes: &[u8], cap: u64, sink: F) -> Stop
+where
+    F: FnMut(&ion_rs::Element) -> ControlFlow<()> + Send,
+{
+    crate::storage::ion::for_each_value_limited(bytes, cap, Some(MAX_NUMBER_DIGITS), sink)
+}
+
 /// The type of a stored value: the column's spelling and Kestra's `KVType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum KvType {
@@ -144,7 +210,7 @@ impl KvNumber {
     /// length charged to `budget` BEFORE the text is built (`1d99999999` is
     /// eleven bytes of Ion and a hundred million digits of text; forty
     /// `1d9000000` in one list would be 360 MB: review NI1).
-    fn of_ion_decimal(d: &ion_rs::Decimal, budget: &mut Budget) -> Result<Self, String> {
+    fn of_ion_decimal(d: &ion_rs::Decimal, budget: &mut Budget) -> Result<Self, Unstorable> {
         let coefficient = d.coefficient();
         let digits = coefficient.magnitude().to_string();
         let sign = if coefficient.is_negative() && !d.is_zero() {
@@ -155,12 +221,17 @@ impl KvNumber {
         let exponent = d.exponent();
         let len = digits.len() as u64;
         let shift = exponent.unsigned_abs();
+        // Exactly the length of the text built below (re-review 2's nit:
+        // one byte over it refused a value egret wrote at the cap).
+        let sign_len = sign.len() as u64;
         let plain_len = if d.is_zero() && exponent >= 0 {
             1
         } else if exponent >= 0 {
-            len.saturating_add(shift)
+            sign_len + len.saturating_add(shift)
+        } else if len > shift {
+            sign_len + len + 1
         } else {
-            len.max(shift).saturating_add(2)
+            sign_len + shift.saturating_add(2)
         };
         budget.charge(plain_len)?;
         let text = if exponent >= 0 {
@@ -247,17 +318,17 @@ impl Budget {
         Budget { cap, left: cap }
     }
 
-    fn charge(&mut self, bytes: u64) -> Result<(), String> {
+    fn charge(&mut self, bytes: u64) -> Result<(), Unstorable> {
         match self.left.checked_sub(bytes) {
             Some(left) => {
                 self.left = left;
                 Ok(())
             }
-            None => Err(format!(
+            None => Err(Unstorable::TooLarge(format!(
                 "decodes to more than workflow.storage.max_read_bytes ({} bytes) of digits and \
                  text",
                 self.cap
-            )),
+            ))),
         }
     }
 }
@@ -283,12 +354,18 @@ impl KvData {
     /// (a fraction, an exponent) a float, as Kestra's Jackson reads a JSON
     /// or rendered number. A flow never makes a decimal. A null inside an
     /// object is kept (Kestra writes it; every read drops it).
-    pub fn from_json(v: &Value) -> Self {
-        match v {
+    ///
+    /// A number of more than [`MAX_NUMBER_DIGITS`] digits (its mantissa as
+    /// written, or its exponent) is refused, `TooLarge`, before it becomes a
+    /// float that would drop its digits silently (the user's ruling,
+    /// 2026-10-07). This is the only refusal.
+    pub fn from_json(v: &Value) -> Result<Self, Unstorable> {
+        Ok(match v {
             Value::Null => KvData::Null,
             Value::Bool(b) => KvData::Bool(*b),
             Value::Number(n) => {
                 let text = n.to_string();
+                check_json_digits(&text)?;
                 KvData::Number(KvNumber::int(&text).unwrap_or_else(|| {
                     // A text `serde_json` accepted but `f64` does not parse
                     // cannot occur; out of range is an infinity, as in Java.
@@ -296,13 +373,18 @@ impl KvData {
                 }))
             }
             Value::String(s) => KvData::String(s.clone()),
-            Value::Array(items) => KvData::List(items.iter().map(Self::from_json).collect()),
+            Value::Array(items) => KvData::List(
+                items
+                    .iter()
+                    .map(Self::from_json)
+                    .collect::<Result<_, _>>()?,
+            ),
             Value::Object(map) => KvData::Struct(
                 map.iter()
-                    .map(|(name, item)| (name.clone(), Self::from_json(item)))
-                    .collect(),
+                    .map(|(name, item)| Ok((name.clone(), Self::from_json(item)?)))
+                    .collect::<Result<_, Unstorable>>()?,
             ),
-        }
+        })
     }
 
     /// What a reader sees: JSON, an int or a decimal by its exact text, a
@@ -330,21 +412,26 @@ impl KvData {
     /// Kestra read drops it (w9c `types.json_nested`); a field named twice
     /// keeps its first place and its last value. A timestamp inside a value
     /// is its text, as the preview shows it (`storage::ion`).
-    pub fn from_element(element: &ion_rs::Element, cap: u64) -> Result<Self, String> {
+    ///
+    /// `element` must come from [`for_each_kv_value`], whose digit limit
+    /// this conversion relies on (an `Element` from anywhere else may hold a
+    /// number `ion-rs` already truncated). Err is `Invalid` for what the KV
+    /// store does not model and `TooLarge` for the budget.
+    pub fn from_element(element: &ion_rs::Element, cap: u64) -> Result<Self, Unstorable> {
         if let Some(found) = unmodelled(element) {
-            return Err(format!(
+            return Err(Unstorable::Invalid(format!(
                 "holds {}, which the KV store does not model",
                 found.with_article()
-            ));
+            )));
         }
         Self::convert(element, &mut Budget::new(cap))
     }
 
     /// `element` as KvData, every copied text charged to `budget` (shared by
     /// the whole value, never per leaf).
-    fn convert(element: &ion_rs::Element, budget: &mut Budget) -> Result<Self, String> {
+    fn convert(element: &ion_rs::Element, budget: &mut Budget) -> Result<Self, Unstorable> {
         use ion_rs::Value as V;
-        let text = |t: &str, budget: &mut Budget| -> Result<String, String> {
+        let text = |t: &str, budget: &mut Budget| -> Result<String, Unstorable> {
             budget.charge(t.len() as u64)?;
             Ok(t.to_string())
         };
@@ -395,7 +482,9 @@ impl KvData {
                 KvData::Struct(fields)
             }
             V::Blob(_) | V::Clob(_) | V::SExp(_) => {
-                return Err("holds a value the KV store does not model".into())
+                return Err(Unstorable::Invalid(
+                    "holds a value the KV store does not model".into(),
+                ))
             }
         })
     }
@@ -513,13 +602,32 @@ pub struct KvValue {
 }
 
 impl KvValue {
-    /// A flow's value of `kind` ([`KvData::from_json`]).
-    pub fn from_json(kind: KvType, json: &Value) -> Self {
-        KvValue {
+    /// A flow's value of `kind` ([`KvData::from_json`], whose only refusal
+    /// is a number over [`MAX_NUMBER_DIGITS`], `TooLarge`).
+    pub fn from_json(kind: KvType, json: &Value) -> Result<Self, Unstorable> {
+        Ok(KvValue {
             kind,
-            data: KvData::from_json(json),
-        }
+            data: KvData::from_json(json)?,
+        })
     }
+}
+
+/// A flow's JSON number text (`serde_json`, `arbitrary_precision`): its
+/// mantissa's digits and its exponent's, each at most [`MAX_NUMBER_DIGITS`].
+fn check_json_digits(text: &str) -> Result<(), Unstorable> {
+    let (mantissa, exponent) = text
+        .split_once(['e', 'E'])
+        .map_or((text, ""), |(m, e)| (m, e));
+    let digits = |s: &str| s.bytes().filter(u8::is_ascii_digit).count() as u64;
+    let longest = digits(mantissa).max(digits(exponent));
+    if longest > MAX_NUMBER_DIGITS {
+        return Err(Unstorable::TooLarge(format!(
+            "a number of {longest} digits is more than a KV value holds: a KV value's numbers \
+             have at most {MAX_NUMBER_DIGITS} digits, and a longer one is refused, never \
+             truncated"
+        )));
+    }
+    Ok(())
 }
 
 /// Whether `data` can be a value of `kind` (review M6): what [`decode`]
@@ -598,30 +706,41 @@ pub fn encode(v: &KvValue) -> Result<Vec<u8>, String> {
 /// 163 840 values at the 10 MiB default, about 320 KB of small numbers),
 /// which bounds the memory a read takes (spec §4.2).
 ///
+/// Every number is at most [`MAX_NUMBER_DIGITS`] digits as egret writes it
+/// (the user's ruling, 2026-10-07): the read back scans egret's own text, so
+/// an int or a decimal (in plain notation) longer than that is refused here.
+///
+/// Err is typed (review P2): [`Unstorable::TooLarge`] for the cap in bytes,
+/// the dense-value limit, the decoded-text budget and the digit limit
+/// (`NsError::TooLarge`, 413); [`Unstorable::Invalid`] for data not of its
+/// type and anything else the read back refuses (`NsError::Author`, 400).
+///
 /// It runs the Ion reader: call it off the async runtime
 /// (`spawn_blocking`), as `store::read_value` runs [`decode`].
-pub fn check_readable(v: &KvValue, cap: u64) -> Result<Vec<u8>, String> {
-    let bytes = encode(v)?;
+pub fn check_readable(v: &KvValue, cap: u64) -> Result<Vec<u8>, Unstorable> {
+    let bytes = encode(v).map_err(Unstorable::Invalid)?;
     if bytes.len() as u64 > cap {
-        return Err(format!(
+        return Err(Unstorable::TooLarge(format!(
             "the {} value is {} bytes as stored, more than workflow.storage.max_read_bytes \
              ({cap} bytes) allows a KV value",
             v.kind,
             bytes.len()
-        ));
+        )));
     }
-    decode(v.kind, &bytes, cap).map_err(|why| {
-        format!(
-            "the {} value is not stored: it could not be read back under \
-             workflow.storage.max_read_bytes ({cap} bytes): {why}",
-            v.kind
-        )
+    read_back(v.kind, &bytes, cap).map_err(|why| {
+        why.map(|why| {
+            format!(
+                "the {} value is not stored: it could not be read back: {why}",
+                v.kind
+            )
+        })
     })?;
     Ok(bytes)
 }
 
 /// The bytes back to the [`KvData`] of `kind`: exactly one Ion value through
-/// `storage::ion::for_each_value` (bounded by `cap`, the preview's reader),
+/// [`for_each_kv_value`] (bounded by `cap` as the preview's reader is, and by
+/// [`MAX_NUMBER_DIGITS`]),
 /// with nothing [`unmodelled`] in it at any depth, then normalised for
 /// DATETIME/DATE as [`encode`] wrote them and for DURATION as w9c
 /// `types._rule_read` prints it. A null inside a map is dropped, as every
@@ -631,36 +750,48 @@ pub fn check_readable(v: &KvValue, cap: u64) -> Result<Vec<u8>, String> {
 /// CPU-bound: it runs the Ion reader on its own thread and joins it. Call it
 /// off the async runtime, as `store::read_value` does.
 pub fn decode(kind: KvType, bytes: &[u8], cap: u64) -> Result<KvData, String> {
-    use crate::storage::ion::{for_each_value, Stop};
-    let mut values: Vec<Result<KvData, String>> = Vec::with_capacity(1);
-    let stop = for_each_value(bytes, cap, |element| {
+    read_back(kind, bytes, cap).map_err(|why| why.to_string())
+}
+
+/// [`decode`], its refusal typed for [`check_readable`].
+fn read_back(kind: KvType, bytes: &[u8], cap: u64) -> Result<KvData, Unstorable> {
+    use Unstorable::{Invalid, TooLarge};
+    let mut values: Vec<Result<KvData, Unstorable>> = Vec::with_capacity(1);
+    let stop = for_each_kv_value(bytes, cap, |element| {
         if !values.is_empty() {
             return ControlFlow::Break(());
         }
         values.push(KvData::from_element(element, cap));
         ControlFlow::Continue(())
     });
+    let unread = |e: String| format!("the stored {kind} value cannot be read: {e}");
     match stop {
         Stop::End => {}
         Stop::Full => {
-            return Err(format!(
+            return Err(Invalid(format!(
                 "the stored {kind} value holds more than one Ion value"
-            ))
+            )))
         }
-        Stop::Failed(e) | Stop::TooDeep(e) | Stop::TooLarge(e) | Stop::Crashed(e) => {
-            return Err(format!("the stored {kind} value cannot be read: {e}"))
-        }
+        Stop::TooLarge(e) => return Err(TooLarge(unread(e))),
+        Stop::Failed(e) | Stop::TooDeep(e) | Stop::Crashed(e) => return Err(Invalid(unread(e))),
     }
     let data = match values.pop() {
-        None => return Err(format!("the stored {kind} value holds no Ion value")),
+        None => {
+            return Err(Invalid(format!(
+                "the stored {kind} value holds no Ion value"
+            )))
+        }
         Some(Err(why)) => {
-            return Err(format!(
-                "the stored {kind} value {why}; egret's KV store writes none, so the object \
-                 was not written by it"
-            ))
+            return Err(why.map(|why| {
+                format!(
+                    "the stored {kind} value {why}; egret's KV store writes none, so the object \
+                     was not written by it"
+                )
+            }))
         }
         Some(Ok(data)) => data,
     };
+    let invalid = |m: String| Invalid(m);
     match (kind, data) {
         // A rendered `null` is stored as Ion `null`, typed STRING (`KvType::of`).
         (KvType::String, d @ (KvData::String(_) | KvData::Null)) => Ok(d),
@@ -669,17 +800,17 @@ pub fn decode(kind: KvType, bytes: &[u8], cap: u64) -> Result<KvData, String> {
         (KvType::Json, d @ (KvData::Struct(_) | KvData::List(_))) => Ok(d),
         (KvType::Datetime, KvData::String(s)) => instant(&s)
             .map(|t| KvData::String(java_instant(t)))
-            .ok_or_else(|| format!("the stored DATETIME value '{s}' is not an instant")),
+            .ok_or_else(|| invalid(format!("the stored DATETIME value '{s}' is not an instant"))),
         (KvType::Date, KvData::String(s)) => date(&s)
             .map(|d| KvData::String(d.format("%Y-%m-%d").to_string()))
-            .ok_or_else(|| format!("the stored DATE value '{s}' is not a date")),
+            .ok_or_else(|| invalid(format!("the stored DATE value '{s}' is not a date"))),
         (KvType::Duration, KvData::String(s)) => {
             Ok(KvData::String(kestra_duration(&s).unwrap_or(s)))
         }
-        (_, d) => Err(format!(
+        (_, d) => Err(invalid(format!(
             "the stored {kind} value is {}, not a {kind}",
             d.shape()
-        )),
+        ))),
     }
 }
 
@@ -867,11 +998,11 @@ mod tests {
                 // the nulls inside maps the read drops).
                 KvType::Json => {
                     let input = cell["set"]["value"].as_str().unwrap();
-                    KvData::from_json(&serde_json::from_str(input).unwrap())
+                    KvData::from_json(&serde_json::from_str(input).unwrap()).unwrap()
                 }
                 // A DURATION is stored as written.
-                KvType::Duration => KvData::from_json(&cell["set"]["value"]),
-                _ => KvData::from_json(&get),
+                KvType::Duration => KvData::from_json(&cell["set"]["value"]).unwrap(),
+                _ => KvData::from_json(&get).unwrap(),
             };
             rows.push((
                 name,
@@ -1024,10 +1155,30 @@ mod tests {
         String::from_utf8(encode(&KvValue { kind, data }).unwrap()).unwrap()
     }
 
-    /// An API body as Task 6 will take it: one Ion value, through the same
-    /// walk and conversion `decode` uses.
+    /// The one Ion value of `body`, read as the KV store reads Ion and as
+    /// Task 6 must read an API body: through [`for_each_kv_value`] (depth
+    /// guard, value budget, symbol charge, digit limit), never
+    /// `ion_rs::Element::read_one` (review P1). Err is how reading stopped
+    /// when it did not end after exactly one value.
+    fn one_element(body: &[u8], cap: u64) -> Result<ion_rs::Element, Stop> {
+        let mut found = Vec::new();
+        let stop = for_each_kv_value(body, cap, |element| {
+            if !found.is_empty() {
+                return ControlFlow::Break(());
+            }
+            found.push(element.clone());
+            ControlFlow::Continue(())
+        });
+        match (stop, found.pop()) {
+            (Stop::End, Some(element)) => Ok(element),
+            (stop, _) => Err(stop),
+        }
+    }
+
+    /// An API body's data as Task 6 converts it: [`one_element`] (the
+    /// hardened reader), then [`KvData::from_element`].
     fn api_body(body: &str) -> KvData {
-        let element = ion_rs::Element::read_one(body.as_bytes()).unwrap();
+        let element = one_element(body.as_bytes(), 1 << 20).unwrap();
         KvData::from_element(&element, 1 << 20).unwrap()
     }
 
@@ -1059,7 +1210,7 @@ mod tests {
             (json!(1.5e20), "1.5e20"),
             (json!(1e-7), "1.0e-7"),
         ] {
-            let v = KvValue::from_json(KvType::Number, &json);
+            let v = KvValue::from_json(KvType::Number, &json).unwrap();
             assert_eq!(String::from_utf8(encode(&v).unwrap()).unwrap(), bytes);
         }
         let nan = KvData::Number(KvNumber::Float(f64::NAN));
@@ -1111,7 +1262,7 @@ mod tests {
         );
         assert_eq!(written(KvType::Number, read), BIG);
         // A float of the same text is a Double: what a flow makes of it.
-        let float = KvData::from_json(&serde_json::from_str(BIG).unwrap());
+        let float = KvData::from_json(&serde_json::from_str(BIG).unwrap()).unwrap();
         assert_eq!(
             float,
             KvData::Number(KvNumber::Float(1.2345678901234568e29))
@@ -1133,7 +1284,7 @@ mod tests {
         let int = "-123456789012345678901234567890";
         assert_eq!(api_body(int), KvData::Number(KvNumber::Int(int.into())));
         assert_eq!(
-            KvData::from_json(&serde_json::from_str(int).unwrap()),
+            KvData::from_json(&serde_json::from_str(int).unwrap()).unwrap(),
             KvData::Number(KvNumber::Int(int.into()))
         );
         assert_eq!(written(KvType::Number, api_body(int)), int);
@@ -1169,7 +1320,7 @@ mod tests {
              (10485760 bytes) of digits and text; egret's KV store writes none, so the object \
              was not written by it"
         );
-        let element = ion_rs::Element::read_one(&b"[1d9000000,1d9000000]"[..]).unwrap();
+        let element = one_element(b"[1d9000000,1d9000000]", CAP).unwrap();
         assert!(
             KvData::from_element(&element, CAP).is_err(),
             "the API path too"
@@ -1186,12 +1337,9 @@ mod tests {
         let three = format!("[\"{s}\",\"{s}\",{{'{s}':1}}]");
         let two = format!("[\"{s}\",{{'{s}':1}}]");
         assert!(
-            KvData::from_element(&ion_rs::Element::read_one(three.as_bytes()).unwrap(), 5000)
-                .is_err()
+            KvData::from_element(&one_element(three.as_bytes(), 1 << 20).unwrap(), 5000).is_err()
         );
-        assert!(
-            KvData::from_element(&ion_rs::Element::read_one(two.as_bytes()).unwrap(), 5000).is_ok()
-        );
+        assert!(KvData::from_element(&one_element(two.as_bytes(), 1 << 20).unwrap(), 5000).is_ok());
         // A zero with a huge exponent is one digit, not refused.
         assert_eq!(
             decode(KvType::Number, b"0d99999999", 4096).unwrap(),
@@ -1232,7 +1380,7 @@ mod tests {
             }
             let kind = KvType::parse(cell["get"]["type"].as_str().unwrap()).unwrap();
             let body = cell["body"].as_str().unwrap();
-            let Ok(element) = ion_rs::Element::read_one(body.trim().as_bytes()) else {
+            let Ok(element) = one_element(body.trim().as_bytes(), 1 << 20) else {
                 continue; // raw text: Task 6
             };
             let data = match (kind, KvData::from_element(&element, 1 << 20)) {
@@ -1272,7 +1420,7 @@ mod tests {
             panic!("{data:?}")
         };
         // A flow's patch `{b: 2, e: 0.5}`: an int and a float.
-        let patch = KvData::from_json(&json!({"b": 2, "e": 0.5}));
+        let patch = KvData::from_json(&json!({"b": 2, "e": 0.5})).unwrap();
         let KvData::Struct(patch) = patch else {
             unreachable!()
         };
@@ -1285,7 +1433,7 @@ mod tests {
 
     #[test]
     fn floats_stay_floats_and_ints_stay_ints() {
-        let v = KvValue::from_json(KvType::Json, &json!({"f": 1.5, "i": 2, "g": 100.0}));
+        let v = KvValue::from_json(KvType::Json, &json!({"f": 1.5, "i": 2, "g": 100.0})).unwrap();
         let bytes = String::from_utf8(encode(&v).unwrap()).unwrap();
         assert_eq!(bytes, "{f:1.5e0,i:2,g:100e0}");
         let read = decode(KvType::Json, bytes.as_bytes(), 4096).unwrap();
@@ -1321,7 +1469,7 @@ mod tests {
             );
         }
         // The walk Task 6 reuses: a type before an annotation.
-        let walk = |body: &str| unmodelled(&ion_rs::Element::read_one(body).unwrap());
+        let walk = |body: &str| unmodelled(&one_element(body.as_bytes(), 1 << 20).unwrap());
         assert_eq!(walk("x::{{aGVsbG8=}}"), Some(Unmodelled::Blob));
         assert_eq!(walk("{a:x::1,b:(c)}"), Some(Unmodelled::SExp));
         assert_eq!(walk("{a:x::1}"), Some(Unmodelled::Annotation));
@@ -1389,16 +1537,18 @@ mod tests {
     #[test]
     fn check_readable_refuses_at_write_what_decode_would_refuse() {
         const CAP: u64 = 10 << 20;
-        let zeros = |n: usize| KvValue::from_json(KvType::Json, &Value::Array(vec![json!(0); n]));
+        let zeros =
+            |n: usize| KvValue::from_json(KvType::Json, &Value::Array(vec![json!(0); n])).unwrap();
         let big = zeros(200_000);
         let bytes = encode(&big).unwrap();
         assert_eq!(bytes.len(), 400_001, "400 KB, far under the cap");
-        let err = check_readable(&big, CAP).unwrap_err();
+        let Unstorable::TooLarge(err) = check_readable(&big, CAP).unwrap_err() else {
+            panic!("the dense-value limit is TooLarge")
+        };
         assert!(
-            err.starts_with(
-                "the JSON value is not stored: it could not be read back under \
-                 workflow.storage.max_read_bytes (10485760 bytes)"
-            ) && err.contains("more than 163840 values"),
+            err.starts_with("the JSON value is not stored: it could not be read back: ")
+                && err.contains("more than 163840 values")
+                && err.contains("workflow.storage.max_read_bytes"),
             "{err}"
         );
         // The control: under the budget, written and read.
@@ -1409,19 +1559,25 @@ mod tests {
         };
         assert_eq!(items.len(), 150_000);
         // Over the cap in bytes: refused naming it, before any decode.
-        let long = KvValue::from_json(KvType::String, &json!("x".repeat(5000)));
+        let long = KvValue::from_json(KvType::String, &json!("x".repeat(5000))).unwrap();
         let err = check_readable(&long, 4096).unwrap_err();
         assert_eq!(
             err,
-            "the STRING value is 5002 bytes as stored, more than \
-             workflow.storage.max_read_bytes (4096 bytes) allows a KV value"
+            Unstorable::TooLarge(
+                "the STRING value is 5002 bytes as stored, more than \
+                 workflow.storage.max_read_bytes (4096 bytes) allows a KV value"
+                    .into()
+            )
         );
         // A refusal of the type comes first.
         let bad = KvValue {
             kind: KvType::Duration,
             data: KvData::Bool(true),
         };
-        assert!(check_readable(&bad, CAP).unwrap_err().contains("DURATION"));
+        assert!(matches!(
+            check_readable(&bad, CAP).unwrap_err(),
+            Unstorable::Invalid(m) if m.contains("DURATION")
+        ));
     }
 
     /// Review I2 / M3: the system symbol table is no longer charged, so a
@@ -1467,7 +1623,7 @@ mod tests {
             json!([]),
         ] {
             assert_eq!(
-                KvType::of_data(&KvData::from_json(&v)),
+                KvType::of_data(&KvData::from_json(&v).unwrap()),
                 KvType::of(&v),
                 "{v}"
             );
@@ -1555,5 +1711,279 @@ mod tests {
             parse_ttl("--PT1S", Ttl::Header).unwrap_err(),
             "Cannot convert value '--PT1S' to Duration"
         );
+    }
+
+    fn int(digits: &str) -> KvData {
+        KvData::Number(KvNumber::Int(digits.into()))
+    }
+
+    /// The user's ruling (2026-10-07), re-review 2 N1: a 70,001-digit
+    /// decimal, 70 KB and far under the cap, is REFUSED, never truncated --
+    /// unlimited, `ion-rs` 1.0.1 hands back 4,466 of its digits and no
+    /// error, which the control shows. The refusal is the reader's, before
+    /// `ion-rs` parses the number, so it is fast.
+    #[test]
+    fn a_decimal_of_70001_digits_is_refused_not_truncated() {
+        let body = format!("1.{}", "3".repeat(70_000));
+        // The control: W9a's reader, no digit limit, loses digits silently.
+        let mut seen = None;
+        let stop = crate::storage::ion::for_each_value(body.as_bytes(), 10 << 20, |e| {
+            seen = e
+                .as_decimal()
+                .map(|d| d.coefficient().magnitude().to_string().len());
+            ControlFlow::Continue(())
+        });
+        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert_eq!(
+            seen,
+            Some(4_465),
+            "ion-rs keeps 4,465 of the coefficient's 70,001 digits"
+        );
+        // The KV path: refused, naming the limit, and fast.
+        let started = std::time::Instant::now();
+        let err = read_back(KvType::Number, body.as_bytes(), 10 << 20).unwrap_err();
+        let Unstorable::TooLarge(why) = &err else {
+            panic!("{err:?}")
+        };
+        assert!(why.contains("more than 1000 digits"), "{why}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(matches!(
+            one_element(body.as_bytes(), 10 << 20),
+            Err(Stop::TooLarge(_))
+        ));
+        // And on write: a KvData holding it (as the API would hand Task 3).
+        let v = KvValue {
+            kind: KvType::Number,
+            data: dec(&body),
+        };
+        assert!(matches!(
+            check_readable(&v, 10 << 20),
+            Err(Unstorable::TooLarge(m)) if m.contains("more than 1000 digits")
+        ));
+    }
+
+    /// A 1,001-digit int is refused at write on every path: a flow's value
+    /// (`from_json`, before it is anything), an int built directly
+    /// (`check_readable` reads egret's own text back), and a stored object
+    /// or an API body (`decode`, `one_element`). So is a flow's float of
+    /// 1,001 mantissa digits, which `from_json` would otherwise round to a
+    /// Double silently, and a decimal of 1,001 digits.
+    #[test]
+    fn a_number_of_1001_digits_is_refused_at_write() {
+        let long = "9".repeat(1001);
+        let json: Value = serde_json::from_str(&long).unwrap();
+        let err = KvValue::from_json(KvType::Number, &json).unwrap_err();
+        assert_eq!(
+            err,
+            Unstorable::TooLarge(
+                "a number of 1001 digits is more than a KV value holds: a KV value's numbers \
+                 have at most 1000 digits, and a longer one is refused, never truncated"
+                    .into()
+            )
+        );
+        let nested: Value = serde_json::from_str(&format!("{{\"a\":[1,{long}]}}")).unwrap();
+        assert!(matches!(
+            KvData::from_json(&nested),
+            Err(Unstorable::TooLarge(_))
+        ));
+        for float in [format!("1.{}", "5".repeat(1000)), format!("1e{long}")] {
+            let json: Value = serde_json::from_str(&float).unwrap();
+            assert!(
+                matches!(KvData::from_json(&json), Err(Unstorable::TooLarge(_))),
+                "{}",
+                &float[..10]
+            );
+        }
+        for data in [
+            int(&long),
+            int(&format!("-{long}")),
+            dec(&format!("1.{}", "5".repeat(1000))),
+            dec(&format!("{}.5", "5".repeat(1000))),
+        ] {
+            let v = KvValue {
+                kind: KvType::Number,
+                data,
+            };
+            assert!(
+                matches!(check_readable(&v, 1 << 20), Err(Unstorable::TooLarge(m)) if m.contains("1000 digits")),
+                "{v:?}"
+            );
+        }
+        assert!(decode(KvType::Number, long.as_bytes(), 1 << 20)
+            .unwrap_err()
+            .contains("more than 1000 digits"));
+        // A decimal whose plain form (as egret writes it) is over the limit
+        // is refused at write too, though its Ion coefficient is one digit.
+        let wide = api_body("1d1000");
+        let v = KvValue {
+            kind: KvType::Number,
+            data: wide,
+        };
+        assert!(matches!(
+            check_readable(&v, 1 << 20),
+            Err(Unstorable::TooLarge(_))
+        ));
+    }
+
+    /// The controls at the limit: a 1,000-digit int, a 1,000-digit decimal
+    /// (from a flow, from an API body) are written and read back exactly.
+    #[test]
+    fn a_1000_digit_int_and_decimal_read_back_exactly() {
+        let long = "8".repeat(1000);
+        let json: Value = serde_json::from_str(&long).unwrap();
+        let v = KvValue::from_json(KvType::Number, &json).unwrap();
+        assert_eq!(v.data, int(&long));
+        let bytes = check_readable(&v, 1 << 20).unwrap();
+        let back = decode(KvType::Number, &bytes, 1 << 20).unwrap();
+        assert_eq!(back, int(&long));
+        assert_eq!(back.to_json().to_string(), long);
+        let negative = format!("-{long}");
+        assert_eq!(api_body(&negative), int(&negative));
+        for plain in [
+            format!("{}.{}", "1".repeat(500), "2".repeat(500)),
+            format!("-1.{}", "3".repeat(999)),
+            format!("0.{}", "4".repeat(999)),
+        ] {
+            let data = api_body(&plain);
+            assert_eq!(data, dec(&plain));
+            let bytes = check_readable(
+                &KvValue {
+                    kind: KvType::Number,
+                    data,
+                },
+                1 << 20,
+            )
+            .unwrap();
+            assert_eq!(String::from_utf8(bytes.clone()).unwrap(), plain);
+            let back = decode(KvType::Number, &bytes, 1 << 20).unwrap();
+            assert_eq!(back, dec(&plain));
+            assert_eq!(back.to_json().to_string(), plain, "every digit");
+        }
+    }
+
+    /// A binary Ion body or object whose int is longer than a 1,000-digit
+    /// number takes is refused before `ion-rs` parses it.
+    #[test]
+    fn a_binary_ion_long_int_is_refused() {
+        let mut long = crate::storage::ion::BINARY_VERSION_MARKER.to_vec();
+        // A positive int (0x2E), length 2 000 bytes (VarUInt 0x0F 0xD0).
+        long.extend([0x2E, 0x0F, 0xD0]);
+        long.extend(std::iter::repeat_n(0xFF, 2000));
+        let err = read_back(KvType::Number, &long, 1 << 20).unwrap_err();
+        assert!(
+            matches!(&err, Unstorable::TooLarge(m) if m.contains("2000 bytes long") && m.contains("at most 1000 digits")),
+            "{err:?}"
+        );
+        assert!(matches!(
+            one_element(&long, 1 << 20),
+            Err(Stop::TooLarge(_))
+        ));
+        // The control: a short binary int reads.
+        let mut short = crate::storage::ion::BINARY_VERSION_MARKER.to_vec();
+        short.extend([0x21, 0x07]);
+        assert_eq!(decode(KvType::Number, &short, 4096).unwrap(), int("7"));
+    }
+
+    /// Re-review 2, N2: with numbers bounded, a value at the 10 MiB cap made
+    /// of 1,000-digit numbers (ints and decimals) decodes fast -- the time is
+    /// linear in the value, not quadratic in a number: 0.97 s in a dev build
+    /// alone, 2.1 s under the lib suite's parallel load, with `num-bigint`
+    /// optimised as `ion-rs` is (the workspace `Cargo.toml`). Unbounded, ONE
+    /// 500,000-digit int took 2.4 s to parse in a debug build.
+    #[test]
+    fn a_cap_size_value_of_1000_digit_numbers_decodes_fast() {
+        const CAP: u64 = 10 << 20;
+        let i = "9".repeat(1000);
+        let d = format!("{}.{}", "1".repeat(500), "2".repeat(500));
+        // Each number and its comma are 1 001 or 1 002 bytes.
+        let n = (CAP as usize - 2) / 1002;
+        let items: Vec<KvData> = (0..n)
+            .map(|k| if k % 2 == 0 { int(&i) } else { dec(&d) })
+            .collect();
+        let v = KvValue {
+            kind: KvType::Json,
+            data: KvData::List(items),
+        };
+        let bytes = check_readable(&v, CAP).unwrap();
+        let started = std::time::Instant::now();
+        let back = decode(KvType::Json, &bytes, CAP).unwrap();
+        let took = started.elapsed();
+        assert!(
+            bytes.len() as u64 > CAP - 10_000,
+            "{} bytes: at the cap",
+            bytes.len()
+        );
+        assert_eq!(back, v.data);
+        assert!(
+            // Generous, so the bound holds under the gate's parallel load
+            // (2.1 s measured there); unbounded, one 10 MiB int is minutes.
+            took < std::time::Duration::from_secs(8),
+            "{n} numbers decoded in {took:?}"
+        );
+        eprintln!("{n} numbers, {} bytes: {took:?}", bytes.len());
+    }
+
+    /// Re-review 2's nit: the budget charge of a decimal is exactly its
+    /// text, so a value egret wrote at the cap reads (it charged one byte
+    /// more, `len + 2`, and refused `1.` + 999 digits at a cap of 1 001).
+    #[test]
+    fn a_decimal_written_at_the_cap_reads_back() {
+        for plain in [
+            format!("1.{}", "5".repeat(999)),
+            format!("-1.{}", "5".repeat(999)),
+            format!("0.{}1", "0".repeat(998)),
+            format!("{}0", "5".repeat(999)),
+        ] {
+            let v = KvValue {
+                kind: KvType::Number,
+                data: dec(&plain),
+            };
+            let cap = encode(&v).unwrap().len() as u64;
+            let bytes = check_readable(&v, cap).unwrap_or_else(|e| panic!("{plain}: {e}"));
+            assert_eq!(decode(KvType::Number, &bytes, cap).unwrap(), dec(&plain));
+        }
+    }
+
+    /// Review P2: `check_readable`'s refusal is typed, so Tasks 3, 5 and 6
+    /// map a variant and never a message: every bound is `TooLarge`, every
+    /// other refusal `Invalid`.
+    #[test]
+    fn check_readable_names_its_class_by_variant() {
+        let too_large = [
+            // Over the cap in bytes.
+            KvValue::from_json(KvType::String, &json!("x".repeat(5000))).unwrap(),
+            // The dense-value limit.
+            KvValue::from_json(KvType::Json, &Value::Array(vec![json!(0); 200])).unwrap(),
+            // The digit limit.
+            KvValue {
+                kind: KvType::Number,
+                data: int(&"1".repeat(1001)),
+            },
+        ];
+        for v in &too_large {
+            assert!(
+                matches!(check_readable(v, 4096), Err(Unstorable::TooLarge(_))),
+                "{:?}",
+                check_readable(v, 4096)
+            );
+        }
+        let mut deep = json!(1);
+        for _ in 0..150 {
+            deep = json!([deep]);
+        }
+        let invalid = [
+            KvValue {
+                kind: KvType::Duration,
+                data: KvData::Bool(true),
+            },
+            KvValue::from_json(KvType::Json, &deep).unwrap(),
+        ];
+        for v in &invalid {
+            assert!(
+                matches!(check_readable(v, 1 << 20), Err(Unstorable::Invalid(_))),
+                "{:?}",
+                check_readable(v, 1 << 20)
+            );
+        }
     }
 }

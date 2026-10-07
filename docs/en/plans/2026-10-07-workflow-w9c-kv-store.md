@@ -272,6 +272,8 @@ docker exec egret-w9c-minio sh -c 'mc alias set local http://localhost:9000 egre
 
 ## Task 2: Table, key rule, `_kv` segment, `Resource::Kv`, and reads
 
+> **Superseded interfaces (2026-10-07, Task 2 fix round 3).** This section's Interfaces block, and its Consumes line (`read_values_capped`, `write_ion_json`), describe Task 2 as first planned. Task 2 is built: the code at the fix-round-3 commit on `feat/workflow-w9c-kv` (`src/storage/kv/{value.rs,store.rs}`) and Task 3's note below are authoritative. Where they differ from this block (`KvValue { kind, data }`, `encode -> Result`, `decode -> Result<KvData, String>`, `read_value -> Result<KvData, NsError>`, `list_inherited(conn, namespace, grants, cap)`, `check_readable -> Result<Vec<u8>, Unstorable>`, the KV reader `for_each_kv_value`), this block is wrong.
+
 **Files:**
 - Create `migrations/0175_workflow_kv_entries.sql`, `src/storage/kv/{mod.rs,key.rs,value.rs,store.rs}` and `tests/kv_store.rs`.
 - Modify `src/storage/mod.rs` (`pub mod kv;` beside `:40`; `FileStore::namespace_kv_uri` after `namespace_object_uri` `:130-156`) and `src/storage/nsfiles/access.rs` (`:22-189`).
@@ -574,7 +576,8 @@ pub async fn read_value(fs: &FileStore, grant: &Grant, e: &KvEntry) -> Result<se
 
 > **Amended 2026-10-07 (Task 2 fix rounds).** Task 2 as built (commits `cc2acfbb`, `5501213d` and fix round 2) changed the interfaces this task consumes; the blocks below use them.
 > - `KvValue { kind: KvType, data: KvData }` (not `json`). `KvData` = `Null | Bool | Number(KvNumber) | String | List(Vec<KvData>) | Struct(Vec<(String, KvData)>)`, a struct's names unique and in order; `KvNumber` = `Int(String) | Decimal(String) | Float(f64)`. Decimals are preserved exactly (the user's ruling, 2026-10-07).
-> - `encode(&KvValue) -> Result<Vec<u8>, String>` refuses data not of its type. **No writer calls `encode` directly:** every writer calls `check_readable(&KvValue, max_read_bytes) -> Result<Vec<u8>, String>`, in `spawn_blocking`, and stages exactly the bytes it returns. Its `Err` (over the cap in bytes, over the dense-value limit of `max_read_bytes`/64 values (the user's ruling, 2026-10-07), a decoded text over the cap, a type mismatch) is the author's: `NsError::TooLarge` when it names the cap or the limit, else `Author`.
+> - `encode(&KvValue) -> Result<Vec<u8>, String>` refuses data not of its type. **No writer calls `encode` directly:** every writer calls `check_readable(&KvValue, max_read_bytes) -> Result<Vec<u8>, Unstorable>`, in `spawn_blocking`, and stages exactly the bytes it returns. *(Amended 2026-10-07, Task 2 fix round 3, review P2: the error is typed.)* `pub enum Unstorable { TooLarge(String), Invalid(String) }`: **map the variant, never the message.** `Unstorable::TooLarge(m)` → `NsError::TooLarge(m)` (413 on the API): over the cap in bytes, over the dense-value limit of `max_read_bytes`/64 values (the user's ruling, 2026-10-07), a decoded text over the cap, a symbol table over the cap, and a number over `value::MAX_NUMBER_DIGITS` (1,000; the user's ruling, 2026-10-07). `Unstorable::Invalid(m)` → `NsError::Author(m)` (400): a type mismatch, nesting past `storage::ion::MAX_DEPTH`, and anything else the read back refuses. Write one `fn unstorable(e: Unstorable) -> NsError` in `store.rs` and use it from Tasks 3, 5 and 6; a test asserts both arms.
+> - **Every number has at most 1,000 digits** (the user's ruling, 2026-10-07; `value::MAX_NUMBER_DIGITS`). The KV store reads Ion only through `value::for_each_kv_value(bytes, cap, sink) -> storage::ion::Stop` (W9a's hardened reader with the digit limit, enforced before `ion-rs` parses a number). `decode` and `check_readable` use it, so every write path refuses a longer number as `TooLarge` with no extra code. `KvData::from_json` and `KvValue::from_json` now return `Result<_, Unstorable>`: a flow's number over the limit is refused (`TooLarge`) before it becomes a float; propagate it through `unstorable`.
 > - `decode(kind, bytes, cap) -> Result<KvData, String>`; `read_value(fs, grant, e) -> Result<KvData, NsError>`, decoding off the runtime already. A reader converts with `.to_json()`; `Put`'s merge works on `KvData`, never on `to_json()` (which would lose decimals).
 > - `KvType::of_data(&KvData)` names the merged result's type (as `KvType::of` names a JSON value).
 > - `list_inherited(conn, namespace, grants, cap)` takes the requested namespace.
@@ -601,8 +604,8 @@ pub enum KvWritten {
     Already(KvEntry),
 }
 /// §4.3. Step 1: require(Kv, Write); bytes = check_readable(&new.value, max_read_bytes) in
-/// spawn_blocking (Err: TooLarge naming workflow.storage.max_read_bytes or the dense-value limit,
-/// else Author), before anything is staged; the staged object is exactly those bytes. Step 2: staging::record, then
+/// spawn_blocking (Err mapped by variant through `unstorable`: Unstorable::TooLarge -> TooLarge,
+/// Unstorable::Invalid -> Author), before anything is staged; the staged object is exactly those bytes. Step 2: staging::record, then
 /// fs.store.put(staged.uri, bytes) holding NO connection and NO lock. Step 3, on `detached`:
 /// begin -> (lock_wait) SET LOCAL lock_timeout -> pg_advisory_xact_lock(hashtextextended($1, 0))
 /// over kv_lock_text -> latest row -> re-claim skip -> overwrite rule (a LIVE latest with
@@ -613,7 +616,8 @@ pub enum KvWritten {
 pub async fn set(pool: &PgPool, fs: &FileStore, grant: &Grant, key: &KvKey, new: NewValue, by: CreatedBy)
     -> Result<KvWritten, NsError>;
 /// §8.5. Step 1 for the patch (require; the patch is KvData::from_json of the rendered value, so a
-/// flow's number is an int or a float, never a decimal); nothing is staged. On `detached`, in ONE
+/// flow's number is an int or a float, never a decimal; its Err, a number over 1,000 digits, is
+/// mapped by `unstorable` in the caller, Task 5); nothing is staged. On `detached`, in ONE
 /// transaction holding the key's lock: latest row -> re-claim skip -> a live latest: read_value
 /// (bounded, KvData, decimals kept) -> merge::merge -> KvValue { kind: KvType::of_data(&merged),
 /// data: merged } -> check_readable (spawn_blocking; server-paced, under the lock) ->
@@ -709,6 +713,11 @@ async fn concurrent_writers_get_distinct_revisions_and_keys() { /* 8 writers x 5
     // the user's ruling (2026-10-07): a JSON list of 200 000 zeros (400 KB) under the 10 MiB default
     // -> TooLarge naming the limit (163 840 values); no staging row or object, no kv_entries row. Set and Put both.
 }
+#[tokio::test] async fn a_number_over_1000_digits_is_413_class_and_nothing_is_staged() {
+    // fix round 3, the user's ruling (2026-10-07): Set of a KvData Int of 1,001 digits -> NsError::TooLarge
+    // naming 1000 digits; no staging row or object, no kv_entries row; 1,000 digits -> written and read back
+    // exactly. `unstorable` maps Invalid (a DURATION holding a bool) to Author: both arms asserted.
+}
 #[tokio::test] async fn put_merge_into_a_stored_decimal_keeps_it_exact() { /* stored {a:123456789012345678901234567890.5}, Put {b:2}: the new object's bytes keep a's digits */ }
 #[tokio::test] async fn expires_at_is_now_plus_ttl_by_the_databases_clock() { /* |expires_at - (created_at + ttl)| < 1 ms */ }
 #[tokio::test] async fn put_keeps_the_latest_description_and_expiry() {}
@@ -776,7 +785,8 @@ async fn a_purge_and_a_writer_never_leave_a_row_without_an_object() { /* every s
   - (j) the re-claim skip removed from `set` (the re-claim test dies);
   - (k) `superseded_at` computed as the row's own `created_at` instead of `lead(created_at)` (the successor test dies, and Task 5's `purge.version_before` cell);
   - (l) `set` calling `encode` and a byte-size check instead of `check_readable` (the dense-value test dies);
-  - (m) `merge` going through `to_json`/`from_json` (the stored-decimal test dies).
+  - (m) `merge` going through `to_json`/`from_json` (the stored-decimal test dies);
+  - (n) `unstorable` mapping every variant to `Author` (the 1,001-digit test's `TooLarge` assertion dies).
 - [ ] **Step 7: Commit** `feat(workflow): W9c Task 3 — KV writes under a per-key lock, Put's merge, purge and the expiry sweep`.
 
 ---
@@ -787,6 +797,7 @@ async fn a_purge_and_a_writer_never_leave_a_row_without_an_object() { /* every s
 > - a `KvNumber::Decimal` becomes egret's existing `filters::BigNumber` with class `java.math.BigDecimal` (a bare `{{ x }}` prints the plain digits; a serialiser prints `BigDecimal.toString`); this needs a `pub(crate)` constructor in `filters.rs`;
 > - an `Int` within i64/u64/i128/u128 becomes that integer (`env::integer_from_literal`), beyond it a `BigNumber` of class `java.math.BigInteger`;
 > - a `Float` becomes an `f64`; strings, booleans, null, lists and maps convert leaf by leaf.
+> - *(Amended 2026-10-07, Task 2 fix round 3, re-review P4.)* **Arithmetic on an exact value is a named refusal.** `filters::BigNumber` is deliberately not arithmetic (`filters.rs:2820-2826`), so `{{ kv('d') + 1 }}` on a `Decimal`, or on an `Int` beyond `i128` (a `BigInteger` `BigNumber`), fails the render as the author's error: minijinja's `InvalidOperation` "tried to use + operator on unsupported types plain and number", surfaced by `pebble_error`'s usual path. It is never converted to an `f64` and never computed. Kestra's Pebble computes it in `BigDecimal`; spec §15 records the difference. An `Int` within `i128` and a `Float` compute as before. Test `arithmetic_on_an_exact_decimal_or_big_int_is_a_named_refusal` below; spec §15 line "Arithmetic on an exact decimal".
 > `Snapshot::kv` calls only `read_value`; it never calls `decode` or `check_readable` itself, and the DB lookup still goes through `off_the_runtime` as the spec says.
 
 **Files:**
@@ -875,6 +886,12 @@ fn on_ns_conn<T>(&self, what: &str,
     // {{ kv('d') }} prints every digit, {{ kv('d') | className }} is java.math.BigDecimal, {{ [kv('d')] }} is [123456789012345678901234567890.5];
     // a Float(1.5) prints 1.5 and a Decimal("0.0000001") prints 0.0000001 bare
 }
+#[test] fn arithmetic_on_an_exact_decimal_or_big_int_is_a_named_refusal() {
+    // fix round 3, re-review P4: the fake answers Decimal("1.5"), Int(40 digits), Int("41"), Float(1.5).
+    // {{ kv('d') + 1 }} and {{ kv('big') * 2 }} fail the render; the error names the operator and
+    // "unsupported types" (minijinja's InvalidOperation), and no output is produced (nothing rounded);
+    // the controls {{ kv('i') + 1 }} = 42 and {{ kv('f') + 1 }} = 2.5 compute
+}
 #[test] fn a_non_boolean_error_on_missing_is_refused_as_measured() { /* w9c kv_function */ }
 #[test] fn kv_without_a_scope_refuses_by_name() { /* "The 'kv' function needs a running execution …" */ }
 
@@ -922,14 +939,14 @@ fn on_ns_conn<T>(&self, what: &str,
   - (e) `errorOnMissing` defaulting to false (the default test dies);
   - (f) the secret scan reporting `secret_outside_plugin_task` for `value` (the code test dies);
   - (g) the secret scan only on `Set` (the `Put` row dies);
-  - (h) `kv()` converting through `to_json()` (the exact-decimal test dies).
+  - (h) `kv()` converting through `to_json()` (the exact-decimal test dies, and the arithmetic refusal: `+ 1` would compute on an f64).
 - [ ] **Step 7: Commit** `feat(workflow): W9c Task 4 — kv() over the KV store, and secret() refused in a KV value`.
 
 ---
 
 ## Task 5: The six tasks
 
-> **Amended 2026-10-07 (Task 2 fix rounds).** See Task 3's note for the interfaces. `coerce` builds `KvValue::from_json(kind, &value)`: `kvType: NUMBER` of a String parses it with `serde_json`, then `KvData::from_json`, so a flow's number is an int or a float and **never a decimal** (the user's ruling, 2026-10-07: a flow's value keeps `serde_json`'s semantics); JSON of a String the same way. `Set` and `Put` stage only through Task 3's `set`/`put_merge`, which run `check_readable`. `Get`'s output is `{"value": data.to_json()}` (a decimal is a JSON number with its exact digits, `arbitrary_precision`); a later render of that output reads JSON. `Put`'s patch is `KvData::from_json(render_value(...))`. Every write test asserts the dense-value refusal ("more than `max_read_bytes`/64 values"); a test comparing a whole `KvValue` compares `data`.
+> **Amended 2026-10-07 (Task 2 fix rounds).** See Task 3's note for the interfaces. `coerce` builds `KvValue::from_json(kind, &value)`: `kvType: NUMBER` of a String parses it with `serde_json`, then `KvData::from_json`, so a flow's number is an int or a float and **never a decimal** (the user's ruling, 2026-10-07: a flow's value keeps `serde_json`'s semantics); JSON of a String the same way. `Set` and `Put` stage only through Task 3's `set`/`put_merge`, which run `check_readable`. `Get`'s output is `{"value": data.to_json()}` (a decimal is a JSON number with its exact digits, `arbitrary_precision`); a later render of that output reads JSON. `Put`'s patch is `KvData::from_json(render_value(...))?`. *(Amended 2026-10-07, Task 2 fix round 3: `KvValue::from_json` and `KvData::from_json` return `Result<_, Unstorable>`, refusing a number of more than 1,000 digits (the user's ruling); `coerce` and the patch map it, and `check_readable`'s error, by variant through Task 3's `unstorable` (`TooLarge` → the task fails naming the limit; `Invalid` → Author), never by message text. `Get`'s output is `data.to_json()`: a later render of `outputs.get.value` reads that JSON as an f64, recorded in spec §15 (re-review P5). Tests: `a_set_of_a_1001_digit_number_fails_naming_the_limit` (a `kvType: NUMBER` string of 1,001 digits and a rendered JSON list holding one; 1,000 digits writes and `kv()` reads it exactly).)* Every write test asserts the dense-value refusal ("more than `max_read_bytes`/64 values"); a test comparing a whole `KvValue` compares `data`.
 
 **Files:**
 - Modify `src/worker/handlers/kv.rs` (the six handlers, `DECLARED`, `register`), `src/storage/kv/value.rs` (`coerce`), `src/runners/env.rs` (`render_typed`, beside `render_str` `:1915`), `src/spec/registry.rs` (six rows after `:271`), `src/runtime.rs` (after `:731-735`), `oracle-exec/driver.rs` (`registry()` `:139-170`) and `oracle-exec/handler-surface.txt` (run `python3 handler_surface.py`; commit its diff if it changes).
@@ -957,7 +974,9 @@ pub fn render_typed(template: &str, cx: &RenderContext) -> Result<serde_json::Va
 /// DURATION is the stored type only for a String (w9c set_coercion.t_*_duration; review C1).
 /// Builds the result with KvValue::from_json / KvData::from_json (amended 2026-10-07): an int or a
 /// float, never a KvNumber::Decimal; the KvValue's data agrees with its kind, so encode accepts it.
-pub fn coerce(value: serde_json::Value, kv_type: Option<KvType>) -> Result<KvValue, String>;
+/// (Amended 2026-10-07, fix round 3: Err is `Unstorable`: `Invalid` for a coercion refusal,
+/// `TooLarge` for a number over 1,000 digits, from `from_json`.)
+pub fn coerce(value: serde_json::Value, kv_type: Option<KvType>) -> Result<KvValue, Unstorable>;
 
 // src/worker/handlers/kv.rs
 pub struct SetKv { /* pool: PgPool, files: Option<Arc<FileStore>> */ }
@@ -1052,13 +1071,21 @@ pub const DECLARED: &[super::namespace::DeclaredClass];
   - (f) the namespace refusal checked after purging earlier namespaces (the refusal test asserts nothing purged);
   - (g) `GetKeys` reading objects (a store that fails every `get_stream` makes it fail; the test asserts it succeeds);
   - (h) `Delete`'s re-claim skip removed (the re-claim test dies);
-  - (i) `coerce` of NUMBER from a String making a `KvNumber::Decimal` (the coercion test's `1.5e0` bytes die).
+  - (i) `coerce` of NUMBER from a String making a `KvNumber::Decimal` (the coercion test's `1.5e0` bytes die);
+  - (j) the `Set` handler mapping `Unstorable` by its message instead of its variant, e.g. every refusal to Author (the 1,001-digit test's class assertion dies).
 - [ ] **Step 7: Commit** `feat(workflow): W9c Task 5 — the io.kestra.plugin.core.kv tasks`.
 
 ---
 
 ## Task 6: The KV API
 
+> **Amended 2026-10-07 (Task 2 fix round 3, re-review P1).** **The body is read with `value::for_each_kv_value(body, max_read_bytes, sink)`** (W9a's hardened reader: depth guard, value budget, symbol charge, and the 1,000-digit limit of the user's ruling, 2026-10-07), **never `ion_rs::Element::read_one`**, which has none of them. The sink takes the first value (`element.clone()`) and answers `Break` at a second, as `value.rs`'s test helper `one_element` does. How reading stopped decides the answer, before anything else:
+> - `Stop::End` with exactly one value → the rules below;
+> - `Stop::Failed` (not Ion) or `Stop::Full` (more than one value) → the raw text, typed STRING; `Stop::End` with no value is `Empty` (R-b);
+> - `Stop::TooLarge(m)` (the byte cap, the dense-value limit, the symbol charge, a number over 1,000 digits) → `ApiBodyError::TooLarge(m)`, 413; `Stop::TooDeep(m)` → `ApiBodyError::TooDeep(m)`, 400; `Stop::Crashed(m)` → `ApiBodyError::Crashed(m)`, 400 naming that the body could not be read, logged at WARN (fix round 3 found one: a symbol ID past `usize`, `$99999999999999999999`, panics `ion-rs` 1.0.1's reader, which the reader's thread catches as `Crashed`). **None of these falls back to the raw text.**
+>
+> `ApiBodyError::Unmodelled(Unmodelled)` **never holds `Annotation`**: `parse_api_body` matches `Some(Unmodelled::Annotation)` first and answers the raw text, so only `Blob`, `Clob` and `SExp` reach the error (a test asserts the variant cannot be built from an annotated body). `KvData::from_element` returns `Result<KvData, Unstorable>`; its `TooLarge` (the decoded-text budget) is `ApiBodyError::TooLarge`, and its `Invalid` cannot occur after `unmodelled` returned `None` (map it to `Crashed`). A body such as `[1d4000000]` is read but refused when written (Task 3's `set` → `check_readable`: egret writes the decimal's 4,000,001 plain digits, over the digit limit), 413.
+>
 > **Amended 2026-10-07 (Task 2 fix rounds).** See Task 3's note for the interfaces. `parse_api_body` runs `unmodelled(&element)` on the one parsed value: `Blob`, `Clob` or `SExp` → 400 naming `Unmodelled::name()` (the type before the annotation: `annot_blob`); `Annotation` → the raw text, typed STRING (`ion_annot`, `nested_annot`); otherwise `KvData::from_element(&element, max_read_bytes)`, whose budget is shared by the whole value (fix round 2, NI1), so a body such as `[1d9000000,1d9000000]` is refused (413 naming `max_read_bytes`), never expanded. The type is inferred from the `Element`: an int, decimal or float is NUMBER; a list or struct JSON; a timestamp DATETIME or DATE by the rulings; a string or symbol STRING or DURATION as measured. `GET`'s `value` is `data.to_json()`. The inheritance route calls `list_inherited(conn, &ns, &grants, cap)` with `grants` for `ancestors(ns)[1..]`. A PUT's write goes through Task 3's `set`, hence `check_readable`: over the cap or the dense-value limit is 413.
 
 **Files:**
@@ -1094,8 +1121,10 @@ pub struct KvRevisionDto { pub revision: u32, pub r#type: String, pub size: u64,
 #[derive(Deserialize, utoipa::IntoParams)] pub struct KvRevisionQuery { pub revision: Option<u32> }
 
 // src/storage/kv/value.rs
-/// The PUT body (KVController.java:124-141): parsed as ONE Ion value (storage::ion), its type as
-/// KVType.from infers it (w9c api); not Ion, or more than one value: the raw text, STRING.
+/// The PUT body (KVController.java:124-141): parsed as ONE Ion value through
+/// value::for_each_kv_value (never Element::read_one), its type as KVType.from infers it (w9c
+/// api); not Ion (Stop::Failed), or more than one value (Stop::Full): the raw text, STRING. A
+/// refusal of the reader (TooLarge, TooDeep, Crashed) is that error, never the raw text (fix round 3).
 /// (Amended 2026-10-07, the user's ruling, spec §9: a timestamp with a time is a DATETIME in UTC,
 /// even at midnight; a day-precision one is a DATE; a blob, clob or sexp at any depth is Err naming
 /// the type, answered 400; an annotated value at any depth makes the whole body the raw text.
@@ -1106,7 +1135,11 @@ pub struct KvRevisionDto { pub revision: u32, pub r#type: String, pub size: u64,
 /// the conversion KvData::from_element(&element, cap), so an Ion decimal stays a KvNumber::Decimal and a
 /// body whose decoded text exceeds `cap` is Err (413). Err distinguishes 400 from 413.)
 pub fn parse_api_body(body: &[u8], cap: u64) -> Result<KvValue, ApiBodyError>;
-pub enum ApiBodyError { Empty, Unmodelled(Unmodelled), TooLarge(String) }
+/// 400 Empty; 400 Unmodelled (Blob, Clob or SExp only: never Annotation, the raw-text case); 413
+/// TooLarge (the reader's byte cap, dense-value limit, symbol charge, 1,000-digit limit, and
+/// from_element's text budget); 400 TooDeep (past storage::ion::MAX_DEPTH); 400 Crashed (the
+/// reader's thread panicked on the body, e.g. a symbol ID past usize; logged at WARN). Amended 2026-10-07, fix round 3 (re-review P1).
+pub enum ApiBodyError { Empty, Unmodelled(Unmodelled), TooLarge(String), TooDeep(String), Crashed(String) }
 ```
 
 - [ ] **Step 1: Write the failing tests** (`tests/kv_api.rs`, `tests/common` app, MemStore, `install_db_for_tests`):
@@ -1121,7 +1154,15 @@ pub enum ApiBodyError { Empty, Unmodelled(Unmodelled), TooLarge(String) }
 #[tokio::test] async fn a_put_body_over_max_read_bytes_is_413_naming_the_cap_and_nothing_is_written() {}
 #[tokio::test] async fn a_dense_or_expanding_body_is_413_and_nothing_is_written() {
     // [0,0,…] 200 000 zeros: 413 naming the dense-value limit; [1d9000000,1d9000000]: 413 naming
-    // max_read_bytes, refused before any expansion (fix round 2, NI1); [1d4000000] at the cap stays readable
+    // max_read_bytes, refused before any expansion (fix round 2, NI1); [1d4000000]: 413 naming the
+    // 1,000-digit limit at write (fix round 3: egret would write 4,000,001 plain digits)
+}
+#[tokio::test] async fn a_reader_refusal_is_never_stored_as_raw_text() {
+    // fix round 3, re-review P1: a 101-deep list -> 400 (TooDeep), a 70,001-digit decimal -> 413 naming
+    // 1000 digits (not 200 with 4,466 digits stored, nor the raw text), a binary Ion int of 2,000 bytes
+    // -> 413, a symbol table over the cap -> 413, `$99999999999999999999` -> 400 (Crashed); each writes nothing. The controls: `{a:` (not Ion)
+    // and `1 2` (two values) are stored as the raw text, STRING; a 1,000-digit int and decimal round-trip
+    // exactly; `x::1` is the raw text and never ApiBodyError::Unmodelled
 }
 #[tokio::test] async fn an_ion_decimal_is_stored_and_answered_exactly() {
     // PUT {a:1.5}: bytes {a:1.5}, GET value {"a":1.5}; PUT 123456789012345678901234567890.5: GET's JSON
@@ -1182,7 +1223,9 @@ pub enum ApiBodyError { Empty, Unmodelled(Unmodelled), TooLarge(String) }
   - (f) the bulk delete committing per key (all-or-nothing dies);
   - (f2) the bulk cap checked with `>=` (the 1,000-accepted test dies) or removed (the 1,001 test dies);
   - (g) the list route answering 404 for another workspace (byte-identity dies);
-  - (h) `parse_api_body` converting with a fresh budget per decimal (the expanding-body test dies).
+  - (h) `parse_api_body` converting with a fresh budget per decimal (the expanding-body test dies);
+  - (i) `parse_api_body` reading with `ion_rs::Element::read_one` instead of `for_each_kv_value` (the reader-refusal test dies: the 70,001-digit decimal is stored truncated);
+  - (j) `Stop::TooLarge` and `Stop::TooDeep` falling back to the raw text (the reader-refusal test dies: 200 instead of 413/400).
 - [ ] **Step 7: Commit** `feat(workflow): W9c Task 6 — the KV API`.
 
 ---

@@ -275,3 +275,10 @@ split-debuginfo = "unpacked"
 # minutes. Optimising this one dependency keeps dev time close to release.
 [profile.dev.package.ion-rs]
 opt-level = 3
+
+# W9c Task 2 fix round 3: `ion-rs` parses and prints a big int or a decimal's
+# coefficient with `num-bigint`, which unoptimised made a 10 MiB KV value of
+# 1,000-digit numbers (the most digits a KV number has) take about 1.8 s to
+# decode in a dev build. Optimised for the same reason as `ion-rs` above.
+[profile.dev.package.num-bigint]
+opt-level = 3
