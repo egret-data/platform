@@ -841,13 +841,20 @@ pub struct WorkflowStorageConfig {
 /// under S3's 1024-byte limit with room to spare.
 pub const MAX_WORKFLOW_STORAGE_PREFIX_BYTES: usize = 200;
 
+/// The smallest `workflow.storage.max_read_bytes` may be: 4 KiB (W9c Task 2
+/// review I2). The Ion reader that reads a KV value and the preview charges
+/// one value per 64 bytes of the cap, so a cap of a few bytes refuses even a
+/// small value; 4 KiB reads any value of up to 64 parts.
+pub const MIN_MAX_READ_BYTES: u64 = 4096;
+
 impl WorkflowStorageConfig {
     /// The boot check (W9a fix round 1 M4), called from [`Config::validate`]:
     /// `prefix` is a non-empty key prefix ending with `/` and not starting
     /// with one (an object key has no leading `/`, and without the trailing
     /// one `workflow` and `workflowX/` would share keys) and at most
-    /// [`MAX_WORKFLOW_STORAGE_PREFIX_BYTES`] bytes, and every cap is at least
-    /// 1. Each refusal names its key.
+    /// [`MAX_WORKFLOW_STORAGE_PREFIX_BYTES`] bytes, every cap is at least
+    /// 1, and `max_read_bytes` is at least [`MIN_MAX_READ_BYTES`]. Each
+    /// refusal names its key.
     pub fn validate(&self) -> Result<(), String> {
         let p = &self.prefix;
         if p.is_empty() || !p.ends_with('/') || p.starts_with('/') {
@@ -873,6 +880,15 @@ impl WorkflowStorageConfig {
             if value == 0 {
                 return Err(format!("workflow.storage.{key} must be at least 1"));
             }
+        }
+        if self.max_read_bytes < MIN_MAX_READ_BYTES {
+            return Err(format!(
+                "workflow.storage.max_read_bytes is {} bytes; it must be at least \
+                 {MIN_MAX_READ_BYTES} bytes (4 KiB), the least the Ion reader of a KV value \
+                 or a preview reads a small value under \
+                 (EGRET_WORKFLOW__STORAGE__MAX_READ_BYTES)",
+                self.max_read_bytes
+            ));
         }
         Ok(())
     }
@@ -2081,7 +2097,19 @@ values = { allowed-images = [] }
         assert!(err.contains("workflow.storage.max_task_bytes"), "{err}");
         let err = check(&|s| s.max_read_bytes = 0).unwrap_err();
         assert!(err.contains("workflow.storage.max_read_bytes"), "{err}");
-        assert_eq!(check(&|s| s.max_read_bytes = 1), Ok(()));
+        // W9c Task 2 review I2: at least 4 KiB, and 4 KiB passes.
+        for small in [1, 4095] {
+            let err = check(&|s| s.max_read_bytes = small).unwrap_err();
+            assert_eq!(
+                err,
+                format!(
+                    "workflow.storage.max_read_bytes is {small} bytes; it must be at least \
+                     4096 bytes (4 KiB), the least the Ion reader of a KV value or a preview \
+                     reads a small value under (EGRET_WORKFLOW__STORAGE__MAX_READ_BYTES)"
+                )
+            );
+        }
+        assert_eq!(check(&|s| s.max_read_bytes = 4096), Ok(()));
         let err = check(&|s| s.max_namespace_files = 0).unwrap_err();
         assert!(
             err.contains("workflow.storage.max_namespace_files"),

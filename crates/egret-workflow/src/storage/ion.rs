@@ -282,7 +282,10 @@ fn read_guarded<R: Read>(
     // `Reader::next` is this same loop skipping all but the values
     // (`ion-rs` 1.0.1 `lazy/reader.rs:101`, `expanded/mod.rs:598`).
     let mut reader = ion_rs::SystemReader::new(ion_rs::AnyEncoding, input);
-    let mut symbols = SymbolCharge::default();
+    // The system symbol table the reader starts with is never charged: it
+    // is the same fixed handful for every input, and charging it made a
+    // small cap refuse a value with no symbol at all (W9c Task 2 review I2).
+    let mut symbols = SymbolCharge::new(reader.symbol_table().len());
     loop {
         use ion_rs::SystemStreamItem as Item;
         let element = match reader.next_item() {
@@ -363,13 +366,24 @@ pub(crate) const SYMBOL_OVERHEAD: u64 = 64;
 /// symbols). Charged after values only, back-to-back tables were seen only
 /// at the next value's yield (the reviewer measured 63 tables held at once,
 /// 494 MB, under a 10 MiB cap).
-#[derive(Default)]
 struct SymbolCharge {
+    /// How many symbols of the table are the system table's, never charged.
+    system: usize,
     len: usize,
     held: u64,
 }
 
 impl SymbolCharge {
+    /// `system`: the length of the table the reader starts with (Ion 1.0's
+    /// system symbols), which is never charged.
+    fn new(system: usize) -> Self {
+        Self {
+            system,
+            len: system,
+            held: 0,
+        }
+    }
+
     /// `pending`: the symbols the reader has read but not yet applied (its
     /// `pending_context_changes()`, a type `ion-rs` does not export).
     fn charge<'s>(
@@ -382,7 +396,8 @@ impl SymbolCharge {
             |symbol: &ion_rs::Symbol| symbol.text().map_or(0, str::len) as u64 + SYMBOL_OVERHEAD;
         let symbols = table.symbols();
         if symbols.len() < self.len {
-            self.len = 0;
+            // A version marker: the table is the system table again.
+            self.len = self.system.min(symbols.len());
             self.held = 0;
         }
         for symbol in &symbols[self.len..] {
@@ -1094,18 +1109,7 @@ fn to_json(element: &ion_rs::Element) -> Value {
                 Err(_) => Value::String(text),
             }
         }
-        V::Timestamp(t) => {
-            let text = t.to_string();
-            // ion-java writes a day-precision timestamp without its `T`.
-            if t.precision() == ion_rs::TimestampPrecision::Day {
-                Value::String(text.trim_end_matches('T').to_string())
-            } else if let Some(utc) = text.strip_suffix("+00:00") {
-                // ... and UTC as `Z` (`-00:00`, an unknown offset, stays).
-                Value::String(format!("{utc}Z"))
-            } else {
-                Value::String(text)
-            }
-        }
+        V::Timestamp(t) => Value::String(timestamp_text(t)),
         V::Symbol(s) => s
             .text()
             .map(|t| Value::String(t.to_string()))
@@ -1123,6 +1127,20 @@ fn to_json(element: &ion_rs::Element) -> Value {
             }
             Value::Object(map)
         }
+    }
+}
+
+/// A timestamp as [`to_json`] shows it: its Ion text, a day-precision date
+/// without its `T` (as ion-java writes one), and UTC as `Z` (`-00:00`, an
+/// unknown offset, stays). The KV store reads timestamps the same way.
+pub(crate) fn timestamp_text(t: &ion_rs::Timestamp) -> String {
+    let text = t.to_string();
+    if t.precision() == ion_rs::TimestampPrecision::Day {
+        text.trim_end_matches('T').to_string()
+    } else if let Some(utc) = text.strip_suffix("+00:00") {
+        format!("{utc}Z")
+    } else {
+        text
     }
 }
 

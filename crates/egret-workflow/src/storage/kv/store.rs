@@ -38,7 +38,7 @@ use tokio::io::AsyncReadExt as _;
 use uuid::Uuid;
 
 use super::key::KvKey;
-use super::value::{decode, KvType};
+use super::value::{decode, KvData, KvType};
 use crate::storage::nsfiles::access::{require, Access, Grant, Resource};
 use crate::storage::nsfiles::store::Want;
 use crate::storage::nsfiles::NsError;
@@ -277,9 +277,9 @@ fn one_workspace(grants: &[Grant]) -> Result<Option<Uuid>, NsError> {
     for g in grants {
         need(g, Access::Read)?;
         if g.workspace() != first.workspace() {
-            return Err(internal(
-                "egret read the KV store of two workspaces in one walk".to_string(),
-            ));
+            return Err(wrong_grant(egret_core::Error::Internal(anyhow::anyhow!(
+                "egret read the KV store of two workspaces in one walk"
+            ))));
         }
     }
     Ok(Some(first.workspace()))
@@ -370,12 +370,14 @@ pub async fn list_live(
     capped(entries(rows)?, cap, &what)
 }
 
-/// The API's inheritance listing: `grants` are the ANCESTORS (not the
-/// namespace itself), deepest first; the live keys of each, the first
-/// occurrence of a key winning (KVController.java:73-100). Bounded by `cap`
-/// over the union (before a shadowed key is dropped).
+/// The API's inheritance listing of `namespace`: `grants` are its
+/// ANCESTORS (not the namespace itself), deepest first; the live keys of
+/// each, the first occurrence of a key winning (KVController.java:73-100).
+/// Bounded by `cap` over the union (before a shadowed key is dropped); the
+/// refusal names `namespace`, the one the caller asked about.
 pub async fn list_inherited(
     conn: &mut PgConnection,
+    namespace: &str,
     grants: &[Grant],
     cap: u64,
 ) -> Result<Vec<KvEntry>, NsError> {
@@ -400,10 +402,7 @@ pub async fn list_inherited(
     .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?;
-    let what = format!(
-        "the parents of namespace '{}'",
-        grants.first().map_or("", |g| g.namespace())
-    );
+    let what = format!("the parents of namespace '{namespace}'");
     let all = capped(entries(rows)?, cap, &what)?;
     let mut seen = std::collections::HashSet::new();
     Ok(all
@@ -488,26 +487,26 @@ pub async fn namespaces_with_kv(
     .map_err(db_err)
 }
 
-/// The entry's object, decoded. size > max_read_bytes: TooLarge naming the
-/// cap (no download). A missing object: Author naming the key and the
-/// revision (no fallback, §4.5). Any other store error: Store. Takes NO
-/// connection: call it after the row was read and the connection let go.
-pub async fn read_value(
-    fs: &FileStore,
-    grant: &Grant,
-    e: &KvEntry,
-) -> Result<serde_json::Value, NsError> {
+/// The entry's object, decoded into the merge-ready [`KvData`]
+/// (`KvData::to_json` is what a reader sees). size > max_read_bytes:
+/// TooLarge naming the cap (no download). A missing object: Author naming
+/// the key and the revision (no fallback, §4.5). Any other store error:
+/// Store. Takes NO connection: call it after the row was read and the
+/// connection let go. The decode runs on the blocking pool, never on the
+/// async worker (review I1): a value of `max_read_bytes` takes the Ion
+/// reader hundreds of milliseconds.
+pub async fn read_value(fs: &FileStore, grant: &Grant, e: &KvEntry) -> Result<KvData, NsError> {
     need(grant, Access::Read)?;
     // An entry another grant resolved names another namespace's object: egret's
     // bug, refused before the store is asked.
     if e.workspace != grant.workspace() || e.namespace != grant.namespace() {
-        return Err(internal(format!(
+        return Err(wrong_grant(egret_core::Error::Internal(anyhow::anyhow!(
             "egret read key '{}' of namespace '{}' holding a grant for namespace '{}' (or \
              another workspace)",
             e.key,
             e.namespace,
             grant.namespace()
-        )));
+        ))));
     }
     let what = format!(
         "revision {} of key '{}' in namespace '{}'",
@@ -553,7 +552,24 @@ pub async fn read_value(
     if bytes.len() as u64 > cap {
         return Err(too_large(bytes.len() as u64));
     }
-    decode(e.value_type, &bytes, cap).map_err(|why| NsError::Author(format!("{what}: {why}")))
+    let kind = e.value_type;
+    let decoded = tokio::task::spawn_blocking(move || decode(kind, &bytes, cap))
+        .await
+        .map_err(|join| {
+            if join.is_cancelled() {
+                // The runtime is shutting down: nothing was read; retry.
+                NsError::Store(format!(
+                    "key '{}' in namespace '{}': the read was cancelled; retry later",
+                    e.key,
+                    grant.namespace()
+                ))
+            } else {
+                wrong_grant(egret_core::Error::Internal(anyhow::anyhow!(
+                    "decoding {what} panicked: {join}"
+                )))
+            }
+        })?;
+    decoded.map_err(|why| NsError::Author(format!("{what}: {why}")))
 }
 
 #[cfg(test)]

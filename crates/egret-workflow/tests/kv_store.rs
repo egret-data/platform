@@ -23,7 +23,7 @@ use egret_workflow::storage::kv::store::{
     ancestors, list_inherited, list_live, namespaces_with_kv, read_value, resolve,
     resolve_first_live, revisions, rows_page, KvEntry,
 };
-use egret_workflow::storage::kv::value::{encode, KvType, KvValue};
+use egret_workflow::storage::kv::value::{encode, KvData, KvType, KvValue};
 use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Grant, Resource};
 use egret_workflow::storage::nsfiles::store::Want;
 use egret_workflow::storage::nsfiles::NsError;
@@ -129,8 +129,9 @@ fn mem_fs() -> (storage::FileStore, Arc<MemStore>) {
 async fn insert_value(db: &Db, fs: &storage::FileStore, ws: Uuid, row: R<'_>, text: &str) -> i64 {
     let bytes = encode(&KvValue {
         kind: KvType::String,
-        json: Value::String(text.into()),
-    });
+        data: KvData::String(text.into()),
+    })
+    .unwrap();
     let id = insert(db, ws, row.size(bytes.len() as i64)).await;
     let object = fs.namespace_kv_uri(&grant(ws, row.ns), &key(row.key), row.rev as u32);
     fs.store.put(&object, bytes).await.unwrap();
@@ -407,7 +408,7 @@ async fn a_read_never_writes() {
     }
     list_live(&mut c, &g, None, 10).await.unwrap();
     list_live(&mut c, &gc, Some("o"), 10).await.unwrap();
-    list_inherited(&mut c, std::slice::from_ref(&g), 10)
+    list_inherited(&mut c, child, std::slice::from_ref(&g), 10)
         .await
         .unwrap();
     rows_page(&mut c, &g, None, 10).await.unwrap();
@@ -536,14 +537,14 @@ async fn the_walk_answers_the_deepest_live_level_and_skips_an_expired_one() {
             None => match resolve_first_live(&mut c, &walk, &key(k)).await.unwrap() {
                 Some(e) => {
                     let g = walk.iter().find(|g| g.namespace() == e.namespace).unwrap();
-                    Some(read_value(&fs, g, &e).await.unwrap())
+                    Some(read_value(&fs, g, &e).await.unwrap().to_json())
                 }
                 None => None,
             },
             Some(ns) => {
                 let g = grant(ws, ns);
                 match resolve(&mut c, &g, &key(k), Want::Latest).await {
-                    Ok(e) => Some(read_value(&fs, &g, &e).await.unwrap()),
+                    Ok(e) => Some(read_value(&fs, &g, &e).await.unwrap().to_json()),
                     Err(NsError::NotFound(_)) => None,
                     Err(other) => panic!("{cell}: {other:?}"),
                 }
@@ -595,7 +596,7 @@ async fn list_inherited_is_deepest_first_and_the_first_occurrence_wins() {
         }
         examined += 1;
         let grants: Vec<Grant> = ancestors(ns)[1..].iter().map(|a| grant(ws, a)).collect();
-        let got = list_inherited(&mut c, &grants, 100).await.unwrap();
+        let got = list_inherited(&mut c, ns, &grants, 100).await.unwrap();
         // Grouped by namespace in the order met: deepest first.
         let mut order: Vec<String> = vec![];
         let mut by_ns: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -636,12 +637,21 @@ async fn list_inherited_is_deepest_first_and_the_first_occurrence_wins() {
         .iter()
         .map(|a| grant(ws, a))
         .collect();
-    let err = list_inherited(&mut c, &grants, 3).await.unwrap_err();
+    let err = list_inherited(&mut c, "w9c.inh.a.b.c", &grants, 3)
+        .await
+        .unwrap_err();
+    // Review M5: the refusal names the namespace asked about, not its
+    // nearest parent.
     assert!(
-        matches!(&err, NsError::TooLarge(m) if m.contains("max_namespace_files") && m.contains("3")),
+        matches!(&err, NsError::TooLarge(m) if m.contains("max_namespace_files")
+            && m.contains("3")
+            && m.contains("the parents of namespace 'w9c.inh.a.b.c'")),
         "{err:?}"
     );
-    assert!(list_inherited(&mut c, &[], 3).await.unwrap().is_empty());
+    assert!(list_inherited(&mut c, "w9c", &[], 3)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -675,7 +685,7 @@ async fn the_same_key_in_two_workspaces_resolves_to_the_grants_row_only() {
         .unwrap()
         .unwrap();
     assert_eq!((e.workspace, e.size), (ws, 11));
-    assert!(list_inherited(&mut c, &[grant(ws, "w9c")], 10)
+    assert!(list_inherited(&mut c, NS, &[grant(ws, "w9c")], 10)
         .await
         .unwrap()
         .is_empty());
@@ -727,12 +737,38 @@ async fn a_grant_of_the_other_resource_or_a_mixed_walk_is_refused() {
             .await
             .is_err()
     );
-    assert!(list_inherited(&mut c, std::slice::from_ref(&files), 10)
+    assert!(list_inherited(&mut c, NS, std::slice::from_ref(&files), 10)
         .await
         .is_err());
+    // Review M4: a mixed walk is egret's bug, failed once (Author), never an
+    // outage a handler re-claims for ever (Db).
     let mixed = [grant(ws, NS), grant(other, "w9c")];
-    assert!(resolve_first_live(&mut c, &mixed, &key("k")).await.is_err());
-    assert!(list_inherited(&mut c, &mixed, 10).await.is_err());
+    let bug = |err: NsError| {
+        assert!(
+            matches!(&err, NsError::Author(m) if m.contains("egret bug")
+                && m.contains("two workspaces")),
+            "{err:?}"
+        );
+    };
+    bug(resolve_first_live(&mut c, &mixed, &key("k"))
+        .await
+        .unwrap_err());
+    bug(list_inherited(&mut c, "w9c.t2.c", &mixed, 10)
+        .await
+        .unwrap_err());
+    // ... and so is an entry read under another namespace's grant.
+    let e = resolve(&mut c, &grant(ws, NS), &key("k"), Want::Latest)
+        .await
+        .unwrap();
+    let (fs, _) = mem_fs();
+    for wrong in [grant(other, NS), grant(ws, "w9c")] {
+        let err = read_value(&fs, &wrong, &e).await.unwrap_err();
+        assert!(
+            matches!(&err, NsError::Author(m) if m.contains("egret bug")
+                && m.contains("holding a grant")),
+            "{err:?}"
+        );
+    }
     // The control.
     assert!(resolve(&mut c, &grant(ws, NS), &key("k"), Want::Latest)
         .await
@@ -888,7 +924,7 @@ async fn a_row_whose_object_is_missing_is_an_author_error_naming_key_and_revisio
     let e1 = resolve(&mut c, &g, &key("k"), Want::Revision(1))
         .await
         .unwrap();
-    assert_eq!(read_value(&fs, &g, &e1).await.unwrap(), "one");
+    assert_eq!(read_value(&fs, &g, &e1).await.unwrap().to_json(), "one");
 }
 
 /// A MemStore that counts streamed reads, and can fail them.
@@ -1002,7 +1038,7 @@ async fn a_stored_value_over_max_read_bytes_is_too_large_naming_the_cap_without_
     let e = resolve(&mut c, &g, &key("small"), Want::Latest)
         .await
         .unwrap();
-    assert_eq!(read_value(&fs, &g, &e).await.unwrap(), "s");
+    assert_eq!(read_value(&fs, &g, &e).await.unwrap().to_json(), "s");
 }
 
 #[tokio::test]
@@ -1338,4 +1374,82 @@ async fn the_kv_object_key_is_kestras_layout() {
     assert!(fs
         .namespace_kv_uri(&other, &key("x"), 1)
         .ends_with(&format!("{}/a/b/c/_kv/x.ion", other.workspace())));
+}
+
+/// Review I1: `read_value` decodes on the blocking pool, not on the async
+/// worker. On a CURRENT-THREAD runtime (one worker for every task), a ticker
+/// spawned beside `read_value` keeps ticking while a large value decodes;
+/// were the decode inline, the worker would sit in the Ion reader's join and
+/// the ticker could not run at all (W9b's `matching_runs_off_the_async_
+/// runtime_and_a_ticker_keeps_ticking`). No database: the entry is built.
+#[tokio::test(flavor = "current_thread")]
+async fn a_large_decode_runs_off_the_async_runtime_and_a_ticker_keeps_ticking() {
+    let (fs, _) = mem_fs();
+    let ws = Uuid::new_v4();
+    let g = grant(ws, NS);
+    // 150 000 strings of 60 bytes: about 9.5 MB, under the 10 MiB default
+    // and under the reader's value budget.
+    let items: Vec<Value> = (0..150_000)
+        .map(|i| Value::String(format!("{i:0>60}")))
+        .collect();
+    let bytes = encode(&KvValue::from_json(KvType::Json, &Value::Array(items))).unwrap();
+    assert!(bytes.len() > 9_000_000 && (bytes.len() as u64) < fs.caps.max_read_bytes);
+    let k = key("big");
+    fs.store
+        .put(&fs.namespace_kv_uri(&g, &k, 1), bytes.clone())
+        .await
+        .unwrap();
+    let e = KvEntry {
+        id: 1,
+        workspace: ws,
+        namespace: NS.into(),
+        key: k,
+        revision: 1,
+        value_type: KvType::Json,
+        size: bytes.len() as u64,
+        description: None,
+        expires_at: None,
+        deleted: false,
+        created_at: chrono::Utc::now(),
+        expired: false,
+        created_by_task_run: None,
+        deleted_by_task_run: None,
+    };
+    let ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let ticker = {
+        let ticks = ticks.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                ticks.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+    };
+    tokio::task::yield_now().await;
+    let started = std::time::Instant::now();
+    let before = ticks.load(Ordering::Relaxed);
+    let read = read_value(&fs, &g, &e).await.unwrap();
+    let took = started.elapsed();
+    let ticked = ticks.load(Ordering::Relaxed) - before;
+    ticker.abort();
+    eprintln!(
+        "read_value of {} bytes took {took:?}; the ticker ticked {ticked} times",
+        bytes.len()
+    );
+    let KvData::List(items) = read else {
+        panic!("{read:?}")
+    };
+    assert_eq!(items.len(), 150_000);
+    // The decode must dominate, or the test proves nothing.
+    assert!(
+        took >= std::time::Duration::from_millis(200),
+        "the read took only {took:?}: raise the value's size"
+    );
+    // A 2 ms ticker on a free runtime ticks at least once per 10 ms.
+    let floor = took.as_millis() as u64 / 10;
+    assert!(
+        ticked >= floor,
+        "{ticked} ticks in {took:?} (at least {floor} expected): the decode ran on the async \
+         worker"
+    );
 }

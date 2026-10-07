@@ -261,8 +261,9 @@ pub(crate) fn write_ion_element(out: &mut String, element: &ion_rs::Element) {
     }
 }
 
-/// One JSON value as Ion text, for [`write_ion_row`] and the KV store's
-/// `storage::kv::value::encode`. Recursion is bounded by
+/// One JSON value as Ion text, for [`write_ion_row`] (the KV store's
+/// `storage::kv::value::encode` writes its own tree with [`write_ion_float`],
+/// [`write_ion_string`] and [`write_symbol`]). Recursion is bounded by
 /// the JSON's own depth, which `serde_json` caps when it parses.
 pub(crate) fn write_ion_json(out: &mut String, value: &serde_json::Value) {
     use serde_json::Value as J;
@@ -325,7 +326,7 @@ pub(crate) fn write_ion_json(out: &mut String, value: &serde_json::Value) {
 ///
 /// So `1.0` and `1.0e100` disagree about whether the `.0` survives, which no
 /// single rule about "trailing zeros" predicts. `-0.0` is `-0e0`.
-fn write_ion_float(out: &mut String, x: f64) {
+pub(crate) fn write_ion_float(out: &mut String, x: f64) {
     // `Double.toString`'s three special values. Ion text spells them
     // differently; Jackson's `IonGenerator.writeNumber(double)` hands them to
     // `IonWriter.writeFloat`, which writes these. No corpus entry reaches
@@ -355,7 +356,7 @@ fn write_ion_float(out: &mut String, x: f64) {
 }
 
 /// A `"`-delimited Ion string.
-fn write_ion_string(out: &mut String, s: &str) {
+pub(crate) fn write_ion_string(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
         match c {

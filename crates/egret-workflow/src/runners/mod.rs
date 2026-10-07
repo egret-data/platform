@@ -67,7 +67,8 @@ pub(crate) use functions::base62;
 /// the message of `spec::validate`'s publish-time refusal (W5b fix round 1).
 pub(crate) use functions::SECRET_REFUSAL;
 pub(crate) use ionfmt::{
-    write_ion_element, write_ion_json, write_ion_row, write_symbol as write_ion_symbol,
+    write_ion_element, write_ion_float, write_ion_row, write_ion_string,
+    write_symbol as write_ion_symbol,
 };
 /// W9a Task 12: `core.storage.Split`'s `regexPattern` is a `java.util.regex`
 /// pattern, compiled by the same translation the `regex*` filters use.

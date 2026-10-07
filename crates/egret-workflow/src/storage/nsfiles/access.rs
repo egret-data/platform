@@ -148,7 +148,7 @@ pub fn check_namespace(namespace: &str) -> Result<(), String> {
     if namespace.split('.').any(str::is_empty) {
         return Err(format!(
             "namespace '{namespace}' has an empty segment ('..', or a '.' at its start or \
-             end); a namespace that holds namespace files names every segment"
+             end), and egret stores nothing under a namespace with an empty segment"
         ));
     }
     check_files_segment(namespace)?;
@@ -421,6 +421,21 @@ mod tests {
                     "{err}"
                 );
             }
+        }
+        // W9c Task 2 review M2: the sentence names neither resource, and
+        // is the same for both.
+        for bad in ["a..b", "a."] {
+            let files =
+                authorize(ws, Actor::Api, bad, Resource::NamespaceFiles, Access::Read).unwrap_err();
+            let kv = authorize(ws, Actor::Api, bad, Resource::Kv, Access::Read).unwrap_err();
+            assert_eq!(files, kv);
+            assert_eq!(
+                kv,
+                format!(
+                    "namespace '{bad}' has an empty segment ('..', or a '.' at its start or \
+                     end), and egret stores nothing under a namespace with an empty segment"
+                )
+            );
         }
         // `.a` is refused by the pattern, named once.
         let err = check_namespace(".a").unwrap_err();

@@ -2,12 +2,19 @@
 //!
 //! - [`KvType`]: the seven types, stored with every revision
 //!   (`workflow.kv_entries.value_type`), never re-inferred on read.
+//! - [`KvData`]: a value as the KV store holds it. Every number keeps its Ion
+//!   kind and its exact digits ([`KvNumber`]: the user's ruling, 2026-10-07,
+//!   "decimals are preserved exactly").
 //! - [`encode`]: the object's bytes, Ion text byte-equal to what the artifact
 //!   writes (w9c `types.<T>.ion_bytes`).
-//! - [`decode`]: the bytes back to the JSON value a reader sees, DATETIME,
-//!   DATE and DURATION as the strings Kestra's `kv()` prints
-//!   (w9c `types.<T>.kv_prints`, `types._rule_read`).
+//! - [`decode`]: the bytes back to a [`KvData`], DATETIME, DATE and DURATION
+//!   as the strings Kestra's `kv()` prints (w9c `types.<T>.kv_prints`,
+//!   `types._rule_read`). [`check_readable`] is the write rule built on it.
+//! - [`unmodelled`]: what the KV store does not model (a blob, a clob, an
+//!   s-expression, an annotation), found at any depth.
 //! - [`parse_ttl`]: a `ttl`, judged as the task or as the API's header does.
+
+use std::ops::ControlFlow;
 
 use serde_json::Value;
 
@@ -75,172 +82,498 @@ impl std::fmt::Display for KvType {
     }
 }
 
-/// A value as egret stores and reads it back: DATETIME, DATE and DURATION
-/// are JSON strings in the form w9c `types.<T>.kv_prints` measured (§4.2, §15).
+/// One number of a stored value, with its Ion kind and its exact digits (the
+/// user's ruling, 2026-10-07: "decimals are preserved exactly").
 ///
-/// # Numbers
-///
-/// This crate's `serde_json` is `arbitrary_precision`, so a NUMBER keeps the
-/// text it was built from:
-///
-/// - an integer text (`42`, `-7`, `123456789012345678901234567890`) is an Ion
-///   int, exact at any size;
-/// - any other text (`1.5`, `100.0`, `1e20`, `1.5e+20`) is a Java `Double`,
-///   written as Ion float text (`1.5e0`, `100e0`, `1.0e20`): what Kestra's
-///   Jackson makes of a JSON or rendered number;
-/// - EXCEPT a text ending `e+0` (`1.50e+0`), which is an Ion DECIMAL: only the
-///   API's `PUT` stores one (w9c `api.put_bodies.ion_float`, `dec_150`,
-///   `nested_dec`), built with [`ion_decimal_number`], and it is written as
-///   its coefficient without trailing zeros (`1.5`). `Number::from_f64`
-///   never spells an exponent `e+`; `serde_json` parsing does only for JSON
-///   text that writes an exponent, and the one it maps to `e+0` (`1.5e0`,
-///   `1.5E+0`) is the known corner where a flow's JSON text would be stored
-///   as a decimal (the same value read back, other bytes);
-/// - the strings `NaN`, `Infinity` and `-Infinity` as a top-level NUMBER are
-///   Ion's `nan`, `+inf` and `-inf` (w9c `api.put_bodies.ion_nan`), as
-///   [`decode`] reads them back.
+/// - A number that arrives as an Ion **decimal** (only the API's `PUT` makes
+///   one) stays a decimal through every read, merge and write, no digit lost.
+/// - A **float** stays a float: a Java `Double`, as Kestra's Jackson makes of
+///   any JSON or rendered number with a fraction or an exponent.
+/// - An **int** stays an int, exact at any size.
+#[derive(Clone, Debug, PartialEq)]
+pub enum KvNumber {
+    /// `-?[0-9]+`, exact at any size: an Ion int.
+    Int(String),
+    /// An Ion decimal as `java.math.BigDecimal.toPlainString` writes it:
+    /// `-?[0-9]+(\.[0-9]+)?`, its scale kept, never an exponent, no negative
+    /// zero (a `BigDecimal` has none). This is also the text a reader sees
+    /// ([`KvData::to_json`]): no fixture cell measures how Kestra prints a
+    /// decimal it read, so the plain form is egret's choice (spec §4.2).
+    Decimal(String),
+    /// An Ion float (a Java `Double`), NaN and the infinities included.
+    Float(f64),
+}
+
+impl KvNumber {
+    /// An Ion int's text: `Some` only for `-?[0-9]+`.
+    pub fn int(text: &str) -> Option<Self> {
+        is_digits(text.strip_prefix('-').unwrap_or(text)).then(|| KvNumber::Int(text.into()))
+    }
+
+    /// A decimal in plain notation (`1.50`, `-0.025`, `2`): `Some` only for
+    /// `-?[0-9]+(\.[0-9]+)?`. A negative zero is zero.
+    pub fn decimal(plain: &str) -> Option<Self> {
+        let unsigned = plain.strip_prefix('-').unwrap_or(plain);
+        let (int, frac) = match unsigned.split_once('.') {
+            Some((int, frac)) => (int, Some(frac)),
+            None => (unsigned, None),
+        };
+        if !is_digits(int) || !frac.is_none_or(is_digits) {
+            return None;
+        }
+        let zero = unsigned.bytes().all(|b| b == b'0' || b == b'.');
+        Some(KvNumber::Decimal(
+            if zero { unsigned } else { plain }.into(),
+        ))
+    }
+
+    /// The Ion decimal `d` in plain notation ([`KvNumber::Decimal`]), or why
+    /// not: its digits would be longer than `cap` (`1d99999999` is eleven
+    /// bytes of Ion and a hundred million digits of text).
+    fn of_ion_decimal(d: &ion_rs::Decimal, cap: u64) -> Result<Self, String> {
+        let coefficient = d.coefficient();
+        let digits = coefficient.magnitude().to_string();
+        let sign = if coefficient.is_negative() && !d.is_zero() {
+            "-"
+        } else {
+            ""
+        };
+        let exponent = d.exponent();
+        let len = digits.len() as u64;
+        let shift = exponent.unsigned_abs();
+        let plain_len = if exponent >= 0 {
+            len.saturating_add(shift)
+        } else {
+            len.max(shift).saturating_add(2)
+        };
+        if plain_len > cap {
+            return Err(format!(
+                "holds a decimal of {plain_len} digits, more than workflow.storage.max_read_bytes \
+                 ({cap} bytes)"
+            ));
+        }
+        let text = if exponent >= 0 {
+            if d.is_zero() {
+                "0".to_string()
+            } else {
+                format!("{sign}{digits}{}", "0".repeat(shift as usize))
+            }
+        } else {
+            let scale = shift as usize;
+            if digits.len() > scale {
+                let (int, frac) = digits.split_at(digits.len() - scale);
+                format!("{sign}{int}.{frac}")
+            } else {
+                format!("{sign}0.{}{digits}", "0".repeat(scale - digits.len()))
+            }
+        };
+        Ok(KvNumber::Decimal(text))
+    }
+
+    /// This number as a JSON number: an int or a decimal by its exact text
+    /// (this crate's `serde_json` is `arbitrary_precision`), a float as
+    /// `storage::ion` shows one (NaN and the infinities as the strings `NaN`,
+    /// `Infinity`, `-Infinity`).
+    fn to_json(&self) -> Value {
+        match self {
+            KvNumber::Int(text) | KvNumber::Decimal(text) => {
+                serde_json::from_str::<serde_json::Number>(text)
+                    .map(Value::Number)
+                    .unwrap_or_else(|_| Value::String(text.clone()))
+            }
+            KvNumber::Float(f) if f.is_nan() => Value::String("NaN".into()),
+            KvNumber::Float(f) if f.is_infinite() => {
+                Value::String(if *f > 0.0 { "Infinity" } else { "-Infinity" }.into())
+            }
+            KvNumber::Float(f) => serde_json::Number::from_f64(*f)
+                .map(Value::Number)
+                .unwrap_or(Value::Null),
+        }
+    }
+
+    /// Ion text: an int as its digits; a decimal as its digits with the
+    /// trailing zeros after the point dropped, the point always written
+    /// (w9c `api.put_bodies.dec_150`: `1.50` is stored as `1.5`; `2` as
+    /// `2.`, which Ion reads as a decimal); a float as Kestra writes a
+    /// `Double` (`1.5e0`, `nan`).
+    fn write(&self, out: &mut String) {
+        match self {
+            KvNumber::Int(text) => out.push_str(text),
+            KvNumber::Decimal(text) => {
+                let (int, frac) = text.split_once('.').unwrap_or((text, ""));
+                out.push_str(int);
+                out.push('.');
+                out.push_str(frac.trim_end_matches('0'));
+            }
+            KvNumber::Float(f) => crate::runners::write_ion_float(out, *f),
+        }
+    }
+}
+
+fn is_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// A value as the KV store holds it: JSON's shapes, with every number a
+/// [`KvNumber`]. This is the merge-ready value: [`decode`] makes it, `Put`'s
+/// merge (Task 3) works on it, [`encode`] writes it, and
+/// [`KvData::to_json`] is what a reader (`kv()`, `Get`, the API) sees.
+#[derive(Clone, Debug, PartialEq)]
+pub enum KvData {
+    Null,
+    Bool(bool),
+    Number(KvNumber),
+    String(String),
+    List(Vec<KvData>),
+    /// The fields in order, each name once.
+    Struct(Vec<(String, KvData)>),
+}
+
+impl KvData {
+    /// A flow's value, with `serde_json`'s semantics (the user's ruling,
+    /// 2026-10-07): a number written with only digits is an int, any other
+    /// (a fraction, an exponent) a float, as Kestra's Jackson reads a JSON
+    /// or rendered number. A flow never makes a decimal. A null inside an
+    /// object is kept (Kestra writes it; every read drops it).
+    pub fn from_json(v: &Value) -> Self {
+        match v {
+            Value::Null => KvData::Null,
+            Value::Bool(b) => KvData::Bool(*b),
+            Value::Number(n) => {
+                let text = n.to_string();
+                KvData::Number(KvNumber::int(&text).unwrap_or_else(|| {
+                    // A text `serde_json` accepted but `f64` does not parse
+                    // cannot occur; out of range is an infinity, as in Java.
+                    KvNumber::Float(text.parse().unwrap_or(f64::NAN))
+                }))
+            }
+            Value::String(s) => KvData::String(s.clone()),
+            Value::Array(items) => KvData::List(items.iter().map(Self::from_json).collect()),
+            Value::Object(map) => KvData::Struct(
+                map.iter()
+                    .map(|(name, item)| (name.clone(), Self::from_json(item)))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// What a reader sees: JSON, an int or a decimal by its exact text, a
+    /// float as `storage::ion` shows one (see [`KvNumber::to_json`]).
+    pub fn to_json(&self) -> Value {
+        match self {
+            KvData::Null => Value::Null,
+            KvData::Bool(b) => Value::Bool(*b),
+            KvData::Number(n) => n.to_json(),
+            KvData::String(s) => Value::String(s.clone()),
+            KvData::List(items) => Value::Array(items.iter().map(Self::to_json).collect()),
+            KvData::Struct(fields) => Value::Object(
+                fields
+                    .iter()
+                    .map(|(name, item)| (name.clone(), item.to_json()))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// One Ion value read from the store, or why the KV store cannot hold
+    /// it: anything [`unmodelled`] finds, or a decimal whose plain digits are
+    /// longer than `cap`. A field whose value is a null is dropped, as every
+    /// Kestra read drops it (w9c `types.json_nested`); a field named twice
+    /// keeps its first place and its last value. A timestamp inside a value
+    /// is its text, as the preview shows it (`storage::ion`).
+    pub fn from_element(element: &ion_rs::Element, cap: u64) -> Result<Self, String> {
+        if let Some(found) = unmodelled(element) {
+            return Err(format!(
+                "holds {}, which the KV store does not model",
+                found.with_article()
+            ));
+        }
+        Self::convert(element, cap)
+    }
+
+    fn convert(element: &ion_rs::Element, cap: u64) -> Result<Self, String> {
+        use ion_rs::Value as V;
+        Ok(match element.value() {
+            V::Null(_) => KvData::Null,
+            V::Bool(b) => KvData::Bool(*b),
+            V::Int(i) => KvData::Number(KvNumber::Int(i.to_string())),
+            V::Float(f) => KvData::Number(KvNumber::Float(*f)),
+            V::Decimal(d) => KvData::Number(KvNumber::of_ion_decimal(d, cap)?),
+            V::Timestamp(t) => KvData::String(crate::storage::ion::timestamp_text(t)),
+            V::Symbol(s) => s
+                .text()
+                .map_or(KvData::Null, |t| KvData::String(t.to_string())),
+            V::String(s) => KvData::String(s.text().to_string()),
+            V::List(seq) => KvData::List(
+                seq.elements()
+                    .map(|item| Self::convert(item, cap))
+                    .collect::<Result<_, _>>()?,
+            ),
+            V::Struct(st) => {
+                let mut fields: Vec<(String, KvData)> = Vec::new();
+                let mut at = std::collections::HashMap::new();
+                for (name, item) in st.fields() {
+                    if item.is_null() {
+                        continue;
+                    }
+                    let name = name.text().unwrap_or("").to_string();
+                    let item = Self::convert(item, cap)?;
+                    match at.get(&name) {
+                        Some(&i) => fields[i] = (name, item),
+                        None => {
+                            at.insert(name.clone(), fields.len());
+                            fields.push((name, item));
+                        }
+                    }
+                }
+                KvData::Struct(fields)
+            }
+            V::Blob(_) | V::Clob(_) | V::SExp(_) => {
+                return Err("holds a value the KV store does not model".into())
+            }
+        })
+    }
+
+    /// "a string", "a number", …: how a refusal names this value's shape.
+    pub fn shape(&self) -> &'static str {
+        match self {
+            KvData::Null => "null",
+            KvData::Bool(_) => "a boolean",
+            KvData::Number(_) => "a number",
+            KvData::String(_) => "a string",
+            KvData::List(_) => "a list",
+            KvData::Struct(_) => "a struct",
+        }
+    }
+
+    fn write(&self, out: &mut String) {
+        match self {
+            KvData::Null => out.push_str("null"),
+            KvData::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            KvData::Number(n) => n.write(out),
+            KvData::String(s) => crate::runners::write_ion_string(out, s),
+            KvData::List(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    item.write(out);
+                }
+                out.push(']');
+            }
+            KvData::Struct(fields) => {
+                out.push('{');
+                for (i, (name, item)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    crate::runners::write_ion_symbol(out, name);
+                    out.push(':');
+                    item.write(out);
+                }
+                out.push('}');
+            }
+        }
+    }
+}
+
+/// What the KV store does not model (the user's ruling, 2026-10-07): a
+/// blob, a clob, an s-expression, or an annotation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unmodelled {
+    Blob,
+    Clob,
+    SExp,
+    Annotation,
+}
+
+impl Unmodelled {
+    /// `blob`, `clob`, `sexp`, `annotation`: the name a refusal gives.
+    pub fn name(self) -> &'static str {
+        match self {
+            Unmodelled::Blob => "blob",
+            Unmodelled::Clob => "clob",
+            Unmodelled::SExp => "sexp",
+            Unmodelled::Annotation => "annotation",
+        }
+    }
+
+    fn with_article(self) -> String {
+        match self {
+            Unmodelled::Annotation => "an annotation".into(),
+            other => format!("a {}", other.name()),
+        }
+    }
+}
+
+/// The first blob, clob or s-expression anywhere in `element` (the type is
+/// refused before the annotation rule: w9c `api.put_bodies.annot_blob`);
+/// else [`Unmodelled::Annotation`] when any value at any depth is annotated;
+/// else `None`. [`decode`] refuses whatever this finds (egret's encoder
+/// writes none of them, so the object is not egret's); the API's `PUT`
+/// (Task 6) refuses a type with 400 and keeps an annotated body as its raw
+/// text (`nested_blob`, `nested_sexp`, `annot_blob`, `nested_annot`). The
+/// depth is the reader's, at most `storage::ion::MAX_DEPTH`.
+pub fn unmodelled(element: &ion_rs::Element) -> Option<Unmodelled> {
+    fn walk(element: &ion_rs::Element, annotated: &mut bool) -> ControlFlow<Unmodelled> {
+        use ion_rs::Value as V;
+        if !element.annotations().is_empty() {
+            *annotated = true;
+        }
+        match element.value() {
+            V::Blob(_) => ControlFlow::Break(Unmodelled::Blob),
+            V::Clob(_) => ControlFlow::Break(Unmodelled::Clob),
+            V::SExp(_) => ControlFlow::Break(Unmodelled::SExp),
+            V::List(seq) => seq.elements().try_for_each(|item| walk(item, annotated)),
+            V::Struct(st) => st.fields().try_for_each(|(_, item)| walk(item, annotated)),
+            _ => ControlFlow::Continue(()),
+        }
+    }
+    let mut annotated = false;
+    match walk(element, &mut annotated) {
+        ControlFlow::Break(found) => Some(found),
+        ControlFlow::Continue(()) => annotated.then_some(Unmodelled::Annotation),
+    }
+}
+
+/// A value as egret stores and reads it back: its type and its data.
+/// DATETIME, DATE and DURATION are strings in the form w9c
+/// `types.<T>.kv_prints` measured (§4.2, §15).
 #[derive(Clone, Debug, PartialEq)]
 pub struct KvValue {
     pub kind: KvType,
-    pub json: Value,
+    pub data: KvData,
 }
 
-/// The object's bytes, byte-equal to w9c `types.<T>.ion_bytes`: Ion text
-/// through `runners::ionfmt::write_ion_json` for every type (a DURATION is an
-/// Ion string, `"P1D"` with its quotes), except a DATETIME or DATE, written as
-/// the Ion timestamp literal the fixture shows (UTC, millisecond precision; a
-/// DATE at day precision), and an API decimal (see [`KvValue`]).
-pub fn encode(v: &KvValue) -> Vec<u8> {
-    let mut out = String::new();
-    match (v.kind, &v.json) {
-        (KvType::Datetime, Value::String(s)) if write_datetime(&mut out, s) => {}
-        (KvType::Date, Value::String(s)) if write_date(&mut out, s) => {}
-        (KvType::Number, Value::String(s)) if write_special_float(&mut out, s) => {}
-        _ => write_json(&mut out, &v.json),
-    }
-    out.into_bytes()
-}
-
-/// `write_ion_json`, with an API decimal (a number text ending `e+0`, see
-/// [`KvValue`]) at any depth written as an Ion decimal.
-fn write_json(out: &mut String, v: &Value) {
-    if !holds_decimal(v) {
-        crate::runners::write_ion_json(out, v);
-        return;
-    }
-    match v {
-        Value::Number(n) => match ion_decimal(&n.to_string()) {
-            Some(text) => out.push_str(&text),
-            None => crate::runners::write_ion_json(out, v),
-        },
-        Value::Array(items) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_json(out, item);
-            }
-            out.push(']');
+impl KvValue {
+    /// A flow's value of `kind` ([`KvData::from_json`]).
+    pub fn from_json(kind: KvType, json: &Value) -> Self {
+        KvValue {
+            kind,
+            data: KvData::from_json(json),
         }
-        Value::Object(map) => {
-            out.push('{');
-            for (i, (name, item)) in map.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                crate::runners::write_ion_symbol(out, name);
-                out.push(':');
-                write_json(out, item);
-            }
-            out.push('}');
-        }
-        other => crate::runners::write_ion_json(out, other),
     }
 }
 
-fn holds_decimal(v: &Value) -> bool {
-    match v {
-        Value::Number(n) => ion_decimal(&n.to_string()).is_some(),
-        Value::Array(items) => items.iter().any(holds_decimal),
-        Value::Object(map) => map.values().any(holds_decimal),
+/// Whether `data` can be a value of `kind` (review M6): what [`decode`]
+/// accepts back, so nothing [`encode`] writes is unreadable for its type.
+fn agree(kind: KvType, data: &KvData) -> Result<(), String> {
+    let ok = match (kind, data) {
+        (KvType::String, KvData::String(_) | KvData::Null)
+        | (KvType::Number, KvData::Number(_))
+        | (KvType::Boolean, KvData::Bool(_))
+        | (KvType::Duration, KvData::String(_))
+        | (KvType::Json, KvData::List(_) | KvData::Struct(_)) => true,
+        (KvType::Datetime, KvData::String(s)) => {
+            return instant(s).map(drop).ok_or_else(|| {
+                format!("a DATETIME value must be an RFC 3339 instant, and '{s}' is not one")
+            })
+        }
+        (KvType::Date, KvData::String(s)) => {
+            return date(s).map(drop).ok_or_else(|| {
+                format!("a DATE value must be a YYYY-MM-DD date, and '{s}' is not one")
+            })
+        }
         _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("a {kind} value cannot be {}", data.shape()))
     }
 }
 
-/// An Ion decimal as a NUMBER [`encode`] writes as one: `plain` is
-/// `-?[0-9]+(\.[0-9]+)?` (`1.50`, `0.1`, `-2`), the API body's decimal in
-/// plain notation (Task 6 normalises `1.5d0` and `15d-1` to it). `None` for
-/// any other text.
-pub fn ion_decimal_number(plain: &str) -> Option<serde_json::Number> {
-    let digits = plain.strip_prefix('-').unwrap_or(plain);
-    let (int, frac) = digits.split_once('.').unwrap_or((digits, "0"));
-    let ok = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    if !ok(int) || !ok(frac) {
-        return None;
+fn instant(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+fn date(s: &str) -> Option<chrono::NaiveDate> {
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+}
+
+/// The object's bytes, byte-equal to w9c `types.<T>.ion_bytes`: Ion text of
+/// the data (see [`KvNumber`] for the numbers; a DURATION is an Ion string,
+/// `"P1D"` with its quotes), except a DATETIME or DATE, written as the Ion
+/// timestamp literal the fixture shows (UTC, millisecond precision, from
+/// w9c `types.dt*`: `2025-01-02T03:04:05.000Z`, nanoseconds truncated; a
+/// DATE at day precision). Err when the data cannot be a value of its type
+/// (review M6: a DURATION holding a number, a DATETIME that is not an
+/// instant), naming both.
+pub fn encode(v: &KvValue) -> Result<Vec<u8>, String> {
+    agree(v.kind, &v.data)?;
+    let mut out = String::new();
+    match (v.kind, &v.data) {
+        (KvType::Datetime, KvData::String(s)) => {
+            let t = instant(s).expect("agree checked it");
+            out.push_str(&t.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
+        }
+        (KvType::Date, KvData::String(s)) => {
+            let d = date(s).expect("agree checked it");
+            out.push_str(&d.format("%Y-%m-%d").to_string());
+        }
+        (_, data) => data.write(&mut out),
     }
-    serde_json::from_str(&format!("{plain}e0")).ok()
+    Ok(out.into_bytes())
 }
 
-/// `1.50e+0` -> `1.5`, `2e+0` -> `2.`, `-0.10e+0` -> `-0.1`: the coefficient
-/// without trailing zeros after the point, as the artifact stores an API
-/// decimal (w9c `api.put_bodies.dec_150`: `1.50` -> `1.5`). `None` for a text
-/// that is not [`ion_decimal_number`]'s.
-fn ion_decimal(text: &str) -> Option<String> {
-    let mantissa = text.strip_suffix("e+0")?;
-    let (sign, unsigned) = match mantissa.strip_prefix('-') {
-        Some(m) => ("-", m),
-        None => ("", mantissa),
-    };
-    let (int, frac) = unsigned.split_once('.').unwrap_or((unsigned, ""));
-    if int.is_empty() || !int.bytes().chain(frac.bytes()).all(|b| b.is_ascii_digit()) {
-        return None;
+/// The write rule (the user's ruling on the value cap, 2026-10-07: anything
+/// writable is also readable; review I2): the bytes [`encode`] makes of `v`,
+/// refused when they are longer than `cap` (`workflow.storage.max_read_bytes`)
+/// or when [`decode`] under the same `cap` would refuse them -- so a stored
+/// value always reads, by construction. Every write path (`Set`, `Put`'s
+/// merged result, the API's `PUT`) stages exactly these bytes, and a refusal
+/// is the author's (413 on the API).
+///
+/// The bound that bites first for dense JSON is the Ion reader's value
+/// budget, one value per 64 bytes of the cap (`storage::ion::ELEMENT_BYTES`:
+/// 163 840 values at the 10 MiB default, about 320 KB of small numbers),
+/// which bounds the memory a read takes (spec §4.2).
+///
+/// It runs the Ion reader: call it off the async runtime
+/// (`spawn_blocking`), as `store::read_value` runs [`decode`].
+pub fn check_readable(v: &KvValue, cap: u64) -> Result<Vec<u8>, String> {
+    let bytes = encode(v)?;
+    if bytes.len() as u64 > cap {
+        return Err(format!(
+            "the {} value is {} bytes as stored, more than workflow.storage.max_read_bytes \
+             ({cap} bytes) allows a KV value",
+            v.kind,
+            bytes.len()
+        ));
     }
-    Some(format!("{sign}{int}.{}", frac.trim_end_matches('0')))
+    decode(v.kind, &bytes, cap).map_err(|why| {
+        format!(
+            "the {} value is not stored: it could not be read back under \
+             workflow.storage.max_read_bytes ({cap} bytes): {why}",
+            v.kind
+        )
+    })?;
+    Ok(bytes)
 }
 
-/// A top-level NUMBER that is not finite: Ion's spelling.
-fn write_special_float(out: &mut String, s: &str) -> bool {
-    let text = match s {
-        "NaN" => "nan",
-        "Infinity" => "+inf",
-        "-Infinity" => "-inf",
-        _ => return false,
-    };
-    out.push_str(text);
-    true
-}
-
-/// An RFC 3339 instant as an Ion timestamp in UTC at millisecond precision
-/// (w9c `types.dt*`: `2025-01-02T03:04:05.000Z`; nanoseconds truncated).
-fn write_datetime(out: &mut String, s: &str) -> bool {
-    let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) else {
-        return false;
-    };
-    let t = t.with_timezone(&chrono::Utc);
-    out.push_str(&t.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
-    true
-}
-
-/// An ISO date as a day-precision Ion timestamp (w9c `types.date`:
-/// `2025-01-02`).
-fn write_date(out: &mut String, s: &str) -> bool {
-    let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") else {
-        return false;
-    };
-    out.push_str(&d.format("%Y-%m-%d").to_string());
-    true
-}
-
-/// The bytes back to the JSON value of `kind`: exactly one Ion value through
-/// `storage::ion::read_values_capped` (bounded by `cap`), then normalised for
+/// The bytes back to the [`KvData`] of `kind`: exactly one Ion value through
+/// `storage::ion::for_each_value` (bounded by `cap`, the preview's reader),
+/// with nothing [`unmodelled`] in it at any depth, then normalised for
 /// DATETIME/DATE as [`encode`] wrote them and for DURATION as w9c
 /// `types._rule_read` prints it. A null inside a map is dropped, as every
 /// Kestra read drops it (w9c `types.json_nested`). Err names what is wrong,
 /// never a storage key.
-pub fn decode(kind: KvType, bytes: &[u8], cap: u64) -> Result<Value, String> {
-    use crate::storage::ion::{read_values_capped, Stop};
-    let (mut values, stop) = read_values_capped(bytes, 1, cap);
+///
+/// CPU-bound: it runs the Ion reader on its own thread and joins it. Call it
+/// off the async runtime, as `store::read_value` does.
+pub fn decode(kind: KvType, bytes: &[u8], cap: u64) -> Result<KvData, String> {
+    use crate::storage::ion::{for_each_value, Stop};
+    let mut values: Vec<Result<KvData, String>> = Vec::with_capacity(1);
+    let stop = for_each_value(bytes, cap, |element| {
+        if !values.is_empty() {
+            return ControlFlow::Break(());
+        }
+        values.push(KvData::from_element(element, cap));
+        ControlFlow::Continue(())
+    });
     match stop {
         Stop::End => {}
         Stop::Full => {
@@ -252,40 +585,35 @@ pub fn decode(kind: KvType, bytes: &[u8], cap: u64) -> Result<Value, String> {
             return Err(format!("the stored {kind} value cannot be read: {e}"))
         }
     }
-    let Some(v) = values.pop() else {
-        return Err(format!("the stored {kind} value holds no Ion value"));
-    };
-    let mismatch = |v: &Value| {
-        let what = match v {
-            Value::Null => "null",
-            Value::Bool(_) => "a boolean",
-            Value::Number(_) => "a number",
-            Value::String(_) => "a string",
-            Value::Array(_) => "a list",
-            Value::Object(_) => "a struct",
-        };
-        format!("the stored {kind} value is {what}, not a {kind}")
-    };
-    match (kind, v) {
-        // A rendered `null` is stored as Ion `null`, typed STRING (`KvType::of`).
-        (KvType::String, v @ (Value::String(_) | Value::Null)) => Ok(v),
-        (KvType::Number, v @ Value::Number(_)) => Ok(v),
-        // `storage::ion`'s spelling of a float that is not finite.
-        (KvType::Number, Value::String(s))
-            if matches!(s.as_str(), "NaN" | "Infinity" | "-Infinity") =>
-        {
-            Ok(Value::String(s))
+    let data = match values.pop() {
+        None => return Err(format!("the stored {kind} value holds no Ion value")),
+        Some(Err(why)) => {
+            return Err(format!(
+                "the stored {kind} value {why}; egret's KV store writes none, so the object \
+                 was not written by it"
+            ))
         }
-        (KvType::Boolean, v @ Value::Bool(_)) => Ok(v),
-        (KvType::Json, v @ (Value::Object(_) | Value::Array(_))) => Ok(v),
-        (KvType::Datetime, Value::String(s)) => chrono::DateTime::parse_from_rfc3339(&s)
-            .map(|t| Value::String(java_instant(t.with_timezone(&chrono::Utc))))
-            .map_err(|_| format!("the stored DATETIME value '{s}' is not an instant")),
-        (KvType::Date, Value::String(s)) => chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d")
-            .map(|d| Value::String(d.format("%Y-%m-%d").to_string()))
-            .map_err(|_| format!("the stored DATE value '{s}' is not a date")),
-        (KvType::Duration, Value::String(s)) => Ok(Value::String(kestra_duration(&s).unwrap_or(s))),
-        (_, v) => Err(mismatch(&v)),
+        Some(Ok(data)) => data,
+    };
+    match (kind, data) {
+        // A rendered `null` is stored as Ion `null`, typed STRING (`KvType::of`).
+        (KvType::String, d @ (KvData::String(_) | KvData::Null)) => Ok(d),
+        (KvType::Number, d @ KvData::Number(_)) => Ok(d),
+        (KvType::Boolean, d @ KvData::Bool(_)) => Ok(d),
+        (KvType::Json, d @ (KvData::Struct(_) | KvData::List(_))) => Ok(d),
+        (KvType::Datetime, KvData::String(s)) => instant(&s)
+            .map(|t| KvData::String(java_instant(t)))
+            .ok_or_else(|| format!("the stored DATETIME value '{s}' is not an instant")),
+        (KvType::Date, KvData::String(s)) => date(&s)
+            .map(|d| KvData::String(d.format("%Y-%m-%d").to_string()))
+            .ok_or_else(|| format!("the stored DATE value '{s}' is not a date")),
+        (KvType::Duration, KvData::String(s)) => {
+            Ok(KvData::String(kestra_duration(&s).unwrap_or(s)))
+        }
+        (_, d) => Err(format!(
+            "the stored {kind} value is {}, not a {kind}",
+            d.shape()
+        )),
     }
 }
 
@@ -433,6 +761,7 @@ pub fn parse_ttl(raw: &str, mode: Ttl) -> Result<chrono::TimeDelta, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!(concat!(
@@ -457,9 +786,8 @@ mod tests {
             }
             let kind = KvType::parse(cell["api"]["type"].as_str().unwrap()).unwrap();
             let get = cell["get_value"].clone();
-            let json = match kind {
-                // A Double (Jackson's read of a non-integer number): the
-                // number of the read, which is f64-backed.
+            let data = match kind {
+                // A Double (Jackson's read of a non-integer number).
                 KvType::Number
                     if !cell["ion_bytes"]
                         .as_str()
@@ -467,22 +795,21 @@ mod tests {
                         .bytes()
                         .all(|b| b.is_ascii_digit() || b == b'-') =>
                 {
-                    let f = get.as_f64().unwrap();
-                    Value::Number(serde_json::Number::from_f64(f).unwrap())
+                    KvData::Number(KvNumber::Float(get.as_f64().unwrap()))
                 }
                 // A JSON value: the set input as Jackson parses it (keeps
                 // the nulls inside maps the read drops).
                 KvType::Json => {
                     let input = cell["set"]["value"].as_str().unwrap();
-                    serde_json::from_str(input).unwrap()
+                    KvData::from_json(&serde_json::from_str(input).unwrap())
                 }
                 // A DURATION is stored as written.
-                KvType::Duration => cell["set"]["value"].clone(),
-                _ => get.clone(),
+                KvType::Duration => KvData::from_json(&cell["set"]["value"]),
+                _ => KvData::from_json(&get),
             };
             rows.push((
                 name,
-                KvValue { kind, json },
+                KvValue { kind, data },
                 cell["ion_bytes"].as_str().unwrap().to_string(),
                 get,
             ));
@@ -515,7 +842,11 @@ mod tests {
         assert_eq!(rows.len(), 39, "every types row is examined");
         let mut kinds = std::collections::BTreeSet::new();
         for (name, v, bytes, _) in &rows {
-            assert_eq!(String::from_utf8(encode(v)).unwrap(), *bytes, "{name}");
+            assert_eq!(
+                String::from_utf8(encode(v).unwrap()).unwrap(),
+                *bytes,
+                "{name}"
+            );
             kinds.insert(v.kind);
         }
         assert_eq!(kinds.len(), 7, "every type is covered: {kinds:?}");
@@ -524,7 +855,9 @@ mod tests {
     #[test]
     fn decode_reads_back_what_encode_wrote_for_every_type() {
         for (name, v, _, get) in types_rows() {
-            let back = decode(v.kind, &encode(&v), 1 << 20).unwrap();
+            let back = decode(v.kind, &encode(&v).unwrap(), 1 << 20)
+                .unwrap()
+                .to_json();
             assert!(json_eq(&back, &get), "{name}: {back} vs {get}");
         }
     }
@@ -540,7 +873,7 @@ mod tests {
             }
             let kind = KvType::parse(cell["api"]["type"].as_str().unwrap()).unwrap();
             let bytes = cell["ion_bytes"].as_str().unwrap();
-            let got = decode(kind, bytes.as_bytes(), 1 << 20).unwrap();
+            let got = decode(kind, bytes.as_bytes(), 1 << 20).unwrap().to_json();
             // The egret answer: get_value JSON-equal, and the API's value.
             assert!(json_eq(&got, &cell["get_value"]), "{name}: {got}");
             assert!(json_eq(&got, &cell["api"]["value"]), "{name}: {got}");
@@ -561,19 +894,23 @@ mod tests {
     fn a_duration_is_stored_as_an_ion_string() {
         let v = KvValue {
             kind: KvType::Duration,
-            json: Value::String("P1D".into()),
+            data: KvData::String("P1D".into()),
         };
-        assert_eq!(encode(&v), b"\"P1D\"");
-        assert_eq!(decode(KvType::Duration, b"\"P1D\"", 4096).unwrap(), "PT24H");
+        assert_eq!(encode(&v).unwrap(), b"\"P1D\"");
+        assert_eq!(
+            decode(KvType::Duration, b"\"P1D\"", 4096).unwrap(),
+            KvData::String("PT24H".into())
+        );
         // Not Kestra's pattern: as written (w9c set_coercion.dur_lower).
         for raw in ["p1d", "-PT1S", "PT1.5S", "PD", "PT", "P", "P1DT", "P1H"] {
             let bytes = encode(&KvValue {
                 kind: KvType::Duration,
-                json: Value::String(raw.into()),
-            });
+                data: KvData::String(raw.into()),
+            })
+            .unwrap();
             assert_eq!(
                 decode(KvType::Duration, &bytes, 4096).unwrap(),
-                raw,
+                KvData::String(raw.into()),
                 "{raw}"
             );
         }
@@ -613,68 +950,371 @@ mod tests {
         assert!(decode(KvType::String, big.as_bytes(), 40_000).is_ok());
     }
 
+    fn dec(plain: &str) -> KvData {
+        KvData::Number(KvNumber::decimal(plain).unwrap())
+    }
+
+    fn written(kind: KvType, data: KvData) -> String {
+        String::from_utf8(encode(&KvValue { kind, data }).unwrap()).unwrap()
+    }
+
+    /// An API body as Task 6 will take it: one Ion value, through the same
+    /// walk and conversion `decode` uses.
+    fn api_body(body: &str) -> KvData {
+        let element = ion_rs::Element::read_one(body.as_bytes()).unwrap();
+        KvData::from_element(&element, 1 << 20).unwrap()
+    }
+
     #[test]
     fn the_api_decimals_and_non_finite_numbers_are_byte_equal_to_the_artifact() {
         // w9c api.put_bodies: ion_float `1.5`, dec_150 `1.50` -> `1.5`,
-        // dec_0_1 `0.1`, ion_decimal_d `1.5d0` -> `1.5`, nested_dec, ion_nan.
-        let num = |t: &str| Value::Number(serde_json::from_str(t).unwrap());
-        let dec = |t: &str| Value::Number(ion_decimal_number(t).unwrap());
-        for (json, bytes) in [
+        // dec_0_1 `0.1`, ion_decimal_d `1.5d0` -> `1.5`, ion_nan.
+        for (data, bytes) in [
             (dec("1.5"), "1.5"),
             (dec("1.50"), "1.5"),
             (dec("0.1"), "0.1"),
             (dec("-0.025"), "-0.025"),
             (dec("2"), "2."),
             (dec("200.00"), "200."),
+            (dec("-0.0"), "0."),
             (
                 dec("123456789012345678901234567890.5"),
                 "123456789012345678901234567890.5",
             ),
         ] {
-            let v = KvValue {
-                kind: KvType::Number,
-                json,
-            };
-            assert_eq!(String::from_utf8(encode(&v)).unwrap(), bytes);
+            assert_eq!(written(KvType::Number, data), bytes);
         }
-        for bad in ["1e5", "", "-", ".5", "5.", "1.5d0", "a"] {
-            assert!(ion_decimal_number(bad).is_none(), "{bad}");
+        for bad in ["1e5", "", "-", ".5", "5.", "1.5d0", "a", "1.5e0", "--1"] {
+            assert!(KvNumber::decimal(bad).is_none(), "{bad}");
         }
         // The controls: Doubles of the same values stay Ion floats.
         for (json, bytes) in [
-            (num("1.5"), "1.5e0"),
-            (num("1.5e20"), "1.5e20"),
-            (num("1e-7"), "1.0e-7"),
+            (json!(1.5), "1.5e0"),
+            (json!(1.5e20), "1.5e20"),
+            (json!(1e-7), "1.0e-7"),
         ] {
-            let v = KvValue {
-                kind: KvType::Number,
-                json,
-            };
-            assert_eq!(String::from_utf8(encode(&v)).unwrap(), bytes);
+            let v = KvValue::from_json(KvType::Number, &json);
+            assert_eq!(String::from_utf8(encode(&v).unwrap()).unwrap(), bytes);
         }
-        let nested = KvValue {
-            kind: KvType::Json,
-            json: serde_json::json!({"a": {"b": dec("1.5")}, "c d": [num("1.5"), 1]}),
-        };
-        assert_eq!(
-            String::from_utf8(encode(&nested)).unwrap(),
-            "{a:{b:1.5},'c d':[1.5e0,1]}"
-        );
-        let nan = KvValue {
-            kind: KvType::Number,
-            json: Value::String("NaN".into()),
-        };
-        assert_eq!(encode(&nan), b"nan");
-        assert_eq!(decode(KvType::Number, b"nan", 4096).unwrap(), "NaN");
+        let nan = KvData::Number(KvNumber::Float(f64::NAN));
+        assert_eq!(written(KvType::Number, nan), "nan");
+        let back = decode(KvType::Number, b"nan", 4096).unwrap();
+        assert_eq!(back.to_json(), "NaN");
+        assert_eq!(written(KvType::Number, back), "nan");
         assert_eq!(
             decode(KvType::Number, b"1.5", 4096).unwrap(),
-            serde_json::json!(1.5)
+            dec("1.5"),
+            "an Ion decimal reads back as a decimal"
+        );
+    }
+
+    /// The user's ruling (2026-10-07): an API-style Ion `{a:1.5}` is
+    /// encoded, decoded and re-encoded without change, and the decimal is
+    /// still a decimal at every step.
+    #[test]
+    fn an_api_decimal_survives_encode_decode_encode_unchanged() {
+        let body = api_body("{a:1.5}");
+        assert_eq!(
+            body,
+            KvData::Struct(vec![("a".into(), dec("1.5"))]),
+            "the body's 1.5 is a decimal"
+        );
+        let first = written(KvType::Json, body);
+        assert_eq!(first, "{a:1.5}");
+        let read = decode(KvType::Json, first.as_bytes(), 4096).unwrap();
+        assert_eq!(read, KvData::Struct(vec![("a".into(), dec("1.5"))]));
+        let second = written(KvType::Json, read.clone());
+        assert_eq!(second, first, "re-encoded byte for byte");
+        assert_eq!(read.to_json(), json!({"a": 1.5}));
+    }
+
+    /// No digit is lost: neither through a read nor through a write.
+    #[test]
+    fn a_decimal_of_thirty_one_digits_is_exact() {
+        const BIG: &str = "123456789012345678901234567890.5";
+        let body = api_body(BIG);
+        assert_eq!(body, dec(BIG));
+        let bytes = written(KvType::Number, body);
+        assert_eq!(bytes, BIG);
+        let read = decode(KvType::Number, bytes.as_bytes(), 4096).unwrap();
+        assert_eq!(read, dec(BIG));
+        assert_eq!(
+            read.to_json().to_string(),
+            BIG,
+            "the reader sees every digit"
+        );
+        assert_eq!(written(KvType::Number, read), BIG);
+        // A float of the same text is a Double: what a flow makes of it.
+        let float = KvData::from_json(&serde_json::from_str(BIG).unwrap());
+        assert_eq!(
+            float,
+            KvData::Number(KvNumber::Float(1.2345678901234568e29))
+        );
+        // Exponent and scale come through as plain digits.
+        for (ion, plain) in [
+            ("1.5d0", "1.5"),
+            ("15d-1", "1.5"),
+            ("1d3", "1000"),
+            ("1.50", "1.50"),
+            ("0.0000001", "0.0000001"),
+            ("-12345678d-10", "-0.0012345678"),
+            ("-0.0", "0.0"),
+            ("0d5", "0"),
+        ] {
+            assert_eq!(api_body(ion), dec(plain), "{ion}");
+        }
+        // Integers stay integers at any size.
+        let int = "-123456789012345678901234567890";
+        assert_eq!(api_body(int), KvData::Number(KvNumber::Int(int.into())));
+        assert_eq!(
+            KvData::from_json(&serde_json::from_str(int).unwrap()),
+            KvData::Number(KvNumber::Int(int.into()))
+        );
+        assert_eq!(written(KvType::Number, api_body(int)), int);
+    }
+
+    /// A decimal whose plain digits would not fit the cap is refused, not
+    /// expanded: eleven bytes of Ion must not become 100 MB of text.
+    #[test]
+    fn a_decimal_with_a_huge_exponent_is_refused_not_expanded() {
+        for ion in ["1d99999999", "1d-99999999", "[1d9999]"] {
+            let err = decode(KvType::Json, ion.as_bytes(), 4096)
+                .or_else(|_| decode(KvType::Number, ion.as_bytes(), 4096))
+                .unwrap_err();
+            assert!(err.contains("max_read_bytes"), "{ion}: {err}");
+        }
+        assert_eq!(
+            decode(KvType::Number, b"1d9", 4096).unwrap(),
+            dec("1000000000")
+        );
+    }
+
+    /// Every API body of the fixture that is a number or JSON: the stored
+    /// bytes are the cell's, and the reader sees the cell's value
+    /// (`nested_dec` among them).
+    #[test]
+    fn the_api_number_and_json_cells_hold() {
+        let f = fixture();
+        let bodies = f["egret_expected"]["api"]["put_bodies"]
+            .as_object()
+            .unwrap();
+        let mut examined = vec![];
+        for (name, cell) in bodies {
+            if cell["put_status"] != 200 {
+                continue;
+            }
+            let kind = KvType::parse(cell["get"]["type"].as_str().unwrap()).unwrap();
+            let body = cell["body"].as_str().unwrap();
+            let Ok(element) = ion_rs::Element::read_one(body.trim().as_bytes()) else {
+                continue; // raw text: Task 6
+            };
+            let data = match (kind, KvData::from_element(&element, 1 << 20)) {
+                (KvType::Number | KvType::Json, Ok(d)) => d,
+                _ => continue,
+            };
+            let bytes = written(kind, data);
+            assert_eq!(bytes, cell["ion_bytes"].as_str().unwrap(), "{name}");
+            let read = decode(kind, bytes.as_bytes(), 4096).unwrap();
+            assert_eq!(read.to_json(), cell["get"]["value"], "{name}");
+            assert_eq!(written(kind, read), bytes, "{name}: stable");
+            examined.push(name.as_str());
+        }
+        for must in [
+            "nested_dec",
+            "ion_float",
+            "dec_150",
+            "dec_0_1",
+            "ion_decimal_d",
+            "ion_float_e",
+            "float_1e2",
+            "ion_big",
+            "ion_nan",
+            "ion_struct",
+        ] {
+            assert!(examined.contains(&must), "{must} examined: {examined:?}");
+        }
+    }
+
+    /// What Task 3's `Put` does to a stored value: decode, change the
+    /// merge-ready value, encode. The decimals already there stay decimals.
+    #[test]
+    fn a_merge_style_round_trip_keeps_the_decimal() {
+        let stored = b"{a:1.5,c:{d:123456789012345678901234567890.5}}";
+        let mut data = decode(KvType::Json, stored, 4096).unwrap();
+        let KvData::Struct(fields) = &mut data else {
+            panic!("{data:?}")
+        };
+        // A flow's patch `{b: 2, e: 0.5}`: an int and a float.
+        let patch = KvData::from_json(&json!({"b": 2, "e": 0.5}));
+        let KvData::Struct(patch) = patch else {
+            unreachable!()
+        };
+        fields.extend(patch);
+        assert_eq!(
+            written(KvType::Json, data),
+            "{a:1.5,c:{d:123456789012345678901234567890.5},b:2,e:0.5e0}"
         );
     }
 
     #[test]
+    fn floats_stay_floats_and_ints_stay_ints() {
+        let v = KvValue::from_json(KvType::Json, &json!({"f": 1.5, "i": 2, "g": 100.0}));
+        let bytes = String::from_utf8(encode(&v).unwrap()).unwrap();
+        assert_eq!(bytes, "{f:1.5e0,i:2,g:100e0}");
+        let read = decode(KvType::Json, bytes.as_bytes(), 4096).unwrap();
+        assert_eq!(
+            read,
+            KvData::Struct(vec![
+                ("f".into(), KvData::Number(KvNumber::Float(1.5))),
+                ("i".into(), KvData::Number(KvNumber::Int("2".into()))),
+                ("g".into(), KvData::Number(KvNumber::Float(100.0))),
+            ])
+        );
+        assert_eq!(read.to_json().to_string(), r#"{"f":1.5,"i":2,"g":100.0}"#);
+    }
+
+    /// Review M1: a blob, clob, s-expression or annotation at any depth is
+    /// refused naming it (egret writes none), never read as another type.
+    #[test]
+    fn decode_refuses_what_the_kv_store_does_not_model_at_any_depth() {
+        for (kind, bytes, name) in [
+            (KvType::String, "{{aGVsbG8=}}", "a blob"),
+            (KvType::String, "{{\"hello\"}}", "a clob"),
+            (KvType::Json, "(a b)", "a sexp"),
+            (KvType::Json, "{a:{{aGVsbG8=}}}", "a blob"),
+            (KvType::Json, "[1,[2,(b)]]", "a sexp"),
+            (KvType::Number, "x::1", "an annotation"),
+            (KvType::Json, "{a:[1,x::2]}", "an annotation"),
+            (KvType::Json, "x::{a:{{\"c\"}}}", "a clob"),
+        ] {
+            let err = decode(kind, bytes.as_bytes(), 4096).unwrap_err();
+            assert!(
+                err.contains(&format!("holds {name}, which the KV store does not model")),
+                "{bytes}: {err}"
+            );
+        }
+        // The walk Task 6 reuses: a type before an annotation.
+        let walk = |body: &str| unmodelled(&ion_rs::Element::read_one(body).unwrap());
+        assert_eq!(walk("x::{{aGVsbG8=}}"), Some(Unmodelled::Blob));
+        assert_eq!(walk("{a:x::1,b:(c)}"), Some(Unmodelled::SExp));
+        assert_eq!(walk("{a:x::1}"), Some(Unmodelled::Annotation));
+        assert_eq!(walk("{a:[1,{b:\"c\"}]}"), None);
+        assert_eq!(Unmodelled::Clob.name(), "clob");
+    }
+
+    /// Review M6: `encode` refuses data that is not of its type, so a
+    /// DURATION holding a number or a DATETIME that is not an instant is
+    /// never written.
+    #[test]
+    fn encode_refuses_data_that_is_not_of_its_type() {
+        let num = KvData::Number(KvNumber::Int("1".into()));
+        let s = |t: &str| KvData::String(t.into());
+        for (kind, data, says) in [
+            (
+                KvType::Duration,
+                num.clone(),
+                "a DURATION value cannot be a number",
+            ),
+            (KvType::Datetime, s("not a date"), "'not a date' is not one"),
+            (
+                KvType::Datetime,
+                num.clone(),
+                "a DATETIME value cannot be a number",
+            ),
+            (KvType::Date, s("2025-13-01"), "'2025-13-01' is not one"),
+            (KvType::Json, s("{}"), "a JSON value cannot be a string"),
+            (KvType::Json, KvData::Null, "a JSON value cannot be null"),
+            (
+                KvType::Boolean,
+                s("true"),
+                "a BOOLEAN value cannot be a string",
+            ),
+            (KvType::Number, s("1"), "a NUMBER value cannot be a string"),
+            (
+                KvType::String,
+                num.clone(),
+                "a STRING value cannot be a number",
+            ),
+        ] {
+            let err = encode(&KvValue { kind, data }).unwrap_err();
+            assert!(err.contains(says), "{kind}: {err}");
+        }
+        // The controls: each type with data of its own reads back.
+        for (kind, data) in [
+            (KvType::String, s("x")),
+            (KvType::String, KvData::Null),
+            (KvType::Number, num),
+            (KvType::Boolean, KvData::Bool(true)),
+            (KvType::Datetime, s("2025-01-02T03:04:05+07:00")),
+            (KvType::Date, s("2025-01-02")),
+            (KvType::Duration, s("p1d")),
+            (KvType::Json, KvData::List(vec![])),
+        ] {
+            let v = KvValue { kind, data };
+            check_readable(&v, 4096).unwrap_or_else(|e| panic!("{kind}: {e}"));
+        }
+    }
+
+    /// Review I2: anything writable is readable. The reviewer's case, a
+    /// 400 KB list of small numbers under the 10 MiB default, is over the
+    /// reader's value budget, so it is refused at write with the reason --
+    /// never written and then unreadable. Under the budget it reads.
+    #[test]
+    fn check_readable_refuses_at_write_what_decode_would_refuse() {
+        const CAP: u64 = 10 << 20;
+        let zeros = |n: usize| KvValue::from_json(KvType::Json, &Value::Array(vec![json!(0); n]));
+        let big = zeros(200_000);
+        let bytes = encode(&big).unwrap();
+        assert_eq!(bytes.len(), 400_001, "400 KB, far under the cap");
+        let err = check_readable(&big, CAP).unwrap_err();
+        assert!(
+            err.starts_with(
+                "the JSON value is not stored: it could not be read back under \
+                 workflow.storage.max_read_bytes (10485760 bytes)"
+            ) && err.contains("more than 163840 values"),
+            "{err}"
+        );
+        // The control: under the budget, written and read.
+        let fits = zeros(150_000);
+        let bytes = check_readable(&fits, CAP).unwrap();
+        let KvData::List(items) = decode(KvType::Json, &bytes, CAP).unwrap() else {
+            panic!()
+        };
+        assert_eq!(items.len(), 150_000);
+        // Over the cap in bytes: refused naming it, before any decode.
+        let long = KvValue::from_json(KvType::String, &json!("x".repeat(5000)));
+        let err = check_readable(&long, 4096).unwrap_err();
+        assert_eq!(
+            err,
+            "the STRING value is 5002 bytes as stored, more than \
+             workflow.storage.max_read_bytes (4096 bytes) allows a KV value"
+        );
+        // A refusal of the type comes first.
+        let bad = KvValue {
+            kind: KvType::Duration,
+            data: KvData::Bool(true),
+        };
+        assert!(check_readable(&bad, CAP).unwrap_err().contains("DURATION"));
+    }
+
+    /// Review I2 / M3: the system symbol table is no longer charged, so a
+    /// value with no symbol of its own reads at a cap of a few bytes; the
+    /// configured floor (`max_read_bytes` >= 4 KiB) reads every small value.
+    #[test]
+    fn a_small_value_reads_under_a_small_cap() {
+        assert_eq!(
+            decode(KvType::Duration, b"\"P1D\"", 64).unwrap(),
+            KvData::String("PT24H".into())
+        );
+        assert_eq!(
+            decode(KvType::Boolean, b"true", 256).unwrap(),
+            KvData::Bool(true)
+        );
+        assert!(decode(KvType::Json, b"{a:1,b:[2,3]}", 4096).is_ok());
+    }
+
+    #[test]
     fn the_type_of_a_value_and_the_kvtype_spelling() {
-        use serde_json::json;
         for (v, t) in [
             (json!("s"), KvType::String),
             (json!(null), KvType::String),
