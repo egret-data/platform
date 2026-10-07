@@ -8,10 +8,11 @@
 **Đã quyết với người dùng, 2026-10-07:**
 - **(2026-10-07) Phạm vi.** W9c giao hàm `kv()`; các task `Set`, `Get`, `GetKeys` và `Delete`; `PurgeKV`; task `Put` deep-merge; và API KV. Plugin host **không** có cầu KV, vì không plugin nào trong catalog gọi `namespaceKv`. Thông báo từ chối của nó đổi sang chỉ tới các task `core.kv.*` (§10).
 - **(2026-10-07) Phạm vi ghi là của W9b.** Một flow đọc KV của mọi namespace trong workspace của nó. Nó chỉ ghi và xoá trong namespace của chính nó. `PurgeKV` tác động lên namespace của chính flow và các namespace con, theo ranh giới dấu chấm. Một `authorize` dùng chung cho W9b và W9c, thêm một loại tài nguyên KV. Kestra cho một flow ghi vào mọi namespace đã tồn tại; §2 ghi lại chỗ khác này (§5).
-- **(2026-10-07) Lưu trữ theo Kestra.** Giá trị của mỗi revision là một object Ion dạng text ở `{prefix}{ws}/{ns-as-path}/_kv/{key}.ion`, hoặc `….ion.vN` cho revision N > 1. Một bảng Postgres, `workflow.kv_entries`, giữ một dòng mỗi revision: workspace, namespace, key, revision, type, size, description, `expires_at`, deleted, `created_at` và `created_by` (user, execution hoặc task run). egret **lưu** type, còn Kestra suy lại khi đọc; fixture của Task 1 quyết định kết quả đọc có còn khớp Kestra không, và mỗi khác biệt đo được là một dòng trong §2. Một lần ghi dùng lại staging của W9b. Body được stage khi không giữ kết nối hay lock nào. Rồi một transaction ngắn có lock khoá `(ws, ns, key)`, kiểm `overwrite`, chọn revision, copy phía server, chạy `head`, chèn dòng và commit. Nhờ vậy `overwrite: false` và read-merge-write của `Put` không có race. Một giá trị bị chặn bởi `max_file_bytes`; Kestra không có trần (§2). Key theo regex của Kestra `[a-zA-Z0-9][a-zA-Z0-9._-]*`, và độ dài của nó có giới hạn (§3). Migration lấy số trống kế tiếp trên main: hôm nay là 0175, bước rebase của plan kiểm lại (§3, §4).
+- **(2026-10-07) Lưu trữ theo Kestra.** Giá trị của mỗi revision là một object Ion dạng text ở `{prefix}{ws}/{ns-as-path}/_kv/{key}.ion`, hoặc `….ion.vN` cho revision N > 1. Một bảng Postgres, `workflow.kv_entries`, giữ một dòng mỗi revision: workspace, namespace, key, revision, type, size, description, `expires_at`, deleted, `created_at` và `created_by` (user, execution hoặc task run). egret **lưu** type, còn Kestra suy lại khi đọc; fixture của Task 1 quyết định kết quả đọc có còn khớp Kestra không, và mỗi khác biệt đo được là một dòng trong §2. Một lần ghi dùng lại staging của W9b. Body được stage khi không giữ kết nối hay lock nào. Rồi một transaction ngắn có lock khoá `(ws, ns, key)`, kiểm `overwrite`, chọn revision, copy phía server, chạy `head`, chèn dòng và commit. Nhờ vậy `overwrite: false` và read-merge-write của `Put` không có race. Một giá trị bị chặn bởi `max_file_bytes`; Kestra không có trần (§2). *(Sửa ngày 2026-10-07 theo phán quyết của người dùng về trần giá trị, bên dưới: trần là `max_read_bytes`.)* Key theo regex của Kestra `[a-zA-Z0-9][a-zA-Z0-9._-]*`, và độ dài của nó có giới hạn (§3). Migration lấy số trống kế tiếp trên main: hôm nay là 0175, bước rebase của plan kiểm lại (§3, §4).
 - **(2026-10-07) TTL: hết hạn nghĩa là không có.** Đọc một key đã hết hạn cư xử y như đọc một key không có, và tuân theo `errorOnMissing`. Đọc không bao giờ ghi. Một đợt quét mỗi giờ xoá cứng các key hết hạn, cả dòng lẫn object, theo row id, trên mọi workspace, và chạy an toàn trên mọi replica. Kestra xoá mềm khi đọc, báo lỗi bất kể `errorOnMissing`, và chỉ quét tenant `main` cùng các namespace có flow (§2, §4.5, §11).
 - **(2026-10-07) Kế thừa theo Kestra.** Một `kv()` không có namespace, hoặc một `Get` có namespace là của chính flow, đi ngược lên các namespace cha theo ranh giới dấu chấm. Một namespace ghi rõ thì không đi. API có một route liệt kê kế thừa (§4.6, §9).
 - **(2026-10-07) `secret()` trong giá trị của `Set` hay `Put` bị từ chối lúc publish.** Lỗi nói rằng giá trị của secret sẽ bị lộ qua KV store. Điều này khác Kestra (§2, §7).
+- **(2026-10-07, phán quyết của người dùng về trần giá trị) Các lần ghi một giá trị KV bị chặn ở `max_read_bytes`, không phải `max_file_bytes`, nên mọi thứ ghi được thì cũng đọc được.** `Set`, `Put` (kể cả kết quả đã merge của nó) và `PUT` của API từ chối một giá trị đã mã hoá vượt `max_read_bytes`, nêu trần (§2, §4.2, §4.3, §8.1, §8.5, §9).
 - **(2026-10-07) Các điểm thiết kế đã duyệt (phần 2–4 của buổi brainstorm).**
   - Version và xoá mềm theo R1 của W9b. Mỗi lần ghi tạo một revision mới. `Delete` đánh dấu revision mới nhất. Lịch sử thấy được qua API, các revision đã xoá được đánh dấu. Ghi lại sau khi xoá tạo một revision mới.
   - `PurgeKV` chỉ xoá các key hết hạn, hoặc xoá theo version (`before` / `keepAmount`). Nó lọc bằng `keyPattern` và xoá theo row id, phân trang keyset. Quy tắc của W9b áp dụng: purge theo version cần `keepAmount` hoặc `before`.
@@ -56,7 +57,7 @@ Kestra (source `96893b589`; artifact `2.0.0-rc13`, nightly `169ca7f2`, image mà
 | lần đi lên cha của `Get` dừng với lỗi ở một key hết hạn | lần đi coi nó là không có và đi tiếp lên cha (§4.6) | cùng quy tắc: hết hạn nghĩa là không có |
 | đợt quét hết hạn phủ tenant `main` và các namespace có flow | mọi workspace và mọi namespace có KV, mỗi giờ, trên mọi replica (§11) | quyết định của người dùng (2026-10-07): nếu không, một giá trị hết hạn trong một namespace không có flow sẽ giữ storage mãi mãi |
 | `secret()` trong giá trị `Set` lưu secret dạng text thường, không che | bị từ chối lúc publish, nêu tên task và nói secret sẽ bị lộ qua KV (§7) | quyết định của người dùng (2026-10-07): bất kỳ ai có `workflow:read` đều đọc lại được |
-| không có trần cho một giá trị | object Ion được lưu tối đa `max_file_bytes` (§4.2); một lần đọc giải mã giá trị vào bộ nhớ bị chặn bởi `max_read_bytes` (§4.5) | bộ nhớ và storage có giới hạn; `kv()` chèn giá trị vào một lần render |
+| không có trần cho một giá trị | object Ion được lưu tối đa `max_read_bytes` (mặc định 10 MiB), trên mọi đường ghi (§4.2) | bộ nhớ và storage có giới hạn; `kv()` chèn giá trị vào một lần render. Phán quyết của người dùng (2026-10-07): trần ghi bằng giới hạn đọc, nên mọi thứ ghi được thì cũng đọc được |
 | không có trần độ dài key ngoài cột `VARCHAR(350)` | tối đa 350 byte; một key dài hơn là lỗi tác giả nêu quy tắc (§3) | mọi key Kestra lưu được, egret lưu được; một key dài thất bại nêu tên nó, không phải như một lỗi DB |
 | type được suy lại khi đọc (`KVType.from`), nên một STRING `"P1D"` đọc về thành DURATION | type được lưu cùng mỗi revision và đọc về đúng như đã ghi (§4.2) | quyết định của người dùng (2026-10-07). Những kết quả đọc nào khác Kestra được **đo ở Task 1**; mỗi khác biệt đo được thêm vào bảng này thành một dòng riêng |
 | một segment namespace `_kv` (`a._kv`) được chấp nhận | bị từ chối lúc publish và bởi mọi thao tác KV và namespace-file (§3) | key của flow và file của nó sẽ nằm dưới tiền tố `_kv` của namespace `a`; hai không gian key không được chồng nhau (quy tắc `_files` của W9b) |
@@ -95,13 +96,13 @@ Các cột `deleted_by_*` vượt ra ngoài danh sách cột người dùng đã
 - **Mã hoá.** egret ghi mỗi giá trị như Kestra: một DURATION dưới dạng các byte chuỗi ISO-8601 nguyên bản, mọi type khác dưới dạng Ion **text**. Các byte chính xác theo từng type được **đo ở Task 1** (STRING, NUMBER (số nguyên, thập phân), BOOLEAN, DATETIME, DATE, DURATION, object và mảng JSON), và bộ mã hoá của egret được kiểm với các byte đó, nên một bucket egret ghi đọc giống của Kestra. Plan chọn crate Ion.
 - **Type.** Type được lưu trong `value_type`: `kvType` đã cho, hoặc, nếu không có, type của giá trị đã render có kiểu (chuỗi → STRING, số → NUMBER, boolean → BOOLEAN, object hay mảng → JSON). `PUT` của API suy nó từ giá trị Ion đã parse như `KVType.from` sẽ làm (§9). Một lần đọc trả giá trị theo kiểu của `value_type`, không bao giờ bằng cách suy lại (§2).
 - **Đọc về.** `kv()` và `Get` trả STRING, NUMBER, BOOLEAN và JSON thành giá trị JSON tương ứng. DATETIME, DATE và DURATION không có type JSON trong render của egret; chúng trả về dưới dạng các chuỗi mà `kv()` của Kestra in ra cho chúng, được **đo ở Task 1** (ví dụ, một DURATION ghi là `P1D` in ra `P1D` hay `PT24H`). Một khác biệt mà fixture cho thấy là một dòng §2.
-- **Kích thước.** Object đã mã hoá tối đa `max_file_bytes` (mặc định 1 GiB); một giá trị lớn hơn là lỗi tác giả nêu trần (413 trên API). Một lần đọc giải mã giá trị vào bộ nhớ (`kv()`, `Get`, merge của `Put`, `GET` của API) bị chặn bởi `max_read_bytes` (mặc định 10 MiB); một giá trị lớn hơn là lỗi tác giả nêu trần đó và nói giá trị lớn hơn mức các lần đọc cho phép (413 trên API). Các giá trị ghi được nhưng không đọc được được ghi trong §15.
+- **Kích thước** *(phán quyết của người dùng, 2026-10-07)*. Object đã mã hoá tối đa `max_read_bytes` (mặc định 10 MiB), trên mọi đường ghi: `Set`, `Put` (kết quả đã merge của nó) và `PUT` của API. Một giá trị lớn hơn là lỗi tác giả nêu `max_read_bytes` (413 trên API), và không gì được ghi. Một lần đọc giải mã giá trị vào bộ nhớ (`kv()`, `Get`, merge của `Put`, `GET` của API) bị chặn bởi cùng trần đó, nên mọi giá trị đã lưu đều đọc được. `max_file_bytes` không áp dụng cho giá trị KV. Lần đọc vẫn kiểm giới hạn, và một object đã lưu vượt nó là lỗi tác giả nêu trần; chỉ một object ghi trước khi trần bị hạ mới gây ra được.
 
 ### 4.3 Ghi
 
 Mọi lần ghi (`Set`, `Put`, `PUT` của API) có hình dạng này. Bài học của W9b giữ nguyên: **không giữ kết nối database và lock nào qua một body do người gọi điều nhịp.**
 
-1. **Kiểm** key (§3), namespace và quy tắc ghi (§5) qua `authorize(…, Resource::Kv, Access::Write)`, rồi render và gán kiểu cho giá trị (một task, §8.1) hoặc parse nó (API, §9). Mã hoá nó (§4.2) và kiểm trần kích thước.
+1. **Kiểm** key (§3), namespace và quy tắc ghi (§5) qua `authorize(…, Resource::Kv, Access::Write)`, rồi render và gán kiểu cho giá trị (một task, §8.1) hoặc parse nó (API, §9). Mã hoá nó (§4.2) và kiểm kích thước của nó với `max_read_bytes`, trước khi stage bất cứ gì.
 2. **Stage.** Ghi một dòng staging (`staging::record`) và đặt các byte đã mã hoá vào staging object của nó, không giữ kết nối và lock nào.
 3. **Commit**, trên một task tách rời như `commit_staged` của W9b, để một request bị bỏ hay một future bị huỷ vẫn hoàn tất. Trong một transaction:
    - lấy `pg_advisory_xact_lock(hashtextextended('w9c:{ws}:{ns}:{key}', 0))`, dưới `SET LOCAL lock_timeout` khi grant có `lock_wait` (5 s của API; một flow chờ bao lâu cũng được);
@@ -180,6 +181,7 @@ Handler native trong worker, như các task `core.namespace` của W9b; mỗi c�
 - `key` (bắt buộc, quy tắc key); `value` (bắt buộc); `namespace` (quy tắc ghi, §5); `overwrite` (mặc định true); `ttl` (duration ISO-8601; giá trị âm là lỗi tác giả, và hành vi của số không được **đo ở Task 1**); `kvType` (một trong bảy type); `kvDescription`.
 - **Render có kiểu**, như `renderTyped` của Kestra (`Set.java:111`): một giá trị là một biểu thức đơn giữ type đã render của nó (`{{ 1 + 1 }}` là NUMBER); mọi giá trị khác là chuỗi. Những template nào trả về có kiểu được **đo ở Task 1**.
 - **Ép kiểu** một String theo `kvType`, như artifact: NUMBER thành số JSON; BOOLEAN chặt, `true`/`false` không phân biệt hoa thường, mọi thứ khác là thông báo của artifact; DATETIME thành một instant; DATE thành một ngày địa phương, lùi về ngày UTC của một instant; DURATION được kiểm và giữ như đã viết; JSON được parse. Một Number với `kvType: STRING` thành chuỗi của nó. Các trường hợp lệch khác (một Boolean với `kvType: NUMBER`, một giá trị JSON với `STRING`) được **đo ở Task 1** và tái tạo. Ép kiểu thất bại là lỗi tác giả mang thông báo đã đo.
+- Giá trị đã mã hoá tối đa `max_read_bytes`; một giá trị lớn hơn làm task thất bại, nêu trần, trước khi stage bất cứ gì (§4.2).
 - Ghi theo §4.3; `overwrite: false` lên một key còn sống làm task thất bại, nêu key (thông báo là của Kestra, **đo ở Task 1**). Output: không có, như `VoidOutput` của Kestra.
 
 ### 8.2 `Get`
@@ -201,7 +203,7 @@ Handler native trong worker, như các task `core.namespace` của W9b; mỗi c�
 - **Dưới lock của key.** `Put` chạy bước 1 của §4.3 cho bản vá của nó và không stage gì, vì các byte đã merge chỉ tồn tại dưới lock. Rồi, trong transaction commit, giữ lock:
   - đọc dòng còn sống mới nhất, và object của nó (chặn bởi `max_read_bytes`);
   - merge;
-  - kiểm kích thước sau merge với `max_file_bytes`;
+  - kiểm kích thước đã mã hoá của kết quả merge với `max_read_bytes`: một kết quả lớn hơn làm task thất bại, nêu trần, và không gì được ghi;
   - ghi object đã merge thẳng vào key của revision;
   - `head` nó;
   - chèn dòng, giữ description và `expires_at` của revision mới nhất, với type của giá trị đã merge;
@@ -239,7 +241,7 @@ Dưới `/api/ws/{ws}/workflows/namespaces/{ns}/kv`, phản chiếu `KVControlle
 | `DELETE …/kv/{key}` | `workflow:manage` | §4.4; `true` khi một key còn sống đã bị xoá, `false` khi không có (200 cả hai trường hợp) |
 | `DELETE …/kv` | `workflow:manage` | body `{keys: […]}`, tối đa `max_namespace_files` key; một transaction lấy lock của từng key theo thứ tự tăng dần, tất cả hoặc không gì cả; `{keys: […]}` liệt kê các key đã còn sống và nay đã bị xoá |
 
-- **Body của `PUT`** bị chặn bởi `max_read_bytes` (nó được parse trong bộ nhớ để gán kiểu, §4.2) rồi bởi `max_file_bytes` khi đã mã hoá. Nó được đọc với các timeout body của W9b: không byte nào trong 30 giây, hoặc hơn 12 giờ tổng cộng, trả 408 và không ghi gì. Body được đọc và stage trước khi lấy lock nào.
+- **Body của `PUT`** bị chặn bởi `max_read_bytes` (nó được parse trong bộ nhớ để gán kiểu, §4.2), và giá trị đã mã hoá cũng vậy (phán quyết của người dùng, 2026-10-07). Nó được đọc với các timeout body của W9b: không byte nào trong 30 giây, hoặc hơn 12 giờ tổng cộng, trả 408 và không ghi gì. Body được đọc và stage trước khi lấy lock nào.
 - **Chờ lock:** một lần ghi qua API chờ lock của key tối đa 5 s (`API_LOCK_WAIT`), rồi trả 409 "the key is busy (another write holds it); try again", nêu key, không giữ gì.
 - **Lỗi → status** (một ánh xạ cho mọi route, `ns_refusal` của W9b với các lỗi của KV):
 
@@ -248,7 +250,7 @@ Dưới `/api/ws/{ws}/workflows/namespaces/{ns}/kv`, phản chiếu `KVControlle
 | quy tắc key, một namespace bị từ chối (không hợp lệ, segment rỗng, segment `_files` hay `_kv`), một `ttl` sai dạng hay âm, một `revision` không phải số nguyên, một body bulk sai dạng | 400 |
 | không có dòng còn sống: một key không biết, đọc bản mới nhất của một key đã xoá mềm, một key hay revision đã hết hạn, một revision không biết, namespace của workspace khác | 404 |
 | lock của key bị giữ lâu hơn 5 s | 409 |
-| một body `PUT` vượt `max_read_bytes`, một giá trị đã mã hoá vượt `max_file_bytes`, một giá trị đã lưu vượt `max_read_bytes` khi `GET`, một danh sách hay body bulk vượt `max_namespace_files` | 413 |
+| một body `PUT` hay giá trị đã mã hoá của nó vượt `max_read_bytes`, một giá trị đã lưu vượt `max_read_bytes` khi `GET`, một danh sách hay body bulk vượt `max_namespace_files` | 413 |
 | một body đứng 30 s hay kéo dài quá 12 h | 408 |
 | store hay database không với tới được | 503, ghi log với một thông báo cố định; lỗi của database không bao giờ được gửi đi |
 
@@ -280,7 +282,7 @@ Không thông báo nào nêu key storage hay workspace khác. Một namespace m�
 
 | lỗi | loại | hậu quả |
 |---|---|---|
-| quy tắc key, một namespace bị từ chối, một lần từ chối theo phạm vi ghi, một `ttl` sai dạng, một lần ép `kvType` thất bại, một hình dạng `Put` mà merge từ chối, `expiredOnly: false`, một purge `version` không có thuộc tính nào, vượt một trần (`max_file_bytes`, `max_read_bytes`, `max_namespace_files`, 64 namespace), `overwrite: false` lên một key còn sống, không có với `errorOnMissing: true`, một object thiếu phía sau một dòng | tác giả (`Author`, `NotFound`, `Conflict`, `TooLarge`) | task thất bại với thông báo nêu key, namespace hay trần; API trả 4xx |
+| quy tắc key, một namespace bị từ chối, một lần từ chối theo phạm vi ghi, một `ttl` sai dạng, một lần ép `kvType` thất bại, một hình dạng `Put` mà merge từ chối, `expiredOnly: false`, một purge `version` không có thuộc tính nào, vượt một trần (`max_read_bytes`, `max_namespace_files`, 64 namespace), `overwrite: false` lên một key còn sống, không có với `errorOnMissing: true`, một object thiếu phía sau một dòng | tác giả (`Author`, `NotFound`, `Conflict`, `TooLarge`) | task thất bại với thông báo nêu key, namespace hay trần; API trả 4xx |
 | `secret()` trong giá trị `Set`/`Put` | tác giả, lúc publish | flow không được publish (§7) |
 | store hay database không với tới được, lúc chạy hay lúc render | hạ tầng (`Store`, `Db`) | handler trả `Err`, hoặc lần render đặt `infrastructure_failure`; run được claim lại mà không tốn attempt; API trả 503 |
 
@@ -346,7 +348,7 @@ Một cầu KV cho plugin (§10); một danh sách phân trang xuyên namespace 
 - Một flow chỉ ghi và xoá KV của namespace của chính nó; một flow Kestra `Set` key của namespace khác thất bại trên egret, nêu namespace (§5).
 - `PurgeKV` không có `namespaces` xoá namespace của chính flow và các con của nó, không phải mọi namespace; `expiredOnly: false` bị từ chối để dùng `version` với `keepAmount: 0` (§8.6).
 - `secret()` trong giá trị `Set` hay `Put` bị từ chối lúc publish (§7).
-- Một giá trị nằm giữa `max_read_bytes` và `max_file_bytes` (mặc định 10 MiB và 1 GiB) ghi được bằng `Set`, nhưng `kv()`, `Get`, `Put` và `GET` của API từ chối đọc nó, nêu `max_read_bytes`; chỉ `Delete` và `PurgeKV` xử lý được nó. Một operator muốn mọi giá trị đã lưu đều đọc được đặt `max_file_bytes` không cao hơn `max_read_bytes`.
+- Một giá trị KV tối đa `max_read_bytes` (mặc định 10 MiB), trong khi Kestra không có trần; một `Set`, `Put` hay `PUT` của API với giá trị lớn hơn thất bại, nêu trần (§4.2; phán quyết của người dùng, 2026-10-07).
 - Giá trị DATETIME, DATE và DURATION trả về dưới dạng chuỗi trong render của egret, nên một template so sánh chúng là so sánh chuỗi (§4.2).
 - Mẫu đọc-tăng-`Set` (`retry-with-flowable-errors`) có race, như ở Kestra; `Put` là dạng không race cho một map, và không có phép tăng nguyên tử.
 - Một key hết hạn giữ dòng và object của nó tới đợt quét kế tiếp, tới khoảng một giờ; các lần đọc đã coi nó là không có (§4.5).
