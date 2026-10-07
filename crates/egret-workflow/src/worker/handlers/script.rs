@@ -2428,6 +2428,7 @@ pub(crate) mod tests {
             ws,
             crate::storage::nsfiles::access::Actor::Api,
             OWN,
+            crate::storage::nsfiles::access::Resource::NamespaceFiles,
             crate::storage::nsfiles::access::Access::Read,
         )
         .unwrap();

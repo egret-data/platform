@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use egret_metastore::Db;
 use egret_workflow::runners::files::{FileScope, NsFileArgs, RenderFiles};
-use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor};
+use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Resource};
 use egret_workflow::storage::nsfiles::path::NsPath;
 use egret_workflow::storage::nsfiles::store::{
     create_directory, put, soft_delete, Conflict, Written,
@@ -59,7 +59,7 @@ fn by() -> CreatedBy {
 
 /// One revision of `path` in `ns` of `ws`, as an API upload writes it.
 async fn put_file(db: &Db, fs: &FileStore, ws: Uuid, ns: &str, path: &str, bytes: &[u8]) {
-    let grant = authorize(ws, Actor::Api, ns, Access::Write).unwrap();
+    let grant = authorize(ws, Actor::Api, ns, Resource::NamespaceFiles, Access::Write).unwrap();
     let mut body: &[u8] = bytes;
     match put(
         &db.pool,
@@ -78,14 +78,14 @@ async fn put_file(db: &Db, fs: &FileStore, ws: Uuid, ns: &str, path: &str, bytes
 }
 
 async fn mkdir(db: &Db, ws: Uuid, ns: &str, path: &str) {
-    let grant = authorize(ws, Actor::Api, ns, Access::Write).unwrap();
+    let grant = authorize(ws, Actor::Api, ns, Resource::NamespaceFiles, Access::Write).unwrap();
     create_directory(&db.pool, &grant, &NsPath::parse_dir(path).unwrap(), by())
         .await
         .unwrap();
 }
 
 async fn delete(db: &Db, ws: Uuid, ns: &str, path: &str) {
-    let grant = authorize(ws, Actor::Api, ns, Access::Write).unwrap();
+    let grant = authorize(ws, Actor::Api, ns, Resource::NamespaceFiles, Access::Write).unwrap();
     let marked = soft_delete(&db.pool, &grant, &NsPath::parse_file(path).unwrap())
         .await
         .unwrap();
@@ -1218,7 +1218,14 @@ async fn the_stream_guard_refuses_an_object_larger_than_its_row() {
         return;
     };
     put_file(&db, &fs, ws, "w9b.lies", "/l.txt", b"abcd").await;
-    let grant = authorize(ws, Actor::Api, "w9b.lies", Access::Read).unwrap();
+    let grant = authorize(
+        ws,
+        Actor::Api,
+        "w9b.lies",
+        Resource::NamespaceFiles,
+        Access::Read,
+    )
+    .unwrap();
     let key = fs.namespace_object_uri(&grant, &NsPath::parse_file("/l.txt").unwrap(), 1);
     fs.store.put(&key, b"abcde".to_vec()).await.unwrap();
     let small = Arc::new(FileStore {

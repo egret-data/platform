@@ -66,7 +66,9 @@ pub(crate) use functions::base62;
 /// The refusal every render but a `kestra.*` task's gives `secret()`, also
 /// the message of `spec::validate`'s publish-time refusal (W5b fix round 1).
 pub(crate) use functions::SECRET_REFUSAL;
-pub(crate) use ionfmt::{write_ion_element, write_ion_row};
+pub(crate) use ionfmt::{
+    write_ion_element, write_ion_json, write_ion_row, write_symbol as write_ion_symbol,
+};
 /// W9a Task 12: `core.storage.Split`'s `regexPattern` is a `java.util.regex`
 /// pattern, compiled by the same translation the `regex*` filters use.
 pub(crate) use javare::{compile as compile_java_regex, JavaRegex};

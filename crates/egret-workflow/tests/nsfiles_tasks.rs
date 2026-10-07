@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use egret_metastore::Db;
 use egret_storage::{ObjectStore, StorageError};
-use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor};
+use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Resource};
 use egret_workflow::storage::nsfiles::path::NsPath;
 use egret_workflow::storage::nsfiles::store::{
     list_live, open, put, resolve, revisions, soft_delete, Conflict, Want, Written,
@@ -260,7 +260,7 @@ async fn rows(pool: &sqlx::PgPool, ws: Uuid, ns: &str) -> BTreeMap<String, Vec<i
 
 /// The bytes of revision `rev` of `path` in `ns`.
 async fn ns_bytes(fs: &FileStore, ws: Uuid, ns: &str, path: &str, rev: u32) -> Vec<u8> {
-    let grant = authorize(ws, Actor::Api, ns, Access::Read).unwrap();
+    let grant = authorize(ws, Actor::Api, ns, Resource::NamespaceFiles, Access::Read).unwrap();
     let key = fs.namespace_object_uri(&grant, &NsPath::parse_file(path).unwrap(), rev);
     fs.store.get(&key).await.unwrap()
 }
@@ -283,7 +283,7 @@ async fn writer_of(pool: &sqlx::PgPool, ws: Uuid, ns: &str, path: &str, rev: i32
 /// One revision of `path` in `ns`, as an API upload writes it (the
 /// fixture's premise: "seeded with store::put").
 async fn seed(db: &Db, fs: &FileStore, ws: Uuid, ns: &str, path: &str, bytes: &[u8]) {
-    let grant = authorize(ws, Actor::Api, ns, Access::Write).unwrap();
+    let grant = authorize(ws, Actor::Api, ns, Resource::NamespaceFiles, Access::Write).unwrap();
     let mut body: &[u8] = bytes;
     match put(
         &db.pool,
@@ -1510,7 +1510,7 @@ async fn download_files_of_an_object_whose_size_differs_from_its_row_fails_namin
         return;
     };
     seed(&db, &fs, ws, NS, "/a.txt", b"abc").await;
-    let grant = authorize(ws, Actor::Api, NS, Access::Read).unwrap();
+    let grant = authorize(ws, Actor::Api, NS, Resource::NamespaceFiles, Access::Read).unwrap();
     let key = fs.namespace_object_uri(&grant, &NsPath::parse_file("/a.txt").unwrap(), 1);
     fs.store.put(&key, b"abcdef".to_vec()).await.unwrap();
     let dl = format!(
@@ -1564,7 +1564,7 @@ async fn download_files_destination_is_a_directory_joined_with_one_slash() {
 /// The live entries directly in `dir` of `ns` (`None` = the root), by name
 /// as a listing shows it (`top.txt`, `sub`).
 async fn listing(pool: &sqlx::PgPool, ws: Uuid, ns: &str, dir: Option<&str>) -> Vec<String> {
-    let grant = authorize(ws, Actor::Api, ns, Access::Read).unwrap();
+    let grant = authorize(ws, Actor::Api, ns, Resource::NamespaceFiles, Access::Read).unwrap();
     let dir = dir.map(|d| NsPath::parse_dir(d).unwrap());
     let mut conn = pool.acquire().await.unwrap();
     let prefix = dir.as_ref().map_or("/", NsPath::as_str).to_string();
@@ -1582,7 +1582,7 @@ async fn listing(pool: &sqlx::PgPool, ws: Uuid, ns: &str, dir: Option<&str>) -> 
 
 /// Whether `path` (a file, or a directory ending `/`) is live in `ns`.
 async fn live(pool: &sqlx::PgPool, ws: Uuid, ns: &str, path: &str) -> bool {
-    let grant = authorize(ws, Actor::Api, ns, Access::Read).unwrap();
+    let grant = authorize(ws, Actor::Api, ns, Resource::NamespaceFiles, Access::Read).unwrap();
     let p = if path.ends_with('/') {
         NsPath::parse_dir(path).unwrap()
     } else {
@@ -1599,7 +1599,7 @@ async fn live(pool: &sqlx::PgPool, ws: Uuid, ns: &str, path: &str) -> bool {
 /// The objects under `ns`'s `_files` prefix in `ws`, relative to it, with
 /// their sizes.
 async fn objects(fs: &FileStore, ws: Uuid, ns: &str) -> BTreeMap<String, i64> {
-    let grant = authorize(ws, Actor::Api, ns, Access::Read).unwrap();
+    let grant = authorize(ws, Actor::Api, ns, Resource::NamespaceFiles, Access::Read).unwrap();
     let probe_key = fs.namespace_object_uri(&grant, &NsPath::parse_file("/x").unwrap(), 1);
     let key = probe_key
         .strip_prefix("s3://")
@@ -1812,7 +1812,7 @@ async fn a_deleted_files_revisions_stay_listed_and_readable_by_number() {
         json!(listing(&db.pool, ws, NS, Some("/up/")).await),
         want["/up (listing)"]
     );
-    let grant = authorize(ws, Actor::Api, NS, Access::Read).unwrap();
+    let grant = authorize(ws, Actor::Api, NS, Resource::NamespaceFiles, Access::Read).unwrap();
     let m = NsPath::parse_file("/up/m.txt").unwrap();
     let mut conn = db.pool.acquire().await.unwrap();
     let revs = revisions(&mut conn, &grant, &m).await.unwrap();
@@ -2160,7 +2160,7 @@ async fn keep_amount_keeps_the_n_highest_revisions_and_size_counts_revisions_pur
     // skip over every version): r1, r2 (deleted), r3 -> keepAmount 2 keeps
     // [2, 3].
     seed_revisions(&db, &fs, ws, own, "/m.txt", 2).await;
-    let write = authorize(ws, Actor::Api, own, Access::Write).unwrap();
+    let write = authorize(ws, Actor::Api, own, Resource::NamespaceFiles, Access::Write).unwrap();
     soft_delete(&db.pool, &write, &NsPath::parse_file("/m.txt").unwrap())
         .await
         .unwrap();
@@ -2286,7 +2286,7 @@ async fn a_soft_deleted_path_is_purged_entirely() {
         objects(&fs, ws, own).await,
         fixture_objects(&want["objects_before"])
     );
-    let write = authorize(ws, Actor::Api, own, Access::Write).unwrap();
+    let write = authorize(ws, Actor::Api, own, Resource::NamespaceFiles, Access::Write).unwrap();
     let p = NsPath::parse_file("/p.txt").unwrap();
     assert_eq!(soft_delete(&db.pool, &write, &p).await.unwrap().len(), 1);
     let ex = run(&db, ws, &raw_flow("w9b.pk/purge")).await;
@@ -2295,7 +2295,7 @@ async fn a_soft_deleted_path_is_purged_entirely() {
         json!(objects(&fs, ws, own).await.into_keys().collect::<Vec<_>>()),
         want["objects_after"]
     );
-    let grant = authorize(ws, Actor::Api, own, Access::Read).unwrap();
+    let grant = authorize(ws, Actor::Api, own, Resource::NamespaceFiles, Access::Read).unwrap();
     let mut conn = db.pool.acquire().await.unwrap();
     let live_revs = revisions(&mut conn, &grant, &NsPath::parse_file("/live.txt").unwrap())
         .await
@@ -2383,7 +2383,7 @@ async fn a_purge_leaves_no_row_without_its_object() {
     seed_revisions(&db, &fs, ws, own, "/a.txt.d/b.txt", 2).await;
     seed_revisions(&db, &fs, ws, own, "/gone.txt", 2).await;
     seed_revisions(&db, &fs, ws, "w9b.pn.c", "/c.txt", 2).await;
-    let write = authorize(ws, Actor::Api, own, Access::Write).unwrap();
+    let write = authorize(ws, Actor::Api, own, Resource::NamespaceFiles, Access::Write).unwrap();
     soft_delete(&db.pool, &write, &NsPath::parse_file("/gone.txt").unwrap())
         .await
         .unwrap();
@@ -2391,7 +2391,7 @@ async fn a_purge_leaves_no_row_without_its_object() {
     assert_eq!(purged(&db.pool, ex, "purge").await, json!(6));
     let mut kept = BTreeSet::new();
     for ns in [own, "w9b.pn.c"] {
-        let grant = authorize(ws, Actor::Api, ns, Access::Read).unwrap();
+        let grant = authorize(ws, Actor::Api, ns, Resource::NamespaceFiles, Access::Read).unwrap();
         for (path, revs) in rows(&db.pool, ws, ns).await {
             for rev in revs {
                 let p = NsPath::parse_file(&path).unwrap();
@@ -2534,7 +2534,7 @@ async fn a_purge_pages_through_far_more_revisions_than_the_cap() {
     .execute(&db.pool)
     .await
     .unwrap();
-    let grant = authorize(ws, Actor::Api, own, Access::Read).unwrap();
+    let grant = authorize(ws, Actor::Api, own, Resource::NamespaceFiles, Access::Read).unwrap();
     for f in 0..10 {
         let p = NsPath::parse_file(&format!("/bulk/f{f:04}.txt")).unwrap();
         for r in 1..=11 {
@@ -2587,7 +2587,7 @@ async fn a_purge_frees_a_soft_deleted_directory_for_a_move() {
     // z.txt's one revision and the `/b/` row.
     assert_eq!(purged(&db.pool, ex, "purge").await, json!(2));
     assert!(!live(&db.pool, ws, own, "/b/").await);
-    let write = authorize(ws, Actor::Api, own, Access::Write).unwrap();
+    let write = authorize(ws, Actor::Api, own, Resource::NamespaceFiles, Access::Write).unwrap();
     let moved = egret_workflow::storage::nsfiles::store::move_path(
         &db.pool,
         &fs,

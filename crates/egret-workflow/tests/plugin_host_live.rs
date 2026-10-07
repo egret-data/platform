@@ -1160,8 +1160,14 @@ async fn write_namespace_file(
     body: &str,
 ) {
     use egret_workflow::storage::nsfiles::{access, path::NsPath, store, CreatedBy};
-    let grant = access::authorize(ws, access::Actor::Api, ns, access::Access::Write)
-        .expect("a writable namespace");
+    let grant = access::authorize(
+        ws,
+        access::Actor::Api,
+        ns,
+        access::Resource::NamespaceFiles,
+        access::Access::Write,
+    )
+    .expect("a writable namespace");
     let mut reader = body.as_bytes();
     store::put(
         pool,

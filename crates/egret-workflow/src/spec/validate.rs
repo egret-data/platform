@@ -623,7 +623,8 @@ fn validate_plugin_tasks(flow: &Flow, report: &mut ValidationReport) {
 /// `^[a-z0-9][a-z0-9._-]*`, `@Size(min = 1, max = 150)`. A hand-written
 /// character check, not a `regex` dependency for one pattern. W9b: then no
 /// `_files` segment (`nsfiles::access::check_files_segment`), a second finding
-/// only when the pattern passes, so no message is doubled.
+/// only when the pattern passes, so no message is doubled. W9c: then no `_kv`
+/// segment (`nsfiles::access::check_kv_segment`), only when both pass.
 fn validate_namespace(flow: &Flow, report: &mut ValidationReport) {
     if !is_valid_namespace(&flow.namespace) {
         report.errors.push(Finding {
@@ -644,6 +645,16 @@ fn validate_namespace(flow: &Flow, report: &mut ValidationReport) {
         // publishes, and is refused by namespace files alone (fix round 1 M3).
         report.errors.push(Finding {
             code: "namespace_files_segment",
+            message,
+            path: "namespace".to_string(),
+        });
+    } else if let Err(message) = crate::storage::nsfiles::access::check_kv_segment(&flow.namespace)
+    {
+        // W9c: a `_kv` segment would put this namespace's execution files and
+        // namespace files under another namespace's KV values (W9c spec §3).
+        // The same function refuses it at run time (`check_namespace`).
+        report.errors.push(Finding {
+            code: "namespace_kv_segment",
             message,
             path: "namespace".to_string(),
         });
@@ -2392,6 +2403,99 @@ mod tests {
             .unwrap();
             assert!(!validate(&f).errors.iter().any(|e| e.path == "id"), "{id}");
         }
+    }
+
+    /// W9c: the save-time refusal of a `_kv` namespace segment; its run-time
+    /// twin is `nsfiles::access`'s
+    /// `a_kv_segment_namespace_is_refused_for_every_resource_access_and_actor`.
+    #[test]
+    fn publish_refuses_a_kv_segment_namespace_by_name() {
+        for ns in ["a._kv", "a._kv.b", "x.y._kv", "_kv.a"] {
+            let f = parse(&format!(
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            let found: Vec<_> = validate(&f)
+                .errors
+                .into_iter()
+                .filter(|e| e.path == "namespace")
+                .collect();
+            if ns.starts_with('_') {
+                // Refused by the pattern; named once.
+                assert_eq!(found.len(), 1, "{found:?}");
+                assert_eq!(found[0].code, "invalid_namespace");
+                continue;
+            }
+            assert_eq!(found.len(), 1, "{ns}: {found:?}");
+            assert_eq!(found[0].code, "namespace_kv_segment");
+            assert!(
+                found[0].message.contains(&format!("'{ns}'")) && found[0].message.contains("'_kv'"),
+                "{found:?}"
+            );
+        }
+        // Both markers: the `_files` finding alone, named once.
+        let f = parse("id: f\nnamespace: a._files._kv\ntasks:\n  - id: t\n    type: x\n").unwrap();
+        let found: Vec<_> = validate(&f)
+            .errors
+            .into_iter()
+            .filter(|e| e.path == "namespace")
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].code, "namespace_files_segment");
+        // The controls: `_kv` inside a segment is not the segment.
+        for ns in ["a.kv", "a.x_kv", "a._kvx", "a.b_kv.c", "kv"] {
+            let f = parse(&format!(
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            assert!(
+                !validate(&f).errors.iter().any(|e| e.path == "namespace"),
+                "{ns}"
+            );
+        }
+    }
+
+    /// W9c: a flow id `_kv` is refused at publish by Kestra's own id pattern
+    /// (no leading `_`), as `_files` is (`a_flow_id_of_files_is_refused`), so
+    /// `{ns}/_kv/…` is never a flow's execution prefix.
+    #[test]
+    fn a_flow_id_of_kv_is_refused() {
+        for id in ["_kv", "_KV", "_kv.x"] {
+            let f = parse(&format!(
+                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            let found: Vec<_> = validate(&f)
+                .errors
+                .into_iter()
+                .filter(|e| e.path == "id")
+                .collect();
+            assert_eq!(found.len(), 1, "{id}: {found:?}");
+            assert_eq!(found[0].code, "invalid_flow_id");
+            assert!(found[0].message.contains(&format!("'{id}'")), "{found:?}");
+        }
+        for id in ["kv", "x_kv"] {
+            let f = parse(&format!(
+                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            assert!(!validate(&f).errors.iter().any(|e| e.path == "id"), "{id}");
+        }
+    }
+
+    /// W9c: the corpus's KV flow (`oracle-exec/corpus/valids/kv.yaml`, an
+    /// over-refusal guard) still validates with no error finding: the `_kv`
+    /// rule is a namespace SEGMENT rule, not a word rule.
+    #[test]
+    fn valids_kv_still_publishes() {
+        let yaml = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/oracle-exec/corpus/valids/kv.yaml"
+        ))
+        .expect("the corpus flow");
+        let f = parse(&yaml).unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
     }
 
     #[test]

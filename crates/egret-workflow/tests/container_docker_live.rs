@@ -1890,7 +1890,7 @@ async fn a_reattached_container_is_collected_under_the_same_uris() {
 /// this suite's workspace, which is made a real workspace row first (the
 /// table's FK). The database is required: a case that cannot reach it FAILS.
 async fn namespace_files_setup() -> sqlx::PgPool {
-    use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor};
+    use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Resource};
     use egret_workflow::storage::nsfiles::path::NsPath;
     use egret_workflow::storage::nsfiles::store::{put, Conflict};
     let pool = common::db()
@@ -1924,7 +1924,14 @@ async fn namespace_files_setup() -> sqlx::PgPool {
         // W9b Task 5 fix round 1, I2: glob characters in a stored name.
         ("w9b.s3", "/reports/q[1].csv", "q,1"),
     ] {
-        let grant = authorize(suite_workspace(), Actor::Api, ns, Access::Write).unwrap();
+        let grant = authorize(
+            suite_workspace(),
+            Actor::Api,
+            ns,
+            Resource::NamespaceFiles,
+            Access::Write,
+        )
+        .unwrap();
         let path = NsPath::parse_file(path).unwrap();
         let has = egret_workflow::storage::nsfiles::store::resolve(
             &mut pool.acquire().await.unwrap(),

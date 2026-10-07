@@ -17,6 +17,8 @@
 //! - [`routes`]: the execution file API -- download, metas, preview (spec §8).
 //! - [`nsfiles`]: W9b's namespace files -- the path rule, the one access
 //!   decision, the metadata table and the objects behind it.
+//! - [`kv`]: W9c's KV store -- the key rule, the value types and bytes, the
+//!   metadata table and the objects behind it, under W9b's access decision.
 //! - this module: the [`FileStore`] (the object store, its bucket, prefix and
 //!   caps), the process-wide slot it is installed in, and the index writers.
 //!
@@ -35,6 +37,7 @@ pub mod collect;
 pub mod index;
 pub mod inputs;
 pub mod ion;
+pub mod kv;
 pub(crate) mod lock;
 pub(crate) mod multipart;
 pub mod nsfiles;
@@ -148,6 +151,39 @@ impl FileStore {
             uri::namespace_as_path(grant.namespace()),
             uri::NAMESPACE_FILES_SEGMENT,
             path.as_str(),
+            suffix
+        )
+    }
+
+    /// `s3://{bucket}/{prefix}{workspace}/{ns-as-path}/_kv/{key}.ion[.v{revision}]`
+    /// (W9c spec §3, Kestra's `kvFileName`): revision 1 has no suffix. The
+    /// workspace and namespace are the grant's. A key holds no `/` and never
+    /// starts with `_` (`kv::key::check_key`), so it is one segment.
+    pub fn namespace_kv_uri(
+        &self,
+        grant: &nsfiles::access::Grant,
+        key: &kv::key::KvKey,
+        revision: u32,
+    ) -> String {
+        debug_assert!(
+            grant.resource() == nsfiles::access::Resource::Kv,
+            "a KV object key asked with a {:?} grant",
+            grant.resource()
+        );
+        debug_assert!(revision >= 1, "revision {revision} of {key}");
+        let suffix = if revision >= 2 {
+            format!(".v{revision}")
+        } else {
+            String::new()
+        };
+        format!(
+            "s3://{}/{}{}/{}/{}/{}.ion{}",
+            self.bucket,
+            self.prefix,
+            grant.workspace().hyphenated(),
+            uri::namespace_as_path(grant.namespace()),
+            nsfiles::access::KV_SEGMENT,
+            key.as_str(),
             suffix
         )
     }

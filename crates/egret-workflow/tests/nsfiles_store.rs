@@ -26,7 +26,7 @@ mod common;
 
 use egret_metastore::Db;
 use egret_workflow::storage;
-use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Grant};
+use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Grant, Resource};
 use egret_workflow::storage::nsfiles::path::NsPath;
 use egret_workflow::storage::nsfiles::store::{
     create_directory, file_rows_page, list_live, move_path, namespaces_with_files, open,
@@ -61,7 +61,7 @@ async fn row(db: &Db, ws: Uuid, ns: &str, path: &str, revision: i32, size: i64, 
 }
 
 fn read_grant(ws: Uuid) -> Grant {
-    authorize(ws, Actor::Api, NS, Access::Read).unwrap()
+    authorize(ws, Actor::Api, NS, Resource::NamespaceFiles, Access::Read).unwrap()
 }
 
 fn file(p: &str) -> NsPath {
@@ -477,7 +477,14 @@ async fn open_refuses_an_entry_of_another_grant() {
     let p = file("/s.txt");
     let e = resolve(&mut c, &ga, &p, Want::Latest).await.unwrap();
     assert_eq!((e.workspace, e.namespace.as_str()), (a, NS));
-    let other_ns = authorize(a, Actor::Api, "w9b.other", Access::Read).unwrap();
+    let other_ns = authorize(
+        a,
+        Actor::Api,
+        "w9b.other",
+        Resource::NamespaceFiles,
+        Access::Read,
+    )
+    .unwrap();
     let other_ws = read_grant(b);
     // Each wrong grant's object exists, so only the check can refuse it.
     for (g, body) in [
@@ -643,7 +650,7 @@ use tokio::sync::oneshot;
 const W: &str = "w9b.t3";
 
 fn grant(ws: Uuid, access: Access) -> Grant {
-    authorize(ws, Actor::Api, W, access).unwrap()
+    authorize(ws, Actor::Api, W, Resource::NamespaceFiles, access).unwrap()
 }
 
 fn by() -> CreatedBy {
@@ -2994,7 +3001,14 @@ async fn an_api_writer_behind_a_held_lock_is_refused_as_busy_and_a_flow_waits() 
     );
 
     // A flow's grant has no bound: it waits, then writes.
-    let flow = authorize(ws, Actor::Flow { namespace: W }, W, Access::Write).unwrap();
+    let flow = authorize(
+        ws,
+        Actor::Flow { namespace: W },
+        W,
+        Resource::NamespaceFiles,
+        Access::Write,
+    )
+    .unwrap();
     assert_eq!(flow.lock_wait(), None);
     assert_eq!(
         g.lock_wait(),

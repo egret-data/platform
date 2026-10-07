@@ -50,7 +50,7 @@ use sqlx::{Connection, PgConnection};
 use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
-use super::nsfiles::access::{authorize, Access, Actor, Grant};
+use super::nsfiles::access::{authorize, Access, Actor, Grant, Resource};
 use super::nsfiles::path::NsPath;
 use super::nsfiles::store::{self as ns_store, NsEntry, Want};
 use super::nsfiles::NsError;
@@ -277,6 +277,7 @@ impl Snapshot {
             self.workspace,
             Actor::Flow { namespace: own },
             &namespace,
+            Resource::NamespaceFiles,
             Access::Read,
         )
         .map_err(refused)?;

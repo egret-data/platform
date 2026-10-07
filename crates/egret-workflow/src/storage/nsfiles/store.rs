@@ -24,7 +24,7 @@ use sqlx::{PgConnection, PgPool};
 use tokio::io::AsyncBufRead;
 use uuid::Uuid;
 
-use super::access::{require, Access, Grant};
+use super::access::{require, Access, Grant, Resource};
 use super::path::NsPath;
 use super::{CreatedBy, NsError};
 use crate::storage::inputs::Guarded;
@@ -725,7 +725,7 @@ pub async fn latest_written(
 }
 
 fn need_write(grant: &Grant) -> Result<(), NsError> {
-    require(grant, Access::Write).map_err(NsError::Db)
+    require(grant, Resource::NamespaceFiles, Access::Write).map_err(NsError::Db)
 }
 
 /// The latest row of `path` (a stored-form path string), live or not.
@@ -1609,7 +1609,7 @@ pub async fn purge_revisions(
     path: &NsPath,
     revisions: &[u32],
 ) -> Result<u64, NsError> {
-    if require(grant, Access::Purge).is_err() {
+    if require(grant, Resource::NamespaceFiles, Access::Purge).is_err() {
         need_write(grant)?;
     }
     let (pool, fs, grant) = (pool.clone(), fs.clone(), grant.clone());
@@ -1640,7 +1640,7 @@ pub async fn purge_rows(
     path: &NsPath,
     rows: &[(i64, u32)],
 ) -> Result<u64, NsError> {
-    require(grant, Access::Purge).map_err(wrong_grant)?;
+    require(grant, Resource::NamespaceFiles, Access::Purge).map_err(wrong_grant)?;
     if path.is_dir() {
         return Err(internal(format!(
             "egret purged '{path}' by row as a file, which is a directory"
@@ -1700,7 +1700,7 @@ pub async fn purge_empty_directory(
     dir: &NsPath,
     live_too: bool,
 ) -> Result<u64, NsError> {
-    require(grant, Access::Purge).map_err(wrong_grant)?;
+    require(grant, Resource::NamespaceFiles, Access::Purge).map_err(wrong_grant)?;
     if !dir.is_dir() {
         return Err(internal(format!(
             "egret purged '{dir}' as a directory, which is a file path"
@@ -1746,6 +1746,7 @@ mod tests {
             Uuid::new_v4(),
             Actor::Api,
             "a",
+            crate::storage::nsfiles::access::Resource::NamespaceFiles,
             Access::Write,
         )
         .unwrap();

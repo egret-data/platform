@@ -261,9 +261,10 @@ pub(crate) fn write_ion_element(out: &mut String, element: &ion_rs::Element) {
     }
 }
 
-/// One JSON value as Ion text, for [`write_ion_row`]. Recursion is bounded by
+/// One JSON value as Ion text, for [`write_ion_row`] and the KV store's
+/// `storage::kv::value::encode`. Recursion is bounded by
 /// the JSON's own depth, which `serde_json` caps when it parses.
-fn write_ion_json(out: &mut String, value: &serde_json::Value) {
+pub(crate) fn write_ion_json(out: &mut String, value: &serde_json::Value) {
     use serde_json::Value as J;
     match value {
         J::Null => out.push_str("null"),
@@ -374,7 +375,7 @@ fn write_ion_string(out: &mut String, s: &str) {
 /// keyword set is case-sensitive and much smaller than YAML's, which is the
 /// opposite of what the `yaml` filter in the same batch does with the same
 /// keys.
-fn write_symbol(out: &mut String, s: &str) {
+pub(crate) fn write_symbol(out: &mut String, s: &str) {
     if is_ion_identifier(s) {
         out.push_str(s);
         return;

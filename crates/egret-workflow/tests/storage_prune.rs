@@ -26,7 +26,7 @@ use std::time::Duration;
 use egret_metastore::Db;
 use egret_storage::{Listing, MemStore, ObjectStore, StorageError};
 use egret_workflow::runners::{FileUnavailable, RenderFiles};
-use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor};
+use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Resource};
 use egret_workflow::storage::nsfiles::path::NsPath;
 use egret_workflow::storage::nsfiles::store::{put, soft_delete, Conflict};
 use egret_workflow::storage::nsfiles::CreatedBy;
@@ -1241,7 +1241,14 @@ async fn a_dependent_started_during_the_pass_keeps_its_source() {
 async fn a_prune_pass_leaves_namespace_files_untouched() {
     let _g = SERIAL.lock().await;
     let Some(w) = World::new().await else { return };
-    let g = authorize(w.ws, Actor::Api, NS, Access::Write).unwrap();
+    let g = authorize(
+        w.ws,
+        Actor::Api,
+        NS,
+        Resource::NamespaceFiles,
+        Access::Write,
+    )
+    .unwrap();
     for (p, body) in [
         ("/a.txt", "one"),
         ("/a.txt", "two"),

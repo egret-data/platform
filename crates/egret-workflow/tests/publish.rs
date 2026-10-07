@@ -449,6 +449,45 @@ async fn publish_refuses_a_files_segment_namespace_by_name() {
         .expect("a.files.b publishes");
 }
 
+/// W9c: the save-time refusal of a namespace with a `_kv` segment, through
+/// publish (its unit twin is `spec::validate`'s
+/// `publish_refuses_a_kv_segment_namespace_by_name`; the run-time twin is
+/// `nsfiles::access`'s `a_kv_segment_namespace_is_refused_for_every_resource_access_and_actor`).
+#[tokio::test]
+async fn publish_refuses_a_kv_segment_namespace_by_name() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let bad = common::draft(
+        &repo,
+        ws,
+        user,
+        "id: f\nnamespace: a._kv.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n",
+    )
+    .await;
+    let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, bad.id, "")
+        .await
+        .expect_err("a `_kv` namespace segment must not publish");
+    match err {
+        egret_core::Error::InvalidInput(m) => assert!(
+            m.contains("'a._kv.b'") && m.contains("'_kv'") && m.contains("(namespace)"),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    // The control: the same flow one character away publishes.
+    let good = common::draft(
+        &repo,
+        ws,
+        user,
+        "id: g\nnamespace: a.kv.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n",
+    )
+    .await;
+    egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
+        .await
+        .expect("a.kv.b publishes");
+}
+
 /// A `WorkingDirectory` flow whose `namespaceFiles` block is `block` (YAML,
 /// indented under the key).
 fn working_directory(id: &str, block: &str) -> String {

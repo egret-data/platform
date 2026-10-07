@@ -57,7 +57,7 @@ use egret_workspace::context::WsContext;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, ReadBuf};
 
-use super::access::{authorize, Access, Actor, Grant};
+use super::access::{authorize, Access, Actor, Grant, Resource};
 use super::path::NsPath;
 use super::store::{self, Conflict, NsEntry, Want, Written};
 use super::{zip, CreatedBy, NsError};
@@ -235,7 +235,14 @@ async fn grant(
     egret_core::authz::require(&*st.pdp, ctx, permission)
         .await
         .map_err(core_refusal)?;
-    authorize(ctx.workspace_id.0, Actor::Api, namespace, access).map_err(bad_request)
+    authorize(
+        ctx.workspace_id.0,
+        Actor::Api,
+        namespace,
+        Resource::NamespaceFiles,
+        access,
+    )
+    .map_err(bad_request)
 }
 
 fn file_path(raw: &str) -> Result<NsPath, Response> {
