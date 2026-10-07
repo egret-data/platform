@@ -34,7 +34,7 @@
   {
    "id": "kvType_only_coerces_strings",
    "basis": "measured",
-   "finding": "kvType applies only to a String value (and a Number with STRING becomes its string). A number, boolean, map or list with any other kvType is stored as itself, typed by its own value (t_bool_number stored `true`, BOOLEAN). egret's stored type therefore follows the coerced value (spec §4.2 amended 2026-10-07).",
+   "finding": "kvType applies only to a String value (and a Number with STRING becomes its string). A number, boolean, map or list with any other kvType is stored as itself, typed by its own value (t_bool_number stored `true`, BOOLEAN). egret's stored type therefore follows the coerced value (spec §4.2 amended 2026-10-07; review C1: DURATION too, so a stored DURATION is always an Ion string).",
    "raw": "egret_expected.set_coercion.t_*"
   },
   {
@@ -338,27 +338,30 @@
     "basis": "measured",
     "compare": "set equality"
    },
-   "note": "GET /api/v1/plugins/{cls} (the plugin API is NOT tenant-scoped on the artifact: /api/v1/main/plugins/{cls} answers 404)"
+   "note": "GET /api/v1/plugins/{cls} (the plugin API is NOT tenant-scoped on the artifact: /api/v1/main/plugins/{cls} answers 404)",
+   "_independent": "read-only plugin schemas"
   },
   "keys": {
    "_note": "keys are the raw key strings; 'k*350' / 'k*351' are 350 / 351 times 'k'. `api_put` is PUT …/kv/{key} with body `1`; `set` is a Set task with value 'v'.",
    "<empty>": {
     "api_put": {
-     "outcome": "no route: 4xx, nothing written",
      "basis": "chosen",
-     "compare": "status class 4xx; no row and no object written",
+     "compare": "status within status_class; written exact (no row and no object)",
      "kestra": {
       "status": 405,
       "detail": "Method [PUT] not allowed for URI [/api/v1/main/namespaces/w9c.keys/kv/]. Allowed methods: [DELETE]"
      },
-     "why": "the empty key is not a path segment; Kestra's router answers 405 (only DELETE …/kv exists); egret's router answers its own 4xx"
+     "why": "the empty key is not a path segment; Kestra's router answers 405 (only DELETE …/kv exists); egret's router answers its own 4xx",
+     "status_class": "4xx",
+     "written": false
     },
     "set": {
      "outcome": "error",
      "message": "Key cannot be null or empty",
      "basis": "measured",
      "compare": "outcome exact; message exact"
-    }
+    },
+    "_independent": "api_put writes in w9c.keys, set in w9c.keyset, api_get reads w9c.keys's inheritance listing (ancestors only): no cell reads what another wrote"
    },
    "a": {
     "api_put": {
@@ -371,7 +374,8 @@
      "outputs": {},
      "basis": "measured",
      "compare": "outcome exact; message exact"
-    }
+    },
+    "_independent": "api_put writes in w9c.keys, set in w9c.keyset, api_get reads w9c.keys's inheritance listing (ancestors only): no cell reads what another wrote"
    },
    "A-1._x": {
     "api_put": {
@@ -384,7 +388,8 @@
      "outputs": {},
      "basis": "measured",
      "compare": "outcome exact; message exact"
-    }
+    },
+    "_independent": "api_put writes in w9c.keys, set in w9c.keyset, api_get reads w9c.keys's inheritance listing (ancestors only): no cell reads what another wrote"
    },
    "_a": {
     "api_put": {
@@ -422,7 +427,8 @@
      "message": "Key must start with an alphanumeric character (uppercase or lowercase) and can contain alphanumeric characters (uppercase or lowercase), dots (.), underscores (_), and hyphens (-) only.",
      "basis": "measured",
      "compare": "outcome exact; message exact"
-    }
+    },
+    "_independent": "api_put writes in w9c.keys, set in w9c.keyset, api_get reads w9c.keys's inheritance listing (ancestors only): no cell reads what another wrote"
    },
    "-a": {
     "api_put": {
@@ -441,7 +447,8 @@
      "message": "Key must start with an alphanumeric character (uppercase or lowercase) and can contain alphanumeric characters (uppercase or lowercase), dots (.), underscores (_), and hyphens (-) only.",
      "basis": "measured",
      "compare": "outcome exact; message exact"
-    }
+    },
+    "_independent": "api_put writes in w9c.keys, set in w9c.keyset, api_get reads w9c.keys's inheritance listing (ancestors only): no cell reads what another wrote"
    },
    "a/b": {
     "api_put": {
@@ -460,7 +467,8 @@
      "message": "Key must start with an alphanumeric character (uppercase or lowercase) and can contain alphanumeric characters (uppercase or lowercase), dots (.), underscores (_), and hyphens (-) only.",
      "basis": "measured",
      "compare": "outcome exact; message exact"
-    }
+    },
+    "_independent": "api_put writes in w9c.keys, set in w9c.keyset, api_get reads w9c.keys's inheritance listing (ancestors only): no cell reads what another wrote"
    },
    "a b": {
     "api_put": {
@@ -479,7 +487,8 @@
      "message": "Key must start with an alphanumeric character (uppercase or lowercase) and can contain alphanumeric characters (uppercase or lowercase), dots (.), underscores (_), and hyphens (-) only.",
      "basis": "measured",
      "compare": "outcome exact; message exact"
-    }
+    },
+    "_independent": "api_put writes in w9c.keys, set in w9c.keyset, api_get reads w9c.keys's inheritance listing (ancestors only): no cell reads what another wrote"
    },
    "é": {
     "api_put": {
@@ -498,7 +507,8 @@
      "message": "Key must start with an alphanumeric character (uppercase or lowercase) and can contain alphanumeric characters (uppercase or lowercase), dots (.), underscores (_), and hyphens (-) only.",
      "basis": "measured",
      "compare": "outcome exact; message exact"
-    }
+    },
+    "_independent": "api_put writes in w9c.keys, set in w9c.keyset, api_get reads w9c.keys's inheritance listing (ancestors only): no cell reads what another wrote"
    },
    "k*350": {
     "api_put": {
@@ -521,7 +531,8 @@
      },
      "why": "spec §3: any key Kestra's column holds (≤ 350) egret holds; Kestra's LOCAL storage fails at the filesystem's 255-byte NAME_MAX (`{key}.ion.metadata` sidecar: File name too long) AFTER saving the row, so a row with no object remains (raw_records.keys_api); keys up to 242 chars stored (keys_api probe)"
     },
-    "premise": "Kestra's 350-key answers are an artifact of its LOCAL storage backend (filesystem NAME_MAX), not of its key rule"
+    "_note": "Kestra's 350-key answers are an artifact of its LOCAL storage backend (filesystem NAME_MAX), not of its key rule",
+    "_independent": "api_put writes in w9c.keys, set in w9c.keyset, api_get reads w9c.keys's inheritance listing (ancestors only): no cell reads what another wrote"
    },
    "k*351": {
     "api_put": {
@@ -550,7 +561,8 @@
       "message": "SQL [insert into kv_metadata (\"key\", \"value\") values (?, cast(? as jsonb)) on conflict (\"key\") do update set \"value\" = excluded.\"value\"]; ERROR: value too long for type character varying(350)"
      },
      "why": "spec §3: the length refusal names the bound"
-    }
+    },
+    "_independent": "api_put writes in w9c.keys, set in w9c.keyset, api_get reads w9c.keys's inheritance listing (ancestors only): no cell reads what another wrote"
    },
    "inheritance": {
     "api_put": {
@@ -570,12 +582,13 @@
      "basis": "measured",
      "compare": "status and body exact",
      "note": "GET …/kv/inheritance is the inheritance listing (empty: w9c.keys's ancestors hold nothing), so the key `inheritance` cannot be read by GET (user ruling 2026-10-07, spec §9)"
-    }
+    },
+    "_independent": "api_put writes in w9c.keys, set in w9c.keyset, api_get reads w9c.keys's inheritance listing (ancestors only): no cell reads what another wrote"
    }
   },
   "types": {
    "_how": "Set (kvType as named) -> bytes `cat /app/storage/main/<ns>/_kv/<key>.ion`; `kv_prints` = Return format `{{ kv(key) }}`; `kv_tojson` = `{{ kv(key) | toJson }}`; `get_value` = Get's outputs.value as the outputs API returns it; `api` = GET …/kv/{key} (KvDetail; `updated` masked)",
-   "_rule_type": "egret's stored type = DURATION when kvType is DURATION, else the type of the value after coercion (string STRING, number NUMBER, boolean BOOLEAN, instant DATETIME, date DATE, object/array/null-in-JSON JSON; a JSON null is STRING as Kestra's KVType.from(null)); spec §4.2 amended 2026-10-07",
+   "_rule_type": "egret's stored type = DURATION when kvType is DURATION AND the value is a String (validated, kept as written); otherwise the type of the value after coercion (string STRING, number NUMBER, boolean BOOLEAN, instant DATETIME, date DATE, object/array JSON; a JSON null is STRING as Kestra's KVType.from(null)); kvType coerces only a String. Spec §4.2 amended 2026-10-07 (fix round 1, review C1)",
    "_rule_read": "DATETIME prints as Java Instant.toString (millisecond precision as stored); DATE as ISO date; DURATION: when the stored text matches Kestra's DURATION_PATTERN `^P(?=[^T]|T.)(?:\\d*D)?(?:T(?=.)(?:\\d*H)?(?:\\d*M)?(?:\\d*S)?)?$` it prints as java.time.Duration.parse(text).toString() (P1D -> PT24H), else as written",
    "bool_false": {
     "set": {
@@ -591,7 +604,9 @@
     },
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.Boolean"
+    "artifact_raw": {
+     "class": "java.lang.Boolean"
+    }
    },
    "bool_true": {
     "set": {
@@ -608,7 +623,9 @@
     "kv_tojson": "true",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.Boolean"
+    "artifact_raw": {
+     "class": "java.lang.Boolean"
+    }
    },
    "date": {
     "set": {
@@ -625,7 +642,9 @@
     "kv_tojson": "\"2025-01-02\"",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.time.LocalDate"
+    "artifact_raw": {
+     "class": "java.time.LocalDate"
+    }
    },
    "dt": {
     "set": {
@@ -858,7 +877,9 @@
     "kv_tojson": "[1,\"a\",true,null]",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.util.ArrayList"
+    "artifact_raw": {
+     "class": "java.util.ArrayList"
+    }
    },
    "json_dotted_key": {
     "set": {
@@ -881,7 +902,9 @@
     "kv_tojson": "{\"a.b\":1,\"c d\":2}",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.util.LinkedHashMap"
+    "artifact_raw": {
+     "class": "java.util.LinkedHashMap"
+    }
    },
    "json_empty_obj": {
     "set": {
@@ -898,7 +921,9 @@
     "kv_tojson": "{}",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.util.LinkedHashMap"
+    "artifact_raw": {
+     "class": "java.util.LinkedHashMap"
+    }
    },
    "json_nested": {
     "set": {
@@ -931,8 +956,10 @@
     "kv_tojson": "{\"a\":{\"b\":[1,{}],\"d\":1.5}}",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.util.LinkedHashMap",
-    "note": "a null INSIDE a map is dropped on every read (kv(), Get, API) although the bytes keep it (`{c:null}`); a null in a list is kept. egret reproduces the read view (measured)."
+    "note": "a null INSIDE a map is dropped on every read (kv(), Get, API) although the bytes keep it (`{c:null}`); a null in a list is kept. egret reproduces the read view (measured).",
+    "artifact_raw": {
+     "class": "java.util.LinkedHashMap"
+    }
    },
    "json_null": {
     "set": {
@@ -949,7 +976,9 @@
     "kv_tojson": "null",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": ""
+    "artifact_raw": {
+     "class": ""
+    }
    },
    "json_num": {
     "set": {
@@ -966,7 +995,9 @@
     "kv_tojson": "7",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.Integer"
+    "artifact_raw": {
+     "class": "java.lang.Integer"
+    }
    },
    "json_obj": {
     "set": {
@@ -989,7 +1020,9 @@
     "kv_tojson": "{\"b\":1,\"a\":\"x\"}",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.util.LinkedHashMap"
+    "artifact_raw": {
+     "class": "java.util.LinkedHashMap"
+    }
    },
    "json_str": {
     "set": {
@@ -1006,7 +1039,9 @@
     "kv_tojson": "\"s\"",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.String"
+    "artifact_raw": {
+     "class": "java.lang.String"
+    }
    },
    "json_topnull": {
     "set": {
@@ -1027,7 +1062,9 @@
     "kv_tojson": "{\"y\":1}",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.util.LinkedHashMap"
+    "artifact_raw": {
+     "class": "java.util.LinkedHashMap"
+    }
    },
    "json_unicode": {
     "set": {
@@ -1048,7 +1085,9 @@
     "kv_tojson": "{\"k\":\"é\\u0001\"}",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.util.LinkedHashMap"
+    "artifact_raw": {
+     "class": "java.util.LinkedHashMap"
+    }
    },
    "num_0_1": {
     "set": {
@@ -1065,7 +1104,9 @@
     "kv_tojson": "0.1",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.Double"
+    "artifact_raw": {
+     "class": "java.lang.Double"
+    }
    },
    "num_100": {
     "set": {
@@ -1082,7 +1123,9 @@
     "kv_tojson": "100.0",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.Double"
+    "artifact_raw": {
+     "class": "java.lang.Double"
+    }
    },
    "num_1_0": {
     "set": {
@@ -1099,7 +1142,9 @@
     "kv_tojson": "1.0",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.Double"
+    "artifact_raw": {
+     "class": "java.lang.Double"
+    }
    },
    "num_1e20": {
     "set": {
@@ -1116,7 +1161,9 @@
     "kv_tojson": "1.0E20",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.Double"
+    "artifact_raw": {
+     "class": "java.lang.Double"
+    }
    },
    "num_20": {
     "set": {
@@ -1133,7 +1180,9 @@
     "kv_tojson": "12345678901234567890",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.math.BigInteger"
+    "artifact_raw": {
+     "class": "java.math.BigInteger"
+    }
    },
    "num_big_int": {
     "set": {
@@ -1150,7 +1199,9 @@
     "kv_tojson": "123456789012345678901234567890",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.math.BigInteger"
+    "artifact_raw": {
+     "class": "java.math.BigInteger"
+    }
    },
    "num_dec": {
     "set": {
@@ -1167,7 +1218,9 @@
     "kv_tojson": "1.5",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.Double"
+    "artifact_raw": {
+     "class": "java.lang.Double"
+    }
    },
    "num_int": {
     "set": {
@@ -1184,7 +1237,9 @@
     "kv_tojson": "42",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.Integer"
+    "artifact_raw": {
+     "class": "java.lang.Integer"
+    }
    },
    "num_long": {
     "set": {
@@ -1201,7 +1256,9 @@
     "kv_tojson": "9223372036854775807",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.Long"
+    "artifact_raw": {
+     "class": "java.lang.Long"
+    }
    },
    "num_neg0": {
     "set": {
@@ -1218,7 +1275,9 @@
     "kv_tojson": "0",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.Integer"
+    "artifact_raw": {
+     "class": "java.lang.Integer"
+    }
    },
    "num_neg_exp": {
     "set": {
@@ -1234,7 +1293,9 @@
     },
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.Double"
+    "artifact_raw": {
+     "class": "java.lang.Double"
+    }
    },
    "num_pi": {
     "set": {
@@ -1251,7 +1312,9 @@
     "kv_tojson": "3.141592653589793",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.Double"
+    "artifact_raw": {
+     "class": "java.lang.Double"
+    }
    },
    "str": {
     "set": {
@@ -1268,7 +1331,9 @@
     "kv_tojson": "\"hello\"",
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.String"
+    "artifact_raw": {
+     "class": "java.lang.String"
+    }
    },
    "str_iso": {
     "set": {
@@ -1284,7 +1349,9 @@
     },
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.String"
+    "artifact_raw": {
+     "class": "java.lang.String"
+    }
    },
    "str_notype": {
     "set": {
@@ -1300,7 +1367,9 @@
     },
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.String"
+    "artifact_raw": {
+     "class": "java.lang.String"
+    }
    },
    "str_num": {
     "set": {
@@ -1316,7 +1385,9 @@
     },
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.String"
+    "artifact_raw": {
+     "class": "java.lang.String"
+    }
    },
    "str_p1d": {
     "set": {
@@ -1358,8 +1429,11 @@
     },
     "basis": "measured",
     "compare": "ion_bytes byte-exact; kv_prints exact; get_value JSON-equal (key order not compared: the outputs API sorts keys); api.type and api.value exact",
-    "kestra_class": "java.lang.String"
-   }
+    "artifact_raw": {
+     "class": "java.lang.String"
+    }
+   },
+   "_independent": "each cell Sets and reads its own key (the key is the cell's name) in w9c.types / w9c.types2"
   },
   "set_coercion": {
    "_how": "Set {key, value, kvType} on the artifact; stored bytes and the type the API re-infers; failures quote the task's ERROR log",
@@ -1400,9 +1474,11 @@
     "message": "Cannot parse 'abc' as a BOOLEAN value: expected 'true' or 'false'.",
     "basis": "measured",
     "compare": "outcome exact; message exact (the outer exception message)",
-    "kestra_error_log_lines": [
-     "Cannot parse 'abc' as a BOOLEAN value: expected 'true' or 'false'."
-    ]
+    "artifact_raw": {
+     "error_log_lines": [
+      "Cannot parse 'abc' as a BOOLEAN value: expected 'true' or 'false'."
+     ]
+    }
    },
    "abc_datetime": {
     "input": {
@@ -1413,10 +1489,12 @@
     "message": "Cannot convert value 'abc' to Instant",
     "basis": "measured",
     "compare": "outcome exact; message exact (the outer exception message)",
-    "kestra_error_log_lines": [
-     "Cannot convert value 'abc' to Instant",
-     "Text 'abc' could not be parsed at index 0"
-    ]
+    "artifact_raw": {
+     "error_log_lines": [
+      "Cannot convert value 'abc' to Instant",
+      "Text 'abc' could not be parsed at index 0"
+     ]
+    }
    },
    "abc_date": {
     "input": {
@@ -1427,7 +1505,9 @@
     "message_prefix": "Text 'abc' could not be parsed",
     "basis": "measured",
     "compare": "outcome exact; message starts with message_prefix (the parse index is Java's)",
-    "kestra_message": "Text 'abc' could not be parsed at index 0"
+    "artifact_raw": {
+     "message": "Text 'abc' could not be parsed at index 0"
+    }
    },
    "abc_duration": {
     "input": {
@@ -1438,10 +1518,12 @@
     "message": "Cannot convert value 'abc' to Duration",
     "basis": "measured",
     "compare": "outcome exact; message exact (the outer exception message)",
-    "kestra_error_log_lines": [
-     "Text cannot be parsed to a Duration",
-     "Cannot convert value 'abc' to Duration"
-    ]
+    "artifact_raw": {
+     "error_log_lines": [
+      "Text cannot be parsed to a Duration",
+      "Cannot convert value 'abc' to Duration"
+     ]
+    }
    },
    "abc_json": {
     "input": {
@@ -1479,9 +1561,11 @@
     "message": "Cannot parse 'yes' as a BOOLEAN value: expected 'true' or 'false'.",
     "basis": "measured",
     "compare": "outcome exact; message exact (the outer exception message)",
-    "kestra_error_log_lines": [
-     "Cannot parse 'yes' as a BOOLEAN value: expected 'true' or 'false'."
-    ]
+    "artifact_raw": {
+     "error_log_lines": [
+      "Cannot parse 'yes' as a BOOLEAN value: expected 'true' or 'false'."
+     ]
+    }
    },
    "bool_1": {
     "input": {
@@ -1492,9 +1576,11 @@
     "message": "Cannot parse '1' as a BOOLEAN value: expected 'true' or 'false'.",
     "basis": "measured",
     "compare": "outcome exact; message exact (the outer exception message)",
-    "kestra_error_log_lines": [
-     "Cannot parse '1' as a BOOLEAN value: expected 'true' or 'false'."
-    ]
+    "artifact_raw": {
+     "error_log_lines": [
+      "Cannot parse '1' as a BOOLEAN value: expected 'true' or 'false'."
+     ]
+    }
    },
    "bool_False_mixed": {
     "input": {
@@ -1516,9 +1602,11 @@
     "message": "Cannot parse ' true' as a BOOLEAN value: expected 'true' or 'false'.",
     "basis": "measured",
     "compare": "outcome exact; message exact (the outer exception message)",
-    "kestra_error_log_lines": [
-     "Cannot parse ' true' as a BOOLEAN value: expected 'true' or 'false'."
-    ]
+    "artifact_raw": {
+     "error_log_lines": [
+      "Cannot parse ' true' as a BOOLEAN value: expected 'true' or 'false'."
+     ]
+    }
    },
    "date_from_instant": {
     "input": {
@@ -1551,7 +1639,9 @@
     "message_prefix": "Text '02/01/2025' could not be parsed",
     "basis": "measured",
     "compare": "outcome exact; message starts with message_prefix (the parse index is Java's)",
-    "kestra_message": "Text '02/01/2025' could not be parsed at index 0"
+    "artifact_raw": {
+     "message": "Text '02/01/2025' could not be parsed at index 0"
+    }
    },
    "dt_from_date": {
     "input": {
@@ -1562,10 +1652,12 @@
     "message": "Cannot convert value '2025-01-02' to Instant",
     "basis": "measured",
     "compare": "outcome exact; message exact (the outer exception message)",
-    "kestra_error_log_lines": [
-     "Cannot convert value '2025-01-02' to Instant",
-     "Text '2025-01-02' could not be parsed at index 10"
-    ]
+    "artifact_raw": {
+     "error_log_lines": [
+      "Cannot convert value '2025-01-02' to Instant",
+      "Text '2025-01-02' could not be parsed at index 10"
+     ]
+    }
    },
    "dt_local": {
     "input": {
@@ -1576,10 +1668,12 @@
     "message": "Cannot convert value '2025-01-02T03:04:05' to Instant",
     "basis": "measured",
     "compare": "outcome exact; message exact (the outer exception message)",
-    "kestra_error_log_lines": [
-     "Text '2025-01-02T03:04:05' could not be parsed at index 19",
-     "Cannot convert value '2025-01-02T03:04:05' to Instant"
-    ]
+    "artifact_raw": {
+     "error_log_lines": [
+      "Text '2025-01-02T03:04:05' could not be parsed at index 19",
+      "Cannot convert value '2025-01-02T03:04:05' to Instant"
+     ]
+    }
    },
    "num_comma": {
     "input": {
@@ -1649,10 +1743,12 @@
     "message": "Cannot convert value '1d' to Duration",
     "basis": "measured",
     "compare": "outcome exact; message exact (the outer exception message)",
-    "kestra_error_log_lines": [
-     "Cannot convert value '1d' to Duration",
-     "Text cannot be parsed to a Duration"
-    ]
+    "artifact_raw": {
+     "error_log_lines": [
+      "Cannot convert value '1d' to Duration",
+      "Text cannot be parsed to a Duration"
+     ]
+    }
    },
    "dur_lower": {
     "input": {
@@ -1810,13 +1906,10 @@
     },
     "outcome": "ok",
     "ion_bytes": "42",
-    "stored_type": "DURATION",
-    "basis": "chosen",
+    "stored_type": "NUMBER",
+    "basis": "measured",
     "compare": "outcome exact; ion_bytes byte-exact; stored_type exact",
-    "kestra": {
-     "stored_type": "NUMBER"
-    },
-    "why": "user decision 2026-10-07 (spec header, §2, §4.2): egret STORES the type with each revision and reads it back as written; Kestra re-infers it on read (KVType.from + its DURATION regex); Kestra validates the duration but its read regex does not match '{{ 42 }}'"
+    "note": "kvType coerces only a String (Set.java:116-132); a rendered number, boolean, map or list is stored as itself, typed by its own value, and DURATION is never validated (findings.kvType_only_coerces_strings)"
    },
    "t_num_json": {
     "input": {
@@ -1891,13 +1984,10 @@
     },
     "outcome": "ok",
     "ion_bytes": "1.5e0",
-    "stored_type": "DURATION",
-    "basis": "chosen",
+    "stored_type": "NUMBER",
+    "basis": "measured",
     "compare": "outcome exact; ion_bytes byte-exact; stored_type exact",
-    "kestra": {
-     "stored_type": "NUMBER"
-    },
-    "why": "user decision 2026-10-07 (spec header, §2, §4.2): egret STORES the type with each revision and reads it back as written; Kestra re-infers it on read (KVType.from + its DURATION regex); Kestra validates the duration but its read regex does not match '{{ 1.5 }}'"
+    "note": "kvType coerces only a String (Set.java:116-132); a rendered number, boolean, map or list is stored as itself, typed by its own value, and DURATION is never validated (findings.kvType_only_coerces_strings)"
    },
    "t_dec_json": {
     "input": {
@@ -1972,13 +2062,10 @@
     },
     "outcome": "ok",
     "ion_bytes": "true",
-    "stored_type": "DURATION",
-    "basis": "chosen",
+    "stored_type": "BOOLEAN",
+    "basis": "measured",
     "compare": "outcome exact; ion_bytes byte-exact; stored_type exact",
-    "kestra": {
-     "stored_type": "BOOLEAN"
-    },
-    "why": "user decision 2026-10-07 (spec header, §2, §4.2): egret STORES the type with each revision and reads it back as written; Kestra re-infers it on read (KVType.from + its DURATION regex); Kestra validates the duration but its read regex does not match '{{ true }}'"
+    "note": "kvType coerces only a String (Set.java:116-132); a rendered number, boolean, map or list is stored as itself, typed by its own value, and DURATION is never validated (findings.kvType_only_coerces_strings)"
    },
    "t_bool_json": {
     "input": {
@@ -2053,13 +2140,10 @@
     },
     "outcome": "ok",
     "ion_bytes": "{a:1}",
-    "stored_type": "DURATION",
-    "basis": "chosen",
+    "stored_type": "JSON",
+    "basis": "measured",
     "compare": "outcome exact; ion_bytes byte-exact; stored_type exact",
-    "kestra": {
-     "stored_type": "JSON"
-    },
-    "why": "user decision 2026-10-07 (spec header, §2, §4.2): egret STORES the type with each revision and reads it back as written; Kestra re-infers it on read (KVType.from + its DURATION regex); Kestra validates the duration but its read regex does not match '{{ {'a': 1} }}'"
+    "note": "kvType coerces only a String (Set.java:116-132); a rendered number, boolean, map or list is stored as itself, typed by its own value, and DURATION is never validated (findings.kvType_only_coerces_strings)"
    },
    "t_map_json": {
     "input": {
@@ -2134,13 +2218,10 @@
     },
     "outcome": "ok",
     "ion_bytes": "[1,2]",
-    "stored_type": "DURATION",
-    "basis": "chosen",
+    "stored_type": "JSON",
+    "basis": "measured",
     "compare": "outcome exact; ion_bytes byte-exact; stored_type exact",
-    "kestra": {
-     "stored_type": "JSON"
-    },
-    "why": "user decision 2026-10-07 (spec header, §2, §4.2): egret STORES the type with each revision and reads it back as written; Kestra re-infers it on read (KVType.from + its DURATION regex); Kestra validates the duration but its read regex does not match '{{ [1, 2] }}'"
+    "note": "kvType coerces only a String (Set.java:116-132); a rendered number, boolean, map or list is stored as itself, typed by its own value, and DURATION is never validated (findings.kvType_only_coerces_strings)"
    },
    "t_list_json": {
     "input": {
@@ -2152,10 +2233,11 @@
     "stored_type": "JSON",
     "basis": "measured",
     "compare": "outcome exact; ion_bytes byte-exact; stored_type exact"
-   }
+   },
+   "_independent": "each cell Sets its own key (the cell's name) in w9c.coerce2, once"
   },
   "typed_render": {
-   "_how": "Set {key, value} with no kvType; `value` is Property<String>, so a YAML map/list/int/bool reaches renderTyped as JSON TEXT and is stored as a STRING",
+   "_how": "Set {key, value} with no kvType. On the artifact `value` is Property<String>, so a YAML map/list/int/bool reaches renderTyped as JSON TEXT and is stored as a STRING; egret stores it typed (user ruling R-a, 2026-10-07): tr_yaml_* are chosen",
    "tr_add": {
     "value": "{{ 1 + 1 }}",
     "outcome": "ok",
@@ -2218,10 +2300,20 @@
      "b": "x"
     },
     "outcome": "ok",
-    "ion_bytes": "\"{\\\"a\\\":\\\"2\\\",\\\"b\\\":\\\"x\\\"}\"",
-    "stored_type": "STRING",
-    "basis": "measured",
-    "compare": "outcome exact; ion_bytes byte-exact; stored_type exact"
+    "ion_bytes": "{a:2,b:\"x\"}",
+    "stored_type": "JSON",
+    "kv_returns": {
+     "a": 2,
+     "b": "x"
+    },
+    "basis": "chosen",
+    "compare": "outcome exact; ion_bytes byte-exact; stored_type exact; kv() returns kv_returns (JSON-equal)",
+    "kestra": {
+     "outcome": "ok",
+     "ion_bytes": "\"{\\\"a\\\":\\\"2\\\",\\\"b\\\":\\\"x\\\"}\"",
+     "stored_type": "STRING"
+    },
+    "why": "user ruling R-a (2026-10-07, spec header, §2, §8.1): Set with a YAML map or list value stores it TYPED, as JSON, exactly the way Put keeps it; each string leaf is rendered by the typed render, so `{{ 1 + 1 }}` is the number 2, and kv() then returns the map. On the artifact `value` is a string property: the YAML value reaches renderTyped as JSON text, its leaves rendered as strings, and is stored as a STRING"
    },
    "tr_yaml_list": {
     "value": [
@@ -2230,10 +2322,21 @@
      "b"
     ],
     "outcome": "ok",
-    "ion_bytes": "\"[1,\\\"2\\\",\\\"b\\\"]\"",
-    "stored_type": "STRING",
-    "basis": "measured",
-    "compare": "outcome exact; ion_bytes byte-exact; stored_type exact"
+    "ion_bytes": "[1,2,\"b\"]",
+    "stored_type": "JSON",
+    "kv_returns": [
+     1,
+     2,
+     "b"
+    ],
+    "basis": "chosen",
+    "compare": "outcome exact; ion_bytes byte-exact; stored_type exact; kv() returns kv_returns (JSON-equal)",
+    "kestra": {
+     "outcome": "ok",
+     "ion_bytes": "\"[1,\\\"2\\\",\\\"b\\\"]\"",
+     "stored_type": "STRING"
+    },
+    "why": "user ruling R-a (2026-10-07, spec header, §2, §8.1): Set with a YAML map or list value stores it TYPED, as JSON, exactly the way Put keeps it; each string leaf is rendered by the typed render, so `{{ 1 + 1 }}` is the number 2, and kv() then returns the map. On the artifact `value` is a string property: the YAML value reaches renderTyped as JSON text, its leaves rendered as strings, and is stored as a STRING"
    },
    "tr_dec": {
     "value": "{{ 1.5 }}",
@@ -2315,18 +2418,32 @@
    "tr_yaml_int": {
     "value": 42,
     "outcome": "ok",
-    "ion_bytes": "\"42\"",
-    "stored_type": "STRING",
-    "basis": "measured",
-    "compare": "outcome exact; ion_bytes byte-exact; stored_type exact"
+    "ion_bytes": "42",
+    "stored_type": "NUMBER",
+    "kv_returns": 42,
+    "basis": "chosen",
+    "compare": "outcome exact; ion_bytes byte-exact; stored_type exact; kv() returns kv_returns (JSON-equal)",
+    "kestra": {
+     "outcome": "ok",
+     "ion_bytes": "\"42\"",
+     "stored_type": "STRING"
+    },
+    "why": "user ruling R-a (2026-10-07, spec header, §2, §8.1): Set with a YAML map or list value stores it TYPED, as JSON, exactly the way Put keeps it; each string leaf is rendered by the typed render, so `{{ 1 + 1 }}` is the number 2, and kv() then returns the map. On the artifact `value` is a string property: the YAML value reaches renderTyped as JSON text, its leaves rendered as strings, and is stored as a STRING; a YAML scalar keeps its YAML type the same way (Put keeps a scalar patch typed: put_merge.scalar_over_map)"
    },
    "tr_yaml_bool": {
     "value": true,
     "outcome": "ok",
-    "ion_bytes": "\"true\"",
-    "stored_type": "STRING",
-    "basis": "measured",
-    "compare": "outcome exact; ion_bytes byte-exact; stored_type exact"
+    "ion_bytes": "true",
+    "stored_type": "BOOLEAN",
+    "kv_returns": true,
+    "basis": "chosen",
+    "compare": "outcome exact; ion_bytes byte-exact; stored_type exact; kv() returns kv_returns (JSON-equal)",
+    "kestra": {
+     "outcome": "ok",
+     "ion_bytes": "\"true\"",
+     "stored_type": "STRING"
+    },
+    "why": "user ruling R-a (2026-10-07, spec header, §2, §8.1): Set with a YAML map or list value stores it TYPED, as JSON, exactly the way Put keeps it; each string leaf is rendered by the typed render, so `{{ 1 + 1 }}` is the number 2, and kv() then returns the map. On the artifact `value` is a string property: the YAML value reaches renderTyped as JSON text, its leaves rendered as strings, and is stored as a STRING; a YAML scalar keeps its YAML type the same way (Put keeps a scalar patch typed: put_merge.scalar_over_map)"
    },
    "tr_concat": {
     "value": "{{ 'a' ~ 'b' }}",
@@ -2343,7 +2460,8 @@
     "stored_type": "NUMBER",
     "basis": "measured",
     "compare": "outcome exact; ion_bytes byte-exact; stored_type exact"
-   }
+   },
+   "_independent": "each cell Sets its own key (the cell's name) in w9c.render, once"
   },
   "ttl": {
    "_how": "Set {key, value: v, ttl}; expiry read from kv_metadata.expiration_date (read-only client) and the GET /kv listing; expires = write time + ttl",
@@ -2364,16 +2482,16 @@
    "PT2S": {
     "ttl": "PT2S",
     "outcome": "ok",
-    "expires": "write + 2 s",
     "basis": "measured",
-    "compare": "outcome exact; expires_at - created_at equals the ttl within 1 s (timestamps masked)"
+    "compare": "outcome exact; expires_at - created_at equals expires_after_write_s within 1 s (null: no expiry; timestamps masked)",
+    "expires_after_write_s": 2
    },
    "P1D": {
     "ttl": "P1D",
     "outcome": "ok",
-    "expires": "write + 1 day",
     "basis": "measured",
-    "compare": "outcome exact; expires_at - created_at equals the ttl within 1 s (timestamps masked)"
+    "compare": "outcome exact; expires_at - created_at equals expires_after_write_s within 1 s (null: no expiry; timestamps masked)",
+    "expires_after_write_s": 86400
    },
    "xyz": {
     "ttl": "xyz",
@@ -2392,25 +2510,26 @@
    "none": {
     "ttl": null,
     "outcome": "ok",
-    "expires": null,
     "basis": "measured",
-    "compare": "outcome exact; expires_at - created_at equals the ttl within 1 s (timestamps masked)"
+    "compare": "outcome exact; expires_at - created_at equals expires_after_write_s within 1 s (null: no expiry; timestamps masked)",
+    "expires_after_write_s": null
    },
    "P7D": {
     "ttl": "P7D",
     "outcome": "ok",
-    "expires": "write + 7 days",
     "basis": "measured",
-    "compare": "outcome exact; expires_at - created_at equals the ttl within 1 s (timestamps masked)"
+    "compare": "outcome exact; expires_at - created_at equals expires_after_write_s within 1 s (null: no expiry; timestamps masked)",
+    "expires_after_write_s": 604800
    },
    "expr": {
     "ttl": "{{ 'PT1H' }}",
     "outcome": "ok",
-    "expires": "write + 1 hour",
     "basis": "measured",
-    "compare": "outcome exact; expires_at - created_at equals the ttl within 1 s (timestamps masked)"
+    "compare": "outcome exact; expires_at - created_at equals expires_after_write_s within 1 s (null: no expiry; timestamps masked)",
+    "expires_after_write_s": 3600
    },
-   "_sidecar": "Kestra's local storage also writes `{key}.ion.metadata` = `{expirationDate:\"<nanos ISO>\"}` (or `{}`); egret keeps expiry in kv_entries only (see layout)"
+   "_sidecar": "Kestra's local storage also writes `{key}.ion.metadata` = `{expirationDate:\"<nanos ISO>\"}` (or `{}`); egret keeps expiry in kv_entries only (see layout)",
+   "_independent": "each cell Sets its own key (ttl_<case>) in w9c.ttl, once"
   },
   "overwrite": {
    "_setup": "w9c.ow: `live` Set v1; `del` Set v1 then Delete; `exp` Set v1 ttl PT1S then 3 s; each step below is its own execution",
@@ -2537,7 +2656,8 @@
      "independent_of": {
       "over_expired": "reads key `never`, which over_expired did not touch"
      }
-    }
+    },
+    "_independent": "reads only, one key each, after every overwrite step; each cell names what it is independent of"
    },
    "_sequence": [
     "over_live",
@@ -2549,11 +2669,29 @@
    ]
   },
   "put_merge": {
-   "_how": "seeded through PUT …/kv/{key} (Ion bodies below), then one Put task per key in one execution. egret's answer is the artifact's Put.mergeValues(existing, value) run in jshell on typed values (raw_records.put_merge_jshell); Kestra's runtime answer (a JSON STRING) is under `kestra`",
+   "_how": "every cell: `existing` (the stored value before Put, typed JSON; null when missing), `existing_state` (live, expired, deleted, missing), `existing_description`, `existing_ttl`, `patch` (the Put task's `value` as the flow gives it, typed JSON), `errorOnMissing` (null: the property left unset; code_* cells call Put.mergeValues directly), `outcome`, `result` (the stored value after Put, typed JSON; null on error), `message` on error. Runtime cells were seeded through PUT …/kv/{key}; egret's answer is the artifact's Put.mergeValues(existing, patch) run in jshell (raw_records.put_merge_jshell); Kestra's runtime answer (a JSON STRING) is under `kestra`",
    "_finding": "RULED 2026-10-07 (Put stays a real deep merge): on the artifact Put stores the value's JSON text as a STRING for every flow-supplied map or list (block YAML too), so its merge is unreachable from a flow; egret merges. See findings.put_never_merges_from_a_flow",
    "map_map": {
-    "existing": "{a:1,b:{c:2,x:1}}",
-    "value": {
+    "existing": {
+     "a": 1,
+     "b": {
+      "c": 2,
+      "x": 1
+     }
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": {
+     "b": {
+      "d": 3,
+      "x": 2
+     },
+     "e": 4
+    },
+    "errorOnMissing": null,
+    "outcome": "ok",
+    "result": {
      "a": 1,
      "b": {
       "c": 2,
@@ -2562,7 +2700,6 @@
      },
      "e": 4
     },
-    "outcome": "ok",
     "value_class": "java.util.LinkedHashMap",
     "ion_bytes": "{a:1,b:{c:2,x:2,d:3},e:4}",
     "revision_after": 2,
@@ -2576,8 +2713,29 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "nested": {
-    "existing": "{a:{b:{c:1,d:2}},z:0}",
-    "value": {
+    "existing": {
+     "a": {
+      "b": {
+       "c": 1,
+       "d": 2
+      }
+     },
+     "z": 0
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": {
+     "a": {
+      "b": {
+       "c": 9,
+       "e": 3
+      }
+     }
+    },
+    "errorOnMissing": null,
+    "outcome": "ok",
+    "result": {
      "a": {
       "b": {
        "c": 9,
@@ -2587,7 +2745,6 @@
      },
      "z": 0
     },
-    "outcome": "ok",
     "value_class": "java.util.LinkedHashMap",
     "ion_bytes": "{a:{b:{c:9,d:2,e:3}},z:0}",
     "revision_after": 2,
@@ -2601,8 +2758,24 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "arr_in_map": {
-    "existing": "{a:[1,2],b:1}",
-    "value": {
+    "existing": {
+     "a": [
+      1,
+      2
+     ],
+     "b": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": {
+     "a": [
+      3
+     ]
+    },
+    "errorOnMissing": null,
+    "outcome": "ok",
+    "result": {
      "a": [
       1,
       2,
@@ -2610,7 +2783,6 @@
      ],
      "b": 1
     },
-    "outcome": "ok",
     "value_class": "java.util.LinkedHashMap",
     "ion_bytes": "{a:[1,2,3],b:1}",
     "revision_after": 2,
@@ -2624,11 +2796,18 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "map_over_scalar": {
-    "existing": "5",
-    "value": {
+    "existing": 5,
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": {
      "a": 1
     },
+    "errorOnMissing": null,
     "outcome": "ok",
+    "result": {
+     "a": 1
+    },
     "value_class": "java.util.LinkedHashMap",
     "ion_bytes": "{a:1}",
     "revision_after": 2,
@@ -2642,9 +2821,16 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "scalar_over_map": {
-    "existing": "{a:1}",
-    "value": 5,
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": 5,
+    "errorOnMissing": null,
     "outcome": "ok",
+    "result": 5,
     "value_class": "java.lang.Integer",
     "ion_bytes": "5",
     "revision_after": 2,
@@ -2658,11 +2844,18 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "map_over_string": {
-    "existing": "\"s\"",
-    "value": {
+    "existing": "s",
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": {
      "a": 1
     },
+    "errorOnMissing": null,
     "outcome": "ok",
+    "result": {
+     "a": 1
+    },
     "value_class": "java.util.LinkedHashMap",
     "ion_bytes": "{a:1}",
     "revision_after": 2,
@@ -2676,11 +2869,21 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "map_over_list": {
-    "existing": "[1,2]",
-    "value": {
+    "existing": [
+     1,
+     2
+    ],
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": {
      "a": 1
     },
+    "errorOnMissing": null,
     "outcome": "ok",
+    "result": {
+     "a": 1
+    },
     "value_class": "java.util.LinkedHashMap",
     "ion_bytes": "{a:1}",
     "revision_after": 2,
@@ -2694,14 +2897,29 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "dot_existing": {
-    "existing": "{a:{b:1,c:2}}",
-    "value": {
+    "existing": {
+     "a": {
+      "b": 1,
+      "c": 2
+     }
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": "a.b",
+      "value": 9
+     }
+    ],
+    "errorOnMissing": null,
+    "outcome": "ok",
+    "result": {
      "a": {
       "b": 9,
       "c": 2
      }
     },
-    "outcome": "ok",
     "value_class": "java.util.LinkedHashMap",
     "ion_bytes": "{a:{b:9,c:2}}",
     "revision_after": 2,
@@ -2715,8 +2933,21 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "dot_missing_level": {
-    "existing": "{a:1}",
-    "value": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": "x.y.z",
+      "value": 1
+     }
+    ],
+    "errorOnMissing": null,
+    "outcome": "ok",
+    "result": {
      "a": 1,
      "x": {
       "y": {
@@ -2724,7 +2955,6 @@
       }
      }
     },
-    "outcome": "ok",
     "value_class": "java.util.LinkedHashMap",
     "ion_bytes": "{a:1,x:{y:{z:1}}}",
     "revision_after": 2,
@@ -2738,13 +2968,25 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "dot_through_scalar": {
-    "existing": "{a:1}",
-    "value": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": "a.b",
+      "value": 2
+     }
+    ],
+    "errorOnMissing": null,
+    "outcome": "ok",
+    "result": {
      "a": {
       "b": 2
      }
     },
-    "outcome": "ok",
     "value_class": "java.util.LinkedHashMap",
     "ion_bytes": "{a:{b:2}}",
     "revision_after": 2,
@@ -2758,8 +3000,29 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "dot_two": {
-    "existing": "{a:{b:1}}",
-    "value": {
+    "existing": {
+     "a": {
+      "b": 1
+     }
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": "a.c",
+      "value": 2
+     },
+     {
+      "key": "d",
+      "value": {
+       "e": 1
+      }
+     }
+    ],
+    "errorOnMissing": null,
+    "outcome": "ok",
+    "result": {
      "a": {
       "b": 1,
       "c": 2
@@ -2768,7 +3031,6 @@
       "e": 1
      }
     },
-    "outcome": "ok",
     "value_class": "java.util.LinkedHashMap",
     "ion_bytes": "{a:{b:1,c:2},d:{e:1}}",
     "revision_after": 2,
@@ -2782,12 +3044,26 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "single_value": {
-    "existing": "{a:1}",
-    "value": [
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "value": [
+       1,
+       2
+      ]
+     }
+    ],
+    "errorOnMissing": null,
+    "outcome": "ok",
+    "result": [
      1,
      2
     ],
-    "outcome": "ok",
     "value_class": "java.util.ArrayList",
     "ion_bytes": "[1,2]",
     "revision_after": 2,
@@ -2801,9 +3077,20 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "single_value_null": {
-    "existing": "{a:1}",
-    "value": null,
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "value": null
+     }
+    ],
+    "errorOnMissing": null,
     "outcome": "ok",
+    "result": null,
     "value_class": "null",
     "ion_bytes": "null",
     "revision_after": 2,
@@ -2817,14 +3104,19 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "dot_on_scalar_existing": {
-    "existing": "5",
-    "value": [
+    "existing": 5,
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
      {
       "key": "a",
       "value": 1
      }
     ],
+    "errorOnMissing": null,
     "outcome": "error",
+    "result": null,
     "message": "Cannot apply keyed `value` updates to a non-JSON existing KV value.",
     "basis": "chosen",
     "compare": "outcome exact; value JSON-equal with key ORDER exact (Ion bytes keep map order); ion_bytes byte-exact; message exact",
@@ -2836,12 +3128,22 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "null_in_map": {
-    "existing": "{a:1,b:2}",
-    "value": {
+    "existing": {
      "a": 1,
      "b": 2
     },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": {
+     "a": null
+    },
+    "errorOnMissing": null,
     "outcome": "ok",
+    "result": {
+     "a": 1,
+     "b": 2
+    },
     "value_class": "java.util.LinkedHashMap",
     "ion_bytes": "{a:1,b:2}",
     "revision_after": 2,
@@ -2855,12 +3157,22 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "list_plain": {
-    "existing": "{a:1}",
-    "value": [
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
      1,
      2
     ],
+    "errorOnMissing": null,
     "outcome": "ok",
+    "result": [
+     1,
+     2
+    ],
     "value_class": "java.util.ArrayList",
     "ion_bytes": "[1,2]",
     "revision_after": 2,
@@ -2874,8 +3186,13 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "mixed_entries": {
-    "existing": "{a:1}",
-    "value": [
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
      {
       "key": "a",
       "value": 1
@@ -2884,7 +3201,9 @@
       "value": 2
      }
     ],
+    "errorOnMissing": null,
     "outcome": "error",
+    "result": null,
     "message": "`value` entries without `key` can only be used as a single replacement item.",
     "basis": "chosen",
     "compare": "outcome exact; value JSON-equal with key ORDER exact (Ion bytes keep map order); ion_bytes byte-exact; message exact",
@@ -2896,14 +3215,21 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "blank_key": {
-    "existing": "{a:1}",
-    "value": [
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
      {
       "key": " ",
       "value": 1
      }
     ],
+    "errorOnMissing": null,
     "outcome": "error",
+    "result": null,
     "message": "Each keyed `value` entry must have a non-empty string `key`.",
     "basis": "chosen",
     "compare": "outcome exact; value JSON-equal with key ORDER exact (Ion bytes keep map order); ion_bytes byte-exact; message exact",
@@ -2915,15 +3241,28 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "extra_field": {
-    "existing": "{a:1}",
-    "value": [
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
      {
       "key": "a",
       "value": 1,
       "other": 1
      }
     ],
+    "errorOnMissing": null,
     "outcome": "ok",
+    "result": [
+     {
+      "key": "a",
+      "value": 1,
+      "other": 1
+     }
+    ],
     "value_class": "java.util.ArrayList",
     "ion_bytes": "[{key:\"a\",value:1,other:1}]",
     "revision_after": 2,
@@ -2937,8 +3276,13 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "two_unkeyed": {
-    "existing": "{a:1}",
-    "value": [
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
      {
       "value": 1
      },
@@ -2946,7 +3290,9 @@
       "value": 2
      }
     ],
+    "errorOnMissing": null,
     "outcome": "error",
+    "result": null,
     "message": "`value` entries without `key` can only be used as a single replacement item.",
     "basis": "chosen",
     "compare": "outcome exact; value JSON-equal with key ORDER exact (Ion bytes keep map order); ion_bytes byte-exact; message exact",
@@ -2958,12 +3304,21 @@
     "premise": "the value reaches Put typed (egret's typed render keeps a YAML map a map); on the artifact it arrives as JSON text"
    },
    "dot_key_in_map": {
-    "existing": "{a:1}",
-    "value": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": {
+     "x.y": 1
+    },
+    "errorOnMissing": null,
+    "outcome": "ok",
+    "result": {
      "a": 1,
      "x.y": 1
     },
-    "outcome": "ok",
     "value_class": "java.util.LinkedHashMap",
     "ion_bytes": "{a:1,'x.y':1}",
     "revision_after": 2,
@@ -2978,10 +3333,17 @@
    },
    "missing_false": {
     "existing": null,
-    "value": {
+    "existing_state": "missing",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": {
      "a": 1
     },
+    "errorOnMissing": null,
     "outcome": "ok",
+    "result": {
+     "a": 1
+    },
     "value_class": "java.util.LinkedHashMap",
     "ion_bytes": "{a:1}",
     "revision_after": 1,
@@ -2996,12 +3358,22 @@
    },
    "missing_entries": {
     "existing": null,
-    "value": {
+    "existing_state": "missing",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": "a.b",
+      "value": 1
+     }
+    ],
+    "errorOnMissing": null,
+    "outcome": "ok",
+    "result": {
      "a": {
       "b": 1
      }
     },
-    "outcome": "ok",
     "value_class": "java.util.HashMap",
     "ion_bytes": "{a:{b:1}}",
     "revision_after": 1,
@@ -3016,31 +3388,57 @@
     "note": "Kestra's flattenToNestedMap returns a HashMap here: with several keys the order is hash order; egret keeps the entries' order"
    },
    "missing_true": {
+    "existing": null,
+    "existing_state": "missing",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": {
+     "a": 1
+    },
+    "errorOnMissing": true,
     "outcome": "error",
+    "result": null,
     "message": "No value found for key 'missing_true' in namespace 'w9c.put' and `errorOnMissing` is set to true",
     "basis": "measured",
     "compare": "outcome exact; message exact; nothing written"
    },
    "missing_true_entries": {
+    "existing": null,
+    "existing_state": "missing",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": "a.b",
+      "value": 1
+     }
+    ],
+    "errorOnMissing": true,
     "outcome": "error",
+    "result": null,
     "message": "No value found for key 'missing_true_entries' in namespace 'w9c.put' and `errorOnMissing` is set to true",
     "basis": "measured",
     "compare": "outcome exact; message exact; nothing written"
    },
    "keep_meta": {
-    "existing": "{a:1} with description 'my description', ttl P1D",
-    "value": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": "my description",
+    "existing_ttl": "P1D",
+    "patch": {
      "b": 2
     },
+    "errorOnMissing": null,
     "outcome": "ok",
-    "value_after": {
+    "result": {
      "a": 1,
      "b": 2
     },
     "description_after": "my description",
-    "expires_after": "unchanged (revision 1's expires_at)",
     "basis": "chosen",
-    "compare": "outcome exact; value JSON-equal; description exact; expires_at equal to revision 1's",
+    "compare": "outcome exact; result JSON-equal; description_after exact; rows_after exact (`<tN>` masks a timestamp: equal placeholders are equal timestamps, `<ts>` any)",
     "kestra": {
      "ion_bytes": "\"{\\\"b\\\":2}\"",
      "metadata_v2": "{description:\"my description\",expirationDate:\"<ts>\"}",
@@ -3063,19 +3461,40 @@
      "description_after": "my description",
      "expires_after": "unchanged"
     },
-    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5); description and expiry ARE kept by Kestra (measured)"
+    "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5); description and expiry ARE kept by Kestra (measured)",
+    "rows_after": [
+     {
+      "key": "keep_meta",
+      "revision": 1,
+      "latest": false,
+      "deleted": false,
+      "expires": "<t1>"
+     },
+     {
+      "key": "keep_meta",
+      "revision": 2,
+      "latest": true,
+      "deleted": false,
+      "expires": "<t1>"
+     }
+    ]
    },
    "over_expired": {
-    "existing": "{a:1}, description 'old desc', ttl PT1S, expired",
-    "value": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "expired",
+    "existing_description": "old desc",
+    "existing_ttl": "PT1S",
+    "patch": {
      "b": 2
     },
+    "errorOnMissing": null,
     "outcome": "ok",
-    "value_after": {
+    "result": {
      "b": 2
     },
     "description_after": null,
-    "expires_after": null,
     "rows_after": [
      {
       "key": "expired_meta",
@@ -3093,7 +3512,7 @@
      }
     ],
     "basis": "chosen",
-    "compare": "outcome exact; value JSON-equal; description and expiry null; rows exact",
+    "compare": "outcome exact; result JSON-equal; description_after and expires_after null; rows_after exact (`<ts>` masks a timestamp)",
     "kestra": {
      "ion_bytes": "\"{\\\"b\\\":2}\"",
      "metadata_v2": "(empty)",
@@ -3117,62 +3536,130 @@
     "why": "user ruling 2026-10-07 (item 8): Put on an expired key treats it as missing and starts fresh, carrying no description and no expiry. Kestra ALSO starts fresh (no description, no expiry: measured) but its read soft-deleted revision 1 (reads never write in egret); the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5)"
    },
    "templated": {
-    "existing": "{a:1}",
-    "value": "{{ {'b': 2} }}",
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": "{{ {'b': 2} }}",
+    "errorOnMissing": null,
     "outcome": "ok",
-    "value_after": {
+    "result": {
      "a": 1,
      "b": 2
     },
     "basis": "chosen",
-    "compare": "outcome exact; value JSON-equal",
+    "compare": "outcome exact; result JSON-equal",
     "kestra": {
      "ion_bytes": "\"{\\\"b\\\":2}\""
     },
     "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5); `{{ {'b': 2} }}` is a single expression, so egret's typed render yields a map"
    },
    "templated_leaf": {
-    "existing": "{a:1}",
-    "value": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": {
      "b": "{{ 1 + 1 }}"
     },
+    "errorOnMissing": null,
     "outcome": "ok",
-    "value_after": {
+    "result": {
      "a": 1,
      "b": 2
     },
     "basis": "chosen",
-    "compare": "outcome exact; value JSON-equal",
+    "compare": "outcome exact; result JSON-equal",
     "kestra": {
      "ion_bytes": "\"{\\\"b\\\":\\\"2\\\"}\""
     },
     "why": "the deep-merge Put is the user's scope decision (2026-10-07, spec header): egret merges the typed value. On the artifact a flow's `value` (Property<Object>) is rendered to its JSON TEXT and stored as a STRING, so Put never merges from a flow (raw_records.put_merge.run, put_yaml_block); egret's answer is what the artifact's own Put.mergeValues computes on typed values (jshell over /app/kestra, raw_records.put_merge_jshell). RULED 2026-10-07 by the user: Put stays a real deep merge; the artifact's unreachable merge is a §2 row (spec header, §2, §8.5); the leaf `{{ 1 + 1 }}` renders typed to 2"
    },
    "string_over_map": {
-    "existing": "{a:1}",
-    "value": "plain",
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": "plain",
+    "errorOnMissing": null,
     "outcome": "ok",
+    "result": "plain",
     "ion_bytes": "\"plain\"",
     "basis": "measured",
     "compare": "outcome exact; ion_bytes byte-exact"
    },
    "code_unkeyed_then_keyed": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "value": 2
+     },
+     {
+      "key": "a",
+      "value": 1
+     }
+    ],
+    "errorOnMissing": null,
     "outcome": "error",
+    "result": null,
     "message": "`value` entries without `key` can only be used as a single replacement item.",
     "basis": "code",
     "compare": "outcome exact; value JSON-equal with key order exact; message exact",
     "note": "jshell only (no runtime cell): Put.mergeValues on the artifact's classes"
    },
    "code_nonstring_key": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": 1,
+      "value": 1
+     }
+    ],
+    "errorOnMissing": null,
     "outcome": "error",
+    "result": null,
     "message": "Each keyed `value` entry must have a non-empty string `key`.",
     "basis": "code",
     "compare": "outcome exact; value JSON-equal with key order exact; message exact",
     "note": "jshell only (no runtime cell): Put.mergeValues on the artifact's classes"
    },
    "code_map_over_map_with_list_of_maps": {
+    "existing": {
+     "a": [
+      {
+       "b": 1
+      }
+     ]
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": {
+     "a": [
+      {
+       "c": 2
+      }
+     ]
+    },
+    "errorOnMissing": null,
     "outcome": "ok",
-    "value": {
+    "result": {
      "a": [
       {
        "b": 1
@@ -3189,8 +3676,16 @@
     "note": "jshell only (no runtime cell): Put.mergeValues on the artifact's classes"
    },
    "code_empty_list": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [],
+    "errorOnMissing": null,
     "outcome": "ok",
-    "value": [],
+    "result": [],
     "value_class": "java.util.ArrayList",
     "ion_bytes": "[]",
     "basis": "code",
@@ -3198,8 +3693,16 @@
     "note": "jshell only (no runtime cell): Put.mergeValues on the artifact's classes"
    },
    "code_empty_map": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": {},
+    "errorOnMissing": null,
     "outcome": "ok",
-    "value": {
+    "result": {
      "a": 1
     },
     "value_class": "java.util.LinkedHashMap",
@@ -3209,8 +3712,18 @@
     "note": "jshell only (no runtime cell): Put.mergeValues on the artifact's classes"
    },
    "code_missing_single": {
+    "existing": null,
+    "existing_state": "missing",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "value": 3
+     }
+    ],
+    "errorOnMissing": null,
     "outcome": "ok",
-    "value": 3,
+    "result": 3,
     "value_class": "java.lang.Integer",
     "ion_bytes": "3",
     "basis": "code",
@@ -3218,8 +3731,14 @@
     "note": "jshell only (no runtime cell): Put.mergeValues on the artifact's classes"
    },
    "code_missing_scalar": {
+    "existing": null,
+    "existing_state": "missing",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": 7,
+    "errorOnMissing": null,
     "outcome": "ok",
-    "value": 7,
+    "result": 7,
     "value_class": "java.lang.Integer",
     "ion_bytes": "7",
     "basis": "code",
@@ -3227,8 +3746,25 @@
     "note": "jshell only (no runtime cell): Put.mergeValues on the artifact's classes"
    },
    "code_dot_deep_merge_existing": {
+    "existing": {
+     "a": {
+      "b": {
+       "c": 1
+      }
+     }
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": "a.b.d",
+      "value": 2
+     }
+    ],
+    "errorOnMissing": null,
     "outcome": "ok",
-    "value": {
+    "result": {
      "a": {
       "b": {
        "c": 1,
@@ -3243,8 +3779,21 @@
     "note": "jshell only (no runtime cell): Put.mergeValues on the artifact's classes"
    },
    "code_trailing_dot": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": "a.",
+      "value": 2
+     }
+    ],
+    "errorOnMissing": null,
     "outcome": "ok",
-    "value": {
+    "result": {
      "a": 2
     },
     "value_class": "java.util.LinkedHashMap",
@@ -3254,8 +3803,21 @@
     "note": "jshell only (no runtime cell): Put.mergeValues on the artifact's classes"
    },
    "code_leading_dot": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": ".a",
+      "value": 2
+     }
+    ],
+    "errorOnMissing": null,
     "outcome": "ok",
-    "value": {
+    "result": {
      "a": 1,
      "": {
       "a": 2
@@ -3268,8 +3830,21 @@
     "note": "jshell only (no runtime cell): Put.mergeValues on the artifact's classes"
    },
    "code_double_dot": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": "a..b",
+      "value": 2
+     }
+    ],
+    "errorOnMissing": null,
     "outcome": "ok",
-    "value": {
+    "result": {
      "a": {
       "": {
        "b": 2
@@ -3283,8 +3858,27 @@
     "note": "jshell only (no runtime cell): Put.mergeValues on the artifact's classes"
    },
    "code_dot_prefix_conflict": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "live",
+    "existing_description": null,
+    "existing_ttl": null,
+    "patch": [
+     {
+      "key": "a",
+      "value": {
+       "z": 1
+      }
+     },
+     {
+      "key": "a.b",
+      "value": 2
+     }
+    ],
+    "errorOnMissing": null,
     "outcome": "ok",
-    "value": {
+    "result": {
      "a": {
       "z": 1,
       "b": 2
@@ -3295,7 +3889,79 @@
     "basis": "code",
     "compare": "outcome exact; value JSON-equal with key order exact; message exact",
     "note": "jshell only (no runtime cell): Put.mergeValues on the artifact's classes"
-   }
+   },
+   "over_expired_eom_true": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "expired",
+    "existing_description": "old desc",
+    "existing_ttl": "PT1S",
+    "patch": {
+     "b": 2
+    },
+    "errorOnMissing": true,
+    "outcome": "error",
+    "result": null,
+    "message": "No value found for key 'expired_eom' in namespace 'w9c.put' and `errorOnMissing` is set to true",
+    "rows_after": [
+     {
+      "key": "expired_eom",
+      "revision": 1,
+      "latest": true,
+      "deleted": false,
+      "expires": "<ts>"
+     }
+    ],
+    "basis": "chosen",
+    "compare": "outcome exact; message exact; nothing written: rows_after exact (`<ts>` masks a timestamp)",
+    "kestra": {
+     "not_measured": "not measured on the artifact (the case was added in Task 1's fix round 1, after the oracle was torn down)"
+    },
+    "why": "user ruling 2026-10-07 (plan item 8, spec §4.5, §8.5): an expired key is missing to Put, so errorOnMissing: true fails with the missing-key message (put_merge.missing_true) and nothing is written; reads never write, so revision 1 is not soft-deleted"
+   },
+   "over_deleted_with_description": {
+    "existing": {
+     "a": 1
+    },
+    "existing_state": "deleted",
+    "existing_description": "old desc",
+    "existing_ttl": null,
+    "patch": {
+     "b": 2
+    },
+    "errorOnMissing": false,
+    "outcome": "ok",
+    "result": {
+     "b": 2
+    },
+    "description_after": null,
+    "expires_after": null,
+    "rows_after": [
+     {
+      "key": "deleted_meta",
+      "revision": 1,
+      "latest": false,
+      "deleted": true,
+      "expires": null
+     },
+     {
+      "key": "deleted_meta",
+      "revision": 2,
+      "latest": true,
+      "deleted": false,
+      "expires": null
+     }
+    ],
+    "revision_after": 2,
+    "basis": "chosen",
+    "compare": "outcome exact; result JSON-equal; description_after and expires_after null; rows_after exact",
+    "kestra": {
+     "not_measured": "not measured on the artifact (the case was added in Task 1's fix round 1, after the oracle was torn down)"
+    },
+    "why": "spec §8.5: a soft-deleted key is missing to Put, which starts fresh and carries over no description and no expiry from a revision that is not live (the user's ruling 2026-10-07 for an expired key, applied alike to a deleted one); the deleted revision 1 stays as it was"
+   },
+   "_independent": "each cell has its own key in w9c.put, seeded once; no cell reads another's key"
   },
   "expiry": {
    "_how": "w9c.exp: every key Set with ttl PT2S (kvDescription d) and read after 3.5 s; `single` = one fresh key per reader, each reader in its own execution; `chain` = ONE key read by every reader in a fixed order",
@@ -3542,12 +4208,6 @@
      ],
      "basis": "measured",
      "compare": "outcome/status exact; message exact (Pebble wrapper stripped); outputs JSON-equal (a null `value` and an absent one are equal); rows_after exact (expiry masked)",
-     "kestra_answer": {
-      "outcome": "ok",
-      "outputs": {
-       "keys": []
-      }
-     },
      "independent_of": {
       "kv_default": "a fresh key of its own (x_getkeys)",
       "kv_eom_true": "a fresh key of its own (x_getkeys)",
@@ -3555,6 +4215,14 @@
       "get_default": "a fresh key of its own (x_getkeys)",
       "get_eom_false": "a fresh key of its own (x_getkeys)",
       "get_eom_true": "a fresh key of its own (x_getkeys)"
+     },
+     "artifact_raw": {
+      "answer": {
+       "outcome": "ok",
+       "outputs": {
+        "keys": []
+       }
+      }
      }
     },
     "delete_task_default": {
@@ -3648,14 +4316,18 @@
      "outcome": "ok",
      "rows_after": [
       {
+       "key": "x_put_task",
        "revision": 1,
        "latest": false,
-       "deleted": false
+       "deleted": false,
+       "expires": "<ts>"
       },
       {
+       "key": "x_put_task",
        "revision": 2,
        "latest": true,
-       "deleted": false
+       "deleted": false,
+       "expires": null
       }
      ],
      "basis": "chosen",
@@ -3840,7 +4512,6 @@
     },
     "api_list": {
      "status": 200,
-     "excludes_expired": true,
      "rows_after": [
       {
        "key": "x_api_list",
@@ -3851,15 +4522,21 @@
       }
      ],
      "basis": "measured",
-     "compare": "outcome/status exact; message exact (Pebble wrapper stripped); outputs JSON-equal (a null `value` and an absent one are equal); rows_after exact (expiry masked)",
-     "kestra_answer": {
-      "status": 200,
-      "keys": [
-       "control",
-       "x_put_task"
-      ]
+     "compare": "status exact; keys exact INCLUDING order; rows_after exact (expiry masked)",
+     "premise": "on Kestra every earlier reader had soft-deleted its own expired key; egret's earlier readers wrote nothing, so the expired keys are left out by expiry alone, and x_put_task's revision 2 is live on both",
+     "artifact_raw": {
+      "answer": {
+       "status": 200,
+       "keys": [
+        "control",
+        "x_put_task"
+       ]
+      }
      },
-     "premise": "on Kestra every earlier reader had soft-deleted its own expired key; egret's earlier readers wrote nothing, so the expired keys are left out by expiry alone, and x_put_task's revision 2 is live on both"
+     "keys": [
+      "control",
+      "x_put_task"
+     ]
     },
     "_sequence": [
      "kv_default",
@@ -4094,7 +4771,6 @@
     {
      "reader": "api_list",
      "status": 200,
-     "excludes_expired": true,
      "rows_after": [
       {
        "key": "chain",
@@ -4105,7 +4781,7 @@
       }
      ],
      "basis": "chosen",
-     "compare": "outcome/status exact; message exact (wrapper stripped); rows_after exact",
+     "compare": "status exact; keys exact INCLUDING order; rows_after exact (expiry masked)",
      "kestra": {
       "answer": {
        "status": 200,
@@ -4125,7 +4801,11 @@
       ]
      },
      "why": "user decision 2026-10-07 (spec header, §2, §4.5): an expired key reads exactly as a missing key; errorOnMissing decides; reads never write; Kestra answers from the soft-deleted state its first reader left",
-     "premise": "after step 0 Kestra's key is soft-deleted (a read wrote); egret's key is still only expired, so egret's test reaches this step by expiry alone, with no earlier reader having changed anything"
+     "premise": "after step 0 Kestra's key is soft-deleted (a read wrote); egret's key is still only expired, so egret's test reaches this step by expiry alone, with no earlier reader having changed anything; x_put_task is live on both sides (expiry.single.put_task wrote revision 2 with no ttl) and control never expires, every other key of w9c.exp has expired",
+     "keys": [
+      "control",
+      "x_put_task"
+     ]
     },
     {
      "reader": "delete_task_default",
@@ -4169,42 +4849,45 @@
     "objects_unchanged_by_reads": true,
     "basis": "measured",
     "compare": "the object list before and after the reads is identical (a soft delete removes no object)",
-    "kestra_tree": [
-     "chain.ion",
-     "chain.ion.metadata",
-     "control.ion",
-     "control.ion.metadata",
-     "x_api_bulk_delete.ion",
-     "x_api_bulk_delete.ion.metadata",
-     "x_api_delete.ion",
-     "x_api_delete.ion.metadata",
-     "x_api_get.ion",
-     "x_api_get.ion.metadata",
-     "x_api_list.ion",
-     "x_api_list.ion.metadata",
-     "x_delete_task_default.ion",
-     "x_delete_task_default.ion.metadata",
-     "x_delete_task_eom_true.ion",
-     "x_delete_task_eom_true.ion.metadata",
-     "x_get_default.ion",
-     "x_get_default.ion.metadata",
-     "x_get_eom_false.ion",
-     "x_get_eom_false.ion.metadata",
-     "x_get_eom_true.ion",
-     "x_get_eom_true.ion.metadata",
-     "x_getkeys.ion",
-     "x_getkeys.ion.metadata",
-     "x_kv_default.ion",
-     "x_kv_default.ion.metadata",
-     "x_kv_eom_false.ion",
-     "x_kv_eom_false.ion.metadata",
-     "x_kv_eom_true.ion",
-     "x_kv_eom_true.ion.metadata",
-     "x_put_task.ion",
-     "x_put_task.ion.metadata",
-     "x_put_task.ion.v2"
-    ]
-   }
+    "artifact_raw": {
+     "tree": [
+      "chain.ion",
+      "chain.ion.metadata",
+      "control.ion",
+      "control.ion.metadata",
+      "x_api_bulk_delete.ion",
+      "x_api_bulk_delete.ion.metadata",
+      "x_api_delete.ion",
+      "x_api_delete.ion.metadata",
+      "x_api_get.ion",
+      "x_api_get.ion.metadata",
+      "x_api_list.ion",
+      "x_api_list.ion.metadata",
+      "x_delete_task_default.ion",
+      "x_delete_task_default.ion.metadata",
+      "x_delete_task_eom_true.ion",
+      "x_delete_task_eom_true.ion.metadata",
+      "x_get_default.ion",
+      "x_get_default.ion.metadata",
+      "x_get_eom_false.ion",
+      "x_get_eom_false.ion.metadata",
+      "x_get_eom_true.ion",
+      "x_get_eom_true.ion.metadata",
+      "x_getkeys.ion",
+      "x_getkeys.ion.metadata",
+      "x_kv_default.ion",
+      "x_kv_default.ion.metadata",
+      "x_kv_eom_false.ion",
+      "x_kv_eom_false.ion.metadata",
+      "x_kv_eom_true.ion",
+      "x_kv_eom_true.ion.metadata",
+      "x_put_task.ion",
+      "x_put_task.ion.metadata",
+      "x_put_task.ion.v2"
+     ]
+    }
+   },
+   "_independent": "objects_after_all_reads compares the object lists before and after every read: neither a Kestra soft delete nor an egret read removes an object, so it holds whatever the order; `single` and `chain` name their own order"
   },
   "inheritance": {
    "_setup": "flow namespace w9c.inh.a.b. Keys: top@w9c.inh; mid@w9c.inh.a and @w9c.inh; own@w9c.inh.a.b and @w9c.inh; child@w9c.inh.a.b.c; root@w9c; delmid@w9c.inh.a (soft-deleted) and @w9c.inh; deepN@w9c.inh.a.b (ttl PT1S, expired) and @w9c.inh; midexp@w9c.inh.a (expired) and @w9c.inh",
@@ -4660,7 +5343,8 @@
      "basis": "measured",
      "compare": "status exact; namespaces_in_order exact (deepest first); entries per namespace as a SET (Kestra's order within a namespace is its database's unordered scan; egret orders them as GetKeys does)",
      "premise": "Kestra's earlier reads soft-deleted deep1..deep4 at w9c.inh.a.b and midexp at w9c.inh.a; egret's reads wrote nothing, and those keys are left out by expiry alone (deep5, deep6, never read, show the same on both)"
-    }
+    },
+    "_independent": "read-only listings of fixed seeds; each states its premise about the earlier reads"
    },
    "_sequence": [
     "kv_top",
@@ -4932,14 +5616,18 @@
     "outcome": "error",
     "basis": "measured",
     "compare": "error-class (the argument check is egret's common Pebble argument check)",
-    "kestra_message": "The argument at position 4 is not allowed. Only 3 argument(s) are allowed."
+    "artifact_raw": {
+     "message": "The argument at position 4 is not allowed. Only 3 argument(s) are allowed."
+    }
    },
    "unknown_named": {
     "expr": "{{ kv(key='k', foo=1) }}",
     "outcome": "error",
     "basis": "measured",
     "compare": "error-class (the argument check is egret's common Pebble argument check)",
-    "kestra_message": "The following named argument does not exist: foo"
+    "artifact_raw": {
+     "message": "The following named argument does not exist: foo"
+    }
    },
    "no_execution": {
     "expr": "{{ kv('k') }}",
@@ -4954,7 +5642,8 @@
      "note": "not measurable on the artifact (every kv() render there has a flow); see function_kv_oracle"
     },
     "why": "spec §6: a render with no execution refuses kv() by name, as W9b's functions"
-   }
+   },
+   "_independent": "every cell is a read (kv() in a Return task) over the fixed `_setup` seeds; no cell writes"
   },
   "get_keys": {
    "_setup": "w9c.gk seeded through the API in this order: ['b', 'a_b', 'A', 'a.1', '0', 'a', 'B', 'aa', 'a1', 'a-b', 'a.b', 'Z9', 'a0']; `a_b` deleted, `B` ttl PT1S (expired)",
@@ -5328,26 +6017,28 @@
     "objects_removed_by_delete": 0,
     "basis": "measured",
     "compare": "a soft delete removes no object",
-    "kestra_tree": [
-     "del_f.ion",
-     "del_f.ion.metadata",
-     "del_t.ion",
-     "del_t.ion.metadata",
-     "exp_f.ion",
-     "exp_f.ion.metadata",
-     "exp_t.ion",
-     "exp_t.ion.metadata",
-     "live_f.ion",
-     "live_f.ion.metadata",
-     "live_t.ion",
-     "live_t.ion.metadata",
-     "multi.ion",
-     "multi.ion.metadata",
-     "multi.ion.v2",
-     "multi.ion.v2.metadata",
-     "multi.ion.v3",
-     "multi.ion.v3.metadata"
-    ]
+    "artifact_raw": {
+     "tree": [
+      "del_f.ion",
+      "del_f.ion.metadata",
+      "del_t.ion",
+      "del_t.ion.metadata",
+      "exp_f.ion",
+      "exp_f.ion.metadata",
+      "exp_t.ion",
+      "exp_t.ion.metadata",
+      "live_f.ion",
+      "live_f.ion.metadata",
+      "live_t.ion",
+      "live_t.ion.metadata",
+      "multi.ion",
+      "multi.ion.metadata",
+      "multi.ion.v2",
+      "multi.ion.v2.metadata",
+      "multi.ion.v3",
+      "multi.ion.v3.metadata"
+     ]
+    }
    },
    "rewrite_after_delete": {
     "rows": [
@@ -5881,7 +6572,7 @@
    },
    "size": {
     "counts": "revisions",
-    "example": "expiredOnly: false over 5 keys holding 12 revisions answers size 12",
+    "example": "{type: version, keepAmount: 0} over 5 keys holding 12 revisions answers size 12 (purge.version_keep0)",
     "basis": "measured",
     "compare": "the unit of `size` (revisions, not keys)"
    },
@@ -5914,7 +6605,25 @@
       ]
      },
      "why": "spec §8.6: children on a DOT boundary among the namespaces HOLDING KV (w9c.ppx is not a child); Kestra takes its candidates from namespaces that have FLOWS, so children with KV but no flow are never purged",
-     "premise": "each cell re-seeds `x` (ttl PT1S, expired) and `live` in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx, w9c.p; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size"
+     "premise": "each cell re-seeds `x` (ttl PT1S, expired) in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx and w9c.p (`seeded`); the flow runs in `flow_namespace`; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size",
+     "flow_namespace": "w9c.pp",
+     "seeded": {
+      "w9c.pp": [
+       "x"
+      ],
+      "w9c.pp.a": [
+       "x"
+      ],
+      "w9c.pp.a.b": [
+       "x"
+      ],
+      "w9c.ppx": [
+       "x"
+      ],
+      "w9c.p": [
+       "x"
+      ]
+     }
     },
     "namespaces_pp_no_children": {
      "props": {
@@ -5929,18 +6638,38 @@
      ],
      "basis": "measured",
      "compare": "outcome exact; purged_namespaces as a set; message contains each fragment",
-     "premise": "each cell re-seeds `x` (ttl PT1S, expired) and `live` in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx, w9c.p; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size",
-     "kestra_answer": {
-      "outcome": "ok",
-      "outputs": {
-       "size": 1
-      },
-      "purged_namespaces": [
-       "w9c.pp"
+     "premise": "each cell re-seeds `x` (ttl PT1S, expired) in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx and w9c.p (`seeded`); the flow runs in `flow_namespace`; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size",
+     "artifact_raw": {
+      "answer": {
+       "outcome": "ok",
+       "outputs": {
+        "size": 1
+       },
+       "purged_namespaces": [
+        "w9c.pp"
+       ],
+       "info_logs": [
+        "purging 1 namespaces: [w9c.pp]",
+        "purged 1 keys"
+       ]
+      }
+     },
+     "flow_namespace": "w9c.pp",
+     "seeded": {
+      "w9c.pp": [
+       "x"
       ],
-      "info_logs": [
-       "purging 1 namespaces: [w9c.pp]",
-       "purged 1 keys"
+      "w9c.pp.a": [
+       "x"
+      ],
+      "w9c.pp.a.b": [
+       "x"
+      ],
+      "w9c.ppx": [
+       "x"
+      ],
+      "w9c.p": [
+       "x"
       ]
      }
     },
@@ -5970,7 +6699,26 @@
       ]
      },
      "why": "spec §8.6: the pattern ranges over the flow's own namespace and its children holding KV (w9c.ppx matches the pattern but is outside the purge rule); Kestra matches namespaces with flows only",
-     "premise": "each cell re-seeds `x` (ttl PT1S, expired) and `live` in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx, w9c.p; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size"
+     "premise": "each cell re-seeds `x` (ttl PT1S, expired) in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx and w9c.p (`seeded`); the flow runs in `flow_namespace`; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size",
+     "flow_namespace": "w9c.pp",
+     "seeded": {
+      "w9c.pp": [
+       "x"
+      ],
+      "w9c.pp.a": [
+       "x"
+      ],
+      "w9c.pp.a.b": [
+       "x"
+      ],
+      "w9c.ppx": [
+       "x"
+      ],
+      "w9c.p": [
+       "x"
+      ]
+     },
+     "note": "a pattern names its namespaces itself: includeChildNamespaces never expands a pattern's matches (Kestra's PurgeTask.findNamespaces applies it to `namespaces` only); spec §8.6 amended 2026-10-07 (fix round 1, I4)"
     },
     "namespacePattern_pp_star_no_children": {
      "props": {
@@ -5999,7 +6747,26 @@
       ]
      },
      "why": "as namespacePattern_pp_star (the pattern itself names the namespaces; Kestra ignores includeChildNamespaces with a pattern)",
-     "premise": "each cell re-seeds `x` (ttl PT1S, expired) and `live` in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx, w9c.p; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size"
+     "premise": "each cell re-seeds `x` (ttl PT1S, expired) in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx and w9c.p (`seeded`); the flow runs in `flow_namespace`; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size",
+     "flow_namespace": "w9c.pp",
+     "seeded": {
+      "w9c.pp": [
+       "x"
+      ],
+      "w9c.pp.a": [
+       "x"
+      ],
+      "w9c.pp.a.b": [
+       "x"
+      ],
+      "w9c.ppx": [
+       "x"
+      ],
+      "w9c.p": [
+       "x"
+      ]
+     },
+     "note": "a pattern names its namespaces itself: includeChildNamespaces never expands a pattern's matches (Kestra's PurgeTask.findNamespaces applies it to `namespaces` only); spec §8.6 amended 2026-10-07 (fix round 1, I4)"
     },
     "namespacePattern_exact": {
      "props": {
@@ -6011,20 +6778,41 @@
      ],
      "basis": "measured",
      "compare": "outcome exact; purged_namespaces as a set; message contains each fragment",
-     "premise": "each cell re-seeds `x` (ttl PT1S, expired) and `live` in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx, w9c.p; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size",
-     "kestra_answer": {
-      "outcome": "ok",
-      "outputs": {
-       "size": 1
-      },
-      "purged_namespaces": [
-       "w9c.pp"
+     "premise": "each cell re-seeds `x` (ttl PT1S, expired) in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx and w9c.p (`seeded`); the flow runs in `flow_namespace`; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size",
+     "artifact_raw": {
+      "answer": {
+       "outcome": "ok",
+       "outputs": {
+        "size": 1
+       },
+       "purged_namespaces": [
+        "w9c.pp"
+       ],
+       "info_logs": [
+        "purging 1 namespaces: [w9c.pp]",
+        "purged 1 keys"
+       ]
+      }
+     },
+     "flow_namespace": "w9c.pp",
+     "seeded": {
+      "w9c.pp": [
+       "x"
       ],
-      "info_logs": [
-       "purging 1 namespaces: [w9c.pp]",
-       "purged 1 keys"
+      "w9c.pp.a": [
+       "x"
+      ],
+      "w9c.pp.a.b": [
+       "x"
+      ],
+      "w9c.ppx": [
+       "x"
+      ],
+      "w9c.p": [
+       "x"
       ]
-     }
+     },
+     "note": "a pattern names its namespaces itself: includeChildNamespaces never expands a pattern's matches (Kestra's PurgeTask.findNamespaces applies it to `namespaces` only); spec §8.6 amended 2026-10-07 (fix round 1, I4)"
     },
     "both": {
      "props": {
@@ -6048,7 +6836,25 @@
       "info_logs": []
      },
      "why": "spec §8.6: `namespaces` xor `namespacePattern`; egret's message names both properties (Kestra's task log says only `Resource fails validation`; its source text is `Properties `namespaces` and `namespacePattern` can't be used at the same time — use one or the other.`)",
-     "premise": "each cell re-seeds `x` (ttl PT1S, expired) and `live` in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx, w9c.p; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size"
+     "premise": "each cell re-seeds `x` (ttl PT1S, expired) in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx and w9c.p (`seeded`); the flow runs in `flow_namespace`; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size",
+     "flow_namespace": "w9c.pp",
+     "seeded": {
+      "w9c.pp": [
+       "x"
+      ],
+      "w9c.pp.a": [
+       "x"
+      ],
+      "w9c.pp.a.b": [
+       "x"
+      ],
+      "w9c.ppx": [
+       "x"
+      ],
+      "w9c.p": [
+       "x"
+      ]
+     }
     },
     "namespaces_other_parent": {
      "props": {
@@ -6078,7 +6884,25 @@
       ]
      },
      "why": "user decision 2026-10-07 (spec header, §2, §5): a flow writes and deletes only its own namespace; PurgeKV its own and its children on a dot boundary; a listed namespace outside the purge rule is refused by name before anything is purged. Kestra purged 16 namespaces (every FLOW namespace starting with the string 'w9c.p', plus w9c.p)",
-     "premise": "each cell re-seeds `x` (ttl PT1S, expired) and `live` in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx, w9c.p; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size"
+     "premise": "each cell re-seeds `x` (ttl PT1S, expired) in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx and w9c.p (`seeded`); the flow runs in `flow_namespace`; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size",
+     "flow_namespace": "w9c.pp",
+     "seeded": {
+      "w9c.pp": [
+       "x"
+      ],
+      "w9c.pp.a": [
+       "x"
+      ],
+      "w9c.pp.a.b": [
+       "x"
+      ],
+      "w9c.ppx": [
+       "x"
+      ],
+      "w9c.p": [
+       "x"
+      ]
+     }
     },
     "namespaces_nonexistent": {
      "props": {
@@ -6102,7 +6926,25 @@
       ]
      },
      "why": "user decision 2026-10-07 (spec header, §2, §5): a flow writes and deletes only its own namespace; PurgeKV its own and its children on a dot boundary; w9c.nowhere is not the flow's namespace or a child",
-     "premise": "each cell re-seeds `x` (ttl PT1S, expired) and `live` in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx, w9c.p; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size"
+     "premise": "each cell re-seeds `x` (ttl PT1S, expired) in w9c.pp, w9c.pp.a, w9c.pp.a.b, w9c.ppx and w9c.p (`seeded`); the flow runs in `flow_namespace`; Kestra's sizes include revisions left by earlier cells, so egret's test seeds each cell fresh and compares the purged NAMESPACES, not the size",
+     "flow_namespace": "w9c.pp",
+     "seeded": {
+      "w9c.pp": [
+       "x"
+      ],
+      "w9c.pp.a": [
+       "x"
+      ],
+      "w9c.pp.a.b": [
+       "x"
+      ],
+      "w9c.ppx": [
+       "x"
+      ],
+      "w9c.p": [
+       "x"
+      ]
+     }
     },
     "_sequence": [
      "namespaces_pp",
@@ -6151,7 +6993,8 @@
      ]
     },
     "why": "spec §2/§8.6 (user decision 2026-10-07): with no namespaces the default is the flow's own namespace and its children; Kestra purges every namespace that has a FLOW (31 here, `tutorial` included) and never w9c.pd.c (KV but no flow)"
-   }
+   },
+   "_independent": "each behaviour cell runs in its own namespace (w9c.pg2.<cell>), seeded fresh (`_setup`)"
   },
   "api": {
    "_routes": "Kestra: /api/v1/main/namespaces/{ns}/kv/{key} (GET, PUT, DELETE), /namespaces/{ns}/kv (DELETE bulk), /namespaces/{ns}/kv/inheritance (GET), /kv (GET paged, all namespaces). egret: /api/ws/{ws}/workflows/namespaces/{ns}/kv… (spec §9)",
@@ -6322,13 +7165,16 @@
     "empty": {
      "body": "",
      "put_status": 400,
+     "message_contains": [
+      "empty body"
+     ],
      "basis": "chosen",
-     "compare": "put_status exact; nothing written",
+     "compare": "put_status exact; message contains each fragment; nothing written (a GET answers 404)",
      "kestra": {
       "put_status": 422,
       "detail": "Required Body [value] not specified"
      },
-     "why": "spec §9 error table (approved 2026-10-07, W9b's ns_refusal): the key rule, a malformed ttl or a malformed body is 400; Kestra answers 422"
+     "why": "user ruling R-b (2026-10-07, spec header, §9 error table): an empty PUT body, or one holding only whitespace (no Ion value at all), answers 400 naming it an empty body, and nothing is written; it is not the raw text of zero values; Kestra answers 422 `Required Body [value] not specified`"
     },
     "malformed_struct": {
      "body": "{a:",
@@ -6852,7 +7698,108 @@
       }
      },
      "why": "ruled 2026-10-07 by the user (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type. `PT1.5S` is not one Ion value (Ion reads the symbol `PT1`, then more), so the whole text is stored as the STRING `PT1.5S`; Kestra keeps the first value and stores `\"PT1\"`, a truncated value the caller never sent. It stays a STRING, not a DURATION: the raw-text fallback never infers a type"
-    }
+    },
+    "ws_only": {
+     "body": "   ",
+     "put_status": 400,
+     "message_contains": [
+      "empty body"
+     ],
+     "basis": "chosen",
+     "compare": "put_status exact; message contains each fragment; nothing written (a GET answers 404)",
+     "kestra": {
+      "not_measured": "not measured on the artifact (the case was added in Task 1's fix round 1, after the oracle was torn down)"
+     },
+     "why": "user ruling R-b (2026-10-07, spec header, §9 error table): an empty PUT body, or one holding only whitespace (no Ion value at all), answers 400 naming it an empty body, and nothing is written; it is not the raw text of zero values. Whitespace alone holds no Ion value, so it counts as empty: the same 400 as `empty`, never a STRING of spaces"
+    },
+    "clob": {
+     "body": "{{\"hello\"}}",
+     "put_status": 400,
+     "message_contains": [
+      "clob"
+     ],
+     "basis": "chosen",
+     "compare": "put_status exact; message contains each fragment; nothing written (a GET answers 404)",
+     "kestra": {
+      "not_measured": "not measured on the artifact (the case was added in Task 1's fix round 1, after the oracle was torn down)"
+     },
+     "why": "user ruling 2026-10-07 (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type, at any depth. A clob is one Ion value of a type the KV store does not model, like a blob (ion_blob)"
+    },
+    "nested_blob": {
+     "body": "{a:{{aGVsbG8=}}}",
+     "put_status": 400,
+     "message_contains": [
+      "blob"
+     ],
+     "basis": "chosen",
+     "compare": "put_status exact; message contains each fragment; nothing written (a GET answers 404)",
+     "kestra": {
+      "not_measured": "not measured on the artifact (the case was added in Task 1's fix round 1, after the oracle was torn down)"
+     },
+     "why": "user ruling 2026-10-07 (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type, at any depth. The refusal applies at any depth: a struct holding a blob is refused naming `blob`"
+    },
+    "nested_sexp": {
+     "body": "[1,(a b)]",
+     "put_status": 400,
+     "message_contains": [
+      "sexp"
+     ],
+     "basis": "chosen",
+     "compare": "put_status exact; message contains each fragment; nothing written (a GET answers 404)",
+     "kestra": {
+      "not_measured": "not measured on the artifact (the case was added in Task 1's fix round 1, after the oracle was torn down)"
+     },
+     "why": "user ruling 2026-10-07 (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type, at any depth. The refusal applies at any depth: a list holding an s-expression is refused naming `sexp`"
+    },
+    "nested_annot": {
+     "body": "{a:x::1}",
+     "put_status": 200,
+     "ion_bytes": "\"{a:x::1}\"",
+     "get": {
+      "status": 200,
+      "type": "STRING",
+      "value": "{a:x::1}"
+     },
+     "basis": "chosen",
+     "compare": "put_status exact; ion_bytes byte-exact; get.status, get.type, get.value exact (`updated` masked)",
+     "kestra": {
+      "not_measured": "not measured on the artifact (the case was added in Task 1's fix round 1, after the oracle was torn down)"
+     },
+     "why": "user ruling 2026-10-07 (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type, at any depth. An annotation is not a type: an annotated value at the top level is kept as the raw text, as Kestra keeps `x::1` (ion_annot, measured), and the same holds at any depth, so the whole body is stored as the STRING `{a:x::1}`"
+    },
+    "ion_ts_year": {
+     "body": "2025T",
+     "put_status": 200,
+     "ion_bytes": "\"2025T\"",
+     "get": {
+      "status": 200,
+      "type": "STRING",
+      "value": "2025T"
+     },
+     "basis": "chosen",
+     "compare": "put_status exact; ion_bytes byte-exact; get.status, get.type, get.value exact (`updated` masked)",
+     "kestra": {
+      "not_measured": "not measured on the artifact (the case was added in Task 1's fix round 1, after the oracle was torn down)"
+     },
+     "why": "user ruling R-c (2026-10-07, spec header, §2, §9): an Ion timestamp of year precision has no KV type (it is neither an instant nor a date), so it is stored as the raw text, a STRING"
+    },
+    "ion_ts_month": {
+     "body": "2025-01T",
+     "put_status": 200,
+     "ion_bytes": "\"2025-01T\"",
+     "get": {
+      "status": 200,
+      "type": "STRING",
+      "value": "2025-01T"
+     },
+     "basis": "chosen",
+     "compare": "put_status exact; ion_bytes byte-exact; get.status, get.type, get.value exact (`updated` masked)",
+     "kestra": {
+      "not_measured": "not measured on the artifact (the case was added in Task 1's fix round 1, after the oracle was torn down)"
+     },
+     "why": "user ruling R-c (2026-10-07, spec header, §2, §9): an Ion timestamp of month precision has no KV type, so it is stored as the raw text, a STRING"
+    },
+    "_independent": "each body is PUT to its own fresh key in w9c.api; no cell reads another's key"
    },
    "headers": {
     "h_desc": {
@@ -6865,12 +7812,15 @@
        "revision": 1,
        "latest": true,
        "deleted": false,
-       "expires": null
+       "expires": null,
+       "description": "my desc"
       }
      ],
      "basis": "measured",
-     "compare": "status exact; rows exact (expiry = write + ttl, masked)",
-     "kestra_sidecar": "{description:\"my desc\"}"
+     "compare": "status exact; rows exact, the stored description included (expiry = write + ttl, masked)",
+     "artifact_raw": {
+      "sidecar": "{description:\"my desc\"}"
+     }
     },
     "h_ttl": {
      "description": null,
@@ -6882,12 +7832,15 @@
        "revision": 1,
        "latest": true,
        "deleted": false,
-       "expires": "<ts>"
+       "expires": "<ts>",
+       "description": null
       }
      ],
      "basis": "measured",
-     "compare": "status exact; rows exact (expiry = write + ttl, masked)",
-     "kestra_sidecar": "{expirationDate:\"<ts>\"}"
+     "compare": "status exact; rows exact, the stored description included (expiry = write + ttl, masked)",
+     "artifact_raw": {
+      "sidecar": "{expirationDate:\"<ts>\"}"
+     }
     },
     "h_both": {
      "description": "d2",
@@ -6899,12 +7852,15 @@
        "revision": 1,
        "latest": true,
        "deleted": false,
-       "expires": "<ts>"
+       "expires": "<ts>",
+       "description": "d2"
       }
      ],
      "basis": "measured",
-     "compare": "status exact; rows exact (expiry = write + ttl, masked)",
-     "kestra_sidecar": "{description:\"d2\",expirationDate:\"<ts>\"}"
+     "compare": "status exact; rows exact, the stored description included (expiry = write + ttl, masked)",
+     "artifact_raw": {
+      "sidecar": "{description:\"d2\",expirationDate:\"<ts>\"}"
+     }
     },
     "h_ttl_bad": {
      "description": null,
@@ -6944,13 +7900,16 @@
        "revision": 1,
        "latest": true,
        "deleted": false,
-       "expires": "<ts>"
+       "expires": "<ts>",
+       "description": null
       }
      ],
      "basis": "measured",
-     "compare": "status exact; rows exact (expiry = write + ttl, masked)",
-     "kestra_sidecar": "{expirationDate:\"<ts>\"}",
-     "note": "the API accepts ttl PT0S (the value is expired at once); the Set task refuses PT0S (`ttl: must be a positive duration`, ttl.ttl_pt0s)"
+     "compare": "status exact; rows exact, the stored description included (expiry = write + ttl, masked)",
+     "note": "the API accepts ttl PT0S (the value is expired at once); the Set task refuses PT0S (`ttl: must be a positive duration`, ttl.ttl_pt0s)",
+     "artifact_raw": {
+      "sidecar": "{expirationDate:\"<ts>\"}"
+     }
     },
     "h_desc_empty": {
      "description": "",
@@ -6962,13 +7921,17 @@
        "revision": 1,
        "latest": true,
        "deleted": false,
-       "expires": null
+       "expires": null,
+       "description": ""
       }
      ],
      "basis": "measured",
-     "compare": "status exact; rows exact (expiry = write + ttl, masked)",
-     "kestra_sidecar": "{description:\"\"}"
-    }
+     "compare": "status exact; rows exact, the stored description included (expiry = write + ttl, masked)",
+     "artifact_raw": {
+      "sidecar": "{description:\"\"}"
+     }
+    },
+    "_independent": "each cell PUTs its own key (the cell's name) in w9c.api, once"
    },
    "routes": {
     "delete_live": {
@@ -7152,16 +8115,31 @@
     },
     "list_namespace": {
      "status": 200,
-     "keys_listed": "the namespace's live keys",
      "basis": "chosen",
-     "compare": "status exact",
+     "compare": "status exact; keys exact INCLUDING order",
      "kestra": {
       "status": 405,
       "note": "GET …/namespaces/{ns}/kv has no GET on Kestra; its listing is GET /kv across namespaces (paged)"
      },
      "why": "spec §2/§9: one namespace's live keys, bounded by max_namespace_files",
      "diverges_state": false,
-     "diverges_state_why": "a refused or read-only request: the state after it is the same on both sides (bulk_invalid_key: Kestra also deleted nothing)"
+     "diverges_state_why": "a refused or read-only request: the state after it is the same on both sides (bulk_invalid_key: Kestra also deleted nothing)",
+     "namespace": "w9c.gk",
+     "keys": [
+      "A",
+      "a.1",
+      "a",
+      "aa",
+      "a1",
+      "a-b",
+      "a.b",
+      "Z9",
+      "a0",
+      "b",
+      "0",
+      "a_b"
+     ],
+     "premise": "the state get_keys.after_rewrites leaves in w9c.gk (measured, no divergent step); the order is Kestra's measured listing order for that namespace (raw_records.fn_getkeys_delete.get_keys_rewrites, `api list`): latest revision row id ascending (spec §8.3)"
     },
     "content_type_json": {
      "status": 415,
@@ -7206,44 +8184,64 @@
      },
      "basis": "measured",
      "compare": "kv_prints exact; get_value JSON-equal",
-     "kestra_class": "java.util.LinkedHashMap"
+     "artifact_raw": {
+      "class": "java.util.LinkedHashMap"
+     }
     },
     "ion_float": {
      "kv_prints": "1.5",
      "get_value": 1.5,
      "basis": "measured",
      "compare": "kv_prints exact; get_value JSON-equal",
-     "kestra_class": "java.math.BigDecimal"
+     "artifact_raw": {
+      "class": "java.math.BigDecimal"
+     }
     },
     "ion_timestamp": {
-     "kv_prints": "2025-01-01",
-     "get_value": "2025-01-01",
-     "basis": "measured",
+     "kv_prints": "2025-01-01T00:00:00Z",
+     "get_value": "2025-01-01T00:00:00Z",
+     "basis": "chosen",
      "compare": "kv_prints exact; get_value JSON-equal",
-     "kestra_class": "java.time.LocalDate"
+     "kestra": {
+      "kv_prints": "2025-01-01",
+      "get_value": "2025-01-01",
+      "class": "java.time.LocalDate"
+     },
+     "why": "user ruling 2026-10-07 (spec §9 'The PUT body's type'): the body 2025-01-01T00:00:00Z is a DATETIME (api.put_bodies.ion_timestamp), and a DATETIME reads back in kv()'s print form (types.dt); Kestra stored a DATE and reads back `2025-01-01`"
     },
     "ts_time": {
      "kv_prints": "2025-01-01T03:04:05Z",
-     "get_value": "2025-01-01T03:04:05.000000Z",
-     "basis": "measured",
+     "get_value": "2025-01-01T03:04:05Z",
+     "basis": "chosen",
      "compare": "kv_prints exact; get_value JSON-equal",
-     "kestra_class": "java.time.Instant"
+     "kestra": {
+      "kv_prints": "2025-01-01T03:04:05Z",
+      "get_value": "2025-01-01T03:04:05.000000Z",
+      "class": "java.time.Instant"
+     },
+     "why": "spec §2 row 'Get's output serialises a DATETIME' (measured 2026-10-07, types.dt chosen): Get returns a DATETIME as the string kv() prints; Kestra's Get serialises the Instant with microseconds"
     },
     "dec_150": {
      "kv_prints": "1.5",
      "get_value": 1.5,
      "basis": "measured",
      "compare": "kv_prints exact; get_value JSON-equal",
-     "kestra_class": "java.math.BigDecimal"
+     "artifact_raw": {
+      "class": "java.math.BigDecimal"
+     }
     },
     "ion_null": {
      "kv_prints": "",
      "get_value": null,
      "basis": "measured",
      "compare": "kv_prints exact; get_value JSON-equal",
-     "kestra_class": ""
-    }
-   }
+     "artifact_raw": {
+      "class": ""
+     }
+    },
+    "_independent": "each cell reads its own key, written once by api.put_bodies; no cell writes"
+   },
+   "_independent": "kv_detail describes the response shape and reads no state; the sub-families name their own order"
   },
   "layout": {
    "namespace": "w9c.lay",
@@ -7256,14 +8254,8 @@
      "objects": [],
      "rows": [],
      "latest_status": 404,
-     "basis": "chosen",
-     "compare": "objects exact (names relative to the namespace's _kv prefix); rows exact; latest_status exact",
-     "kestra": {
-      "objects": []
-     },
-     "why": "egret keeps description and expiry in workflow.kv_entries (spec §4.1); Kestra's LOCAL storage writes each object's metadata to a `{object}.metadata` sidecar file, which egret does not write",
-     "diverges_state": false,
-     "diverges_state_why": "the only divergence is the `.metadata` sidecar objects, which no later step reads"
+     "basis": "measured",
+     "compare": "objects exact (names relative to the namespace's _kv prefix); rows exact; latest_status exact"
     },
     {
      "step": "write v1",
@@ -7703,30 +8695,31 @@
     "why": "user decision 2026-10-07 (spec header, §2, §5): a flow writes and deletes only its own namespace; PurgeKV its own and its children on a dot boundary",
     "flow_namespace": "w9c.wsp.ws",
     "target": "w9c.api"
-   }
+   },
+   "_independent": "egret refuses every write, delete and purge here before touching anything (the write rule is checked first), so no answer depends on another cell; get_nonexistent reads w9c.nowhere2, which no cell can write"
   }
  },
  "egret_expected_basis": {
   "schema": "measured (GET /api/v1/plugins/{cls})",
   "keys": "measured, except the API statuses of refused keys (400, chosen), the empty key's route, and the 350/351-char keys (chosen; see each cell)",
   "types": "measured, except DATETIME/DURATION Get values, STRING values that look like durations, and DURATION values Kestra's read regex does not match (chosen)",
-  "set_coercion": "measured, except Jackson-worded failures (NUMBER, JSON, a bad kvType) and DURATION type of non-matching durations (chosen)",
-  "typed_render": "measured, except tr_p1d (chosen, stored type)",
+  "set_coercion": "measured, except Jackson-worded failures (NUMBER, JSON, a bad kvType) and the DURATION type of String durations Kestra's read regex does not match (chosen)",
+  "typed_render": "measured, except tr_p1d (chosen, stored type) and tr_yaml_* (chosen, user ruling R-a: a YAML value is stored typed)",
   "ttl": "measured, except a malformed ttl's message (chosen)",
   "overwrite": "measured, except over_expired and api_after.exp (chosen; the latter states its premise)",
-  "put_merge": "chosen (egret = the artifact's Put.mergeValues, run in jshell; Kestra's runtime stores JSON text) except missing_true* and string_over_map (measured) and code_* (code)",
+  "put_merge": "chosen (egret = the artifact's Put.mergeValues, run in jshell; Kestra's runtime stores JSON text) except missing_true* and string_over_map (measured) and code_* (code); over_expired_eom_true and over_deleted_with_description are chosen without a Kestra measurement",
   "expiry": "chosen where Kestra answers or writes differently for an expired key; every chain step after the first states its premise",
   "inheritance": "measured, except an expired level (chosen); api_inheritance compares entries per namespace as sets",
   "kv_function": "measured, except ClassCastException answers, a non-existent or invalid namespace and the no-execution render (chosen)",
   "get_keys": "measured (order included), except a namespace with no KV (chosen)",
   "delete": "measured, except expired keys (chosen)",
   "purge": "per cell; see each cell's basis",
-  "api": "measured, except 422->400 statuses, the PUT bodies ruled 2026-10-07 (more than one Ion value or no Ion value: the raw text as a STRING; a blob or s-expression: 400; a timestamp with a time: DATETIME in UTC), explicit-revision reads, the revisions route and the namespace listing (chosen)",
-  "layout": "chosen per step only because egret writes no `.metadata` sidecar; object names, rows and statuses are measured",
+  "api": "measured, except 422->400 statuses, the PUT bodies ruled 2026-10-07 (not exactly one Ion value: the raw text as a STRING; empty or whitespace-only: 400; a blob, clob or s-expression at any depth: 400; a timestamp with a time: DATETIME in UTC; year or month precision: the raw text), the reads of those values, explicit-revision reads, the revisions route and the namespace listing (chosen)",
+  "layout": "chosen per step only because egret writes no `.metadata` sidecar; object names, rows and statuses are measured; steps.0 (no objects on either side) is measured",
   "kv_segment_namespaces": "measured",
   "function_kv_oracle": "measured (the expression oracle's golden)",
   "write_scope": "chosen (the user's write-scope and read-any decisions); Kestra's measured answers under kestra",
-  "rule": "a cell whose egret answer is not Kestra's measured answer carries basis: chosen, egret's answer at the TOP LEVEL, the reason under why and Kestra's measured answer under kestra, and is listed in chosen_cells (path: dot-joined keys; pointer: RFC 6901). A cell measured after a step where egret diverges carries `premise` (how egret's test reaches that state). basis: code = an artifact class run in jshell. Enforced by w9c_check_fixture.py (SDD workspace).",
+  "rule": "a cell whose egret answer is not Kestra's measured answer carries basis: chosen, egret's answer at the TOP LEVEL, the reason under why and Kestra's measured answer under kestra, and is listed in chosen_cells (path: dot-joined keys; pointer: RFC 6901). A cell measured after a step where egret diverges carries `premise` (how egret's test reaches that state). basis: code = an artifact class run in jshell. Uncompared artifact detail on a measured or code cell lives under `artifact_raw`, never under a `kestra*` key. A container of two or more cells names its order in `_sequence` or says why order does not matter in `_independent`. Enforced by w9c_check_fixture.py (SDD workspace).",
   "chosen_cells": [
    {
     "path": "keys.<empty>.api_put",
@@ -7882,31 +8875,6 @@
     "path": "set_coercion.type_bad",
     "pointer": "/set_coercion/type_bad",
     "why": "kvType is an enum of seven upper-case names; egret refuses any other value (at publish or at run), naming the allowed types; Kestra fails at run with Jackson's text"
-   },
-   {
-    "path": "set_coercion.t_num_duration",
-    "pointer": "/set_coercion/t_num_duration",
-    "why": "user decision 2026-10-07 (spec header, §2, §4.2): egret STORES the type with each revision and reads it back as written; Kestra re-infers it on read (KVType.from + its DURATION regex); Kestra validates the duration but its read regex does not match '{{ 42 }}'"
-   },
-   {
-    "path": "set_coercion.t_dec_duration",
-    "pointer": "/set_coercion/t_dec_duration",
-    "why": "user decision 2026-10-07 (spec header, §2, §4.2): egret STORES the type with each revision and reads it back as written; Kestra re-infers it on read (KVType.from + its DURATION regex); Kestra validates the duration but its read regex does not match '{{ 1.5 }}'"
-   },
-   {
-    "path": "set_coercion.t_bool_duration",
-    "pointer": "/set_coercion/t_bool_duration",
-    "why": "user decision 2026-10-07 (spec header, §2, §4.2): egret STORES the type with each revision and reads it back as written; Kestra re-infers it on read (KVType.from + its DURATION regex); Kestra validates the duration but its read regex does not match '{{ true }}'"
-   },
-   {
-    "path": "set_coercion.t_map_duration",
-    "pointer": "/set_coercion/t_map_duration",
-    "why": "user decision 2026-10-07 (spec header, §2, §4.2): egret STORES the type with each revision and reads it back as written; Kestra re-infers it on read (KVType.from + its DURATION regex); Kestra validates the duration but its read regex does not match '{{ {'a': 1} }}'"
-   },
-   {
-    "path": "set_coercion.t_list_duration",
-    "pointer": "/set_coercion/t_list_duration",
-    "why": "user decision 2026-10-07 (spec header, §2, §4.2): egret STORES the type with each revision and reads it back as written; Kestra re-infers it on read (KVType.from + its DURATION regex); Kestra validates the duration but its read regex does not match '{{ [1, 2] }}'"
    },
    {
     "path": "typed_render.tr_p1d",
@@ -8361,7 +9329,7 @@
    {
     "path": "api.put_bodies.empty",
     "pointer": "/api/put_bodies/empty",
-    "why": "spec §9 error table (approved 2026-10-07, W9b's ns_refusal): the key rule, a malformed ttl or a malformed body is 400; Kestra answers 422"
+    "why": "user ruling R-b (2026-10-07, spec header, §9 error table): an empty PUT body, or one holding only whitespace (no Ion value at all), answers 400 naming it an empty body, and nothing is written; it is not the raw text of zero values; Kestra answers 422 `Required Body [value] not specified`"
    },
    {
     "path": "api.headers.h_ttl_bad",
@@ -8407,11 +9375,6 @@
     "path": "api.routes.list_namespace",
     "pointer": "/api/routes/list_namespace",
     "why": "spec §2/§9: one namespace's live keys, bounded by max_namespace_files"
-   },
-   {
-    "path": "layout.steps.0",
-    "pointer": "/layout/steps/0",
-    "why": "egret keeps description and expiry in workflow.kv_entries (spec §4.1); Kestra's LOCAL storage writes each object's metadata to a `{object}.metadata` sidecar file, which egret does not write"
    },
    {
     "path": "layout.steps.1",
@@ -8487,6 +9450,81 @@
     "path": "write_scope.purge_other_existing",
     "pointer": "/write_scope/purge_other_existing",
     "why": "user decision 2026-10-07 (spec header, §2, §5): a flow writes and deletes only its own namespace; PurgeKV its own and its children on a dot boundary"
+   },
+   {
+    "path": "typed_render.tr_yaml_map",
+    "pointer": "/typed_render/tr_yaml_map",
+    "why": "user ruling R-a (2026-10-07, spec header, §2, §8.1): Set with a YAML map or list value stores it TYPED, as JSON, exactly the way Put keeps it; each string leaf is rendered by the typed render, so `{{ 1 + 1 }}` is the number 2, and kv() then returns the map. On the artifact `value` is a string property: the YAML value reaches renderTyped as JSON text, its leaves rendered as strings, and is stored as a STRING"
+   },
+   {
+    "path": "typed_render.tr_yaml_list",
+    "pointer": "/typed_render/tr_yaml_list",
+    "why": "user ruling R-a (2026-10-07, spec header, §2, §8.1): Set with a YAML map or list value stores it TYPED, as JSON, exactly the way Put keeps it; each string leaf is rendered by the typed render, so `{{ 1 + 1 }}` is the number 2, and kv() then returns the map. On the artifact `value` is a string property: the YAML value reaches renderTyped as JSON text, its leaves rendered as strings, and is stored as a STRING"
+   },
+   {
+    "path": "typed_render.tr_yaml_int",
+    "pointer": "/typed_render/tr_yaml_int",
+    "why": "user ruling R-a (2026-10-07, spec header, §2, §8.1): Set with a YAML map or list value stores it TYPED, as JSON, exactly the way Put keeps it; each string leaf is rendered by the typed render, so `{{ 1 + 1 }}` is the number 2, and kv() then returns the map. On the artifact `value` is a string property: the YAML value reaches renderTyped as JSON text, its leaves rendered as strings, and is stored as a STRING; a YAML scalar keeps its YAML type the same way (Put keeps a scalar patch typed: put_merge.scalar_over_map)"
+   },
+   {
+    "path": "typed_render.tr_yaml_bool",
+    "pointer": "/typed_render/tr_yaml_bool",
+    "why": "user ruling R-a (2026-10-07, spec header, §2, §8.1): Set with a YAML map or list value stores it TYPED, as JSON, exactly the way Put keeps it; each string leaf is rendered by the typed render, so `{{ 1 + 1 }}` is the number 2, and kv() then returns the map. On the artifact `value` is a string property: the YAML value reaches renderTyped as JSON text, its leaves rendered as strings, and is stored as a STRING; a YAML scalar keeps its YAML type the same way (Put keeps a scalar patch typed: put_merge.scalar_over_map)"
+   },
+   {
+    "path": "api.api_written_read_by_flow.ion_timestamp",
+    "pointer": "/api/api_written_read_by_flow/ion_timestamp",
+    "why": "user ruling 2026-10-07 (spec §9 'The PUT body's type'): the body 2025-01-01T00:00:00Z is a DATETIME (api.put_bodies.ion_timestamp), and a DATETIME reads back in kv()'s print form (types.dt); Kestra stored a DATE and reads back `2025-01-01`"
+   },
+   {
+    "path": "api.api_written_read_by_flow.ts_time",
+    "pointer": "/api/api_written_read_by_flow/ts_time",
+    "why": "spec §2 row 'Get's output serialises a DATETIME' (measured 2026-10-07, types.dt chosen): Get returns a DATETIME as the string kv() prints; Kestra's Get serialises the Instant with microseconds"
+   },
+   {
+    "path": "api.put_bodies.ws_only",
+    "pointer": "/api/put_bodies/ws_only",
+    "why": "user ruling R-b (2026-10-07, spec header, §9 error table): an empty PUT body, or one holding only whitespace (no Ion value at all), answers 400 naming it an empty body, and nothing is written; it is not the raw text of zero values. Whitespace alone holds no Ion value, so it counts as empty: the same 400 as `empty`, never a STRING of spaces"
+   },
+   {
+    "path": "api.put_bodies.clob",
+    "pointer": "/api/put_bodies/clob",
+    "why": "user ruling 2026-10-07 (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type, at any depth. A clob is one Ion value of a type the KV store does not model, like a blob (ion_blob)"
+   },
+   {
+    "path": "api.put_bodies.nested_blob",
+    "pointer": "/api/put_bodies/nested_blob",
+    "why": "user ruling 2026-10-07 (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type, at any depth. The refusal applies at any depth: a struct holding a blob is refused naming `blob`"
+   },
+   {
+    "path": "api.put_bodies.nested_sexp",
+    "pointer": "/api/put_bodies/nested_sexp",
+    "why": "user ruling 2026-10-07 (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type, at any depth. The refusal applies at any depth: a list holding an s-expression is refused naming `sexp`"
+   },
+   {
+    "path": "api.put_bodies.nested_annot",
+    "pointer": "/api/put_bodies/nested_annot",
+    "why": "user ruling 2026-10-07 (spec header, §2, §9): a body that parses as exactly one Ion value is stored as that value's type; anything else is the raw text as a STRING; a blob, clob or s-expression is refused with 400 naming the type, at any depth. An annotation is not a type: an annotated value at the top level is kept as the raw text, as Kestra keeps `x::1` (ion_annot, measured), and the same holds at any depth, so the whole body is stored as the STRING `{a:x::1}`"
+   },
+   {
+    "path": "api.put_bodies.ion_ts_year",
+    "pointer": "/api/put_bodies/ion_ts_year",
+    "why": "user ruling R-c (2026-10-07, spec header, §2, §9): an Ion timestamp of year precision has no KV type (it is neither an instant nor a date), so it is stored as the raw text, a STRING"
+   },
+   {
+    "path": "api.put_bodies.ion_ts_month",
+    "pointer": "/api/put_bodies/ion_ts_month",
+    "why": "user ruling R-c (2026-10-07, spec header, §2, §9): an Ion timestamp of month precision has no KV type, so it is stored as the raw text, a STRING"
+   },
+   {
+    "path": "put_merge.over_expired_eom_true",
+    "pointer": "/put_merge/over_expired_eom_true",
+    "why": "user ruling 2026-10-07 (plan item 8, spec §4.5, §8.5): an expired key is missing to Put, so errorOnMissing: true fails with the missing-key message (put_merge.missing_true) and nothing is written; reads never write, so revision 1 is not soft-deleted"
+   },
+   {
+    "path": "put_merge.over_deleted_with_description",
+    "pointer": "/put_merge/over_deleted_with_description",
+    "why": "spec §8.5: a soft-deleted key is missing to Put, which starts fresh and carries over no description and no expiry from a revision that is not live (the user's ruling 2026-10-07 for an expired key, applied alike to a deleted one); the deleted revision 1 stays as it was"
    }
   ]
  },

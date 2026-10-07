@@ -37,6 +37,10 @@
   - `Put` stays a **real deep merge**, with the semantics of the fixture's `put_merge` cells (the artifact's `Put.mergeValues`); on the artifact a flow's value reaches `Put` as JSON text, so the merge is unreachable there (spec §2, §8.5; Tasks 3, 5);
   - the API's `PUT` body: **exactly one Ion value** is stored as that value's type, anything else as the raw text, typed STRING; a blob, clob or s-expression is 400 naming the type; a timestamp with a time is a DATETIME in UTC, a day-precision one a DATE (spec §2, §9; Task 6, `api.put_bodies`);
   - `PurgeKV`'s **`before` follows Kestra**: a revision is purged when the `created_at` of the key's next revision is at or before `before`; the latest is never purged by `before` (spec §2, §8.6; Tasks 3, 5, `purge.version_before`).
+- **The user's rulings on Task 1's review (2026-10-07), now in the spec's header:**
+  - **R-a:** `Set` stores a YAML map or list **typed**, as JSON, exactly as `Put` keeps it; one render rule serves both (Task 5, `typed_render.tr_yaml_*`);
+  - **R-b:** an empty or whitespace-only `PUT` body answers **400 "empty body"** (Task 6, `api.put_bodies.empty`, `ws_only`);
+  - **R-c:** a year- or month-precision Ion timestamp (`2025T`, `2025-01T`) is stored as the **raw text**, typed STRING (Task 6, `api.put_bodies.ion_ts_year`, `ion_ts_month`).
 - **Dedicated containers for this branch:** Postgres `egret-w9c-postgres` on :5440 (postgres:16, egret/egret, db egret_test), Valkey `egret-w9c-valkey` :6400, MinIO `egret-w9c-minio` :9001 (egret/egretsecret, bucket warehouse). The env for every cargo test includes `EGRET_TEST_STARROCKS_URL=mysql://localhost:9030`.
 - **Destructive tests run only on MemStore or under a throwaway prefix `w9c-tN-test/<uuid>/`. Never touch the shared dev DB or bucket. Never touch a kind cluster named `egret`.** On MinIO, a test builds a `FileStore` with that `prefix` and removes it with `delete_prefix` at the end. Never delete at the bucket root or under `workflow/`. Postgres means `egret-w9c-postgres` only. Task 1's `_kv` count runs **one read-only `SELECT`** on the dev database and touches nothing else there.
 - **No DB connection or lock may be held across slow I/O (client bodies, S3 streaming, plugin runs, renders). Ask this for every write path.** Each task has a **hold audit** step. It names every place a pool connection or an advisory lock is held, and what I/O happens while it is. The server-paced windows the spec accepts are named where they occur, with their bound:
@@ -135,7 +139,7 @@ migrations/0175_workflow_kv_entries.sql                       NEW  T2: workflow.
 crates/egret-workflow/src/storage/mod.rs                       MOD  T2: pub mod kv; FileStore::namespace_kv_uri
 crates/egret-workflow/src/storage/kv/mod.rs                    NEW  T2: module doc, LOCK_PREFIX, kv_lock_text
 crates/egret-workflow/src/storage/kv/key.rs                    NEW  T2: KvKey, check_key, MAX_KEY_BYTES (the one key rule)
-crates/egret-workflow/src/storage/kv/value.rs                  NEW  T2: KvType, KvValue, encode, decode, parse_ttl;
+crates/egret-workflow/src/storage/kv/value.rs                  NEW  T2: KvType, KvValue, encode, decode, Ttl, parse_ttl;
                                                                     T5: coerce; T6: parse_api_body
 crates/egret-workflow/src/storage/kv/store.rs                  NEW  T2 reads (resolve, resolve_first_live, list_live,
                                                                     list_inherited, revisions, read_value, namespaces_with_kv,
@@ -384,30 +388,41 @@ impl KvType {
     pub fn as_str(self) -> &'static str;
     /// A kvType property value, as Kestra's enum binding accepts it (case as w9c `set_coercion` measured).
     pub fn parse(s: &str) -> Option<Self>;
-    /// The type of a rendered typed value with no kvType: string -> STRING, number -> NUMBER,
-    /// boolean -> BOOLEAN, object or array -> JSON (§4.2). `null` -> None: the caller refuses it.
-    /// (Amended 2026-10-07, Task 1: Kestra stores a rendered `null` as Ion `null`, typed STRING (w9c
-    /// `typed_render.tr_null`), and kvType coerces only a String, so the stored type is the coerced
-    /// value's own (spec §4.2 amended); `of(null)` is STRING, not a refusal.)
-    pub fn of(v: &serde_json::Value) -> Option<Self>;
+    /// The type of a value after coercion (§4.2): string -> STRING, number -> NUMBER, boolean ->
+    /// BOOLEAN, object or array -> JSON, `null` -> STRING (Kestra stores a rendered `null` as Ion
+    /// `null`, typed STRING: w9c `typed_render.tr_null`). Never DURATION, DATETIME or DATE: those
+    /// come only from `coerce` of a String with that kvType (amended 2026-10-07, Task 1 and its review C1).
+    pub fn of(v: &serde_json::Value) -> Self;
 }
 /// A value as egret stores and reads it back: DATETIME, DATE and DURATION are JSON strings in
 /// the form w9c `types.<T>.kv_prints` measured (§4.2, §15).
 #[derive(Clone, Debug, PartialEq)]
 pub struct KvValue { pub kind: KvType, pub json: serde_json::Value }
-/// The object's bytes, byte-equal to w9c `types.<T>.ion_bytes`: DURATION as its raw ISO text,
-/// (amended 2026-10-07, Task 1: DURATION is an Ion STRING, `"P1D"` with its quotes, like any string)
-/// everything else as Ion text through runners::ionfmt::write_ion_json, except where the fixture
-/// shows a timestamp (DATETIME, DATE), written as the Ion timestamp literal it shows.
+/// The object's bytes, byte-equal to w9c `types.<T>.ion_bytes`: Ion text through
+/// runners::ionfmt::write_ion_json for every type (a DURATION is an Ion string, `"P1D"` with its
+/// quotes), except a DATETIME or DATE, written as the Ion timestamp literal the fixture shows (UTC,
+/// millisecond precision; a DATE at day precision). Amended 2026-10-07 (Task 1).
 pub fn encode(v: &KvValue) -> Vec<u8>;
-/// The bytes back to the JSON value of `kind`: DURATION is UTF-8 text; the others are exactly one
-/// (amended 2026-10-07, Task 1: DURATION is one Ion string too; it prints as w9c `types._rule_read` says)
-/// Ion value through storage::ion::read_values_capped (bounded by `cap`), then normalised for
-/// DATETIME/DATE as `encode` wrote them. Err names what is wrong, never a storage key.
+/// The bytes back to the JSON value of `kind`: exactly one Ion value through
+/// storage::ion::read_values_capped (bounded by `cap`), then normalised for DATETIME/DATE as
+/// `encode` wrote them and for DURATION as w9c `types._rule_read` prints it. Err names what is
+/// wrong, never a storage key. Amended 2026-10-07 (Task 1: a DURATION is one Ion string).
 pub fn decode(kind: KvType, bytes: &[u8], cap: u64) -> Result<serde_json::Value, String>;
+/// Where a ttl comes from: the two measured behaviours differ (Task 1 review I3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ttl {
+    /// The tasks' `ttl` property (Set): zero and negative are both refused with
+    /// `ttl: must be a positive duration` (w9c `ttl.PT0S`, `ttl.-PT1S`); a malformed one names the
+    /// value and `ttl` (w9c `ttl.xyz`).
+    Task,
+    /// The API's `ttl` header: zero is ACCEPTED (the value is expired at once, w9c
+    /// `api.headers.h_ttl_zero`); a negative one is `ttl cannot be negative` (`h_ttl_neg`, exact);
+    /// a malformed one `Cannot convert value '<v>' to Duration` (`h_ttl_bad`, exact).
+    Header,
+}
 /// An ISO-8601 duration as java.time.Duration.parse reads it (crate::executor::retry::parse_duration,
-/// retry.rs:518); a negative one is refused naming the property; zero as w9c `ttl.PT0S` measured.
-pub fn parse_ttl(raw: &str) -> Result<chrono::TimeDelta, String>;
+/// retry.rs:518), then zero and the sign judged by `mode`. Err is the message for that mode.
+pub fn parse_ttl(raw: &str, mode: Ttl) -> Result<chrono::TimeDelta, String>;
 
 // src/storage/kv/mod.rs
 pub mod key; pub mod merge /* T3 */; pub mod routes /* T6 */; pub mod store; pub mod sweep /* T3 */; pub mod value;
@@ -478,9 +493,10 @@ pub async fn read_value(fs: &FileStore, grant: &Grant, e: &KvEntry) -> Result<se
 #[test] fn encode_is_byte_equal_to_the_artifact_for_every_type() { /* w9c types.*.ion_bytes */ }
 #[test] fn decode_reads_back_what_encode_wrote_for_every_type() { /* round trip, every types row */ }
 #[test] fn decode_of_the_artifacts_bytes_answers_what_kestras_kv_printed() { /* types.*.kv_prints; a mismatch is a §2 row */ }
-#[test] fn a_duration_is_stored_as_its_raw_text() { /* "P1D" -> b"P1D", not "\"P1D\"" */ }
+#[test] fn a_duration_is_stored_as_an_ion_string() { /* "P1D" -> b"\"P1D\"" (w9c types.dur_p1d) */ }
 #[test] fn decode_refuses_two_values_and_none() {}
-#[test] fn parse_ttl_refuses_a_negative_and_a_malformed_duration_naming_them() {}
+#[test] fn parse_ttl_task_refuses_zero_and_negative_as_not_positive() { /* w9c ttl.PT0S, ttl.-PT1S, ttl.xyz */ }
+#[test] fn parse_ttl_header_accepts_zero_and_refuses_negative_with_its_own_message() { /* w9c api.headers.h_ttl_zero, h_ttl_neg, h_ttl_bad */ }
 
 // src/storage/nsfiles/access.rs (unit) -- added beside W9b's
 #[test] fn a_kv_segment_namespace_is_refused_for_every_resource_access_and_actor() { /* "a._kv", "a._kv.b"; "_kv" is invalid anyway */ }
@@ -535,8 +551,8 @@ pub async fn read_value(fs: &FileStore, grant: &Grant, e: &KvEntry) -> Result<se
     - `list_live`: `SELECT … FROM (SELECT DISTINCT ON (key) … ORDER BY key, revision DESC) latest WHERE NOT deleted AND NOT expired ORDER BY key COLLATE "C" LIMIT $n`, so the cap counts live keys. *(Amended 2026-10-07, Task 1: `ORDER BY latest.id`, not `key COLLATE "C"`: Kestra lists keys in the order their latest revision was written, w9c `get_keys`.)*
     - `resolve_first_live`: `namespace = ANY($2)` with `DISTINCT ON (namespace)`, then the deepest live level is picked in Rust in `grants` order. Assert that every grant has one workspace and `Resource::Kv`.
   - **`read_value`:** `e.size > cap` → `TooLarge` before any download; `get_stream(..).take(cap + 1)`; `NotFound` → `Author("revision {n} of key '{k}' in namespace '{ns}' is recorded but its value is gone from internal storage")`; other store errors are logged with the `s3://` key at `ERROR` and answered as `Store`, naming the key and namespace only. Then `value::decode(e.value_type, &bytes, cap)`, whose error is `Author` naming the key and revision.
-  - **`value::encode`:** call `runners::ionfmt::write_ion_json` (make `ionfmt` and the function `pub(crate)`), and special-case only what `types` shows: DURATION's raw text, and the timestamp literals. *(Amended 2026-10-07, Task 1: DURATION needs no special case: it is an Ion string. The cases the fixture shows are Double as Ion float text (`1.5e0`, `1e0`, `1.0e20`), the API's Ion decimals, and timestamps at millisecond precision in UTC.)*
-  - **`parse_ttl`:** make `executor::retry` `pub(crate)` and call its `parse_duration`; a leading `-` gets its own message.
+  - **`value::encode`:** call `runners::ionfmt::write_ion_json` (make `ionfmt` and the function `pub(crate)`), and special-case only what `types` shows: a Double as Ion float text (`1.5e0`, `1e0`, `1.0e20`), the API's Ion decimals, and timestamps at millisecond precision in UTC. A DURATION needs no special case: it is an Ion string (amended 2026-10-07, Task 1).
+  - **`parse_ttl`:** make `executor::retry` `pub(crate)` and call its `parse_duration`; then `Ttl::Task` refuses `<= 0` with `ttl: must be a positive duration`, and `Ttl::Header` refuses `< 0` with `ttl cannot be negative` and accepts zero (Task 1 review I3).
 - [ ] **Step 4: Run the tests to see them pass**, then the per-task gate.
 - [ ] **Step 5: Hold audit.** This task writes nothing. Confirm that `read_value` takes no connection and that every read function takes a `&mut PgConnection` it does not keep. State both in the report.
 - [ ] **Step 6: Mutations:**
@@ -656,7 +672,7 @@ pub fn spawn_kv_expiry_sweeper(pool: PgPool, fs: Arc<FileStore>, cfg: KvSweepCon
 
 ```rust
 // src/storage/kv/merge.rs (unit)
-#[test] fn every_put_merge_cell_of_the_artifact() { /* w9c put_merge: nested maps, arrays in maps, map vs scalar, dotted patch, missing level, [{value}] */ }
+#[test] fn every_put_merge_cell_of_the_artifact() { /* every w9c put_merge cell, driven from its top level only: merge(existing, patch) == result, or Err(message); existing_state != live -> None */ }
 
 // tests/kv_store.rs (Postgres :5440 + MemStore; flavor = "multi_thread")
 #[tokio::test(flavor = "multi_thread")]
@@ -887,9 +903,10 @@ fn on_ns_conn<T>(&self, what: &str,
 
 ```rust
 // src/runners/env.rs
-/// Kestra's renderTyped (Set.java:111): `template`, trimmed, that is exactly ONE `{{ … }}` with no
-/// other text is rendered as `{{ (…) | toJson }}` and parsed back with serde_json (arbitrary
-/// precision kept); anything else is render_str's String. Against w9c typed_render.
+/// Kestra's renderTyped (Set.java:111): a `template` that is exactly ONE `{{ … }}` with no other
+/// text, not even surrounding spaces (w9c typed_render.tr_ws: ` {{ 1 }} ` is the string " 1 "), is
+/// rendered as `{{ (…) | toJson }}` and parsed back with serde_json (arbitrary precision kept);
+/// anything else is render_str's String. Against w9c typed_render.
 pub fn render_typed(template: &str, cx: &RenderContext) -> Result<serde_json::Value, RenderError>;
 
 // src/storage/kv/value.rs
@@ -897,7 +914,9 @@ pub fn render_typed(template: &str, cx: &RenderContext) -> Result<serde_json::Va
 /// NUMBER from a string by Jackson; BOOLEAN strict ("true"/"false", any case, else "Cannot parse '%s'
 /// as a BOOLEAN value: expected 'true' or 'false'."); DATETIME an instant; DATE a local date falling
 /// back to an instant's UTC date; DURATION validated, kept as written; JSON parsed; a Number with
-/// STRING its toString(); the other mismatches as measured. No kvType: KvType::of.
+/// STRING its toString(); the other mismatches as measured. No kvType: KvType::of. kvType applies to
+/// a String only: any other value is returned as itself, typed KvType::of, whatever kvType says, so
+/// DURATION is the stored type only for a String (w9c set_coercion.t_*_duration; review C1).
 pub fn coerce(value: serde_json::Value, kv_type: Option<KvType>) -> Result<KvValue, String>;
 
 // src/worker/handlers/kv.rs
@@ -926,6 +945,7 @@ pub const DECLARED: &[super::namespace::DeclaredClass];
 ```rust
 #[tokio::test] async fn declared_properties_and_outputs_match_the_artifact() { /* DECLARED vs w9c schema, top level */ }
 #[test] fn render_typed_matches_the_artifact() { /* w9c typed_render, unit, no DB */ }
+#[test] fn set_and_put_render_a_yaml_map_by_one_rule() { /* w9c typed_render.tr_yaml_* (chosen) and put_merge.templated_leaf: the same value */ }
 #[test] fn every_set_coercion_matches_the_artifact() { /* w9c set_coercion, unit */ }
 #[tokio::test(flavor = "multi_thread")] async fn set_then_get_round_trips_every_type() { /* w9c types: Get's outputs.value */ }
 #[tokio::test(flavor = "multi_thread")] async fn set_with_overwrite_false_over_a_live_key_fails_naming_it() { /* w9c overwrite */ }
@@ -968,12 +988,12 @@ pub const DECLARED: &[super::namespace::DeclaredClass];
   - `Ok(Outcome::succeeded_with(json))`.
 
   `cancel` holds nothing (each write commits on its own, on a detached task).
-  - `Set`/`Put`: `value` is the raw spec JSON. A string goes through `render_typed`; an array or object is rendered leaf by leaf (strings through `render_typed`, keys through `render_str`), as `typed_render`'s YAML cells measured. `Set` then calls `coerce(rendered, kvType)`; `ttl` uses `parse_ttl`. `by` is `CreatedBy::TaskRun { … }`. `KvWritten::Already` succeeds with a log line saying the earlier attempt wrote it.
+  - `Set`/`Put` share **one render rule** (the user's ruling R-a, 2026-10-07; spec §8.1), `render_value(raw, cx) -> serde_json::Value`: `value` is the raw spec JSON. A string goes through `render_typed`. An array or object stays an array or object, rendered leaf by leaf: each string leaf through `render_typed`, each key through `render_str`, every other leaf (number, boolean, null) kept as YAML gave it. A YAML number or boolean is kept as itself. So `{a: "{{ 1 + 1 }}", b: x}` is `{"a": 2, "b": "x"}` for both tasks (w9c `typed_render.tr_yaml_map`, chosen; `put_merge.templated_leaf`). This is NOT what the artifact does for `Set` (it stores a STRING of the JSON text, with string leaves; the `kestra` of each `tr_yaml_*` cell); do not reproduce it. `Set` then calls `coerce(rendered, kvType)`; `ttl` uses `parse_ttl(raw, Ttl::Task)`. `by` is `CreatedBy::TaskRun { … }`. `KvWritten::Already` succeeds with a log line saying the earlier attempt wrote it.
   - `Get`: the rendered namespace defaults to `own`. When it **equals** `own`, the levels are `ancestors(own)`; otherwise `[ns]`, with a grant per level. Read with `resolve_first_live` on a pool connection, then **let the connection go**, then `read_value`. Output `{"value": v}` or `{"value": null}`.
   - `GetKeys`: `list_live(conn, &grant, prefix, max_namespace_files)`. Output `{"keys": [...]}`.
   - `Delete`: `delete(pool, &grant, &key, by)`. `Deleted | Already` → `{deleted: true}`; `Missing` → `{deleted: false}`, or with `errorOnMissing` a failure carrying Kestra's message.
   - `PurgeKV`, on `detached`, mirroring `PurgeFiles`' `purge_namespaces`/`run_purge` (`namespace.rs:1384-1560`):
-    - the namespace set: `namespaces` xor `namespacePattern` (default `[own]`), plus children when `includeChildNamespaces`. Candidates come from `namespaces_with_kv`, filtered to own and `own + "."` children; a listed one outside the rule is refused before anything is purged; at most `MAX_NAMESPACES`;
+    - the namespace set: `namespaces` xor `namespacePattern` (default `[own]`). Children are added when `includeChildNamespaces` and only for `namespaces` (or the default): a `namespacePattern`'s matches are never expanded (Kestra's `PurgeTask.findNamespaces`; w9c `purge.namespaces.namespacePattern_exact`; Task 1 review I4). Candidates come from `namespaces_with_kv`, filtered to own and `own + "."` children; a listed one outside the rule is refused before anything is purged; at most `MAX_NAMESPACES`;
     - per namespace, `rows_page` pages of `max_namespace_files + 1`. Each **complete** key in a page goes to `purge_key` with a `judge` built from `behavior`: key/expired-only → every id when the fresh latest is expired; version → `keepAmount` as `revisions_to_purge` (`namespace.rs:1348`), a deleted latest → every id; `before` → every row whose `superseded_at` (Task 3's `PurgeRow`) is at or before `before`, never the latest, a deleted latest included (the user's ruling, 2026-10-07: as Kestra; w9c `purge.version_before`);
     - `keyPattern` with `wildcard_match` on the key;
     - `size` as `purge.size` measured.
@@ -1033,7 +1053,9 @@ pub struct KvRevisionDto { pub revision: u32, pub r#type: String, pub size: u64,
 /// KVType.from infers it (w9c api); not Ion, or more than one value: the raw text, STRING.
 /// (Amended 2026-10-07, the user's ruling, spec §9: a timestamp with a time is a DATETIME in UTC,
 /// even at midnight; a day-precision one is a DATE; a blob, clob or sexp at any depth is Err naming
-/// the type, answered 400; an annotated value is the raw text. w9c api.put_bodies.)
+/// the type, answered 400; an annotated value at any depth makes the whole body the raw text.
+/// Fix round 1, the user's rulings R-b and R-c: an empty or whitespace-only body is Err "empty body"
+/// (400); a year- or month-precision timestamp is the raw text, STRING. w9c api.put_bodies.)
 pub fn parse_api_body(body: &[u8]) -> Result<KvValue, String>;
 ```
 
@@ -1078,7 +1100,7 @@ pub fn parse_api_body(body: &[u8]) -> Result<KvValue, String>;
     2. `st.storage` present (`no_store`);
     3. the body through `TotalTimeout::new(IdleTimeout::new(…))` and `http_body_util::Limited::new(body, max_read_bytes + 1)`, collected into memory (a 408 for either clock, a 413 at the limit);
     4. `parse_api_body` (Err: 400 naming the type, nothing staged);
-    5. `ttl` header via `parse_ttl` (400);
+    5. `ttl` header via `parse_ttl(raw, Ttl::Header)` (400; zero accepted);
     6. `store::set(pool, fs, &grant, &key, NewValue { overwrite: true, .. }, CreatedBy::User(ctx.principal.user_id.0))`.
 
     The route gets `DefaultBodyLimit::disable()`, as the namespace-file upload does (`routes.rs:2463-2464`).
