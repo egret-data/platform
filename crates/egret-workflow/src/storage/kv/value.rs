@@ -74,6 +74,17 @@ impl KvType {
             Value::Array(_) | Value::Object(_) => KvType::Json,
         }
     }
+
+    /// [`KvType::of`] for a [`KvData`]: the type of `Put`'s merged result
+    /// (Task 3), named by the same rule (a `null` is STRING).
+    pub fn of_data(d: &KvData) -> Self {
+        match d {
+            KvData::Null | KvData::String(_) => KvType::String,
+            KvData::Number(_) => KvType::Number,
+            KvData::Bool(_) => KvType::Boolean,
+            KvData::List(_) | KvData::Struct(_) => KvType::Json,
+        }
+    }
 }
 
 impl std::fmt::Display for KvType {
@@ -105,20 +116,22 @@ pub enum KvNumber {
 }
 
 impl KvNumber {
-    /// An Ion int's text: `Some` only for `-?[0-9]+`.
+    /// An Ion int's text: `Some` only for `-?[0-9]+` with no leading zero
+    /// (`0`, `-7`; never `007`, which Ion and JSON both refuse).
     pub fn int(text: &str) -> Option<Self> {
-        is_digits(text.strip_prefix('-').unwrap_or(text)).then(|| KvNumber::Int(text.into()))
+        is_whole(text.strip_prefix('-').unwrap_or(text)).then(|| KvNumber::Int(text.into()))
     }
 
     /// A decimal in plain notation (`1.50`, `-0.025`, `2`): `Some` only for
-    /// `-?[0-9]+(\.[0-9]+)?`. A negative zero is zero.
+    /// `-?[0-9]+(\.[0-9]+)?` whose integer part has no leading zero (`0.5`,
+    /// never `00.5` or `007`). A negative zero is zero.
     pub fn decimal(plain: &str) -> Option<Self> {
         let unsigned = plain.strip_prefix('-').unwrap_or(plain);
         let (int, frac) = match unsigned.split_once('.') {
             Some((int, frac)) => (int, Some(frac)),
             None => (unsigned, None),
         };
-        if !is_digits(int) || !frac.is_none_or(is_digits) {
+        if !is_whole(int) || !frac.is_none_or(is_digits) {
             return None;
         }
         let zero = unsigned.bytes().all(|b| b == b'0' || b == b'.');
@@ -127,10 +140,11 @@ impl KvNumber {
         ))
     }
 
-    /// The Ion decimal `d` in plain notation ([`KvNumber::Decimal`]), or why
-    /// not: its digits would be longer than `cap` (`1d99999999` is eleven
-    /// bytes of Ion and a hundred million digits of text).
-    fn of_ion_decimal(d: &ion_rs::Decimal, cap: u64) -> Result<Self, String> {
+    /// The Ion decimal `d` in plain notation ([`KvNumber::Decimal`]), its
+    /// length charged to `budget` BEFORE the text is built (`1d99999999` is
+    /// eleven bytes of Ion and a hundred million digits of text; forty
+    /// `1d9000000` in one list would be 360 MB: review NI1).
+    fn of_ion_decimal(d: &ion_rs::Decimal, budget: &mut Budget) -> Result<Self, String> {
         let coefficient = d.coefficient();
         let digits = coefficient.magnitude().to_string();
         let sign = if coefficient.is_negative() && !d.is_zero() {
@@ -141,17 +155,14 @@ impl KvNumber {
         let exponent = d.exponent();
         let len = digits.len() as u64;
         let shift = exponent.unsigned_abs();
-        let plain_len = if exponent >= 0 {
+        let plain_len = if d.is_zero() && exponent >= 0 {
+            1
+        } else if exponent >= 0 {
             len.saturating_add(shift)
         } else {
             len.max(shift).saturating_add(2)
         };
-        if plain_len > cap {
-            return Err(format!(
-                "holds a decimal of {plain_len} digits, more than workflow.storage.max_read_bytes \
-                 ({cap} bytes)"
-            ));
-        }
+        budget.charge(plain_len)?;
         let text = if exponent >= 0 {
             if d.is_zero() {
                 "0".to_string()
@@ -212,6 +223,43 @@ impl KvNumber {
 
 fn is_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Digits with no leading zero: `0`, `10`; not `007`.
+fn is_whole(s: &str) -> bool {
+    is_digits(s) && (s.len() == 1 || !s.starts_with('0'))
+}
+
+/// What one Ion value may grow to as [`KvData`] (review NI1): the text of
+/// every decimal's plain digits, int, string, symbol and field name it
+/// copies, summed over the WHOLE value and charged before a decimal's text
+/// is built. It starts at the cap (`workflow.storage.max_read_bytes`), so
+/// the decoded text of a value is never more than the cap; what egret
+/// writes never expands (its text is at most its encoded bytes), so every
+/// value [`check_readable`] accepts stays within it.
+struct Budget {
+    cap: u64,
+    left: u64,
+}
+
+impl Budget {
+    fn new(cap: u64) -> Self {
+        Budget { cap, left: cap }
+    }
+
+    fn charge(&mut self, bytes: u64) -> Result<(), String> {
+        match self.left.checked_sub(bytes) {
+            Some(left) => {
+                self.left = left;
+                Ok(())
+            }
+            None => Err(format!(
+                "decodes to more than workflow.storage.max_read_bytes ({} bytes) of digits and \
+                 text",
+                self.cap
+            )),
+        }
+    }
 }
 
 /// A value as the KV store holds it: JSON's shapes, with every number a
@@ -276,8 +324,9 @@ impl KvData {
     }
 
     /// One Ion value read from the store, or why the KV store cannot hold
-    /// it: anything [`unmodelled`] finds, or a decimal whose plain digits are
-    /// longer than `cap`. A field whose value is a null is dropped, as every
+    /// it: anything [`unmodelled`] finds, or a value whose digits and text
+    /// (every decimal's plain digits, every int, string, symbol and field
+    /// name) add up to more than `cap` (review NI1). A field whose value is a null is dropped, as every
     /// Kestra read drops it (w9c `types.json_nested`); a field named twice
     /// keeps its first place and its last value. A timestamp inside a value
     /// is its text, as the preview shows it (`storage::ion`).
@@ -288,25 +337,42 @@ impl KvData {
                 found.with_article()
             ));
         }
-        Self::convert(element, cap)
+        Self::convert(element, &mut Budget::new(cap))
     }
 
-    fn convert(element: &ion_rs::Element, cap: u64) -> Result<Self, String> {
+    /// `element` as KvData, every copied text charged to `budget` (shared by
+    /// the whole value, never per leaf).
+    fn convert(element: &ion_rs::Element, budget: &mut Budget) -> Result<Self, String> {
         use ion_rs::Value as V;
+        let text = |t: &str, budget: &mut Budget| -> Result<String, String> {
+            budget.charge(t.len() as u64)?;
+            Ok(t.to_string())
+        };
         Ok(match element.value() {
             V::Null(_) => KvData::Null,
             V::Bool(b) => KvData::Bool(*b),
-            V::Int(i) => KvData::Number(KvNumber::Int(i.to_string())),
+            // An int's digits are at most a few times the bytes that hold it
+            // in the element already; charged once built.
+            V::Int(i) => {
+                let digits = i.to_string();
+                budget.charge(digits.len() as u64)?;
+                KvData::Number(KvNumber::Int(digits))
+            }
             V::Float(f) => KvData::Number(KvNumber::Float(*f)),
-            V::Decimal(d) => KvData::Number(KvNumber::of_ion_decimal(d, cap)?),
-            V::Timestamp(t) => KvData::String(crate::storage::ion::timestamp_text(t)),
-            V::Symbol(s) => s
-                .text()
-                .map_or(KvData::Null, |t| KvData::String(t.to_string())),
-            V::String(s) => KvData::String(s.text().to_string()),
+            V::Decimal(d) => KvData::Number(KvNumber::of_ion_decimal(d, budget)?),
+            V::Timestamp(t) => {
+                let shown = crate::storage::ion::timestamp_text(t);
+                budget.charge(shown.len() as u64)?;
+                KvData::String(shown)
+            }
+            V::Symbol(s) => match s.text() {
+                Some(t) => KvData::String(text(t, budget)?),
+                None => KvData::Null,
+            },
+            V::String(s) => KvData::String(text(s.text(), budget)?),
             V::List(seq) => KvData::List(
                 seq.elements()
-                    .map(|item| Self::convert(item, cap))
+                    .map(|item| Self::convert(item, budget))
                     .collect::<Result<_, _>>()?,
             ),
             V::Struct(st) => {
@@ -316,8 +382,8 @@ impl KvData {
                     if item.is_null() {
                         continue;
                     }
-                    let name = name.text().unwrap_or("").to_string();
-                    let item = Self::convert(item, cap)?;
+                    let name = text(name.text().unwrap_or(""), budget)?;
+                    let item = Self::convert(item, budget)?;
                     match at.get(&name) {
                         Some(&i) => fields[i] = (name, item),
                         None => {
@@ -1089,6 +1155,67 @@ mod tests {
         );
     }
 
+    /// Review NI1: the expansion budget is the WHOLE value's, not each
+    /// decimal's. At the 10 MiB cap two decimals of nine million digits each
+    /// (18 MB of text from 23 bytes of Ion) are refused; two of four million
+    /// (8 MB) read.
+    #[test]
+    fn the_decoded_text_of_a_whole_value_is_bounded_by_the_cap() {
+        const CAP: u64 = 10 << 20;
+        let err = decode(KvType::Json, b"[1d9000000,1d9000000]", CAP).unwrap_err();
+        assert_eq!(
+            err,
+            "the stored JSON value decodes to more than workflow.storage.max_read_bytes \
+             (10485760 bytes) of digits and text; egret's KV store writes none, so the object \
+             was not written by it"
+        );
+        let element = ion_rs::Element::read_one(&b"[1d9000000,1d9000000]"[..]).unwrap();
+        assert!(
+            KvData::from_element(&element, CAP).is_err(),
+            "the API path too"
+        );
+        let KvData::List(items) = decode(KvType::Json, b"[1d4000000,1d4000000]", CAP).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[1], KvData::Number(KvNumber::Decimal(t)) if t.len() == 4_000_001));
+        // Strings and field names share the same budget: 3 x 2 000 bytes of
+        // text under a 5 000-byte budget is refused, 2 x 2 000 reads.
+        let s = "x".repeat(2000);
+        let three = format!("[\"{s}\",\"{s}\",{{'{s}':1}}]");
+        let two = format!("[\"{s}\",{{'{s}':1}}]");
+        assert!(
+            KvData::from_element(&ion_rs::Element::read_one(three.as_bytes()).unwrap(), 5000)
+                .is_err()
+        );
+        assert!(
+            KvData::from_element(&ion_rs::Element::read_one(two.as_bytes()).unwrap(), 5000).is_ok()
+        );
+        // A zero with a huge exponent is one digit, not refused.
+        assert_eq!(
+            decode(KvType::Number, b"0d99999999", 4096).unwrap(),
+            dec("0")
+        );
+    }
+
+    /// Review NM1: a leading zero is not a number Ion or JSON reads.
+    #[test]
+    fn a_leading_zero_is_not_an_int_or_a_decimal() {
+        for bad in ["007", "-007", "00", "01"] {
+            assert!(KvNumber::int(bad).is_none(), "{bad}");
+        }
+        for bad in ["00.5", "-00.5", "007", "01.0"] {
+            assert!(KvNumber::decimal(bad).is_none(), "{bad}");
+        }
+        for good in ["0", "-0", "10", "-7"] {
+            assert!(KvNumber::int(good).is_some(), "{good}");
+        }
+        for good in ["0.5", "-0.05", "10.0", "0", "100"] {
+            assert!(KvNumber::decimal(good).is_some(), "{good}");
+        }
+    }
+
     /// Every API body of the fixture that is a number or JSON: the stored
     /// bytes are the cell's, and the reader sees the cell's value
     /// (`nested_dec` among them).
@@ -1329,6 +1456,23 @@ mod tests {
         for t in KvType::ALL {
             assert_eq!(KvType::parse(t.as_str()), Some(t));
         }
+        // of_data names a KvData as `of` names its JSON.
+        for v in [
+            json!("s"),
+            json!(null),
+            json!(1),
+            json!(1.5),
+            json!(true),
+            json!({}),
+            json!([]),
+        ] {
+            assert_eq!(
+                KvType::of_data(&KvData::from_json(&v)),
+                KvType::of(&v),
+                "{v}"
+            );
+        }
+        assert_eq!(KvType::of_data(&dec("1.5")), KvType::Number);
         for bad in ["number", "Number", "INTEGER", "", " STRING"] {
             assert_eq!(KvType::parse(bad), None, "{bad}");
         }

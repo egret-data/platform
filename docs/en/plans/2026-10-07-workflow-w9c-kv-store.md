@@ -139,7 +139,7 @@ migrations/0175_workflow_kv_entries.sql                       NEW  T2: workflow.
 crates/egret-workflow/src/storage/mod.rs                       MOD  T2: pub mod kv; FileStore::namespace_kv_uri
 crates/egret-workflow/src/storage/kv/mod.rs                    NEW  T2: module doc, LOCK_PREFIX, kv_lock_text
 crates/egret-workflow/src/storage/kv/key.rs                    NEW  T2: KvKey, check_key, MAX_KEY_BYTES (the one key rule)
-crates/egret-workflow/src/storage/kv/value.rs                  NEW  T2: KvType, KvValue, encode, decode, Ttl, parse_ttl;
+crates/egret-workflow/src/storage/kv/value.rs                  NEW  T2: KvType, KvNumber, KvData, KvValue, encode, decode, check_readable, unmodelled, Ttl, parse_ttl;
                                                                     T5: coerce; T6: parse_api_body
 crates/egret-workflow/src/storage/kv/store.rs                  NEW  T2 reads (resolve, resolve_first_live, list_live,
                                                                     list_inherited, revisions, read_value, namespaces_with_kv,
@@ -572,12 +572,20 @@ pub async fn read_value(fs: &FileStore, grant: &Grant, e: &KvEntry) -> Result<se
 
 ## Task 3: Writes, staging, `Put`'s merge, purge, and the expiry sweep
 
+> **Amended 2026-10-07 (Task 2 fix rounds).** Task 2 as built (commits `cc2acfbb`, `5501213d` and fix round 2) changed the interfaces this task consumes; the blocks below use them.
+> - `KvValue { kind: KvType, data: KvData }` (not `json`). `KvData` = `Null | Bool | Number(KvNumber) | String | List(Vec<KvData>) | Struct(Vec<(String, KvData)>)`, a struct's names unique and in order; `KvNumber` = `Int(String) | Decimal(String) | Float(f64)`. Decimals are preserved exactly (the user's ruling, 2026-10-07).
+> - `encode(&KvValue) -> Result<Vec<u8>, String>` refuses data not of its type. **No writer calls `encode` directly:** every writer calls `check_readable(&KvValue, max_read_bytes) -> Result<Vec<u8>, String>`, in `spawn_blocking`, and stages exactly the bytes it returns. Its `Err` (over the cap in bytes, over the dense-value limit of `max_read_bytes`/64 values (the user's ruling, 2026-10-07), a decoded text over the cap, a type mismatch) is the author's: `NsError::TooLarge` when it names the cap or the limit, else `Author`.
+> - `decode(kind, bytes, cap) -> Result<KvData, String>`; `read_value(fs, grant, e) -> Result<KvData, NsError>`, decoding off the runtime already. A reader converts with `.to_json()`; `Put`'s merge works on `KvData`, never on `to_json()` (which would lose decimals).
+> - `KvType::of_data(&KvData)` names the merged result's type (as `KvType::of` names a JSON value).
+> - `list_inherited(conn, namespace, grants, cap)` takes the requested namespace.
+> - Tests in every write task (3, 5, 6) assert the dense-value refusal ("more than `max_read_bytes`/64 values"); the API path (Task 6, the only one that converts an Ion body) also asserts the decimal-expansion refusal. A test comparing a whole `KvValue` compares `data`, never `json`.
+
 **Files:**
 - Create `src/storage/kv/{merge.rs,sweep.rs}` and `tests/kv_s3_live.rs`.
 - Modify `src/storage/kv/store.rs`, `src/storage/lock.rs` (`LockedSession::try_acquire` beside `acquire` `:51`), `src/storage/nsfiles/store.rs` (`detached` `:677` becomes `pub(crate)`), `crates/egret-bin/src/main.rs` (beside `:1871`) and `tests/kv_store.rs`.
 
 **Interfaces:**
-- Consumes: Task 2's `KvKey`, `KvValue`, `KvEntry`, `encode`, `decode`, `resolve`, `rows_page`, `read_value`, `kv_lock_text` and `namespace_kv_uri`; W9b's `staging::{record, forget}` (`staging.rs:63`, `:81`), `nsfiles::store::detached`, `storage::lock::{LockedSession, lock_timeout_value, is_lock_timeout, is_lock_timeout_error}` (`lock.rs:51`, `:129-148`), and `ObjectStore::{put, copy, head, get_stream, delete}`.
+- Consumes: Task 2's `KvKey`, `KvValue`, `KvData`, `KvType::of_data`, `KvEntry`, `check_readable`, `decode`, `resolve`, `rows_page`, `read_value`, `kv_lock_text` and `namespace_kv_uri`; W9b's `staging::{record, forget}` (`staging.rs:63`, `:81`), `nsfiles::store::detached`, `storage::lock::{LockedSession, lock_timeout_value, is_lock_timeout, is_lock_timeout_error}` (`lock.rs:51`, `:129-148`), and `ObjectStore::{put, copy, head, get_stream, delete}`.
 - Produces:
 
 ```rust
@@ -592,8 +600,9 @@ pub enum KvWritten {
     /// judged under the key's lock): nothing is written (§11).
     Already(KvEntry),
 }
-/// §4.3. Step 1: require(Kv, Write); encode; encoded.len() > max_read_bytes -> TooLarge naming
-/// workflow.storage.max_read_bytes, before anything is staged. Step 2: staging::record, then
+/// §4.3. Step 1: require(Kv, Write); bytes = check_readable(&new.value, max_read_bytes) in
+/// spawn_blocking (Err: TooLarge naming workflow.storage.max_read_bytes or the dense-value limit,
+/// else Author), before anything is staged; the staged object is exactly those bytes. Step 2: staging::record, then
 /// fs.store.put(staged.uri, bytes) holding NO connection and NO lock. Step 3, on `detached`:
 /// begin -> (lock_wait) SET LOCAL lock_timeout -> pg_advisory_xact_lock(hashtextextended($1, 0))
 /// over kv_lock_text -> latest row -> re-claim skip -> overwrite rule (a LIVE latest with
@@ -603,14 +612,16 @@ pub enum KvWritten {
 /// Conflict "the key is busy (another write holds it); try again", naming the key.
 pub async fn set(pool: &PgPool, fs: &FileStore, grant: &Grant, key: &KvKey, new: NewValue, by: CreatedBy)
     -> Result<KvWritten, NsError>;
-/// §8.5. Step 1 for the patch (require, the patch's encoded size); nothing is staged. On
-/// `detached`, in ONE transaction holding the key's lock: latest row -> re-claim skip -> a live
-/// latest: read_value (bounded) -> merge::merge -> KvType::of(merged) -> encode -> size check ->
-/// fs.store.put(revision key) -> head -> INSERT keeping the latest's description and expires_at.
-/// Missing (never written, deleted, expired, item 8): error_on_missing -> NotFound with w9c's
-/// message; else merge::merge(None, patch).
+/// §8.5. Step 1 for the patch (require; the patch is KvData::from_json of the rendered value, so a
+/// flow's number is an int or a float, never a decimal); nothing is staged. On `detached`, in ONE
+/// transaction holding the key's lock: latest row -> re-claim skip -> a live latest: read_value
+/// (bounded, KvData, decimals kept) -> merge::merge -> KvValue { kind: KvType::of_data(&merged),
+/// data: merged } -> check_readable (spawn_blocking; server-paced, under the lock) ->
+/// fs.store.put(revision key, those bytes) -> head -> INSERT keeping the latest's description and
+/// expires_at. Missing (never written, deleted, expired, item 8): error_on_missing -> NotFound with
+/// w9c's message; else merge::merge(None, patch).
 pub async fn put_merge(pool: &PgPool, fs: &FileStore, grant: &Grant, key: &KvKey,
-                       patch: serde_json::Value, error_on_missing: bool, by: CreatedBy)
+                       patch: KvData, error_on_missing: bool, by: CreatedBy)
     -> Result<KvWritten, NsError>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Deleted { Deleted, Missing, Already }
@@ -641,10 +652,12 @@ where F: FnOnce(&[PurgeRow]) -> Vec<i64> + Send + 'static;
 pub struct PurgeRow { pub entry: KvEntry, pub superseded_at: Option<chrono::DateTime<chrono::Utc>> }
 
 // src/storage/kv/merge.rs
-/// Kestra's Put (Put.java:72-121), against w9c `put_merge`: a map deep-merges into a map; a list of
-/// {key, value} entries patches dotted paths; a single [{value}] replaces. A shape the fixture
-/// refuses is Err with its message. `current` None: the key is missing.
-pub fn merge(current: Option<&serde_json::Value>, patch: &serde_json::Value) -> Result<serde_json::Value, String>;
+/// Kestra's Put (Put.java:72-121), against w9c `put_merge`, re-stated on KvData: a map deep-merges
+/// into a map (KvData::Struct: field order kept, an existing name replaced IN PLACE, a new name
+/// appended); a list of {key, value} entries patches dotted paths; a single [{value}] replaces. A
+/// shape the fixture refuses is Err with its message. `current` None: the key is missing. Every
+/// KvNumber passes through unchanged (a stored decimal stays a decimal).
+pub fn merge(current: Option<&KvData>, patch: &KvData) -> Result<KvData, String>;
 
 // src/storage/lock.rs
 impl LockedSession {
@@ -672,7 +685,8 @@ pub fn spawn_kv_expiry_sweeper(pool: PgPool, fs: Arc<FileStore>, cfg: KvSweepCon
 
 ```rust
 // src/storage/kv/merge.rs (unit)
-#[test] fn every_put_merge_cell_of_the_artifact() { /* every w9c put_merge cell, driven from its top level only: merge(existing, patch) == result, or Err(message); existing_state != live -> None */ }
+#[test] fn every_put_merge_cell_of_the_artifact() { /* every w9c put_merge cell, driven from its top level only: merge(existing, patch).to_json() == result, or Err(message); existing_state != live -> None; inputs via KvData::from_json */ }
+#[test] fn a_merge_keeps_a_stored_decimal_and_a_patch_float_stays_a_float() { /* current from decode(b"{a:1.5}"), patch {b: 0.5}: encode -> {a:1.5,b:0.5e0} */ }
 
 // tests/kv_store.rs (Postgres :5440 + MemStore; flavor = "multi_thread")
 #[tokio::test(flavor = "multi_thread")]
@@ -691,6 +705,11 @@ async fn concurrent_writers_get_distinct_revisions_and_keys() { /* 8 writers x 5
     // table and the store's staging prefix are empty; no row. And at exactly 64: written.
 }
 #[tokio::test] async fn a_merged_result_over_max_read_bytes_is_refused_and_nothing_is_written() {}
+#[tokio::test] async fn a_dense_value_over_the_value_limit_is_refused_naming_it_and_nothing_is_staged() {
+    // the user's ruling (2026-10-07): a JSON list of 200 000 zeros (400 KB) under the 10 MiB default
+    // -> TooLarge naming the limit (163 840 values); no staging row or object, no kv_entries row. Set and Put both.
+}
+#[tokio::test] async fn put_merge_into_a_stored_decimal_keeps_it_exact() { /* stored {a:123456789012345678901234567890.5}, Put {b:2}: the new object's bytes keep a's digits */ }
 #[tokio::test] async fn expires_at_is_now_plus_ttl_by_the_databases_clock() { /* |expires_at - (created_at + ttl)| < 1 ms */ }
 #[tokio::test] async fn put_keeps_the_latest_description_and_expiry() {}
 #[tokio::test] async fn put_over_an_expired_key_is_a_missing_key() { /* item 8; w9c put_merge.over_expired */ }
@@ -739,7 +758,7 @@ async fn a_purge_and_a_writer_never_leave_a_row_without_an_object() { /* every s
 - [ ] **Step 4: Run the tests to see them pass**, the MinIO suite with the four `EGRET_TEST_S3_*` vars, then the per-task gate.
 - [ ] **Step 5: Hold audit**, every write path, in the report. For each: what is held, from where to where, and the I/O inside.
   - `set`: `record` (one statement), then the staging PUT with nothing held, then the transaction holding the lock across one server-side `copy` + `head` (server-paced, ≤ `max_read_bytes`).
-  - `put_merge`: the transaction holding the lock across one bounded GET and one PUT (each ≤ `max_read_bytes`; item 7).
+  - `put_merge`: the transaction holding the lock across one bounded GET, the merge and `check_readable` (CPU, in `spawn_blocking`, bounded by `max_read_bytes`), and one PUT (each ≤ `max_read_bytes`; item 7).
   - `delete` / `delete_many`: no store I/O under the lock.
   - `purge_key` / the sweep: the session lock across the object deletes.
 
@@ -755,12 +774,20 @@ async fn a_purge_and_a_writer_never_leave_a_row_without_an_object() { /* every s
   - (h) the sweep with `interval` instead of `interval_at` (the first-pass test dies);
   - (i) `delete_many` committing per key (all-or-nothing dies);
   - (j) the re-claim skip removed from `set` (the re-claim test dies);
-  - (k) `superseded_at` computed as the row's own `created_at` instead of `lead(created_at)` (the successor test dies, and Task 5's `purge.version_before` cell).
+  - (k) `superseded_at` computed as the row's own `created_at` instead of `lead(created_at)` (the successor test dies, and Task 5's `purge.version_before` cell);
+  - (l) `set` calling `encode` and a byte-size check instead of `check_readable` (the dense-value test dies);
+  - (m) `merge` going through `to_json`/`from_json` (the stored-decimal test dies).
 - [ ] **Step 7: Commit** `feat(workflow): W9c Task 3 — KV writes under a per-key lock, Put's merge, purge and the expiry sweep`.
 
 ---
 
 ## Task 4: `kv()` and the secret refusal
+
+> **Amended 2026-10-07 (Task 2 fix rounds).** `read_value` answers `KvData` (Task 3's note lists the interfaces) and already decodes on the blocking pool (review I1). `kv()` hands the render the `KvData`, not `to_json()`, so the user's ruling (2026-10-07, decimals preserved exactly) reaches the template:
+> - a `KvNumber::Decimal` becomes egret's existing `filters::BigNumber` with class `java.math.BigDecimal` (a bare `{{ x }}` prints the plain digits; a serialiser prints `BigDecimal.toString`); this needs a `pub(crate)` constructor in `filters.rs`;
+> - an `Int` within i64/u64/i128/u128 becomes that integer (`env::integer_from_literal`), beyond it a `BigNumber` of class `java.math.BigInteger`;
+> - a `Float` becomes an `f64`; strings, booleans, null, lists and maps convert leaf by leaf.
+> `Snapshot::kv` calls only `read_value`; it never calls `decode` or `check_readable` itself, and the DB lookup still goes through `off_the_runtime` as the spec says.
 
 **Files:**
 - Create `src/worker/handlers/kv.rs`, holding **only** the module doc and the six FQCN constants (Task 5 adds the rest), and `tests/kv_render.rs`.
@@ -790,7 +817,10 @@ pub struct KvArgs<'a> {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum KvAnswer {
-    Value(serde_json::Value),
+    /// The stored value as the KV store holds it (amended 2026-10-07: `KvData`, not JSON, so a
+    /// decimal reaches the render exactly). `storage::kv::value::KvData` is plain data with no
+    /// sqlx or store type in it, so files.rs's "no storage types" rule admits it.
+    Value(crate::storage::kv::value::KvData),
     /// Never written, soft-deleted or expired at every level looked at: Kestra's sentence
     /// (w9c kv_function / inheritance), naming the namespace Kestra's names.
     Missing(String),
@@ -816,7 +846,7 @@ pub fn secret_in_kv_value_message(task_id: &str, path: &str) -> String;
   4. `authorize(self.workspace, Actor::Flow { namespace: own }, level, Resource::Kv, Access::Read)` per level, the first refusal returned;
   5. on the scope's one connection, opened lazily from `ns_db` and re-opened once on a reused broken connection as `ns_lookup` does, `resolve_first_live(conn, &grants, &key)`;
   6. **release the connection mutex**;
-  7. then `read_value(&self.store, grant_of(entry), &entry)` on `handle.block_on`.
+  7. then `read_value(&self.store, grant_of(entry), &entry)` on `handle.block_on` (it decodes in `spawn_blocking` itself; never call `decode` here).
 - `NotFound`/`None` → `KvAnswer::Missing(message)`. A `Db` or `Store` error → `self.outage(..)` and `Err`.
 - **Factor** the connect-and-retry loop out of `ns_lookup` into one private helper that both call, rather than copying it. The block below is a **sketch**: adjust its signature to the lifetimes `ns_lookup`'s loop really needs.
 
@@ -840,6 +870,11 @@ fn on_ns_conn<T>(&self, what: &str,
 #[test] fn kv_without_a_key_is_kestras_sentence() { /* "The 'kv' function expects an argument 'key'." */ }
 #[test] fn kv_error_on_missing_defaults_to_true() { /* Missing -> error with the message; errorOnMissing=false -> null */ }
 #[test] fn kv_returns_each_type_as_kestras_kv_printed_it() { /* w9c types.*.kv_prints through the fake */ }
+#[test] fn kv_renders_a_decimal_and_a_big_int_exactly() {
+    // the fake answers Decimal("123456789012345678901234567890.5") and Int("123456789012345678901234567890123"):
+    // {{ kv('d') }} prints every digit, {{ kv('d') | className }} is java.math.BigDecimal, {{ [kv('d')] }} is [123456789012345678901234567890.5];
+    // a Float(1.5) prints 1.5 and a Decimal("0.0000001") prints 0.0000001 bare
+}
 #[test] fn a_non_boolean_error_on_missing_is_refused_as_measured() { /* w9c kv_function */ }
 #[test] fn kv_without_a_scope_refuses_by_name() { /* "The 'kv' function needs a running execution …" */ }
 
@@ -873,7 +908,7 @@ fn on_ns_conn<T>(&self, what: &str,
   - **`kv_function`** (`functions.rs`, beside `file_function`):
     - `Args::new(rest)`; `key` at `("key", 0)`, missing → Kestra's sentence; `namespace` at `("namespace", 1)` with `is_java_null` as absent; `errorOnMissing` at `("errorOnMissing", 2)`, default `true`, non-boolean as `kv_function` measured.
     - Look up the scope as `file_function` does (`:379-390`); no scope → refused by name.
-    - Then `scope.0.kv(&KvArgs { … })`: `Value(v)` → `MjValue::from_serialize(&v)`; `Missing(m)` → `pebble_error(m)` when `errorOnMissing`, else `MjValue::from(())`; `Err(m)` → `pebble_error(m)`.
+    - Then `scope.0.kv(&KvArgs { … })`: `Value(d)` → the `KvData` converted leaf by leaf as this task's note says (a `Decimal` as a `BigNumber`, never `MjValue::from_serialize(&d.to_json())`, which would turn it into an f64); `Missing(m)` → `pebble_error(m)` when `errorOnMissing`, else `MjValue::from(())`; `Err(m)` → `pebble_error(m)`.
   - **`REFUSED`:** drop the `kv` row. The doc paragraph gains *"Updated 2026-10-07 (W9c Task 4): six names now. `kv` is implemented ([`kv_function`]) over the KV store."*
   - **`secret_findings`:** in `Walk::value`'s object arm (`:429-447`), when `ty` is `kv::SET` or `kv::PUT` and `k == "value"`, collect every string under `v` (keys too, with `strings`) and push `Finding { code: CODE_SECRET_IN_KV_VALUE, message: secret_in_kv_value_message(id, &p), path: p }` for each that `text_uses_secret`, **instead of** recursing into `self.value(v, here)`. Every other property of the task walks as today. The message is §7's sentence, verbatim.
   - **`Unconfigured::kv`** answers its `[storage]` message, naming `kv`.
@@ -886,12 +921,15 @@ fn on_ns_conn<T>(&self, what: &str,
   - (d) a DB error mapped to `Missing` (the outage test dies: `errorOnMissing: false` would answer `null`);
   - (e) `errorOnMissing` defaulting to false (the default test dies);
   - (f) the secret scan reporting `secret_outside_plugin_task` for `value` (the code test dies);
-  - (g) the secret scan only on `Set` (the `Put` row dies).
+  - (g) the secret scan only on `Set` (the `Put` row dies);
+  - (h) `kv()` converting through `to_json()` (the exact-decimal test dies).
 - [ ] **Step 7: Commit** `feat(workflow): W9c Task 4 — kv() over the KV store, and secret() refused in a KV value`.
 
 ---
 
 ## Task 5: The six tasks
+
+> **Amended 2026-10-07 (Task 2 fix rounds).** See Task 3's note for the interfaces. `coerce` builds `KvValue::from_json(kind, &value)`: `kvType: NUMBER` of a String parses it with `serde_json`, then `KvData::from_json`, so a flow's number is an int or a float and **never a decimal** (the user's ruling, 2026-10-07: a flow's value keeps `serde_json`'s semantics); JSON of a String the same way. `Set` and `Put` stage only through Task 3's `set`/`put_merge`, which run `check_readable`. `Get`'s output is `{"value": data.to_json()}` (a decimal is a JSON number with its exact digits, `arbitrary_precision`); a later render of that output reads JSON. `Put`'s patch is `KvData::from_json(render_value(...))`. Every write test asserts the dense-value refusal ("more than `max_read_bytes`/64 values"); a test comparing a whole `KvValue` compares `data`.
 
 **Files:**
 - Modify `src/worker/handlers/kv.rs` (the six handlers, `DECLARED`, `register`), `src/storage/kv/value.rs` (`coerce`), `src/runners/env.rs` (`render_typed`, beside `render_str` `:1915`), `src/spec/registry.rs` (six rows after `:271`), `src/runtime.rs` (after `:731-735`), `oracle-exec/driver.rs` (`registry()` `:139-170`) and `oracle-exec/handler-surface.txt` (run `python3 handler_surface.py`; commit its diff if it changes).
@@ -917,6 +955,8 @@ pub fn render_typed(template: &str, cx: &RenderContext) -> Result<serde_json::Va
 /// STRING its toString(); the other mismatches as measured. No kvType: KvType::of. kvType applies to
 /// a String only: any other value is returned as itself, typed KvType::of, whatever kvType says, so
 /// DURATION is the stored type only for a String (w9c set_coercion.t_*_duration; review C1).
+/// Builds the result with KvValue::from_json / KvData::from_json (amended 2026-10-07): an int or a
+/// float, never a KvNumber::Decimal; the KvValue's data agrees with its kind, so encode accepts it.
 pub fn coerce(value: serde_json::Value, kv_type: Option<KvType>) -> Result<KvValue, String>;
 
 // src/worker/handlers/kv.rs
@@ -952,6 +992,8 @@ pub const DECLARED: &[super::namespace::DeclaredClass];
 #[tokio::test(flavor = "multi_thread")] async fn set_ttl_zero_negative_and_malformed_as_measured() { /* w9c ttl */ }
 #[tokio::test(flavor = "multi_thread")] async fn set_in_another_namespace_is_refused_naming_it_and_writes_nothing() {}
 #[tokio::test(flavor = "multi_thread")] async fn set_of_a_value_over_max_read_bytes_fails_naming_the_cap() {}
+#[tokio::test(flavor = "multi_thread")] async fn set_and_put_of_a_value_over_the_dense_limit_fail_naming_it() { /* a rendered list of 200 000 zeros: the task fails naming 163 840 values; nothing written */ }
+#[tokio::test(flavor = "multi_thread")] async fn put_over_an_api_decimal_keeps_it_and_get_outputs_its_digits() { /* API-stored {a:1.5} (Task 3's set with KvData), Put {b:2}: Get's value {"a":1.5,"b":2}, bytes {a:1.5,b:2} */ }
 #[tokio::test(flavor = "multi_thread")] async fn get_walks_only_when_its_namespace_is_the_flows() { /* w9c inheritance */ }
 #[tokio::test(flavor = "multi_thread")] async fn get_missing_under_each_error_on_missing() { /* Get.java:91's message */ }
 #[tokio::test(flavor = "multi_thread")] async fn get_keys_lists_live_keys_in_the_artifacts_order_with_prefix() {}
@@ -989,7 +1031,7 @@ pub const DECLARED: &[super::namespace::DeclaredClass];
 
   `cancel` holds nothing (each write commits on its own, on a detached task).
   - `Set`/`Put` share **one render rule** (the user's ruling R-a, 2026-10-07; spec §8.1), `render_value(raw, cx) -> serde_json::Value`: `value` is the raw spec JSON. A string goes through `render_typed`. An array or object stays an array or object, rendered leaf by leaf: each string leaf through `render_typed`, each key through `render_str`, every other leaf (number, boolean, null) kept as YAML gave it. A YAML number or boolean is kept as itself. So `{a: "{{ 1 + 1 }}", b: x}` is `{"a": 2, "b": "x"}` for both tasks (w9c `typed_render.tr_yaml_map`, chosen; `put_merge.templated_leaf`). This is NOT what the artifact does for `Set` (it stores a STRING of the JSON text, with string leaves; the `kestra` of each `tr_yaml_*` cell); do not reproduce it. `Set` then calls `coerce(rendered, kvType)`; `ttl` uses `parse_ttl(raw, Ttl::Task)`. `by` is `CreatedBy::TaskRun { … }`. `KvWritten::Already` succeeds with a log line saying the earlier attempt wrote it.
-  - `Get`: the rendered namespace defaults to `own`. When it **equals** `own`, the levels are `ancestors(own)`; otherwise `[ns]`, with a grant per level. Read with `resolve_first_live` on a pool connection, then **let the connection go**, then `read_value`. Output `{"value": v}` or `{"value": null}`.
+  - `Get`: the rendered namespace defaults to `own`. When it **equals** `own`, the levels are `ancestors(own)`; otherwise `[ns]`, with a grant per level. Read with `resolve_first_live` on a pool connection, then **let the connection go**, then `read_value`. Output `{"value": data.to_json()}` or `{"value": null}`.
   - `GetKeys`: `list_live(conn, &grant, prefix, max_namespace_files)`. Output `{"keys": [...]}`.
   - `Delete`: `delete(pool, &grant, &key, by)`. `Deleted | Already` → `{deleted: true}`; `Missing` → `{deleted: false}`, or with `errorOnMissing` a failure carrying Kestra's message.
   - `PurgeKV`, on `detached`, mirroring `PurgeFiles`' `purge_namespaces`/`run_purge` (`namespace.rs:1384-1560`):
@@ -1009,12 +1051,15 @@ pub const DECLARED: &[super::namespace::DeclaredClass];
   - (e) PurgeKV's child match without the dot (`a.bc` dies);
   - (f) the namespace refusal checked after purging earlier namespaces (the refusal test asserts nothing purged);
   - (g) `GetKeys` reading objects (a store that fails every `get_stream` makes it fail; the test asserts it succeeds);
-  - (h) `Delete`'s re-claim skip removed (the re-claim test dies).
+  - (h) `Delete`'s re-claim skip removed (the re-claim test dies);
+  - (i) `coerce` of NUMBER from a String making a `KvNumber::Decimal` (the coercion test's `1.5e0` bytes die).
 - [ ] **Step 7: Commit** `feat(workflow): W9c Task 5 — the io.kestra.plugin.core.kv tasks`.
 
 ---
 
 ## Task 6: The KV API
+
+> **Amended 2026-10-07 (Task 2 fix rounds).** See Task 3's note for the interfaces. `parse_api_body` runs `unmodelled(&element)` on the one parsed value: `Blob`, `Clob` or `SExp` → 400 naming `Unmodelled::name()` (the type before the annotation: `annot_blob`); `Annotation` → the raw text, typed STRING (`ion_annot`, `nested_annot`); otherwise `KvData::from_element(&element, max_read_bytes)`, whose budget is shared by the whole value (fix round 2, NI1), so a body such as `[1d9000000,1d9000000]` is refused (413 naming `max_read_bytes`), never expanded. The type is inferred from the `Element`: an int, decimal or float is NUMBER; a list or struct JSON; a timestamp DATETIME or DATE by the rulings; a string or symbol STRING or DURATION as measured. `GET`'s `value` is `data.to_json()`. The inheritance route calls `list_inherited(conn, &ns, &grants, cap)` with `grants` for `ancestors(ns)[1..]`. A PUT's write goes through Task 3's `set`, hence `check_readable`: over the cap or the dense-value limit is 413.
 
 **Files:**
 - Create `src/storage/kv/routes.rs` and `tests/kv_api.rs`.
@@ -1057,7 +1102,11 @@ pub struct KvRevisionDto { pub revision: u32, pub r#type: String, pub size: u64,
 /// Fix round 1, the user's rulings R-b and R-c: an empty or whitespace-only body is Err "empty body"
 /// (400); a year- or month-precision timestamp is the raw text, STRING. The blob/clob/sexp refusal
 /// comes before the annotation rule: `x::{{aGVsbG8=}}` is Err naming `blob` (re-review N3). w9c api.put_bodies.)
-pub fn parse_api_body(body: &[u8]) -> Result<KvValue, String>;
+/// (Amended 2026-10-07, Task 2 fix rounds: `cap` is max_read_bytes; the walk is value::unmodelled and
+/// the conversion KvData::from_element(&element, cap), so an Ion decimal stays a KvNumber::Decimal and a
+/// body whose decoded text exceeds `cap` is Err (413). Err distinguishes 400 from 413.)
+pub fn parse_api_body(body: &[u8], cap: u64) -> Result<KvValue, ApiBodyError>;
+pub enum ApiBodyError { Empty, Unmodelled(Unmodelled), TooLarge(String) }
 ```
 
 - [ ] **Step 1: Write the failing tests** (`tests/kv_api.rs`, `tests/common` app, MemStore, `install_db_for_tests`):
@@ -1070,6 +1119,14 @@ pub fn parse_api_body(body: &[u8]) -> Result<KvValue, String>;
 #[tokio::test] async fn put_parses_ion_and_falls_back_to_the_raw_string() { /* w9c api PUT cells, the stored type of each; blob and sexp 400 naming the type */ }
 #[tokio::test] async fn put_takes_description_and_ttl_headers() {}
 #[tokio::test] async fn a_put_body_over_max_read_bytes_is_413_naming_the_cap_and_nothing_is_written() {}
+#[tokio::test] async fn a_dense_or_expanding_body_is_413_and_nothing_is_written() {
+    // [0,0,…] 200 000 zeros: 413 naming the dense-value limit; [1d9000000,1d9000000]: 413 naming
+    // max_read_bytes, refused before any expansion (fix round 2, NI1); [1d4000000] at the cap stays readable
+}
+#[tokio::test] async fn an_ion_decimal_is_stored_and_answered_exactly() {
+    // PUT {a:1.5}: bytes {a:1.5}, GET value {"a":1.5}; PUT 123456789012345678901234567890.5: GET's JSON
+    // carries every digit; nested_dec, dec_150, ion_decimal_d as w9c api.put_bodies
+}
 #[tokio::test] async fn a_put_body_that_stalls_or_takes_too_long_is_408_and_nothing_is_written() { /* app_with_upload_idle / _total */ }
 #[tokio::test] async fn a_busy_key_answers_409_after_the_lock_wait_holding_nothing() { /* another session holds the lock; pool idle count restored */ }
 #[tokio::test] async fn get_answers_kestras_detail_with_the_stored_type() { /* w9c api get cells */ }
@@ -1105,8 +1162,8 @@ pub fn parse_api_body(body: &[u8]) -> Result<KvValue, String>;
     6. `store::set(pool, fs, &grant, &key, NewValue { overwrite: true, .. }, CreatedBy::User(ctx.principal.user_id.0))`.
 
     The route gets `DefaultBodyLimit::disable()`, as the namespace-file upload does (`routes.rs:2463-2464`).
-  - `GET …/kv/{key}`: `resolve` on a pool connection, connection released, then `read_value`, then `KvDetailDto`.
-  - `inheritance`: grants for `ancestors(ns)[1..]`, then `list_inherited`.
+  - `GET …/kv/{key}`: `resolve` on a pool connection, connection released, then `read_value`, then `KvDetailDto` with `value: data.to_json()`.
+  - `inheritance`: grants for `ancestors(ns)[1..]`, then `list_inherited(conn, &ns, &grants, cap)`.
   - Bulk `DELETE`: `axum::Json<KvKeysBody>`, a malformed body answered through `bad_request`; each key parsed (400 naming it); more than `MAX_BULK_DELETE_KEYS` (1,000) → 413 naming the cap, before any lock; then `delete_many`.
   - Audit follows item 14.
   - utoipa documents every response, as `upload_namespace_file` does (`nsfiles/routes.rs:908-932`), including the 409 "busy" and the `inheritance` key collision (item 5).
@@ -1124,12 +1181,15 @@ pub fn parse_api_body(body: &[u8]) -> Result<KvValue, String>;
   - (e) `GET` of a deleted key served latest (404 dies);
   - (f) the bulk delete committing per key (all-or-nothing dies);
   - (f2) the bulk cap checked with `>=` (the 1,000-accepted test dies) or removed (the 1,001 test dies);
-  - (g) the list route answering 404 for another workspace (byte-identity dies).
+  - (g) the list route answering 404 for another workspace (byte-identity dies);
+  - (h) `parse_api_body` converting with a fresh budget per decimal (the expanding-body test dies).
 - [ ] **Step 7: Commit** `feat(workflow): W9c Task 6 — the KV API`.
 
 ---
 
 ## Task 7: The plugin host's messages
+
+> **Amended 2026-10-07 (Task 2 fix rounds).** No Task 2 interface reaches this task: the plugin host stages nothing for KV. The re-review's config item (`workflow.storage.max_read_bytes` is now at least 4096, checked at boot) is applied to Task 8's docs and Helm check, where configuration is documented.
 
 **Files:**
 - Modify `plugin-host/src/main/java/io/kestra/core/runners/ShimRunContext.java:340-341`, `EgretUnsupported.java:4` and `EgretPluginHost.java:58`.
@@ -1160,6 +1220,8 @@ namespaceKv(): egret gives flows the KV store through the `io.kestra.plugin.core
 
 ## Task 8: Rebase, end to end on a temporary kind cluster, docs, full CI
 
+> **Amended 2026-10-07 (Task 2 fix rounds).** `workflow.storage.max_read_bytes` must now be at least 4096 (`egret_config::MIN_MAX_READ_BYTES`, checked at boot): the release note says so, and `helm lint` is joined by a check that no chart value or deploy env sets it lower. The release note also carries the dense-value limit (`max_read_bytes`/64 values per KV value, the user's ruling, 2026-10-07) and the decimal ruling.
+
 - [ ] **Step 0: Rebase if `origin/main` moved.**
   - `git fetch origin`; GitHub may be flaky, so retry up to three times with a pause and report each failure.
   - If `origin/main` is ahead of `11782600`, `git rebase origin/main` and resolve conflicts.
@@ -1189,7 +1251,9 @@ namespaceKv(): egret gives flows the KV store through the `io.kestra.plugin.core
     - migration 0175 (`workflow.kv_entries`);
     - publish now refuses a namespace with a `_kv` segment (Task 1's count says whom it affects), and `secret()` in a `Set`/`Put` value;
     - seven API routes under `workflow:read`/`workflow:manage`, with no new permission;
-    - a KV value is at most `max_read_bytes`;
+    - a KV value is at most `max_read_bytes`, and holds at most `max_read_bytes`/64 values (the user's ruling, 2026-10-07);
+    - `workflow.storage.max_read_bytes` must be at least 4096, checked at boot;
+    - an API-written Ion decimal is kept exactly through every read, merge and write;
     - the hourly expiry sweep on every process with a store;
     - the plugin host's new `namespaceKv` message;
     - the known limits of spec §15 (the key `inheritance`, the 1,000-key bulk cap and the accepted lock windows included).
