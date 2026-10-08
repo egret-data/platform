@@ -99,6 +99,8 @@ Một URI có `{exec}` nằm ngoài tập bị từ chối **mà không đọc d
 
 **Snapshot (phán quyết của người dùng, phần đầu).** Một lần render chạy trên luồng riêng và không truy vấn được database: trong `settle` connection duy nhất là của transaction, và một pool sẽ không thấy các dòng index mà transaction đó vừa insert cho task vừa xong. Vì vậy trước mỗi lần render có execution, egret gom mọi chuỗi `kestra://` trong source của flow và trong mọi giá trị JSON của render context (inputs, outputs của mọi task đã kết thúc, execution, item của vòng lặp) và phân giải tất cả một lần trên connection đang render. Bốn hàm, staging và cầu plugin trả lời từ snapshot đó. **Một URI được ghép lúc render mà không có trong snapshot là một lỗi nêu URI đó; không có lần tra thứ hai.**
 
+*(2026-10-08, W9c Task 9, phán quyết của người dùng về F2 của bản review cuối W9c.)* Bên trong `settle`, các PHÂN GIẢI của snapshot vẫn được lấy trong transaction, như trên, nhưng không body nào được đọc ở đó: `read()` và file values của một `Loop` đọc qua cache của chủ transaction (`storage::prefetch`). Một lần miss rollback lần thử, body được tải khi không có transaction nào mở -- phân giải đi kèm yêu cầu, vì lần rollback đã xóa mọi dòng index mà lần thử ghi -- rồi transaction chạy lại. Lần render của handler (bên ngoài mọi transaction) đọc như trước. Giá trị và thông điệp không đổi (W9c spec §11).
+
 ### 4.5 Trần
 
 `workflow.storage.max_file_bytes` (mặc định 1 GiB) mỗi file và `workflow.storage.max_task_bytes` (mặc định 5 GiB) mỗi task run. Vượt một trong hai thì task thất bại, nêu trần đó.
@@ -253,6 +255,7 @@ Namespace files, `nsfile://` và `fileURI` (W9b); KV store (W9c); `PurgeStorage`
 
 ## 15. Giới hạn đã biết
 
+- *(2026-10-08, W9c Task 9.)* `settle` không còn giữ kết nối pool và row lock qua lần tải của `read()` hay file values của một `Loop` (W9c spec §11); một lần đọc như vậy làm transaction tốn một lần rollback và thêm một lần thử, và những gì một transaction đọc bị chặn ở 4 x `max_read_bytes` (W9c spec §15).
 - Một flow chỉ đọc file của execution của chính nó, của họ vòng lặp của nó (loop root và mọi vòng lặp dưới nó), của trigger execution của nó và của họ vòng lặp của trigger đó, và một replay đọc file của chuỗi nguồn của nó (§2, §4.4). Chỉ một cấp trigger: file của trigger của chính trigger bị từ chối (phán quyết 2026-10-01).
 - Một `Subflow` hay trigger `Flow` được bắn từ một **replay thủ công** mà chuyển `{{ inputs.f }}` đã sao chép thì bị từ chối: URI đó chỉ tới nguồn của replay, và tập đọc được của execution con đi theo họ vòng lặp của trigger nhưng không theo chuỗi replay của trigger (phán quyết 2026-10-01 chỉ phủ họ vòng lặp, §4.4 mục 5).
 - Một file ghi bên trong một vòng lặp `Loop` mang id của chính vòng lặp, như trong Kestra (§3, phán quyết của người dùng); API file phục vụ nó qua bất kỳ id nào của họ vòng lặp, không redirect (§8).

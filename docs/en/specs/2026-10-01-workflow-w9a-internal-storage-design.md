@@ -97,6 +97,8 @@ A URI whose `{exec}` is outside the set is refused **without reading any row of 
 
 **The snapshot (the user's ruling, header).** A render runs on its own thread and cannot query the database: inside `settle` the only connection is the transaction's, and a pool would not see the index rows that transaction has just inserted for the task that finished. So before every render with an execution, egret collects every `kestra://` string in the flow source and in every JSON value of the render context (inputs, outputs of every terminated task, execution, loop item) and resolves them at once on the connection that renders. The four functions, staging and the plugin bridge answer from that snapshot. **A URI assembled at render that is not in the snapshot is an error naming it; there is no second lookup.**
 
+*(2026-10-08, W9c Task 9, the user's ruling on W9c's final review F2.)* Inside `settle` the snapshot's RESOLUTIONS are still taken in the transaction, as above, but no body is read there: `read()` and a `Loop`'s values file read through the transaction owner's cache (`storage::prefetch`). A miss rolls the attempt back, the body downloads with no transaction open -- the resolution travels with the request, since the rollback erased any index row the attempt wrote -- and the transaction runs again. A handler's render (outside any transaction) reads as before. Values and messages are unchanged (W9c spec §11).
+
 ### 4.5 Caps
 
 `workflow.storage.max_file_bytes` (default 1 GiB) per file and `workflow.storage.max_task_bytes` (default 5 GiB) per task run. Crossing either fails the task, naming the cap.
@@ -251,6 +253,7 @@ Namespace files, `nsfile://` and `fileURI` (W9b); the KV store (W9c); `PurgeStor
 
 ## 15. Known limits
 
+- *(2026-10-08, W9c Task 9.)* `settle` no longer holds its pool connection and row locks across a `read()` or a `Loop` values file's download (W9c spec §11); such a read costs the transaction one rollback and one more attempt, and what one transaction reads is capped at 4 x `max_read_bytes` (W9c spec §15).
 - A flow reads only its own execution's, its loop family's (its loop root and every iteration under it) and its trigger execution's files and that trigger's loop family's, and a replay its source chain's (§2, §4.4). One trigger level only: a file of the trigger's own trigger is refused (2026-10-01 ruling).
 - A `Subflow` or `Flow` trigger fired from a **manual replay** that passes the copied `{{ inputs.f }}` is refused: that URI names the replay's source, and the child's readable set follows its trigger's loop family but not its trigger's replay chain (the 2026-10-01 ruling covers the loop family only, §4.4 item 5).
 - A file written inside a `Loop` iteration carries the iteration's id, as in Kestra (§3, the user's ruling); the file API serves it through any id of the loop family, with no redirect (§8).
