@@ -181,18 +181,6 @@ pub(super) async fn open_batch(
     // branch. With every row in place the loop counts the whole batch as
     // started, as Kestra's does (it emits the batch before any
     // iteration runs), and waits for it.
-    // **Every row of the batch first, then each one's first settle**
-    // (W9c Task 9 fix round 2). An iteration that ENDS inside its first
-    // settle tells its loop at once ([`on_execution_terminal`]), and the
-    // loop counts the iterations started from the rows. Created one
-    // settle at a time, the batch's later iterations had no row yet, so
-    // the loop read "one left to start", started iteration `base + 1`
-    // itself -- and this loop then created it again: `duplicate key ...
-    // workflow_executions_loop_run_idx`, the whole transaction lost, for
-    // a `concurrencyLimit: 0` loop whose first iteration took an empty
-    // branch. With every row in place the loop counts the whole batch as
-    // started, as Kestra's does (it emits the batch before any
-    // iteration runs), and waits for it.
     let mut jobs = Vec::with_capacity(batch.len() + 1);
     for (r, (index, value)) in batch.iter().zip(picked) {
         match insert_iteration(conn, ctx, parent_run, r.task, index, &value).await? {
@@ -524,10 +512,14 @@ pub(super) async fn on_execution_terminal(
     // for having no depth guard, and it does not transfer.** `descend`'s
     // recursion is bounded by `state.runs.len()` for any plan; this one is
     // bounded only by how deeply an author nested `Loop`s, which `build_plan`
-    // caps at `plan::MAX_TASK_DEPTH` = 48. Measured: 12 nested one-value
-    // `Loop`s run at `ctx.depth = 12` with no `Subflow` anywhere, and **47
-    // abort the process with a stack overflow** — so this is not a guard
-    // nobody could see fire, it is an absent guard on a reachable recursion.
+    // caps at `plan::MAX_TASK_DEPTH` = 48. Measured before W9c Task 9 fix
+    // round 3: 12 nested one-value `Loop`s ran at `ctx.depth = 12` with no
+    // `Subflow` anywhere, and **47 aborted the process with a stack
+    // overflow** -- an absent guard on a reachable recursion. **Measured at
+    // round 3 (re-review 3, 2026-10-09): 46 nested `Loop`s run to SUCCESS
+    // (47 executions) and 47 is refused by the planner's 48-level cap**, so
+    // static nesting no longer reaches an abort; see the round 2-3 paragraph
+    // below for why.
     // It predates W6 (this recursion is W3b `ad93ef2d`, the cap is W3a
     // `6f046e57`) and it is recorded with its owner and with what the artifact
     // does instead on `subflow::MAX_SPAWN_CHAIN`.

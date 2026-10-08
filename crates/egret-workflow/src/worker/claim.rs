@@ -1782,7 +1782,7 @@ async fn apply_outcome_on(
         conn,
         &ctx,
         &before,
-        &mut state,
+        state,
         now,
         Some(Lease {
             run_ix: claimed.run_ix,
@@ -1845,11 +1845,15 @@ pub(super) struct Lease {
 /// together or none does. That is the plan's Global Constraint one level up
 /// from where Task 2 left it: with a spawner, "the execution has not moved"
 /// includes "the iteration it started does not exist".
+///
+/// `state` is MOVED into the walk's top frame (re-review 3 n1): nothing is
+/// written back to the owner, and every owner returns this function's result
+/// directly, so no owner reads its state after the settle.
 async fn settle(
     conn: &mut PgConnection,
     ctx: &ExecutionCtx,
     before: &ExecutionState,
-    state: &mut ExecutionState,
+    state: ExecutionState,
     now: Tick,
     release: Option<Lease>,
 ) -> Result<()> {
@@ -1858,7 +1862,7 @@ async fn settle(
         Frame {
             ctx: Held::Borrowed(ctx),
             before: before.clone(),
-            state: state.clone(),
+            state,
             now,
             release,
             jobs: VecDeque::new(),
@@ -2702,7 +2706,7 @@ async fn start_execution_in_on(
     // `Tick(0)` is the execution's own origin — `Tick` is milliseconds since
     // the execution was created (`executor::state::Tick`), and this is that
     // instant.
-    settle(conn, &ctx, &empty, &mut state, Tick(0), None).await?;
+    settle(conn, &ctx, &empty, state, Tick(0), None).await?;
     Ok(id)
 }
 
@@ -2725,9 +2729,9 @@ async fn start_execution_in_on(
 pub async fn resume(pool: &PgPool, execution_id: Uuid) -> Result<()> {
     transaction!(pool, |at| {
         let (conn, gate) = at.parts();
-        let (ctx, mut state, now) = load(conn, execution_id, Stack::Fresh(gate.clone())).await?;
+        let (ctx, state, now) = load(conn, execution_id, Stack::Fresh(gate.clone())).await?;
         let before = state.clone();
-        settle(conn, &ctx, &before, &mut state, now, None).await
+        settle(conn, &ctx, &before, state, now, None).await
     })
 }
 

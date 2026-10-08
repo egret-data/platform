@@ -203,6 +203,12 @@ use crate::trigger::flow::DEFAULT_MAX_EXECUTION_DEPTH;
 /// | 498 | published | — |
 /// | 499 | **422** `Illegal genericflow source: YAML parsing error: Document nesting depth (1001) exceeds the maximum allowed (1000, from StreamReadConstraints.getMaxNestingDepth())` | — |
 ///
+/// *(The egret column is the measurement before W9c Task 9 fix round 3.
+/// Re-measured at round 3 (re-review 3, 2026-10-09): every settle now runs
+/// from `claim::walk`'s explicit stack, so 46 nested `Loop`s run to SUCCESS
+/// and 47 is refused by `plan::MAX_TASK_DEPTH` before anything runs; nothing
+/// in this table's range aborts any more.)*
+///
 /// So **Kestra imposes no semantic bound on `Loop` nesting at all**: its only
 /// refusal is Jackson's document-nesting limit in the YAML reader, two levels
 /// per `Loop`, and it is a *parse* error rather than a rule about flowables.
