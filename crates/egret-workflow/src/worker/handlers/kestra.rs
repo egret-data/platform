@@ -78,8 +78,8 @@
 //! `3` the plugin threw; `4` the plugin asked for something egret does not
 //! provide -- `localPath`/`decrypt`/`sdk`/`services`, and a plugin's
 //! `namespaceKv()` (2026-10-07, W9c: the KV store is the `core.kv` tasks'
-//! and `kv()`'s; a plugin's `namespaceKv()` still throws, pointing at them). Internal storage is provided
-//! (W9a): a refused storage call (a write outside the prefix, a file not
+//! and `kv()`'s; a plugin's `namespaceKv()` still throws, pointing at
+//! them). Internal storage is provided (W9a): a refused storage call (a write outside the prefix, a file not
 //! staged) is the plugin's own failure, exit 3. So are namespace files
 //! (W9b, 2026-10-06): a namespace file not staged, or any namespace-file
 //! write, is the plugin's own failure, exit 3. Any other code (137: the JVM was OOM-killed) is
@@ -1620,7 +1620,7 @@ mod tests {
     }
 
     /// **Nothing is staged for KV (W9c Task 7):** no `task.json` key names
-    /// KV, with or without internal storage.
+    /// KV, in the runtime without internal storage.
     #[tokio::test]
     async fn task_json_has_no_kv_key() {
         let spy = Spy::ok(ok(serde_json::json!({})));
@@ -1635,6 +1635,48 @@ mod tests {
             "{keys:?}"
         );
         assert_eq!(keys.len(), 5, "{keys:?}");
+    }
+
+    /// **Nothing is staged for KV, with internal storage either (W9c Task 7):**
+    /// `baseUri` and `context` are present, and the key set is exactly the
+    /// known one.
+    #[tokio::test]
+    async fn task_json_with_storage_has_no_kv_key() {
+        let files = mem_files();
+        let spy = Spy::ok(ok(serde_json::json!({"rowCount": 2})));
+        let t = stored_task(
+            &files,
+            COPY_IN,
+            serde_json::json!({
+                "url": "jdbc:postgresql://pg:5432/w9a",
+                "table": "dst",
+                "from": "{{ outputs.q.a }}",
+            }),
+            Ok(indexed(&upstream("a.ion"), 7)),
+            Ok(indexed(&upstream("b.ion"), 9)),
+        );
+        let out = stored(COPY_IN, spy.clone(), Some(files.clone()))
+            .run(&t)
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        let doc = task_json(&spy.only());
+        let mut keys: Vec<&String> = doc.as_object().expect("a map").keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "baseUri",
+                "context",
+                "mask",
+                "maxTaskBytes",
+                "namespaceFiles",
+                "properties",
+                "storage",
+                "type"
+            ]
+        );
+        assert!(keys.iter().all(|k| !k.to_lowercase().contains("kv")));
     }
 
     /// **`task.json` holds `storage`, `baseUri`, `maxTaskBytes` and
