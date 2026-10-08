@@ -563,7 +563,7 @@ async fn spawn_one(
         // See `ExecutionCtx::depth`, and the guard above that reads it.
         depth: ctx.depth + 1,
         // The caller's cache: this settle runs in its transaction (W9c Task 9).
-        prefetch: ctx.prefetch.clone(),
+        gate: ctx.gate.clone(),
     };
     let empty = ExecutionState::new(&child_ctx.plan);
     let mut child_state = empty.clone();

@@ -7,9 +7,10 @@
 //! and out of every **JSON value** of the render context (inputs, the outputs
 //! of every terminated task, `execution`, `item`) and resolves all of them at
 //! once through [`super::resolve_readable_many`] -- the one readability
-//! decision -- on the caller's connection. Inside `settle` that is the
-//! transaction that has just indexed the finished task's files, which a pool
-//! would not see.
+//! decision -- on the caller's POOL connection: a [`Snapshot`] reads, so it is
+//! never built inside a transaction (below). Inside `settle` the same
+//! resolution is taken by [`scope_in_transaction`] on the transaction that
+//! has just indexed the finished task's files, which a pool would not see.
 //!
 //! That covers every URI a template can reach without building it from pieces.
 //! **A URI assembled at render (`'kestra:///…' ~ execution.id ~ '/x'`) is not
@@ -30,7 +31,11 @@
 //! holds the same resolutions, taken the same way, but no store and no
 //! connect options: every body, namespace-file and KV read there is answered
 //! from the transaction owner's cache, and a miss is fetched by a
-//! [`Snapshot`] with the transaction rolled back.
+//! [`Snapshot`] with the transaction rolled back. **The types keep the two
+//! apart** (final review m2): [`Snapshot::take`] and [`scope_for`] take a
+//! `PoolConnection`, which a transaction is not, and
+//! [`scope_in_transaction`] takes the attempt's `worker::txn::Gate`, which
+//! only a gated attempt has.
 //!
 //! # Namespace files (W9b Task 4, 2026-10-05)
 //!
@@ -54,8 +59,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use egret_core::Result;
 use regex::Regex;
+use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgConnectOptions;
-use sqlx::{Connection, PgConnection};
+use sqlx::{Connection, PgConnection, Postgres};
 use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
@@ -106,7 +112,7 @@ impl Snapshot {
     /// With no URI anywhere the database is not touched.
     #[allow(clippy::too_many_arguments)]
     pub async fn take(
-        conn: &mut PgConnection,
+        conn: &mut PoolConnection<Postgres>,
         store: Arc<FileStore>,
         workspace: Uuid,
         execution: Uuid,
@@ -986,13 +992,16 @@ impl RenderFiles for Unconfigured {
     }
 }
 
-/// The scope a render inside a running execution gets: a [`Snapshot`] over
-/// the installed store, or -- with [`super::current`] `None` -- a scope whose
-/// every answer names `[storage]`. A wiring point (the module doc of
-/// `storage`): `worker::claim` calls this and nothing else does.
+/// The scope a render inside a running execution gets OUTSIDE any
+/// transaction (a handler's): a [`Snapshot`] over the installed store, or --
+/// with [`super::current`] `None` -- a scope whose every answer names
+/// `[storage]`. A wiring point (the module doc of `storage`): `worker::claim`
+/// calls this and nothing else does. `conn` is a pool connection, so a
+/// transaction cannot be handed in: a scope that downloads and connects is
+/// never built where a transaction is open (W9c Task 9, final review m2).
 #[allow(clippy::too_many_arguments)]
 pub async fn scope_for(
-    conn: &mut PgConnection,
+    conn: &mut PoolConnection<Postgres>,
     store: Option<Arc<FileStore>>,
     workspace: Uuid,
     execution: Uuid,
@@ -1023,11 +1032,11 @@ pub async fn scope_for(
 /// taken on `conn` exactly as [`scope_for`]'s (the one readability decision,
 /// statements only, and the only connection that sees the index rows this
 /// transaction has just written); every body, namespace-file and KV read is
-/// answered from `prefetch` (`storage::prefetch`), never from the store or
-/// the database. The scope it returns holds no store and no connect
+/// answered from `gate`'s cache (`storage::prefetch`), never from the store
+/// or the database. The scope it returns holds no store and no connect
 /// options, so it cannot do I/O; `store` is read here only for its cap.
 #[allow(clippy::too_many_arguments)]
-pub async fn scope_in_transaction(
+pub(crate) async fn scope_in_transaction(
     conn: &mut PgConnection,
     store: Option<Arc<FileStore>>,
     workspace: Uuid,
@@ -1036,7 +1045,7 @@ pub async fn scope_in_transaction(
     json: &[&serde_json::Value],
     task_prefix: Option<String>,
     flow_namespace: Option<String>,
-    prefetch: &super::prefetch::Prefetch,
+    gate: &crate::worker::txn::Gate,
 ) -> Result<FileScope> {
     match store {
         None => Ok(FileScope(Arc::new(Unconfigured))),
@@ -1048,7 +1057,7 @@ pub async fn scope_in_transaction(
                 task_prefix,
                 flow_namespace,
                 store.caps.max_read_bytes,
-                prefetch.clone(),
+                gate.prefetch().clone(),
             ))))
         }
     }

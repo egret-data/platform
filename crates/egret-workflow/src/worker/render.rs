@@ -567,6 +567,13 @@ impl Surface {
             .and_then(|f| f.0.infrastructure_failure())
     }
 
+    /// W9c Task 9 (final review I2): the per-call read limit a render of this
+    /// surface's scope met, if one did since the last call (taken). See
+    /// `RenderFiles::take_limit_failure`.
+    pub(super) fn take_limit_failure(&self) -> Option<String> {
+        self.files.as_ref().and_then(|f| f.0.take_limit_failure())
+    }
+
     /// W9a Task 11 (spec §9.3): the values of a `Loop` whose `values:`
     /// rendered to `uri`, one per record in file order (no `distinct()`, as
     /// Kestra's URI path) -- or why not, which fails the loop run with that
@@ -901,9 +908,9 @@ fn with_declared_defaults(posted: Value, flow: Option<&Flow>) -> Value {
 /// that is still running -- a `PAUSED` source can be resumed while its event
 /// waits. Spec §4.4 point 3 states what that costs.
 ///
-/// `Stack::Fresh`, because the processor is entered from the scheduler ticker
-/// with nothing of this crate's below it; nothing `settle`-shaped runs on the
-/// context this returns.
+/// `Stack::Reader`, because the processor is entered from the scheduler
+/// ticker with nothing of this crate's below it, and nothing `settle`-shaped
+/// runs on the context this returns (W9c Task 9: so it carries no gate).
 pub async fn execution_render_context(
     conn: &mut PgConnection,
     execution_id: Uuid,
@@ -912,9 +919,7 @@ pub async fn execution_render_context(
         conn,
         execution_id,
         super::claim::Lock::No,
-        // A reader: no `settle` runs on this context, so its cache is never
-        // consulted (W9c Task 9, `claim::Stack`).
-        super::claim::Stack::Fresh(crate::storage::prefetch::Prefetch::new()),
+        super::claim::Stack::Reader,
     )
     .await?;
     let surface = Surface::load(conn, &ctx).await?;
@@ -1080,7 +1085,16 @@ pub(super) enum Pass {
 /// `valids/task-runif`'s `willfailedtheflow` is `["CREATED","FAILED"]` with
 /// `attempts: []` in the golden, which is a different shape from a skip
 /// (`["CREATED","SKIPPED"]`, one attempt).
-pub(super) fn render_run_if(surface: &Surface, plan: &Plan, state: &mut ExecutionState) -> Pass {
+///
+/// W9c Task 9 (final review I2): a render that failed because a per-call
+/// read limit was spent ([`failed_on_a_limit`]) fails the run WITH that
+/// message; every other failure stays silent, as the golden has it.
+pub(super) fn render_run_if(
+    surface: &Surface,
+    plan: &Plan,
+    state: &mut ExecutionState,
+    side: &mut RenderSide,
+) -> Pass {
     let pending: Vec<RunIx> = (0..state.runs.len())
         .filter(|&ix| {
             plan.tasks
@@ -1100,12 +1114,30 @@ pub(super) fn render_run_if(surface: &Surface, plan: &Plan, state: &mut Executio
             .clone()
             .expect("filtered on Some above");
         let cx = surface.context(plan, state, Some(ix));
-        match crate::render_str(&expression, &cx) {
+        let rendered = crate::render_str(&expression, &cx);
+        let limit = surface.take_limit_failure();
+        match rendered {
             Ok(value) => state.runs[ix].rendered_run_if = Some(value),
-            Err(_) => fail(state, ix),
+            Err(_) => failed_on_a_limit(state, ix, limit, side),
         }
     }
     Pass::Rendered
+}
+
+/// Fail run `ix` for a render that would not resolve: with the message of
+/// the per-call read limit it met (`storage::prefetch`, final review I2), if
+/// it met one -- egret's own bound, which the author cannot see any other
+/// way -- and silently otherwise, as before.
+fn failed_on_a_limit(
+    state: &mut ExecutionState,
+    ix: RunIx,
+    limit: Option<String>,
+    side: &mut RenderSide,
+) {
+    fail(state, ix);
+    if let Some(message) = limit {
+        side.failures.push((ix, message));
+    }
 }
 
 /// What a render pass produced beside the state, for `settle` to write in
@@ -1113,8 +1145,8 @@ pub(super) fn render_run_if(surface: &Surface, plan: &Plan, state: &mut Executio
 #[derive(Debug, Default)]
 pub(super) struct RenderSide {
     /// Each run a render failed WITH a message: a `Loop` whose values file
-    /// cannot be iterated. Every other render failure fails its run without
-    /// one.
+    /// cannot be iterated, and (W9c Task 9) a render that met a per-call read
+    /// limit. Every other render failure fails its run without one.
     pub(super) failures: Vec<(RunIx, String)>,
     /// Each `Loop` run whose values were read from a file, with those values
     /// in file order: written to `workflow.loop_file_values`, not to the
@@ -1183,7 +1215,9 @@ pub(super) fn render_expressions(
     for ix in pending {
         let expression = expression_of(plan, state.runs[ix].task).expect("filtered on Some above");
         let cx = surface.context(plan, state, Some(ix));
-        match crate::render_str(&expression, &cx) {
+        let rendered = crate::render_str(&expression, &cx);
+        let limit = surface.take_limit_failure();
+        match rendered {
             // W9a Task 11 (spec §9.3): a `Loop` whose `values:` renders to a
             // file URI iterates the FILE. Kestra's test is
             // `URIFetcher.supports` -- the rendered text starts with one of
@@ -1196,7 +1230,10 @@ pub(super) fn render_expressions(
                 if matches!(plan.tasks[state.runs[ix].task].kind, TaskKind::Loop { .. })
                     && crate::executor::values_name_a_file(&value) =>
             {
-                match surface.loop_values_from_file(&value) {
+                let from_file = surface.loop_values_from_file(&value);
+                // Its message, a limit's included, is the failure's below.
+                let _ = surface.take_limit_failure();
+                match from_file {
                     Ok(values) => {
                         state.runs[ix].rendered =
                             Some(crate::executor::rendered_from_file(&value, values.len()));
@@ -1209,7 +1246,7 @@ pub(super) fn render_expressions(
                 }
             }
             Ok(value) => state.runs[ix].rendered = Some(value),
-            Err(_) => fail(state, ix),
+            Err(_) => failed_on_a_limit(state, ix, limit, side),
         }
     }
     Pass::Rendered

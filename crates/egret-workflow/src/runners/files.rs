@@ -72,6 +72,14 @@ pub trait RenderFiles: Send + Sync {
     fn infrastructure_failure(&self) -> Option<String> {
         None
     }
+    /// W9c Task 9 (final review I2): the latest read this scope refused
+    /// because a per-call limit was spent (`storage::prefetch`'s rounds,
+    /// fetches or byte cap), taken (cleared) by the call. `settle` records it
+    /// as the message of the run whose render failed on it. `None` for every
+    /// scope but the in-transaction one.
+    fn take_limit_failure(&self) -> Option<String> {
+        None
+    }
     /// `workflow.storage.max_read_bytes` of the store this scope reads, the
     /// Ion reader's cap for a `Loop` over a file; `None` with no store.
     fn max_read_bytes(&self) -> Option<u64> {

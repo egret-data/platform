@@ -433,7 +433,7 @@ async fn spawn_one(
         depth: parent.depth + 1,
         // The same cache as its caller: this settle runs in the caller's
         // transaction (W9c Task 9, `claim::Stack`).
-        prefetch: parent.prefetch.clone(),
+        gate: parent.gate.clone(),
     };
     let empty = ExecutionState::new(&ctx.plan);
     let mut state = empty.clone();

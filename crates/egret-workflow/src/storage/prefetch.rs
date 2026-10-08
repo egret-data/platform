@@ -20,8 +20,7 @@
 //! only: the one readability decision, and the only connection that sees the
 //! index rows the transaction has just written) and a [`Prefetch`] cache. It
 //! holds **no store and no connect options**, so it cannot do I/O. Every
-//! body, namespace-file and KV read is a cache lookup; a miss records the
-//! request and fails the render in memory.
+//! body, namespace-file and KV read is a cache lookup.
 //!
 //! The transaction's outermost owner (`worker::txn`) checks the cache
 //! **before it commits**: with a miss pending it rolls back -- every lock
@@ -29,24 +28,43 @@
 //! transaction open ([`Prefetch::fetch_pending`]), through the same live
 //! code a render outside a transaction uses ([`super::scope::Snapshot`]), and
 //! runs the transaction again, which now reads the fetched answers. **A
-//! transaction never commits with a miss pending**, which is why a render
-//! error some caller turns into a write (a failed run, a `Subflow`'s
-//! `fail_run`) is harmless: that attempt is never committed.
+//! transaction never commits with a miss pending.**
 //!
-//! Values and messages are exactly today's: the cache holds what the live
-//! function returned, error or value, and the in-transaction scope hands it
-//! back unchanged. Only the moment of the fetch moves -- a little before the
-//! final attempt instead of during it.
+//! # Gather: a miss does not end the attempt (the user's ruling, 2026-10-08)
 //!
-//! # Bounds (the user's rulings, 2026-10-08)
+//! A miss records the request and hands the render a neutral PLACEHOLDER
+//! answer (an empty string, empty bytes, a zero-size file), so the render
+//! carries on: every later read in the same expression, every later loop
+//! iteration's settle and every later listener of the same event is
+//! discovered in the SAME attempt, and one fetch answers them all. Whatever
+//! the attempt computed from a placeholder -- a value, a branch taken, an
+//! author's error, a failed run -- is discarded with its rollback: the
+//! attempt that commits has no miss, so every value it rendered is the one a
+//! live render gives. A placeholder may steer control flow down a branch the
+//! real value would not take; that branch is only ever rolled back, and its
+//! reads are fetched (and counted against the limits below) like any other.
 //!
-//! * **Rounds.** One fetch is one round; a chain of dependent reads
-//!   (`kv(kv('p'))`) needs one round per level. After [`MAX_ROUNDS`] fetches
-//!   the next attempt is final: a miss there is the AUTHOR's error, naming
-//!   the limit and the read that missed, and the attempt commits with it.
-//! * **Bytes.** What one call caches is capped at [`CACHE_CAP_FACTOR`] ×
-//!   `workflow.storage.max_read_bytes`; an answer that would cross it is
-//!   replaced by the author's error naming the cap.
+//! So one fetch round answers everything an attempt can see. A further
+//! round is needed only where a read is REACHED through another read's
+//! value -- `kv(kv('p'))`, or a task that exists only once an earlier task's
+//! `runIf` is known to be true: one more attempt per level of real control
+//! or data dependency.
+//!
+//! # Limits (the user's ruling, 2026-10-08)
+//!
+//! Per call of an owner, across every attempt and every re-[`bind`]:
+//!
+//! * at most [`MAX_FETCHES`] entries fetched;
+//! * at most [`MAX_ROUNDS`] fetch rounds;
+//! * at most [`CACHE_CAP_FACTOR`] × `workflow.storage.max_read_bytes` of
+//!   cached values, each distinct entry counted once.
+//!
+//! A read past either count is answered with the AUTHOR's error naming the
+//! limit and the read; an answer that would cross the byte cap is cached as
+//! the author's error naming the cap. Either reaches the run that rendered
+//! it with that message ([`InTransaction::take_limit_failure`]).
+//!
+//! [`bind`]: Prefetch::bind
 //!
 //! # What is not cached
 //!
@@ -66,7 +84,7 @@
 //! `Err`, the transaction rolls back, and a claimed run is re-claimed with no
 //! attempt spent (spec §11).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use egret_core::{Error, Result};
@@ -78,13 +96,28 @@ use crate::runners::files::{
     FileMeta, FileUnavailable, KvAnswer, KvArgs, NsFileArgs, NsFileMeta, RenderFiles,
 };
 
-/// How many fetch rounds one call may make before a miss is the author's
-/// error (the user's ruling, 2026-10-08).
-pub const MAX_ROUNDS: u32 = 8;
+/// How many fetch rounds one call may make (the user's ruling, 2026-10-08).
+pub const MAX_ROUNDS: u32 = 64;
+
+/// How many entries one call may fetch, over all its rounds (the user's
+/// ruling, 2026-10-08).
+pub const MAX_FETCHES: usize = 256;
 
 /// One call's cache holds at most this many times
 /// `workflow.storage.max_read_bytes` (the user's ruling, 2026-10-08).
 pub const CACHE_CAP_FACTOR: u64 = 4;
+
+/// Test-only: every fetch round this process has run, so a test can tell
+/// one round that answered N reads from N rounds that answered one each.
+#[cfg(any(test, feature = "test-util"))]
+static FETCH_ROUNDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only: how many fetch rounds this process has run (see
+/// [`Prefetch::fetch_pending`]).
+#[cfg(any(test, feature = "test-util"))]
+pub fn fetch_rounds_so_far() -> u64 {
+    FETCH_ROUNDS.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 /// What a render asked for: a function and its arguments, as the scope
 /// that would have answered it live sees them.
@@ -180,6 +213,26 @@ impl Answer {
             Request::Kv { .. } => Answer::Kv(Err(message)),
         }
     }
+
+    /// What a render gets for a read not fetched yet: a neutral value of the
+    /// function's shape, so the render carries on and every later read is
+    /// discovered in the same attempt. Never committed: the attempt that
+    /// handed it out has a miss pending, and the gate rolls it back.
+    fn placeholder(request: &Request) -> Answer {
+        match request {
+            Request::ExecBody { .. } => Answer::Bytes(Ok(Vec::new())),
+            Request::NsMeta(k) => Answer::NsMeta(Ok(NsFileMeta {
+                path: k.path.clone(),
+                size: 0,
+                is_directory: false,
+                uri: String::new(),
+            })),
+            Request::NsRead(_) => Answer::NsRead(Ok(String::new())),
+            Request::Kv { .. } => Answer::Kv(Ok(KvAnswer::Value(
+                crate::storage::kv::value::KvData::String(String::new()),
+            ))),
+        }
+    }
 }
 
 /// A rough size of a KV value: its text and one word per node, walked with
@@ -206,25 +259,33 @@ fn kv_bytes(d: &crate::storage::kv::value::KvData) -> u64 {
     total
 }
 
-/// An answer and the outage the live read met giving it, if any.
-#[derive(Clone, Debug)]
+/// An answer, the outage the live read met giving it, if any, and whether it
+/// is a limit's refusal (the byte cap) rather than the live answer. Shared:
+/// a hit hands out the `Arc`, not a copy of the body.
+#[derive(Debug)]
 struct Stored {
     answer: Answer,
     outage: Option<String>,
+    limit: bool,
 }
 
 #[derive(Default)]
 struct State {
-    answers: BTreeMap<Request, Stored>,
+    /// This owner's answers (see [`Prefetch::bind`]).
+    answers: BTreeMap<Request, Arc<Stored>>,
     /// Asked for and not answered: the request, and for an execution file
     /// the resolution the attempt made (the attempt's rollback erases any
     /// index row it wrote, so the fetch cannot resolve it again).
     pending: BTreeMap<Request, Option<IndexedFile>>,
-    /// What [`State::answers`] holds, in [`Answer::bytes`].
+    /// What the cap counts, per CALL: the bytes of each distinct entry ever
+    /// cached, once, kept across [`Prefetch::bind`].
+    counted: BTreeSet<Request>,
     bytes: u64,
-    /// Fetches made so far.
+    /// Entries fetched so far in this call, across [`Prefetch::bind`].
+    fetched: usize,
+    /// Fetch rounds so far in this call, across [`Prefetch::bind`].
     rounds: u32,
-    /// What this cache is for (`Prefetch::bind`).
+    /// What the answers are for (`Prefetch::bind`).
     owner: Option<String>,
 }
 
@@ -240,6 +301,7 @@ impl std::fmt::Debug for Prefetch {
         f.debug_struct("Prefetch")
             .field("answers", &s.answers.len())
             .field("pending", &s.pending.len())
+            .field("fetched", &s.fetched)
             .field("rounds", &s.rounds)
             .finish()
     }
@@ -247,15 +309,15 @@ impl std::fmt::Debug for Prefetch {
 
 /// What the cache had for a request.
 enum Lookup {
-    Hit(Stored),
+    Hit(Arc<Stored>),
     /// Recorded as pending: this attempt will not commit.
     Missed,
-    /// The rounds are spent: the author's error.
-    Final,
+    /// A limit is spent: the author's error, naming it and the read.
+    Final(String),
 }
 
 impl Prefetch {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -269,24 +331,30 @@ impl Prefetch {
         !self.state().pending.is_empty()
     }
 
-    /// How many fetches this cache has made.
+    /// How many fetch rounds this call has made.
     pub fn rounds(&self) -> u32 {
         self.state().rounds
     }
 
-    /// Say what this cache is for -- a trigger, an event -- before the
-    /// attempt reads through it. An owner that claims its item afresh on
+    /// How many entries this call has fetched.
+    pub fn fetched(&self) -> usize {
+        self.state().fetched
+    }
+
+    /// Say what this cache's answers are for -- a trigger, an event -- before
+    /// the attempt reads through it. An owner that claims its item afresh on
     /// every attempt (the scheduler, the Flow-trigger processor) may claim a
     /// different one on a retry, when another replica took the first; the
-    /// cache then starts over, so it always holds one item's reads and that
-    /// item's rounds.
+    /// ANSWERS then start over, so they are always one item's, read after
+    /// that item was claimed. **The limits do not**: the rounds, the fetches
+    /// and the bytes are the call's, whatever it claims, so a call whose
+    /// retries keep claiming different items still ends (final review m1).
     pub fn bind(&self, owner: &str) {
         let mut s = self.state();
         if s.owner.as_deref() != Some(owner) {
-            *s = State {
-                owner: Some(owner.to_string()),
-                ..State::default()
-            };
+            s.owner = Some(owner.to_string());
+            s.answers.clear();
+            s.pending.clear();
         }
     }
 
@@ -295,8 +363,14 @@ impl Prefetch {
         if let Some(stored) = s.answers.get(&request) {
             return Lookup::Hit(stored.clone());
         }
+        if s.pending.contains_key(&request) {
+            return Lookup::Missed;
+        }
         if s.rounds >= MAX_ROUNDS {
-            return Lookup::Final;
+            return Lookup::Final(over_rounds(&request));
+        }
+        if s.fetched + s.pending.len() >= MAX_FETCHES {
+            return Lookup::Final(over_fetches(&request));
         }
         s.pending.insert(request, file);
         Lookup::Missed
@@ -360,29 +434,41 @@ impl Prefetch {
             ))
         })?;
         let mut s = self.state();
-        for (request, stored) in fetched {
-            s.store(request, stored, cap);
+        for (request, answer, outage) in fetched {
+            s.store(request, answer, outage, cap);
         }
         s.rounds += 1;
+        #[cfg(any(test, feature = "test-util"))]
+        FETCH_ROUNDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 }
 
 impl State {
-    /// Cache one fetched answer -- or, when it would take the cache past
-    /// `cap` bytes, the author's error naming the cap in its place.
-    fn store(&mut self, request: Request, stored: Stored, cap: u64) {
-        let size = stored.answer.bytes();
+    /// Cache one fetched answer -- or, when it would take what this call has
+    /// cached past `cap` bytes, the author's error naming the cap in its
+    /// place. Each distinct entry counts against the cap ONCE per call, and
+    /// against [`MAX_FETCHES`] each time it is fetched.
+    fn store(&mut self, request: Request, answer: Answer, outage: Option<String>, cap: u64) {
+        self.fetched += 1;
+        let counted = self.counted.contains(&request);
+        let size = if counted { 0 } else { answer.bytes() };
         let stored = if self.bytes.saturating_add(size) > cap {
             Stored {
                 answer: Answer::refusal(&request, over_cache_cap(&request, cap)),
                 outage: None,
+                limit: true,
             }
         } else {
             self.bytes += size;
-            stored
+            self.counted.insert(request.clone());
+            Stored {
+                answer,
+                outage,
+                limit: false,
+            }
         };
-        self.answers.insert(request, stored);
+        self.answers.insert(request, Arc::new(stored));
     }
 }
 
@@ -395,7 +481,9 @@ type Group = (
 
 /// Run each request on its snapshot, on this (non-runtime) thread, and close
 /// each snapshot's namespace connection when its requests are done.
-fn fetch_on_this_thread(work: Vec<(Snapshot, Vec<Request>)>) -> Vec<(Request, Stored)> {
+fn fetch_on_this_thread(
+    work: Vec<(Snapshot, Vec<Request>)>,
+) -> Vec<(Request, Answer, Option<String>)> {
     let mut out = Vec::new();
     for (live, requests) in work {
         for request in requests {
@@ -409,7 +497,7 @@ fn fetch_on_this_thread(work: Vec<(Snapshot, Vec<Request>)>) -> Vec<(Request, St
                 })),
             };
             let outage = live.take_outage();
-            out.push((request, Stored { answer, outage }));
+            out.push((request, answer, outage));
         }
         live.end_render();
     }
@@ -428,9 +516,19 @@ fn ns_args(k: &NsKey) -> NsFileArgs<'_> {
 fn over_rounds(request: &Request) -> String {
     format!(
         "{} could not be read: the expressions rendered in this transaction need more than \
-         {MAX_ROUNDS} rounds of dependent reads (a kv(), read() or namespace-file function \
-         whose argument comes from another such read is one more round), and {MAX_ROUNDS} is \
-         the limit",
+         {MAX_ROUNDS} rounds of reads (a read reached only through another read's value -- \
+         kv(kv(...)), or a task that exists only once an earlier task's runIf is known -- needs \
+         one more round), and {MAX_ROUNDS} is the limit",
+        request.what()
+    )
+}
+
+/// The author's error when the fetches are spent ([`MAX_FETCHES`]).
+fn over_fetches(request: &Request) -> String {
+    format!(
+        "{} could not be read: the expressions rendered in this transaction read more than \
+         {MAX_FETCHES} values (kv(), read() and namespace-file functions together), and \
+         {MAX_FETCHES} is the limit",
         request.what()
     )
 }
@@ -441,16 +539,6 @@ fn over_cache_cap(request: &Request, cap: u64) -> String {
         "{} could not be read: the values the expressions rendered in this transaction read \
          add up to more than {cap} bytes, the limit of {CACHE_CAP_FACTOR} x \
          workflow.storage.max_read_bytes",
-        request.what()
-    )
-}
-
-/// What a render gets while its read is being fetched. It fails the render
-/// in memory only: an attempt that recorded a miss is never committed.
-fn not_yet(request: &Request) -> String {
-    format!(
-        "{} is read before this transaction, not inside it: this attempt is rolled back, the \
-         value fetched with no transaction open, and the transaction run again",
         request.what()
     )
 }
@@ -466,6 +554,9 @@ pub struct InTransaction {
     prefetch: Prefetch,
     /// A cached outage this scope handed back (see the module doc).
     outage: Mutex<Option<String>>,
+    /// The latest limit's refusal this scope handed back
+    /// ([`RenderFiles::take_limit_failure`]).
+    limit: Mutex<Option<String>>,
 }
 
 impl InTransaction {
@@ -485,26 +576,37 @@ impl InTransaction {
             max_read_bytes,
             prefetch,
             outage: Mutex::new(None),
+            limit: Mutex::new(None),
         }
     }
 
-    /// The cached answer to `request`, or the error a miss renders as.
-    fn answer(
-        &self,
-        request: Request,
-        file: Option<IndexedFile>,
-    ) -> std::result::Result<Answer, String> {
+    /// The cached answer to `request`; a placeholder for a miss (recorded as
+    /// pending, so the attempt is rolled back); or a limit's refusal, which
+    /// is also noted for [`RenderFiles::take_limit_failure`].
+    fn answer(&self, request: Request, file: Option<IndexedFile>) -> Answer {
         match self.prefetch.lookup(request.clone(), file) {
-            Lookup::Hit(Stored { answer, outage }) => {
-                if let Some(outage) = outage {
+            Lookup::Hit(stored) => {
+                if let Some(outage) = &stored.outage {
                     let mut held = self.outage.lock().unwrap_or_else(|p| p.into_inner());
-                    held.get_or_insert(outage);
+                    held.get_or_insert_with(|| outage.clone());
                 }
-                Ok(answer)
+                if stored.limit {
+                    if let Some(message) = refusal_message(&stored.answer) {
+                        self.note_limit(message);
+                    }
+                }
+                stored.answer.clone()
             }
-            Lookup::Missed => Err(not_yet(&request)),
-            Lookup::Final => Err(over_rounds(&request)),
+            Lookup::Missed => Answer::placeholder(&request),
+            Lookup::Final(message) => {
+                self.note_limit(message.clone());
+                Answer::refusal(&request, message)
+            }
         }
+    }
+
+    fn note_limit(&self, message: String) {
+        *self.limit.lock().unwrap_or_else(|p| p.into_inner()) = Some(message);
     }
 
     fn ns_key(&self, args: &NsFileArgs<'_>) -> NsKey {
@@ -515,6 +617,15 @@ impl InTransaction {
             namespace: args.namespace.map(str::to_string),
             revision: args.revision.clone(),
         }
+    }
+}
+
+/// The message a refusal carries.
+fn refusal_message(answer: &Answer) -> Option<String> {
+    match answer {
+        Answer::Bytes(Err(m)) | Answer::NsRead(Err(m)) | Answer::Kv(Err(m)) => Some(m.clone()),
+        Answer::NsMeta(Err(FileUnavailable::Refused(m))) => Some(m.clone()),
+        _ => None,
     }
 }
 
@@ -543,14 +654,9 @@ impl RenderFiles for InTransaction {
             uri: uri.to_string(),
             whole: whole.to_string(),
         };
-        match self.answer(request, Some(file)) {
-            Ok(Answer::Bytes(answer)) => answer,
-            Ok(_) => Err(mismatched(&Request::ExecBody {
-                workspace: self.workspace,
-                uri: uri.to_string(),
-                whole: whole.to_string(),
-            })),
-            Err(message) => Err(message),
+        match self.answer(request.clone(), Some(file)) {
+            Answer::Bytes(answer) => answer,
+            _ => Err(mismatched(&request)),
         }
     }
 
@@ -559,6 +665,10 @@ impl RenderFiles for InTransaction {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    fn take_limit_failure(&self) -> Option<String> {
+        self.limit.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
 
     fn task_prefix(&self) -> Option<&str> {
@@ -573,22 +683,18 @@ impl RenderFiles for InTransaction {
         &self,
         args: &NsFileArgs<'_>,
     ) -> std::result::Result<NsFileMeta, FileUnavailable> {
-        match self.answer(Request::NsMeta(self.ns_key(args)), None) {
-            Ok(Answer::NsMeta(answer)) => answer,
-            Ok(_) => Err(FileUnavailable::Refused(mismatched(&Request::NsMeta(
-                self.ns_key(args),
-            )))),
-            // Refused, never Missing: a miss must not read as `fileExists`'
-            // `false` (the attempt is rolled back either way).
-            Err(message) => Err(FileUnavailable::Refused(message)),
+        let request = Request::NsMeta(self.ns_key(args));
+        match self.answer(request.clone(), None) {
+            Answer::NsMeta(answer) => answer,
+            _ => Err(FileUnavailable::Refused(mismatched(&request))),
         }
     }
 
     fn read_namespace_file(&self, args: &NsFileArgs<'_>) -> std::result::Result<String, String> {
-        match self.answer(Request::NsRead(self.ns_key(args)), None) {
-            Ok(Answer::NsRead(answer)) => answer,
-            Ok(_) => Err(mismatched(&Request::NsRead(self.ns_key(args)))),
-            Err(message) => Err(message),
+        let request = Request::NsRead(self.ns_key(args));
+        match self.answer(request.clone(), None) {
+            Answer::NsRead(answer) => answer,
+            _ => Err(mismatched(&request)),
         }
     }
 
@@ -604,9 +710,8 @@ impl RenderFiles for InTransaction {
             namespace: args.namespace.map(str::to_string),
         };
         match self.answer(request.clone(), None) {
-            Ok(Answer::Kv(answer)) => answer,
-            Ok(_) => Err(mismatched(&request)),
-            Err(message) => Err(message),
+            Answer::Kv(answer) => answer,
+            _ => Err(mismatched(&request)),
         }
     }
 }
@@ -636,19 +741,23 @@ mod tests {
         }
     }
 
-    fn scope(files: &[(String, u64)], pf: &Prefetch, cap: u64) -> crate::runners::files::FileScope {
+    fn in_tx(files: &[(String, u64)], pf: &Prefetch, cap: u64) -> Arc<InTransaction> {
         let files = files
             .iter()
             .map(|(u, n)| (u.clone(), Ok(file(u, *n))))
             .collect();
-        crate::runners::files::FileScope(Arc::new(InTransaction::new(
+        Arc::new(InTransaction::new(
             files,
             WS,
             None,
             Some("w9c.t9".into()),
             cap,
             pf.clone(),
-        )))
+        ))
+    }
+
+    fn scope(files: &[(String, u64)], pf: &Prefetch, cap: u64) -> crate::runners::files::FileScope {
+        crate::runners::files::FileScope(in_tx(files, pf, cap))
     }
 
     fn render(
@@ -659,30 +768,39 @@ mod tests {
         render_str(template, &cx).map_err(|e| e.to_string())
     }
 
+    fn kv_request(key: &str) -> Request {
+        Request::Kv {
+            workspace: WS,
+            flow_namespace: Some("w9c.t9".into()),
+            key: key.into(),
+            namespace: None,
+        }
+    }
+
     /// The same answers a live snapshot gives, through the cache: what the
     /// fetch stores is what the in-transaction scope hands back.
     fn seeded(pf: &Prefetch, request: Request, answer: Answer) {
         pf.state().answers.insert(
             request,
-            Stored {
+            Arc::new(Stored {
                 answer,
                 outage: None,
-            },
+                limit: false,
+            }),
         );
     }
 
     #[test]
-    fn a_miss_records_the_request_and_fails_the_render_in_memory() {
+    fn a_miss_records_the_request_and_renders_on_with_a_placeholder() {
         let pf = Prefetch::new();
         let uri = uri_of("a.txt");
-        let err = render(
-            &format!("{{{{ read('{uri}') }}}}"),
-            scope(&[(uri.clone(), 3)], &pf, 10),
-        )
-        .unwrap_err();
-        assert!(
-            err.contains(&uri) && err.contains("read before this transaction"),
-            "{err}"
+        assert_eq!(
+            render(
+                &format!("[{{{{ read('{uri}') }}}}]"),
+                scope(&[(uri.clone(), 3)], &pf, 10),
+            ),
+            Ok("[]".into()),
+            "the placeholder is an empty body"
         );
         assert!(pf.has_pending());
         let pending = pf.state().pending.clone();
@@ -693,6 +811,34 @@ mod tests {
             f,
             Some(file(&uri, 3)),
             "the resolution rides with the request"
+        );
+    }
+
+    /// The user's ruling of 2026-10-08 (gather): one attempt discovers every
+    /// read its renders reach, so one fetch answers them all.
+    #[test]
+    fn every_read_of_one_expression_is_recorded_in_one_attempt() {
+        let pf = Prefetch::new();
+        let uri = uri_of("a.txt");
+        let out = render(
+            &format!(
+                "{{{{ kv('a') ~ kv('b') ~ read('{uri}') ~ fileExists('nsfile:///x.txt') ~ \
+                 read('nsfile:///y.txt') ~ kv('a') }}}}"
+            ),
+            scope(&[(uri.clone(), 3)], &pf, 10),
+        );
+        assert!(out.is_ok(), "every placeholder is neutral: {out:?}");
+        let pending: Vec<String> = pf.state().pending.keys().map(Request::what).collect();
+        assert_eq!(
+            pending,
+            vec![
+                uri.clone(),
+                "namespace file 'nsfile:///x.txt'".to_string(),
+                "namespace file 'nsfile:///y.txt'".to_string(),
+                "key 'a'".to_string(),
+                "key 'b'".to_string(),
+            ],
+            "each distinct read once"
         );
     }
 
@@ -725,12 +871,7 @@ mod tests {
         );
         seeded(
             &pf,
-            Request::Kv {
-                workspace: WS,
-                flow_namespace: Some("w9c.t9".into()),
-                key: "gone".into(),
-                namespace: None,
-            },
+            kv_request("gone"),
             Answer::Kv(Ok(KvAnswer::Missing(
                 "The key 'gone' does not exist".into(),
             ))),
@@ -748,18 +889,13 @@ mod tests {
     #[test]
     fn a_cached_outage_is_reported_by_the_scope_that_hands_it_back() {
         let pf = Prefetch::new();
-        let request = Request::Kv {
-            workspace: WS,
-            flow_namespace: Some("w9c.t9".into()),
-            key: "k".into(),
-            namespace: None,
-        };
         pf.state().answers.insert(
-            request,
-            Stored {
+            kv_request("k"),
+            Arc::new(Stored {
                 answer: Answer::Kv(Err("store down".into())),
                 outage: Some("store down".into()),
-            },
+                limit: false,
+            }),
         );
         let s = scope(&[], &pf, 10);
         assert!(render("{{ kv('k') }}", s.clone()).is_err());
@@ -770,23 +906,78 @@ mod tests {
     fn after_max_rounds_a_miss_is_the_authors_error_naming_the_limit_and_the_read() {
         let pf = Prefetch::new();
         pf.state().rounds = MAX_ROUNDS;
-        let err = render("{{ kv('deep') }}", scope(&[], &pf, 10)).unwrap_err();
+        let t = in_tx(&[], &pf, 10);
+        let err = render(
+            "{{ kv('deep') }}",
+            crate::runners::files::FileScope(t.clone()),
+        )
+        .unwrap_err();
         assert!(
             err.contains("key 'deep'") && err.contains(&format!("more than {MAX_ROUNDS} rounds")),
             "{err}"
         );
         assert!(!pf.has_pending(), "a final miss is answered, not pending");
+        let noted = t.take_limit_failure().expect("noted for the run's message");
+        assert!(noted.contains("key 'deep'"), "{noted}");
+        assert_eq!(t.take_limit_failure(), None, "taken once");
     }
 
+    /// [`MAX_FETCHES`] counts what this call fetched AND what this attempt
+    /// has already recorded: the read past it is the author's error.
     #[test]
-    fn bind_starts_over_for_another_owner_and_keeps_the_same_one() {
+    fn past_max_fetches_a_miss_is_the_authors_error_naming_the_limit_and_the_read() {
+        let pf = Prefetch::new();
+        pf.state().fetched = MAX_FETCHES - 1;
+        let err = render("{{ kv('last') ~ kv('over') }}", scope(&[], &pf, 10)).unwrap_err();
+        assert!(
+            err.contains("key 'over'") && err.contains(&format!("more than {MAX_FETCHES} values")),
+            "{err}"
+        );
+        let pending: Vec<String> = pf.state().pending.keys().map(Request::what).collect();
+        assert_eq!(pending, vec!["key 'last'".to_string()]);
+    }
+
+    /// m1: a re-bind clears the ANSWERS (they are one item's), never the
+    /// call's limits.
+    #[test]
+    fn bind_clears_the_answers_for_another_owner_and_keeps_the_calls_limits() {
         let pf = Prefetch::new();
         pf.bind("a");
-        pf.state().rounds = 3;
+        seeded(&pf, kv_request("k"), Answer::Kv(Err("x".into())));
+        {
+            let mut s = pf.state();
+            s.rounds = 3;
+            s.fetched = 7;
+            s.bytes = 11;
+        }
         pf.bind("a");
-        assert_eq!(pf.rounds(), 3);
+        assert_eq!(pf.state().answers.len(), 1, "the same owner keeps them");
         pf.bind("b");
-        assert_eq!(pf.rounds(), 0);
+        let s = pf.state();
+        assert_eq!(s.answers.len(), 0, "another owner's answers start over");
+        assert_eq!(
+            (s.rounds, s.fetched, s.bytes),
+            (3, 7, 11),
+            "the limits do not"
+        );
+    }
+
+    /// m4: an entry counts against the byte cap once per call, however many
+    /// times a re-bind makes it fetched again.
+    #[test]
+    fn the_cap_counts_each_distinct_entry_once_per_call() {
+        let pf = Prefetch::new();
+        let value = || {
+            Answer::Kv(Ok(KvAnswer::Value(
+                crate::storage::kv::value::KvData::String("abcd".into()),
+            )))
+        };
+        pf.state().store(kv_request("k"), value(), None, 100);
+        pf.bind("other");
+        pf.state().store(kv_request("k"), value(), None, 100);
+        let s = pf.state();
+        assert_eq!(s.bytes, 8 + 4, "counted once");
+        assert_eq!(s.fetched, 2, "fetched twice");
     }
 
     fn mem_store(max_read_bytes: u64) -> Arc<FileStore> {
@@ -841,7 +1032,7 @@ mod tests {
         .unwrap();
         let bytes: Vec<_> = out
             .iter()
-            .map(|(_, s)| match &s.answer {
+            .map(|(_, answer, _)| match answer {
                 Answer::Bytes(Ok(b)) => b.clone(),
                 other => panic!("{other:?}"),
             })
@@ -850,19 +1041,23 @@ mod tests {
 
         // The cap: 4 x 1 bytes holds the first four-byte value only.
         let pf = Prefetch::new();
-        for (request, stored) in out {
-            pf.state().store(request, stored, CACHE_CAP_FACTOR);
+        for (request, answer, outage) in out {
+            pf.state().store(request, answer, outage, CACHE_CAP_FACTOR);
         }
-        let s = scope(&[(a.clone(), 4), (b.clone(), 4)], &pf, 1);
+        let t = in_tx(&[(a.clone(), 4), (b.clone(), 4)], &pf, 1);
+        let s = crate::runners::files::FileScope(t.clone());
         assert_eq!(
             render(&format!("{{{{ read('{a}') }}}}"), s.clone()),
             Ok("abcd".into())
         );
+        assert_eq!(t.take_limit_failure(), None, "a plain hit is no limit");
         let err = render(&format!("{{{{ read('{b}') }}}}"), s).unwrap_err();
         assert!(
             err.contains(&b) && err.contains("more than 4 bytes") && err.contains("max_read_bytes"),
             "{err}"
         );
+        let noted = t.take_limit_failure().expect("the cap is a limit");
+        assert!(noted.contains("more than 4 bytes"), "{noted}");
     }
 
     #[test]

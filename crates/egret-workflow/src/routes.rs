@@ -2082,10 +2082,9 @@ async fn read_parts_and_start(
     // needs a read is rolled back, the read fetched, and the start run again
     // -- with the same id and the same uploads: they happened above, before
     // any transaction, and are not repeated.
-    crate::worker::txn::transaction!(&st.db.pool, |tx, pf| {
+    crate::worker::txn::transaction!(&st.db.pool, |at| {
         crate::worker::start_execution_in_with(
-            tx,
-            pf,
+            at,
             crate::worker::NewExecution {
                 workspace_id: workspace,
                 flow_id: Some(flow.id),
@@ -2356,10 +2355,9 @@ async fn replay_execution(
     }
     // W9c Task 9: in `worker::txn::transaction!`, so a first settle that
     // needs a read is rolled back, the read fetched, and the start run again.
-    let replacement = crate::worker::txn::transaction!(&st.db.pool, |tx, pf| {
+    let replacement = crate::worker::txn::transaction!(&st.db.pool, |at| {
         crate::worker::start_execution_in_with(
-            tx,
-            pf,
+            at,
             crate::worker::NewExecution {
                 workspace_id: ctx.workspace_id.0,
                 flow_id: source.execution.flow_id,
