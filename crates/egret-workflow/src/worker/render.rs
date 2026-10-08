@@ -912,7 +912,9 @@ pub async fn execution_render_context(
         conn,
         execution_id,
         super::claim::Lock::No,
-        super::claim::Stack::Fresh,
+        // A reader: no `settle` runs on this context, so its cache is never
+        // consulted (W9c Task 9, `claim::Stack`).
+        super::claim::Stack::Fresh(crate::storage::prefetch::Prefetch::new()),
     )
     .await?;
     let surface = Surface::load(conn, &ctx).await?;

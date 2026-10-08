@@ -405,7 +405,7 @@ async fn spawn_one(
             &[RunState::Failed],
             None,
             Some(&format!("loop iteration {index}: {why}")),
-            claim::Stack::Nested(parent.depth),
+            claim::Stack::Nested(parent.caller()),
         ))
         .await?;
         return Ok(None);
@@ -431,6 +431,9 @@ async fn spawn_one(
         // nesting itself**, which nothing refuses: see that constant's
         // "What neither bound closes".
         depth: parent.depth + 1,
+        // The same cache as its caller: this settle runs in the caller's
+        // transaction (W9c Task 9, `claim::Stack`).
+        prefetch: parent.prefetch.clone(),
     };
     let empty = ExecutionState::new(&ctx.plan);
     let mut state = empty.clone();
@@ -488,7 +491,7 @@ pub(super) async fn on_execution_terminal(
     conn: &mut PgConnection,
     execution_id: Uuid,
     state: RunState,
-    caller_depth: usize,
+    caller: claim::Caller,
 ) -> Result<()> {
     // Async recursion: a loop body may itself contain a `Loop`
     // (`valids/loop-nested`), so terminating the innermost sub-execution walks
@@ -512,7 +515,7 @@ pub(super) async fn on_execution_terminal(
         conn,
         execution_id,
         state,
-        caller_depth,
+        caller,
     ))
     .await
 }
@@ -521,7 +524,7 @@ async fn on_execution_terminal_inner(
     conn: &mut PgConnection,
     execution_id: Uuid,
     child_state: RunState,
-    caller_depth: usize,
+    caller: claim::Caller,
 ) -> Result<()> {
     let Some((parent_id, parent_run)) = parent_of(conn, execution_id).await? else {
         return Ok(());
@@ -531,8 +534,7 @@ async fn on_execution_terminal_inner(
     // of this function nests inside the one that called it -- a `Loop` that
     // starts its next iteration from here is one more frame, not a fresh
     // stack. See `claim::Stack`.
-    let (ctx, mut state, now) =
-        claim::load(conn, parent_id, claim::Stack::Nested(caller_depth)).await?;
+    let (ctx, mut state, now) = claim::load(conn, parent_id, claim::Stack::Nested(caller)).await?;
     let before = state.clone();
 
     let run = usize::try_from(parent_run).map_err(|_| {

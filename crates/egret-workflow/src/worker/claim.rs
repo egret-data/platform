@@ -71,11 +71,13 @@ use super::replay;
 use super::spawn::{self, Requested};
 use super::subflow;
 use super::timeout::{self, Budget};
+use super::txn::{transaction, Ended, Fetched, Finish, Isolation};
 use super::{from_wire, Outcome, Registry, TaskInput, WorkerError, MAX_ROUNDS};
 use crate::executor::{
     advance, apply, build_plan, Attempt, Command, ExecutionMeta, ExecutionState, Plan, Resume,
     RunIx, RunState, TaskKind, TaskRun, Tick,
 };
+use crate::storage::prefetch::Prefetch;
 
 /// Keeps the `sqlx::Error` as the source rather than flattening it to text:
 /// the Display is unchanged, and `scheduler::fire` downcasts it to tell a
@@ -1217,7 +1219,7 @@ async fn run_one(
             other => cancel::guarded(reg, &input, other.duration()).await,
         }
     };
-    let (outcome, held) = match under_lease(
+    let (outcome, held, renewed_at) = match under_lease(
         pool,
         c,
         timing.renew_every(),
@@ -1227,7 +1229,11 @@ async fn run_one(
     )
     .await
     {
-        Leased::Kept { out, held } => (out, held),
+        Leased::Kept {
+            out,
+            held,
+            renewed_at,
+        } => (out, held, renewed_at),
         // **The fence moved: another worker holds this run now, and this one
         // records NOTHING** — no outcome, and no failed-attempt line, because
         // there is no failure to report: the task was not finished by anyone
@@ -1277,13 +1283,63 @@ async fn run_one(
     // **The fence is the LATEST renewed lease, not the claim's.** Every
     // renewal moved `claimed_at`, so the claim's own value would match no row
     // and a live worker's outcome would be refused as `LeaseLost`.
-    let renewed = Claimed {
-        claimed_at: held,
-        ..c.clone()
-    };
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    apply_outcome(&mut tx, &renewed, &outcome).await?;
-    tx.commit().await.map_err(db_err)?;
+    //
+    // W9c Task 9: the outcome's transaction runs in `txn::transaction!`,
+    // so a render in its `settle` that needs a read rolls the attempt back,
+    // the read is fetched with no transaction open, and the attempt runs
+    // again. **The fetch runs under the lease's renewal**, as the handler
+    // did: the run is no longer locked by an open transaction while it
+    // waits, so without the renewal a fetch longer than `working_timeout`
+    // would let the reaper take it. A renewal that finds the fence moved
+    // gives the run up exactly as during the handler.
+    let mut lease = (held, renewed_at);
+    let ended = transaction!(
+        pool,
+        Isolation::Default,
+        |tx, pf| {
+            let renewed = Claimed {
+                claimed_at: lease.0,
+                ..c.clone()
+            };
+            apply_outcome_with(tx, pf, &renewed, &outcome)
+                .await
+                .map(Finish::Commit)
+        },
+        |pf| {
+            let fetched = under_lease_with(
+                |h| renew_lease(pool, c.id, h),
+                c.id,
+                lease.0,
+                timing.renew_every(),
+                timing.working_timeout,
+                lease.1,
+                pf.fetch_pending(),
+            )
+            .await;
+            match fetched {
+                Leased::Kept {
+                    out,
+                    held,
+                    renewed_at,
+                } => {
+                    out?;
+                    lease = (held, renewed_at);
+                    Ok(Fetched::Again)
+                }
+                Leased::Lost => Ok(Fetched::GiveUp),
+            }
+        }
+    )?;
+    if let Ended::GaveUp = ended {
+        tracing::warn!(
+            execution = %c.execution_id,
+            run = %c.id,
+            task_id = %c.task_id,
+            "this worker lost the run's lease while it fetched what the run's successors \
+             read; it records no outcome"
+        );
+        return Ok(Committed::LeaseLost);
+    }
     // Only now: see "released AFTER the commit" above.
     if let Err(e) = reg.release(&input).await {
         tracing::warn!(
@@ -1309,8 +1365,14 @@ enum Committed {
 /// What [`under_lease`] ended with.
 enum Leased<T> {
     /// The work finished while this worker still held the lease; `held` is
-    /// the lease's latest value, the one [`apply_outcome`] must fence on.
-    Kept { out: T, held: DateTime<Utc> },
+    /// the lease's latest value, the one [`apply_outcome`] must fence on, and
+    /// `renewed_at` when the renewal that wrote it was sent (the self-fence's
+    /// clock, for a later [`under_lease_with`] that carries on from here).
+    Kept {
+        out: T,
+        held: DateTime<Utc>,
+        renewed_at: tokio::time::Instant,
+    },
     /// A renewal found the fence moved. The work was dropped unfinished.
     Lost,
 }
@@ -1439,7 +1501,13 @@ where
             biased;
             _ = renew_tick.tick() => {}
             _ = tokio::time::sleep_until(last_ok + fence_after) => {}
-            out = &mut work => return Leased::Kept { out, held },
+            out = &mut work => {
+                return Leased::Kept {
+                    out,
+                    held,
+                    renewed_at: last_ok,
+                }
+            }
         }
         let sent = tokio::time::Instant::now();
         let limit = std::cmp::max(last_ok + fence_after, sent + every);
@@ -1504,7 +1572,16 @@ async fn input_for(
     script_default: std::time::Duration,
 ) -> Result<(TaskInput, Budget)> {
     let mut conn = pool.acquire().await.map_err(db_err)?;
-    let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No, Stack::Fresh).await?;
+    // A reader: no `settle` runs on this context, so its cache is never
+    // consulted. The handler's render below is LIVE (`scope_for`): it runs
+    // after this connection is returned, outside any transaction.
+    let (ctx, state, _now) = load_with(
+        &mut conn,
+        c.execution_id,
+        Lock::No,
+        Stack::Fresh(Prefetch::new()),
+    )
+    .await?;
     let mut surface = Surface::load(&mut conn, &ctx).await?;
     // W9a Task 4: the claimed run's OWN execution -- an iteration's id inside
     // a `Loop` (spec §3), never the loop root -- reads through a snapshot of
@@ -1558,12 +1635,37 @@ async fn input_for(
 /// visibly finished run behind if — and only if — these statements are not in
 /// one transaction. That is the window
 /// `a_failure_partway_through_a_tick_leaves_nothing_half_applied` looks for.
+///
+/// # A caller-owned transaction reads nothing (W9c Task 9)
+///
+/// `settle`'s renders read through a cache filled outside any transaction
+/// (`storage::prefetch`), and only an owner that can roll back, fetch and
+/// run again fills it -- [`tick`]'s `run_one` does. This entry point is the
+/// caller's transaction, so its cache stays empty: a render here that needs
+/// a read (`kv()`, `read()`, a namespace file, a `Loop`'s values file)
+/// answers `Err`, and the caller must not commit. Nothing a caller commits
+/// was rendered without its value.
 pub async fn apply_outcome(
     conn: &mut PgConnection,
     claimed: &Claimed,
     outcome: &Outcome,
 ) -> Result<()> {
-    let (ctx, mut state, now) = load(conn, claimed.execution_id, Stack::Fresh).await?;
+    let pf = Prefetch::new();
+    let applied = apply_outcome_with(conn, &pf, claimed, outcome).await;
+    if pf.has_pending() {
+        return Err(prefetch_miss());
+    }
+    applied
+}
+
+/// [`apply_outcome`] reading through `pf`, the owner's cache.
+async fn apply_outcome_with(
+    conn: &mut PgConnection,
+    pf: &Prefetch,
+    claimed: &Claimed,
+    outcome: &Outcome,
+) -> Result<()> {
+    let (ctx, mut state, now) = load(conn, claimed.execution_id, Stack::Fresh(pf.clone())).await?;
     let before = state.clone();
 
     // The output goes down BEFORE `settle` renders, because a successor's
@@ -1735,10 +1837,15 @@ pub(super) async fn settle(
     // inputs -- taken on `conn`, i.e. INSIDE the caller's transaction, which
     // is the only connection that sees the index rows of the task this
     // transaction has just finished.
+    //
+    // W9c Task 9: and it is the IN-TRANSACTION scope, which holds no store
+    // and no connect options. Every body, namespace-file and KV read is
+    // answered from `ctx.prefetch`, the owner's cache; a miss is fetched by
+    // the owner with this transaction rolled back (`worker::txn`).
     let texts: Vec<&str> = std::iter::once(ctx.source.as_str())
         .chain(state.runs.iter().filter_map(|r| r.value.as_deref()))
         .collect();
-    let files = crate::storage::scope::scope_for(
+    let files = crate::storage::scope::scope_in_transaction(
         conn,
         crate::storage::current(),
         ctx.workspace_id,
@@ -1747,6 +1854,7 @@ pub(super) async fn settle(
         &surface.snapshot_values(),
         None,
         surface.flow().map(|f| f.namespace.clone()),
+        &ctx.prefetch,
     )
     .await?;
     surface.attach_files(files);
@@ -1777,6 +1885,7 @@ pub(super) async fn settle(
     // failed WITH a message, and a file `Loop`'s values -- written after the
     // state `persist` writes and BEFORE `spawn_all`, which reads the values.
     let mut side = render::RenderSide::default();
+    missed(ctx)?;
     let (spawns, subflows) = drive(ctx, &surface, state, now, &mut marks, &mut seq, &mut side)?;
     persist(conn, ctx, before, state, release, &marks, seq).await?;
     if !side.failures.is_empty() || !side.file_values.is_empty() {
@@ -1871,7 +1980,7 @@ pub(super) async fn settle(
     let is = state.history.last().copied();
     if was != is {
         if let Some(terminal) = is.filter(|s| notifies_parent(*s)) {
-            spawn::on_execution_terminal(conn, ctx.id, terminal, ctx.depth).await?;
+            spawn::on_execution_terminal(conn, ctx.id, terminal, ctx.caller()).await?;
             // The other kind of link. `on_execution_terminal` reads
             // `parent_execution_id` and this reads `trigger_execution_id`, and
             // `workflow_executions_one_link_kind` makes it impossible for both
@@ -1886,9 +1995,13 @@ pub(super) async fn settle(
             // `workflow_executions_loop_run_whole_or_absent` keeps NULL for a
             // row with no loop index. Registered as a divergence in
             // `oracle-exec/README.md`'s coverage statement, item 16.
-            subflow::on_child_terminal(conn, ctx.id, terminal, ctx.depth).await?;
+            subflow::on_child_terminal(conn, ctx.id, terminal, ctx.caller()).await?;
         }
     }
+    // W9c Task 9: a render after `drive` (a `Subflow`'s target and inputs,
+    // a nested settle's) may have missed too. Not the gate -- the owner's
+    // check before its commit is -- but nothing after a miss is worth doing.
+    missed(ctx)?;
     // Spec §11 (fix round 1, I2): a render this settle ran met a store OUTAGE.
     // It failed a run above, and that failure is not the author's: an `Err`
     // here rolls the caller's whole transaction back -- `apply_outcome`'s
@@ -1975,38 +2088,38 @@ pub async fn start_execution_with_trigger(
     inputs: serde_json::Value,
     trigger: Option<serde_json::Value>,
 ) -> Result<Uuid> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    let id = start_execution_in(
-        &mut tx,
-        NewExecution {
-            workspace_id,
-            flow_id,
-            source,
-            inputs,
-            trigger,
-            // Only the scheduler (W12 Task 4) fires a `Schedule` tick, and it
-            // calls `start_execution_in` directly on the transaction that
-            // advances `next_evaluation_date` -- this wrapper is never that
-            // caller.
-            scheduled_date: None,
-            // Likewise only the Flow-trigger processor (W13a Task 4) starts an
-            // execution because another one reached a state; this wrapper's
-            // callers -- the API, a webhook, the tests -- start at the bottom.
-            trigger_execution_id: None,
-            execution_depth: 0,
-            flow_trigger_event_id: None,
-            born_failed: false,
-            // A manual replay calls `start_execution_in` itself with the link.
-            replayed_from_execution_id: None,
-            // Only the start route uploads FILE inputs, and it calls
-            // `start_execution_in` itself with the id it uploaded under.
-            id: None,
-            input_files: Vec::new(),
-        },
-    )
-    .await?;
-    tx.commit().await.map_err(db_err)?;
-    Ok(id)
+    transaction!(pool, |tx, pf| {
+        start_execution_in_with(
+            tx,
+            pf,
+            NewExecution {
+                workspace_id,
+                flow_id,
+                source,
+                inputs: inputs.clone(),
+                trigger: trigger.clone(),
+                // Only the scheduler (W12 Task 4) fires a `Schedule` tick, and it
+                // calls `start_execution_in` directly on the transaction that
+                // advances `next_evaluation_date` -- this wrapper is never that
+                // caller.
+                scheduled_date: None,
+                // Likewise only the Flow-trigger processor (W13a Task 4) starts an
+                // execution because another one reached a state; this wrapper's
+                // callers -- the API, a webhook, the tests -- start at the bottom.
+                trigger_execution_id: None,
+                execution_depth: 0,
+                flow_trigger_event_id: None,
+                born_failed: false,
+                // A manual replay calls `start_execution_in` itself with the link.
+                replayed_from_execution_id: None,
+                // Only the start route uploads FILE inputs, and it calls
+                // `start_execution_in` itself with the id it uploaded under.
+                id: None,
+                input_files: Vec::new(),
+            },
+        )
+        .await
+    })
 }
 
 /// Everything a caller supplies to create an execution. A struct because the
@@ -2069,7 +2182,29 @@ pub struct NewExecution<'a> {
 /// so the trigger's advance and the execution it fires commit or roll back
 /// together. `start_execution_with_trigger` is now the thin wrapper: begin,
 /// call this, commit.
+///
+/// # A caller-owned transaction reads nothing (W9c Task 9)
+///
+/// As [`apply_outcome`]: the first settle renders through a cache only an
+/// owner that can roll back and fetch fills, so here it stays empty and a
+/// render that needs a read answers `Err` -- the caller must not commit.
+/// The scheduler, the Flow-trigger processor and the routes call
+/// [`start_execution_in_with`] inside `worker::txn`.
 pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) -> Result<Uuid> {
+    let pf = Prefetch::new();
+    let started = start_execution_in_with(conn, &pf, new).await;
+    if pf.has_pending() {
+        return Err(prefetch_miss());
+    }
+    started
+}
+
+/// [`start_execution_in`] reading through `pf`, the owner's cache.
+pub(crate) async fn start_execution_in_with(
+    conn: &mut PgConnection,
+    pf: &Prefetch,
+    new: NewExecution<'_>,
+) -> Result<Uuid> {
     let NewExecution {
         workspace_id,
         flow_id,
@@ -2148,6 +2283,7 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
         seq: 0,
         // A caller that starts an execution is the bottom of the stack.
         depth: 0,
+        prefetch: pf.clone(),
     };
     let empty = ExecutionState::new(&ctx.plan);
     let mut state = empty.clone();
@@ -2185,12 +2321,15 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
 /// It takes the same lock and runs the same [`settle`] as every other writer,
 /// so a run created here and a run created by a finishing task are the same
 /// row written by the same code.
+///
+/// W9c Task 9: in `txn::transaction!`, so a render that needs a read is
+/// fetched with this transaction rolled back, and the settle runs again.
 pub async fn resume(pool: &PgPool, execution_id: Uuid) -> Result<()> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    let (ctx, mut state, now) = load(&mut tx, execution_id, Stack::Fresh).await?;
-    let before = state.clone();
-    settle(&mut tx, &ctx, &before, &mut state, now, None).await?;
-    tx.commit().await.map_err(db_err)
+    transaction!(pool, |tx, pf| {
+        let (ctx, mut state, now) = load(tx, execution_id, Stack::Fresh(pf.clone())).await?;
+        let before = state.clone();
+        settle(tx, &ctx, &before, &mut state, now, None).await
+    })
 }
 
 /// Everything a writer needs to know about the execution it is writing.
@@ -2258,6 +2397,32 @@ pub(super) struct ExecutionCtx {
     /// the whole measurement and who owns it. Loop links are counted here,
     /// because each one is a real frame.
     pub depth: usize,
+    /// W9c Task 9: the cache every render of this execution's `settle` reads
+    /// through (`storage::prefetch`) -- the transaction OWNER's, handed down
+    /// by [`Stack`] to every nested settle, so all the executions one
+    /// transaction touches read through one cache and the owner's check
+    /// before its commit sees every miss.
+    pub prefetch: Prefetch,
+}
+
+impl ExecutionCtx {
+    /// What a load nested inside this execution's `settle` passes as
+    /// [`Stack::Nested`]: this frame's depth, and the owner's cache.
+    pub(super) fn caller(&self) -> Caller {
+        Caller {
+            depth: self.depth,
+            prefetch: self.prefetch.clone(),
+        }
+    }
+}
+
+/// The frame a nested load sits inside: [`Stack::Nested`]'s payload.
+#[derive(Debug, Clone)]
+pub(super) struct Caller {
+    /// The calling `settle`'s [`ExecutionCtx::depth`].
+    pub depth: usize,
+    /// The calling `settle`'s [`ExecutionCtx::prefetch`].
+    pub prefetch: Prefetch,
 }
 
 /// Whether [`load_with`] takes the execution's row lock.
@@ -2298,25 +2463,41 @@ pub(super) enum Lock {
 /// `a_chain_of_subflows_that_COMPLETES_is_bounded_by_the_same_counter` is the
 /// control: it is the ascent, where the reset lived, as distinct from the
 /// descent the sibling test covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// # It carries the cache too (W9c Task 9)
+///
+/// For the same reason: a nested settle's renders must read through the
+/// transaction owner's [`Prefetch`], or the owner's check before its commit
+/// would not see their misses. `Fresh` takes the owner's cache and `Nested`
+/// takes the caller's, so a load cannot be written without one.
+#[derive(Debug, Clone)]
 pub(super) enum Stack {
     /// **This caller begins a fresh call stack.** The tick (`apply_outcome`),
     /// [`resume`], and `input_for`, which runs before the tick's transaction
     /// is even opened. Each is entered from `worker::run`, with nothing of
-    /// this crate's below it.
-    Fresh,
-    /// **This load happens inside a `settle` that is already `.0` deep**, and
-    /// the `settle` it is about to run nests inside that one — so the frame it
-    /// produces is `.0 + 1`.
-    Nested(usize),
+    /// this crate's below it. The cache is the transaction owner's (a reader
+    /// that runs no `settle` passes a fresh one nobody consults).
+    Fresh(Prefetch),
+    /// **This load happens inside a `settle` that is already `.0.depth`
+    /// deep**, and the `settle` it is about to run nests inside that one — so
+    /// the frame it produces is `.0.depth + 1`, reading through the same cache.
+    Nested(Caller),
 }
 
 impl Stack {
     /// [`ExecutionCtx::depth`] for the context this load is building.
-    fn depth(self) -> usize {
+    fn depth(&self) -> usize {
         match self {
-            Stack::Fresh => 0,
-            Stack::Nested(caller) => caller + 1,
+            Stack::Fresh(_) => 0,
+            Stack::Nested(caller) => caller.depth + 1,
+        }
+    }
+
+    /// [`ExecutionCtx::prefetch`] for the context this load is building.
+    fn prefetch(&self) -> Prefetch {
+        match self {
+            Stack::Fresh(pf) => pf.clone(),
+            Stack::Nested(caller) => caller.prefetch.clone(),
         }
     }
 }
@@ -2403,6 +2584,7 @@ pub(super) async fn load_with(
         // it made the counter walk in place while the stack climbed. See
         // [`Stack`].
         depth: stack.depth(),
+        prefetch: stack.prefetch(),
     };
 
     let rows = sqlx::query(
@@ -2782,8 +2964,13 @@ fn drive(
             continue;
         }
 
+        // W9c Task 9: after each render pass, an attempt whose render missed
+        // stops here. Its renders failed for want of a value, so every round
+        // after would drive a state that will be rolled back -- and could
+        // record reads only that wrong state needs.
         let snapshot = state.clone();
         if render::render_run_if(surface, plan, state) == Pass::Rendered {
+            missed(ctx)?;
             *seq += 1;
             marks.observe(&snapshot, state, *seq);
             continue;
@@ -2791,6 +2978,7 @@ fn drive(
 
         let snapshot = state.clone();
         if render::render_expressions(surface, plan, state, now, side) == Pass::Rendered {
+            missed(ctx)?;
             *seq += 1;
             marks.observe(&snapshot, state, *seq);
             continue;
@@ -2799,6 +2987,22 @@ fn drive(
         return Ok((spawns, subflows));
     }
     Err(worker_err(WorkerError::NoFixedPoint(ctx.id)))
+}
+
+/// W9c Task 9: `Err` once a render of this transaction has recorded a miss
+/// (`storage::prefetch`): the attempt will be rolled back, so stop. The
+/// owner's check before its commit (`worker::txn`) is the gate; this only
+/// saves work.
+fn missed(ctx: &ExecutionCtx) -> Result<()> {
+    if ctx.prefetch.has_pending() {
+        return Err(prefetch_miss());
+    }
+    Ok(())
+}
+
+/// The `Err` an attempt with a miss pending answers.
+pub(crate) fn prefetch_miss() -> Error {
+    worker_err(WorkerError::PrefetchMiss)
 }
 
 /// The decision point [`CREATE_BESIDE_A_CREATED_SIBLING`] counts: this round

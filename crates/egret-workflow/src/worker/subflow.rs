@@ -562,6 +562,8 @@ async fn spawn_one(
         // One deeper than its caller: the `settle` below runs inside this one.
         // See `ExecutionCtx::depth`, and the guard above that reads it.
         depth: ctx.depth + 1,
+        // The caller's cache: this settle runs in its transaction (W9c Task 9).
+        prefetch: ctx.prefetch.clone(),
     };
     let empty = ExecutionState::new(&child_ctx.plan);
     let mut child_state = empty.clone();
@@ -602,7 +604,7 @@ async fn spawn_one(
             // `Nested`: this is inside this execution's own `settle`, and the
             // one `complete` runs below nests inside it. It is the re-entrancy
             // `claim::settle`'s step-3 comment names.
-            claim::Stack::Nested(ctx.depth),
+            claim::Stack::Nested(ctx.caller()),
         )
         .await;
     }
@@ -621,13 +623,13 @@ pub(super) async fn on_child_terminal(
     conn: &mut PgConnection,
     execution_id: Uuid,
     child_state: RunState,
-    caller_depth: usize,
+    caller: claim::Caller,
 ) -> Result<()> {
     Box::pin(on_child_terminal_inner(
         conn,
         execution_id,
         child_state,
-        caller_depth,
+        caller,
     ))
     .await
 }
@@ -636,7 +638,7 @@ async fn on_child_terminal_inner(
     conn: &mut PgConnection,
     execution_id: Uuid,
     child_state: RunState,
-    caller_depth: usize,
+    caller: claim::Caller,
 ) -> Result<()> {
     let Some((parent_id, parent_run)) = trigger_of(conn, execution_id).await? else {
         return Ok(());
@@ -654,7 +656,7 @@ async fn on_child_terminal_inner(
     // `load_with`'s unconditional `depth: 0` amounted to -- reset the counter
     // once per link of a completing chain. See `claim::Stack`.
     let (ctx, state, _now) =
-        claim::load(conn, parent_id, claim::Stack::Nested(caller_depth)).await?;
+        claim::load(conn, parent_id, claim::Stack::Nested(caller.clone())).await?;
     let task = state.runs.get(run).map(|r| r.task).ok_or_else(|| {
         worker_err(WorkerError::Corrupt(
             parent_id,
@@ -760,7 +762,7 @@ async fn on_child_terminal_inner(
             "outputs": {},
         })),
         None,
-        claim::Stack::Nested(caller_depth),
+        claim::Stack::Nested(caller),
     )
     .await
 }
@@ -966,7 +968,7 @@ async fn fail_run(
         Some(message),
         // `Nested`: every caller of this is inside `spawn_one`, which is inside
         // its own execution's `settle`.
-        claim::Stack::Nested(ctx.depth),
+        claim::Stack::Nested(ctx.caller()),
     )
     .await
 }

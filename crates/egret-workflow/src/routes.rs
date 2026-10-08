@@ -2078,36 +2078,33 @@ async fn read_parts_and_start(
         };
         inputs.insert(name, serde_json::Value::String(value));
     }
-    let mut tx = st
-        .db
-        .pool
-        .begin()
+    // W9c Task 9: in `worker::txn::transaction!`, so a first settle that
+    // needs a read is rolled back, the read fetched, and the start run again
+    // -- with the same id and the same uploads: they happened above, before
+    // any transaction, and are not repeated.
+    crate::worker::txn::transaction!(&st.db.pool, |tx, pf| {
+        crate::worker::start_execution_in_with(
+            tx,
+            pf,
+            crate::worker::NewExecution {
+                workspace_id: workspace,
+                flow_id: Some(flow.id),
+                source: &flow.source,
+                inputs: serde_json::Value::Object(inputs.clone()),
+                trigger: None,
+                scheduled_date: None,
+                trigger_execution_id: None,
+                execution_depth: 0,
+                flow_trigger_event_id: None,
+                born_failed: false,
+                replayed_from_execution_id: None,
+                id: Some(execution),
+                input_files: files.clone(),
+            },
+        )
         .await
-        .map_err(|e| core_refusal(Error::Internal(e.into())))?;
-    let id = crate::worker::start_execution_in(
-        &mut tx,
-        crate::worker::NewExecution {
-            workspace_id: workspace,
-            flow_id: Some(flow.id),
-            source: &flow.source,
-            inputs: serde_json::Value::Object(inputs),
-            trigger: None,
-            scheduled_date: None,
-            trigger_execution_id: None,
-            execution_depth: 0,
-            flow_trigger_event_id: None,
-            born_failed: false,
-            replayed_from_execution_id: None,
-            id: Some(execution),
-            input_files: files,
-        },
-    )
-    .await
-    .map_err(core_refusal)?;
-    tx.commit()
-        .await
-        .map_err(|e| core_refusal(Error::Internal(e.into())))?;
-    Ok(id)
+    })
+    .map_err(core_refusal)
 }
 
 /// A text part, whole, at most [`MAX_TEXT_PART_BYTES`], as UTF-8.
@@ -2357,33 +2354,31 @@ async fn replay_execution(
             source.execution.state
         )));
     }
-    let mut tx = st
-        .db
-        .pool
-        .begin()
+    // W9c Task 9: in `worker::txn::transaction!`, so a first settle that
+    // needs a read is rolled back, the read fetched, and the start run again.
+    let replacement = crate::worker::txn::transaction!(&st.db.pool, |tx, pf| {
+        crate::worker::start_execution_in_with(
+            tx,
+            pf,
+            crate::worker::NewExecution {
+                workspace_id: ctx.workspace_id.0,
+                flow_id: source.execution.flow_id,
+                source: &source.source,
+                inputs: source.execution.inputs.clone(),
+                trigger: None,
+                scheduled_date: None,
+                trigger_execution_id: None,
+                execution_depth: 0,
+                flow_trigger_event_id: None,
+                born_failed: false,
+                // The link (this handler's doc), committed with the row.
+                replayed_from_execution_id: Some(id),
+                id: None,
+                input_files: Vec::new(),
+            },
+        )
         .await
-        .map_err(|e| Error::Internal(e.into()))?;
-    let replacement = crate::worker::start_execution_in(
-        &mut tx,
-        crate::worker::NewExecution {
-            workspace_id: ctx.workspace_id.0,
-            flow_id: source.execution.flow_id,
-            source: &source.source,
-            inputs: source.execution.inputs,
-            trigger: None,
-            scheduled_date: None,
-            trigger_execution_id: None,
-            execution_depth: 0,
-            flow_trigger_event_id: None,
-            born_failed: false,
-            // The link (this handler's doc), committed with the row.
-            replayed_from_execution_id: Some(id),
-            id: None,
-            input_files: Vec::new(),
-        },
-    )
-    .await?;
-    tx.commit().await.map_err(|e| Error::Internal(e.into()))?;
+    })?;
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ctx.workspace_id.0),

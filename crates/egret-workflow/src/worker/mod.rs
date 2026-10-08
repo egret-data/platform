@@ -89,12 +89,14 @@ mod replay;
 mod spawn;
 mod subflow;
 mod timeout;
+pub(crate) mod txn;
 
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
 pub use claim::{
     apply_outcome, claim, due_retries, resume, start_execution, start_execution_in,
     start_execution_with_trigger, tick, tick_with, wake, Claimed, NewExecution, WorkerTiming,
 };
+pub(crate) use claim::{prefetch_miss, start_execution_in_with};
 pub use reaper::reap;
 pub use registry::Handlers;
 pub use render::execution_render_context;
@@ -572,6 +574,18 @@ pub enum WorkerError {
     /// causes.
     #[error("advance() did not reach a fixed point in {MAX_ROUNDS} rounds on execution {0}")]
     NoFixedPoint(uuid::Uuid),
+
+    /// W9c Task 9: a render inside this transaction needed a read its cache
+    /// did not hold (`storage::prefetch`). Never committed and never the
+    /// author's: the transaction's owner (`worker::txn`) rolls back, fetches
+    /// the read with no transaction open, and runs the transaction again. A
+    /// caller that owns its own transaction (`apply_outcome`,
+    /// `start_execution_in`) gets this `Err` and must roll back.
+    #[error(
+        "a render in this transaction needs a value read before the transaction; the \
+         transaction is rolled back, the value fetched, and the transaction run again"
+    )]
+    PrefetchMiss,
 
     /// The stored `source` no longer builds a plan.
     #[error("execution {0} holds a source that no longer plans: {1}")]

@@ -298,7 +298,7 @@ pub(super) async fn spawn_due(
             Some(&format!(
                 "the CREATE_NEW_EXECUTION retry cannot replay: {why}"
             )),
-            claim::Stack::Nested(ctx.depth),
+            claim::Stack::Nested(ctx.caller()),
         ))
         .await;
     }
@@ -321,6 +321,8 @@ pub(super) async fn spawn_due(
         seq: 0,
         // One deeper than its caller: the `settle` below runs inside this one.
         depth: ctx.depth + 1,
+        // The caller's cache: this settle runs in its transaction (W9c Task 9).
+        prefetch: ctx.prefetch.clone(),
     };
     let empty = ExecutionState::new(&child_ctx.plan);
     let mut child_state = empty.clone();
