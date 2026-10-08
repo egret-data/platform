@@ -322,8 +322,7 @@ impl Prefetch {
         let ns_db = super::nsfiles::db_options();
         // One live snapshot per (workspace, running flow); built here, on the
         // runtime, because it captures the runtime's handle.
-        let mut groups: BTreeMap<(Uuid, Option<String>), (BTreeMap<_, _>, Vec<Request>)> =
-            BTreeMap::new();
+        let mut groups: BTreeMap<(Uuid, Option<String>), Group> = BTreeMap::new();
         for (request, file) in pending {
             let group = groups.entry(request.group()).or_default();
             if let (Request::ExecBody { uri, .. }, Some(file)) = (&request, file) {
@@ -334,7 +333,6 @@ impl Prefetch {
         let work: Vec<(Snapshot, Vec<Request>)> = groups
             .into_iter()
             .map(|((workspace, flow_namespace), (files, requests))| {
-                let files: BTreeMap<String, std::result::Result<IndexedFile, Unreadable>> = files;
                 (
                     Snapshot::for_fetch(
                         files,
@@ -387,6 +385,13 @@ impl State {
         self.answers.insert(request, stored);
     }
 }
+
+/// One live snapshot's work: the execution-file resolutions it reads by, and
+/// the requests it answers.
+type Group = (
+    BTreeMap<String, std::result::Result<IndexedFile, Unreadable>>,
+    Vec<Request>,
+);
 
 /// Run each request on its snapshot, on this (non-runtime) thread, and close
 /// each snapshot's namespace connection when its requests are done.
@@ -488,7 +493,7 @@ impl InTransaction {
         &self,
         request: Request,
         file: Option<IndexedFile>,
-    ) -> std::result::Result<Answer, (Request, String)> {
+    ) -> std::result::Result<Answer, String> {
         match self.prefetch.lookup(request.clone(), file) {
             Lookup::Hit(Stored { answer, outage }) => {
                 if let Some(outage) = outage {
@@ -497,14 +502,8 @@ impl InTransaction {
                 }
                 Ok(answer)
             }
-            Lookup::Missed => {
-                let message = not_yet(&request);
-                Err((request, message))
-            }
-            Lookup::Final => {
-                let message = over_rounds(&request);
-                Err((request, message))
-            }
+            Lookup::Missed => Err(not_yet(&request)),
+            Lookup::Final => Err(over_rounds(&request)),
         }
     }
 
@@ -551,7 +550,7 @@ impl RenderFiles for InTransaction {
                 uri: uri.to_string(),
                 whole: whole.to_string(),
             })),
-            Err((_, message)) => Err(message),
+            Err(message) => Err(message),
         }
     }
 
@@ -581,7 +580,7 @@ impl RenderFiles for InTransaction {
             )))),
             // Refused, never Missing: a miss must not read as `fileExists`'
             // `false` (the attempt is rolled back either way).
-            Err((_, message)) => Err(FileUnavailable::Refused(message)),
+            Err(message) => Err(FileUnavailable::Refused(message)),
         }
     }
 
@@ -589,7 +588,7 @@ impl RenderFiles for InTransaction {
         match self.answer(Request::NsRead(self.ns_key(args)), None) {
             Ok(Answer::NsRead(answer)) => answer,
             Ok(_) => Err(mismatched(&Request::NsRead(self.ns_key(args)))),
-            Err((_, message)) => Err(message),
+            Err(message) => Err(message),
         }
     }
 
@@ -607,7 +606,7 @@ impl RenderFiles for InTransaction {
         match self.answer(request.clone(), None) {
             Ok(Answer::Kv(answer)) => answer,
             Ok(_) => Err(mismatched(&request)),
-            Err((_, message)) => Err(message),
+            Err(message) => Err(message),
         }
     }
 }
