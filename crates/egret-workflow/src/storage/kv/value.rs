@@ -803,7 +803,12 @@ impl ApiBodyError {
 ///   raw text, typed STRING ([`ApiBodyError::NotUtf8`] when the bytes are
 ///   not UTF-8); no value at all: [`ApiBodyError::Empty`];
 /// - a refusal of the reader (`TooLarge`, `TooDeep`, `Crashed`) is that
-///   error, never the raw text (fix round 3, re-review P1).
+///   error, never the raw text (fix round 3, re-review P1) -- except that
+///   the digit limit applies only to a body that is one Ion value (W9c final
+///   review F5, spec §9): a text body refused `TooLarge` that holds a run
+///   of more than [`MAX_NUMBER_DIGITS`] digits is read again with each such
+///   run as one digit ([`not_one_value_but_for_long_runs`]), and when that
+///   is not one Ion value the body is the raw text (`note 111…`).
 ///
 /// Then the one value (the user's rulings, 2026-10-07, spec §9):
 /// - a blob, clob or sexp at any depth: [`ApiBodyError::Unmodelled`]
@@ -837,6 +842,7 @@ pub fn parse_api_body(body: &[u8], cap: u64) -> Result<KvValue, ApiBodyError> {
             None => return Err(ApiBodyError::Empty),
         },
         Stop::Failed(_) | Stop::Full => return raw_text(body),
+        Stop::TooLarge(_) if not_one_value_but_for_long_runs(body, cap) => return raw_text(body),
         Stop::TooLarge(m) => return Err(ApiBodyError::TooLarge(m)),
         Stop::TooDeep(m) => return Err(ApiBodyError::TooDeep(m)),
         Stop::Crashed(m) => {
@@ -885,6 +891,52 @@ pub fn parse_api_body(body: &[u8], cap: u64) -> Result<KvValue, ApiBodyError> {
             })
         }
     }
+}
+
+/// W9c final review F5: whether a text `body` would not be ONE Ion value
+/// were each run of more than [`MAX_NUMBER_DIGITS`] ASCII digits a single
+/// `0` -- the body's shape, judged without handing `ion-rs` a long number
+/// (a run inside a number, a string, a symbol or a timestamp's fraction
+/// stays the same kind of token as one digit). `false` for a binary body
+/// (its bytes are not text to shorten) and for a body with no such run
+/// (nothing would change), so every other refusal stands. A body whose
+/// over-limit number is written in shorter runs (a `.` or a `_` splits it)
+/// is not reshaped, and is refused as before (spec §9).
+fn not_one_value_but_for_long_runs(body: &[u8], cap: u64) -> bool {
+    if body.starts_with(&crate::storage::ion::BINARY_VERSION_MARKER) {
+        return false;
+    }
+    let mut short = Vec::with_capacity(body.len());
+    let mut changed = false;
+    let mut rest = body;
+    while let Some((&b, tail)) = rest.split_first() {
+        if !b.is_ascii_digit() {
+            short.push(b);
+            rest = tail;
+            continue;
+        }
+        let run = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+        if run as u64 > MAX_NUMBER_DIGITS {
+            short.push(b'0');
+            changed = true;
+        } else {
+            short.extend_from_slice(&rest[..run]);
+        }
+        rest = &rest[run..];
+    }
+    if !changed {
+        return false;
+    }
+    let mut seen = 0usize;
+    let stop = for_each_kv_value(&short, cap, |_| {
+        seen += 1;
+        if seen > 1 {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    matches!(stop, Stop::Full | Stop::Failed(_))
 }
 
 /// [`KvData::from_element`] for an API body: its budget refusal is 413; its
@@ -2777,6 +2829,46 @@ mod tests {
             parse_api_body(b"{a:", 4096).unwrap().data,
             KvData::String("{a:".into())
         );
+    }
+
+    /// W9c final review F5: the digit limit applies only to a body that is
+    /// one Ion value. A body of several values, or one that is not Ion, is
+    /// the raw text whatever its digits; one value with a long number stays
+    /// 413. Mutant: dropping the `TooLarge` reshape guard answers 413 here.
+    #[test]
+    fn a_long_digit_run_outside_one_ion_value_is_the_raw_text() {
+        let run = "1".repeat(1001);
+        for body in [
+            format!("note {run}"),
+            format!("{run} note"),
+            format!("1 {run}"),
+            format!("{{a:{run}"),
+            format!("\"{run}\" \"x\""),
+        ] {
+            let v = parse_api_body(body.as_bytes(), 1 << 20).unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(
+                (v.kind, v.data),
+                (KvType::String, KvData::String(body.clone())),
+                "{body}"
+            );
+        }
+        for body in [
+            run.clone(),
+            format!("{{a:{run}}}"),
+            format!("[1, {run}.5]"),
+            format!("1.{run}"),
+        ] {
+            assert!(
+                matches!(
+                    parse_api_body(body.as_bytes(), 1 << 20),
+                    Err(ApiBodyError::TooLarge(_))
+                ),
+                "{body}"
+            );
+        }
+        // A string of 1,001 digits is a value the limit never counted.
+        let v = parse_api_body(format!("\"{run}\"").as_bytes(), 1 << 20).unwrap();
+        assert_eq!(v.data, KvData::String(run));
     }
 
     /// R-b: no value at all is Empty, whatever the whitespace.

@@ -234,6 +234,30 @@ fn joined<T>(
     }
 }
 
+/// Why a `spawn_blocking` job gave no answer (W9c final review F8).
+#[derive(Debug, PartialEq)]
+enum Blocked {
+    /// It panicked: egret's bug, a failed run.
+    Bug(String),
+    /// It was cancelled (the runtime shutting down): the worker's, an `Err`
+    /// that another worker re-claims.
+    Stopped(String),
+}
+
+/// A `spawn_blocking` join told apart as [`joined`] tells the purge's:
+/// `JoinError::into_panic` itself panics on a cancelled join, so neither
+/// case is resumed as a panic here.
+fn blocking<T>(
+    joined: std::result::Result<T, tokio::task::JoinError>,
+    what: &str,
+) -> std::result::Result<T, Blocked> {
+    match joined {
+        Ok(v) => Ok(v),
+        Err(e) if e.is_panic() => Err(Blocked::Bug(egret_bug(format!("{what} panicked: {e}")))),
+        Err(e) => Err(Blocked::Stopped(format!("{what} stopped: {e}"))),
+    }
+}
+
 fn db_err(type_id: &str, e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!(
         "{type_id}: the database is unavailable: {e}"
@@ -1219,9 +1243,16 @@ async fn run_purge(
             }
             let next = page.last().map(|e| e.key.clone());
             let pattern = key_pattern.clone();
-            let keys = tokio::task::spawn_blocking(move || page_keys(&page, pattern.as_deref()))
-                .await
-                .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()));
+            let keys = match blocking(
+                tokio::task::spawn_blocking(move || page_keys(&page, pattern.as_deref())).await,
+                "the purge's key filter",
+            ) {
+                Ok(keys) => keys,
+                Err(Blocked::Bug(why)) => return Ok(Err(why)),
+                Err(Blocked::Stopped(why)) => {
+                    return Err(NsError::Db(Error::Internal(anyhow::anyhow!(why))))
+                }
+            };
             for key in keys {
                 purged += purge_key(&pool, &fs, grant, &key, cap, move |rows| {
                     judge(rows, behavior)
@@ -1360,7 +1391,7 @@ impl TaskHandler for PurgeKv {
             let own = own.clone();
             let listed = listed.clone();
             let pattern = pattern.clone();
-            tokio::task::spawn_blocking(move || {
+            let joined = tokio::task::spawn_blocking(move || {
                 purge_namespaces(
                     &own,
                     listed.as_deref(),
@@ -1369,8 +1400,14 @@ impl TaskHandler for PurgeKv {
                     &candidates,
                 )
             })
-            .await
-            .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
+            .await;
+            match blocking(joined, "the purge's namespace resolution") {
+                Ok(resolved) => resolved,
+                Err(Blocked::Bug(why)) => return fail(why),
+                Err(Blocked::Stopped(why)) => {
+                    return Err(Error::Internal(anyhow::anyhow!("{T}: {why}")))
+                }
+            }
         };
         if resolved.len() > MAX_NAMESPACES {
             return fail(format!(
@@ -1487,6 +1524,31 @@ mod tests {
         pending.abort();
         assert!(joined(pending.await).is_err());
         assert_eq!(joined(tokio::spawn(async { 7u64 }).await).unwrap(), Ok(7));
+    }
+
+    /// W9c final review F8: a blocking job's panic is egret's bug and a
+    /// cancelled one the worker's; neither panics the handler (mutant: the
+    /// old `resume_unwind(e.into_panic())` panics on the cancelled join).
+    #[tokio::test]
+    async fn a_blocking_job_that_panics_or_is_cancelled_is_told_apart() {
+        let panicked = tokio::task::spawn_blocking(|| -> u64 { panic!("boom") }).await;
+        match blocking(panicked, "the job") {
+            Err(Blocked::Bug(why)) => assert!(
+                why.starts_with("internal error (an egret bug, not retried): the job panicked"),
+                "{why}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        let pending = tokio::spawn(std::future::pending::<u64>());
+        pending.abort();
+        match blocking(pending.await, "the job") {
+            Err(Blocked::Stopped(why)) => assert!(why.starts_with("the job stopped"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            blocking(Ok::<_, tokio::task::JoinError>(7), "the job"),
+            Ok(7)
+        );
     }
 
     #[test]

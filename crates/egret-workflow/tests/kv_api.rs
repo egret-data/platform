@@ -845,6 +845,15 @@ async fn a_reader_refusal_is_never_stored_as_raw_text() {
             (json!("STRING"), json!(body))
         );
     }
+    // W9c final review F5: the digit limit applies only to one Ion value; a
+    // body of several values holding a 1,001-digit run is the raw text.
+    let several = format!("note {}", "1".repeat(1001));
+    fx.ok_put(NS, "several", &several).await;
+    let d = detail("several").await;
+    assert_eq!(
+        (d["type"].clone(), d["value"].clone()),
+        (json!("STRING"), json!(several))
+    );
     // 1,000 digits round-trip exactly, as an int and as a decimal.
     let int = "7".repeat(1000);
     let dec = format!("{}.25", "3".repeat(998));

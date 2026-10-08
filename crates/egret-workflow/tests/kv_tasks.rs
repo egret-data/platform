@@ -2499,6 +2499,29 @@ tasks:
     assert_eq!(out("k2").await, json!({"keys": []}));
 }
 
+/// W9c final review F3: an egret bug on the task path (here a key whose
+/// next revision would pass `i32`) fails the task once, as a wrong grant
+/// does, instead of `Err`, which re-claims the run forever. Mutant: the
+/// store's `internal` back to `NsError::Db` makes this run a worker error.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_egret_bug_on_the_task_path_fails_once() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, _fs)) = setup().await else {
+        return;
+    };
+    let ns = "w9c.f3";
+    row(&db, ws, ns, "top", i32::MAX, 1.0, false, false).await;
+    let t = Tasks::new(&db.pool, Some(installed()));
+    let m = t
+        .go(ws, ns, kvt::SET, json!({"key": "top", "value": "x"}))
+        .await
+        .failed();
+    assert!(
+        m.contains("internal error (an egret bug, not retried)") && m.contains("2147483648"),
+        "{m}"
+    );
+}
+
 /// A 31-digit decimal and a 40-digit int (past `u128`), as the API stores
 /// them (W9c final review F1).
 const DEC31: &str = "123456789012345678901234567890.5";

@@ -1712,6 +1712,24 @@ fn join(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 /// anything**: `[null] | sort` is `[null]` and `[{"a":1}] | sort` is itself,
 /// both measured. That is why the class check below is skipped below two
 /// elements rather than run over every input.
+/// An integer as an exactly ordered key, over every `i128` and every `u128`
+/// (W9c final review C-M1): the variants order negatives first.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum WideInt {
+    Negative(i128),
+    NonNegative(u128),
+}
+
+/// `v` as a [`WideInt`], or `None` when it is not an integer either type
+/// holds.
+fn wide_integer(v: &MjValue) -> Option<WideInt> {
+    match i128::try_from(v.clone()) {
+        Ok(i) if i < 0 => Some(WideInt::Negative(i)),
+        Ok(i) => Some(WideInt::NonNegative(i.unsigned_abs())),
+        Err(_) => u128::try_from(v.clone()).ok().map(WideInt::NonNegative),
+    }
+}
+
 fn sort(value: MjValue) -> Result<MjValue, MjError> {
     strict_undefined("sort", &value)?;
     if is_java_null(&value) {
@@ -1796,12 +1814,15 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
             return super::compare::values_cmp(a, b);
         }
         if integers {
-            // `i128` holds every `i64` and every `u64`, so no integer this
-            // crate can carry loses a bit on the way in.
-            return match (i128::try_from(a.clone()), i128::try_from(b.clone())) {
-                (Ok(x), Ok(y)) => x.cmp(&y),
-                // Past `i128` is `BigInteger` territory, and `java_class_name`
-                // has already made the two elements one class.
+            // `i128` holds every `i64` and every `u64`; a native `u128` past
+            // `i128::MAX` (a `kv()` integer, `integer_from_literal`) is
+            // compared as one too (W9c final review C-M1: it fell to the
+            // TEXT order, so `2^127` sorted before `2^64`).
+            return match (wide_integer(a), wide_integer(b)) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                // A `BigInteger` past `u128` is `exact_cmp`'s, above, and
+                // `java_class_name` has already made the two elements one
+                // class.
                 _ => kestra_to_string(a).cmp(&kestra_to_string(b)),
             };
         }
@@ -5052,6 +5073,18 @@ mod tests {
         // And the pre-port default was RIGHT about this, which is the part
         // worth remembering: minijinja compares integers exactly too.
         assert_eq!(ok("{{ l | sort }}", r#"{"l": [3, 1, 2]}"#), "[1,2,3]");
+        // W9c final review C-M1: a native `u128` past `i128::MAX` (2^127,
+        // as `kv()` hands one over) sorts by value against 2^64, an `i128`,
+        // against -2^64 and against another `u128` (all one class,
+        // `BigInteger`). Mutant: the text order puts 2^127 (`17…`) before
+        // 2^64 (`18…`).
+        assert_eq!(
+            ok(
+                "{{ l | sort }}",
+                r#"{"l": [170141183460469231731687303715884105729, 170141183460469231731687303715884105728, 18446744073709551616, -18446744073709551616]}"#
+            ),
+            "[-18446744073709551616,18446744073709551616,170141183460469231731687303715884105728,170141183460469231731687303715884105729]"
+        );
     }
 
     // -- W2 Task 8 fix round 1: Pebble's own core filters ----------------

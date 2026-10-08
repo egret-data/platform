@@ -162,9 +162,15 @@ type Row = (
     Option<Uuid>,
 );
 
-/// egret's bug, not the author's and not an outage: a 500.
+/// egret's bug, not the author's and not an outage: a row egret would not
+/// have written, a revision past `i32`, a closed semaphore. Failed once,
+/// as [`wrong_grant`] fails (W9c final review F3): `NsError::Db` is what a
+/// task handler treats as an outage and re-claims forever, and no retry
+/// changes an egret bug. The API answers it 400, as it answers a wrong grant.
 fn internal(message: String) -> NsError {
-    NsError::Db(egret_core::Error::Internal(anyhow::anyhow!(message)))
+    NsError::Author(format!(
+        "internal error (an egret bug, not retried): {message}"
+    ))
 }
 
 /// A KV function handed a grant of the other resource, or a Read grant for a
@@ -1589,5 +1595,53 @@ mod tests {
             ancestors("w9c.inh.a.b"),
             ["w9c.inh.a.b", "w9c.inh.a", "w9c.inh", "w9c"]
         );
+    }
+
+    /// W9c final review F3: an egret bug fails once, never as `NsError::Db`
+    /// (a task re-claims that forever). Mutant: `internal` back to
+    /// `NsError::Db`.
+    fn is_bug_failed_once(e: &NsError) -> bool {
+        matches!(e, NsError::Author(m) if m.starts_with("internal error (an egret bug, not retried): "))
+    }
+
+    #[test]
+    fn an_egret_bug_is_failed_once_not_an_outage() {
+        let e = internal("the bulk delete semaphore is closed".into());
+        assert!(is_bug_failed_once(&e), "{e:?}");
+        assert!(!matches!(e, NsError::Db(_)));
+    }
+
+    /// [`entry`] of a row egret would not have written (the CHECKs make it
+    /// unreachable from SQL, so the row is built here).
+    #[test]
+    fn a_row_egret_would_not_write_is_failed_once() {
+        let now = Utc::now();
+        let row = |key: &str, revision: i32, value_type: &str| -> Row {
+            (
+                0,
+                Uuid::nil(),
+                "ns".into(),
+                key.into(),
+                revision,
+                value_type.into(),
+                1,
+                None,
+                None,
+                false,
+                now,
+                false,
+                None,
+                None,
+            )
+        };
+        assert!(entry(row("k", 1, "STRING")).is_ok());
+        for bad in [
+            row("", 1, "STRING"),
+            row("k", -1, "STRING"),
+            row("k", 1, "TEXT"),
+        ] {
+            let e = entry(bad).unwrap_err();
+            assert!(is_bug_failed_once(&e), "{e:?}");
+        }
     }
 }

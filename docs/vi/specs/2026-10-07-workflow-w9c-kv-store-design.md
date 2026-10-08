@@ -208,7 +208,7 @@ Theo R1 của W9b:
 
 ### 4.7 Một hàm truy cập
 
-`nsfiles::access::authorize` của W9b có thêm một loại tài nguyên: `authorize(workspace, actor, target, resource: Resource::{NamespaceFiles, Kv}, access)`. Quy tắc giống nhau cho cả hai loại (§5); tài nguyên chỉ đổi lời của lần từ chối ("namespace files" hay "the KV store"), và `Grant` ghi lại nó. Mọi hàm store KV nhận một `Grant` và khẳng định tài nguyên và quyền của nó (`require`), nên một grant namespace-file không chạm được KV và một grant Read không ghi được. Quy tắc truy cập ở trong một module duy nhất, `nsfiles::access`, cho cả hai gói.
+`nsfiles::access::authorize` của W9b có thêm một loại tài nguyên: `authorize(workspace, actor, target, resource: Resource::{NamespaceFiles, Kv}, access)`. Quy tắc giống nhau cho cả hai loại (§5); tài nguyên chỉ đổi lời của lần từ chối ("namespace files" hay "the KV store"), và `Grant` ghi lại nó. Mọi hàm store KV nhận một `Grant` và khẳng định tài nguyên và quyền của nó (`require`), nên một grant namespace-file không chạm được KV và một grant Read không ghi được. *(2026-10-08, final review F4: chỉ một chiều. Các lần đọc namespace file của W9b không gọi `require`, nên một grant KV mà một lỗi của egret trao cho chúng sẽ đọc được namespace file; không được thêm quyền gì, vì quy tắc Read giống nhau cho cả hai tài nguyên.)* Quy tắc truy cập ở trong một module duy nhất, `nsfiles::access`, cho cả hai gói.
 
 ## 5. Ai được đọc và ghi
 
@@ -324,6 +324,7 @@ Dưới `/api/ws/{ws}/workflows/namespaces/{ns}/kv`, phản chiếu `KVControlle
   - Khoảng trắng quanh một giá trị không phải giá trị thứ hai (`  42  ` là NUMBER 42). Một giá trị có annotation (`x::1`), ở bất kỳ độ sâu nào (`{a:x::1}`), làm cả body thành text nguyên bản, như Kestra giữ `x::1`.
   - **Thứ tự ưu tiên** *(2026-10-07, re-review Task 1, N3; viết lại 2026-10-08, vòng sửa 1 của Task 6, review M7)*: từ chối đi trước. Một giá trị Ion duy nhất chứa blob, clob hay s-expression ở bất kỳ độ sâu nào bị từ chối với 400 nêu tên type, kể cả khi một annotation lẽ ra làm nó thành text nguyên bản (`x::{{aGVsbG8=}}` là 400 `blob`).
   - *(2026-10-08, vòng sửa 1 của Task 6, review M7.)* **Một body gồm nhiều giá trị là text nguyên bản, dù chúng chứa gì.** Cách lần đọc dừng quyết định trước: một giá trị thứ hai (`Stop::Full`) hay text thôi là Ion (`Stop::Failed`) làm cả body thành text nguyên bản, type STRING, trước khi giá trị nào được xem xét. Vì vậy `1 {{aGVsbG8=}}`, `(a b) 1` và `{{aGVsbG8=}} {a:` đều được lưu thành STRING, và lần từ chối ở trên chỉ áp cho một body là một giá trị Ion.
+  - *(2026-10-08, final review F5.)* **Giới hạn chữ số chỉ áp cho một body là một giá trị Ion.** Lần quét chữ số từ chối một số dài trước khi bộ đọc kịp thấy một giá trị thứ hai theo sau hay text thôi là Ion, nên một body text bị từ chối theo cách đó mà chứa một dãy hơn 1.000 chữ số được đọc thêm một lần, mỗi dãy như vậy coi như một chữ số. Khi đó không phải một giá trị Ion, body là text nguyên bản, type STRING (`note 111…`, `111… note`, `{a:111…`); khi đó là một giá trị, 413 được giữ (`[1, 111….5]`). Một body có số vượt giới hạn được viết thành các dãy ngắn hơn (tách bởi `.` hay `_`), hay một body nhị phân, không được đọc lại và giữ 413.
   - *(2026-10-08, vòng sửa 1 của Task 6, review M6.)* Một timestamp có giờ mà offset đẩy nó ra ngoài các năm 1-9999 khi đổi sang UTC (`0001-01-01T00:00+01:00` là năm 0 ở đó, `9999-12-31T23:59:59-01:00` là năm 10000) bị từ chối với 400 "the timestamp … is in year … in UTC, outside the years 1-9999 a DATETIME can hold", nêu tên nó; không gì được ghi.
 - **Chờ lock:** một lần ghi qua API chờ lock của key tối đa 5 s (`API_LOCK_WAIT`), rồi trả 409 "the key is busy (another write holds it); try again", nêu key, không giữ gì.
 - **Lỗi → status** (một ánh xạ cho mọi route, các status của `ns_refusal` của W9b với các lỗi của KV):
@@ -337,6 +338,7 @@ Dưới `/api/ws/{ws}/workflows/namespaces/{ns}/kv`, phản chiếu `KVControlle
 | lock của key bị giữ lâu hơn 5 s | 409 |
 | một body `PUT` hay giá trị đã mã hoá của nó vượt `max_read_bytes`, một giá trị đã lưu vượt `max_read_bytes` khi `GET`, một danh sách vượt `max_namespace_files`, một body bulk quá 1.000 key, hoặc quá 1 MiB (`MAX_BULK_BODY_BYTES`, nêu tên; 2026-10-08, vòng sửa 1 của Task 6, review M8) | 413 |
 | một body đứng 30 s hay kéo dài quá 12 h | 408 |
+| một `PUT` có `Content-Type` không phải `text/plain` (2026-10-08, final review F9) | 415 "a KV value is sent as text/plain: one Ion value, or any text" |
 | store hay database không với tới được | 503, ghi log với một thông báo cố định; lỗi của database không bao giờ được gửi đi |
 
 Không thông báo nào nêu key storage hay workspace khác. Một namespace mà workspace khác giữ trả lời y như một namespace chưa từng chứa gì. *(2026-10-07, phán quyết của người dùng.)* Các danh sách (`GET …/kv`, `…/kv/inheritance`) trả `200 []`, và đọc một key hay `revisions` trả 404, giống từng byte như với một namespace rỗng (§13).
@@ -471,3 +473,4 @@ Một cầu KV cho plugin (§10); một danh sách phân trang xuyên namespace 
   - các lần xoá object của `PurgeKV` và đợt quét.
 
   Một flow chờ bao lâu cũng được; một người ghi qua API chờ 5 s, rồi nhận 409. Được chấp nhận theo phán quyết của người dùng, 2026-10-07 (§4.3).
+- *(2026-10-08, final review F6.)* Một người ghi của flow (`Set`, `Put`, `Delete`) chờ một key đang bận thì giữ một connection của pool trong lúc chờ: transaction của nó bắt đầu trước khi nó lấy lock của key, và thời gian chờ lock của một flow không có giới hạn. N người ghi xếp hàng trên một key nóng (một `ForEach` `Put` vào một map dùng chung) giữ N connection, nên với mặc định `database.max_connections = 10`, mười người như vậy chiếm hết pool của process và executor cùng API phải chờ tới khi hàng đợi hết. Các lần ghi namespace file của W9b có cùng hình dạng. Một lock được lấy mà không giữ connection trong lúc chờ (try-lock có backoff) là việc làm sau.

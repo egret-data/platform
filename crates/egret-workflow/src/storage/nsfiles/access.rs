@@ -4,9 +4,15 @@
 //! [`authorize`] is the only code that decides whether a namespace may be
 //! read, written or purged, for both resources ([`Resource`]): the rule is
 //! the same, and the resource changes only the refusal's words. Every store
-//! function takes the [`Grant`] it returns and checks its resource and access
-//! with [`require`], so an unauthorised call does not type-check and a grant
-//! of one resource cannot reach the other.
+//! function takes the [`Grant`] it returns, so an unauthorised call does not
+//! type-check. Every KV store function and W9b's namespace-file writes check
+//! the grant's resource and access with [`require`], so a namespace-file
+//! grant cannot reach the KV store and a Read grant cannot write. The other
+//! direction is not checked (W9c final review F4): W9b's namespace-file
+//! reads (`store::resolve`, `list_live`, `revisions`, `search`, `open`,
+//! `file_rows_page`) call no `require`, so a KV grant an egret bug handed
+//! one would read namespace files. Nothing is gained by it, since the Read
+//! rule is the same for both resources.
 //!
 //! [`check_kv_segment`] is W9c's `_kv` rule, the twin of `_files`: publish
 //! refuses it, and [`check_namespace`] refuses it for every operation of

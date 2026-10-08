@@ -314,24 +314,10 @@ async fn expiry_is_judged_by_the_databases_clock() {
     let Some(db) = common::db().await else { return };
     let (ws, _) = common::seed_workspace(&db).await;
     let g = grant(ws, NS);
-    // The brief's form: now() + 200 ms, read at once. Live by both clocks
-    // unless they disagree by 200 ms: it cannot tell the two apart.
-    sqlx::query(
-        "INSERT INTO workflow.kv_entries (workspace_id, namespace, key, revision, value_type, \
-         size, expires_at) VALUES ($1, $2, 'soon', 1, 'STRING', 1, now() + interval '200 ms')",
-    )
-    .bind(ws)
-    .bind(NS)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    let mut c = conn(&db).await;
-    assert!(resolve(&mut c, &g, &key("soon"), Want::Latest)
-        .await
-        .is_ok());
-    drop(c);
-
-    // The instrument that separates them.
+    // W9c final review F10: the brief's form (`now() + 200 ms`, read at
+    // once) was dropped here: live by both clocks unless they disagree by
+    // 200 ms, its assertion could not fail. This is the instrument that
+    // separates the two clocks.
     let mut tx = db.pool.begin().await.unwrap();
     let expires: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
         "INSERT INTO workflow.kv_entries (workspace_id, namespace, key, revision, value_type, \
@@ -354,7 +340,7 @@ async fn expiry_is_judged_by_the_databases_clock() {
     assert!(!e.expired);
     assert_eq!(
         keys(&list_live(&mut tx, &g, None, 10).await.unwrap()),
-        ["soon", "k"]
+        ["k"]
     );
     tx.rollback().await.unwrap();
 }
@@ -1582,6 +1568,19 @@ mod writes {
             .unwrap()
     }
 
+    /// Waits up to 5 s for every connection of `pool` to be idle, failing
+    /// with `why` (final review F10; `kv_api.rs` polls for the same reason).
+    async fn all_idle(pool: &PgPool, why: &str) {
+        let idle = async {
+            while pool.num_idle() < pool.size() as usize {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), idle)
+            .await
+            .unwrap_or_else(|_| panic!("{why}"));
+    }
+
     /// Two barriers: the store call waits at `entered` (the test learns it is
     /// in there), then at `release`.
     #[derive(Clone)]
@@ -2798,8 +2797,10 @@ mod writes {
             started.elapsed()
         );
         // Every connection of the writer is back in its pool, and the staging
-        // object and row are forgotten.
-        assert_eq!(writer_pool.size() as usize - writer_pool.num_idle(), 0);
+        // object and row are forgotten. Polled (final review F10): sqlx
+        // returns a dropped connection through a spawned ping, so the count
+        // can read 1 for a moment after the call returned (`kv_api.rs`).
+        all_idle(&writer_pool, "a refused purge kept a connection").await;
         assert_eq!(
             (staging_rows(&db, ws).await, staging_objects(&store.mem)),
             (0, 0)
@@ -2839,11 +2840,10 @@ mod writes {
                 .unwrap();
         tx.rollback().await.unwrap();
         assert!(free, "the key's lock is held while staging");
-        assert_eq!(
-            writer_pool.size() as usize - writer_pool.num_idle(),
-            0,
-            "a connection is out"
-        );
+        // Polled (F10): a connection `set` used before staging may still be
+        // on its way back; one held across the staging never comes back
+        // while the staging is held.
+        all_idle(&writer_pool, "a connection is out while staging").await;
         let busy: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1 AND state <> 'idle'",
         )

@@ -206,7 +206,7 @@ Following W9b's R1:
 
 ### 4.7 One access function
 
-W9b's `nsfiles::access::authorize` gains a resource kind: `authorize(workspace, actor, target, resource: Resource::{NamespaceFiles, Kv}, access)`. The rule is the same for both kinds (§5); the resource changes only the refusal's words ("namespace files" or "the KV store"), and the `Grant` records it. Every KV store function takes a `Grant` and asserts its resource and access (`require`), so a namespace-file grant cannot reach KV and a Read grant cannot write. The access rule stays in one module, `nsfiles::access`, for both packages.
+W9b's `nsfiles::access::authorize` gains a resource kind: `authorize(workspace, actor, target, resource: Resource::{NamespaceFiles, Kv}, access)`. The rule is the same for both kinds (§5); the resource changes only the refusal's words ("namespace files" or "the KV store"), and the `Grant` records it. Every KV store function takes a `Grant` and asserts its resource and access (`require`), so a namespace-file grant cannot reach KV and a Read grant cannot write. *(2026-10-08, final review F4: one direction only. W9b's namespace-file reads call no `require`, so a KV grant an egret bug handed one would read namespace files; nothing is gained, since the Read rule is the same for both resources.)* The access rule stays in one module, `nsfiles::access`, for both packages.
 
 ## 5. Who may read and write
 
@@ -322,6 +322,7 @@ Under `/api/ws/{ws}/workflows/namespaces/{ns}/kv`, mirroring `KVController`, wit
   - Whitespace around the one value is not a second value (`  42  ` is NUMBER 42). An annotated value (`x::1`), at any depth (`{a:x::1}`), makes the whole body the raw text, as Kestra keeps `x::1`.
   - **Precedence** *(2026-10-07, Task 1 re-review N3; reworded 2026-10-08, Task 6 fix round 1, review M7)*: the refusal comes first. A single Ion value containing a blob, clob or s-expression at any depth is refused with 400 naming the type, even when an annotation would otherwise make it raw text (`x::{{aGVsbG8=}}` is 400 `blob`).
   - *(2026-10-08, Task 6 fix round 1, review M7.)* **A body of several values is the raw text, whatever they hold.** How reading stops decides first: a second value (`Stop::Full`) or text that stops being Ion (`Stop::Failed`) makes the whole body the raw text, typed STRING, before any value is looked at. So `1 {{aGVsbG8=}}`, `(a b) 1` and `{{aGVsbG8=}} {a:` are each stored as a STRING, and the refusal above applies only to a body that is one Ion value.
+  - *(2026-10-08, final review F5.)* **The digit limit applies only to a body that is one Ion value.** The digit scan refuses a long number before the reader can see that a second value follows or that the text stops being Ion, so a text body refused that way that holds a run of more than 1,000 digits is read once more with each such run as one digit. When that is not one Ion value, the body is the raw text, typed STRING (`note 111…`, `111… note`, `{a:111…`); when it is one, the 413 stands (`[1, 111….5]`). A body whose over-limit number is written in shorter runs (split by `.` or `_`), or a binary body, is not read again and keeps its 413.
   - *(2026-10-08, Task 6 fix round 1, review M6.)* A timestamp with a time whose offset carries it outside the years 1-9999 once converted to UTC (`0001-01-01T00:00+01:00` is year 0 there, `9999-12-31T23:59:59-01:00` year 10000) is refused with 400 "the timestamp … is in year … in UTC, outside the years 1-9999 a DATETIME can hold", naming it; nothing is written.
 - **Lock wait:** an API write waits at most 5 s (`API_LOCK_WAIT`) for the key's lock, then answers 409 "the key is busy (another write holds it); try again", naming the key, holding nothing.
 - **Errors → status** (one mapping for every route, W9b's `ns_refusal` statuses with KV's errors):
@@ -335,6 +336,7 @@ Under `/api/ws/{ws}/workflows/namespaces/{ns}/kv`, mirroring `KVController`, wit
 | the key's lock held longer than 5 s | 409 |
 | a `PUT` body or its encoded value over `max_read_bytes`, a stored value over `max_read_bytes` on `GET`, a listing over `max_namespace_files`, a bulk body over 1,000 keys, or over 1 MiB (`MAX_BULK_BODY_BYTES`, named; 2026-10-08, Task 6 fix round 1, review M8) | 413 |
 | a body that stalls for 30 s or takes over 12 h | 408 |
+| a `PUT` whose `Content-Type` is not `text/plain` (2026-10-08, final review F9) | 415 "a KV value is sent as text/plain: one Ion value, or any text" |
 | the store or the database unreachable | 503, logged with a fixed message; the database's error is never sent |
 
 No message names a storage key or another workspace. A namespace another workspace holds answers exactly as a namespace that never held anything. *(2026-10-07, the user's ruling.)* The listings (`GET …/kv`, `…/kv/inheritance`) answer `200 []`, and a key read or `revisions` answers 404, byte for byte as for an empty namespace (§13).
@@ -469,3 +471,4 @@ A KV bridge for plugins (§10); a cross-namespace paged listing (`GET /kv` acros
   - `PurgeKV`'s and the sweep's object deletes.
 
   A flow waits as long as it takes; an API writer waits 5 s, then gets 409. Accepted by the user's ruling, 2026-10-07 (§4.3).
+- *(2026-10-08, final review F6.)* A flow writer (`Set`, `Put`, `Delete`) waiting for a busy key holds a pool connection while it waits: its transaction begins before it takes the key's lock, and a flow's lock wait is unbounded. N writers queued on one hot key (a `ForEach` that `Put`s into one shared map) hold N connections, so with the default `database.max_connections = 10`, ten of them pin the process's pool and the executor and the API wait until the queue drains. W9b's namespace-file writes have the same shape. A lock taken without holding a connection while it waits (a try-lock with backoff) is a follow-up.
