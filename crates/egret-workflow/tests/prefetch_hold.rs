@@ -2434,11 +2434,17 @@ async fn a_sequential_loop_of_a_refused_subflow() {
     for (i, (index, state, message)) in runs.iter().enumerate() {
         assert_eq!((*index, state.as_str()), (i as i32, "FAILED"));
         let message = message.as_deref().unwrap_or_default();
-        assert!(
-            message.contains("unable to find flow 'w9c.t9'.'missing'")
-                || message.contains("child execution(s) down a chain and 8 is as deep"),
-            "{message}"
-        );
+        // Pinned per index (re-review 3 N2): iterations 0-2 reach the lookup
+        // and are refused for the missing target; from iteration 3 on the
+        // pre-existing depth growth (+3 per iteration) refuses first. A
+        // regression that refused iteration 0 for depth -- a counter that no
+        // longer resets per owner, say -- fails here.
+        let want = if i < 3 {
+            "unable to find flow 'w9c.t9'.'missing'"
+        } else {
+            "child execution(s) down a chain and 8 is as deep"
+        };
+        assert!(message.contains(want), "iteration {i}: {message}");
     }
     let (_, loop_state, _) = run_of(&fx.db, ex, "loop").await.unwrap();
     assert_eq!(loop_state, "SUCCESS", "transmitFailed: false");
@@ -2516,6 +2522,83 @@ fn inner_a_sequential_loop_of_a_subflow_whose_input_is_a_kv_attribute() {
 #[test]
 fn a_sequential_loop_of_a_subflow_whose_input_is_a_kv_attribute() {
     in_a_subprocess("inner_a_sequential_loop_of_a_subflow_whose_input_is_a_kv_attribute");
+}
+
+/// N3 (re-review 3): the `wait: false` job path at scale. A `Loop` with
+/// `concurrencyLimit: 0` over [`MANY`] values whose body is a `wait: false`
+/// `Subflow` of a child that ends in its first settle (an `If` with no
+/// `else`). Every iteration's `Subflows` phase returns two jobs -- the
+/// child's first settle, then the iteration's own completion -- so the
+/// start's one walk runs 200 children and 200 completions, and every
+/// iteration ends inside it.
+///
+/// Parallel, because a SEQUENTIAL `wait: false` loop is refused by
+/// `subflow::MAX_SPAWN_CHAIN` from its 4th iteration (pre-existing; W9c §15
+/// FOLLOW-UP), so it cannot be driven to scale.
+async fn a_parallel_loop_of_a_wait_false_subflow() {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    let child = flow("instant", "", &if_then("gate", "{{ false }}", "never"));
+    common::seed_flow(&fx.db, fx.ws, fx.user, &child, "draft").await;
+    let body = format!(
+        "  - id: loop\n    type: io.kestra.plugin.core.flow.Loop\n    values: {}\n    \
+         concurrencyLimit: 0\n    tasks:\n      \
+         - id: sub\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+         namespace: {NS}\n        flowId: instant\n        wait: false\n",
+        many_values(MANY)
+    );
+    let src = flow("no_wait_sub", "", &body);
+    let (ex, rounds) = rounds_of(start_execution(&fx.db.pool, fx.ws, None, &src, json!({}))).await;
+    let ex = ex.expect("the start");
+    assert_eq!(rounds, 0);
+    let runs = sub_runs(&fx.db, ex).await;
+    let expected: Vec<(i32, String, Option<String>)> = (0..MANY as i32)
+        .map(|i| (i, "SUCCESS".to_string(), None))
+        .collect();
+    assert_eq!(runs, expected, "every iteration's `sub` completed SUCCESS");
+    let children: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT c.state, count(*) FROM workflow.executions c \
+           JOIN workflow.executions e ON c.trigger_execution_id = e.id \
+          WHERE e.parent_execution_id = $1 GROUP BY c.state",
+    )
+    .bind(ex)
+    .fetch_all(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        children,
+        vec![("SUCCESS".to_string(), MANY as i64)],
+        "one child per iteration, each ended in its first settle"
+    );
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.task_runs r \
+           JOIN workflow.executions e ON e.id = r.execution_id \
+          WHERE e.parent_execution_id = $1 AND r.task_id = 'sub' \
+            AND r.outputs->>'state' = 'CREATED'",
+    )
+    .bind(ex)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        recorded, MANY as i64,
+        "each completion recorded the child's state at spawn, CREATED"
+    );
+    let (_, loop_state, _) = run_of(&fx.db, ex, "loop").await.unwrap();
+    assert_eq!(loop_state, "SUCCESS");
+    assert_eq!(state_of(&fx.db, ex).await, "SUCCESS");
+}
+
+#[test]
+#[ignore = "run by its outer test in a child process"]
+fn inner_a_parallel_loop_of_a_wait_false_subflow_succeeds() {
+    on_a_worker_stack(a_parallel_loop_of_a_wait_false_subflow());
+}
+
+#[test]
+fn a_parallel_loop_of_a_wait_false_subflow_succeeds() {
+    in_a_subprocess("inner_a_parallel_loop_of_a_wait_false_subflow_succeeds");
 }
 
 /// C3: a sequential `Loop` over `outer` values whose body is a sequential

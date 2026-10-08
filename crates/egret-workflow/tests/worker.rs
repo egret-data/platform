@@ -4968,6 +4968,195 @@ async fn a_loop_ascent_and_a_wait_false_subflow_are_frames_too(pool: sqlx::PgPoo
     );
 }
 
+/// The test-only effect log [`the_walk_runs_each_started_settle_where_the_inline_call_ran`]
+/// reads: one row per effect, numbered by a sequence, so the numbering is the
+/// order the walk wrote them in, across every execution of one transaction.
+///
+/// Triggers, because nothing egret writes is globally ordered except the
+/// Flow-trigger outbox's `id`: `executions.created_at` is transaction time
+/// (one instant for the whole walk), `seq` is per execution, and ids are
+/// random. `#[sqlx::test]` gives this test its own database, so the triggers
+/// are seen by nothing else.
+async fn record_effects(pool: &sqlx::PgPool) {
+    for ddl in [
+        "CREATE TABLE public.w9c_effects (n bigserial PRIMARY KEY, execution uuid NOT NULL, what text NOT NULL)",
+        "CREATE FUNCTION public.w9c_execution_effect() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF TG_OP = 'INSERT' THEN \
+             INSERT INTO public.w9c_effects (execution, what) VALUES (NEW.id, 'created'); \
+           ELSIF OLD.state IS DISTINCT FROM NEW.state THEN \
+             INSERT INTO public.w9c_effects (execution, what) VALUES (NEW.id, NEW.state); \
+           END IF; \
+           RETURN NEW; \
+         END $$",
+        "CREATE FUNCTION public.w9c_run_effect() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF TG_OP = 'INSERT' OR OLD.state IS DISTINCT FROM NEW.state THEN \
+             INSERT INTO public.w9c_effects (execution, what) \
+               VALUES (NEW.execution_id, NEW.task_id || ' ' || NEW.state); \
+           END IF; \
+           RETURN NEW; \
+         END $$",
+        "CREATE FUNCTION public.w9c_event_effect() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           INSERT INTO public.w9c_effects (execution, what) \
+             VALUES (NEW.source_execution_id, 'event ' || NEW.state); \
+           RETURN NEW; \
+         END $$",
+        "CREATE TRIGGER w9c_execution_effect AFTER INSERT OR UPDATE ON workflow.executions \
+         FOR EACH ROW EXECUTE FUNCTION public.w9c_execution_effect()",
+        "CREATE TRIGGER w9c_run_effect AFTER INSERT OR UPDATE ON workflow.task_runs \
+         FOR EACH ROW EXECUTE FUNCTION public.w9c_run_effect()",
+        "CREATE TRIGGER w9c_event_effect AFTER INSERT ON workflow.flow_trigger_events \
+         FOR EACH ROW EXECUTE FUNCTION public.w9c_event_effect()",
+    ] {
+        sqlx::query(ddl)
+            .execute(pool)
+            .await
+            .unwrap_or_else(|e| panic!("{ddl}: {e}"));
+    }
+}
+
+/// **The order of effects across one walk** (W9c Task 9 re-review 3, N1).
+///
+/// Fix round 3 turned every settle a head starts -- a `Loop` batch's first
+/// settles, a `Subflow` child's first settle, a refused `Subflow`'s
+/// completion -- into a `claim::Job` the walk runs, and argued the ORDER is
+/// the inline calls' order by construction: a frame runs its queued jobs,
+/// each to the end of its own tail, before its next phase. The golden cannot
+/// see this axis. This pins it on one `Parallel` holding a `Loop` (both
+/// iterations in one batch), a refused `Subflow` and a `Subflow` whose child
+/// ends in its first settle, all inside the start's one transaction:
+///
+/// - the loop's iterations settle -- and the loop ends -- BEFORE the
+///   `Subflow` phase starts;
+/// - the refused `Subflow`'s completion lands BEFORE its sibling's child is
+///   created;
+/// - the child's whole first settle and its completion land before the
+///   parent's own outbox.
+///
+/// **The Flow-trigger ids alone cannot see a reordering of the queue.** Every
+/// event is written by an `Outbox` phase, and a frame whose jobs were
+/// deferred to its `Outbox` phase (mutant O1) still runs them, in the same
+/// order, before that phase's outbox -- so the event sequence is identical
+/// under O1, measured. What moves is where a head's own writes (a child's
+/// row) fall relative to the jobs, so the whole effect log is asserted:
+/// creations, state changes and events.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_walk_runs_each_started_settle_where_the_inline_call_ran(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(
+        &db,
+        ws,
+        user,
+        &listener(
+            "ord-hears",
+            "    states: [RUNNING, SUCCESS, FAILED, WARNING]\n",
+        ),
+    )
+    .await;
+    // Ends inside its own first settle: an `If` that is false with no `else`.
+    let leaf = "id: ord-leaf\nnamespace: t\ntasks:\n  - id: gate\n    \
+                type: io.kestra.plugin.core.flow.If\n    condition: \"{{ false }}\"\n    \
+                then:\n      - id: never\n        type: io.kestra.plugin.core.log.Log\n        \
+                message: no\n";
+    file_flow(&db, ws, user, leaf).await;
+    record_effects(&pool).await;
+
+    let root_src = "id: ord\nnamespace: t\ntasks:\n  \
+                    - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      \
+                      - id: each\n        type: io.kestra.plugin.core.flow.Loop\n        \
+                        values: [\"1\", \"2\"]\n        concurrencyLimit: 0\n        tasks:\n          \
+                          - id: body\n            type: io.kestra.plugin.core.flow.If\n            \
+                            condition: \"{{ false }}\"\n            then:\n              \
+                              - id: never\n                type: io.kestra.plugin.core.log.Log\n                \
+                                message: no\n      \
+                      - id: refused\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+                        namespace: t\n        flowId: missing\n      \
+                      - id: call\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+                        namespace: t\n        flowId: ord-leaf\n";
+    let root = start_execution(&pool, ws, None, root_src, serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    // Name every execution: the root, the iterations by index, the child.
+    let names: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, CASE WHEN id = $1 THEN 'root' \
+                         WHEN loop_index IS NOT NULL THEN 'it' || loop_index \
+                         ELSE flow_key END \
+           FROM workflow.executions",
+    )
+    .bind(root)
+    .fetch_all(&pool)
+    .await
+    .expect("name the executions");
+    let name = |id: Uuid| {
+        names
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| id.to_string())
+    };
+    let log: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT execution, what FROM public.w9c_effects ORDER BY n")
+            .fetch_all(&pool)
+            .await
+            .expect("read the effect log");
+    let trace: Vec<String> = log
+        .into_iter()
+        .map(|(e, what)| format!("{}: {what}", name(e)))
+        .collect();
+    assert_eq!(
+        trace,
+        [
+            // The root's `Begin`: persist, the `Parallel` starts all three.
+            "root: created",
+            "root: par RUNNING",
+            "root: each RUNNING",
+            "root: refused RUNNING",
+            "root: call RUNNING",
+            "root: RUNNING",
+            // `Loops`: the batch's rows first (fix round 2), then each
+            // iteration's whole settle, and the loop ends in the second's tail.
+            "it0: created",
+            "it1: created",
+            "it0: body SUCCESS",
+            "it0: SUCCESS",
+            "it0: event RUNNING",
+            "it0: event SUCCESS",
+            "it1: body SUCCESS",
+            "it1: SUCCESS",
+            "it1: event RUNNING",
+            "it1: event SUCCESS",
+            "root: each SUCCESS",
+            // `Subflows`, request 1: the refusal's completion -- a nested
+            // settle of the root, which fails the `Parallel` and the root --
+            // lands BEFORE request 2 runs at all.
+            "root: par FAILED",
+            "root: refused FAILED",
+            "root: call FAILED",
+            "root: FAILED",
+            "root: event FAILED",
+            // Request 2: the child is still created (the top frame's request
+            // list is fixed at its `Begin`) and its whole first settle runs.
+            "ord-leaf: created",
+            "ord-leaf: gate SUCCESS",
+            "ord-leaf: SUCCESS",
+            "ord-leaf: event RUNNING",
+            "ord-leaf: event SUCCESS",
+            // The root's own `Outbox` last: it appends `RUNNING` relative to
+            // its own `before`, after the nested settle's `FAILED`.
+            "root: event RUNNING",
+        ],
+        "the walk must run every settle a head started where the inline call \
+         ran it: a frame's queued jobs before its next phase. Under mutant O1 \
+         (jobs deferred to the `Outbox` phase) `ord-leaf: created` moves up \
+         before `it0: body SUCCESS`; the events alone do not move"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // W6 Task 4: the `CREATE_NEW_EXECUTION` replay, at the seams the oracle cannot
 // reach
