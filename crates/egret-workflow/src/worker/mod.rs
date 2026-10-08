@@ -93,7 +93,7 @@ pub(crate) mod txn;
 
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
 pub use claim::{
-    apply_outcome, claim, due_retries, resume, start_execution, start_execution_in,
+    apply_outcome, claim, commit_outcome, due_retries, resume, start_execution, start_execution_in,
     start_execution_with_trigger, tick, tick_with, wake, Claimed, NewExecution, WorkerTiming,
 };
 pub(crate) use claim::{prefetch_miss, start_execution_in_with};

@@ -1658,6 +1658,17 @@ pub async fn apply_outcome(
     applied
 }
 
+/// [`apply_outcome`] in a transaction of its own that this function owns:
+/// `run_one`'s commit, without the handler and without the lease's renewal
+/// (W9c Task 9). A render that needs a read is fetched with the transaction
+/// rolled back, and the outcome applied again; `Ok` once it committed.
+/// For a caller that holds an outcome but no handler -- a test, a driver.
+pub async fn commit_outcome(pool: &PgPool, claimed: &Claimed, outcome: &Outcome) -> Result<()> {
+    transaction!(pool, |tx, pf| {
+        apply_outcome_with(tx, pf, claimed, outcome).await
+    })
+}
+
 /// [`apply_outcome`] reading through `pf`, the owner's cache.
 async fn apply_outcome_with(
     conn: &mut PgConnection,
