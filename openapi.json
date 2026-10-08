@@ -30222,7 +30222,7 @@
           }
         ],
         "requestBody": {
-          "description": "`{\"keys\": [...]}`: at most 1,000 keys (a key named twice counts twice). Every key is checked before anything is deleted.",
+          "description": "`{\"keys\": [...]}`: at most 1,000 keys (a key named twice counts twice), in a body of at most 1 MiB (1,048,576 bytes). Every key is checked before anything is deleted.",
           "content": {
             "application/json": {
               "schema": {
@@ -30284,7 +30284,7 @@
             }
           },
           "413": {
-            "description": "More than 1,000 keys (the cap is named); nothing was deleted. Send several requests.",
+            "description": "More than 1,000 keys, or a body over 1 MiB (each cap is named); nothing was deleted. Send several requests.",
             "content": {
               "application/json": {
                 "schema": {
@@ -30342,7 +30342,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The live keys of the namespace's ancestors only (not its own), deepest first; a key in two ancestors is listed once, from the deeper (Kestra's `KVController`, `:73-100`). Each entry names its namespace. **This path is also where a key named `inheritance` would be read: such a key's value cannot be read by `GET …/kv/{key}` (Kestra's collision too); its `PUT`, `DELETE` and `…/revisions` work, and so do the tasks and `kv()`.**",
+            "description": "The live keys of the namespace's ancestors only (not its own), deepest first; a key in two ancestors is listed once, from the deeper (Kestra's `KVController`, `:73-100`). Each entry names its namespace. **This path is also where a key named `inheritance` would be read, so `GET …/kv/inheritance` answers this listing, not that key (Kestra's collision too). The key's value is read by percent-encoding any letter of its name (`GET …/kv/inheritanc%65`): the route is matched on the path as sent and the key decoded afterwards. Its `PUT`, `DELETE` and `…/revisions` work as written, and so do the tasks and `kv()`.**",
             "content": {
               "application/json": {
                 "schema": {
@@ -30435,7 +30435,7 @@
           {
             "name": "key",
             "in": "path",
-            "description": "The key: `[a-zA-Z0-9][a-zA-Z0-9._-]*`, at most 350 bytes. A key named `inheritance` cannot be read here: that path is the inheritance listing.",
+            "description": "The key: `[a-zA-Z0-9][a-zA-Z0-9._-]*`, at most 350 bytes. `GET …/kv/inheritance` is the inheritance listing, not the key `inheritance`; that key is read here with any letter of it percent-encoded (`inheritanc%65`), since the route is matched on the path as sent and the key decoded afterwards.",
             "required": true,
             "schema": {
               "type": "string"
@@ -30616,7 +30616,7 @@
             "description": "Stored as the key's next revision (it always overwrites). No content and no content type (Kestra's answer)."
           },
           "400": {
-            "description": "The key rule, a refused namespace, a malformed or negative `ttl` (`Cannot convert value 'x' to Duration`, `ttl cannot be negative`), an empty or whitespace-only body (`empty body`), a body holding a blob, clob or s-expression at any depth (named; even under an annotation), a raw-text body that is not UTF-8 (`not UTF-8 text`), or one nesting deeper than 100 levels",
+            "description": "The key rule, a refused namespace, a malformed or negative `ttl` (`Cannot convert value 'x' to Duration`, `ttl cannot be negative`), an empty or whitespace-only body (`empty body`), a body that is a single Ion value containing a blob, clob or s-expression at any depth (named; even under an annotation; a body of several values is the raw text whatever they hold), a timestamp whose offset carries it outside the years 1-9999 in UTC (named), a raw-text body that is not UTF-8 (`not UTF-8 text`), or one nesting deeper than 100 levels",
             "content": {
               "application/json": {
                 "schema": {

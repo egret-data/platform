@@ -30,6 +30,8 @@ use egret_storage::{ObjectStore, StorageError};
 use egret_workflow::storage::kv::key::KvKey;
 use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Resource};
 use egret_workflow::storage::{self, FileStore};
+use egret_workflow::worker::handlers::kv as kvt;
+use egret_workflow::worker::{start_execution, tick, Handlers};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -414,6 +416,26 @@ async fn read_routes_need_workflow_read_and_write_routes_need_workflow_manage() 
     for rest in ["", "/inheritance", "/k", "/k/revisions"] {
         refusal(fx.get_as(nobody, NS, rest).await, 403).await;
     }
+    // Permission before namespace (fix round 1, review M1; mutant ORDER,
+    // `authorize` before `require` in `grant`, answers these 400 naming
+    // the `_kv` rule): a caller without the permission learns nothing about
+    // the namespace, here one `authorize` refuses.
+    let refused = "w9c._kv";
+    for rest in ["", "/inheritance", "/k", "/k/revisions"] {
+        let msg = refusal(fx.get_as(nobody, refused, rest).await, 403).await;
+        assert!(!msg.contains("_kv"), "GET {rest}: {msg}");
+    }
+    refusal(fx.put_as(reader, refused, "k", "2", &[TEXT]).await, 403).await;
+    refusal(fx.del_as(reader, refused, "k").await, 403).await;
+    let body = json!({"keys": ["k"]}).to_string();
+    refusal(
+        fx.bulk_as(reader, refused, Some(body.as_bytes())).await,
+        403,
+    )
+    .await;
+    // The control: with the permission, the same namespace is 400.
+    let msg = refusal(fx.get(refused, "").await, 400).await;
+    assert!(msg.contains("_kv"), "{msg}");
     // workflow:manage alone writes (and reads nothing without workflow:read).
     refusal(fx.get_as(manager, NS, "").await, 403).await;
     let res = fx.put_as(manager, NS, "k", "2", &[TEXT]).await;
@@ -725,10 +747,22 @@ async fn a_put_body_over_max_read_bytes_is_413_naming_the_cap_and_nothing_is_wri
         pulled <= cap + 2 * 64 * 1024,
         "the server read {pulled} bytes of a body over the cap ({cap})"
     );
-    // The cap itself: a value at exactly the cap is read, then refused as
-    // stored (its quotes make it longer); nothing is written either way.
     assert_eq!(fx.table_state().await, before);
     assert_eq!(fx.staging_rows().await, 0);
+    // The cap itself (fix round 1, review M4; mutant `limit - 1` refuses
+    // it 413 "the request body is over"): a quoted Ion string of exactly
+    // `max_read_bytes` bytes is read whole, and its encoded value, those
+    // same bytes, is exactly the cap: stored.
+    let at_cap = format!("\"{}\"", "a".repeat(cap as usize - 2));
+    assert_eq!(at_cap.len() as u64, cap);
+    fx.ok_put(NS, "at-cap", &at_cap).await;
+    assert_eq!(fx.latest(NS, "at-cap").await, Some((1, false)));
+    assert_eq!(fx.object(NS, "at-cap", 1).await.len() as u64, cap);
+    // One byte more is the body's refusal, and writes nothing.
+    let over = format!("\"{}\"", "a".repeat(cap as usize - 1));
+    let msg = refusal(fx.put(NS, "at-cap", &over).await, 413).await;
+    assert!(msg.contains("the request body is over"), "{msg}");
+    assert_eq!(fx.latest(NS, "at-cap").await, Some((1, false)));
 }
 
 /// The dense-value limit and the shared expansion budget (fix round 2,
@@ -964,9 +998,22 @@ async fn stalled_puts_hold_no_connection_no_lock_and_stage_nothing() {
             }
         };
         let _ = tokio::time::timeout(std::time::Duration::from_secs(10), all_stalled).await;
+        // Every connection the pool has opened is idle: the five stalled
+        // PUTs hold none (fix round 1, review M11: `num_idle() > 0` let a
+        // PUT keep one). A connection goes back to the pool on a task of
+        // its own after its guard drops, so this waits up to 2 s for the
+        // pool to settle; one held connection never does.
+        let settled = async {
+            while fx.db.pool.num_idle() != fx.db.pool.size() as usize {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        let held = tokio::time::timeout(std::time::Duration::from_secs(2), settled).await;
         assert!(
-            fx.db.pool.num_idle() > 0,
-            "the stalled PUTs hold every connection"
+            held.is_ok(),
+            "the stalled PUTs hold {} of the pool's {} connections",
+            fx.db.pool.size() as usize - fx.db.pool.num_idle(),
+            fx.db.pool.size()
         );
         let get = tokio::time::timeout(std::time::Duration::from_secs(5), fx.get(NS, "/seen"))
             .await
@@ -1282,6 +1329,16 @@ async fn a_key_named_inheritance_is_written_and_deleted_and_its_get_is_the_listi
     assert_eq!(keys_of(&got), ["p"]);
     assert_eq!(got[0]["namespace"], json!("w9c.coll"));
     let revisions = ok_json(fx.get(ns, "/inheritance/revisions").await).await;
+    assert_eq!(revisions.as_array().unwrap().len(), 1);
+    // Its value is read with a letter percent-encoded (fix round 1, review
+    // M3; spec §9, §15): the router matches the path as sent, and the key
+    // is decoded afterwards.
+    let d = ok_json(fx.get(ns, "/inheritanc%65").await).await;
+    assert_eq!(
+        (d["type"].clone(), d["value"].clone()),
+        (json!("STRING"), json!("mine"))
+    );
+    let revisions = ok_json(fx.get(ns, "/%69nheritance/revisions").await).await;
     assert_eq!(revisions.as_array().unwrap().len(), 1);
     // A second PUT is revision 2; a revision read is still the listing.
     fx.ok_put(ns, "inheritance", "2").await;
@@ -1720,4 +1777,179 @@ async fn the_route_cells_hold() {
     let res = fx.put_as(fx.user, NS, "j", "2", &[]).await;
     assert_eq!(res.status(), 200);
     assert_eq!(fx.latest(NS, "j").await, Some((2, false)));
+}
+
+// ─── Fix round 1 ────────────────────────────────────────────────────────────
+
+/// Review M8: the bulk body has its own cap, `MAX_BULK_BODY_BYTES` (1 MiB),
+/// refused 413 with egret's text naming it (not axum's "length limit
+/// exceeded"), nothing deleted; a body of exactly the cap is taken.
+#[tokio::test]
+async fn a_bulk_body_over_its_cap_is_413_naming_it() {
+    let Some(fx) = fx().await else { return };
+    let cap = egret_workflow::storage::kv::routes::MAX_BULK_BODY_BYTES;
+    fx.ok_put(NS, "kept", "1").await;
+    // `{"keys":["kept"]}` padded with whitespace to `len` bytes.
+    let padded = |len: usize| {
+        let head = br#"{"keys":["kept"]"#;
+        let mut body = head.to_vec();
+        body.resize(len - 1, b' ');
+        body.push(b'}');
+        body
+    };
+    let over = padded(cap + 1);
+    let msg = refusal(fx.bulk_as(fx.user, NS, Some(over.as_slice())).await, 413).await;
+    assert_eq!(
+        msg,
+        format!(
+            "the bulk delete body is over {cap} bytes: it takes at most 1000 keys of at most \
+             350 bytes each; nothing was deleted"
+        )
+    );
+    assert_eq!(fx.latest(NS, "kept").await, Some((1, false)));
+    let at = padded(cap);
+    assert_eq!(at.len(), cap);
+    let got = ok_json(fx.bulk_as(fx.user, NS, Some(at.as_slice())).await).await;
+    assert_eq!(got, json!({"keys": ["kept"]}));
+    assert_eq!(fx.latest(NS, "kept").await, Some((1, true)));
+}
+
+/// Review M6: a DATETIME whose offset carries it outside the years 1-9999
+/// in UTC is 400 naming the timestamp and the reason, with none of ion-rs's
+/// text, and nothing is written; the years' edges are stored.
+#[tokio::test]
+async fn a_datetime_outside_years_1_to_9999_in_utc_is_400_naming_it() {
+    let Some(fx) = fx().await else { return };
+    let before = fx.table_state().await;
+    for (body, year) in [
+        ("0001-01-01T00:00+01:00", 0),
+        ("9999-12-31T23:59:59-01:00", 10000),
+    ] {
+        let msg = refusal(fx.put(NS, "far", body).await, 400).await;
+        assert_eq!(
+            msg,
+            format!(
+                "the timestamp {body} is in year {year} in UTC, outside the years 1-9999 a \
+                 DATETIME can hold; nothing was stored"
+            )
+        );
+    }
+    assert_eq!(
+        fx.table_state().await,
+        before,
+        "a refused timestamp was written"
+    );
+    for (body, utc) in [
+        ("0001-01-01T00:00-01:00", "0001-01-01T01:00:00Z"),
+        ("9999-12-31T23:59:59+01:00", "9999-12-31T22:59:59Z"),
+    ] {
+        fx.ok_put(NS, "edge", body).await;
+        let d = ok_json(fx.get(NS, "/edge").await).await;
+        assert_eq!(
+            (d["type"].clone(), d["value"].clone()),
+            (json!("DATETIME"), json!(utc)),
+            "{body}"
+        );
+    }
+}
+
+/// Tick until nothing is claimable, with the core and `core.kv` tasks.
+async fn drain(pool: &sqlx::PgPool) {
+    let mut reg = Handlers::with_core_tasks(storage::current());
+    kvt::register(&mut reg, pool.clone(), storage::current());
+    for _ in 0..512 {
+        let ticked = tick(pool, 16, &reg).await;
+        assert!(ticked.is_ok(), "a worker error: {ticked:?}");
+        if ticked.unwrap() == 0 {
+            return;
+        }
+    }
+    panic!("tick never stopped claiming");
+}
+
+/// `(state, outputs, message)` of `task` in execution `ex`.
+async fn result_of(
+    pool: &sqlx::PgPool,
+    ex: Uuid,
+    task: &str,
+) -> (String, Option<Value>, Option<String>) {
+    sqlx::query_as(
+        "SELECT state, outputs, message FROM workflow.task_runs \
+          WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(ex)
+    .bind(task)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("run {task} of {ex}: {e}"))
+}
+
+/// Review I1: every w9c `api.api_written_read_by_flow` cell. Its body (the
+/// body of `api.put_bodies.<cell>`) is PUT through the route, then one flow,
+/// run by the worker, reads each key with `kv()` (a `Return` rendering
+/// `{{ kv('<key>') }}`, a real render scope) and with `Get`: the render is
+/// `kv_prints` exactly, and `Get`'s output is `{"value": get_value}`, JSON
+/// equal. The two decimals (`ion_float` is `1.5`, `dec_150` is `1.50`) are
+/// the only API-written decimals any flow reads (mutants I1a, the decimal as
+/// `kv()` renders it, and I1b, as `Get` outputs it, die here).
+#[tokio::test(flavor = "multi_thread")]
+async fn api_written_values_read_back_through_kv_and_get() {
+    let Some(fx) = fx().await else { return };
+    let ns = "w9c.flowread";
+    let cells = api("api_written_read_by_flow");
+    let bodies = api("put_bodies");
+    let mut names: Vec<String> = cells
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|k| !k.starts_with('_'))
+        .cloned()
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "dec_150",
+            "ion_float",
+            "ion_null",
+            "ion_struct",
+            "ion_timestamp",
+            "ts_time"
+        ],
+        "the family's cells"
+    );
+    let mut tasks = String::new();
+    for name in &names {
+        fx.ok_put(ns, name, bodies[name]["body"].as_str().unwrap())
+            .await;
+        let format = serde_json::to_string(&format!("{{{{ kv('{name}') }}}}")).unwrap();
+        tasks.push_str(&format!(
+            "  - id: r_{name}\n    type: io.kestra.plugin.core.debug.Return\n    \
+             format: {format}\n  - id: g_{name}\n    type: {}\n    key: {name}\n",
+            kvt::GET
+        ));
+    }
+    let source = format!("id: readback\nnamespace: {ns}\ntasks:\n{tasks}");
+    let ex = start_execution(&fx.db.pool, fx.ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    drain(&fx.db.pool).await;
+    for name in &names {
+        let cell = &cells[name];
+        let (state, outputs, message) = result_of(&fx.db.pool, ex, &format!("r_{name}")).await;
+        assert_eq!(state, "SUCCESS", "kv('{name}'): {message:?}");
+        let printed = outputs.unwrap_or_default()["value"].clone();
+        assert_eq!(
+            printed.as_str(),
+            Some(cell["kv_prints"].as_str().unwrap()),
+            "kv('{name}') printed {printed}"
+        );
+        let (state, outputs, message) = result_of(&fx.db.pool, ex, &format!("g_{name}")).await;
+        assert_eq!(state, "SUCCESS", "Get {name}: {message:?}");
+        assert_eq!(
+            outputs,
+            Some(json!({"value": cell["get_value"]})),
+            "Get {name}"
+        );
+    }
 }

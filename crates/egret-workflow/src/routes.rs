@@ -2491,8 +2491,15 @@ pub fn management_router() -> Router<WorkflowState> {
         // written and deleted on it (its GET is the listing, as in Kestra).
         .route(
             "/ws/{workspace}/workflows/namespaces/{namespace}/kv",
-            get(crate::storage::kv::routes::list_kv)
-                .delete(crate::storage::kv::routes::delete_kv_values),
+            get(crate::storage::kv::routes::list_kv).delete(
+                // The bulk body's own cap, refused with egret's text.
+                axum::handler::Handler::layer(
+                    crate::storage::kv::routes::delete_kv_values,
+                    axum::extract::DefaultBodyLimit::max(
+                        crate::storage::kv::routes::MAX_BULK_BODY_BYTES,
+                    ),
+                ),
+            ),
         )
         .route(
             "/ws/{workspace}/workflows/namespaces/{namespace}/kv/inheritance",

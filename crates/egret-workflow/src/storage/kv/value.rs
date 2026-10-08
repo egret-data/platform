@@ -735,6 +735,11 @@ pub enum ApiBodyError {
     TooDeep(String),
     /// The reader's thread panicked on the body (logged at WARN). 400.
     Crashed(String),
+    /// A timestamp with a time whose offset carries it outside the years
+    /// 1-9999 once in UTC (`0001-01-01T00:00+01:00`), which a DATETIME
+    /// cannot hold: the timestamp as written, and its year in UTC. 400
+    /// (W9c Task 6 fix round 1, review M6).
+    OutOfRange { timestamp: String, utc_year: i64 },
 }
 
 impl ApiBodyError {
@@ -758,6 +763,13 @@ impl ApiBodyError {
             ApiBodyError::TooLarge(m) => format!("the body cannot be stored: {m}"),
             ApiBodyError::TooDeep(m) => format!("the body cannot be stored: {m}"),
             ApiBodyError::Crashed(m) => format!("the body could not be read: {m}"),
+            ApiBodyError::OutOfRange {
+                timestamp,
+                utc_year,
+            } => format!(
+                "the timestamp {timestamp} is in year {utc_year} in UTC, outside the years \
+                 1-9999 a DATETIME can hold; nothing was stored"
+            ),
         }
     }
 }
@@ -827,7 +839,7 @@ pub fn parse_api_body(body: &[u8], cap: u64) -> Result<KvValue, ApiBodyError> {
                     kind: KvType::Date,
                     data: KvData::String(crate::storage::ion::timestamp_text(t)),
                 }),
-                _ => match utc_instant(t) {
+                _ => match utc_instant(t)? {
                     Some(at) => Ok(KvValue {
                         kind: KvType::Datetime,
                         data: KvData::String(at),
@@ -876,13 +888,30 @@ fn raw_text(body: &[u8]) -> Result<KvValue, ApiBodyError> {
 }
 
 /// A timestamp of minute precision or finer as an RFC 3339 instant in UTC
-/// (nanoseconds kept; [`encode`] writes milliseconds).
-fn utc_instant(t: &ion_rs::Timestamp) -> Option<String> {
+/// (nanoseconds kept; [`encode`] writes milliseconds). Its year in UTC
+/// outside 1-9999 (an offset can carry `0001-01-01T00:00+01:00` into year 0,
+/// and `9999-12-31T23:59:59-01:00` into 10000) is
+/// [`ApiBodyError::OutOfRange`], named, before any text is built (review
+/// M6: it reached the encoder, which answered with ion-rs's internals).
+/// `Ok(None)`: a timestamp chrono cannot hold otherwise.
+fn utc_instant(t: &ion_rs::Timestamp) -> Result<Option<String>, ApiBodyError> {
     let u = t.to_utc();
-    let at = chrono::NaiveDate::from_ymd_opt(i32::try_from(u.year()).ok()?, u.month(), u.day())?
-        .and_hms_nano_opt(u.hour(), u.minute(), u.second(), t.nanoseconds())?
-        .and_utc();
-    Some(at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+    let year = i64::from(u.year());
+    if !(1..=9999).contains(&year) {
+        return Err(ApiBodyError::OutOfRange {
+            timestamp: t.to_string(),
+            utc_year: year,
+        });
+    }
+    let Ok(year) = i32::try_from(year) else {
+        return Ok(None);
+    };
+    Ok(chrono::NaiveDate::from_ymd_opt(year, u.month(), u.day())
+        .and_then(|d| d.and_hms_nano_opt(u.hour(), u.minute(), u.second(), t.nanoseconds()))
+        .map(|at| {
+            at.and_utc()
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+        }))
 }
 
 /// §8.1 (W9c Task 5): a typed value and an optional `kvType` -> the

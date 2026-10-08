@@ -22,12 +22,17 @@
 //!
 //! # Errors
 //!
-//! W9b's `ns_refusal` (spec §9's table): `Author` 400, `NotFound` 404,
-//! `Conflict` 409 (the key's lock held past the API's 5 s wait), `TooLarge`
-//! 413, `Store` and `Db` 503 (`Db` logged with a fixed message, never sent).
-//! The `PUT` body's own refusals: 400 (empty, not UTF-8, a blob, clob or
-//! sexp, too deep, unreadable), 408 (it stalled, or took too long), 413
-//! (over `max_read_bytes`), 415 (not `text/plain`).
+//! W9b's `ns_refusal` statuses (spec §9's table): `Author` 400, `NotFound`
+//! 404, `Conflict` 409 (the key's lock held past the API's 5 s wait),
+//! `TooLarge` 413, `Store` and `Db` 503 (`Db` logged with a fixed message,
+//! never sent). The KV routes' own refusals send the message unprefixed, as
+//! the fixture compares it (`kv_refusal`); the shared namespace refusal
+//! (`grant`) and a malformed `?revision` keep W9b's `invalid input: `
+//! prefix (spec §9, 2026-10-08). The `PUT` body's own refusals: 400 (empty,
+//! not UTF-8, a blob, clob or sexp, too deep, unreadable, a DATETIME outside
+//! years 1-9999 in UTC), 408 (it stalled, or took too long), 413 (over
+//! `max_read_bytes`), 415 (not `text/plain`). The bulk body is at most
+//! [`MAX_BULK_BODY_BYTES`] (413 naming it).
 //!
 //! # Holding nothing across the client
 //!
@@ -43,9 +48,12 @@
 //! # A key named `inheritance`
 //!
 //! `GET …/kv/inheritance` is the inheritance listing, so a key of that name
-//! cannot be read by `GET …/kv/{key}` (Kestra's collision too,
-//! `KVController.java:73`, `:103`; spec §9, §15). Its `PUT` and `DELETE`
-//! are served on the same path, and its `…/revisions` works.
+//! is not read by that path (Kestra's collision too, `KVController.java:73`,
+//! `:103`; spec §9, §15). The router matches the path as sent and `Path`
+//! decodes the key afterwards, so `GET …/kv/inheritanc%65` reaches
+//! `get_kv_value` and reads the key (review M3; pinned by a test). Its
+//! `PUT` and `DELETE` are served on the same path, and its `…/revisions`
+//! works.
 //!
 //! # Audit
 //!
@@ -87,6 +95,24 @@ const AUDIT_RESOURCE: &str = "workflow_namespace_kv";
 
 /// The key whose `GET` is the inheritance listing (spec §9, §15).
 pub const INHERITANCE: &str = "inheritance";
+
+/// The bulk delete's body cap, 1 MiB (W9c Task 6 fix round 1, review M8):
+/// 1,000 keys of 350 bytes, quoted and comma-separated, are 353,012 bytes
+/// of JSON, so a body this large has room for any whitespace. A larger one
+/// is 413 naming this cap (not axum's default text), before it is parsed.
+pub const MAX_BULK_BODY_BYTES: usize = 1 << 20;
+
+/// The refusal of a bulk body over [`MAX_BULK_BODY_BYTES`].
+fn bulk_body_too_large() -> Response {
+    refuse(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        format!(
+            "the bulk delete body is over {MAX_BULK_BODY_BYTES} bytes: it takes at most \
+             {} keys of at most 350 bytes each; nothing was deleted",
+            store::MAX_BULK_DELETE_KEYS
+        ),
+    )
+}
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -280,7 +306,7 @@ pub(crate) async fn list_kv(
         ("namespace" = String, Path, description = "The namespace whose PARENTS are listed (cut at dots: `a.b.c` lists `a.b`, then `a`)."),
     ),
     responses(
-        (status = 200, description = "The live keys of the namespace's ancestors only (not its own), deepest first; a key in two ancestors is listed once, from the deeper (Kestra's `KVController`, `:73-100`). Each entry names its namespace. **This path is also where a key named `inheritance` would be read: such a key's value cannot be read by `GET …/kv/{key}` (Kestra's collision too); its `PUT`, `DELETE` and `…/revisions` work, and so do the tasks and `kv()`.**", body = Vec<KvInheritedDto>),
+        (status = 200, description = "The live keys of the namespace's ancestors only (not its own), deepest first; a key in two ancestors is listed once, from the deeper (Kestra's `KVController`, `:73-100`). Each entry names its namespace. **This path is also where a key named `inheritance` would be read, so `GET …/kv/inheritance` answers this listing, not that key (Kestra's collision too). The key's value is read by percent-encoding any letter of its name (`GET …/kv/inheritanc%65`): the route is matched on the path as sent and the key decoded afterwards. Its `PUT`, `DELETE` and `…/revisions` work as written, and so do the tasks and `kv()`.**", body = Vec<KvInheritedDto>),
         (status = 400, description = "A refused namespace (named)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
@@ -333,7 +359,7 @@ pub(crate) async fn list_inherited_kv(
     params(
         WorkspacePath,
         ("namespace" = String, Path, description = "The namespace"),
-        ("key" = String, Path, description = "The key: `[a-zA-Z0-9][a-zA-Z0-9._-]*`, at most 350 bytes. A key named `inheritance` cannot be read here: that path is the inheritance listing."),
+        ("key" = String, Path, description = "The key: `[a-zA-Z0-9][a-zA-Z0-9._-]*`, at most 350 bytes. `GET …/kv/inheritance` is the inheritance listing, not the key `inheritance`; that key is read here with any letter of it percent-encoded (`inheritanc%65`), since the route is matched on the path as sent and the key decoded afterwards."),
         KvRevisionQuery,
     ),
     responses(
@@ -531,7 +557,8 @@ fn body_refusal(e: ApiBodyError) -> Response {
         | ApiBodyError::NotUtf8
         | ApiBodyError::Unmodelled(_)
         | ApiBodyError::TooDeep(_)
-        | ApiBodyError::Crashed(_) => bad_request(message),
+        | ApiBodyError::Crashed(_)
+        | ApiBodyError::OutOfRange { .. } => bad_request(message),
     }
 }
 
@@ -552,7 +579,7 @@ fn body_refusal(e: ApiBodyError) -> Response {
     ),
     responses(
         (status = 200, description = "Stored as the key's next revision (it always overwrites). No content and no content type (Kestra's answer)."),
-        (status = 400, description = "The key rule, a refused namespace, a malformed or negative `ttl` (`Cannot convert value 'x' to Duration`, `ttl cannot be negative`), an empty or whitespace-only body (`empty body`), a body holding a blob, clob or s-expression at any depth (named; even under an annotation), a raw-text body that is not UTF-8 (`not UTF-8 text`), or one nesting deeper than 100 levels", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The key rule, a refused namespace, a malformed or negative `ttl` (`Cannot convert value 'x' to Duration`, `ttl cannot be negative`), an empty or whitespace-only body (`empty body`), a body that is a single Ion value containing a blob, clob or s-expression at any depth (named; even under an annotation; a body of several values is the raw text whatever they hold), a timestamp whose offset carries it outside the years 1-9999 in UTC (named), a raw-text body that is not UTF-8 (`not UTF-8 text`), or one nesting deeper than 100 levels", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 408, description = "No byte of the body arrived for 30 seconds, or the body took longer than 12 hours in all; nothing was stored.", body = egret_core::http::ErrorBody),
@@ -721,7 +748,7 @@ async fn delete_value(
         ("namespace" = String, Path, description = "The namespace"),
     ),
     request_body(
-        description = "`{\"keys\": [...]}`: at most 1,000 keys (a key named twice counts twice). Every key is checked before anything is deleted.",
+        description = "`{\"keys\": [...]}`: at most 1,000 keys (a key named twice counts twice), in a body of at most 1 MiB (1,048,576 bytes). Every key is checked before anything is deleted.",
         content((KvKeysBody = "application/json")),
     ),
     responses(
@@ -730,7 +757,7 @@ async fn delete_value(
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
         (status = 409, description = "A key is busy (named), or other bulk deletes are running, for longer than the API waits (5 s); nothing was deleted, try again.", body = egret_core::http::ErrorBody),
-        (status = 413, description = "More than 1,000 keys (the cap is named); nothing was deleted. Send several requests.", body = egret_core::http::ErrorBody),
+        (status = 413, description = "More than 1,000 keys, or a body over 1 MiB (each cap is named); nothing was deleted. Send several requests.", body = egret_core::http::ErrorBody),
         (status = 503, description = "Internal storage is not configured, or the database is unavailable; nothing was deleted and the request can be retried.", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -743,7 +770,8 @@ pub(crate) async fn delete_kv_values(
     let grant = grant(&st, &ctx, &namespace, Resource::Kv, Access::Write).await?;
     let fs = file_store()?;
     let Json(body) = body.map_err(|r| match r.status() {
-        StatusCode::PAYLOAD_TOO_LARGE => refuse(StatusCode::PAYLOAD_TOO_LARGE, r.body_text()),
+        // The route's `DefaultBodyLimit` is `MAX_BULK_BODY_BYTES`.
+        StatusCode::PAYLOAD_TOO_LARGE => bulk_body_too_large(),
         _ => bad_request(format!(
             "the body is not `{{\"keys\": [...]}}`: {}",
             r.body_text()
