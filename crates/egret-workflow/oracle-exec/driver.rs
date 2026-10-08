@@ -167,7 +167,13 @@ pub fn registry(pool: &PgPool) -> Handlers {
     if !is_unconnected(pool) {
         egret_workflow::storage::nsfiles::install_db_for_tests(pool);
     }
-    egret_workflow::worker::handlers::namespace::register(&mut r, pool.clone(), Some(files));
+    egret_workflow::worker::handlers::namespace::register(
+        &mut r,
+        pool.clone(),
+        Some(files.clone()),
+    );
+    // W9c Task 5: the six KV tasks over the same store.
+    egret_workflow::worker::handlers::kv::register(&mut r, pool.clone(), Some(files));
     r.add(std::sync::Arc::new(
         egret_workflow::worker::handlers::log::Log::new(),
     ));

@@ -106,7 +106,7 @@ pub use repo::{
     UpdateFlowInput,
 };
 pub use routes::{management_router, openapi, WorkflowState};
-pub use runners::{render_str, rewrite, RenderContext, RenderError, RewriteError};
+pub use runners::{render_str, render_typed, rewrite, RenderContext, RenderError, RewriteError};
 pub use runtime::RuntimeConfig;
 pub use webhook_routes::{
     webhook_router, webhook_router_with_guard, WebhookGuard, WebhookResponse,

@@ -63,7 +63,8 @@ mod yamlfmt;
 // sentinel). `render_str` is the supported entry point -- see
 // `env::environment`'s doc for the measured table.
 pub use env::{
-    referenced_roots, render_str, render_str_guarded, GuardedRender, RenderContext, RenderError,
+    referenced_roots, render_str, render_str_guarded, render_typed, GuardedRender, RenderContext,
+    RenderError,
 };
 pub use files::{FileMeta, FileScope, FileUnavailable, RenderFiles};
 /// W9a: `storage::uri` builds Kestra's URIs from these two (`Slugify.of`, and

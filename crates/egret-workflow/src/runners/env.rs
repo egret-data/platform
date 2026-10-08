@@ -1939,6 +1939,32 @@ pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderEr
     }
 }
 
+/// Kestra's `renderTyped` (`Set.java:111`, `VariableRenderer.renderTyped`):
+/// a `template` that is exactly ONE `{{ … }}` with no other text, not even
+/// surrounding spaces (w9c `typed_render.tr_ws`: ` {{ 1 }} ` is the string
+/// `" 1 "`), keeps the type its expression evaluates to. It is rendered as
+/// `{{ (…) | toJson }}` and the text parsed back with `serde_json`
+/// (`arbitrary_precision`: an integer keeps every digit, `{{ 1.5 }}` is the
+/// number `1.5`). Anything else is [`render_str`]'s `String` (`x {{ 1 }}`,
+/// `{{ 1 }}{{ 2 }}`, a literal `42`). Against w9c `typed_render` (W9c Task
+/// 5).
+///
+/// The value `serde_json` builds is bounded by its own recursion limit (128
+/// levels), and every writer `toJson` reaches is bounded by the crate's value
+/// depth (`MAX_VALUE_DEPTH`), so no depth reaches this function's caller
+/// that a recursive walk of 128 levels cannot handle.
+pub fn render_typed(template: &str, cx: &RenderContext) -> Result<serde_json::Value, RenderError> {
+    let Some(inner) = super::rewrite::sole_expression(template) else {
+        return render_str(template, cx).map(serde_json::Value::String);
+    };
+    let text = render_str(&format!("{{{{ ({inner}) | toJson }}}}"), cx)?;
+    serde_json::from_str(&text).map_err(|e| {
+        RenderError::Template(format!(
+            "the expression {template:?} rendered a value egret cannot read back as JSON: {e}"
+        ))
+    })
+}
+
 /// ONE pass of the renderer, on a copy of the environment that `extend` has
 /// changed: Kestra's `VariableRenderer.render` with `recursiveRendering =
 /// false`, which is its default (`VariableConfiguration.java:16`), i.e.

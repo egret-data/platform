@@ -184,7 +184,12 @@ pub enum KvNumber {
 impl KvNumber {
     /// An Ion int's text: `Some` only for `-?[0-9]+` with no leading zero
     /// (`0`, `-7`; never `007`, which Ion and JSON both refuse).
+    /// A negative zero is zero (W9c Task 5: w9c `types.num_neg0`, `-0` is
+    /// stored `0`, as Jackson reads it into an `Integer`).
     pub fn int(text: &str) -> Option<Self> {
+        if text == "-0" {
+            return Some(KvNumber::Int("0".into()));
+        }
         is_whole(text.strip_prefix('-').unwrap_or(text)).then(|| KvNumber::Int(text.into()))
     }
 
@@ -707,6 +712,151 @@ impl KvValue {
             data: KvData::from_json(json)?,
         })
     }
+}
+
+/// §8.1 (W9c Task 5): a typed value and an optional `kvType` -> the
+/// [`KvValue`] `Set` stores, as the artifact coerces (`Set.java:116-132`;
+/// w9c `set_coercion`):
+///
+/// - **`kvType` applies to a String only** (review C1, w9c
+///   `set_coercion.t_*`): any other value is returned as itself, typed
+///   [`KvType::of`], whatever `kvType` says -- except a Number with `STRING`,
+///   which becomes its Java `toString()` (`42`, `1.5`, `1.0E20`). So DURATION
+///   is the stored type only for a String.
+/// - NUMBER: the String read as one JSON number, as Jackson's
+///   `readValue(s, Number.class)` does (surrounding whitespace allowed;
+///   `1,5`, `0x10`, `+5` refused), then [`KvData::from_json`]: an int or a
+///   float, **never a decimal** (the user's ruling, 2026-10-07).
+/// - BOOLEAN: strict, `true`/`false` in any case, else the artifact's
+///   `Cannot parse '…' as a BOOLEAN value: expected 'true' or 'false'.`
+/// - DATETIME: an RFC 3339 instant (an offset is converted to UTC when it is
+///   written); else `Cannot convert value '…' to Instant`.
+/// - DATE: a `YYYY-MM-DD` date, falling back to an instant's UTC date; else
+///   `Text '…' could not be parsed …`.
+/// - DURATION: validated as `java.time.Duration.parse` reads it, kept as
+///   written; else `Cannot convert value '…' to Duration`.
+/// - JSON: the String parsed, typed by what it holds ([`KvType::of`]: `"s"`
+///   is a STRING, `7` a NUMBER, `null` a STRING).
+/// - STRING: the String.
+///
+/// Err is typed: `Invalid` for a coercion refusal (its message names the
+/// value and the type), `TooLarge` for a number over [`MAX_NUMBER_DIGITS`]
+/// digits; a value nesting deeper than `storage::ion::MAX_DEPTH` is
+/// `Invalid` ([`KvData::from_json`]).
+pub fn coerce(value: Value, kv_type: Option<KvType>) -> Result<KvValue, Unstorable> {
+    let (kind, s) = match (&value, kv_type) {
+        (Value::String(s), Some(kind)) => (kind, s.as_str()),
+        (Value::Number(n), Some(KvType::String)) => {
+            let text = n.to_string();
+            check_json_digits(&text)?;
+            let text = match KvNumber::int(&text) {
+                Some(KvNumber::Int(digits)) => digits,
+                _ => {
+                    let mut out = String::new();
+                    crate::runners::env::write_java_double(
+                        &mut out,
+                        text.parse().unwrap_or(f64::NAN),
+                    );
+                    out
+                }
+            };
+            return KvValue::from_json(KvType::String, &Value::String(text));
+        }
+        _ => return KvValue::from_json(KvType::of(&value), &value),
+    };
+    let invalid = |why: String| Unstorable::Invalid(why);
+    match kind {
+        KvType::String => KvValue::from_json(KvType::String, &value),
+        KvType::Number => {
+            let parsed: Value = serde_json::from_str(s)
+                .map_err(|e| invalid(format!("Cannot parse '{s}' as a NUMBER value: {e}")))?;
+            if !parsed.is_number() {
+                return Err(invalid(format!(
+                    "Cannot parse '{s}' as a NUMBER value: it is not a number"
+                )));
+            }
+            KvValue::from_json(KvType::Number, &parsed)
+        }
+        KvType::Boolean => {
+            let b = if s.eq_ignore_ascii_case("true") {
+                true
+            } else if s.eq_ignore_ascii_case("false") {
+                false
+            } else {
+                return Err(invalid(format!(
+                    "Cannot parse '{s}' as a BOOLEAN value: expected 'true' or 'false'."
+                )));
+            };
+            Ok(KvValue {
+                kind: KvType::Boolean,
+                data: KvData::Bool(b),
+            })
+        }
+        KvType::Datetime => match instant(s) {
+            Some(_) => KvValue::from_json(KvType::Datetime, &value),
+            None => Err(invalid(format!("Cannot convert value '{s}' to Instant"))),
+        },
+        KvType::Date => {
+            let day = date(s).or_else(|| instant(s).map(|t| t.date_naive()));
+            match day {
+                Some(d) => Ok(KvValue {
+                    kind: KvType::Date,
+                    data: KvData::String(d.format("%Y-%m-%d").to_string()),
+                }),
+                None => Err(invalid(format!(
+                    "Text '{s}' could not be parsed as a DATE: expected a YYYY-MM-DD date or an \
+                     ISO-8601 instant"
+                ))),
+            }
+        }
+        KvType::Duration => {
+            if java_duration_parses(s) {
+                KvValue::from_json(KvType::Duration, &value)
+            } else {
+                Err(invalid(format!("Cannot convert value '{s}' to Duration")))
+            }
+        }
+        KvType::Json => {
+            let parsed: Value = serde_json::from_str(s)
+                .map_err(|e| invalid(format!("Cannot parse '{s}' as a JSON value: {e}")))?;
+            KvValue::from_json(KvType::of(&parsed), &parsed)
+        }
+    }
+}
+
+/// Whether `java.time.Duration.parse` accepts `s`: `[-+]?P` then days, and
+/// after a `T` hours, minutes and seconds (with up to nine fraction digits),
+/// each optionally signed, case-insensitive; at least one part, a `T` never
+/// alone, and the total in seconds within a Java `long`.
+fn java_duration_parses(s: &str) -> bool {
+    static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)^[-+]?P(?:([-+]?[0-9]+)D)?(T(?:([-+]?[0-9]+)H)?(?:([-+]?[0-9]+)M)?(?:([-+]?[0-9]+)(?:[.,][0-9]{0,9})?S)?)?$",
+        )
+        .expect("a fixed pattern")
+    });
+    let Some(c) = PATTERN.captures(s) else {
+        return false;
+    };
+    let part = |i: usize| c.get(i).map(|m| m.as_str());
+    if part(1).is_none() && part(3).is_none() && part(4).is_none() && part(5).is_none() {
+        return false;
+    }
+    if part(2).is_some_and(|t| t.eq_ignore_ascii_case("T")) {
+        return false;
+    }
+    let mut total: i64 = 0;
+    for (i, per) in [(1, 86_400i64), (3, 3_600), (4, 60), (5, 1)] {
+        let Some(digits) = part(i) else { continue };
+        let Some(n) = digits.parse::<i64>().ok().and_then(|n| n.checked_mul(per)) else {
+            return false;
+        };
+        let Some(t) = total.checked_add(n) else {
+            return false;
+        };
+        total = t;
+    }
+    true
 }
 
 /// A flow's JSON number text (`serde_json`, `arbitrary_precision`): its

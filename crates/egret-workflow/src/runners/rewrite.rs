@@ -442,6 +442,23 @@ pub fn rewrite(expr: &str) -> Result<String, RewriteError> {
     Ok(out)
 }
 
+/// W9c Task 5: when `template` is exactly ONE `{{ … }}` region and nothing
+/// else -- no text before or after it, not even a space -- its content,
+/// without a `-` whitespace-control marker at either end; `None` otherwise.
+/// The region's end is found as [`rewrite`] finds it (string literals and
+/// brace nesting skipped), so `{{ {'a': {'b': 1}} }}` is one region and
+/// `{{ 1 }}{{ 2 }}` is two. An unterminated string answers `None`: the plain
+/// render then refuses the template in its own words.
+pub(crate) fn sole_expression(template: &str) -> Option<&str> {
+    let rest = template.strip_prefix("{{")?;
+    let close = find_region_close(template, 2, "}}").ok()??;
+    if close + 2 != template.len() {
+        return None;
+    }
+    let (_, inner, _) = split_whitespace_control(&rest[..close - 2]);
+    Some(inner)
+}
+
 /// Splits a `-` whitespace-control marker off the front and/or back of a
 /// `{{ }}` / `{% %}` region's raw content (`Kestra`/Pebble/Jinja's
 /// `{{- ... -}}` / `{%- ... -%}` convention for trimming adjacent template

@@ -733,6 +733,9 @@ pub async fn handlers_for(
         pool.clone(),
         crate::storage::current(),
     );
+    // W9c Task 5: `Set`, `Get`, `GetKeys`, `Delete`, `Put` and `PurgeKV`,
+    // which need the pool too.
+    crate::worker::handlers::kv::register(&mut handlers, pool.clone(), crate::storage::current());
     let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) = match cfg
         .container_runner
     {
