@@ -781,7 +781,14 @@ const CREATE_REFUSED: usize = 4;
 /// four core storage FQCNs W9a Task 11 implements, and `Write` was the only
 /// type either flow lacked. An over-refusal closing, as at W10 Task 6: the
 /// pinned artifact published both. [`UNKNOWN_TYPE_REFUSED`] fell by the same 2.
-const LIVE: usize = 247;
+///
+/// # 247 → **248** at W9c Task 5
+///
+/// `valids/retry-with-flowable-errors`: `TASK_TYPES` gained the six
+/// `io.kestra.plugin.core.kv.*` FQCNs, and `kv.Set` was the only type it
+/// lacked. An over-refusal closing; [`UNKNOWN_TYPE_REFUSED`] fell by 1. Its
+/// golden entry stays baselined: `AllowFailure` is still planned opaque.
+const LIVE: usize = 248;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -813,7 +820,8 @@ const LIVE: usize = 247;
 /// implements, which DO move two (see [`LIVE`]), and **since W9a Task 12**
 /// the five whole-file ones (`Concat`, `Split`, `Reverse`,
 /// `DeduplicateItems`, `FilterItems`), which the corpus writes in no flow, so
-/// they move no count here.
+/// they move no count here. **Since W9c Task 5** it holds the six
+/// `io.kestra.plugin.core.kv.*` FQCNs, which move one (see [`LIVE`]).
 ///
 /// **The FQCN rows are what make most of [`LIVE`].** (This sentence said
 /// "makes `LIVE` 248" and "false for 227 of the 248" after `LIVE` had moved
@@ -833,14 +841,15 @@ const LIVE: usize = 247;
 /// test-only classes — is exactly the behaviour W1 built the table for.
 ///
 /// **301 through W8 Task 2, 296 through W10 Task 6, 68 through W9a Task 10,
-/// 66 now** (W9a Task 11: the two `core.storage.Write` flows, see [`LIVE`]). The 228 that left
+/// 66 through W9c Task 4, 65 now** (W9a Task 11: the two `core.storage.Write`
+/// flows; W9c Task 5: the `core.kv.Set` flow; see [`LIVE`]). The 228 that left
 /// were NOT unported: `worker::handlers` has implemented all four of their types
 /// since W3b, and only `TASK_TYPES` did not say so. See [`LIVE`] for the
 /// mechanism and for why the figure was hiding behind a table rather than
 /// behind a missing handler; that is the difference between "egret has not
 /// ported this plugin" and "egret refuses a plugin it runs", and only the first
 /// is a statement about the oracle rather than a defect.
-const UNKNOWN_TYPE_REFUSED: usize = 66;
+const UNKNOWN_TYPE_REFUSED: usize = 65;
 
 /// How many corpus flows have a draft row that `publish` refused for a reason
 /// of **egret's own validate** — a real disagreement about the flow, not an

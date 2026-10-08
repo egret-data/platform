@@ -636,35 +636,21 @@ async fn a_secret_in_a_kv_value_is_refused_at_publish_by_its_own_message() {
 
 /// W9c Task 4: the corpus's `valids/kv` (two `kv()` calls in `Return`
 /// tasks) publishes. `valids/retry-with-flowable-errors` carries no
-/// `secret()` either, and today stops at the unknown `kv.Set` type only,
-/// which Task 5 registers; the secret scan adds nothing to it.
+/// `secret()` either; it stopped only at the unknown `kv.Set` type until W9c
+/// Task 5 registered the six KV tasks, and it publishes now (it still needs
+/// the `AllowFailure` flowable to run as Kestra ran it).
 #[tokio::test]
-async fn valids_kv_publishes_and_retry_with_flowable_errors_stops_only_at_its_set_type() {
+async fn valids_kv_and_retry_with_flowable_errors_publish() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
-    let kv = common::draft(
-        &repo,
-        ws,
-        user,
+    for source in [
         include_str!("../oracle-exec/corpus/valids/kv.yaml"),
-    )
-    .await;
-    egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, kv.id, "")
-        .await
-        .expect("valids/kv publishes");
-    let retry = common::draft(
-        &repo,
-        ws,
-        user,
         include_str!("../oracle-exec/corpus/valids/retry-with-flowable-errors.yaml"),
-    )
-    .await;
-    match egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, retry.id, "").await {
-        Err(egret_core::Error::InvalidInput(m)) => assert_eq!(
-            m, "task 'set_kv' has unknown type 'io.kestra.plugin.core.kv.Set'",
-            "only the type Task 5 registers"
-        ),
-        other => panic!("{other:?}"),
+    ] {
+        let draft = common::draft(&repo, ws, user, source).await;
+        egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "")
+            .await
+            .unwrap_or_else(|e| panic!("{e}: {source}"));
     }
 }

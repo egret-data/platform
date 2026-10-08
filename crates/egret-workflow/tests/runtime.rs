@@ -2174,6 +2174,12 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         egret_workflow::worker::handlers::namespace::DELETE_FILES.to_string(),
         egret_workflow::worker::handlers::namespace::PURGE_FILES.to_string(),
     ]);
+    // W9c Task 5: the six KV tasks, registered beside them.
+    want.extend(
+        egret_workflow::worker::handlers::kv::DECLARED
+            .iter()
+            .map(|c| c.0.to_string()),
+    );
     want.sort_unstable();
     assert_eq!(reg.type_ids(), want);
     assert_eq!(default_runner, None, "publish has no runner to default to");
@@ -2225,6 +2231,13 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         vec![
             "egret.container",
             "egret.script.python",
+            // W9c Task 5.
+            "io.kestra.plugin.core.kv.Delete",
+            "io.kestra.plugin.core.kv.Get",
+            "io.kestra.plugin.core.kv.GetKeys",
+            "io.kestra.plugin.core.kv.PurgeKV",
+            "io.kestra.plugin.core.kv.Put",
+            "io.kestra.plugin.core.kv.Set",
             "io.kestra.plugin.core.namespace.DeleteFiles",
             "io.kestra.plugin.core.namespace.DownloadFiles",
             "io.kestra.plugin.core.namespace.PurgeFiles",
@@ -2237,7 +2250,7 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
             "io.kestra.plugin.scripts.shell.Script",
         ]
     );
-    assert_eq!(reg.type_ids().len(), core + 2 + 4 + 6 + 9);
+    assert_eq!(reg.type_ids().len(), core + 2 + 4 + 6 + 6 + 9);
     assert_eq!(default_runner, Some(RunnerKind::Docker));
     assert!(
         reg.orphan_sweep().is_some(),
