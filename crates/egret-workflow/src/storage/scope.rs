@@ -106,20 +106,7 @@ impl Snapshot {
         task_prefix: Option<String>,
         flow_namespace: Option<String>,
     ) -> Result<Self> {
-        let mut found = BTreeSet::new();
-        for text in texts {
-            collect(text, &mut found);
-        }
-        for value in json {
-            walk(value, &mut found);
-        }
-        let files = if found.is_empty() {
-            BTreeMap::new()
-        } else {
-            let readable = readable_executions(conn, workspace, execution).await?;
-            let uris: Vec<String> = found.into_iter().collect();
-            resolve_readable_many(conn, workspace, &readable, &uris).await?
-        };
+        let files = reachable(conn, workspace, execution, texts, json).await?;
         Ok(Self {
             files,
             store,
@@ -136,11 +123,7 @@ impl Snapshot {
     /// The indexed file, or why it is not readable here, naming the URI --
     /// what staging (T5) and the bridge (T9) call.
     pub fn resolve(&self, uri: &str) -> std::result::Result<&IndexedFile, String> {
-        match self.files.get(uri) {
-            Some(Ok(file)) => Ok(file),
-            Some(Err(why)) => Err(why.to_string()),
-            None => Err(not_in_snapshot(uri)),
-        }
+        resolve_in(&self.files, uri)
     }
 
     pub fn into_scope(self) -> FileScope {
@@ -181,6 +164,38 @@ impl Snapshot {
         self
     }
 
+    /// W9c Task 9: a live snapshot for the prefetch's fetch
+    /// (`storage::prefetch`), which runs with no transaction open: `files`
+    /// are the resolutions the rolled-back attempt recorded (its index rows
+    /// were rolled back with it), and namespace and KV lookups connect with
+    /// `ns_db`, as every render's do. Built on the runtime (it captures the
+    /// handle), read on a thread that may block.
+    pub(crate) fn for_fetch(
+        files: BTreeMap<String, std::result::Result<IndexedFile, Unreadable>>,
+        store: Arc<FileStore>,
+        workspace: Uuid,
+        flow_namespace: Option<String>,
+        ns_db: Option<Arc<PgConnectOptions>>,
+    ) -> Self {
+        Self {
+            files,
+            store,
+            workspace,
+            handle: tokio::runtime::Handle::current(),
+            task_prefix: None,
+            outage: Mutex::new(None),
+            flow_namespace,
+            ns_db,
+            ns_conn: Mutex::new(None),
+        }
+    }
+
+    /// W9c Task 9: the outage the last read recorded, cleared, so the
+    /// prefetch can tell which of several reads on one snapshot met it.
+    pub(crate) fn take_outage(&self) -> Option<String> {
+        self.outage.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+
     /// Record an outage (the first one wins) and hand back its message.
     fn outage(&self, message: String) -> String {
         let mut held = self.outage.lock().unwrap_or_else(|p| p.into_inner());
@@ -195,7 +210,7 @@ impl Snapshot {
 /// the same `uri::parse` that `resolve_readable_many` runs first -- it can
 /// only refine a refusal, never make anything readable. Everything else was
 /// assembled at render, which the user's ruling refuses.
-fn not_in_snapshot(uri: &str) -> String {
+pub(super) fn not_in_snapshot(uri: &str) -> String {
     match uri::parse(uri) {
         Err(reason) => Unreadable::Malformed {
             uri: uri.to_string(),
@@ -740,16 +755,40 @@ fn ns_over_cap(entry: &NsEntry, ns: &str, cap: u64) -> String {
     )
 }
 
+/// The resolutions a render may read: what `fileSize`, `fileExists`,
+/// `isFileEmpty` and `fileURI` answer from, with no I/O. Shared by the live
+/// [`Snapshot`] and the in-transaction scope (`storage::prefetch`), so the
+/// two answer metadata identically.
+pub(super) fn lookup_in(
+    files: &BTreeMap<String, std::result::Result<IndexedFile, Unreadable>>,
+    uri: &str,
+) -> std::result::Result<FileMeta, FileUnavailable> {
+    match files.get(uri) {
+        Some(Ok(file)) => Ok(FileMeta { size: file.size }),
+        Some(Err(missing @ Unreadable::Missing { .. })) => {
+            Err(FileUnavailable::Missing(missing.to_string()))
+        }
+        Some(Err(why)) => Err(FileUnavailable::Refused(why.to_string())),
+        None => Err(FileUnavailable::Refused(not_in_snapshot(uri))),
+    }
+}
+
+/// The indexed file `uri` resolved to, or why it is not readable here: the
+/// first step of every body read, live or in a transaction.
+pub(super) fn resolve_in<'f>(
+    files: &'f BTreeMap<String, std::result::Result<IndexedFile, Unreadable>>,
+    uri: &str,
+) -> std::result::Result<&'f IndexedFile, String> {
+    match files.get(uri) {
+        Some(Ok(file)) => Ok(file),
+        Some(Err(why)) => Err(why.to_string()),
+        None => Err(not_in_snapshot(uri)),
+    }
+}
+
 impl RenderFiles for Snapshot {
     fn lookup(&self, uri: &str) -> std::result::Result<FileMeta, FileUnavailable> {
-        match self.files.get(uri) {
-            Some(Ok(file)) => Ok(FileMeta { size: file.size }),
-            Some(Err(missing @ Unreadable::Missing { .. })) => {
-                Err(FileUnavailable::Missing(missing.to_string()))
-            }
-            Some(Err(why)) => Err(FileUnavailable::Refused(why.to_string())),
-            None => Err(FileUnavailable::Refused(not_in_snapshot(uri))),
-        }
+        lookup_in(&self.files, uri)
     }
 
     fn read_utf8(&self, uri: &str) -> std::result::Result<String, String> {
@@ -968,6 +1007,67 @@ pub async fn scope_for(
         .await?
         .into_scope()),
     }
+}
+
+/// W9c Task 9: the scope a render INSIDE a transaction gets -- `settle`'s,
+/// and through it every nested settle's. The execution-file resolutions are
+/// taken on `conn` exactly as [`scope_for`]'s (the one readability decision,
+/// statements only, and the only connection that sees the index rows this
+/// transaction has just written); every body, namespace-file and KV read is
+/// answered from `prefetch` (`storage::prefetch`), never from the store or
+/// the database. The scope it returns holds no store and no connect
+/// options, so it cannot do I/O; `store` is read here only for its cap.
+#[allow(clippy::too_many_arguments)]
+pub async fn scope_in_transaction(
+    conn: &mut PgConnection,
+    store: Option<Arc<FileStore>>,
+    workspace: Uuid,
+    execution: Uuid,
+    texts: &[&str],
+    json: &[&serde_json::Value],
+    task_prefix: Option<String>,
+    flow_namespace: Option<String>,
+    prefetch: &super::prefetch::Prefetch,
+) -> Result<FileScope> {
+    match store {
+        None => Ok(FileScope(Arc::new(Unconfigured))),
+        Some(store) => {
+            let files = reachable(conn, workspace, execution, texts, json).await?;
+            Ok(FileScope(Arc::new(super::prefetch::InTransaction::new(
+                files,
+                workspace,
+                task_prefix,
+                flow_namespace,
+                store.caps.max_read_bytes,
+                prefetch.clone(),
+            ))))
+        }
+    }
+}
+
+/// Every `kestra:///…` string in `texts` and `json` (see [`Snapshot::take`]),
+/// resolved at once through `resolve_readable_many` on `conn`. With no URI
+/// anywhere the database is not touched.
+async fn reachable(
+    conn: &mut PgConnection,
+    workspace: Uuid,
+    execution: Uuid,
+    texts: &[&str],
+    json: &[&serde_json::Value],
+) -> Result<BTreeMap<String, std::result::Result<IndexedFile, Unreadable>>> {
+    let mut found = BTreeSet::new();
+    for text in texts {
+        collect(text, &mut found);
+    }
+    for value in json {
+        walk(value, &mut found);
+    }
+    if found.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let readable = readable_executions(conn, workspace, execution).await?;
+    let uris: Vec<String> = found.into_iter().collect();
+    resolve_readable_many(conn, workspace, &readable, &uris).await
 }
 
 fn collect(text: &str, found: &mut BTreeSet<String>) {

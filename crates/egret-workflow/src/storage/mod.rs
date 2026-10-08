@@ -41,6 +41,7 @@ pub mod kv;
 pub(crate) mod lock;
 pub(crate) mod multipart;
 pub mod nsfiles;
+pub mod prefetch;
 pub mod prune;
 pub mod routes;
 pub mod scope;
