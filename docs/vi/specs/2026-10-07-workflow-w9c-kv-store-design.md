@@ -27,7 +27,7 @@
   - **`Put` trên một key đã hết hạn coi nó là không có.** Nó bắt đầu mới và không mang theo description hay hạn nào (§4.5, §8.5).
   - **Một namespace của workspace khác** trả lời y như một namespace rỗng. Các danh sách trả `200 []`; đọc một key và `revisions` trả 404 (§9, §13).
   - **Các quyết định ghi lại từ plan:**
-    - một key tên `inheritance` không đọc được bằng `GET …/kv/{key}`, như ở Kestra (§9, §15);
+    - một key tên `inheritance` không đọc được bằng `GET …/kv/{key}`, như ở Kestra (§9, §15); *(Làm rõ 2026-10-08, vòng sửa 1 của Task 6, review M3: đường dẫn `…/kv/inheritance` trả danh sách; key vẫn đọc được qua `…/kv/inheritanc%65`, xem §9, §15.)*
     - lượt quét đầu tiên đến sau một chu kỳ kể từ lúc khởi động (`interval_at`; §11);
     - `PurgeKV` đọc lại và xét các dòng của một key dưới lock session của key (§8.6);
     - không có index dòng-mới-nhất thứ hai (§4.1);

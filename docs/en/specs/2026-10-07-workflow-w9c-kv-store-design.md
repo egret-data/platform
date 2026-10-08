@@ -25,7 +25,7 @@
   - **`Put` on an expired key treats it as missing.** It starts fresh and carries over no description and no expiry (§4.5, §8.5).
   - **A namespace of another workspace** answers exactly as an empty namespace. The listings answer `200 []`; a key read and `revisions` answer 404 (§9, §13).
   - **Decisions recorded from the plan:**
-    - a key named `inheritance` cannot be read by `GET …/kv/{key}`, as in Kestra (§9, §15);
+    - a key named `inheritance` cannot be read by `GET …/kv/{key}`, as in Kestra (§9, §15); *(Clarified 2026-10-08, Task 6 fix round 1, review M3: the path `…/kv/inheritance` answers the listing; the key is still reachable as `…/kv/inheritanc%65`, see §9, §15.)*
     - the expiry sweep's first pass comes one interval after start (`interval_at`; §11);
     - `PurgeKV` re-reads and judges a key's rows under the key's session lock (§8.6);
     - no second latest-row index (§4.1);

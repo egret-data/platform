@@ -903,15 +903,15 @@ fn utc_instant(t: &ion_rs::Timestamp) -> Result<Option<String>, ApiBodyError> {
             utc_year: year,
         });
     }
-    let Ok(year) = i32::try_from(year) else {
-        return Ok(None);
-    };
-    Ok(chrono::NaiveDate::from_ymd_opt(year, u.month(), u.day())
-        .and_then(|d| d.and_hms_nano_opt(u.hour(), u.minute(), u.second(), t.nanoseconds()))
-        .map(|at| {
-            at.and_utc()
-                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
-        }))
+    // Checked to be in 1..=9999 above, so the cast is exact.
+    Ok(
+        chrono::NaiveDate::from_ymd_opt(year as i32, u.month(), u.day())
+            .and_then(|d| d.and_hms_nano_opt(u.hour(), u.minute(), u.second(), t.nanoseconds()))
+            .map(|at| {
+                at.and_utc()
+                    .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+            }),
+    )
 }
 
 /// §8.1 (W9c Task 5): a typed value and an optional `kvType` -> the

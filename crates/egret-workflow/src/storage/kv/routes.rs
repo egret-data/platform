@@ -97,8 +97,8 @@ const AUDIT_RESOURCE: &str = "workflow_namespace_kv";
 pub const INHERITANCE: &str = "inheritance";
 
 /// The bulk delete's body cap, 1 MiB (W9c Task 6 fix round 1, review M8):
-/// 1,000 keys of 350 bytes, quoted and comma-separated, are 353,012 bytes
-/// of JSON, so a body this large has room for any whitespace. A larger one
+/// 1,000 keys of 350 bytes, quoted and comma-separated, are 353,010 bytes
+/// of compact JSON, so a body this large has room for any whitespace. A larger one
 /// is 413 naming this cap (not axum's default text), before it is parsed.
 pub const MAX_BULK_BODY_BYTES: usize = 1 << 20;
 
@@ -748,7 +748,7 @@ async fn delete_value(
         ("namespace" = String, Path, description = "The namespace"),
     ),
     request_body(
-        description = "`{\"keys\": [...]}`: at most 1,000 keys (a key named twice counts twice), in a body of at most 1 MiB (1,048,576 bytes). Every key is checked before anything is deleted.",
+        description = "`{\"keys\": [...]}`: at most 1,000 keys (a key named twice counts twice), in a body of at most 1 MiB (1,048,576 bytes). Keys need no JSON escaping; a body that `\\u`-escapes key characters can exceed the cap. Every key is checked before anything is deleted.",
         content((KvKeysBody = "application/json")),
     ),
     responses(
