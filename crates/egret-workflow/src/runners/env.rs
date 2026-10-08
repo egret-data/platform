@@ -1947,7 +1947,9 @@ pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderEr
 /// (`arbitrary_precision`: an integer keeps every digit, `{{ 1.5 }}` is the
 /// number `1.5`). Anything else is [`render_str`]'s `String` (`x {{ 1 }}`,
 /// `{{ 1 }}{{ 2 }}`, a literal `42`). Against w9c `typed_render` (W9c Task
-/// 5).
+/// 5). An expression the wrapper would change (brackets that do not pair up,
+/// `{{ 1) ~ (2 }}`; a top-level comma) is never wrapped: it fails, as
+/// Pebble fails it (`rewrite::parenthesizes_safely`; Task 5 review M3).
 ///
 /// The value `serde_json` builds is bounded by its own recursion limit (128
 /// levels), and every writer `toJson` reaches is bounded by the crate's value
@@ -1957,6 +1959,17 @@ pub fn render_typed(template: &str, cx: &RenderContext) -> Result<serde_json::Va
     let Some(inner) = super::rewrite::sole_expression(template) else {
         return render_str(template, cx).map(serde_json::Value::String);
     };
+    if !super::rewrite::parenthesizes_safely(inner) {
+        // Wrapped, the expression would mean something else (`{{ 1) ~ (2 }}`
+        // would become `(1) ~ (2)`): the template as written is rendered,
+        // so its syntax error is the renderer's own words. Should it render,
+        // it is still refused: its type cannot be kept without the wrapper.
+        render_str(template, cx)?;
+        return Err(RenderError::Template(format!(
+            "the expression {template:?} cannot be typed: its brackets do not pair up, or a \
+             comma stands outside them"
+        )));
+    }
     let text = render_str(&format!("{{{{ ({inner}) | toJson }}}}"), cx)?;
     serde_json::from_str(&text).map_err(|e| {
         RenderError::Template(format!(

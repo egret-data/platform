@@ -459,6 +459,36 @@ pub(crate) fn sole_expression(template: &str) -> Option<&str> {
     Some(inner)
 }
 
+/// W9c Task 5 fix round 1 (review M3): whether `inner` (a
+/// [`sole_expression`]) means the same once it is wrapped as `(inner)`: its
+/// brackets, read by the rewriter's own tokenizer (string literals skipped),
+/// pair up by kind and never close one that `inner` did not open, and no
+/// comma stands at the top level. `1) ~ (2` does not (wrapped, its `)` would
+/// close the wrapper's `(`, and `(1) ~ (2)` renders where the source is a
+/// syntax error); nor does `1, 2` (wrapped, a tuple). An unterminated
+/// string answers `false`.
+pub(crate) fn parenthesizes_safely(inner: &str) -> bool {
+    let Ok(tokens) = tokenize(inner) else {
+        return false;
+    };
+    let mut open: Vec<char> = Vec::new();
+    for t in &tokens {
+        match t {
+            Tok::LParen(_) => open.push(')'),
+            Tok::LBracket(_) => open.push(']'),
+            Tok::LBrace(_) => open.push('}'),
+            Tok::RParen(s) | Tok::RBracket(s) | Tok::RBrace(s) => {
+                if open.pop() != s.chars().next() {
+                    return false;
+                }
+            }
+            Tok::Text(s) if open.is_empty() && s.contains(',') => return false,
+            _ => {}
+        }
+    }
+    open.is_empty()
+}
+
 /// Splits a `-` whitespace-control marker off the front and/or back of a
 /// `{{ }}` / `{% %}` region's raw content (`Kestra`/Pebble/Jinja's
 /// `{{- ... -}}` / `{%- ... -%}` convention for trimming adjacent template

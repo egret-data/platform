@@ -557,13 +557,9 @@ fn render_typed_matches_the_artifact() {
                 chrono::DateTime::parse_from_rfc3339(inner).is_ok(),
                 "{name}: {got}"
             );
-        } else if name == "tr_div" {
-            // A RENDERER gap, not the KV store's: Pebble divides two
-            // integers as integers (`7 / 2` is 3), egret's renderer as
-            // floats. Pinned so a fix to the renderer is noticed here.
-            assert_eq!(cell["ion_bytes"], json!("3"));
-            assert_eq!(got, "3.5e0", "{name}");
         } else {
+            // `tr_div` included: chosen (the user's ruling, 2026-10-08),
+            // egret's float division `3.5e0` at its top level.
             assert_eq!(json!(got), cell["ion_bytes"], "{name}");
         }
         examined += 1;
@@ -625,6 +621,7 @@ fn set_and_put_render_a_yaml_map_by_one_rule() {
 fn every_set_coercion_matches_the_artifact() {
     let cx = RenderContext::new();
     let mut examined = 0;
+    let mut through_the_handler = 0;
     for (name, cell) in cells("set_coercion").as_object().unwrap() {
         if name.starts_with('_') {
             continue;
@@ -632,12 +629,18 @@ fn every_set_coercion_matches_the_artifact() {
         let input = &cell["input"];
         let raw = input["value"].as_str().unwrap();
         let kind = input["kvType"].as_str().unwrap();
-        let got: Result<KvValue, String> = match KvType::parse(kind) {
-            Some(t) => set_value(&json!(raw), Some(t), &cx).map_err(|e| e.to_string()),
-            None => Err(format!(
-                "`kvType` must be one of STRING, …, and it is {kind:?} (KvType::parse refused)"
-            )),
+        // A kvType that is not one of the seven names is refused by the
+        // handler, before the value: `kv_type_refusals_run_through_the_handler`.
+        let Some(t) = KvType::parse(kind) else {
+            assert!(
+                ["type_lower", "type_bad"].contains(&name.as_str()),
+                "{name}"
+            );
+            through_the_handler += 1;
+            continue;
         };
+        let got: Result<KvValue, String> =
+            set_value(&json!(raw), Some(t), &cx).map_err(|e| e.to_string());
         match cell["outcome"].as_str().unwrap() {
             "ok" => {
                 let v = got.unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -660,7 +663,7 @@ fn every_set_coercion_matches_the_artifact() {
         }
         examined += 1;
     }
-    assert_eq!(examined, 63);
+    assert_eq!((examined, through_the_handler), (61, 2));
     let mut types = 0;
     for (name, cell) in cells("types").as_object().unwrap() {
         if name.starts_with('_') {
@@ -761,6 +764,131 @@ async fn a_rendered_value_10000_deep_fails_set_and_put_as_the_authors() {
 // ---------------------------------------------------------------------------
 // Set and Get
 // ---------------------------------------------------------------------------
+
+/// w9c `set_coercion.type_lower` and `type_bad` through the `Set` handler
+/// (Task 5 review I2): a kvType that is not one of the seven names fails the
+/// task naming it, BEFORE the key rule and the write rule (a bad key in
+/// another namespace still fails on the kvType), and nothing is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn kv_type_refusals_run_through_the_handler() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let t = Tasks::new(&db.pool, Some(fs));
+    let mut examined = 0;
+    for name in ["type_lower", "type_bad"] {
+        let cell = &cells("set_coercion")[name];
+        let kind = cell["input"]["kvType"].as_str().unwrap();
+        let value = cell["input"]["value"].clone();
+        assert_eq!(cell["outcome"], json!("error"), "{name}");
+        for spec in [
+            json!({"key": "k", "value": value, "kvType": kind}),
+            json!({"key": "bad key", "value": value, "kvType": kind, "namespace": "w9c.else"}),
+        ] {
+            let m = t.go(ws, "w9c.kvt", kvt::SET, spec).await.failed();
+            assert_eq!(
+                m,
+                format!(
+                    "`kvType` must be one of STRING, NUMBER, BOOLEAN, DATETIME, DATE, DURATION \
+                     or JSON, and it is {kind:?}"
+                ),
+                "{name}"
+            );
+            for frag in cell["message_contains"].as_array().unwrap() {
+                assert!(m.contains(frag.as_str().unwrap()), "{name}: {m}");
+            }
+        }
+        examined += 1;
+    }
+    assert_eq!(examined, 2);
+    assert_eq!(count_rows(&db, ws, "w9c.kvt").await, 0);
+    assert_eq!(count_rows(&db, ws, "w9c.else").await, 0);
+}
+
+/// A run that is not a flow's task run has no namespace of its own: each
+/// of the six tasks fails naming that, and nothing is read or written
+/// (Task 5 review I2).
+#[tokio::test(flavor = "multi_thread")]
+async fn each_task_outside_a_flow_run_fails_naming_it() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let t = Tasks::new(&db.pool, Some(fs.clone()));
+    seed(&db, &fs, ws, "w9c.nf", "k", string("v")).await;
+    let want = "this run is not a task run of a flow's execution, so it has no namespace of its \
+                own to read or write the KV store from";
+    for (type_id, spec) in [
+        (
+            kvt::SET,
+            json!({"key": "k", "value": "v", "namespace": "w9c.nf"}),
+        ),
+        (kvt::GET, json!({"key": "k", "namespace": "w9c.nf"})),
+        (kvt::GET_KEYS, json!({"namespace": "w9c.nf"})),
+        (kvt::DELETE, json!({"key": "k", "namespace": "w9c.nf"})),
+        (
+            kvt::PUT,
+            json!({"key": "k", "value": {"b": 1}, "namespace": "w9c.nf"}),
+        ),
+        (
+            kvt::PURGE_KV,
+            json!({"behavior": {"type": "version", "keepAmount": 0}}),
+        ),
+    ] {
+        let mut task = input(ws, "w9c.nf", type_id, spec);
+        task.render = RenderContext::new();
+        assert_eq!(t.run(&task).await.failed(), want, "{type_id}");
+    }
+    assert_eq!(rows(&db, ws, "w9c.nf", "k").await.len(), 1);
+    assert_eq!(latest(&db, &fs, ws, "w9c.nf", "k").await, json!("v"));
+}
+
+/// Two YAML keys that render to one key are refused naming it, for `Set` and
+/// `Put` alike, where one value would silently be lost (Task 5 review M2).
+#[test]
+fn two_keys_rendering_to_one_key_are_refused_naming_it() {
+    let cx = RenderContext::new();
+    let raw = json!({"x": {"{{ 'a' }}": 1, "a": 2}});
+    let want = "`value.x`: two keys render to the same key 'a', so one value would be lost; \
+                render them to different keys";
+    for got in [
+        render_value(&raw, &cx).map(|_| ()),
+        set_value(&raw, None, &cx).map(|_| ()),
+        put_patch(&raw, &cx).map(|_| ()),
+    ] {
+        assert!(
+            matches!(&got, Err(NsError::Author(m)) if m == want),
+            "{got:?}"
+        );
+    }
+    // Distinct keys are kept, each with its value.
+    assert_eq!(
+        render_value(&json!({"{{ 'a' }}": 1, "b": 2}), &cx).unwrap(),
+        json!({"a": 1, "b": 2})
+    );
+}
+
+/// The typed render never changes what an expression means by wrapping it
+/// (Task 5 review M3): `{{ 1) ~ (2 }}` is a syntax error, as in Pebble, not
+/// the number 12; a top-level comma is not a tuple. Brackets inside a string
+/// and balanced ones are kept.
+#[test]
+fn render_typed_fails_an_expression_the_wrapper_would_change() {
+    let cx = RenderContext::new();
+    for template in ["{{ 1) ~ (2 }}", "{{ 1 ] ~ [ 2 }}", "{{ 1, 2 }}", "{{ (1 }}"] {
+        let e = render_typed(template, &cx).unwrap_err().to_string();
+        assert!(e.contains("syntax error"), "{template}: {e}");
+    }
+    for (template, want) in [
+        ("{{ (1) ~ (2) }}", json!("12")),
+        ("{{ ')' ~ '(' }}", json!(")(")),
+        ("{{ [1, 2] }}", json!([1, 2])),
+        ("{{ {'a': 1, 'b': [2, 3]} }}", json!({"a": 1, "b": [2, 3]})),
+    ] {
+        assert_eq!(render_typed(template, &cx).unwrap(), want, "{template}");
+    }
+}
 
 /// w9c `types`: Set (as the cell), then Get's `outputs.value` JSON-equal
 /// `get_value`, and the stored bytes `ion_bytes`.
@@ -923,7 +1051,7 @@ async fn set_ttl_zero_negative_and_malformed_as_measured() {
 
 /// w9c `write_scope`: a write, delete or purge of another namespace fails
 /// naming it and touches nothing; a read of a namespace with no KV answers
-/// null. Mutation (a) (`Set` with `Access::Read`) dies here.
+/// `{}`, no `value` field. Mutation (a) (`Set` with `Access::Read`) dies here.
 #[tokio::test(flavor = "multi_thread")]
 async fn set_in_another_namespace_is_refused_naming_it_and_writes_nothing() {
     let _turn = SERIAL.lock().await;
@@ -1177,10 +1305,8 @@ async fn seed_inheritance(db: &Db, fs: &FileStore, ws: Uuid) {
 /// the flow's own; `GetKeys` and `Delete` never walk. Mutation (b) (a walk
 /// for any namespace) dies at `get_top_ns_parent_N1`.
 ///
-/// `get_top_ns_parent_N1` is measured as `{}`: Kestra's outputs omit a null
-/// field. egret outputs `{"value": null}` (the brief, and w9c
-/// `write_scope.get_nonexistent`), which reads the same in an expression;
-/// this test compares the cell with its null fields dropped.
+/// `get_top_ns_parent_N1` is measured as `{}`: a missing key's output has
+/// no `value` field, on Kestra and on egret (Task 5 fix round 1, Concern 2).
 #[tokio::test(flavor = "multi_thread")]
 async fn get_walks_only_when_its_namespace_is_the_flows() {
     let _turn = SERIAL.lock().await;
@@ -1189,10 +1315,6 @@ async fn get_walks_only_when_its_namespace_is_the_flows() {
     };
     seed_inheritance(&db, &fs, ws).await;
     let t = Tasks::new(&db.pool, Some(fs));
-    let drop_nulls = |v: Value| match v {
-        Value::Object(m) => Value::Object(m.into_iter().filter(|(_, v)| !v.is_null()).collect()),
-        other => other,
-    };
     let mut examined = 0;
     for (name, cell) in cells("inheritance").as_object().unwrap() {
         let Some(task) = cell.get("task").filter(|t| {
@@ -1207,7 +1329,7 @@ async fn get_walks_only_when_its_namespace_is_the_flows() {
         spec.as_object_mut().unwrap().remove("type");
         let got = t.go(ws, "w9c.inh.a.b", &type_id, spec).await;
         match cell["outcome"].as_str().unwrap() {
-            "ok" => assert_eq!(drop_nulls(got.ok()), cell["outputs"], "{name}"),
+            "ok" => assert_eq!(got.ok(), cell["outputs"], "{name}"),
             _ => assert_eq!(json!(got.failed()), cell["message"], "{name}"),
         }
         examined += 1;
@@ -1232,12 +1354,12 @@ async fn get_missing_under_each_error_on_missing() {
     expire_latest(&db, ws, ns, "exp").await;
     for k in ["never", "del", "exp"] {
         let got = t.go(ws, ns, kvt::GET, json!({"key": k})).await.ok();
-        assert_eq!(got, json!({"value": null}), "{k}");
+        assert_eq!(got, json!({}), "{k}");
         let got = t
             .go(ws, ns, kvt::GET, json!({"key": k, "errorOnMissing": false}))
             .await
             .ok();
-        assert_eq!(got, json!({"value": null}), "{k}");
+        assert_eq!(got, json!({}), "{k}");
         let m = t
             .go(
                 ws,
@@ -1822,8 +1944,11 @@ async fn purge_kv_key_pattern_and_namespace_pattern_are_wildcards() {
 }
 
 /// A listed namespace outside the rule fails the task naming it, and
-/// NOTHING is purged, not even the listed namespaces before it (mutation
-/// (f) dies here).
+/// NOTHING is purged, not even the listed namespaces before it. The refused
+/// namespace sorts AFTER the allowed ones (`w9c.owx` > `w9c.own.c`; the
+/// purge runs in byte order), so a purge that authorized namespace by
+/// namespace inside `run_purge` would purge `w9c.own` and `w9c.own.c` first:
+/// the brief's mutation (f) dies here (Task 5 review I1).
 #[tokio::test(flavor = "multi_thread")]
 async fn purge_kv_refuses_a_listed_namespace_outside_the_rule_before_purging_anything() {
     let _turn = SERIAL.lock().await;
@@ -1831,22 +1956,34 @@ async fn purge_kv_refuses_a_listed_namespace_outside_the_rule_before_purging_any
         return;
     };
     let t = Tasks::new(&db.pool, Some(fs));
-    seed_expired(&db, ws, &["w9c.own", "w9c.own.c", "w9c.other"], "x").await;
+    let all = ["w9c.own", "w9c.own.c", "w9c.owx"];
+    seed_expired(&db, ws, &all, "x").await;
     let m = t
         .go(
             ws,
             "w9c.own",
             kvt::PURGE_KV,
-            json!({"namespaces": ["w9c.own", "w9c.own.c", "w9c.other"]}),
+            json!({"namespaces": ["w9c.owx", "w9c.own.c", "w9c.own"]}),
         )
         .await
         .failed();
-    assert!(
-        m.contains("'w9c.other'") && m.contains("purges only"),
-        "{m}"
-    );
-    for ns in ["w9c.own", "w9c.own.c", "w9c.other"] {
+    assert!(m.contains("'w9c.owx'") && m.contains("purges only"), "{m}");
+    for ns in all {
         assert_eq!(count_rows(&db, ws, ns).await, 1, "{ns}");
+    }
+    // The control: without the refused one, both are purged.
+    let got = t
+        .go(
+            ws,
+            "w9c.own",
+            kvt::PURGE_KV,
+            json!({"namespaces": ["w9c.own", "w9c.own.c"], "includeChildNamespaces": false}),
+        )
+        .await
+        .ok();
+    assert_eq!(got, json!({"size": 2}));
+    for (ns, left) in [("w9c.own", 0), ("w9c.own.c", 0), ("w9c.owx", 1)] {
+        assert_eq!(count_rows(&db, ws, ns).await, left, "{ns}");
     }
     // Both lists at once: Kestra's message.
     let m = t
@@ -1859,6 +1996,134 @@ async fn purge_kv_refuses_a_listed_namespace_outside_the_rule_before_purging_any
         .await
         .failed();
     assert!(m.contains("can't be used at the same time"), "{m}");
+}
+
+/// The 64-namespace cap (`MAX_NAMESPACES`), on both paths, counting
+/// DISTINCT namespaces (Task 5 review I2, M6): 65 listed fails naming 65
+/// before anything is read; 65 entries naming one namespace is one; a
+/// default scope resolving to 65 (own + 64 children holding KV) fails naming
+/// 65, and one resolving to 64 purges. Nothing is purged by a refusal.
+#[tokio::test(flavor = "multi_thread")]
+async fn purge_kv_covers_at_most_64_distinct_namespaces_on_either_path() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let t = Tasks::new(&db.pool, Some(fs));
+    let children: Vec<String> = (0..64).map(|i| format!("w9c.cap.c{i:02}")).collect();
+    let refs: Vec<&str> = children.iter().map(String::as_str).collect();
+    seed_expired(&db, ws, &refs, "x").await;
+    seed_expired(&db, ws, &["w9c.cap"], "x").await;
+
+    // Listed: 65 distinct (own + 64 children) is refused naming 65.
+    let mut listed: Vec<String> = children.clone();
+    listed.push("w9c.cap".to_string());
+    let m = t
+        .go(
+            ws,
+            "w9c.cap",
+            kvt::PURGE_KV,
+            json!({"namespaces": listed, "includeChildNamespaces": false}),
+        )
+        .await
+        .failed();
+    assert!(
+        m.contains("`namespaces` names 65 namespaces, more than the 64"),
+        "{m}"
+    );
+    // The default scope: own + 64 children = 65 is refused naming 65.
+    let m = t.go(ws, "w9c.cap", kvt::PURGE_KV, json!({})).await.failed();
+    assert!(
+        m.contains("65 namespaces would be purged, more than the 64"),
+        "{m}"
+    );
+    assert_eq!(count_rows(&db, ws, "w9c.cap").await, 1);
+    for ns in &refs {
+        assert_eq!(count_rows(&db, ws, ns).await, 1, "{ns}: untouched");
+    }
+    // 65 entries naming ONE namespace are one namespace.
+    let one = vec!["w9c.cap"; 65];
+    let got = t
+        .go(
+            ws,
+            "w9c.cap",
+            kvt::PURGE_KV,
+            json!({"namespaces": one, "includeChildNamespaces": false}),
+        )
+        .await
+        .ok();
+    assert_eq!(got, json!({"size": 1}));
+    // Own (now empty of KV) + 63 children holding KV = 64: purged.
+    sqlx::query("DELETE FROM workflow.kv_entries WHERE workspace_id = $1 AND namespace = $2")
+        .bind(ws)
+        .bind("w9c.cap.c63")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let got = t.go(ws, "w9c.cap", kvt::PURGE_KV, json!({})).await.ok();
+    assert_eq!(got, json!({"size": 63}));
+}
+
+/// Every refusal of `behavior` (Task 5 review I2), through the task, each
+/// naming what is wrong, with nothing purged.
+#[tokio::test(flavor = "multi_thread")]
+async fn purge_kv_refuses_each_malformed_behavior_naming_it() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let t = Tasks::new(&db.pool, Some(fs));
+    seed_purge(&db, ws, "w9c.pb").await;
+    let before = surviving(&db, ws, "w9c.pb").await;
+    let key_only = "`behavior` of type \"key\" takes only `expiredOnly`; `keepAmount` and \
+                    `before` belong to type \"version\"";
+    let instant = "`behavior.before` must be an ISO 8601 instant such as 2025-01-01T00:00:00Z";
+    for (behavior, want) in [
+        (json!({"type": "key", "keepAmount": 1}), key_only),
+        (
+            json!({"type": "key", "before": "2025-01-01T00:00:00Z"}),
+            key_only,
+        ),
+        (
+            json!({"type": "version", "expiredOnly": true, "keepAmount": 1}),
+            "`behavior` of type \"version\" takes `keepAmount` or `before`; `expiredOnly` \
+             belongs to type \"key\"",
+        ),
+        (
+            json!({"type": "foo"}),
+            "`behavior.type` must be \"key\" or \"version\", and it is \"foo\"",
+        ),
+        (
+            json!({}),
+            "`behavior.type` must be \"key\" or \"version\", and it is missing",
+        ),
+        (
+            json!({"type": "key", "expiredOnly": "maybe"}),
+            "`behavior.expiredOnly` must be true or false, and it is \"maybe\"",
+        ),
+        (
+            json!({"type": "version", "keepAmount": -1}),
+            "`behavior.keepAmount` must be a whole number, 0 or more, and it is -1",
+        ),
+        (
+            json!({"type": "version", "keepAmount": 1.5}),
+            "`behavior.keepAmount` must be a whole number, 0 or more, and it is 1.5",
+        ),
+        (json!({"type": "version", "before": "yesterday"}), instant),
+        (json!({"type": "version", "before": 5}), instant),
+    ] {
+        let m = t
+            .go(
+                ws,
+                "w9c.pb",
+                kvt::PURGE_KV,
+                json!({"behavior": behavior.clone()}),
+            )
+            .await
+            .failed();
+        assert!(m.starts_with(want), "{behavior}: {m}");
+        assert_eq!(surviving(&db, ws, "w9c.pb").await, before, "{behavior}");
+    }
 }
 
 /// `max_namespace_files` 3, 8 keys (some of two revisions): pages past one

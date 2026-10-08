@@ -41,7 +41,10 @@
 //! A value the KV store refuses maps through `store::unstorable` by its
 //! variant ([`set_value`], [`put_patch`]); `NsError::{Store, Db}` and a pool
 //! that cannot connect are infrastructure: `Err`, so the lease lapses and
-//! the run is re-claimed with no attempt spent. A re-claim of the same task
+//! the run is re-claimed with no attempt spent. egret's own bug (`Get`'s
+//! walk answering a namespace it did not ask, a panic in the detached purge)
+//! fails the run once, "internal error (an egret bug, not retried)", as the
+//! store's wrong grant does. A re-claim of the same task
 //! run is idempotent: `Set` and `Put` skip a key whose latest revision this
 //! run wrote, `Delete` answers `deleted: true` for a key this run deleted,
 //! and `PurgeKV` recomputes from the rows as they are.
@@ -196,6 +199,41 @@ fn not_a_flow_run() -> String {
         .to_string()
 }
 
+/// egret's own bug, as the store classes one (`store::wrong_grant`): the task
+/// fails, loudly and once. NOT `Err`, which lets the lease lapse and
+/// re-claims the run for ever (Task 5 review M1).
+fn egret_bug(why: impl std::fmt::Display) -> String {
+    format!("internal error (an egret bug, not retried): {why}")
+}
+
+/// `Get`'s grant for the namespace its walk answered: one it asked for,
+/// else egret's bug (a failed run, never re-claimed).
+fn grant_for<'g>(grants: &'g [Grant], answered: &str) -> std::result::Result<&'g Grant, String> {
+    grants
+        .iter()
+        .find(|g| g.namespace() == answered)
+        .ok_or_else(|| {
+            egret_bug(format!(
+                "egret's KV walk answered namespace '{answered}', which it did not ask"
+            ))
+        })
+}
+
+/// The detached purge's join: a panic in it is egret's bug, a failed run
+/// (Task 5 review M1). A cancelled join (the runtime shutting down) is the
+/// worker's: `Err`, re-claimed by another worker.
+fn joined<T>(
+    joined: std::result::Result<T, tokio::task::JoinError>,
+) -> Result<std::result::Result<T, String>> {
+    match joined {
+        Ok(v) => Ok(Ok(v)),
+        Err(e) if e.is_panic() => Ok(Err(egret_bug(format!("the purge panicked: {e}")))),
+        Err(e) => Err(Error::Internal(anyhow::anyhow!(
+            "{PURGE_KV}: the purge stopped: {e}"
+        ))),
+    }
+}
+
 fn db_err(type_id: &str, e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!(
         "{type_id}: the database is unavailable: {e}"
@@ -307,6 +345,14 @@ fn walk_value(raw: &Value, cx: &RenderContext, at: &str) -> std::result::Result<
             for (name, item) in map {
                 let shown = format!("{at}.{name}");
                 let key = render_str(name, cx).map_err(|e| failed(&shown, e))?;
+                // Two keys rendering to one text: which value survived would
+                // depend on the map's order (Task 5 review M2).
+                if out.contains_key(&key) {
+                    return Err(NsError::Author(format!(
+                        "`{at}`: two keys render to the same key '{key}', so one value would be \
+                         lost; render them to different keys"
+                    )));
+                }
                 out.insert(key, walk_value(item, cx, &shown)?);
             }
             Value::Object(out)
@@ -557,18 +603,16 @@ impl TaskHandler for GetKv {
         let entry = match found {
             Ok(Some(e)) => e,
             Ok(None) if error_on_missing => return fail(no_value(&key, &target)),
-            Ok(None) => {
-                return Ok(Outcome::succeeded_with(
-                    serde_json::json!({ "value": null }),
-                ))
-            }
+            // No `value` field, as the artifact's outputs omit a null one
+            // (w9c `inheritance.get_top_ns_parent_N1`, measured `{}`): an
+            // expression reading `outputs.<id>.value` then fails as on
+            // Kestra, and `is defined` is false (Task 5 review, Concern 2).
+            Ok(None) => return Ok(Outcome::succeeded_with(serde_json::json!({}))),
             Err(e) => return split(T, e).map(Outcome::failed_with),
         };
-        let Some(grant) = grants.iter().find(|g| g.namespace() == entry.namespace) else {
-            return Err(Error::Internal(anyhow::anyhow!(
-                "{T}: egret's KV walk answered namespace '{}', which it did not ask",
-                entry.namespace
-            )));
+        let grant = match grant_for(&grants, &entry.namespace) {
+            Ok(g) => g,
+            Err(why) => return fail(why),
         };
         match read_value(&self.pool, fs, grant, &entry).await {
             Ok(data) => Ok(Outcome::succeeded_with(
@@ -1041,13 +1085,6 @@ fn judge(rows: &[PurgeRow], behavior: Behavior) -> Vec<i64> {
     }
 }
 
-/// `ns` is `own` or one of its children, on a DOT boundary (`a.bc` is not a
-/// child of `a.b`).
-fn own_or_child(ns: &str, own: &str) -> bool {
-    ns.strip_prefix(own)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
-}
-
 /// `ns` is a child of `parent` on a dot boundary.
 fn child_of(ns: &str, parent: &str) -> bool {
     ns.strip_prefix(parent)
@@ -1093,7 +1130,7 @@ fn purge_namespaces(
             }
         }
         // The candidates ARE the flow's own namespace and its children: the
-        // dot boundary is `own_or_child`'s, decided once, where they are read.
+        // dot boundary is `namespaces_with_kv`'s, decided once, in SQL.
         None => {
             if include_children {
                 out.extend(candidates.iter().cloned());
@@ -1249,7 +1286,14 @@ impl TaskHandler for PurgeKv {
                 (.., Err(e), _) | (.., Err(e)) => return fail(e),
             };
         // Kestra's emptiness tests: an empty list and a blank pattern are absent.
-        let listed = namespaces.filter(|l| !l.is_empty());
+        // Each listed namespace once, in the order written: the cap counts
+        // distinct namespaces (Task 5 review M6).
+        let listed = namespaces.filter(|l| !l.is_empty()).map(|l| {
+            let mut seen = BTreeSet::new();
+            l.into_iter()
+                .filter(|ns| seen.insert(ns.clone()))
+                .collect::<Vec<_>>()
+        });
         let pattern = pattern.filter(|p| !p.trim().is_empty());
         let key_pattern = key_pattern.filter(|p| !p.trim().is_empty());
         if listed.is_some() && pattern.is_some() {
@@ -1290,17 +1334,14 @@ impl TaskHandler for PurgeKv {
             }
         }
         // The candidates: the namespaces holding KV that are the flow's own
-        // or its children, on a dot boundary.
+        // or its children, on a dot boundary, filtered in SQL (review M7).
         let candidates: Vec<String> = if pattern.is_some() || children {
-            let all = {
+            let found = {
                 let mut conn = self.pool.acquire().await.map_err(|e| db_err(T, e))?;
-                namespaces_with_kv(&mut conn, task.workspace_id).await
+                namespaces_with_kv(&mut conn, task.workspace_id, &own).await
             };
-            match all {
-                Ok(all) => all
-                    .into_iter()
-                    .filter(|ns| own_or_child(ns, &own))
-                    .collect(),
+            match found {
+                Ok(found) => found,
                 Err(e) => return split(T, e).map(Outcome::failed_with),
             }
         } else {
@@ -1357,20 +1398,22 @@ impl TaskHandler for PurgeKv {
         // Detached (spec §8.6): once started, the purge runs to completion
         // even if this run is dropped.
         let cap = fs.caps.max_namespace_files;
-        let purged = tokio::spawn(run_purge(
-            self.pool.clone(),
-            fs.clone(),
-            grants,
-            key_pattern.map(Arc::from),
-            behavior,
-            cap,
-        ))
-        .await
-        .map_err(|e| Error::Internal(anyhow::anyhow!("{T}: the purge stopped: {e}")))?;
+        let purged = joined(
+            tokio::spawn(run_purge(
+                self.pool.clone(),
+                fs.clone(),
+                grants,
+                key_pattern.map(Arc::from),
+                behavior,
+                cap,
+            ))
+            .await,
+        )?;
         let purged = match purged {
-            Ok(Ok(n)) => n,
-            Ok(Err(why)) => return fail(why),
-            Err(e) => return split(T, e).map(Outcome::failed_with),
+            Err(why) => return fail(why),
+            Ok(Ok(Ok(n))) => n,
+            Ok(Ok(Err(why))) => return fail(why),
+            Ok(Err(e)) => return split(T, e).map(Outcome::failed_with),
         };
         task.log
             .line(LogLevel::Info, &format!("purged {purged} revisions"))
@@ -1392,13 +1435,49 @@ mod tests {
 
     #[test]
     fn children_are_cut_at_a_dot() {
-        assert!(own_or_child("a.b", "a.b"));
-        assert!(own_or_child("a.b.c", "a.b"));
-        assert!(!own_or_child("a.bc", "a.b"));
-        assert!(!own_or_child("a", "a.b"));
         assert!(child_of("a.b.c", "a.b"));
         assert!(!child_of("a.b", "a.b"));
         assert!(!child_of("a.bc", "a.b"));
+    }
+
+    /// Task 5 review M1: `Get`'s walk answering a namespace it did not ask
+    /// is egret's bug, a failed run (not `Err`, which re-claims for ever).
+    #[test]
+    fn a_walk_answering_an_unasked_namespace_is_an_egret_bug_not_retried() {
+        let ws = uuid::Uuid::new_v4();
+        let grants: Vec<Grant> = ["a.b", "a"]
+            .iter()
+            .map(|ns| authorize(ws, Actor::Api, ns, Resource::Kv, Access::Read).unwrap())
+            .collect();
+        assert_eq!(grant_for(&grants, "a").unwrap().namespace(), "a");
+        assert_eq!(
+            grant_for(&grants, "x").unwrap_err(),
+            "internal error (an egret bug, not retried): egret's KV walk answered namespace \
+             'x', which it did not ask"
+        );
+    }
+
+    /// Task 5 review M1: a panic in the detached purge is egret's bug, a
+    /// failed run; a cancelled join (the runtime going down) is the
+    /// worker's `Err`, re-claimed.
+    #[tokio::test]
+    async fn a_panicking_purge_is_an_egret_bug_and_a_cancelled_one_the_workers() {
+        let panicked = tokio::spawn(async {
+            if true {
+                panic!("boom");
+            }
+            7u64
+        })
+        .await;
+        let why = joined(panicked).unwrap().unwrap_err();
+        assert!(
+            why.starts_with("internal error (an egret bug, not retried): the purge panicked:"),
+            "{why}"
+        );
+        let pending = tokio::spawn(std::future::pending::<u64>());
+        pending.abort();
+        assert!(joined(pending.await).is_err());
+        assert_eq!(joined(tokio::spawn(async { 7u64 }).await).unwrap(), Ok(7));
     }
 
     #[test]

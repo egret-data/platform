@@ -525,17 +525,24 @@ pub async fn rows_page(
     entries(rows)
 }
 
-/// The namespaces of `workspace` holding at least one row, in byte order
-/// (PurgeKV's candidates, Task 5).
+/// The namespaces of `workspace` holding at least one row that are `under`
+/// or its children on a DOT boundary (`a.bc` is not a child of `a.b`), in
+/// byte order: PurgeKV's candidates (Task 5; filtered here, not in Rust, so
+/// a workspace's other namespaces are never read, Task 5 review M7). The
+/// prefix is matched with `left`, never `LIKE` (`_` is legal in a namespace).
 pub async fn namespaces_with_kv(
     conn: &mut PgConnection,
     workspace: Uuid,
+    under: &str,
 ) -> Result<Vec<String>, NsError> {
     sqlx::query_scalar(
         "SELECT DISTINCT namespace COLLATE \"C\" FROM workflow.kv_entries \
-         WHERE workspace_id = $1 ORDER BY 1",
+         WHERE workspace_id = $1 \
+           AND (namespace = $2 OR left(namespace, length($2) + 1) = $2 || '.') \
+         ORDER BY 1",
     )
     .bind(workspace)
+    .bind(under)
     .fetch_all(&mut *conn)
     .await
     .map_err(db_err)

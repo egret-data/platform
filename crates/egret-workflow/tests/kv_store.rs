@@ -415,7 +415,7 @@ async fn a_read_never_writes() {
         .await
         .unwrap();
     rows_page(&mut c, &g, None, 10).await.unwrap();
-    namespaces_with_kv(&mut c, ws).await.unwrap();
+    namespaces_with_kv(&mut c, ws, "w9c").await.unwrap();
     drop(c);
 
     let after = (table_state(&db, ws).await, {
@@ -716,7 +716,7 @@ async fn the_same_key_in_two_workspaces_resolves_to_the_grants_row_only() {
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(namespaces_with_kv(&mut c, ws).await.unwrap(), [NS]);
+    assert_eq!(namespaces_with_kv(&mut c, ws, NS).await.unwrap(), [NS]);
     // A namespace of another workspace answers as an empty one.
     let ge = grant(empty, NS);
     let err = resolve(&mut c, &ge, &key("k"), Want::Latest)
@@ -738,7 +738,10 @@ async fn the_same_key_in_two_workspaces_resolves_to_the_grants_row_only() {
             .unwrap()
             .is_none()
     );
-    assert!(namespaces_with_kv(&mut c, empty).await.unwrap().is_empty());
+    assert!(namespaces_with_kv(&mut c, empty, NS)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

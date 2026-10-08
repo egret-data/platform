@@ -2456,10 +2456,18 @@
    "tr_div": {
     "value": "{{ 7 / 2 }}",
     "outcome": "ok",
-    "ion_bytes": "3",
+    "ion_bytes": "3.5e0",
     "stored_type": "NUMBER",
-    "basis": "measured",
-    "compare": "outcome exact; ion_bytes byte-exact; stored_type exact"
+    "basis": "chosen",
+    "compare": "outcome exact; ion_bytes byte-exact; stored_type exact",
+    "kestra": {
+     "outcome": "ok",
+     "ion_bytes": "3",
+     "stored_type": "NUMBER"
+    },
+    "why": "RULED 2026-10-08 by the user (Task 5 review, Concern 1): egret keeps its renderer's float division, so `{{ 7 / 2 }}` stores the float 3.5 (`3.5e0`); Pebble divides two integers as integers and stores 3. This is a renderer gap, not the KV store's: every egret render divides as floats. A renderer-wide fix is a follow-up after W9c (spec header, §2, §15)",
+    "diverges_state": false,
+    "diverges_state_why": "the cell Sets its own key (tr_div) once; no other cell reads it (typed_render._independent)"
    },
    "_independent": "each cell Sets its own key (the cell's name) in w9c.render, once"
   },
@@ -8796,9 +8804,7 @@
    },
    "get_nonexistent": {
     "outcome": "ok",
-    "outputs": {
-     "value": null
-    },
+    "outputs": {},
     "basis": "chosen",
     "compare": "outcome exact; message contains the namespace",
     "kestra": {
@@ -8807,7 +8813,8 @@
     },
     "why": "spec §2 row 1 / §5 (user decision 2026-10-07): any namespace of the workspace is readable, existing or not; egret has no namespace table, so a namespace with no KV simply has no keys",
     "flow_namespace": "w9c.wsp.ws",
-    "target": "w9c.nowhere2"
+    "target": "w9c.nowhere2",
+    "note": "2026-10-08 (Task 5 fix round 1, Concern 2): `{}`, no `value` field, as the artifact's Get outputs a missing key (inheritance.get_top_ns_parent_N1, measured); the cell is chosen for the namespace-existence divergence only"
    },
    "purge_other_existing": {
     "outcome": "error",
@@ -9680,6 +9687,11 @@
     "path": "put_merge.code_dot_map_leaf_dropped",
     "pointer": "/put_merge/code_dot_map_leaf_dropped",
     "why": "RULED 2026-10-07 by the user (Task 3 review I2; spec header, §2): keyed `value` entries whose dotted paths conflict (one key's path is a leaf that another key also sets or writes inside) are refused with an author error naming both keys. A MAP-valued leaf is no exception: MapUtils.flattenToNestedMap (MapUtils.java:193-219) nests the entries in HashMap bucket order ((h ^ h>>>16) & 15), not entry order. When the leaf's key comes first (`a` bucket 1, `a.b` bucket 4) the dotted key writes into the leaf's map: {x:1,a:{z:1,b:2}} in both entry orders; when the dotted key comes first (`m.b` bucket 0, `m` bucket 13) the leaf hits 'Conflict at key … ignoring it' and is dropped: {x:1,m:{b:2}} in both entry orders (jshell on w9c-kestra.jar, Task 3 fix round 2). The result depends on the key's hash, so egret refuses; `kestra` is the artifact's Put.mergeValues measured in jshell (Task 3 review I2, w9c-kestra.jar)"
+   },
+   {
+    "path": "typed_render.tr_div",
+    "pointer": "/typed_render/tr_div",
+    "why": "RULED 2026-10-08 by the user (Task 5 review, Concern 1): egret keeps its renderer's float division, so `{{ 7 / 2 }}` stores the float 3.5 (`3.5e0`); Pebble divides two integers as integers and stores 3. This is a renderer gap, not the KV store's: every egret render divides as floats. A renderer-wide fix is a follow-up after W9c (spec header, §2, §15)"
    }
   ]
  },
