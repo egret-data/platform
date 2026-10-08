@@ -23,6 +23,15 @@
 //! (`runners::env::render_str`), and the tokio worker that spawned it waits in
 //! `join`. That needs the multi-thread runtime (global constraints).
 //!
+//! **Only outside a transaction** (W9c Task 9, the user's ruling on W9c's
+//! final review F2): a [`Snapshot`] is the scope of a handler's render and of
+//! the prefetch's fetch. A render INSIDE a transaction -- `settle`'s -- gets
+//! [`scope_in_transaction`], whose scope (`storage::prefetch::InTransaction`)
+//! holds the same resolutions, taken the same way, but no store and no
+//! connect options: every body, namespace-file and KV read there is answered
+//! from the transaction owner's cache, and a miss is fetched by a
+//! [`Snapshot`] with the transaction rolled back.
+//!
 //! # Namespace files (W9b Task 4, 2026-10-05)
 //!
 //! Execution files are snapshot-only, for the reason above. **Namespace files
