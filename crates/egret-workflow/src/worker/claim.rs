@@ -60,6 +60,8 @@
 //!   was invisible for a whole package: the only caller `resume` had was one
 //!   that had already moved the clock itself.
 
+use std::collections::VecDeque;
+
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool, Row};
@@ -1843,7 +1845,7 @@ pub(super) struct Lease {
 /// together or none does. That is the plan's Global Constraint one level up
 /// from where Task 2 left it: with a spawner, "the execution has not moved"
 /// includes "the iteration it started does not exist".
-pub(super) async fn settle(
+async fn settle(
     conn: &mut PgConnection,
     ctx: &ExecutionCtx,
     before: &ExecutionState,
@@ -1851,13 +1853,143 @@ pub(super) async fn settle(
     now: Tick,
     release: Option<Lease>,
 ) -> Result<()> {
-    let settled = settle_head(conn, ctx, before, state, now, release).await?;
-    walk(conn, settled).await
+    walk(
+        conn,
+        Frame {
+            ctx: Held::Borrowed(ctx),
+            before: before.clone(),
+            state: state.clone(),
+            now,
+            release,
+            jobs: VecDeque::new(),
+            phase: Phase::Begin,
+        },
+    )
+    .await
 }
 
-/// What [`settle_head`] leaves to do: step 4 (tell a parent) and the outage
-/// check -- the TAIL of one `settle`, carried as data so [`walk`] can run a
-/// chain of them without nesting one frame inside the next.
+/// The context a [`Frame`] settles: the owner's own, for the settle an owner
+/// starts ([`settle`]), or one the frame owns, for every settle started
+/// inside it.
+enum Held<'a> {
+    Borrowed(&'a ExecutionCtx),
+    Owned(Box<ExecutionCtx>),
+}
+
+impl std::ops::Deref for Held<'_> {
+    type Target = ExecutionCtx;
+    fn deref(&self) -> &ExecutionCtx {
+        match self {
+            Held::Borrowed(ctx) => ctx,
+            Held::Owned(ctx) => ctx,
+        }
+    }
+}
+
+/// **One settle, as data** (W9c Task 9 fix round 3, re-review C2/C3): its
+/// context and states, the phase it has reached, and the settles it started
+/// and has not run yet.
+///
+/// A settle starts other settles from its HEAD as well as from its tail: a
+/// `Loop` iteration's first settle (`spawn::open_batch`), a `Subflow` child's
+/// first settle and the completion of a refused or `wait: false` one
+/// (`subflow::spawn_one`), a replay's first settle or its refusal
+/// (`replay::spawn_due`). Each of those used to run inline, head AND walk, so
+/// a chain that came back through one of them -- a sequential `Loop` whose
+/// `Subflow` is refused (C2), a sequential `Loop` inside another (C3) --
+/// nested one settle per iteration on the Rust stack and aborted the
+/// process. Now none of them can run a settle at all: they return [`Job`]s,
+/// and only [`walk`] -- private to this module, called only by [`settle`],
+/// which only the transaction owners call -- runs one. A frame runs its jobs
+/// in order, each to the end of its own tail, before its next phase, which
+/// is exactly where the inline call ran it.
+pub(super) struct Frame<'a> {
+    ctx: Held<'a>,
+    before: ExecutionState,
+    state: ExecutionState,
+    now: Tick,
+    release: Option<Lease>,
+    /// Settles this one has started and not yet run, in order.
+    jobs: VecDeque<Job>,
+    phase: Phase,
+}
+
+impl Frame<'static> {
+    /// A new execution's first settle: from the empty state, at `Tick(0)` --
+    /// a `Tick` is milliseconds since the EXECUTION was created and this is
+    /// that instant, for the execution's own clock.
+    pub(super) fn first(ctx: ExecutionCtx) -> Self {
+        let empty = ExecutionState::new(&ctx.plan);
+        Frame {
+            state: empty.clone(),
+            before: empty,
+            ctx: Held::Owned(Box::new(ctx)),
+            now: Tick(0),
+            release: None,
+            jobs: VecDeque::new(),
+            phase: Phase::Begin,
+        }
+    }
+
+    /// A settle of a loaded execution, `state` being `before` with the
+    /// caller's commands applied.
+    pub(super) fn loaded(
+        ctx: ExecutionCtx,
+        before: ExecutionState,
+        state: ExecutionState,
+        now: Tick,
+    ) -> Self {
+        Frame {
+            ctx: Held::Owned(Box::new(ctx)),
+            before,
+            state,
+            now,
+            release: None,
+            jobs: VecDeque::new(),
+            phase: Phase::Begin,
+        }
+    }
+}
+
+/// A settle some code started, for [`walk`] to run: what every function that
+/// used to call `settle` returns instead.
+pub(super) enum Job {
+    /// A settle whose context and state are built.
+    Settle(Box<Frame<'static>>),
+    /// `subflow::complete`: load the execution, write the run's outputs and
+    /// message, apply the states, and settle -- opened when the walk reaches
+    /// it, which is where the call used to run.
+    Complete(subflow::Completion),
+}
+
+/// Where a [`Frame`]'s head has got to: steps 1-3 of the settle and the
+/// outbox, cut at every point that can start another settle.
+enum Phase {
+    /// Steps 1-2: render, drive, persist, the render side.
+    Begin,
+    /// Step 3, the loop spawner: one loop run's batch per advance, in the
+    /// order the runs were first asked for.
+    Loops {
+        surface: Surface,
+        runs: VecDeque<RunIx>,
+        spawns: Vec<Requested>,
+        subflows: Vec<subflow::Requested>,
+    },
+    /// Step 3, the subflow spawner: one request per advance.
+    Subflows {
+        surface: Surface,
+        subflows: Vec<subflow::Requested>,
+        next: usize,
+    },
+    /// The execution-delay loop.
+    Replay { surface: Surface },
+    /// The Flow-trigger outbox, then the tail.
+    Outbox { surface: Surface },
+}
+
+/// What a settle leaves to do once its head is done: step 4 (tell a parent)
+/// and the outage check -- its tail, carried as data so [`walk`] runs a chain
+/// of them without nesting one inside the next.
 #[derive(Debug)]
 pub(super) struct Settled {
     /// The execution that settled.
@@ -1871,8 +2003,12 @@ pub(super) struct Settled {
     outage: Option<String>,
 }
 
-/// One step of [`walk`]: the three parts of a settle's tail, in their order.
-enum Step {
+/// One step of [`walk`].
+enum Step<'a> {
+    /// Advance a settle's head by one phase, or run its next job.
+    Frame(Box<Frame<'a>>),
+    /// Open a settle some code started.
+    Job(Job),
     /// Tell the loop that spawned it (`spawn::on_execution_terminal`).
     Loop(Settled),
     /// Tell the run that started it (`subflow::on_child_terminal`).
@@ -1881,45 +2017,61 @@ enum Step {
     Outage(Settled),
 }
 
-/// **Run the tails of a chain of settles with an explicit stack**, W9c Task 9
-/// fix round 2 (re-review N1).
+/// **THE walk: every settle of one transaction, run from one explicit
+/// stack**, so the Rust stack this uses is the same at any iteration count
+/// and any nesting (W9c Task 9 fix rounds 2 and 3; re-review N1, C2, C3).
 ///
-/// A settle's tail tells the execution's parent, and that runs ANOTHER
-/// settle -- the loop's next iteration (`spawn::on_execution_terminal`'s
-/// `Start`), the loop run's completion (its `Terminate`), or the parent of a
-/// `Subflow` child (`subflow::on_child_terminal`). That settle's tail can do
-/// the same, once per iteration of a `Loop` whose iterations end inside their
-/// first settle. Written as recursion, each link nested one settle inside the
-/// last, so the Rust stack grew with the ITERATION COUNT, and 66 iterations of
-/// an `If` with no `else` aborted the process (a stack overflow is not a
-/// panic tokio can contain). So the three callees run only the HEAD of the
-/// settle they start ([`settle_head`]) and hand its tail back here, and this
-/// loop runs every tail in exactly the order the recursion ran them:
+/// The order is the order the recursion ran things in, because a step that
+/// starts a settle pushes it ABOVE what remains of its starter:
 ///
-/// `on_execution_terminal(s)` -- with the WHOLE tail of the settle it started
-/// -- then `on_child_terminal(s)` -- with the whole tail of the settle it
-/// started -- then `s`'s outage check. A stack (LIFO) gives that order: a
-/// started settle's steps are pushed above `s`'s remaining ones. An `Err`
-/// returns at once, as the `?` of the recursion did, so no later step runs.
+/// - a [`Frame`] runs its pending [`Job`]s one at a time -- each to the end
+///   of its own tail -- before its next phase, which is where the inline call
+///   ran it, and its next job only after that;
+/// - a finished head becomes its tail: `on_execution_terminal(s)` with the
+///   whole of what it started, then `on_child_terminal(s)` with the whole of
+///   what it started, then `s`'s outage check.
 ///
-/// What still nests is a settle started inside a settle's HEAD (a spawn's
-/// first settle; a `wait: false` `Subflow`'s completion), which the walk
-/// cannot defer without moving the effects after it: that depth is the
-/// nesting of the flow, not its iteration count.
-pub(super) async fn walk(conn: &mut PgConnection, first: Settled) -> Result<()> {
-    let mut steps = vec![Step::Loop(first)];
+/// An `Err` returns at once, as the `?` of the recursion did.
+///
+/// Private, and called only by [`settle`]: no other function can run a
+/// settle, so nothing a settle calls can nest one.
+async fn walk<'a>(conn: &mut PgConnection, top: Frame<'a>) -> Result<()> {
+    let mut steps: Vec<Step<'a>> = vec![Step::Frame(Box::new(top))];
     while let Some(step) = steps.pop() {
         match step {
+            Step::Frame(mut frame) => {
+                if let Some(job) = frame.jobs.pop_front() {
+                    steps.push(Step::Frame(frame));
+                    steps.push(Step::Job(job));
+                    continue;
+                }
+                match Box::pin(advance_frame(conn, &mut frame)).await? {
+                    Some(settled) => steps.push(Step::Loop(settled)),
+                    None => steps.push(Step::Frame(frame)),
+                }
+            }
+            Step::Job(Job::Settle(frame)) => steps.push(Step::Frame(frame)),
+            Step::Job(Job::Complete(completion)) => {
+                if let Some(frame) = Box::pin(subflow::open_completion(conn, completion)).await? {
+                    steps.push(Step::Frame(Box::new(frame)));
+                }
+            }
             Step::Loop(s) => {
                 let started = match s.terminal {
                     Some(terminal) => {
-                        spawn::on_execution_terminal(conn, s.id, terminal, s.caller.clone()).await?
+                        Box::pin(spawn::on_execution_terminal(
+                            conn,
+                            s.id,
+                            terminal,
+                            s.caller.clone(),
+                        ))
+                        .await?
                     }
                     None => None,
                 };
                 steps.push(Step::Child(s));
-                if let Some(next) = started {
-                    steps.push(Step::Loop(next));
+                if let Some(job) = started {
+                    steps.push(Step::Job(job));
                 }
             }
             Step::Child(s) => {
@@ -1940,13 +2092,19 @@ pub(super) async fn walk(conn: &mut PgConnection, first: Settled) -> Result<()> 
                 // item 16.
                 let started = match s.terminal {
                     Some(terminal) => {
-                        subflow::on_child_terminal(conn, s.id, terminal, s.caller.clone()).await?
+                        Box::pin(subflow::on_child_terminal(
+                            conn,
+                            s.id,
+                            terminal,
+                            s.caller.clone(),
+                        ))
+                        .await?
                     }
                     None => None,
                 };
                 steps.push(Step::Outage(s));
-                if let Some(next) = started {
-                    steps.push(Step::Loop(next));
+                if let Some(job) = started {
+                    steps.push(Step::Job(job));
                 }
             }
             // Spec §11 (fix round 1, I2): a render this settle ran met a store
@@ -1968,17 +2126,138 @@ pub(super) async fn walk(conn: &mut PgConnection, first: Settled) -> Result<()> 
     Ok(())
 }
 
-/// Steps 1-3 of [`settle`] and the outbox: everything but the tail, which it
-/// returns for [`walk`]. Called alone by a settle started from another
-/// settle's tail, whose tail the running walk takes over.
-pub(super) async fn settle_head(
+/// Run one phase of `frame`'s head: the settle's tail when the head is done,
+/// otherwise `None` (with any settles the phase started queued as jobs).
+async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result<Option<Settled>> {
+    let Frame {
+        ctx,
+        before,
+        state,
+        now,
+        release,
+        jobs,
+        phase,
+    } = frame;
+    let ctx: &ExecutionCtx = ctx;
+    match std::mem::replace(phase, Phase::Begin) {
+        Phase::Begin => {
+            let (surface, spawns, subflows) =
+                begin(conn, ctx, before, state, *now, *release).await?;
+            // Grouped by the loop run, because the index is per loop run and
+            // two `Loop`s can be in flight in one execution.
+            let mut runs = VecDeque::new();
+            for r in &spawns {
+                if !runs.contains(&r.parent_run) {
+                    runs.push_back(r.parent_run);
+                }
+            }
+            *phase = Phase::Loops {
+                surface,
+                runs,
+                spawns,
+                subflows,
+            };
+        }
+        Phase::Loops {
+            surface,
+            mut runs,
+            spawns,
+            subflows,
+        } => match runs.pop_front() {
+            Some(run) => {
+                let batch: Vec<Requested> = spawns
+                    .iter()
+                    .filter(|r| r.parent_run == run)
+                    .cloned()
+                    .collect();
+                jobs.extend(spawn::open_batch(conn, ctx, state, run, &batch).await?);
+                *phase = Phase::Loops {
+                    surface,
+                    runs,
+                    spawns,
+                    subflows,
+                };
+            }
+            // **After `persist`, exactly like the loop spawner, and for the
+            // same reason**: the child's row names `(execution, run_ix)` and
+            // that run has to exist. `subflow::spawn_one` may complete the
+            // parent's own run (a `wait: false` subflow, or a target that does
+            // not resolve), and it does so through a nested settle on this
+            // same execution -- the same re-entrancy the loop spawner has via
+            // `on_execution_terminal` -- which is why the terminal check in
+            // the outbox phase reads `state`, this settle's in-memory copy,
+            // which a nested settle deliberately does not update, rather than
+            // the row: a nested settle that terminated the execution has
+            // ALREADY told its parent, and firing again from here would report
+            // one terminal twice.
+            None => {
+                *phase = Phase::Subflows {
+                    surface,
+                    subflows,
+                    next: 0,
+                }
+            }
+        },
+        Phase::Subflows {
+            surface,
+            subflows,
+            next,
+        } => match subflows.get(next) {
+            Some(r) => {
+                jobs.extend(subflow::spawn_one(conn, ctx, &surface, state, r).await?);
+                *phase = Phase::Subflows {
+                    surface,
+                    subflows,
+                    next: next + 1,
+                };
+            }
+            None => *phase = Phase::Replay { surface },
+        },
+        // **The execution-delay loop, and it is a different loop in the
+        // artifact too.** A `CREATE_NEW_EXECUTION` retry ends THIS execution
+        // `RETRIED` and leaves an `ExecutionDelay` behind (`retry::scan`'s
+        // `ScheduleRetry`); the replacement execution is started later, by
+        // whoever notices the deadline. Here that is every `settle`, because
+        // `resume` -- from `worker::wake` in production and from `pass_time` in
+        // the oracle's driver -- is the settle a due deadline produces. It
+        // reads `state`, so the round that scheduled the delay can see it too,
+        // and refuses on `not_before > now`.
+        Phase::Replay { surface } => {
+            jobs.extend(replay::spawn_due(conn, ctx, state, *now).await?);
+            *phase = Phase::Outbox { surface };
+        }
+        Phase::Outbox { surface } => {
+            outbox(conn, ctx, before, state).await?;
+            // Step 4 is the tail ([`walk`]): if this settle reached a
+            // terminal, tell the parent. `was != is` reads `state` -- this
+            // settle's in-memory copy, which a nested settle deliberately does
+            // not update -- so a nested settle that terminated the execution
+            // has ALREADY told its parent, and this one does not report the
+            // terminal twice.
+            let was = before.history.last().copied();
+            let is = state.history.last().copied();
+            return Ok(Some(Settled {
+                id: ctx.id,
+                terminal: is.filter(|s| was != Some(*s) && notifies_parent(*s)),
+                caller: ctx.caller(),
+                outage: surface.files_outage(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Steps 1-2 of a settle: the render scope, the SLA, `drive`, `persist` and
+/// the render side. Starts no settle. Returns the surface and what `drive`
+/// asked to spawn.
+async fn begin(
     conn: &mut PgConnection,
     ctx: &ExecutionCtx,
     before: &ExecutionState,
     state: &mut ExecutionState,
     now: Tick,
     release: Option<Lease>,
-) -> Result<Settled> {
+) -> Result<(Surface, Vec<Requested>, Vec<subflow::Requested>)> {
     let mut surface = Surface::load(conn, ctx).await?;
     // W9a Task 4: the snapshot every render of this settle reads files
     // through -- `runIf`, the five tier-B expressions, the SLA, a subflow's
@@ -2040,7 +2319,7 @@ pub(super) async fn settle_head(
     }
     // W9a Task 11: what a render produced beside the state -- the runs it
     // failed WITH a message, and a file `Loop`'s values -- written after the
-    // state `persist` writes and BEFORE `spawn_all`, which reads the values.
+    // state `persist` writes and BEFORE `spawn::open_batch`, which reads the values.
     let mut side = render::RenderSide::default();
     let (spawns, subflows) = drive(ctx, &surface, state, now, &mut marks, &mut seq, &mut side)?;
     persist(conn, ctx, before, state, release, &marks, seq).await?;
@@ -2052,29 +2331,16 @@ pub(super) async fn settle_head(
         // overflowed with either.
         write_render_side(conn, ctx.id, side).await?;
     }
-    spawn::spawn_all(conn, ctx, state, &spawns).await?;
-    // **After `persist`, exactly like the loop spawner, and for the same
-    // reason**: the child's row names `(execution, run_ix)` and that run has to
-    // exist. It differs in one way that matters for what comes next --
-    // `subflow::spawn_one` may complete the parent's own run (a `wait: false`
-    // subflow, or a target that does not resolve), and it does so through a
-    // nested `settle` on this same execution. That is the same re-entrancy
-    // `spawn::spawn_all` already has via `on_execution_terminal`, and it is why
-    // the terminal check below reads `state` -- this transaction's in-memory
-    // copy, which a nested settle deliberately does not update -- rather than
-    // the row: a nested settle that terminated the execution has ALREADY told
-    // its parent, and firing again from here would report one terminal twice.
-    subflow::spawn_all(conn, ctx, &surface, state, &subflows).await?;
-    // **The execution-delay loop, and it is a different loop in the artifact
-    // too.** A `CREATE_NEW_EXECUTION` retry ends THIS execution `RETRIED` and
-    // leaves an `ExecutionDelay` behind (`retry::scan`'s `ScheduleRetry`); the
-    // replacement execution is started later, by whoever notices the deadline.
-    // Here that is every `settle`, because `resume` -- from `worker::wake` in
-    // production and from `pass_time` in the oracle's driver -- is the settle a
-    // due deadline produces. It reads `state`, so the round that scheduled the
-    // delay can see it too, and refuses on `not_before > now`.
-    replay::spawn_due(conn, ctx, state, now).await?;
+    Ok((surface, spawns, subflows))
+}
 
+/// The Flow-trigger outbox of one settle.
+async fn outbox(
+    conn: &mut PgConnection,
+    ctx: &ExecutionCtx,
+    before: &ExecutionState,
+    state: &ExecutionState,
+) -> Result<()> {
     // **The Flow-trigger outbox (W13 spec §4.3), and it is the ONE statement
     // W13a adds to this transaction.** One event per state this settle
     // APPENDED to the execution's history, except `CREATED`, in the order they
@@ -2132,19 +2398,7 @@ pub(super) async fn settle_head(
         .map_err(db_err)?;
     }
 
-    // Step 4 is the tail ([`walk`]): if this settle reached a terminal, tell
-    // the parent. `was != is` reads `state` -- this transaction's in-memory
-    // copy, which a nested settle deliberately does not update -- so a nested
-    // settle that terminated the execution has ALREADY told its parent, and
-    // this one does not report the terminal twice.
-    let was = before.history.last().copied();
-    let is = state.history.last().copied();
-    Ok(Settled {
-        id: ctx.id,
-        terminal: is.filter(|s| was != Some(*s) && notifies_parent(*s)),
-        caller: ctx.caller(),
-        outage: surface.files_outage(),
-    })
+    Ok(())
 }
 
 /// Create an execution for `source` and drive `advance()` until it is waiting

@@ -162,19 +162,19 @@ pub(super) async fn spawn_due(
     ctx: &claim::ExecutionCtx,
     state: &ExecutionState,
     now: Tick,
-) -> Result<()> {
+) -> Result<Option<claim::Job>> {
     // The run supplies the INSTANT and nothing else: `DefaultExecutor`'s
     // delay loop calls `executionService.replay(execution, flow, null, null,
     // empty)` -- a null `taskRunId` -- so the replay is of the whole flow and
     // the delay's own `taskRunId` is never read on this path.
     let Some(run) = due_run(state, now) else {
-        return Ok(());
+        return Ok(None);
     };
     // A nested `settle` is not the artifact's delay loop; see the module doc's
     // third refusal. The deadline stays on the run and the next `resume` --
     // `worker::wake`'s, or the oracle driver's -- takes it.
     if ctx.depth > 0 {
-        return Ok(());
+        return Ok(None);
     }
 
     let row = sqlx::query(
@@ -192,7 +192,7 @@ pub(super) async fn spawn_due(
     // doc. `parent_run_ix` is what distinguishes one from a replay under
     // migration 0138's `workflow_executions_loop_run_whole_or_absent`.
     if row.get::<Option<i32>, _>("parent_run_ix").is_some() {
-        return Ok(());
+        return Ok(None);
     }
 
     // One replay per execution. The unique index makes a second one
@@ -210,7 +210,7 @@ pub(super) async fn spawn_due(
     .await
     .map_err(db_err)?;
     if existing.is_some() {
-        return Ok(());
+        return Ok(None);
     }
 
     let attempt: i32 = row.get("attempt_number");
@@ -289,18 +289,17 @@ pub(super) async fn spawn_due(
     .await?;
     if let Err(why) = checked {
         sp.rollback().await.map_err(db_err)?;
-        return Box::pin(super::subflow::complete(
-            conn,
-            ctx.id,
+        return Ok(Some(claim::Job::Complete(super::subflow::Completion {
+            execution_id: ctx.id,
             run,
-            &[RunState::Failed],
-            None,
-            Some(&format!(
+            states: vec![RunState::Failed],
+            outputs: None,
+            message: Some(format!(
                 "the CREATE_NEW_EXECUTION retry cannot replay: {why}"
             )),
-            claim::Stack::Nested(ctx.caller()),
-        ))
-        .await;
+            stack: claim::Stack::Nested(ctx.caller()),
+            unless_terminal: false,
+        })));
     }
     sp.commit().await.map_err(db_err)?;
 
@@ -324,30 +323,16 @@ pub(super) async fn spawn_due(
         // The caller's cache: this settle runs in its transaction (W9c Task 9).
         gate: ctx.gate.clone(),
     };
-    let empty = ExecutionState::new(&child_ctx.plan);
-    let mut child_state = empty.clone();
-    // `Tick(0)`: a `Tick` is milliseconds since the EXECUTION was created and
-    // this is that instant. The chain's accumulated time is in
-    // `origin_offset_ms`, which `claim::load_with` turns back into
+    // Its first settle, as a job for the walk (W9c Task 9 fix round 3): from
+    // the empty state at `Tick(0)` -- a `Tick` is milliseconds since the
+    // EXECUTION was created and this is that instant. The chain's accumulated
+    // time is in `origin_offset_ms`, which `claim::load_with` turns back into
     // `ExecutionMeta::origin` -- deliberately NOT folded into `now`, so that
     // every other tick in this execution stays measured from its own
     // `created_at`.
-    //
-    // Boxed: this settle can reach `spawn_due` again through the chain, so
-    // `settle -> here -> settle` is a real cycle in the type graph. It is not a
-    // cycle in the data -- each link is a new execution row with a strictly
-    // greater `attempt_number`, and the policy that produced it is what stops
-    // the chain.
-    Box::pin(claim::settle(
-        conn,
-        &child_ctx,
-        &empty,
-        &mut child_state,
-        Tick(0),
-        None,
-    ))
-    .await?;
-    Ok(())
+    Ok(Some(claim::Job::Settle(Box::new(claim::Frame::first(
+        child_ctx,
+    )))))
 }
 
 /// The `RETRIED` run whose `ExecutionDelay` has come due, if there is one.

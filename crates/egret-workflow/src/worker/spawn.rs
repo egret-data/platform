@@ -68,7 +68,7 @@ use uuid::Uuid;
 use super::{claim, WorkerError};
 use crate::executor::{
     apply, build_plan, resolve_loop_values, Command, ExecutionState, LoopValues, RunIx, RunState,
-    TaskIx, TaskKind, Tick,
+    TaskIx, TaskKind,
 };
 use crate::models::{Flow, Task, TaskKind as ModelTaskKind};
 
@@ -77,7 +77,7 @@ use crate::models::{Flow, Task, TaskKind as ModelTaskKind};
 ///
 /// `advance()`'s command carries no index, and it could not: it is emitted
 /// once, in `values` order, by `flowable::loop_::open`. The index is derived
-/// here from the loop's own resolved values — see [`spawn_all`].
+/// here from the loop's own resolved values — see [`open_batch`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Requested {
     pub task: TaskIx,
@@ -103,7 +103,11 @@ impl Requested {
     }
 }
 
-/// Execute every spawn one round of `advance()` asked for.
+/// One loop run's batch of the spawns one round of `advance()` asked for:
+/// every row created, and the jobs that settle them -- what the settle's
+/// `Loops` phase runs, once per loop run (W9c Task 9 fix round 3: it returns
+/// the iterations' first settles as [`claim::Job`]s for the walk to run, in
+/// order, each to the end of its tail, where they used to run inline).
 ///
 /// # The index is derived from the values, not from the emission order
 ///
@@ -122,121 +126,97 @@ impl Requested {
 /// `rendered` has changed under a running loop, and both are corruption rather
 /// than a case to tolerate.
 ///
-/// # A sync fn returning a boxed future
-///
-/// `settle` awaits this, and `settle` re-enters itself through a `Subflow`
-/// chain: awaited inline, this future's size is part of every level's poll
-/// frame, and W9a Task 11 fix round 1's file-values arm grew it past what the
-/// worker suite's `a_chain_of_subflows_deeper_than_the_bound…` fits in its
-/// stack (measured: it overflowed). Boxed here, `settle` holds a pointer.
-pub(super) fn spawn_all<'a>(
-    conn: &'a mut PgConnection,
-    ctx: &'a claim::ExecutionCtx,
-    state: &'a ExecutionState,
-    requested: &'a [Requested],
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Uuid>>> + Send + 'a>> {
-    Box::pin(spawn_all_now(conn, ctx, state, requested))
-}
-
-async fn spawn_all_now(
+pub(super) async fn open_batch(
     conn: &mut PgConnection,
     ctx: &claim::ExecutionCtx,
     state: &ExecutionState,
-    requested: &[Requested],
-) -> Result<Vec<Uuid>> {
-    let mut out = Vec::with_capacity(requested.len());
-    // Grouped by the loop run, because the index is per loop run and two
-    // `Loop`s can be in flight in one execution.
-    let mut runs: Vec<RunIx> = Vec::new();
-    for r in requested {
-        if !runs.contains(&r.parent_run) {
-            runs.push(r.parent_run);
+    parent_run: RunIx,
+    batch: &[Requested],
+) -> Result<Vec<claim::Job>> {
+    let values = values_of(ctx, state, parent_run)?;
+    let base = spawned_count(conn, ctx.id, parent_run).await?;
+    let corrupt = |e: String| {
+        worker_err(WorkerError::Corrupt(
+            ctx.id,
+            format!("loop run {parent_run}: {e}"),
+        ))
+    };
+    // `(index, value)` of each spawn of the batch.
+    let picked: Vec<(usize, String)> = match &values {
+        LoopValues::Listed(values) => {
+            let asked: Vec<&str> = batch.iter().map(|r| r.value.as_str()).collect();
+            let indices = iteration_indices(values, base, &asked).map_err(corrupt)?;
+            indices
+                .into_iter()
+                .zip(batch.iter().map(|r| r.value.clone()))
+                .collect()
+        }
+        // A file's values are not in the state: `advance()` asked for
+        // `batch.len()` more iterations (each carrying an empty value),
+        // and the values are the next ones of the file, by index.
+        LoopValues::FromFile { count } => {
+            if base + batch.len() > *count {
+                return Err(corrupt(format!(
+                    "asked to spawn iterations {base}..{} but the file holds {count}",
+                    base + batch.len()
+                )));
+            }
+            file_values(conn, ctx.id, parent_run, base, batch.len())
+                .await?
+                .into_iter()
+                .enumerate()
+                .map(|(k, v)| (base + k, v))
+                .collect()
+        }
+    };
+    // **Every row of the batch first, then each one's first settle**
+    // (W9c Task 9 fix round 2). An iteration that ENDS inside its first
+    // settle tells its loop at once ([`on_execution_terminal`]), and the
+    // loop counts the iterations started from the rows. Created one
+    // settle at a time, the batch's later iterations had no row yet, so
+    // the loop read "one left to start", started iteration `base + 1`
+    // itself -- and this loop then created it again: `duplicate key ...
+    // workflow_executions_loop_run_idx`, the whole transaction lost, for
+    // a `concurrencyLimit: 0` loop whose first iteration took an empty
+    // branch. With every row in place the loop counts the whole batch as
+    // started, as Kestra's does (it emits the batch before any
+    // iteration runs), and waits for it.
+    // **Every row of the batch first, then each one's first settle**
+    // (W9c Task 9 fix round 2). An iteration that ENDS inside its first
+    // settle tells its loop at once ([`on_execution_terminal`]), and the
+    // loop counts the iterations started from the rows. Created one
+    // settle at a time, the batch's later iterations had no row yet, so
+    // the loop read "one left to start", started iteration `base + 1`
+    // itself -- and this loop then created it again: `duplicate key ...
+    // workflow_executions_loop_run_idx`, the whole transaction lost, for
+    // a `concurrencyLimit: 0` loop whose first iteration took an empty
+    // branch. With every row in place the loop counts the whole batch as
+    // started, as Kestra's does (it emits the batch before any
+    // iteration runs), and waits for it.
+    let mut jobs = Vec::with_capacity(batch.len() + 1);
+    for (r, (index, value)) in batch.iter().zip(picked) {
+        match insert_iteration(conn, ctx, parent_run, r.task, index, &value).await? {
+            Ok(child) => jobs.push(claim::Job::Settle(Box::new(claim::Frame::first(child)))),
+            // The loop run is failed (a copied FILE input no longer readable):
+            // no further iteration of it is started. **Unless an iteration of
+            // this batch has already ended the loop run** (re-review m1): its
+            // terminal decides before this job runs, and completing a
+            // terminal run again would append a second FAILED.
+            Err(why) => {
+                jobs.push(claim::Job::Complete(super::subflow::Completion {
+                    execution_id: ctx.id,
+                    run: parent_run,
+                    states: vec![RunState::Failed],
+                    outputs: None,
+                    message: Some(format!("loop iteration {index}: {why}")),
+                    stack: claim::Stack::Nested(ctx.caller()),
+                    unless_terminal: true,
+                }));
+                break;
+            }
         }
     }
-    for parent_run in runs {
-        let batch: Vec<&Requested> = requested
-            .iter()
-            .filter(|r| r.parent_run == parent_run)
-            .collect();
-        let values = values_of(ctx, state, parent_run)?;
-        let base = spawned_count(conn, ctx.id, parent_run).await?;
-        let corrupt = |e: String| {
-            worker_err(WorkerError::Corrupt(
-                ctx.id,
-                format!("loop run {parent_run}: {e}"),
-            ))
-        };
-        // `(index, value)` of each spawn of the batch.
-        let picked: Vec<(usize, String)> = match &values {
-            LoopValues::Listed(values) => {
-                let asked: Vec<&str> = batch.iter().map(|r| r.value.as_str()).collect();
-                let indices = iteration_indices(values, base, &asked).map_err(corrupt)?;
-                indices
-                    .into_iter()
-                    .zip(batch.iter().map(|r| r.value.clone()))
-                    .collect()
-            }
-            // A file's values are not in the state: `advance()` asked for
-            // `batch.len()` more iterations (each carrying an empty value),
-            // and the values are the next ones of the file, by index.
-            LoopValues::FromFile { count } => {
-                if base + batch.len() > *count {
-                    return Err(corrupt(format!(
-                        "asked to spawn iterations {base}..{} but the file holds {count}",
-                        base + batch.len()
-                    )));
-                }
-                file_values(conn, ctx.id, parent_run, base, batch.len())
-                    .await?
-                    .into_iter()
-                    .enumerate()
-                    .map(|(k, v)| (base + k, v))
-                    .collect()
-            }
-        };
-        // **Every row of the batch first, then each one's first settle**
-        // (W9c Task 9 fix round 2). An iteration that ENDS inside its first
-        // settle tells its loop at once ([`on_execution_terminal`]), and the
-        // loop counts the iterations started from the rows. Created one
-        // settle at a time, the batch's later iterations had no row yet, so
-        // the loop read "one left to start", started iteration `base + 1`
-        // itself -- and this loop then created it again: `duplicate key ...
-        // workflow_executions_loop_run_idx`, the whole transaction lost, for
-        // a `concurrencyLimit: 0` loop whose first iteration took an empty
-        // branch. With every row in place the loop counts the whole batch as
-        // started, as Kestra's does (it emits the batch before any
-        // iteration runs), and waits for it.
-        let mut created = Vec::with_capacity(batch.len());
-        let mut refused = None;
-        for (r, (index, value)) in batch.iter().zip(picked) {
-            match insert_iteration(conn, ctx, parent_run, r.task, index, &value).await? {
-                Ok(child) => created.push(child),
-                // The loop run is failed (a copied FILE input no longer
-                // readable): no further iteration of it is started.
-                Err(why) => {
-                    refused = Some((index, why));
-                    break;
-                }
-            }
-        }
-        for child in created {
-            out.push(child.id);
-            first_settle(conn, child).await?;
-        }
-        if let Some((index, why)) = refused {
-            Box::pin(super::subflow::complete(
-                conn,
-                ctx.id,
-                parent_run,
-                &[RunState::Failed],
-                None,
-                Some(&format!("loop iteration {index}: {why}")),
-                claim::Stack::Nested(ctx.caller()),
-            ))
-            .await?;
-        }
-    }
-    Ok(out)
+    Ok(jobs)
 }
 
 /// Which iteration index each requested spawn is.
@@ -329,12 +309,10 @@ fn decide(
     }
 }
 
-/// Create one sub-execution and run the HEAD of its first settle, returning
-/// the tail for `claim::walk` -- or, when its FILE inputs are refused, the
-/// head of the settle that fails the loop run. What
-/// [`on_execution_terminal`]'s `Start` runs (W9c Task 9 fix round 2): its
-/// caller is a step of a walk, so the iteration's tail joins that walk rather
-/// than nesting one more settle per iteration.
+/// Create one sub-execution and return its first settle as a job -- or,
+/// when its FILE inputs are refused, the completion that fails the loop run.
+/// What [`on_execution_terminal`]'s `Start` runs (W9c Task 9 fix rounds 2-3):
+/// the walk runs the job, so the next iteration never nests inside the last.
 ///
 /// The whole of it — the row, its task runs, and anything the sub-execution's
 /// own first round asks for — is on the caller's connection and therefore in
@@ -348,51 +326,21 @@ async fn spawn_one(
     task: TaskIx,
     index: usize,
     value: &str,
-) -> Result<claim::Settled> {
-    match insert_iteration(conn, parent, parent_run, task, index, value).await? {
-        Ok(child) => first_settle_head(conn, child).await,
-        Err(why) => {
-            Box::pin(super::subflow::complete_head(
-                conn,
-                parent.id,
-                parent_run,
-                &[RunState::Failed],
-                None,
-                Some(&format!("loop iteration {index}: {why}")),
-                claim::Stack::Nested(parent.caller()),
-            ))
-            .await
-        }
-    }
-}
-
-/// An iteration's first settle, whole: what a batch runs for each row it
-/// created ([`spawn_all`]). Its tail runs here, before the next iteration's
-/// first settle, as it always did.
-async fn first_settle(conn: &mut PgConnection, child: claim::ExecutionCtx) -> Result<()> {
-    let settled = first_settle_head(conn, child).await?;
-    claim::walk(conn, settled).await
-}
-
-/// The head of an iteration's first settle.
-fn first_settle_head(
-    conn: &mut PgConnection,
-    ctx: claim::ExecutionCtx,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<claim::Settled>> + Send + '_>> {
-    Box::pin(async move {
-        let empty = ExecutionState::new(&ctx.plan);
-        let mut state = empty.clone();
-        // `Tick(0)`: a `Tick` is milliseconds since the EXECUTION was created
-        // and this is that instant, for the sub-execution's own clock. A
-        // sub-execution does not inherit its parent's elapsed time --
-        // `executions.created_at` is the origin and this row's is `now()`.
-        // Boxed: a loop body may itself hold a `Loop` (`valids/loop-nested`),
-        // so `settle` -> `spawn_all` -> here -> `settle` is a real cycle in
-        // the type graph. It is not a cycle in the data -- a sub-flow is
-        // strictly smaller than the flow it came from, since it is one
-        // `Loop`'s `tasks:` list.
-        claim::settle_head(conn, &ctx, &empty, &mut state, Tick(0), None).await
-    })
+) -> Result<claim::Job> {
+    Ok(
+        match insert_iteration(conn, parent, parent_run, task, index, value).await? {
+            Ok(child) => claim::Job::Settle(Box::new(claim::Frame::first(child))),
+            Err(why) => claim::Job::Complete(super::subflow::Completion {
+                execution_id: parent.id,
+                run: parent_run,
+                states: vec![RunState::Failed],
+                outputs: None,
+                message: Some(format!("loop iteration {index}: {why}")),
+                stack: claim::Stack::Nested(parent.caller()),
+                unless_terminal: false,
+            }),
+        },
+    )
 }
 
 /// Insert one iteration's row and check its FILE inputs, in a savepoint:
@@ -564,7 +512,7 @@ pub(super) async fn on_execution_terminal(
     execution_id: Uuid,
     state: RunState,
     caller: claim::Caller,
-) -> Result<Option<claim::Settled>> {
+) -> Result<Option<claim::Job>> {
     // Async recursion: a loop body may itself contain a `Loop`
     // (`valids/loop-nested`), so terminating the innermost sub-execution walks
     // up the chain, and each level is a nested `settle` inside the caller's
@@ -584,14 +532,17 @@ pub(super) async fn on_execution_terminal(
     // `6f046e57`) and it is recorded with its owner and with what the artifact
     // does instead on `subflow::MAX_SPAWN_CHAIN`.
     //
-    // **W9c Task 9 fix round 2: this ASCENT is no longer recursion.** The
-    // settle this starts -- the next iteration's first, or the loop run's
-    // completion -- runs only its head here, and its tail is returned to
-    // `claim::walk`, which runs the chain with an explicit stack. So a `Loop`
-    // whose iterations end inside their first settle no longer nests one
-    // settle per iteration (re-review N1: 66 iterations of an `If` with no
-    // `else` aborted the process). The DESCENT -- a spawn's first settle,
-    // inside its caller's head -- still nests, once per level of the flow.
+    // **W9c Task 9 fix rounds 2-3: neither the ascent nor the descent is
+    // recursion any more.** The settle this starts -- the next iteration's
+    // first, or the loop run's completion -- is returned as a `claim::Job`,
+    // and so is every settle a head starts (a batch's first settles, a
+    // `Subflow` child's, a refused `Subflow`'s completion). Only
+    // `claim::walk` runs a settle, from an explicit stack, so the Rust stack
+    // is the same at any iteration count and any nesting (re-review N1: 66
+    // iterations of an `If` with no `else`; C2: 10 iterations of a refused
+    // `Subflow`; C3: 50 iterations of a sequential `Loop` in a sequential
+    // `Loop` -- each aborted the process). `ExecutionCtx::depth` still counts
+    // every link, so `subflow::MAX_SPAWN_CHAIN` refuses what it refused.
     Box::pin(on_execution_terminal_inner(
         conn,
         execution_id,
@@ -606,7 +557,7 @@ async fn on_execution_terminal_inner(
     execution_id: Uuid,
     child_state: RunState,
     caller: claim::Caller,
-) -> Result<Option<claim::Settled>> {
+) -> Result<Option<claim::Job>> {
     let Some((parent_id, parent_run)) = parent_of(conn, execution_id).await? else {
         return Ok(None);
     };
@@ -682,9 +633,9 @@ async fn on_execution_terminal_inner(
             state: terminal,
         },
     );
-    claim::settle_head(conn, &ctx, &before, &mut state, now, None)
-        .await
-        .map(Some)
+    Ok(Some(claim::Job::Settle(Box::new(claim::Frame::loaded(
+        ctx, before, state, now,
+    )))))
 }
 
 /// The loop's resolved iteration values, as
