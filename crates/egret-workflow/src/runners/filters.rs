@@ -2885,7 +2885,7 @@ pub(super) fn big_number_plain(value: &MjValue) -> Option<&str> {
 }
 
 /// The Java class of a [`BigNumber`], or `None` for anything else.
-fn big_number_class(value: &MjValue) -> Option<&'static str> {
+pub(super) fn big_number_class(value: &MjValue) -> Option<&'static str> {
     value
         .downcast_object_ref::<BigNumber>()
         .map(|big| big.class_name)
@@ -2921,6 +2921,12 @@ pub(crate) fn big_decimal(plain: &str) -> Option<MjValue> {
         canonical,
         class_name: "java.math.BigDecimal",
     }))
+}
+
+/// W9c final review F1: `new BigDecimal(plain).toString()`, or `None` when
+/// `plain` is not a decimal literal.
+pub(crate) fn big_decimal_to_string(plain: &str) -> Option<String> {
+    big_decimal_strings(plain).map(|(_, canonical)| canonical)
 }
 
 /// W9c Task 4: a `java.math.BigInteger` [`BigNumber`] of `digits`
@@ -3796,7 +3802,7 @@ fn timestamp_input(value: &MjValue, rest: Rest<MjValue>) -> Result<Option<Zdt>, 
 /// `JacksonMapper.ofJson()` is the same mapper `JsonWriter` holds. **`toIon`
 /// and `yaml` are NOT the same mapper** — see the null-inclusion table in
 /// [`super::ionfmt`].
-fn to_json(value: MjValue) -> Result<MjValue, MjError> {
+pub(super) fn to_json(value: MjValue) -> Result<MjValue, MjError> {
     if is_java_null(&value) {
         return Ok(MjValue::from("null"));
     }

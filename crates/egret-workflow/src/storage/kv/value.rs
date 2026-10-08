@@ -171,9 +171,13 @@ impl std::fmt::Display for KvType {
 pub enum KvNumber {
     /// `-?[0-9]+`, exact at any size: an Ion int.
     Int(String),
-    /// An Ion decimal as `java.math.BigDecimal.toPlainString` writes it:
-    /// `-?[0-9]+(\.[0-9]+)?`, its scale kept, never an exponent, no negative
-    /// zero (a `BigDecimal` has none). This is also the text a reader sees
+    /// An Ion decimal in plain notation: `-?[0-9]+(\.[0-9]+)?`, never an
+    /// exponent, no negative zero (a `BigDecimal` has none). Its value and
+    /// every significant digit are kept, its scale is not: [`KvNumber::write`]
+    /// drops the trailing zeros after the point, so a decimal read back from
+    /// the store has none (`1.50` is stored `1.5` and reads back `1.5`, where
+    /// `BigDecimal.toPlainString` of `1.50` prints `1.50`; the spec header's
+    /// clarification of 2026-10-08). This text is what a reader sees
     /// ([`KvData::to_json`]): no fixture cell measures how Kestra prints a
     /// decimal it read, so the plain form is egret's choice (spec §4.2).
     Decimal(String),
@@ -209,6 +213,27 @@ impl KvNumber {
         Some(KvNumber::Decimal(
             if zero { unsigned } else { plain }.into(),
         ))
+    }
+
+    /// A flow's JSON number text, by `serde_json`'s semantics (the user's
+    /// ruling, 2026-10-07): digits only is an int, anything else (a
+    /// fraction, an exponent) a float. Refused (`TooLarge`) past
+    /// [`MAX_NUMBER_DIGITS`] before it can become a float that drops digits.
+    /// The one number rule of [`KvData::from_json`] and of the typed render
+    /// (`runners::env::typed_data`).
+    pub(crate) fn of_json_text(text: &str) -> Result<Self, Unstorable> {
+        check_json_digits(text)?;
+        Ok(KvNumber::int(text).unwrap_or_else(|| {
+            // A text `serde_json` accepted but `f64` does not parse
+            // cannot occur; out of range is an infinity, as in Java.
+            KvNumber::Float(text.parse().unwrap_or(f64::NAN))
+        }))
+    }
+
+    /// An exact number's text (`-?[0-9]+`, or a decimal's plain digits)
+    /// held to [`MAX_NUMBER_DIGITS`], counted as a flow's number is.
+    pub(crate) fn check_exact_digits(text: &str) -> Result<(), Unstorable> {
+        check_json_digits(text)
     }
 
     /// The Ion decimal `d` in plain notation ([`KvNumber::Decimal`]), its
@@ -435,7 +460,10 @@ impl KvData {
     /// A flow's value, with `serde_json`'s semantics (the user's ruling,
     /// 2026-10-07): a number written with only digits is an int, any other
     /// (a fraction, an exponent) a float, as Kestra's Jackson reads a JSON
-    /// or rendered number. A flow never makes a decimal. A null inside an
+    /// or rendered number. A flow's literal never makes a decimal; an exact
+    /// number a typed render evaluated (`kv()`'s decimal) is kept by
+    /// `runners::env::typed_data`, never through JSON (W9c final review
+    /// F1). A null inside an
     /// object is kept (Kestra writes it; every read drops it).
     ///
     /// A number of more than [`MAX_NUMBER_DIGITS`] digits (its mantissa as
@@ -460,15 +488,7 @@ impl KvData {
         Ok(match v {
             Value::Null => KvData::Null,
             Value::Bool(b) => KvData::Bool(*b),
-            Value::Number(n) => {
-                let text = n.to_string();
-                check_json_digits(&text)?;
-                KvData::Number(KvNumber::int(&text).unwrap_or_else(|| {
-                    // A text `serde_json` accepted but `f64` does not parse
-                    // cannot occur; out of range is an infinity, as in Java.
-                    KvNumber::Float(text.parse().unwrap_or(f64::NAN))
-                }))
-            }
+            Value::Number(n) => KvData::Number(KvNumber::of_json_text(&n.to_string())?),
             Value::String(s) => KvData::String(s.clone()),
             Value::Array(items) => KvData::List(
                 items
@@ -918,11 +938,14 @@ fn utc_instant(t: &ion_rs::Timestamp) -> Result<Option<String>, ApiBodyError> {
 /// [`KvValue`] `Set` stores, as the artifact coerces (`Set.java:116-132`;
 /// w9c `set_coercion`):
 ///
+/// `value` is the typed render's result (`worker::handlers::kv::render_value`).
+///
 /// - **`kvType` applies to a String only** (review C1, w9c
 ///   `set_coercion.t_*`): any other value is returned as itself, typed
-///   [`KvType::of`], whatever `kvType` says -- except a Number with `STRING`,
-///   which becomes its Java `toString()` (`42`, `1.5`, `1.0E20`). So DURATION
-///   is the stored type only for a String.
+///   [`KvType::of_data`], whatever `kvType` says -- except a Number with
+///   `STRING`, which becomes its Java `toString()` (`42`, `1.5`, `1.0E20`; a
+///   decimal as `BigDecimal.toString()`, `1E-7`). So DURATION is the stored
+///   type only for a String.
 /// - NUMBER: the String read as one JSON number, as Jackson's
 ///   `readValue(s, Number.class)` does (surrounding whitespace allowed;
 ///   `1,5`, `0x10`, `+5` refused), then [`KvData::from_json`]: an int or a
@@ -942,31 +965,46 @@ fn utc_instant(t: &ion_rs::Timestamp) -> Result<Option<String>, ApiBodyError> {
 /// Err is typed: `Invalid` for a coercion refusal (its message names the
 /// value and the type), `TooLarge` for a number over [`MAX_NUMBER_DIGITS`]
 /// digits; a value nesting deeper than `storage::ion::MAX_DEPTH` is
-/// `Invalid` ([`KvData::from_json`]).
-pub fn coerce(value: Value, kv_type: Option<KvType>) -> Result<KvValue, Unstorable> {
+/// `Invalid` ([`too_deep`]).
+pub fn coerce(value: KvData, kv_type: Option<KvType>) -> Result<KvValue, Unstorable> {
+    if value.nests_deeper_than(crate::storage::ion::MAX_DEPTH) {
+        return Err(too_deep());
+    }
     let (kind, s) = match (&value, kv_type) {
-        (Value::String(s), Some(kind)) => (kind, s.as_str()),
-        (Value::Number(n), Some(KvType::String)) => {
-            let text = n.to_string();
-            check_json_digits(&text)?;
-            let text = match KvNumber::int(&text) {
-                Some(KvNumber::Int(digits)) => digits,
-                _ => {
+        (KvData::String(s), Some(kind)) => (kind, s.as_str()),
+        (KvData::Number(n), Some(KvType::String)) => {
+            let text = match n {
+                KvNumber::Int(digits) => digits.clone(),
+                // `BigDecimal.toString()`, as Java's `Number.toString` is
+                // (W9c final review F1: a typed render keeps an exact
+                // decimal, so one can reach here).
+                KvNumber::Decimal(plain) => {
+                    crate::runners::big_decimal_to_string(plain).unwrap_or_else(|| plain.clone())
+                }
+                KvNumber::Float(f) => {
                     let mut out = String::new();
-                    crate::runners::env::write_java_double(
-                        &mut out,
-                        text.parse().unwrap_or(f64::NAN),
-                    );
+                    crate::runners::env::write_java_double(&mut out, *f);
                     out
                 }
             };
-            return KvValue::from_json(KvType::String, &Value::String(text));
+            return Ok(KvValue {
+                kind: KvType::String,
+                data: KvData::String(text),
+            });
         }
-        _ => return KvValue::from_json(KvType::of(&value), &value),
+        _ => {
+            return Ok(KvValue {
+                kind: KvType::of_data(&value),
+                data: value,
+            })
+        }
     };
     let invalid = |why: String| Unstorable::Invalid(why);
     match kind {
-        KvType::String => KvValue::from_json(KvType::String, &value),
+        KvType::String => Ok(KvValue {
+            kind: KvType::String,
+            data: value.clone(),
+        }),
         KvType::Number => {
             let parsed: Value = serde_json::from_str(s)
                 .map_err(|e| invalid(format!("Cannot parse '{s}' as a NUMBER value: {e}")))?;
@@ -993,7 +1031,10 @@ pub fn coerce(value: Value, kv_type: Option<KvType>) -> Result<KvValue, Unstorab
             })
         }
         KvType::Datetime => match instant(s) {
-            Some(_) => KvValue::from_json(KvType::Datetime, &value),
+            Some(_) => Ok(KvValue {
+                kind: KvType::Datetime,
+                data: value.clone(),
+            }),
             None => Err(invalid(format!("Cannot convert value '{s}' to Instant"))),
         },
         KvType::Date => {
@@ -1011,7 +1052,10 @@ pub fn coerce(value: Value, kv_type: Option<KvType>) -> Result<KvValue, Unstorab
         }
         KvType::Duration => {
             if java_duration_parses(s) {
-                KvValue::from_json(KvType::Duration, &value)
+                Ok(KvValue {
+                    kind: KvType::Duration,
+                    data: value.clone(),
+                })
             } else {
                 Err(invalid(format!("Cannot convert value '{s}' to Duration")))
             }

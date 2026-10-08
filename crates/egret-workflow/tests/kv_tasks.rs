@@ -28,7 +28,7 @@ use egret_workflow::storage::kv::store::{
     self as kv_store, read_value, resolve, KvWritten, NewValue,
 };
 use egret_workflow::storage::kv::value::{
-    coerce, encode, parse_ttl, KvData, KvNumber, KvType, KvValue, Ttl,
+    coerce, encode, parse_api_body, parse_ttl, KvData, KvNumber, KvType, KvValue, Ttl,
 };
 use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Grant, Resource};
 use egret_workflow::storage::nsfiles::store::Want;
@@ -534,6 +534,14 @@ async fn declared_properties_and_outputs_match_the_artifact() {
     }
 }
 
+/// [`render_typed`]'s value as a reader sees it.
+fn rendered_typed(template: &str, cx: &RenderContext) -> Value {
+    render_typed(template, cx)
+        .unwrap_or_else(|e| panic!("{template}: {e}"))
+        .unwrap_or_else(|e| panic!("{template}: {e}"))
+        .to_json()
+}
+
 /// w9c `typed_render`, every string cell: the typed render, then `coerce`
 /// with no kvType, then the bytes and the type.
 #[test]
@@ -544,7 +552,9 @@ fn render_typed_matches_the_artifact() {
         let Some(template) = cell["value"].as_str() else {
             continue;
         };
-        let rendered = render_typed(template, &cx).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let rendered = render_typed(template, &cx)
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
         let v = coerce(rendered, None).unwrap();
         assert_eq!(json!(v.kind.as_str()), cell["stored_type"], "{name}");
         let got = bytes(&v);
@@ -574,7 +584,7 @@ fn render_typed_matches_the_artifact() {
         ("{{ '}}' }}", json!("}}")),
         ("{{ 1 }}{{ 2 }}", json!("12")),
     ] {
-        assert_eq!(render_typed(template, &cx).unwrap(), want, "{template}");
+        assert_eq!(rendered_typed(template, &cx), want, "{template}");
     }
 }
 
@@ -593,7 +603,7 @@ fn set_and_put_render_a_yaml_map_by_one_rule() {
         // Put's patch is the same value.
         assert_eq!(put_patch(&cell["value"], &cx).unwrap(), v.data, "{name}");
         assert_eq!(
-            render_value(&cell["value"], &cx).unwrap(),
+            render_value(&cell["value"], &cx).unwrap().to_json(),
             cell["kv_returns"]
         );
     }
@@ -610,7 +620,9 @@ fn set_and_put_render_a_yaml_map_by_one_rule() {
     );
     // Keys are rendered as text, other leaves kept.
     assert_eq!(
-        render_value(&json!({"{{ 'k' ~ 1 }}": [true, null, 1.5, "{{ 3 }}"]}), &cx).unwrap(),
+        render_value(&json!({"{{ 'k' ~ 1 }}": [true, null, 1.5, "{{ 3 }}"]}), &cx)
+            .unwrap()
+            .to_json(),
         json!({"k1": [true, null, 1.5, 3]})
     );
 }
@@ -864,7 +876,9 @@ fn two_keys_rendering_to_one_key_are_refused_naming_it() {
     }
     // Distinct keys are kept, each with its value.
     assert_eq!(
-        render_value(&json!({"{{ 'a' }}": 1, "b": 2}), &cx).unwrap(),
+        render_value(&json!({"{{ 'a' }}": 1, "b": 2}), &cx)
+            .unwrap()
+            .to_json(),
         json!({"a": 1, "b": 2})
     );
 }
@@ -886,7 +900,7 @@ fn render_typed_fails_an_expression_the_wrapper_would_change() {
         ("{{ [1, 2] }}", json!([1, 2])),
         ("{{ {'a': 1, 'b': [2, 3]} }}", json!({"a": 1, "b": [2, 3]})),
     ] {
-        assert_eq!(render_typed(template, &cx).unwrap(), want, "{template}");
+        assert_eq!(rendered_typed(template, &cx), want, "{template}");
     }
 }
 
@@ -2483,6 +2497,155 @@ tasks:
     assert_eq!(out("d").await, json!({"deleted": true}));
     assert_eq!(out("purge").await, json!({"size": 3}));
     assert_eq!(out("k2").await, json!({"keys": []}));
+}
+
+/// A 31-digit decimal and a 40-digit int (past `u128`), as the API stores
+/// them (W9c final review F1).
+const DEC31: &str = "123456789012345678901234567890.5";
+const INT40: &str = "1234567890123456789012345678901234567890";
+
+/// W9c final review F1: an exact number keeps its kind and digits through
+/// the typed render, top level and nested; a flow's own literal fraction is
+/// still a float. Mutant: `render_typed` going back to the `toJson` text
+/// round trip makes every decimal here a float.
+#[test]
+fn the_typed_render_keeps_an_exact_number_exact() {
+    let cx = RenderContext::new();
+    let typed = |t: &str| render_typed(t, &cx).unwrap().unwrap();
+    let dec = |s: &str| KvData::Number(KvNumber::Decimal(s.into()));
+    let int = |s: &str| KvData::Number(KvNumber::Int(s.into()));
+    let float = |f: f64| KvData::Number(KvNumber::Float(f));
+    assert_eq!(
+        typed(&format!("{{{{ '{DEC31}' | number(type='BIGDECIMAL') }}}}")),
+        dec(DEC31)
+    );
+    assert_eq!(
+        typed(&format!("{{{{ '{INT40}' | number(type='BIGINTEGER') }}}}")),
+        int(INT40)
+    );
+    assert_eq!(
+        typed(&format!(
+            "{{{{ {{'a': ['{DEC31}' | number(type='BIGDECIMAL'), 1.5], 'b': '2.50' | \
+             number(type='BIGDECIMAL'), 'n': none}} }}}}"
+        )),
+        KvData::Struct(vec![
+            ("a".into(), KvData::List(vec![dec(DEC31), float(1.5)])),
+            ("b".into(), dec("2.50")),
+        ])
+    );
+    // A flow's own literals keep `serde_json`'s semantics.
+    assert_eq!(typed("{{ 1.5 }}"), float(1.5));
+    assert_eq!(
+        typed("{{ [7, 2.0] }}"),
+        KvData::List(vec![int("7"), float(2.0)])
+    );
+    // A value a later pass re-rendered is read back from its text, as
+    // before F1 (spec §15): the decimal is a float there.
+    assert_eq!(
+        typed("{{ ['{{ 1 }}', '2.5' | number(type='BIGDECIMAL')] }}"),
+        KvData::List(vec![KvData::String("1".into()), float(2.5)])
+    );
+    // kvType STRING writes a decimal as `BigDecimal.toString()`.
+    let v = set_value(
+        &json!("{{ '0.0000001' | number(type='BIGDECIMAL') }}"),
+        Some(KvType::String),
+        &cx,
+    )
+    .unwrap();
+    assert_eq!(v.data, KvData::String("1E-7".into()));
+    // Over the digit limit: refused typed, never rounded.
+    let long = "1".repeat(1001);
+    let e = set_value(
+        &json!(format!("{{{{ '{long}.5' | number(type='BIGDECIMAL') }}}}")),
+        None,
+        &cx,
+    )
+    .unwrap_err();
+    assert!(matches!(e, NsError::TooLarge(_)), "{e:?}");
+}
+
+/// W9c final review F1, end to end: a decimal and an int the API stored,
+/// copied by `Set` and through a `Put` leaf, are stored byte for byte; a
+/// nested map holding the decimal goes through `Set` exact too. Mutant:
+/// the typed render's JSON round trip stores `1.2345678901234568e29`.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_and_put_copy_an_exact_number_byte_for_byte() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let ns = "w9c.f1";
+    let cap = 10 << 20;
+    for (k, body) in [
+        ("price", DEC31.to_string()),
+        ("count", INT40.to_string()),
+        ("nested", format!("{{a:{{d:{DEC31},l:[{DEC31},1.5e0]}}}}")),
+    ] {
+        seed(
+            &db,
+            &fs,
+            ws,
+            ns,
+            k,
+            parse_api_body(body.as_bytes(), cap).unwrap(),
+        )
+        .await;
+    }
+    let source = format!(
+        r#"id: exact
+namespace: {ns}
+tasks:
+  - id: d
+    type: io.kestra.plugin.core.kv.Set
+    key: copy_d
+    value: "{{{{ kv('price') }}}}"
+  - id: i
+    type: io.kestra.plugin.core.kv.Set
+    key: copy_i
+    value: "{{{{ kv('count') }}}}"
+  - id: n
+    type: io.kestra.plugin.core.kv.Set
+    key: copy_n
+    value: "{{{{ kv('nested') }}}}"
+  - id: m
+    type: io.kestra.plugin.core.kv.Set
+    key: map
+    value:
+      outer:
+        d: "{{{{ kv('price') }}}}"
+        f: 1.5
+  - id: p
+    type: io.kestra.plugin.core.kv.Put
+    key: patched
+    value:
+      p: "{{{{ kv('price') }}}}"
+      i: "{{{{ kv('count') }}}}"
+"#
+    );
+    let ex = start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    drain(&db.pool, &registry(&db.pool)).await;
+    for t in ["d", "i", "n", "m", "p"] {
+        let (state, _, message) = result_of(&db.pool, ex, t).await;
+        assert_eq!(state, "SUCCESS", "{t}: {message:?}");
+    }
+    let stored = |k: &'static str| latest_bytes(&db, &fs, ws, ns, k);
+    assert_eq!(stored("price").await, DEC31);
+    assert_eq!(stored("copy_d").await, stored("price").await);
+    assert_eq!(stored("count").await, INT40);
+    assert_eq!(stored("copy_i").await, stored("count").await);
+    assert_eq!(stored("copy_n").await, stored("nested").await);
+    assert_eq!(
+        stored("copy_n").await,
+        format!("{{a:{{d:{DEC31},l:[{DEC31},1.5e0]}}}}")
+    );
+    // A flow's own literal fraction stays a float beside the decimal.
+    assert_eq!(
+        stored("map").await,
+        format!("{{outer:{{d:{DEC31},f:1.5e0}}}}")
+    );
+    assert_eq!(stored("patched").await, format!("{{p:{DEC31},i:{INT40}}}"));
 }
 
 /// `valids/retry-with-flowable-errors` names `core.kv.Set`, a known type

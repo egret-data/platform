@@ -121,6 +121,7 @@ use super::files::{FileScope, FileScopeObject, FILE_SCOPE};
 use super::filters;
 use super::functions;
 use super::rewrite::{rewrite, RewriteError};
+use crate::storage::kv::value::{too_deep, KvData, KvNumber, Unstorable};
 
 /// `VariableRenderer.MAX_RENDERING_AMOUNT`. A render whose output is itself a
 /// template renders again; this bounds that.
@@ -1942,22 +1943,45 @@ pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderEr
 /// Kestra's `renderTyped` (`Set.java:111`, `VariableRenderer.renderTyped`):
 /// a `template` that is exactly ONE `{{ … }}` with no other text, not even
 /// surrounding spaces (w9c `typed_render.tr_ws`: ` {{ 1 }} ` is the string
-/// `" 1 "`), keeps the type its expression evaluates to. It is rendered as
-/// `{{ (…) | toJson }}` and the text parsed back with `serde_json`
-/// (`arbitrary_precision`: an integer keeps every digit, `{{ 1.5 }}` is the
-/// number `1.5`). Anything else is [`render_str`]'s `String` (`x {{ 1 }}`,
-/// `{{ 1 }}{{ 2 }}`, a literal `42`). Against w9c `typed_render` (W9c Task
-/// 5). An expression the wrapper would change (brackets that do not pair up,
-/// `{{ 1) ~ (2 }}`; a top-level comma) is never wrapped: it fails, as
-/// Pebble fails it (`rewrite::parenthesizes_safely`; Task 5 review M3).
+/// `" 1 "`), keeps the type its expression evaluates to, as KV data.
+/// Anything else is [`render_str`]'s `String` (`x {{ 1 }}`, `{{ 1 }}{{ 2 }}`,
+/// a literal `42`). Against w9c `typed_render` (W9c Task 5). An expression
+/// the wrapper would change (brackets that do not pair up, `{{ 1) ~ (2 }}`;
+/// a top-level comma) is never wrapped: it fails, as Pebble fails it
+/// (`rewrite::parenthesizes_safely`; Task 5 review M3).
 ///
-/// The value `serde_json` builds is bounded by its own recursion limit (128
-/// levels), and every writer `toJson` reaches is bounded by the crate's value
-/// depth (`MAX_VALUE_DEPTH`), so no depth reaches this function's caller
-/// that a recursive walk of 128 levels cannot handle.
-pub fn render_typed(template: &str, cx: &RenderContext) -> Result<serde_json::Value, RenderError> {
+/// # How the type is kept (W9c final review F1)
+///
+/// The expression is rendered as `{{ (…) | <TYPED_JSON> }}`, a filter
+/// registered for this render only. It writes exactly `toJson`'s text, and
+/// it also converts the value it was given straight to [`KvData`]
+/// ([`typed_data`]), so an exact number keeps its kind and digits: a
+/// `BigDecimal` (a decimal `kv()` read, `number(type='BIGDECIMAL')`) is a
+/// `KvNumber::Decimal`, a `BigInteger` a `KvNumber::Int`. Through `toJson`'s
+/// text alone, `serde_json` and `KvData::from_json`, the decimal
+/// `123456789012345678901234567890.5` became the float
+/// `1.2345678901234568e29`.
+///
+/// Every other value converts as that JSON round trip would: an integer is an
+/// int at any size, a float a float, a null map entry dropped, a map in its
+/// own order (`serde_json`'s `preserve_order`). A flow's own literal keeps
+/// `serde_json`'s semantics: `{{ 1.5 }}` is a minijinja float, so a float.
+///
+/// The render is still the fixpoint [`render_str`] runs. When a later pass
+/// changed the filter's text (a string in the value held a template, which
+/// the next pass evaluated), the converted value is not what was rendered,
+/// and the final text is read back as JSON instead, as before F1: an exact
+/// decimal in such a value becomes a float (spec §15).
+///
+/// The outer `Err` is the render's; the inner one is the value's
+/// ([`Unstorable`]: a number over `MAX_NUMBER_DIGITS`, nesting past
+/// `storage::ion::MAX_DEPTH`), kept typed so a caller maps the class.
+pub fn render_typed(
+    template: &str,
+    cx: &RenderContext,
+) -> Result<Result<KvData, Unstorable>, RenderError> {
     let Some(inner) = super::rewrite::sole_expression(template) else {
-        return render_str(template, cx).map(serde_json::Value::String);
+        return render_str(template, cx).map(|text| Ok(KvData::String(text)));
     };
     if !super::rewrite::parenthesizes_safely(inner) {
         // Wrapped, the expression would mean something else (`{{ 1) ~ (2 }}`
@@ -1970,11 +1994,149 @@ pub fn render_typed(template: &str, cx: &RenderContext) -> Result<serde_json::Va
              comma stands outside them"
         )));
     }
-    let text = render_str(&format!("{{{{ ({inner}) | toJson }}}}"), cx)?;
-    serde_json::from_str(&text).map_err(|e| {
+    // The FIRST call's text and value. A later pass that calls the filter
+    // again is evaluating text an earlier pass produced, never the
+    // expression, so it is not recorded.
+    type Slot = Arc<std::sync::Mutex<Option<(String, Result<KvData, Unstorable>)>>>;
+    let slot: Slot = Arc::default();
+    let filled = Arc::clone(&slot);
+    let extend = move |env: &mut Environment<'static>| {
+        let filled = Arc::clone(&filled);
+        env.add_filter(
+            TYPED_JSON,
+            move |value: MjValue| -> Result<MjValue, MjError> {
+                let text = filters::to_json(value.clone())?;
+                let mut slot = filled.lock().unwrap_or_else(|e| e.into_inner());
+                if slot.is_none() {
+                    let written = text.as_str().unwrap_or_default().to_string();
+                    *slot = Some((written, typed_data(&value, 0)));
+                }
+                Ok(text)
+            },
+        );
+    };
+    let source = format!("{{{{ ({inner}) | {TYPED_JSON} }}}}");
+    let text = match render_guarded_with(&source, cx, &[], &extend, Passes::Fixpoint)? {
+        GuardedRender::Rendered(text) => text,
+        GuardedRender::Forbidden(root) => {
+            return Err(RenderError::Template(format!(
+                "internal: render_typed refused the root `{root}` with no forbidden list"
+            )))
+        }
+    };
+    let first = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some((written, data)) = first {
+        if written == text {
+            return Ok(data);
+        }
+    }
+    let json: JsonValue = serde_json::from_str(&text).map_err(|e| {
         RenderError::Template(format!(
             "the expression {template:?} rendered a value egret cannot read back as JSON: {e}"
         ))
+    })?;
+    Ok(KvData::from_json(&json))
+}
+
+/// The filter [`render_typed`] wraps its expression in, registered only on
+/// that render's environment. `kestra_` names are egret's own (a template
+/// cannot assign one, spec §15).
+const TYPED_JSON: &str = "kestra_typed_json";
+
+/// W9c final review F1: `value` as KV data, exactly as `toJson`'s text
+/// ([`write_json`], nulls omitted) read back by `serde_json` and
+/// `KvData::from_json` would be, except that an exact number (a
+/// `BigNumber`) keeps its kind and its digits instead of passing through a
+/// JSON number: a `BigDecimal` is `KvNumber::Decimal` (its plain digits), a
+/// `BigInteger` `KvNumber::Int`. `depth` is the containers above `value`;
+/// a container past `storage::ion::MAX_DEPTH` is refused as
+/// `KvData::from_json` refuses it, which also bounds this recursion.
+pub(super) fn typed_data(value: &MjValue, depth: usize) -> Result<KvData, Unstorable> {
+    // `serde_json`'s text of a number, by `KvData::from_json`'s rule.
+    let number = |text: &str| KvNumber::of_json_text(text).map(KvData::Number);
+    let container = |depth: usize| {
+        if depth >= crate::storage::ion::MAX_DEPTH {
+            Err(too_deep())
+        } else {
+            Ok(())
+        }
+    };
+    Ok(match value.kind() {
+        ValueKind::Undefined | ValueKind::None => KvData::Null,
+        ValueKind::Bool => KvData::Bool(value.is_true()),
+        ValueKind::Number => {
+            if value.is_integer() {
+                number(&value.to_string())?
+            } else {
+                match f64::try_from(value.clone()) {
+                    Ok(f) if !f.is_finite() => {
+                        let mut text = String::new();
+                        write_java_double(&mut text, f);
+                        KvData::String(text)
+                    }
+                    Ok(f) => {
+                        let mut text = String::new();
+                        write_java_double(&mut text, f);
+                        number(&text)?
+                    }
+                    Err(_) => number(&value.to_string())?,
+                }
+            }
+        }
+        ValueKind::Seq | ValueKind::Iterable => {
+            container(depth)?;
+            let mut items = Vec::new();
+            if let Ok(iter) = value.try_iter() {
+                for item in iter {
+                    items.push(typed_data(&item, depth + 1)?);
+                }
+            }
+            KvData::List(items)
+        }
+        ValueKind::Map => {
+            container(depth)?;
+            let mut fields: Vec<(String, KvData)> = Vec::new();
+            let mut at: std::collections::HashMap<String, usize> = Default::default();
+            if let Ok(keys) = value.try_iter() {
+                for key in keys {
+                    let Ok(item) = value.get_item(&key) else {
+                        continue;
+                    };
+                    if item.is_none() || item.is_undefined() {
+                        continue;
+                    }
+                    let name = key.to_string();
+                    let data = typed_data(&item, depth + 1)?;
+                    // Two keys with one text: `serde_json`'s map keeps the
+                    // first place and the last value.
+                    match at.get(&name) {
+                        Some(&i) => fields[i].1 = data,
+                        None => {
+                            at.insert(name.clone(), fields.len());
+                            fields.push((name, data));
+                        }
+                    }
+                }
+            }
+            KvData::Struct(fields)
+        }
+        _ if filters::big_number_plain(value).is_some() => {
+            let plain = filters::big_number_plain(value).expect("checked");
+            let exact = match filters::big_number_class(value) {
+                Some("java.math.BigInteger") => KvNumber::int(plain),
+                _ => KvNumber::decimal(plain),
+            };
+            match exact {
+                Some(n) => {
+                    KvNumber::check_exact_digits(plain)?;
+                    KvData::Number(n)
+                }
+                // Not reachable for a `BigNumber` egret built; kept total:
+                // the number `toJson` writes, as before F1.
+                None => number(&filters::big_number_text(value).expect("checked"))?,
+            }
+        }
+        _ => KvData::String(value.to_string()),
     })
 }
 

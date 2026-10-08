@@ -311,10 +311,12 @@ fn json_deeper_than(v: &Value, limit: usize) -> bool {
 /// spec §8.1): `raw` is `value` as the spec holds it.
 ///
 /// - A string goes through [`render_typed`]: exactly one `{{ … }}` keeps
-///   its type (`{{ 1 + 1 }}` is the number 2), anything else is a string.
+///   its type (`{{ 1 + 1 }}` is the number 2; a decimal `kv()` read stays
+///   that exact decimal, W9c final review F1), anything else is a string.
 /// - An array or object stays one, rendered leaf by leaf: each string leaf
 ///   through [`render_typed`], each key through [`render_str`].
-/// - Every other leaf (number, boolean, null) is kept as YAML gave it.
+/// - Every other leaf (number, boolean, null) is kept as YAML gave it, by
+///   `KvData::from_json`'s rule (a fraction is a float).
 ///
 /// So `{a: "{{ 1 + 1 }}", b: x}` is `{"a": 2, "b": "x"}` for both tasks
 /// (w9c `typed_render.tr_yaml_map`, chosen; `put_merge.templated_leaf`).
@@ -322,18 +324,25 @@ fn json_deeper_than(v: &Value, limit: usize) -> bool {
 /// A `raw` nesting containers deeper than `storage::ion::MAX_DEPTH` is
 /// refused (`Invalid`, the author's) before anything is rendered, judged
 /// with an explicit stack: the walk below then recurses at most that deep.
-pub fn render_value(raw: &Value, cx: &RenderContext) -> std::result::Result<Value, NsError> {
+/// The rendered value is judged again, since a leaf's render may nest.
+pub fn render_value(raw: &Value, cx: &RenderContext) -> std::result::Result<KvData, NsError> {
     if json_deeper_than(raw, crate::storage::ion::MAX_DEPTH) {
         return Err(unstorable(too_deep()));
     }
-    walk_value(raw, cx, "value")
+    let data = walk_value(raw, cx, "value")?;
+    if data.nests_deeper_than(crate::storage::ion::MAX_DEPTH) {
+        return Err(unstorable(too_deep()));
+    }
+    Ok(data)
 }
 
-fn walk_value(raw: &Value, cx: &RenderContext, at: &str) -> std::result::Result<Value, NsError> {
+fn walk_value(raw: &Value, cx: &RenderContext, at: &str) -> std::result::Result<KvData, NsError> {
     let failed = |at: &str, e: crate::runners::RenderError| NsError::Author(format!("`{at}`: {e}"));
     Ok(match raw {
-        Value::String(s) => render_typed(s, cx).map_err(|e| failed(at, e))?,
-        Value::Array(items) => Value::Array(
+        Value::String(s) => render_typed(s, cx)
+            .map_err(|e| failed(at, e))?
+            .map_err(unstorable)?,
+        Value::Array(items) => KvData::List(
             items
                 .iter()
                 .enumerate()
@@ -341,23 +350,25 @@ fn walk_value(raw: &Value, cx: &RenderContext, at: &str) -> std::result::Result<
                 .collect::<std::result::Result<_, _>>()?,
         ),
         Value::Object(map) => {
-            let mut out = serde_json::Map::with_capacity(map.len());
+            let mut out: Vec<(String, KvData)> = Vec::with_capacity(map.len());
+            let mut seen = std::collections::HashSet::with_capacity(map.len());
             for (name, item) in map {
                 let shown = format!("{at}.{name}");
                 let key = render_str(name, cx).map_err(|e| failed(&shown, e))?;
                 // Two keys rendering to one text: which value survived would
                 // depend on the map's order (Task 5 review M2).
-                if out.contains_key(&key) {
+                if !seen.insert(key.clone()) {
                     return Err(NsError::Author(format!(
                         "`{at}`: two keys render to the same key '{key}', so one value would be \
                          lost; render them to different keys"
                     )));
                 }
-                out.insert(key, walk_value(item, cx, &shown)?);
+                let item = walk_value(item, cx, &shown)?;
+                out.push((key, item));
             }
-            Value::Object(out)
+            KvData::Struct(out)
         }
-        other => other.clone(),
+        other => KvData::from_json(other).map_err(unstorable)?,
     })
 }
 
@@ -373,11 +384,9 @@ pub fn set_value(
     coerce(rendered, kv_type).map_err(unstorable)
 }
 
-/// `Put`'s patch: [`render_value`], then `KvData::from_json`, mapped as
-/// [`set_value`] maps.
+/// `Put`'s patch: [`render_value`], whose [`KvData`] is the patch.
 pub fn put_patch(raw: &Value, cx: &RenderContext) -> std::result::Result<KvData, NsError> {
-    let rendered = render_value(raw, cx)?;
-    KvData::from_json(&rendered).map_err(unstorable)
+    render_value(raw, cx)
 }
 
 /// The log line of a write a re-claim found already done.
