@@ -617,14 +617,16 @@ async fn spawn_one(
 /// reason: it is pure over `(plan, state, now)` and [`ExecutionState`] holds
 /// nothing about another execution.
 ///
-/// `Ok(())` and nothing else for an execution that is not a subflow child,
-/// which is almost all of them.
+/// `Ok(None)` and nothing else for an execution that is not a subflow child,
+/// which is almost all of them. Otherwise it runs the HEAD of the parent's
+/// settle and returns its tail for `claim::walk` (W9c Task 9 fix round 2), so
+/// a completing chain does not nest one settle inside the next.
 pub(super) async fn on_child_terminal(
     conn: &mut PgConnection,
     execution_id: Uuid,
     child_state: RunState,
     caller: claim::Caller,
-) -> Result<()> {
+) -> Result<Option<claim::Settled>> {
     Box::pin(on_child_terminal_inner(
         conn,
         execution_id,
@@ -639,9 +641,9 @@ async fn on_child_terminal_inner(
     execution_id: Uuid,
     child_state: RunState,
     caller: claim::Caller,
-) -> Result<()> {
+) -> Result<Option<claim::Settled>> {
     let Some((parent_id, parent_run)) = trigger_of(conn, execution_id).await? else {
-        return Ok(());
+        return Ok(None);
     };
     let run = usize::try_from(parent_run).map_err(|_| {
         worker_err(WorkerError::Corrupt(
@@ -709,7 +711,7 @@ async fn on_child_terminal_inner(
         .last()
         .is_some_and(|s| s.is_terminal())
     {
-        return Ok(());
+        return Ok(None);
     }
 
     let flow = crate::spec::parse(&ctx.source)
@@ -729,7 +731,7 @@ async fn on_child_terminal_inner(
     // would arrive later and overwrite both — turning `valids/subflow-parent-no-wait`
     // (SUCCESS on the artifact) into whatever its child happened to do.
     if !sub.wait {
-        return Ok(());
+        return Ok(None);
     }
 
     // Fact 4: the child's own state first, then `guessState` if it differs.
@@ -746,7 +748,7 @@ async fn on_child_terminal_inner(
         vec![child_state, guessed]
     };
     // See `complete` for why the SECOND state is a `Command::CompleteRun`.
-    complete(
+    complete_head(
         conn,
         parent_id,
         run,
@@ -765,6 +767,7 @@ async fn on_child_terminal_inner(
         claim::Stack::Nested(caller),
     )
     .await
+    .map(Some)
 }
 
 /// `ExecutableUtils.guessState` — **whole since W8 Task 5**, except for the
@@ -910,6 +913,23 @@ pub(super) async fn complete(
     message: Option<&str>,
     stack: claim::Stack,
 ) -> Result<()> {
+    let settled = complete_head(conn, execution_id, run, states, outputs, message, stack).await?;
+    claim::walk(conn, settled).await
+}
+
+/// [`complete`] up to the parent's settle's tail, which it returns for
+/// `claim::walk` (W9c Task 9 fix round 2): what a caller that is itself a
+/// step of a walk -- [`on_child_terminal`], `spawn::on_execution_terminal`
+/// -- runs, so the parent's tail joins the running walk.
+pub(super) async fn complete_head(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+    run: RunIx,
+    states: &[RunState],
+    outputs: Option<Value>,
+    message: Option<&str>,
+    stack: claim::Stack,
+) -> Result<claim::Settled> {
     let (ctx, mut state, now) = claim::load(conn, execution_id, stack).await?;
     let before = state.clone();
     sqlx::query(
@@ -945,7 +965,7 @@ pub(super) async fn complete(
         };
         apply(&mut state, &cmd);
     }
-    claim::settle(conn, &ctx, &before, &mut state, now, None).await
+    claim::settle_head(conn, &ctx, &before, &mut state, now, None).await
 }
 
 /// Fail one `Subflow` run with the reason it could not start.

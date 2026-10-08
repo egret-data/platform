@@ -1851,6 +1851,134 @@ pub(super) async fn settle(
     now: Tick,
     release: Option<Lease>,
 ) -> Result<()> {
+    let settled = settle_head(conn, ctx, before, state, now, release).await?;
+    walk(conn, settled).await
+}
+
+/// What [`settle_head`] leaves to do: step 4 (tell a parent) and the outage
+/// check -- the TAIL of one `settle`, carried as data so [`walk`] can run a
+/// chain of them without nesting one frame inside the next.
+#[derive(Debug)]
+pub(super) struct Settled {
+    /// The execution that settled.
+    id: Uuid,
+    /// The terminal it reached in this settle, if it reached one that
+    /// [`notifies_parent`].
+    terminal: Option<RunState>,
+    /// [`ExecutionCtx::caller`] of the settle: what a nested load passes.
+    caller: Caller,
+    /// The store outage a render of this settle met (spec §11).
+    outage: Option<String>,
+}
+
+/// One step of [`walk`]: the three parts of a settle's tail, in their order.
+enum Step {
+    /// Tell the loop that spawned it (`spawn::on_execution_terminal`).
+    Loop(Settled),
+    /// Tell the run that started it (`subflow::on_child_terminal`).
+    Child(Settled),
+    /// The outage check.
+    Outage(Settled),
+}
+
+/// **Run the tails of a chain of settles with an explicit stack**, W9c Task 9
+/// fix round 2 (re-review N1).
+///
+/// A settle's tail tells the execution's parent, and that runs ANOTHER
+/// settle -- the loop's next iteration (`spawn::on_execution_terminal`'s
+/// `Start`), the loop run's completion (its `Terminate`), or the parent of a
+/// `Subflow` child (`subflow::on_child_terminal`). That settle's tail can do
+/// the same, once per iteration of a `Loop` whose iterations end inside their
+/// first settle. Written as recursion, each link nested one settle inside the
+/// last, so the Rust stack grew with the ITERATION COUNT, and 66 iterations of
+/// an `If` with no `else` aborted the process (a stack overflow is not a
+/// panic tokio can contain). So the three callees run only the HEAD of the
+/// settle they start ([`settle_head`]) and hand its tail back here, and this
+/// loop runs every tail in exactly the order the recursion ran them:
+///
+/// `on_execution_terminal(s)` -- with the WHOLE tail of the settle it started
+/// -- then `on_child_terminal(s)` -- with the whole tail of the settle it
+/// started -- then `s`'s outage check. A stack (LIFO) gives that order: a
+/// started settle's steps are pushed above `s`'s remaining ones. An `Err`
+/// returns at once, as the `?` of the recursion did, so no later step runs.
+///
+/// What still nests is a settle started inside a settle's HEAD (a spawn's
+/// first settle; a `wait: false` `Subflow`'s completion), which the walk
+/// cannot defer without moving the effects after it: that depth is the
+/// nesting of the flow, not its iteration count.
+pub(super) async fn walk(conn: &mut PgConnection, first: Settled) -> Result<()> {
+    let mut steps = vec![Step::Loop(first)];
+    while let Some(step) = steps.pop() {
+        match step {
+            Step::Loop(s) => {
+                let started = match s.terminal {
+                    Some(terminal) => {
+                        spawn::on_execution_terminal(conn, s.id, terminal, s.caller.clone()).await?
+                    }
+                    None => None,
+                };
+                steps.push(Step::Child(s));
+                if let Some(next) = started {
+                    steps.push(Step::Loop(next));
+                }
+            }
+            Step::Child(s) => {
+                // The other kind of link. `on_execution_terminal` reads
+                // `parent_execution_id` and this reads `trigger_execution_id`,
+                // and `workflow_executions_one_link_kind` makes it impossible
+                // for both to find something -- so the pair is a dispatch, not
+                // two chances to report the same terminal.
+                //
+                // **For a `CREATE_NEW_EXECUTION` replay NEITHER finds
+                // anything**, and that is why egret's answer for a replayed
+                // `Subflow` child is invariant rather than timing-dependent:
+                // `trigger_of` zips two NULL trigger columns, and `parent_of`
+                // zips a set `parent_execution_id` with a NULL `parent_run_ix`,
+                // which `workflow_executions_loop_run_whole_or_absent` keeps
+                // NULL for a row with no loop index. Registered as a
+                // divergence in `oracle-exec/README.md`'s coverage statement,
+                // item 16.
+                let started = match s.terminal {
+                    Some(terminal) => {
+                        subflow::on_child_terminal(conn, s.id, terminal, s.caller.clone()).await?
+                    }
+                    None => None,
+                };
+                steps.push(Step::Outage(s));
+                if let Some(next) = started {
+                    steps.push(Step::Loop(next));
+                }
+            }
+            // Spec §11 (fix round 1, I2): a render this settle ran met a store
+            // OUTAGE. It failed a run, and that failure is not the author's:
+            // an `Err` here rolls the caller's whole transaction back --
+            // `apply_outcome`'s write included -- so the lease lapses and the
+            // run is re-claimed with no attempt spent, exactly as a handler
+            // `Err` is.
+            Step::Outage(s) => {
+                if let Some(outage) = s.outage {
+                    return Err(Error::Internal(anyhow::anyhow!(
+                        "execution {}: {outage}",
+                        s.id
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Steps 1-3 of [`settle`] and the outbox: everything but the tail, which it
+/// returns for [`walk`]. Called alone by a settle started from another
+/// settle's tail, whose tail the running walk takes over.
+pub(super) async fn settle_head(
+    conn: &mut PgConnection,
+    ctx: &ExecutionCtx,
+    before: &ExecutionState,
+    state: &mut ExecutionState,
+    now: Tick,
+    release: Option<Lease>,
+) -> Result<Settled> {
     let mut surface = Surface::load(conn, ctx).await?;
     // W9a Task 4: the snapshot every render of this settle reads files
     // through -- `runIf`, the five tier-B expressions, the SLA, a subflow's
@@ -2004,40 +2132,19 @@ pub(super) async fn settle(
         .map_err(db_err)?;
     }
 
+    // Step 4 is the tail ([`walk`]): if this settle reached a terminal, tell
+    // the parent. `was != is` reads `state` -- this transaction's in-memory
+    // copy, which a nested settle deliberately does not update -- so a nested
+    // settle that terminated the execution has ALREADY told its parent, and
+    // this one does not report the terminal twice.
     let was = before.history.last().copied();
     let is = state.history.last().copied();
-    if was != is {
-        if let Some(terminal) = is.filter(|s| notifies_parent(*s)) {
-            spawn::on_execution_terminal(conn, ctx.id, terminal, ctx.caller()).await?;
-            // The other kind of link. `on_execution_terminal` reads
-            // `parent_execution_id` and this reads `trigger_execution_id`, and
-            // `workflow_executions_one_link_kind` makes it impossible for both
-            // to find something -- so the pair is a dispatch, not two chances
-            // to report the same terminal.
-            //
-            // **For a `CREATE_NEW_EXECUTION` replay NEITHER finds anything**,
-            // and that is why egret's answer for a replayed `Subflow` child is
-            // invariant rather than timing-dependent: `trigger_of` zips two
-            // NULL trigger columns, and `parent_of` zips a set
-            // `parent_execution_id` with a NULL `parent_run_ix`, which
-            // `workflow_executions_loop_run_whole_or_absent` keeps NULL for a
-            // row with no loop index. Registered as a divergence in
-            // `oracle-exec/README.md`'s coverage statement, item 16.
-            subflow::on_child_terminal(conn, ctx.id, terminal, ctx.caller()).await?;
-        }
-    }
-    // Spec §11 (fix round 1, I2): a render this settle ran met a store OUTAGE.
-    // It failed a run above, and that failure is not the author's: an `Err`
-    // here rolls the caller's whole transaction back -- `apply_outcome`'s
-    // write included -- so the lease lapses and the run is re-claimed with no
-    // attempt spent, exactly as a handler `Err` is.
-    if let Some(outage) = surface.files_outage() {
-        return Err(Error::Internal(anyhow::anyhow!(
-            "execution {}: {outage}",
-            ctx.id
-        )));
-    }
-    Ok(())
+    Ok(Settled {
+        id: ctx.id,
+        terminal: is.filter(|s| was != Some(*s) && notifies_parent(*s)),
+        caller: ctx.caller(),
+        outage: surface.files_outage(),
+    })
 }
 
 /// Create an execution for `source` and drive `advance()` until it is waiting

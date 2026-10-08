@@ -194,13 +194,46 @@ async fn spawn_all_now(
                     .collect()
             }
         };
+        // **Every row of the batch first, then each one's first settle**
+        // (W9c Task 9 fix round 2). An iteration that ENDS inside its first
+        // settle tells its loop at once ([`on_execution_terminal`]), and the
+        // loop counts the iterations started from the rows. Created one
+        // settle at a time, the batch's later iterations had no row yet, so
+        // the loop read "one left to start", started iteration `base + 1`
+        // itself -- and this loop then created it again: `duplicate key ...
+        // workflow_executions_loop_run_idx`, the whole transaction lost, for
+        // a `concurrencyLimit: 0` loop whose first iteration took an empty
+        // branch. With every row in place the loop counts the whole batch as
+        // started, as Kestra's does (it emits the batch before any
+        // iteration runs), and waits for it.
+        let mut created = Vec::with_capacity(batch.len());
+        let mut refused = None;
         for (r, (index, value)) in batch.iter().zip(picked) {
-            match spawn_one(conn, ctx, parent_run, r.task, index, &value).await? {
-                Some(id) => out.push(id),
-                // The loop run was failed (a copied FILE input no longer
+            match insert_iteration(conn, ctx, parent_run, r.task, index, &value).await? {
+                Ok(child) => created.push(child),
+                // The loop run is failed (a copied FILE input no longer
                 // readable): no further iteration of it is started.
-                None => break,
+                Err(why) => {
+                    refused = Some((index, why));
+                    break;
+                }
             }
+        }
+        for child in created {
+            out.push(child.id);
+            first_settle(conn, child).await?;
+        }
+        if let Some((index, why)) = refused {
+            Box::pin(super::subflow::complete(
+                conn,
+                ctx.id,
+                parent_run,
+                &[RunState::Failed],
+                None,
+                Some(&format!("loop iteration {index}: {why}")),
+                claim::Stack::Nested(ctx.caller()),
+            ))
+            .await?;
         }
     }
     Ok(out)
@@ -296,7 +329,12 @@ fn decide(
     }
 }
 
-/// Create one sub-execution and drive it until it is waiting on a worker.
+/// Create one sub-execution and run the HEAD of its first settle, returning
+/// the tail for `claim::walk` -- or, when its FILE inputs are refused, the
+/// head of the settle that fails the loop run. What
+/// [`on_execution_terminal`]'s `Start` runs (W9c Task 9 fix round 2): its
+/// caller is a step of a walk, so the iteration's tail joins that walk rather
+/// than nesting one more settle per iteration.
 ///
 /// The whole of it — the row, its task runs, and anything the sub-execution's
 /// own first round asks for — is on the caller's connection and therefore in
@@ -310,7 +348,63 @@ async fn spawn_one(
     task: TaskIx,
     index: usize,
     value: &str,
-) -> Result<Option<Uuid>> {
+) -> Result<claim::Settled> {
+    match insert_iteration(conn, parent, parent_run, task, index, value).await? {
+        Ok(child) => first_settle_head(conn, child).await,
+        Err(why) => {
+            Box::pin(super::subflow::complete_head(
+                conn,
+                parent.id,
+                parent_run,
+                &[RunState::Failed],
+                None,
+                Some(&format!("loop iteration {index}: {why}")),
+                claim::Stack::Nested(parent.caller()),
+            ))
+            .await
+        }
+    }
+}
+
+/// An iteration's first settle, whole: what a batch runs for each row it
+/// created ([`spawn_all`]). Its tail runs here, before the next iteration's
+/// first settle, as it always did.
+async fn first_settle(conn: &mut PgConnection, child: claim::ExecutionCtx) -> Result<()> {
+    let settled = first_settle_head(conn, child).await?;
+    claim::walk(conn, settled).await
+}
+
+/// The head of an iteration's first settle.
+fn first_settle_head(
+    conn: &mut PgConnection,
+    ctx: claim::ExecutionCtx,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<claim::Settled>> + Send + '_>> {
+    Box::pin(async move {
+        let empty = ExecutionState::new(&ctx.plan);
+        let mut state = empty.clone();
+        // `Tick(0)`: a `Tick` is milliseconds since the EXECUTION was created
+        // and this is that instant, for the sub-execution's own clock. A
+        // sub-execution does not inherit its parent's elapsed time --
+        // `executions.created_at` is the origin and this row's is `now()`.
+        // Boxed: a loop body may itself hold a `Loop` (`valids/loop-nested`),
+        // so `settle` -> `spawn_all` -> here -> `settle` is a real cycle in
+        // the type graph. It is not a cycle in the data -- a sub-flow is
+        // strictly smaller than the flow it came from, since it is one
+        // `Loop`'s `tasks:` list.
+        claim::settle_head(conn, &ctx, &empty, &mut state, Tick(0), None).await
+    })
+}
+
+/// Insert one iteration's row and check its FILE inputs, in a savepoint:
+/// its context, or why the inputs are refused (the row rolled back).
+async fn insert_iteration(
+    conn: &mut PgConnection,
+    parent: &claim::ExecutionCtx,
+    parent_run: RunIx,
+    task: TaskIx,
+    index: usize,
+    value: &str,
+) -> Result<std::result::Result<claim::ExecutionCtx, String>> {
     let loop_id = parent
         .plan
         .tasks
@@ -398,21 +492,11 @@ async fn spawn_one(
     .await?;
     if let Err(why) = checked {
         sp.rollback().await.map_err(db_err)?;
-        Box::pin(super::subflow::complete(
-            conn,
-            parent.id,
-            parent_run,
-            &[RunState::Failed],
-            None,
-            Some(&format!("loop iteration {index}: {why}")),
-            claim::Stack::Nested(parent.caller()),
-        ))
-        .await?;
-        return Ok(None);
+        return Ok(Err(why));
     }
     sp.commit().await.map_err(db_err)?;
 
-    let ctx = claim::ExecutionCtx {
+    Ok(Ok(claim::ExecutionCtx {
         id,
         workspace_id: parent.workspace_id,
         flow_id: parent.flow_id,
@@ -434,19 +518,7 @@ async fn spawn_one(
         // The same cache as its caller: this settle runs in the caller's
         // transaction (W9c Task 9, `claim::Stack`).
         gate: parent.gate.clone(),
-    };
-    let empty = ExecutionState::new(&ctx.plan);
-    let mut state = empty.clone();
-    // `Tick(0)`: a `Tick` is milliseconds since the EXECUTION was created and
-    // this is that instant, for the sub-execution's own clock. A sub-execution
-    // does not inherit its parent's elapsed time — `executions.created_at` is
-    // the origin and this row's is `now()`.
-    // Boxed: a loop body may itself hold a `Loop` (`valids/loop-nested`), so
-    // `settle` -> `spawn_all` -> here -> `settle` is a real cycle in the type
-    // graph. It is not a cycle in the data — a sub-flow is strictly smaller
-    // than the flow it came from, since it is one `Loop`'s `tasks:` list.
-    Box::pin(claim::settle(conn, &ctx, &empty, &mut state, Tick(0), None)).await?;
-    Ok(Some(id))
+    }))
 }
 
 /// One sub-execution has reached a terminal state: tell the loop that spawned
@@ -492,7 +564,7 @@ pub(super) async fn on_execution_terminal(
     execution_id: Uuid,
     state: RunState,
     caller: claim::Caller,
-) -> Result<()> {
+) -> Result<Option<claim::Settled>> {
     // Async recursion: a loop body may itself contain a `Loop`
     // (`valids/loop-nested`), so terminating the innermost sub-execution walks
     // up the chain, and each level is a nested `settle` inside the caller's
@@ -511,6 +583,15 @@ pub(super) async fn on_execution_terminal(
     // It predates W6 (this recursion is W3b `ad93ef2d`, the cap is W3a
     // `6f046e57`) and it is recorded with its owner and with what the artifact
     // does instead on `subflow::MAX_SPAWN_CHAIN`.
+    //
+    // **W9c Task 9 fix round 2: this ASCENT is no longer recursion.** The
+    // settle this starts -- the next iteration's first, or the loop run's
+    // completion -- runs only its head here, and its tail is returned to
+    // `claim::walk`, which runs the chain with an explicit stack. So a `Loop`
+    // whose iterations end inside their first settle no longer nests one
+    // settle per iteration (re-review N1: 66 iterations of an `If` with no
+    // `else` aborted the process). The DESCENT -- a spawn's first settle,
+    // inside its caller's head -- still nests, once per level of the flow.
     Box::pin(on_execution_terminal_inner(
         conn,
         execution_id,
@@ -525,9 +606,9 @@ async fn on_execution_terminal_inner(
     execution_id: Uuid,
     child_state: RunState,
     caller: claim::Caller,
-) -> Result<()> {
+) -> Result<Option<claim::Settled>> {
     let Some((parent_id, parent_run)) = parent_of(conn, execution_id).await? else {
-        return Ok(());
+        return Ok(None);
     };
     // **`Nested`, and the fix round 2 Critical is that this used to be `0`.**
     // This is called from `claim::settle` step 4, so the `settle` at the bottom
@@ -566,7 +647,7 @@ async fn on_execution_terminal_inner(
         .last()
         .is_some_and(|s| s.is_terminal())
     {
-        return Ok(());
+        return Ok(None);
     }
 
     let values = values_of(&ctx, &state, run)?;
@@ -588,10 +669,11 @@ async fn on_execution_terminal_inner(
                     file_values(conn, parent_id, run, index, 1).await?.remove(0)
                 }
             };
-            spawn_one(conn, &ctx, run, task, index, &value).await?;
-            return Ok(());
+            return spawn_one(conn, &ctx, run, task, index, &value)
+                .await
+                .map(Some);
         }
-        Next::Wait => return Ok(()),
+        Next::Wait => return Ok(None),
     };
     apply(
         &mut state,
@@ -600,7 +682,9 @@ async fn on_execution_terminal_inner(
             state: terminal,
         },
     );
-    claim::settle(conn, &ctx, &before, &mut state, now, None).await
+    claim::settle_head(conn, &ctx, &before, &mut state, now, None)
+        .await
+        .map(Some)
 }
 
 /// The loop's resolved iteration values, as
