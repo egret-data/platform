@@ -105,6 +105,21 @@ test-ranger-gates:
     {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-policy --test ranger_engine_gate --no-fail-fast
     {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture
 
+# The Kestra plugin host's Java tests (`plugin-host/`, W5b), including the pins of its refusal
+# messages (`EgretPluginHostTest`: `namespaceKv()`'s since W9c Task 7).
+#
+# The plugin jars are NOT Maven dependencies: `fetch-plugins.sh` downloads them into
+# `plugin-host/target/plugins`, checked against `plugins.lock` (a jar already there is
+# re-verified, not downloaded again), and surefire puts them on the tests' classpath. On a
+# fresh checkout `mvn verify` alone cannot load a plugin, so the fetch comes first. Needs JDK 25
+# (`JAVA_HOME`) and Maven. No GitHub CI job runs it, so run it before merging a change under
+# `plugin-host/` or to the plugin handler's messages.
+#
+# Fetch the plugin jars, then run the plugin host's Java tests.
+test-plugin-host:
+    plugin-host/fetch-plugins.sh plugin-host/target/plugins
+    mvn -f plugin-host/pom.xml verify
+
 # egret-workflow's tests, compiled under the resolution the BINARY ships.
 #
 # Cargo unifies features across the packages a build SELECTS, so

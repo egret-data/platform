@@ -14,6 +14,10 @@
 //!   io.kestra.core.runners.EgretPluginHost describe target/plugins \
 //!   > ../crates/egret-workflow/src/plugins/catalog.json
 //! ```
+//!
+//! The host's own tests need the same jars: on a fresh checkout, run
+//! `plugin-host/fetch-plugins.sh plugin-host/target/plugins` before
+//! `mvn -f plugin-host/pom.xml verify` (`just test-plugin-host` does both).
 
 //!
 //! # The task model (W5b spec §4)

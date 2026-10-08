@@ -11,6 +11,11 @@
   and their base `plugin-jdbc` is not on Central): `fetch-plugins.sh` downloads them, checked against
   `plugins.lock`, into a directory that goes on the classpath beside `target/lib/`.
 
+  The tests need those jars too (surefire puts `target/plugins/*.jar` on their classpath), so on a
+  fresh checkout run `plugin-host/fetch-plugins.sh plugin-host/target/plugins` BEFORE
+  `mvn -f plugin-host/pom.xml verify`, or `just test-plugin-host`, which does both. Without them the
+  tests that load a plugin fail. (2026-10-08, W9c Task 8: recorded after Task 7's review, I-1.)
+
   Requires JDK 25: Kestra 2.x class files are version 69.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"

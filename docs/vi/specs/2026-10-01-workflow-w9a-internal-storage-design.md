@@ -153,7 +153,7 @@ Như §5. Dạng nội dung của W5a không đổi.
 | `fileExists(uri)` | từ index. Đo trên Kestra (Task 1): một URI đúng dạng của execution đang chạy mà không chỉ tới file nào trả `false`; một URI không parse được, chứa `..`, hoặc có scheme khác là lỗi. egret theo đó: *thiếu* (trong tập đọc được, không có dòng) là `false`; một URI ngoài tập đọc được là lỗi (lựa chọn: Kestra OSS đọc được nó, §2) |
 | `isFileEmpty(uri)` | từ index (`size == 0`) |
 
-- Cả bốn trả lời từ snapshot (§4.4). `fileURI` vẫn bị từ chối, giờ nêu W9b; `kv` nêu W9c. *(Đã thay 2026-10-07, W9b: `fileURI` được cài trên namespace files, và cả bốn cũng trả lời cho namespace files; spec W9b §6.)*
+- Cả bốn trả lời từ snapshot (§4.4). `fileURI` vẫn bị từ chối, giờ nêu W9b; `kv` nêu W9c. *(Đã thay 2026-10-07, W9b: `fileURI` được cài trên namespace files, và cả bốn cũng trả lời cho namespace files; spec W9b §6.)* *(Đã thay 2026-10-08, W9c: `kv` được cài trên KV store và rời danh sách bị từ chối, nay còn sáu tên; spec W9c §6.)*
 - Chúng tồn tại trong mọi lần render có execution (thuộc tính task, `runIf`, `Log`, outputs); một lần render không có (điều kiện của trigger, publish) từ chối chúng, có tên.
 - Render là đồng bộ và đã chạy trên luồng riêng (`render_on_this_thread`, và `bind_on_this_thread` cho `egret.sql`): các hàm trả lời từ snapshot chụp trước khi render; **một URI được ghép lúc render là một lỗi nêu URI đó** (phán quyết của người dùng); `read` block trên runtime handle cho một lần đọc có trần, nên một lần render đọc file cần runtime đa luồng (của production).
 

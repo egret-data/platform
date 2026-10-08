@@ -151,7 +151,7 @@ As §5. The W5a contents form is unchanged.
 | `fileExists(uri)` | from the index. Measured on Kestra (Task 1): a well-formed URI of the running execution that names no file answers `false`; a URI that does not parse, holds `..`, or has another scheme is an error. egret follows: *missing* (in the readable set, no row) is `false`; a URI outside the readable set is an error (chosen: Kestra OSS reads it, §2) |
 | `isFileEmpty(uri)` | from the index (`size == 0`) |
 
-- All four answer from the snapshot (§4.4). `fileURI` stays refused, now naming W9b; `kv` names W9c. *(Superseded 2026-10-07, W9b: `fileURI` is implemented over namespace files, and the four answer for namespace files too; W9b spec §6.)*
+- All four answer from the snapshot (§4.4). `fileURI` stays refused, now naming W9b; `kv` names W9c. *(Superseded 2026-10-07, W9b: `fileURI` is implemented over namespace files, and the four answer for namespace files too; W9b spec §6.)* *(Superseded 2026-10-08, W9c: `kv` is implemented over the KV store and left the refused list, which is six names now; W9c spec §6.)*
 - They exist in every render with an execution (task properties, `runIf`, `Log`, outputs); a render with none (a trigger's conditions, publish) refuses them by name.
 - Rendering is synchronous and already on its own thread (`render_on_this_thread`, and `bind_on_this_thread` for `egret.sql`): the functions answer from the snapshot taken before the render; **a URI assembled at render is an error naming it** (the user's ruling); `read` blocks on the runtime handle for one capped read, so a render that reads a file needs the multi-thread runtime (production's).
 
