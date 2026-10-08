@@ -62,6 +62,18 @@ fn db_err(e: sqlx::Error) -> Error {
 /// Proof that whoever renders through this cache is inside an attempt whose
 /// commit is [`finish`]'s: the cache of one [`transaction!`] call. Its field
 /// is private, so only this module makes one. See the module doc.
+///
+/// **`Clone`, because every execution one attempt settles carries it**
+/// (re-review n3): `claim::ExecutionCtx::gate` is owned, and a nested settle
+/// builds a new context -- a loop iteration, a `Subflow` child, a replay, a
+/// parent reloaded by `claim::Stack::Nested` -- that must read through the
+/// SAME cache, so the owner's [`finish`] sees its misses. A clone shares the
+/// `Prefetch` (an `Arc`); it is not a second cache and grants nothing a
+/// `Txn` did not. Borrowing instead would put a lifetime on `ExecutionCtx`,
+/// `Caller` and `Stack` and every function that holds one. The misuse a
+/// clone could allow -- carrying it to a connection no `Txn` owns -- has no
+/// entry: `settle` is reached only through `apply_outcome_with` and
+/// `start_execution_in_with`, which take an [`InTxn`].
 #[derive(Clone, Debug)]
 pub(crate) struct Gate(Prefetch);
 
@@ -91,6 +103,10 @@ pub(crate) struct Txn {
 /// What renders inside an attempt: its connection and its gate. An
 /// [`Txn`], or a [`Savepoint`] of one -- never a bare connection.
 pub(crate) trait InTxn {
+    /// The attempt's connection and gate. **Never issue `COMMIT`,
+    /// `ROLLBACK` or `END` on the connection** -- only [`finish`] may end the
+    /// attempt, after its miss check; a raw `COMMIT` here would commit a
+    /// render that missed. Statements only.
     fn parts(&mut self) -> (&mut PgConnection, &Gate);
 }
 
@@ -115,7 +131,11 @@ impl Txn {
         })
     }
 
-    /// The attempt's connection, for statements.
+    /// The attempt's connection, **for statements only** (the scheduler's
+    /// fire). **Never issue `COMMIT`, `ROLLBACK` or `END` on it**: only
+    /// [`finish`] ends an attempt, after its miss check, and a raw `COMMIT`
+    /// here would commit a render that missed (re-review n3). Crate-private
+    /// for that reason.
     pub(crate) fn conn(&mut self) -> &mut PgConnection {
         &mut self.tx
     }
@@ -147,6 +167,7 @@ pub(crate) struct Savepoint<'a> {
 }
 
 impl Savepoint<'_> {
+    /// The savepoint's connection, for statements only: see [`Txn::conn`].
     pub(crate) fn conn(&mut self) -> &mut PgConnection {
         &mut self.sp
     }

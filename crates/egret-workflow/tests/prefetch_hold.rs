@@ -1746,8 +1746,10 @@ async fn the_lease_is_renewed_while_a_long_fetch_downloads() {
         .await
         .unwrap();
     let (a, _, _) = run_of(&fx.db, ex, "a").await.unwrap();
+    // 1.5 s, renewed every 500 ms: a renewal may arrive up to 1 s late before
+    // the `reap` below takes the lease (re-review n2; it was 600 ms and 400 ms).
     let timing = WorkerTiming {
-        working_timeout: Duration::from_millis(600),
+        working_timeout: Duration::from_millis(1500),
         ..WorkerTiming::default()
     };
     let (started, release) = hold("/_kv/flag.ion");
@@ -2186,8 +2188,9 @@ async fn a_parallel_loop_whose_iterations_end_in_their_first_settle_succeeds() {
 /// (`'' == ''`) where every real value (`'x'`) does not. Each attempt stops
 /// at the first iteration it has not read (it waits for a worker), so round
 /// `r` discovers iteration `r`; iteration `MAX_ROUNDS` meets the limit.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_round_limit_met_inside_a_loop_iteration_fails_the_loop_and_is_not_re_claimed() {
+/// In a child process too: the walk is 65 iterations deep, which the
+/// recursion of `3d6c29e6` overflowed.
+async fn a_round_limit_met_inside_a_loop_iteration() {
     let Some(fx) = setup().await else {
         return;
     };
@@ -2259,5 +2262,18 @@ async fn a_round_limit_met_inside_a_loop_iteration_fails_the_loop_and_is_not_re_
         tick(&fx.db.pool, 16, &handlers()).await.unwrap(),
         0,
         "nothing re-claimed"
+    );
+}
+
+#[test]
+#[ignore = "run by its outer test in a child process"]
+fn inner_a_round_limit_met_inside_a_loop_iteration_fails_the_loop_and_is_not_re_claimed() {
+    on_a_worker_stack(a_round_limit_met_inside_a_loop_iteration());
+}
+
+#[test]
+fn a_round_limit_met_inside_a_loop_iteration_fails_the_loop_and_is_not_re_claimed() {
+    in_a_subprocess(
+        "inner_a_round_limit_met_inside_a_loop_iteration_fails_the_loop_and_is_not_re_claimed",
     );
 }
