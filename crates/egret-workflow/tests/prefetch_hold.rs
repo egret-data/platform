@@ -1865,12 +1865,25 @@ const MANY: usize = 200;
 /// tokio's default worker stack.
 const WORKER_STACK: usize = 2 * 1024 * 1024;
 
+/// Set by [`in_a_subprocess`] on its child: an inner body runs only there,
+/// so `cargo test -- --ignored` cannot run one in-process, where a regression
+/// would abort the whole binary (re-review 2, m2).
+const INNER_ENV: &str = "W9C_T9_INNER_CHILD";
+/// How long a child may run before it is killed and its test fails.
+const CHILD_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Run `work` as a task on a multi-thread runtime whose workers have
 /// [`WORKER_STACK`]: where a route or the claim loop polls it in production.
+/// Only inside [`in_a_subprocess`]'s child.
 fn on_a_worker_stack<F>(work: F)
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    assert!(
+        std::env::var_os(INNER_ENV).is_some(),
+        "an inner body runs only in the child process its outer test starts; \
+         run the test without the `inner_` prefix"
+    );
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .thread_stack_size(WORKER_STACK)
@@ -1885,7 +1898,8 @@ where
 /// process and fail unless it passed. A stack overflow aborts its process
 /// (SIGABRT), which this reports as a failure naming the signal.
 fn in_a_subprocess(inner: &str) {
-    let out = std::process::Command::new(std::env::current_exe().expect("this binary"))
+    use std::io::Read;
+    let mut child = std::process::Command::new(std::env::current_exe().expect("this binary"))
         .args([
             inner,
             "--exact",
@@ -1893,10 +1907,35 @@ fn in_a_subprocess(inner: &str) {
             "--nocapture",
             "--test-threads=1",
         ])
-        .output()
+        .env(INNER_ENV, "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .expect("spawn the child test process");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Drained on their own threads, so a full pipe cannot stall the child.
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let _ = pipe.read_to_end(&mut out);
+            String::from_utf8_lossy(&out).into_owned()
+        })
+    };
+    let stdout = drain(Box::new(child.stdout.take().unwrap()));
+    let stderr = drain(Box::new(child.stderr.take().unwrap()));
+    let deadline = std::time::Instant::now() + CHILD_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait for the child") {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let stdout = stdout.join().unwrap();
+    let stderr = stderr.join().unwrap();
     let tail = |s: &str| {
         s.lines()
             .rev()
@@ -1907,28 +1946,39 @@ fn in_a_subprocess(inner: &str) {
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let Some(status) = status else {
+        panic!(
+            "{inner} in a child process: killed after {CHILD_TIMEOUT:?}\n--- stdout\n{}\n--- stderr\n{}",
+            tail(&stdout),
+            tail(&stderr)
+        );
+    };
     #[cfg(unix)]
-    let signal = std::os::unix::process::ExitStatusExt::signal(&out.status);
+    let signal = std::os::unix::process::ExitStatusExt::signal(&status);
     #[cfg(not(unix))]
     let signal: Option<i32> = None;
     assert!(
-        out.status.success() && stdout.contains("test result: ok. 1 passed"),
-        "{inner} in a child process: status {:?} (signal {signal:?})\n--- stdout\n{}\n--- stderr\n{}",
-        out.status,
+        status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{inner} in a child process: status {status:?} (signal {signal:?})\n--- stdout\n{}\n--- stderr\n{}",
         tail(&stdout),
         tail(&stderr),
     );
 }
 
-/// `MANY` values, `"1"` .. `"MANY"`, as a `values:` JSON list in YAML.
-fn many_values() -> String {
-    let vals: Vec<String> = (1..=MANY).map(|i| format!("\\\"{i}\\\"")).collect();
+/// `n` values, `"1"` .. `"n"`, as a `values:` JSON list in YAML.
+fn many_values(n: usize) -> String {
+    let vals: Vec<String> = (1..=n).map(|i| format!("\\\"{i}\\\"")).collect();
     format!("\"[{}]\"", vals.join(","))
 }
 
-/// A `Loop` over [`many_values`] with `limit`, whose body is an `If` on
+/// A `Loop` over [`MANY`] values with `limit`, whose body is an `If` on
 /// `condition` with a `then` (one `Log`, `took_then`) and NO `else`.
 fn loop_no_else(limit: u32, condition: &str) -> String {
+    loop_no_else_of(MANY, limit, condition)
+}
+
+/// [`loop_no_else`] over `n` values.
+fn loop_no_else_of(n: usize, limit: u32, condition: &str) -> String {
     let condition = serde_json::to_string(condition).unwrap();
     format!(
         "  - id: loop\n    type: io.kestra.plugin.core.flow.Loop\n    values: {}\n    \
@@ -1937,7 +1987,7 @@ fn loop_no_else(limit: u32, condition: &str) -> String {
          condition: {condition}\n        then:\n          \
          - id: took_then\n            type: io.kestra.plugin.core.log.Log\n            \
          message: then\n",
-        many_values()
+        many_values(n)
     )
 }
 
@@ -1961,7 +2011,12 @@ async fn iterations(db: &Db, ex: Uuid) -> Vec<(i32, String, bool)> {
 /// Every one of the `MANY` iterations exists once, its `If` SUCCEEDED and
 /// took `then` iff `then`; the loop run and the execution SUCCEEDED.
 async fn assert_every_iteration(db: &Db, ex: Uuid, then: bool) {
-    let expected: Vec<(i32, String, bool)> = (0..MANY as i32)
+    assert_every_iteration_of(db, ex, MANY, then).await
+}
+
+/// [`assert_every_iteration`] for `n` iterations.
+async fn assert_every_iteration_of(db: &Db, ex: Uuid, n: usize, then: bool) {
+    let expected: Vec<(i32, String, bool)> = (0..n as i32)
         .map(|i| (i, "SUCCESS".to_string(), then))
         .collect();
     assert_eq!(iterations(db, ex).await, expected);
@@ -2071,13 +2126,14 @@ fn many_iterations_steered_by_a_placeholder_start_from_the_route() {
 
 /// The same, with the `Loop` after a task: the discovery attempt is
 /// `run_one`'s, where an abort was a crash loop (the run is re-claimed with
-/// no attempt spent). `limit` 0 and 1.
-async fn many_iterations_steered_by_a_placeholder_after_a_task(limit: u32) {
+/// no attempt spent). `limit` 0 over [`MANY`], and 1 over [`SEQUENTIAL_MANY`]
+/// (each of its iterations costs a tick and a round).
+async fn many_iterations_steered_by_a_placeholder_after_a_task(limit: u32, n: usize) {
     let Some(fx) = setup().await else {
         return;
     };
     let tag = format!("t{limit}x");
-    for i in 1..=MANY {
+    for i in 1..=n {
         seed_str(&fx, &format!("{tag}{i}"), "on").await;
     }
     let src = flow(
@@ -2086,7 +2142,8 @@ async fn many_iterations_steered_by_a_placeholder_after_a_task(limit: u32) {
         &format!(
             "{}{}",
             log("first"),
-            loop_no_else(
+            loop_no_else_of(
+                n,
                 limit,
                 &format!("{{{{ kv('{tag}' ~ item.value) == 'on' }}}}")
             )
@@ -2104,13 +2161,19 @@ async fn many_iterations_steered_by_a_placeholder_after_a_task(limit: u32) {
     let (_, first, _) = run_of(&fx.db, ex, "first").await.unwrap();
     assert_eq!(first, "SUCCESS");
     drain(&fx.db.pool).await;
-    assert_every_iteration(&fx.db, ex, true).await;
+    assert_every_iteration_of(&fx.db, ex, n, true).await;
 }
+
+/// The sequential after-task test's iteration count: 1.5 x the 40 that
+/// aborted at `3d6c29e6` (re-review 2, concern 2: 200 cost 5 minutes).
+const SEQUENTIAL_MANY: usize = 60;
 
 #[test]
 #[ignore = "run by its outer test in a child process"]
 fn inner_many_parallel_iterations_steered_by_a_placeholder_after_a_task() {
-    on_a_worker_stack(many_iterations_steered_by_a_placeholder_after_a_task(0));
+    on_a_worker_stack(many_iterations_steered_by_a_placeholder_after_a_task(
+        0, MANY,
+    ));
 }
 
 #[test]
@@ -2121,7 +2184,10 @@ fn many_parallel_iterations_steered_by_a_placeholder_after_a_task() {
 #[test]
 #[ignore = "run by its outer test in a child process"]
 fn inner_many_sequential_iterations_steered_by_a_placeholder_after_a_task() {
-    on_a_worker_stack(many_iterations_steered_by_a_placeholder_after_a_task(1));
+    on_a_worker_stack(many_iterations_steered_by_a_placeholder_after_a_task(
+        1,
+        SEQUENTIAL_MANY,
+    ));
 }
 
 #[test]
@@ -2276,4 +2342,303 @@ fn a_round_limit_met_inside_a_loop_iteration_fails_the_loop_and_is_not_re_claime
     in_a_subprocess(
         "inner_a_round_limit_met_inside_a_loop_iteration_fails_the_loop_and_is_not_re_claimed",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 3 (re-review 2, C2 and C3): settles started inside a settle's
+// HEAD -- a refused `Subflow`'s completion, an inner `Loop`'s iterations --
+// are jobs for the one walk too, so neither shape nests per iteration.
+// ---------------------------------------------------------------------------
+
+/// One revision of `key` typed `ty`, holding the Ion text `ion`.
+async fn seed_typed(fx: &Fx, key: &str, ty: KvType, ion: &str) {
+    sqlx::query(
+        "INSERT INTO workflow.kv_entries \
+           (workspace_id, namespace, key, revision, value_type, size, expires_at) \
+         VALUES ($1, $2, $3, 1, $4, $5, NULL)",
+    )
+    .bind(fx.ws)
+    .bind(NS)
+    .bind(key)
+    .bind(ty.as_str())
+    .bind(ion.len() as i64)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap_or_else(|e| panic!("seed {key}: {e}"));
+    let grant = authorize(fx.ws, Actor::Api, NS, Resource::Kv, Access::Read).unwrap();
+    let object = fx
+        .fs
+        .namespace_kv_uri(&grant, &KvKey::parse(key).unwrap(), 1);
+    fx.fs
+        .store
+        .put(&object, ion.as_bytes().to_vec())
+        .await
+        .unwrap();
+}
+
+/// A sequential (`concurrencyLimit: 1`), `transmitFailed: false` `Loop` over
+/// `n` values whose body is one `Subflow` `sub` of `flow_id`, with the input
+/// `x: <x>` when given.
+fn loop_of_a_subflow(n: usize, flow_id: &str, x: Option<&str>) -> String {
+    let inputs = x
+        .map(|x| {
+            format!(
+                "        inputs:\n          x: {}\n",
+                serde_json::to_string(x).unwrap()
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "  - id: loop\n    type: io.kestra.plugin.core.flow.Loop\n    values: {}\n    \
+         concurrencyLimit: 1\n    transmitFailed: false\n    tasks:\n      \
+         - id: sub\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+         namespace: {NS}\n        flowId: {flow_id}\n{inputs}",
+        many_values(n)
+    )
+}
+
+/// `(loop_index, state of its 'sub' run, its message)` per iteration.
+async fn sub_runs(db: &Db, ex: Uuid) -> Vec<(i32, String, Option<String>)> {
+    sqlx::query_as(
+        "SELECT e.loop_index, r.state, r.message FROM workflow.executions e \
+           JOIN workflow.task_runs r ON r.execution_id = e.id AND r.task_id = 'sub' \
+          WHERE e.parent_execution_id = $1 ORDER BY e.loop_index",
+    )
+    .bind(ex)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap()
+}
+
+/// C2, pre-existing: every iteration's `Subflow` is refused at spawn (its
+/// flow does not exist), so its run is completed FAILED inside the
+/// iteration's own head and the iteration ends there, starting the next.
+/// That nested one head per iteration and aborted from 10.
+///
+/// From the 4th iteration on, the refusal is `subflow::MAX_SPAWN_CHAIN`'s
+/// instead: `ExecutionCtx::depth` grows by 2 per iteration started from the
+/// last one's terminal, exactly as before this round (it must refuse the same
+/// flows), which is the pre-existing defect the sequential `wait: false` loop
+/// shows (report, fix round 3, FOLLOW-UP). Either way the run FAILS and the
+/// loop goes on.
+async fn a_sequential_loop_of_a_refused_subflow() {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    let src = flow("refused_sub", "", &loop_of_a_subflow(MANY, "missing", None));
+    let (ex, rounds) = rounds_of(start_execution(&fx.db.pool, fx.ws, None, &src, json!({}))).await;
+    let ex = ex.expect("the start");
+    assert_eq!(rounds, 0);
+    let runs = sub_runs(&fx.db, ex).await;
+    assert_eq!(runs.len(), MANY, "every iteration ran");
+    for (i, (index, state, message)) in runs.iter().enumerate() {
+        assert_eq!((*index, state.as_str()), (i as i32, "FAILED"));
+        let message = message.as_deref().unwrap_or_default();
+        assert!(
+            message.contains("unable to find flow 'w9c.t9'.'missing'")
+                || message.contains("child execution(s) down a chain and 8 is as deep"),
+            "{message}"
+        );
+    }
+    let (_, loop_state, _) = run_of(&fx.db, ex, "loop").await.unwrap();
+    assert_eq!(loop_state, "SUCCESS", "transmitFailed: false");
+    assert_eq!(state_of(&fx.db, ex).await, "SUCCESS");
+}
+
+#[test]
+#[ignore = "run by its outer test in a child process"]
+fn inner_a_sequential_loop_of_a_refused_subflow_succeeds() {
+    on_a_worker_stack(a_sequential_loop_of_a_refused_subflow());
+}
+
+#[test]
+fn a_sequential_loop_of_a_refused_subflow_succeeds() {
+    in_a_subprocess("inner_a_sequential_loop_of_a_refused_subflow_succeeds");
+}
+
+/// C2, steered: the `Subflow`'s input is `{{ kv('cfg').a }}`, `cfg` a JSON
+/// `{a: 5}`. Live it renders and each child waits for a worker, so each
+/// iteration is started by its predecessor's child finishing, in a tick.
+/// In the discovery attempt the placeholder does NOT render (`''.a`), so
+/// every `Subflow` is refused and every iteration ends inside its first
+/// settle, starting the next: the shape that aborted from 10 iterations.
+async fn a_sequential_loop_of_a_subflow_whose_input_reads_kv() {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    seed_typed(&fx, "cfg", KvType::Json, "{a:5}").await;
+    let child = flow(
+        "child_int",
+        "inputs:\n  - id: x\n    type: INT\n",
+        &log("k"),
+    );
+    common::seed_flow(&fx.db, fx.ws, fx.user, &child, "draft").await;
+    let n = MANY / 2;
+    let src = flow(
+        "kv_input_sub",
+        "",
+        &loop_of_a_subflow(n, "child_int", Some("{{ kv('cfg').a }}")),
+    );
+    let (ex, rounds) = rounds_of(start_execution(&fx.db.pool, fx.ws, None, &src, json!({}))).await;
+    let ex = ex.expect("the start");
+    assert_eq!(rounds, 1, "one discovery round");
+    // Live: iteration 0's child was started with the value and waits.
+    assert_eq!(sub_runs(&fx.db, ex).await.len(), 1);
+    drain(&fx.db.pool).await;
+    let runs = sub_runs(&fx.db, ex).await;
+    let expected: Vec<(i32, String, Option<String>)> = (0..n as i32)
+        .map(|i| (i, "SUCCESS".to_string(), None))
+        .collect();
+    assert_eq!(runs, expected);
+    let children: Vec<(String, String)> = sqlx::query_as(
+        "SELECT c.inputs->>'x', c.state FROM workflow.executions c \
+           JOIN workflow.executions e ON c.trigger_execution_id = e.id \
+          WHERE e.parent_execution_id = $1",
+    )
+    .bind(ex)
+    .fetch_all(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        children,
+        vec![("5".to_string(), "SUCCESS".to_string()); n],
+        "each child got the live value"
+    );
+    assert_eq!(state_of(&fx.db, ex).await, "SUCCESS");
+}
+
+#[test]
+#[ignore = "run by its outer test in a child process"]
+fn inner_a_sequential_loop_of_a_subflow_whose_input_is_a_kv_attribute() {
+    on_a_worker_stack(a_sequential_loop_of_a_subflow_whose_input_reads_kv());
+}
+
+#[test]
+fn a_sequential_loop_of_a_subflow_whose_input_is_a_kv_attribute() {
+    in_a_subprocess("inner_a_sequential_loop_of_a_subflow_whose_input_is_a_kv_attribute");
+}
+
+/// C3: a sequential `Loop` over `outer` values whose body is a sequential
+/// `Loop` over `inner` values whose body is an `If` with no `else` on
+/// `condition`. Each outer iteration's head ran its inner loop's first
+/// settles, the inner chain ended the outer iteration, and the next outer
+/// iteration started inside that: one level per OUTER iteration.
+fn nested_loops(outer: usize, inner: usize, condition: &str) -> String {
+    format!(
+        "  - id: outer\n    type: io.kestra.plugin.core.flow.Loop\n    values: {}\n    \
+         concurrencyLimit: 1\n    tasks:\n      \
+         - id: inner\n        type: io.kestra.plugin.core.flow.Loop\n        values: {}\n        \
+         concurrencyLimit: 1\n        tasks:\n          \
+         - id: branch\n            type: io.kestra.plugin.core.flow.If\n            \
+         condition: {}\n            then:\n              \
+         - id: took_then\n                type: io.kestra.plugin.core.log.Log\n                \
+         message: then\n",
+        many_values(outer),
+        many_values(inner),
+        serde_json::to_string(condition).unwrap()
+    )
+}
+
+/// `(outer iterations, inner iterations, inner iterations that took
+/// `then`)`, each counted only when SUCCESS; and whether any is not.
+async fn nested_counts(db: &Db, ex: Uuid) -> (i64, i64, i64, i64) {
+    sqlx::query_as(
+        "WITH o AS (SELECT id, state FROM workflow.executions WHERE parent_execution_id = $1), \
+              i AS (SELECT e.id, e.state FROM workflow.executions e JOIN o ON e.parent_execution_id = o.id) \
+         SELECT (SELECT count(*) FROM o WHERE state = 'SUCCESS'), \
+                (SELECT count(*) FROM i WHERE state = 'SUCCESS'), \
+                (SELECT count(*) FROM i JOIN workflow.task_runs t \
+                    ON t.execution_id = i.id AND t.task_id = 'took_then'), \
+                (SELECT count(*) FROM o WHERE state <> 'SUCCESS') \
+              + (SELECT count(*) FROM i WHERE state <> 'SUCCESS')",
+    )
+    .bind(ex)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap()
+}
+
+/// C3 with no KV: every inner `If` is false, so the whole of it runs in the
+/// start's one transaction.
+async fn nested_sequential_loops_ending_in_their_first_settle(outer: usize, inner: usize) {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    let src = flow(
+        &format!("nested_{outer}_{inner}"),
+        "",
+        &nested_loops(outer, inner, "{{ item.value == 'x' }}"),
+    );
+    let ex = start_execution(&fx.db.pool, fx.ws, None, &src, json!({}))
+        .await
+        .expect("the start");
+    assert_eq!(
+        nested_counts(&fx.db, ex).await,
+        (outer as i64, (outer * inner) as i64, 0, 0)
+    );
+    assert_eq!(state_of(&fx.db, ex).await, "SUCCESS");
+}
+
+#[test]
+#[ignore = "run by its outer test in a child process"]
+fn inner_many_nested_sequential_loops_end_in_their_first_settle() {
+    on_a_worker_stack(nested_sequential_loops_ending_in_their_first_settle(
+        MANY / 2,
+        2,
+    ));
+}
+
+#[test]
+fn many_nested_sequential_loops_end_in_their_first_settle() {
+    in_a_subprocess("inner_many_nested_sequential_loops_end_in_their_first_settle");
+}
+
+#[test]
+#[ignore = "run by its outer test in a child process"]
+fn inner_thirty_by_thirty_nested_sequential_loops_end_in_their_first_settle() {
+    on_a_worker_stack(nested_sequential_loops_ending_in_their_first_settle(30, 30));
+}
+
+#[test]
+fn thirty_by_thirty_nested_sequential_loops_end_in_their_first_settle() {
+    in_a_subprocess("inner_thirty_by_thirty_nested_sequential_loops_end_in_their_first_settle");
+}
+
+/// C3, steered: every inner `If` reads `kv('on')`, live `on`, so live each
+/// inner iteration takes `then` and waits for a worker. The discovery
+/// attempt's placeholder makes every one false: the whole nested chain,
+/// 50 outer iterations deep, ran in that attempt and aborted.
+async fn nested_sequential_loops_steered_by_a_placeholder_body() {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    seed_str(&fx, "on", "on").await;
+    let outer = 50;
+    let src = flow(
+        "nested_kv",
+        "",
+        &nested_loops(outer, 2, "{{ kv('on') == 'on' }}"),
+    );
+    let (ex, rounds) = rounds_of(start_execution(&fx.db.pool, fx.ws, None, &src, json!({}))).await;
+    let ex = ex.expect("the start");
+    assert_eq!(rounds, 1, "one discovery round");
+    // Live: outer 0, inner 0 took `then` and waits.
+    assert_eq!(nested_counts(&fx.db, ex).await, (0, 0, 1, 2));
+    drain(&fx.db.pool).await;
+    assert_eq!(
+        nested_counts(&fx.db, ex).await,
+        (outer as i64, (outer * 2) as i64, (outer * 2) as i64, 0)
+    );
+    assert_eq!(state_of(&fx.db, ex).await, "SUCCESS");
+}
+
+#[test]
+#[ignore = "run by its outer test in a child process"]
+fn inner_nested_sequential_loops_steered_by_a_placeholder() {
+    on_a_worker_stack(nested_sequential_loops_steered_by_a_placeholder_body());
+}
+
+#[test]
+fn nested_sequential_loops_steered_by_a_placeholder() {
+    in_a_subprocess("inner_nested_sequential_loops_steered_by_a_placeholder");
 }
