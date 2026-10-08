@@ -50,10 +50,13 @@ use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Resourc
 use egret_workflow::storage::nsfiles::path::NsPath;
 use egret_workflow::storage::nsfiles::store::{put as ns_put, Conflict, Written};
 use egret_workflow::storage::nsfiles::{self, CreatedBy};
-use egret_workflow::storage::prefetch::{CACHE_CAP_FACTOR, MAX_ROUNDS};
+use egret_workflow::storage::prefetch::{
+    fetch_rounds_so_far, CACHE_CAP_FACTOR, MAX_FETCHES, MAX_ROUNDS,
+};
 use egret_workflow::storage::{self, uri, FileStore, StoredFile};
 use egret_workflow::worker::{
-    claim, commit_outcome, reap, start_execution, tick, Handlers, Outcome,
+    apply_outcome, claim, commit_outcome, reap, start_execution, start_execution_in, tick,
+    tick_with, Handlers, NewExecution, Outcome, WorkerTiming,
 };
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
@@ -1095,7 +1098,7 @@ async fn a_dependent_chain_resolves_within_the_round_limit() {
     let Some(fx) = setup().await else {
         return;
     };
-    for (prefix, depth) in [("two", 2), ("eight", MAX_ROUNDS as usize)] {
+    for (prefix, depth) in [("two", 2), ("atlimit", MAX_ROUNDS as usize)] {
         let expr = seed_chain(&fx, prefix, depth, "on").await;
         let before = reads_of(&format!("/_kv/{prefix}"));
         let src = flow(
@@ -1294,4 +1297,551 @@ async fn a_loop_until_reads_the_changed_value_at_its_next_iteration() {
         .filter(|s| *s == "RUNNING")
         .count();
     assert_eq!(running, 2, "two iterations: the second read the new value");
+}
+
+// ---------------------------------------------------------------------------
+// Gather (the user's ruling on review C1, 2026-10-08): a miss does not end
+// the attempt, so every read an attempt can reach is fetched in ONE round,
+// and the values committed are a live render's.
+// ---------------------------------------------------------------------------
+
+/// The fetch rounds `work` ran (the process-wide test counter; the tests
+/// take turns on [`SERIAL`], so nothing else fetches meanwhile).
+async fn rounds_of<T>(work: impl Future<Output = T>) -> (T, u64) {
+    let before = fetch_rounds_so_far();
+    let out = work.await;
+    (out, fetch_rounds_so_far() - before)
+}
+
+/// The flow `child_x`: one STRING input `x`, logged.
+async fn seed_child_x(fx: &Fx) {
+    let child = flow(
+        "child_x",
+        "inputs:\n  - id: x\n    type: STRING\n",
+        "  - id: k\n    type: io.kestra.plugin.core.log.Log\n    message: \"{{ inputs.x }}\"\n",
+    );
+    common::seed_flow(&fx.db, fx.ws, fx.user, &child, "draft").await;
+}
+
+/// Review probe 1: nine INDEPENDENT `kv()` in ONE Subflow input. Every one
+/// is discovered by the first attempt, fetched in one round, and the child
+/// receives exactly what a live render gives.
+#[tokio::test(flavor = "multi_thread")]
+async fn nine_independent_reads_in_one_expression_are_fetched_in_one_round() {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    seed_child_x(&fx).await;
+    let mut expr = Vec::new();
+    let mut live = String::new();
+    for i in 1..=9 {
+        seed_str(&fx, &format!("ex{i}"), &format!("v{i}")).await;
+        expr.push(format!("kv('ex{i}')"));
+        live.push_str(&format!("v{i}"));
+    }
+    let src = flow(
+        "one_expr",
+        "",
+        &format!(
+            "  - id: s\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: {NS}\n    \
+             flowId: child_x\n    inputs:\n      x: \"{{{{ {} }}}}\"\n",
+            expr.join(" ~ ")
+        ),
+    );
+    let (ex, rounds) = rounds_of(start_execution(&fx.db.pool, fx.ws, None, &src, json!({}))).await;
+    let ex = ex.expect("the start");
+    assert_eq!(rounds, 1, "one fetch round answered all nine");
+    assert_eq!(reads_of("/_kv/ex"), 9, "each value read once");
+    let (_, state, message) = run_of(&fx.db, ex, "s").await.unwrap();
+    assert_ne!(state, "FAILED", "{message:?}");
+    let x: String = sqlx::query_scalar(
+        "SELECT inputs->>'x' FROM workflow.executions WHERE trigger_execution_id = $1",
+    )
+    .bind(ex)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(x, live, "the value a live render gives");
+    drain(&fx.db.pool).await;
+    assert_eq!(state_of(&fx.db, ex).await, "SUCCESS");
+}
+
+/// Review probe 2: a `Loop` over nine values with `concurrencyLimit: 0`,
+/// each iteration's `If` reading its OWN key. Every iteration's first
+/// settle runs in the same attempt, so all nine reads are fetched in one
+/// round; each iteration branches on its real value.
+///
+/// Both branches hold a task, so no iteration ENDS inside its first settle:
+/// a parallel `Loop` whose iterations end there fails the start with a
+/// duplicate `workflow_executions_loop_run_idx`, with or without a read
+/// (fix round 1 report, concern 1), and a placeholder steering every
+/// iteration to an empty branch would meet that defect in discovery.
+#[tokio::test(flavor = "multi_thread")]
+async fn nine_loop_iterations_each_reading_their_own_key_are_fetched_in_one_round() {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    for i in 1..=9 {
+        seed_str(
+            &fx,
+            &format!("lk{i}"),
+            if i % 2 == 1 { "on" } else { "off" },
+        )
+        .await;
+    }
+    let src = flow(
+        "loop_own_key",
+        "",
+        "  - id: loop\n    type: io.kestra.plugin.core.flow.Loop\n    \
+         values: '[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\"]'\n    concurrencyLimit: 0\n    tasks:\n      \
+         - id: branch\n        type: io.kestra.plugin.core.flow.If\n        \
+         condition: \"{{ kv('lk' ~ item.value) == 'on' }}\"\n        then:\n          \
+         - id: took_then\n            type: io.kestra.plugin.core.log.Log\n            \
+         message: then\n        else:\n          \
+         - id: took_else\n            type: io.kestra.plugin.core.log.Log\n            \
+         message: else\n",
+    );
+    let (ex, rounds) = rounds_of(start_execution(&fx.db.pool, fx.ws, None, &src, json!({}))).await;
+    let ex = ex.expect("the start");
+    assert_eq!(rounds, 1, "one fetch round answered all nine iterations");
+    assert_eq!(reads_of("/_kv/lk"), 9, "each value read once");
+    drain(&fx.db.pool).await;
+    let rows: Vec<(i32, String, bool)> = sqlx::query_as(
+        "SELECT e.loop_index, r.state, \
+                EXISTS (SELECT 1 FROM workflow.task_runs t \
+                         WHERE t.execution_id = e.id AND t.task_id = 'took_then') \
+           FROM workflow.executions e \
+           JOIN workflow.task_runs r ON r.execution_id = e.id AND r.task_id = 'branch' \
+          WHERE e.parent_execution_id = $1 ORDER BY e.loop_index",
+    )
+    .bind(ex)
+    .fetch_all(&fx.db.pool)
+    .await
+    .unwrap();
+    let expected: Vec<(i32, String, bool)> = (0..9)
+        .map(|i| (i, "SUCCESS".to_string(), (i + 1) % 2 == 1))
+        .collect();
+    assert_eq!(rows, expected, "each iteration took its own value's branch");
+    assert_eq!(state_of(&fx.db, ex).await, "SUCCESS");
+}
+
+/// Review probe 3: nine consecutive `runIf: kv(...)` tasks. Each task exists
+/// only once the one before is decided; a placeholder decides it (falsy) in
+/// the discovery attempt, so all nine reads are still found in one round --
+/// and the committed attempt decides each on its real value.
+#[tokio::test(flavor = "multi_thread")]
+async fn nine_consecutive_run_ifs_are_fetched_in_one_round() {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    let mut tasks = String::new();
+    for i in 1..=9 {
+        seed_str(&fx, &format!("rf{i}"), if i == 9 { "go" } else { "no" }).await;
+        tasks.push_str(&format!(
+            "  - id: t{i}\n    type: io.kestra.plugin.core.log.Log\n    runIf: \"{{{{ kv('rf{i}') == 'go' }}}}\"\n    message: t{i}\n"
+        ));
+    }
+    let src = flow("runif_nine", "", &tasks);
+    let (ex, rounds) = rounds_of(start_execution(&fx.db.pool, fx.ws, None, &src, json!({}))).await;
+    let ex = ex.expect("the start");
+    assert_eq!(rounds, 1, "one fetch round answered all nine");
+    assert_eq!(reads_of("/_kv/rf"), 9, "each value read once");
+    drain(&fx.db.pool).await;
+    for i in 1..=8 {
+        assert_eq!(
+            run_of(&fx.db, ex, &format!("t{i}")).await.unwrap().1,
+            "SKIPPED",
+            "t{i} read 'no'"
+        );
+    }
+    assert_eq!(
+        run_of(&fx.db, ex, "t9").await.unwrap().1,
+        "SUCCESS",
+        "t9 read 'go'"
+    );
+    assert_eq!(state_of(&fx.db, ex).await, "SUCCESS");
+}
+
+/// The Flow-trigger arm: ONE event heard by nine listeners, each of whose
+/// first settle reads its own key. Every listener is visited in the same
+/// attempt, so one round answers all nine; nine fires, no error, and each
+/// fired execution branched on its real value.
+#[tokio::test(flavor = "multi_thread")]
+async fn nine_listeners_of_one_event_each_reading_are_fetched_in_one_round() {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    let mut listeners = Vec::new();
+    for i in 1..=9 {
+        seed_str(
+            &fx,
+            &format!("lsn{i}"),
+            if i % 2 == 1 { "on" } else { "off" },
+        )
+        .await;
+        let listener = flow(
+            &format!("listener{i}"),
+            "triggers:\n  - id: on_done\n    type: io.kestra.plugin.core.trigger.Flow\n    \
+             when: \"{{ flow.id == 'p1' }}\"\n",
+            &if_then("c", &format!("{{{{ kv('lsn{i}') == 'on' }}}}"), "t"),
+        );
+        listeners.push(common::seed_flow(&fx.db, fx.ws, fx.user, &listener, "draft").await);
+    }
+    let source = flow("p1", "", &log("a"));
+    let source_id = common::seed_flow(&fx.db, fx.ws, fx.user, &source, "draft").await;
+    start_execution(&fx.db.pool, fx.ws, Some(source_id), &source, json!({}))
+        .await
+        .unwrap();
+    drain(&fx.db.pool).await;
+    let (report, rounds) = rounds_of(process_events(&fx.db.pool)).await;
+    let report = report.expect("the pass");
+    assert_eq!(rounds, 1, "one fetch round answered all nine listeners");
+    assert_eq!(reads_of("/_kv/lsn"), 9, "each value read once");
+    assert_eq!(
+        (report.fired, report.errored, report.born_failed),
+        (9, 0, 0),
+        "{report:?}"
+    );
+    assert_eq!(event_ids(&fx.db).await, vec![], "every event is done with");
+    for (i, id) in listeners.iter().enumerate() {
+        let fired: Uuid =
+            sqlx::query_scalar("SELECT id FROM workflow.executions WHERE flow_id = $1")
+                .bind(id)
+                .fetch_one(&fx.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            run_of(&fx.db, fired, "t").await.is_some(),
+            i % 2 == 0,
+            "listener{} took its own value's branch",
+            i + 1
+        );
+    }
+    drain(&fx.db.pool).await;
+}
+
+/// [`MAX_FETCHES`]: one read more than the limit in one expression is the
+/// AUTHOR's error, naming the limit and that read -- and, on an `If`, it is
+/// the failed run's message (I2). The limit's reads are fetched, the one
+/// past it never.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_past_the_fetch_limit_is_the_authors_error_naming_it() {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    let n = MAX_FETCHES + 1;
+    let mut expr = Vec::new();
+    for i in 1..=n {
+        seed_str(&fx, &format!("lim{i}"), "v").await;
+        expr.push(format!("kv('lim{i}')"));
+    }
+    let src = flow(
+        "fetch_limit",
+        "",
+        &if_then(
+            "c",
+            &format!("{{{{ ({}) | length > 0 }}}}", expr.join(" ~ ")),
+            "t",
+        ),
+    );
+    let (ex, rounds) = rounds_of(start_execution(&fx.db.pool, fx.ws, None, &src, json!({}))).await;
+    let ex = ex.expect("an author's error is not the start's");
+    assert_eq!(rounds, 1);
+    let (_, state, message) = run_of(&fx.db, ex, "c").await.unwrap();
+    assert_eq!(state, "FAILED");
+    let message = message.expect("the limit is the run's message");
+    assert!(
+        message.contains(&format!("key 'lim{n}'"))
+            && message.contains(&format!("more than {MAX_FETCHES} values")),
+        "{message}"
+    );
+    assert_eq!(reads_of(&format!("/_kv/lim{n}.ion")), 0, "never read");
+    assert_eq!(reads_of("/_kv/lim"), MAX_FETCHES);
+    assert!(run_of(&fx.db, ex, "t").await.is_none());
+    drain(&fx.db.pool).await;
+}
+
+/// I2: a per-call limit met by a render in `settle` is the message of the
+/// run it fails -- on `runIf`, an `If`, a `Switch`, a `Loop`'s `values:`, a
+/// `Pause`'s `pauseDuration:` and a `LoopUntil`'s condition, not only on a
+/// `Subflow`'s inputs. The limit here is the cache cap.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_limit_met_by_any_render_in_settle_is_the_failed_runs_message() {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    let big = "v".repeat(3600);
+    for i in 1..=5 {
+        seed_str(&fx, &format!("cap{i}"), &big).await;
+    }
+    // Five values of 8 + 3600 bytes: the fifth crosses 4 x 4096.
+    let over = "(kv('cap1') ~ kv('cap2') ~ kv('cap3') ~ kv('cap4') ~ kv('cap5'))";
+    let cases: Vec<(&str, String)> = vec![
+        (
+            "x",
+            format!(
+                "  - id: x\n    type: io.kestra.plugin.core.log.Log\n    runIf: \"{{{{ {over} | length > 0 }}}}\"\n    message: x\n"
+            ),
+        ),
+        ("x", if_then("x", &format!("{{{{ {over} | length > 0 }}}}"), "t")),
+        (
+            "x",
+            format!(
+                "  - id: x\n    type: io.kestra.plugin.core.flow.Switch\n    value: \"{{{{ {over} | length }}}}\"\n    \
+                 cases:\n      a:\n        - id: on_a\n          type: io.kestra.plugin.core.log.Log\n          message: a\n"
+            ),
+        ),
+        (
+            "x",
+            format!(
+                "  - id: x\n    type: io.kestra.plugin.core.flow.Loop\n    values: \"{{{{ {over} | length }}}}\"\n    \
+                 tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: body\n"
+            ),
+        ),
+        (
+            "x",
+            format!(
+                "  - id: x\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: \"{{{{ {over} | length }}}}\"\n"
+            ),
+        ),
+        (
+            "x",
+            format!(
+                "  - id: x\n    type: io.kestra.plugin.core.flow.LoopUntil\n    \
+                 condition: \"{{{{ {over} | length > 0 }}}}\"\n    checkFrequency:\n      interval: PT0.1S\n      \
+                 maxIterations: 3\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        \
+                 message: body\n"
+            ),
+        ),
+    ];
+    let cap = CACHE_CAP_FACTOR * MAX_READ;
+    for (n, (task, tasks)) in cases.into_iter().enumerate() {
+        let src = flow(&format!("limit_msg_{n}"), "", &tasks);
+        let ex = start_execution(&fx.db.pool, fx.ws, None, &src, json!({}))
+            .await
+            .expect("an author's error is not the start's");
+        // A LoopUntil asks its condition after its body ran.
+        drain(&fx.db.pool).await;
+        let (_, state, message) = run_of(&fx.db, ex, task).await.unwrap();
+        assert_eq!(state, "FAILED", "case {n}: {tasks}");
+        let message = message.unwrap_or_else(|| panic!("case {n}: no message\n{tasks}"));
+        assert!(
+            message.contains("key 'cap5'") && message.contains(&format!("more than {cap} bytes")),
+            "case {n}: {message}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The caller-owned, test-only wrappers (I3, m3): the caller is the gate.
+// ---------------------------------------------------------------------------
+
+/// `apply_outcome` and `start_execution_in` run in the CALLER's transaction,
+/// which cannot be rolled back and fetched: a render that needs a read
+/// answers `Err`, and the caller must not commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_caller_owned_wrappers_answer_err_for_a_render_that_needs_a_read() {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    seed_str(&fx, "wrapflag", "on").await;
+    let src = flow(
+        "wrapped",
+        "",
+        &if_then("c", "{{ kv('wrapflag') == 'on' }}", "t"),
+    );
+    let mut tx = fx.db.pool.begin().await.unwrap();
+    let started = start_execution_in(
+        &mut tx,
+        NewExecution {
+            workspace_id: fx.ws,
+            flow_id: None,
+            source: &src,
+            inputs: json!({}),
+            trigger: None,
+            scheduled_date: None,
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
+            born_failed: false,
+            replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
+        },
+    )
+    .await;
+    tx.rollback().await.unwrap();
+    let err = started.expect_err("a start that needs a read is refused to its caller");
+    assert!(err.to_string().contains("fetched"), "{err}");
+
+    let src = flow(
+        "wrapped_outcome",
+        "",
+        &format!(
+            "{}  - id: b\n    type: io.kestra.plugin.core.log.Log\n    runIf: \"{{{{ kv('wrapflag') }}}}\"\n    message: b\n",
+            log("a")
+        ),
+    );
+    let ex = start_execution(&fx.db.pool, fx.ws, None, &src, json!({}))
+        .await
+        .unwrap();
+    let c = claim(&fx.db.pool, 1).await.unwrap().remove(0);
+    let mut tx = fx.db.pool.begin().await.unwrap();
+    let applied = apply_outcome(&mut tx, &c, &Outcome::success()).await;
+    tx.rollback().await.unwrap();
+    let err = applied.expect_err("an outcome that needs a read is refused to its caller");
+    assert!(err.to_string().contains("fetched"), "{err}");
+    assert_eq!(run_of(&fx.db, ex, "a").await.unwrap().1, "RUNNING");
+    assert_eq!(reads_of("/_kv/wrapflag"), 0, "nothing was read");
+}
+
+// ---------------------------------------------------------------------------
+// The lease during the fetch (m5)
+// ---------------------------------------------------------------------------
+
+/// Arm the hold on the first download whose key contains `needle`: `started`
+/// says it began, `release` lets it finish.
+fn hold(needle: &str) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    *GATE.lock().unwrap() = Some(Gate {
+        needle: needle.to_string(),
+        started: Some(started_tx),
+        release: Some(release_rx),
+    });
+    (started_rx, release_tx)
+}
+
+async fn claimed_at(db: &Db, run: Uuid) -> chrono::DateTime<chrono::Utc> {
+    sqlx::query_scalar("SELECT claimed_at FROM workflow.task_runs WHERE id = $1")
+        .bind(run)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+/// A run-If flow whose successor reads `kv('flag')` after `a`.
+fn after_a_reads_flag(id: &str) -> String {
+    flow(
+        id,
+        "",
+        &format!(
+            "{}  - id: b\n    type: io.kestra.plugin.core.log.Log\n    runIf: \"{{{{ kv('flag') }}}}\"\n    message: b\n",
+            log("a")
+        ),
+    )
+}
+
+/// A fetch longer than `working_timeout` keeps the run: the lease is renewed
+/// while the value downloads, so the reaper finds nothing to take, and the
+/// outcome commits once it is released.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_lease_is_renewed_while_a_long_fetch_downloads() {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    seed_str(&fx, "flag", "true").await;
+    let src = after_a_reads_flag("lease_renewed");
+    let ex = start_execution(&fx.db.pool, fx.ws, None, &src, json!({}))
+        .await
+        .unwrap();
+    let (a, _, _) = run_of(&fx.db, ex, "a").await.unwrap();
+    let timing = WorkerTiming {
+        working_timeout: Duration::from_millis(600),
+        ..WorkerTiming::default()
+    };
+    let (started, release) = hold("/_kv/flag.ion");
+    let worker = fx.worker.clone();
+    let task = tokio::spawn(async move { tick_with(&worker, 4, &handlers(), timing).await });
+    tokio::time::timeout(Duration::from_secs(60), started)
+        .await
+        .expect("the fetch began")
+        .unwrap();
+    let first = claimed_at(&fx.db, a).await;
+    // Hold the download past two working timeouts: time must pass for a
+    // lease to expire. What is asserted is the lease's state after it.
+    tokio::time::sleep(timing.working_timeout * 2).await;
+    let later = claimed_at(&fx.db, a).await;
+    assert!(
+        later > first,
+        "renewed during the fetch: {first} -> {later}"
+    );
+    assert_eq!(
+        reap(&fx.db.pool, timing.working_timeout).await.unwrap(),
+        0,
+        "a renewed lease is not reaped"
+    );
+    let _ = release.send(());
+    let ticked = task.await.unwrap().expect("the tick");
+    assert_eq!(ticked, 1, "the outcome committed");
+    assert_eq!(run_of(&fx.db, ex, "a").await.unwrap().1, "SUCCESS");
+    assert_eq!(run_of(&fx.db, ex, "b").await.unwrap().1, "RUNNING");
+    drain(&fx.db.pool).await;
+    assert_eq!(state_of(&fx.db, ex).await, "SUCCESS");
+}
+
+/// A lease lost while the value downloads (another worker took the run):
+/// the worker gives the run up -- `LeaseLost`, not counted -- and records
+/// NOTHING: no outcome, no message, no successor.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lease_lost_during_the_fetch_records_nothing() {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    seed_str(&fx, "flag", "true").await;
+    let src = after_a_reads_flag("lease_lost");
+    let ex = start_execution(&fx.db.pool, fx.ws, None, &src, json!({}))
+        .await
+        .unwrap();
+    let (a, _, _) = run_of(&fx.db, ex, "a").await.unwrap();
+    let timing = WorkerTiming {
+        working_timeout: Duration::from_millis(600),
+        ..WorkerTiming::default()
+    };
+    let (started, release) = hold("/_kv/flag.ion");
+    let worker = fx.worker.clone();
+    let mut task = tokio::spawn(async move { tick_with(&worker, 4, &handlers(), timing).await });
+    tokio::time::timeout(Duration::from_secs(60), started)
+        .await
+        .expect("the fetch began")
+        .unwrap();
+    // Another worker's claim: the fence moves under the fetch.
+    let stolen = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+        "UPDATE workflow.task_runs SET claimed_at = claimed_at + interval '1 hour' \
+          WHERE id = $1 RETURNING claimed_at",
+    )
+    .bind(a)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    // The next renewal finds the fence moved and gives the run up, with the
+    // download still held: the tick ends without waiting for it.
+    let ticked = tokio::time::timeout(Duration::from_secs(30), &mut task)
+        .await
+        .expect("the worker gave the run up while the download was held")
+        .unwrap();
+    let _ = release.send(());
+    assert_eq!(
+        ticked.expect("a lost lease is not an error"),
+        0,
+        "not counted"
+    );
+    let (_, state, message) = run_of(&fx.db, ex, "a").await.unwrap();
+    assert_eq!((state.as_str(), message), ("RUNNING", None), "no outcome");
+    assert_eq!(
+        claimed_at(&fx.db, a).await,
+        stolen,
+        "the other's lease stands"
+    );
+    let outputs: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT outputs FROM workflow.task_runs WHERE id = $1")
+            .bind(a)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert!(
+        outputs.is_none() || outputs == Some(json!({})) || outputs == Some(json!(null)),
+        "{outputs:?}"
+    );
+    assert!(run_of(&fx.db, ex, "b").await.is_none(), "no successor");
 }
