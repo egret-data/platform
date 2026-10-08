@@ -8806,7 +8806,7 @@
     "outcome": "ok",
     "outputs": {},
     "basis": "chosen",
-    "compare": "outcome exact; message contains the namespace",
+    "compare": "outcome exact; outputs exact",
     "kestra": {
      "outcome": "error",
      "message": "Cannot access the KV store. The namespace 'w9c.nowhere2' does not exist."
