@@ -2486,6 +2486,34 @@ pub fn management_router() -> Router<WorkflowState> {
             get(crate::storage::nsfiles::routes::list_namespace_directory)
                 .post(crate::storage::nsfiles::routes::create_namespace_directory),
         )
+        // W9c Task 6: the KV API (spec §9). The static `/kv/inheritance`
+        // is matched before `/kv/{key}`, so a key named `inheritance` is
+        // written and deleted on it (its GET is the listing, as in Kestra).
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/kv",
+            get(crate::storage::kv::routes::list_kv)
+                .delete(crate::storage::kv::routes::delete_kv_values),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/kv/inheritance",
+            get(crate::storage::kv::routes::list_inherited_kv)
+                .put(crate::storage::kv::routes::put_kv_inheritance_key)
+                .layer(axum::extract::DefaultBodyLimit::disable())
+                .delete(crate::storage::kv::routes::delete_kv_inheritance_key),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/kv/{key}",
+            get(crate::storage::kv::routes::get_kv_value)
+                // The PUT applies its own limit (`max_read_bytes`), so the
+                // router's default is off for it, as for the upload.
+                .put(crate::storage::kv::routes::put_kv_value)
+                .layer(axum::extract::DefaultBodyLimit::disable())
+                .delete(crate::storage::kv::routes::delete_kv_value),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/kv/{key}/revisions",
+            get(crate::storage::kv::routes::kv_revisions),
+        )
         .route(
             "/ws/{workspace}/workflows/executions/{id}/resume",
             post(resume_execution),
@@ -2527,6 +2555,13 @@ pub fn management_router() -> Router<WorkflowState> {
         crate::storage::nsfiles::routes::create_namespace_directory,
         crate::storage::nsfiles::routes::move_namespace_file,
         crate::storage::nsfiles::routes::delete_namespace_file,
+        crate::storage::kv::routes::list_kv,
+        crate::storage::kv::routes::list_inherited_kv,
+        crate::storage::kv::routes::get_kv_value,
+        crate::storage::kv::routes::kv_revisions,
+        crate::storage::kv::routes::put_kv_value,
+        crate::storage::kv::routes::delete_kv_value,
+        crate::storage::kv::routes::delete_kv_values,
     ),
     components(schemas(
         FindingDto,
@@ -2552,6 +2587,11 @@ pub fn management_router() -> Router<WorkflowState> {
         crate::storage::nsfiles::routes::NsFileStatsDto,
         crate::storage::nsfiles::routes::NsFileRevisionDto,
         crate::storage::nsfiles::routes::NsFileUploadForm,
+        crate::storage::kv::routes::KvEntryDto,
+        crate::storage::kv::routes::KvInheritedDto,
+        crate::storage::kv::routes::KvDetailDto,
+        crate::storage::kv::routes::KvRevisionDto,
+        crate::storage::kv::routes::KvKeysBody,
     )),
     tags((name = "workflow", description = "Flow drafts and published versions (W1)"))
 )]

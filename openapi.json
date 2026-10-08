@@ -30088,6 +30088,831 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/namespaces/{namespace}/kv": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "list_kv",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The namespace; one with a `_files` or `_kv` segment, an empty segment or an invalid name is refused (400). A namespace with no flow can hold keys; one that holds none (or that only another workspace holds) answers `[]`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The namespace's live keys (neither soft-deleted nor expired), each its latest revision, in the order their latest revisions were written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/KvEntryDto"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A refused namespace (named)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The namespace holds more live keys than one answer may hold (`workflow.storage.max_namespace_files`, named).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Internal storage is not configured, or the database is unavailable; the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "delete_kv_values",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "`{\"keys\": [...]}`: at most 1,000 keys (a key named twice counts twice). Every key is checked before anything is deleted.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KvKeysBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`{\"keys\": [...]}`: the keys that were live and are now soft-deleted, ascending; a key that was not live is left out. One transaction: all or nothing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KvKeysBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A malformed or missing body, a key that breaks the key rule (named; nothing is deleted), or a refused namespace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A key is busy (named), or other bulk deletes are running, for longer than the API waits (5 s); nothing was deleted, try again.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "More than 1,000 keys (the cap is named); nothing was deleted. Send several requests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Internal storage is not configured, or the database is unavailable; nothing was deleted and the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/namespaces/{namespace}/kv/inheritance": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "list_inherited_kv",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The namespace whose PARENTS are listed (cut at dots: `a.b.c` lists `a.b`, then `a`).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The live keys of the namespace's ancestors only (not its own), deepest first; a key in two ancestors is listed once, from the deeper (Kestra's `KVController`, `:73-100`). Each entry names its namespace. **This path is also where a key named `inheritance` would be read: such a key's value cannot be read by `GET …/kv/{key}` (Kestra's collision too); its `PUT`, `DELETE` and `…/revisions` work, and so do the tasks and `kv()`.**",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/KvInheritedDto"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A refused namespace (named)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The ancestors hold more live keys in all than one answer may hold (`workflow.storage.max_namespace_files`, named).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Internal storage is not configured, or the database is unavailable; the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/namespaces/{namespace}/kv/{key}": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "get_kv_value",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "The key: `[a-zA-Z0-9][a-zA-Z0-9._-]*`, at most 350 bytes. A key named `inheritance` cannot be read here: that path is the inheritance listing.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision",
+            "in": "query",
+            "description": "A given revision, served even when the key is soft-deleted (not when\nit has expired); none = the latest, which must be live.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The value with its stored type. With no `revision`, the latest, which must be live; with one, that revision, served when the key is soft-deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KvDetailDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The key rule, a refused namespace, a `revision` that is not an integer, or a stored object that does not match its record (named)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such key in this workspace's namespace, a latest read of a soft-deleted or expired key, an expired or unknown revision. Nothing is written by the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The stored value is over `workflow.storage.max_read_bytes` (named)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Internal storage or the database is unavailable or not configured; the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "put_kv_value",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The namespace; it needs no flow",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "The key: `[a-zA-Z0-9][a-zA-Z0-9._-]*`, at most 350 bytes (`inheritance` included)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "description",
+            "in": "header",
+            "description": "The key's description, stored with this revision (`\"\"` is kept as given).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "ttl",
+            "in": "header",
+            "description": "An ISO-8601 duration (`PT1H`, `P1D`): the key expires that long after the write. `PT0S` is accepted (expired at once); a negative one, a malformed one, or one over 1,000 years is 400.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "`text/plain` (or no `Content-Type`), at most `workflow.storage.max_read_bytes`. A body that is exactly ONE Ion value is stored as that value's type: an int, decimal or float a NUMBER (every digit kept), `true`/`false` a BOOLEAN, a list or struct JSON, a string or symbol a STRING -- a DURATION when it reads as one (`PT1H`, `\"P1D\"`) --, a timestamp with a time a DATETIME in UTC (even at midnight), a day-precision timestamp a DATE, `null` a STRING null. Anything else is stored whole as the raw text, typed STRING: two or more values (`hello world`, `1 2`), text that is not Ion (`{a:`), an annotated value at any depth (`x::1`), a year- or month-precision timestamp (`2025T`). Whitespace around the one value is not a second value. A body that stops arriving for 30 seconds, or takes longer than 12 hours in all, is refused (408).",
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored as the key's next revision (it always overwrites). No content and no content type (Kestra's answer)."
+          },
+          "400": {
+            "description": "The key rule, a refused namespace, a malformed or negative `ttl` (`Cannot convert value 'x' to Duration`, `ttl cannot be negative`), an empty or whitespace-only body (`empty body`), a body holding a blob, clob or s-expression at any depth (named; even under an annotation), a raw-text body that is not UTF-8 (`not UTF-8 text`), or one nesting deeper than 100 levels",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "No byte of the body arrived for 30 seconds, or the body took longer than 12 hours in all; nothing was stored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The key is busy: another write holds its lock for longer than the API waits (5 s); nothing was written, try again.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body, or the value as stored, is over `workflow.storage.max_read_bytes`; or the value holds more values than the dense-value limit (`max_read_bytes`/64), or a number of more than 1,000 digits (each named). Nothing was stored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "A `Content-Type` other than `text/plain`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Internal storage or the database is unavailable or not configured; nothing was stored and the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "delete_kv_value",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "The key (`inheritance` included)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`true`: the key was live and is now soft-deleted (its revisions are kept, listed by `…/revisions` and served by `?revision=N`); `false`: there was no live key (never written, already deleted, or expired), nothing done.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The key rule, or a refused namespace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The key is busy: another write holds its lock for longer than the API waits (5 s); nothing was deleted, try again.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Internal storage is not configured, or the database is unavailable; the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/namespaces/{namespace}/kv/{key}/revisions": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "kv_revisions",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "The key (`inheritance` included)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every revision of the key, ascending, each flagged `deleted` (soft-deleted at it) and `expired`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/KvRevisionDto"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The key rule, or a refused namespace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The key has no revision in this workspace's namespace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Internal storage is not configured, or the database is unavailable; the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/data-api/v1/{ws}": {
       "get": {
         "tags": [
@@ -36811,6 +37636,182 @@
             "items": {
               "type": "object"
             }
+          }
+        }
+      },
+      "KvDetailDto": {
+        "type": "object",
+        "required": [
+          "type",
+          "value",
+          "revision",
+          "updated"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "The stored type (never re-inferred on read)."
+          },
+          "value": {
+            "description": "The value: a DATETIME as `2025-01-02T03:04:05Z`, a DATE as\n`2025-01-02`, a DURATION as Java prints it (`PT24H`), a decimal with\nevery digit, a JSON value as itself; any JSON type."
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "updated": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this revision was written."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "KvEntryDto": {
+        "type": "object",
+        "required": [
+          "key",
+          "type",
+          "size",
+          "revision",
+          "updated"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "`STRING`, `NUMBER`, `BOOLEAN`, `DATETIME`, `DATE`, `DURATION` or `JSON`:\nthe type stored with the latest revision."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The stored value's size in bytes (its Ion text).",
+            "minimum": 0
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the key expires; `null` never."
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The latest revision.",
+            "minimum": 0
+          },
+          "updated": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the latest revision was written."
+          }
+        }
+      },
+      "KvInheritedDto": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/KvEntryDto"
+          },
+          {
+            "type": "object",
+            "required": [
+              "namespace"
+            ],
+            "properties": {
+              "namespace": {
+                "type": "string",
+                "description": "The ancestor namespace the key is read from."
+              }
+            }
+          }
+        ]
+      },
+      "KvKeysBody": {
+        "type": "object",
+        "description": "The bulk delete's request and answer: the keys to delete, and the keys\nthat were live and are now deleted (ascending).",
+        "required": [
+          "keys"
+        ],
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "KvRevisionDto": {
+        "type": "object",
+        "required": [
+          "revision",
+          "type",
+          "size",
+          "created",
+          "deleted",
+          "expired"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "type": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deleted": {
+            "type": "boolean",
+            "description": "The key was soft-deleted at this revision (its latest); the revision\nis still served by `GET …/kv/{key}?revision=N`."
+          },
+          "expired": {
+            "type": "boolean",
+            "description": "This revision has expired: it is not served."
           }
         }
       },

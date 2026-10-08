@@ -20,6 +20,7 @@
 
 pub mod key;
 pub mod merge;
+pub mod routes;
 pub mod store;
 pub mod sweep;
 pub mod value;

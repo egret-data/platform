@@ -714,6 +714,177 @@ impl KvValue {
     }
 }
 
+/// Why an API `PUT` body cannot be stored (W9c spec §9; Task 6). Never the
+/// raw-text case: [`Unmodelled::Annotation`] is answered as the raw text by
+/// [`parse_api_body`] and never reaches [`ApiBodyError::Unmodelled`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApiBodyError {
+    /// No Ion value at all: a 0-byte body, or only whitespace (the user's
+    /// ruling R-b, 2026-10-07). 400 "empty body".
+    Empty,
+    /// The raw-text fallback, whose bytes are not UTF-8 (re-review 3, M3):
+    /// such a body cannot be a STRING. 400 "not UTF-8 text".
+    NotUtf8,
+    /// A blob, a clob or an s-expression, at any depth (never `Annotation`).
+    /// 400 naming the type.
+    Unmodelled(Unmodelled),
+    /// The reader's byte cap, the dense-value limit, the symbol charge, the
+    /// 1,000-digit limit, or `from_element`'s text budget. 413.
+    TooLarge(String),
+    /// Nesting past `storage::ion::MAX_DEPTH`. 400.
+    TooDeep(String),
+    /// The reader's thread panicked on the body (logged at WARN). 400.
+    Crashed(String),
+}
+
+impl ApiBodyError {
+    /// The refusal's text, as the API sends it.
+    pub fn message(&self) -> String {
+        match self {
+            ApiBodyError::Empty => {
+                "empty body: a KV value is one Ion value, or any text, and the body holds \
+                 neither"
+                    .into()
+            }
+            ApiBodyError::NotUtf8 => {
+                "the body is not one Ion value, and it is not UTF-8 text either, so it cannot \
+                 be stored as a STRING: not UTF-8 text"
+                    .into()
+            }
+            ApiBodyError::Unmodelled(found) => format!(
+                "the body holds {}, a type the KV store does not model; nothing was stored",
+                found.with_article()
+            ),
+            ApiBodyError::TooLarge(m) => format!("the body cannot be stored: {m}"),
+            ApiBodyError::TooDeep(m) => format!("the body cannot be stored: {m}"),
+            ApiBodyError::Crashed(m) => format!("the body could not be read: {m}"),
+        }
+    }
+}
+
+/// The PUT body (`KVController.java:124-141`): parsed as ONE Ion value
+/// through [`for_each_kv_value`] (never `Element::read_one`), its type as
+/// `KVType.from` infers it (w9c `api.put_bodies`).
+///
+/// How reading stopped decides first:
+/// - not Ion (`Stop::Failed`), or more than one value (`Stop::Full`): the
+///   raw text, typed STRING ([`ApiBodyError::NotUtf8`] when the bytes are
+///   not UTF-8); no value at all: [`ApiBodyError::Empty`];
+/// - a refusal of the reader (`TooLarge`, `TooDeep`, `Crashed`) is that
+///   error, never the raw text (fix round 3, re-review P1).
+///
+/// Then the one value (the user's rulings, 2026-10-07, spec §9):
+/// - a blob, clob or sexp at any depth: [`ApiBodyError::Unmodelled`]
+///   naming it, before the annotation rule (`x::{{aGVsbG8=}}` names
+///   `blob`: re-review N3);
+/// - an annotation at any depth: the whole body is the raw text, STRING;
+/// - a timestamp with a time: a DATETIME, in UTC, even at midnight; a
+///   day-precision one: a DATE; a year- or month-precision one (R-c): the
+///   raw text, STRING;
+/// - a string or a symbol: a DURATION when its text matches Kestra's
+///   DURATION_PATTERN (w9c `types._rule_read`; `PT1H`, `"P1D"`), kept as
+///   written; else a STRING;
+/// - anything else: [`KvData::from_element`] under `cap` (one budget for
+///   the whole value: fix round 2, NI1), typed by [`KvType::of_data`] (an
+///   int, decimal or float NUMBER, a list or struct JSON, a null STRING).
+///
+/// `cap` is `workflow.storage.max_read_bytes`. CPU-bound: call it off the
+/// async runtime.
+pub fn parse_api_body(body: &[u8], cap: u64) -> Result<KvValue, ApiBodyError> {
+    let mut found: Vec<ion_rs::Element> = Vec::with_capacity(1);
+    let stop = for_each_kv_value(body, cap, |element| {
+        if !found.is_empty() {
+            return ControlFlow::Break(());
+        }
+        found.push(element.clone());
+        ControlFlow::Continue(())
+    });
+    let element = match stop {
+        Stop::End => match found.pop() {
+            Some(element) => element,
+            None => return Err(ApiBodyError::Empty),
+        },
+        Stop::Failed(_) | Stop::Full => return raw_text(body),
+        Stop::TooLarge(m) => return Err(ApiBodyError::TooLarge(m)),
+        Stop::TooDeep(m) => return Err(ApiBodyError::TooDeep(m)),
+        Stop::Crashed(m) => {
+            tracing::warn!(error = %m, "the Ion reader crashed on a KV API body");
+            return Err(ApiBodyError::Crashed(m));
+        }
+    };
+    match unmodelled(&element) {
+        Some(Unmodelled::Annotation) => return raw_text(body),
+        Some(found) => return Err(ApiBodyError::Unmodelled(found)),
+        None => {}
+    }
+    use ion_rs::Value as V;
+    match element.value() {
+        V::Timestamp(t) => {
+            use ion_rs::TimestampPrecision as P;
+            match t.precision() {
+                P::Year | P::Month => raw_text(body),
+                P::Day => Ok(KvValue {
+                    kind: KvType::Date,
+                    data: KvData::String(crate::storage::ion::timestamp_text(t)),
+                }),
+                _ => match utc_instant(t) {
+                    Some(at) => Ok(KvValue {
+                        kind: KvType::Datetime,
+                        data: KvData::String(at),
+                    }),
+                    // A timestamp chrono cannot hold: the text as written.
+                    None => raw_text(body),
+                },
+            }
+        }
+        V::String(_) | V::Symbol(_) => {
+            let data = from_body_element(&element, cap)?;
+            let kind = match &data {
+                KvData::String(s) if kestra_duration(s).is_some() => KvType::Duration,
+                _ => KvType::String,
+            };
+            Ok(KvValue { kind, data })
+        }
+        _ => {
+            let data = from_body_element(&element, cap)?;
+            Ok(KvValue {
+                kind: KvType::of_data(&data),
+                data,
+            })
+        }
+    }
+}
+
+/// [`KvData::from_element`] for an API body: its budget refusal is 413; its
+/// `Invalid` cannot occur once [`unmodelled`] found nothing, so it is
+/// egret's surprise, answered as an unreadable body.
+fn from_body_element(element: &ion_rs::Element, cap: u64) -> Result<KvData, ApiBodyError> {
+    KvData::from_element(element, cap).map_err(|e| match e {
+        Unstorable::TooLarge(m) => ApiBodyError::TooLarge(m),
+        Unstorable::Invalid(m) => ApiBodyError::Crashed(m),
+    })
+}
+
+/// The whole body as a STRING, or [`ApiBodyError::NotUtf8`] (never a lossy
+/// decode: re-review 3, M3).
+fn raw_text(body: &[u8]) -> Result<KvValue, ApiBodyError> {
+    let text = std::str::from_utf8(body).map_err(|_| ApiBodyError::NotUtf8)?;
+    Ok(KvValue {
+        kind: KvType::String,
+        data: KvData::String(text.to_string()),
+    })
+}
+
+/// A timestamp of minute precision or finer as an RFC 3339 instant in UTC
+/// (nanoseconds kept; [`encode`] writes milliseconds).
+fn utc_instant(t: &ion_rs::Timestamp) -> Option<String> {
+    let u = t.to_utc();
+    let at = chrono::NaiveDate::from_ymd_opt(i32::try_from(u.year()).ok()?, u.month(), u.day())?
+        .and_hms_nano_opt(u.hour(), u.minute(), u.second(), t.nanoseconds())?
+        .and_utc();
+    Some(at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+}
+
 /// §8.1 (W9c Task 5): a typed value and an optional `kvType` -> the
 /// [`KvValue`] `Set` stores, as the artifact coerces (`Set.java:116-132`;
 /// w9c `set_coercion`):
@@ -2410,6 +2581,140 @@ mod tests {
                 );
             }
             assert_eq!(parse_ttl("P365250D", mode), Ok(max_ttl()));
+        }
+    }
+
+    // ── Task 6: the API's PUT body ───────────────────────────────────────
+
+    /// Every w9c `api.put_bodies` cell through [`parse_api_body`]: a 400 cell
+    /// is refused naming what it says; a 200 cell is stored as its type, as
+    /// exactly its `ion_bytes`, and read back as its GET value.
+    #[test]
+    fn every_put_body_cell_parses_to_its_stored_type_bytes_and_value() {
+        let cells = fixture()["egret_expected"]["api"]["put_bodies"]
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut examined = 0;
+        for (name, cell) in cells.iter().filter(|(n, _)| !n.starts_with('_')) {
+            examined += 1;
+            let body = cell["body"].as_str().unwrap();
+            let got = parse_api_body(body.as_bytes(), 1 << 20);
+            if cell["put_status"] == 400 {
+                let err = got.expect_err(name);
+                let msg = err.message();
+                for frag in cell["message_contains"].as_array().unwrap() {
+                    assert!(msg.contains(frag.as_str().unwrap()), "{name}: {msg}");
+                }
+                continue;
+            }
+            assert_eq!(cell["put_status"], 200, "{name}");
+            let v = got.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(v.kind.as_str(), cell["get"]["type"], "{name}");
+            let bytes = check_readable(&v, 1 << 20).unwrap();
+            assert_eq!(
+                std::str::from_utf8(&bytes).unwrap(),
+                cell["ion_bytes"].as_str().unwrap(),
+                "{name}"
+            );
+            let back = decode(v.kind, &bytes, 1 << 20).unwrap();
+            assert_eq!(back.to_json(), cell["get"]["value"], "{name}");
+        }
+        assert_eq!(examined, 54, "every put_bodies cell is examined");
+    }
+
+    /// Re-review P1: `ApiBodyError::Unmodelled` never holds `Annotation`:
+    /// an annotated body is its raw text, at any depth and on any type.
+    #[test]
+    fn an_annotated_body_is_the_raw_text_and_never_unmodelled_annotation() {
+        for body in [
+            "x::1",
+            "{a:x::1}",
+            "[1,a::[2]]",
+            "x::2025-01-01T",
+            "a::b::\"s\"",
+        ] {
+            let v = parse_api_body(body.as_bytes(), 4096).unwrap();
+            assert_eq!(v.kind, KvType::String, "{body}");
+            assert_eq!(v.data, KvData::String(body.into()), "{body}");
+        }
+        // The refusal comes first (re-review N3).
+        for (body, name) in [
+            ("x::{{aGVsbG8=}}", Unmodelled::Blob),
+            ("[a::1,(b)]", Unmodelled::SExp),
+            ("{a:x::{{\"c\"}}}", Unmodelled::Clob),
+        ] {
+            assert_eq!(
+                parse_api_body(body.as_bytes(), 4096),
+                Err(ApiBodyError::Unmodelled(name)),
+                "{body}"
+            );
+        }
+    }
+
+    /// Fix round 3 (re-review P1): a reader refusal is never the raw text.
+    #[test]
+    fn a_reader_refusal_is_its_error_and_never_the_raw_text() {
+        let deep = format!("{}1{}", "[".repeat(101), "]".repeat(101));
+        assert!(matches!(
+            parse_api_body(deep.as_bytes(), 1 << 20),
+            Err(ApiBodyError::TooDeep(_))
+        ));
+        let long = format!("1.{}", "1".repeat(70_000));
+        match parse_api_body(long.as_bytes(), 1 << 20) {
+            Err(ApiBodyError::TooLarge(m)) => assert!(m.contains("1000"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        // A value over the cap is the reader's TooLarge, not the raw text.
+        let big = format!("\"{}\"", "a".repeat(5000));
+        assert!(matches!(
+            parse_api_body(big.as_bytes(), 4096),
+            Err(ApiBodyError::TooLarge(_))
+        ));
+        // Expanding decimals share one budget (fix round 2, NI1).
+        assert!(matches!(
+            parse_api_body(b"[1d9000000,1d9000000]", 10 << 20),
+            Err(ApiBodyError::TooLarge(_))
+        ));
+        // The huge symbol id is refused unread (re-review 3, M2): raw text.
+        let v = parse_api_body(b"$99999999999999999999", 4096).unwrap();
+        assert_eq!(v.data, KvData::String("$99999999999999999999".into()));
+        // The controls: 1,000 digits round-trip exactly.
+        let int = "9".repeat(1000);
+        let v = parse_api_body(int.as_bytes(), 1 << 20).unwrap();
+        assert_eq!(v.data, KvData::Number(KvNumber::Int(int.clone())));
+        let dec_text = format!("{}.5", "9".repeat(998));
+        let v = parse_api_body(dec_text.as_bytes(), 1 << 20).unwrap();
+        assert_eq!(v.data, dec(&dec_text));
+    }
+
+    /// Re-review 3, M3: a raw-text fallback that is not UTF-8 is refused.
+    #[test]
+    fn a_raw_text_fallback_that_is_not_utf8_is_not_utf8() {
+        let mut binary = crate::storage::ion::BINARY_VERSION_MARKER.to_vec();
+        binary.push(0xF0); // a reserved type code
+        for body in [binary.as_slice(), &[0xFF, 0xFE, 0x00][..]] {
+            assert_eq!(
+                parse_api_body(body, 4096),
+                Err(ApiBodyError::NotUtf8),
+                "{body:?}"
+            );
+        }
+        assert_eq!(
+            parse_api_body(b"{a:", 4096).unwrap().data,
+            KvData::String("{a:".into())
+        );
+    }
+
+    /// R-b: no value at all is Empty, whatever the whitespace.
+    #[test]
+    fn an_empty_or_blank_body_is_empty() {
+        for body in ["", " ", "\n\t\r ", "  \u{0b}\u{0c} "] {
+            assert_eq!(
+                parse_api_body(body.as_bytes(), 4096),
+                Err(ApiBodyError::Empty),
+                "{body:?}"
+            );
         }
     }
 }
