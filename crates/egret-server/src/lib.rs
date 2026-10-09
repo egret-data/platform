@@ -772,6 +772,181 @@ mod tests {
         );
     }
 
+    /// `crates/egret-server` → the workspace root, which is where `openapi.json`
+    /// and `frontend/` live.
+    fn repo_root() -> std::path::PathBuf {
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .canonicalize()
+            .expect("the workspace root is two levels above crates/egret-server")
+    }
+
+    /// Every `.ts` file under `dir`, as `(path relative to dir, contents)`,
+    /// sorted by path. Paths use `/` — the only platform this builds on is
+    /// POSIX, and a `\` here would move the digest.
+    fn generated_ts_files(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+        fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
+            let entries =
+                std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+            for entry in entries {
+                let entry = entry.expect("dir entry");
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let rel = if prefix.is_empty() {
+                    name
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                if entry.file_type().expect("file type").is_dir() {
+                    walk(&entry.path(), &rel, out);
+                } else if rel.ends_with(".ts") {
+                    out.push((
+                        rel,
+                        std::fs::read(entry.path()).expect("read generated file"),
+                    ));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, "", &mut out);
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    /// The tree digest, and its pre-image is the contract with
+    /// `frontend/scripts/write-api-digest.mjs`: one `<path> <sha256>\n` line per
+    /// file, paths sorted. Paths are IN the pre-image, so a rename moves the
+    /// digest even with every byte of content unchanged.
+    fn tree_digest(files: &[(String, Vec<u8>)]) -> String {
+        let mut preimage = String::new();
+        for (rel, bytes) in files {
+            preimage.push_str(rel);
+            preimage.push(' ');
+            preimage.push_str(&sha256_hex(bytes));
+            preimage.push('\n');
+        }
+        sha256_hex(preimage.as_bytes())
+    }
+
+    /// Drift gate, part two: the committed orval client must be the one the
+    /// committed `openapi.json` produced.
+    ///
+    /// [`committed_openapi_json_is_current`] above compares the spec against a
+    /// FRESH emit, so the spec cannot drift from the Rust types. Nothing
+    /// compared the spec against `frontend/src/api/generated/`, and that hole is
+    /// not hypothetical: `3d8ee22a` changed `openapi.json` without running
+    /// `npm run gen:api`, the drift survived two tasks, and a third task's own
+    /// regeneration caught up TWO doc sweeps at once. Same shape as the two
+    /// other holes this plan found — a gate that exists, is green, and does not
+    /// cover what a reader assumes.
+    ///
+    /// `npm run gen:api` now writes a receipt beside the client
+    /// (`frontend/src/api/generated.digest.json`, by
+    /// `frontend/scripts/write-api-digest.mjs`) naming the spec bytes it read
+    /// and the tree it emitted. This recomputes both.
+    ///
+    /// # What a green here means, stated no wider than the measurement
+    ///
+    /// That the spec and the client were last written TOGETHER by `gen:api`, and
+    /// that neither has changed since. It does NOT re-run orval. `just check`
+    /// has to work on a machine with no `node_modules` — GitHub CI is out of
+    /// quota on this project, so `just check` IS the pre-merge gate — and
+    /// `npm run gen:api` is 5.9 s measured with the install warm, plus a network
+    /// fetch without one. The receipt writer is also reachable on its own, so
+    /// somebody who hand-edits a generated file and then runs that script
+    /// instead of `gen:api` re-blesses their edit. This catches the forgetful
+    /// case, which is the one that has actually happened here.
+    ///
+    /// Reach: `.ts` files only, which is all orval emits (525 of 525 measured).
+    /// A non-`.ts` file added under `generated/` is outside this gate — hashing
+    /// every file would turn a Finder-created `.DS_Store` red, and a guard that
+    /// cries wolf gets deleted rather than fixed.
+    #[test]
+    fn generated_client_was_emitted_from_the_committed_spec() {
+        let root = repo_root();
+        let receipt_path = root.join("frontend/src/api/generated.digest.json");
+        let receipt: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&receipt_path)
+                .unwrap_or_else(|e| panic!("{}: {e}", receipt_path.display())),
+        )
+        .expect("the receipt is JSON");
+
+        let spec = std::fs::read(root.join("openapi.json")).expect("openapi.json at repo root");
+        let files = generated_ts_files(&root.join("frontend/src/api/generated"));
+        // Computed ONCE. 3.5 MB over 525 files is ~43 ms, and the controls below
+        // need three more digests; recomputing the base for each would make this
+        // one test most of the cost of `cargo test -p egret-server --lib`.
+        let committed_tree = tree_digest(&files);
+
+        // A digest over an empty walk would match an empty receipt and assert
+        // nothing — the shape this plan has recorded most often.
+        assert!(
+            files.len() > 100,
+            "walked {} .ts files under frontend/src/api/generated — the walk is finding \
+             nothing and this gate would pass whatever the client said",
+            files.len()
+        );
+
+        assert_eq!(
+            receipt["spec"].as_str(),
+            Some(sha256_hex(&spec).as_str()),
+            "openapi.json has changed since the frontend client was generated from it, so \
+             `frontend/src/api/generated/` describes a DIFFERENT API than the one this \
+             backend serves.\n\
+             Run `cd frontend && npm run gen:api` and commit both.\n\
+             (Receipt: {})",
+            receipt_path.display()
+        );
+        assert_eq!(
+            receipt["client"].as_str(),
+            Some(committed_tree.as_str()),
+            "frontend/src/api/generated/ has changed since `npm run gen:api` last wrote it \
+             ({} .ts files walked), so it is no longer the output of any generator run.\n\
+             Generated code is not hand-edited here — put the change in the backend types or \
+             in frontend/scripts/, then run `cd frontend && npm run gen:api`.\n\
+             (Receipt: {})",
+            files.len(),
+            receipt_path.display()
+        );
+        assert_eq!(
+            receipt["files"].as_u64(),
+            Some(files.len() as u64),
+            "the receipt counts a different number of files than the walk found; one of the \
+             two implementations of this digest has drifted from the other"
+        );
+
+        // The predicate has to be able to say "different", and on this branch —
+        // a guard on this programme called two byte-equal bodies "differing"
+        // and only its accept-control caught it. So: identical input, identical
+        // digest; one byte moved, or one path renamed, different digest.
+        assert_eq!(
+            committed_tree,
+            tree_digest(&files.clone()),
+            "the digest is not a function of its input"
+        );
+        let mut one_byte_changed = files.clone();
+        one_byte_changed[0].1.push(b'\n');
+        assert_ne!(
+            committed_tree,
+            tree_digest(&one_byte_changed),
+            "appending a byte to {} left the digest unchanged, so this gate cannot see a \
+             hand-edited generated file",
+            files[0].0
+        );
+        let mut one_path_renamed = files.clone();
+        one_path_renamed[0].0.push_str(".renamed.ts");
+        one_path_renamed.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_ne!(
+            committed_tree,
+            tree_digest(&one_path_renamed),
+            "renaming {} left the digest unchanged, so this gate cannot see a file that moved",
+            files[0].0
+        );
+    }
+
     #[tokio::test]
     async fn healthz_returns_200_ok() {
         let app = build_router(AppState::without_db());
