@@ -42,7 +42,7 @@ use std::time::Duration;
 use egret_core::UserId;
 use egret_metastore::Db;
 use egret_storage::{ObjectStore, StorageError};
-use egret_workflow::flow_trigger::process_events;
+use egret_workflow::flow_trigger::{process_events, process_events_with, PassLimits};
 use egret_workflow::scheduler::{fire_due, PassReport};
 use egret_workflow::storage::kv::key::KvKey;
 use egret_workflow::storage::kv::value::KvType;
@@ -63,6 +63,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1493,7 +1494,19 @@ async fn nine_listeners_of_one_event_each_reading_are_fetched_in_one_round() {
         .await
         .unwrap();
     drain(&fx.db.pool).await;
-    let (report, rounds) = rounds_of(process_events(&fx.db.pool)).await;
+    // The pass must reach the four events the `off` listeners' fires write
+    // (their first settle ends them SUCCESS), so no duration cap may end it
+    // first: under load the source's event alone can outrun the default 1s.
+    let limits = PassLimits {
+        max_duration: Duration::from_secs(3600),
+        ..PassLimits::default()
+    };
+    let (report, rounds) = rounds_of(process_events_with(
+        &fx.db.pool,
+        &limits,
+        &CancellationToken::new(),
+    ))
+    .await;
     let report = report.expect("the pass");
     assert_eq!(rounds, 1, "one fetch round answered all nine listeners");
     assert_eq!(reads_of("/_kv/lsn"), 9, "each value read once");
