@@ -9374,6 +9374,16 @@
               }
             }
           },
+          "400": {
+            "description": "The new name is masked by a tag masking policy while this tag is attached to a whole TABLE (which would make that table unreadable rather than masked)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Not authenticated",
             "content": {

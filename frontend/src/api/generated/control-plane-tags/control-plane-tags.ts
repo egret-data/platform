@@ -379,6 +379,11 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
   status: 200
 }
 
+export type controlPlaneTagsUpdateTagResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
 export type controlPlaneTagsUpdateTagResponse401 = {
   data: ErrorBody
   status: 401
@@ -402,7 +407,7 @@ export type controlPlaneTagsUpdateTagResponse500 = {
 export type controlPlaneTagsUpdateTagResponseSuccess = (controlPlaneTagsUpdateTagResponse200) & {
   headers: Headers;
 };
-export type controlPlaneTagsUpdateTagResponseError = (controlPlaneTagsUpdateTagResponse401 | controlPlaneTagsUpdateTagResponse403 | controlPlaneTagsUpdateTagResponse404 | controlPlaneTagsUpdateTagResponse500) & {
+export type controlPlaneTagsUpdateTagResponseError = (controlPlaneTagsUpdateTagResponse400 | controlPlaneTagsUpdateTagResponse401 | controlPlaneTagsUpdateTagResponse403 | controlPlaneTagsUpdateTagResponse404 | controlPlaneTagsUpdateTagResponse500) & {
   headers: Headers;
 };
 
