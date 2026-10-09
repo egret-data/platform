@@ -99,6 +99,30 @@ pub enum CompileError {
         total: usize,
         ceiling: usize,
     },
+    /// **The compiled set would be served with two mask (or two row-filter)
+    /// policies that arbitrate the same request and arbitrate it differently**
+    /// — SP4d debt Task 6, the WRITE side of
+    /// `egret_ranger_eval`'s `UndecidableCause::EvalOrderAmbiguous`. Measured
+    /// live as SP4d-1's finding F2
+    /// (`docs/en/plans/2026-09-28-sp4d-1-live-result.md` §8): egret's own rule
+    /// compiler put `country = 'US'` and `id > 2` on one table at one priority,
+    /// and which rows a reader saw was decided by a tie-break the artifact does
+    /// not express.
+    ///
+    /// **It is a whole-SET refusal, like [`Self::ProfileExpansionCeiling`] and
+    /// unlike every per-rule variant above**, because no single `compile_rule`
+    /// call can see the other rule's output. It therefore names the PROFILE as
+    /// well: the trigger may be a workspace-membership write on a page that
+    /// mentions neither rule.
+    ///
+    /// `refusal` is `egret_policy::AmbiguousArbitration::refusal()` — the SAME
+    /// sentence the policy editor's 400 carries, so the two surfaces cannot
+    /// describe one state differently. The rule itself is
+    /// `egret_policy::ambiguous_arbitration_in`, spelled once; read that
+    /// module for why an AGREEING tie is admitted, and for why the guard is
+    /// deliberately narrower than the evaluator's own refusal.
+    #[error("recompiling profile {profile:?} would emit an order-ambiguous pair: {refusal}")]
+    AmbiguousMaskOrFilterArbitration { profile: String, refusal: String },
     /// A `User` principal's `r#ref` is not the bare username the store is
     /// supposed to hold (`model::Principal`'s doc comment: "a username,
     /// never an email … written through unchanged"). The compiler does no

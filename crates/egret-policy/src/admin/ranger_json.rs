@@ -204,14 +204,19 @@ pub fn masking_to_ranger_json(input: &MaskingPolicyInput) -> Value {
         "resources": resources_object(&input.resources),
         "dataMaskPolicyItems": input.items.iter().map(mask_item_obj).collect::<Vec<_>>(),
         "policyItems": [], "denyPolicyItems": [],
-        // SP4d-1 F2 (live-measured, see
-        // `docs/en/plans/2026-09-28-sp4d-1-live-result.md` §8): two rules that
-        // overlap on one resource compile into two policies at the SAME
-        // priority, and Ranger defines no order between them — for a mask or a
-        // row filter the FIRST evaluator in `getEvalOrder()` is final, so which
-        // one applies is not determined by anything this compiler writes down.
-        // `egret-ranger-eval` answers `EvalOrderAmbiguous` rather than
-        // guessing. Not fixed here; SP4d-2 and the perm compiler own it.
+        // **Always 0 or 1, and the pair this used to warn about is now
+        // GUARDED rather than commented** (SP4d debt Task 6). Two rules that
+        // overlap on one resource still compile to two policies at this same
+        // priority — one serializer call cannot see the other's output — but a
+        // SET that would be served with such a pair is refused:
+        // [`crate::ambiguous_arbitration::ambiguous_arbitration_in`] is the one
+        // rule, called by `egret_perm_compile::trigger::compile_desired` for
+        // every recompile and by this crate's own `create_policy`/
+        // `update_policy` for the editor. Read that module for the measurement
+        // (SP4d-1 F2), for why an AGREEING tie is admitted and a DIFFERING one
+        // is not, and for the correction to this comment's old claim that
+        // "Ranger defines no order" — the comparator is a total order; what it
+        // falls through to is the policy NAME, which is a rule's uuid.
         "policyPriority": if input.is_override { 1 } else { 0 },
     })
 }
@@ -267,14 +272,19 @@ pub fn rowfilter_to_ranger_json(input: &RowFilterPolicyInput) -> Value {
         "resources": resources_object(&input.resources),
         "rowFilterPolicyItems": input.items.iter().map(rowfilter_item_obj).collect::<Vec<_>>(),
         "policyItems": [], "denyPolicyItems": [],
-        // SP4d-1 F2 (live-measured, see
-        // `docs/en/plans/2026-09-28-sp4d-1-live-result.md` §8): two rules that
-        // overlap on one resource compile into two policies at the SAME
-        // priority, and Ranger defines no order between them — for a mask or a
-        // row filter the FIRST evaluator in `getEvalOrder()` is final, so which
-        // one applies is not determined by anything this compiler writes down.
-        // `egret-ranger-eval` answers `EvalOrderAmbiguous` rather than
-        // guessing. Not fixed here; SP4d-2 and the perm compiler own it.
+        // **Always 0 or 1, and the pair this used to warn about is now
+        // GUARDED rather than commented** (SP4d debt Task 6). Two rules that
+        // overlap on one resource still compile to two policies at this same
+        // priority — one serializer call cannot see the other's output — but a
+        // SET that would be served with such a pair is refused:
+        // [`crate::ambiguous_arbitration::ambiguous_arbitration_in`] is the one
+        // rule, called by `egret_perm_compile::trigger::compile_desired` for
+        // every recompile and by this crate's own `create_policy`/
+        // `update_policy` for the editor. Read that module for the measurement
+        // (SP4d-1 F2), for why an AGREEING tie is admitted and a DIFFERING one
+        // is not, and for the correction to this comment's old claim that
+        // "Ranger defines no order" — the comparator is a total order; what it
+        // falls through to is the policy NAME, which is a rule's uuid.
         "policyPriority": if input.is_override { 1 } else { 0 },
     })
 }

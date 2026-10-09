@@ -1338,3 +1338,185 @@ async fn trino_profile_with_tag_service(
         .expect("create tag service");
     (profile, tag_service.id)
 }
+
+// ---------------------------------------------------------------------------
+// SP4d debt Task 6, item 1 — the compiler must not EMIT an order-ambiguous
+// mask/row-filter pair.
+// ---------------------------------------------------------------------------
+//
+// SP4d-1's finding F2, reproduced from the MODEL rather than from a hand-built
+// policy set: two `perm.rules` rows whose selectors land on the same column
+// compile, independently, to two `policyType 1` policies at `policyPriority 0`
+// selecting one resource. Which one the engine applies falls through to a
+// tie-break the artifact does not express (see
+// `egret_policy::ambiguous_arbitration`), so the whole recompile is refused.
+//
+// These run through `recompile_service`, the real driver every write surface
+// funnels through — `POST`/`PATCH /perm/rules`, `POST /perm/preview`, and the
+// tag/role/membership triggers — so the guard is exercised where it actually
+// sits and not through a unit call that could not fail for route reasons.
+
+/// Creates a tag and a MASK rule on it with a caller-chosen `mask_type`, so a
+/// test can make two rules that AGREE or DIFFER on the decisive value.
+/// Returns `(rule_id, tag_key)`.
+async fn create_tag_and_mask_rule(
+    perm: &PermStore,
+    pool: &sqlx::PgPool,
+    label: &str,
+    mask_type: &str,
+) -> (Uuid, String) {
+    let tag_key = unique(label);
+    sqlx::query("INSERT INTO tags (key, name) VALUES ($1, $2)")
+        .bind(&tag_key)
+        .bind(label)
+        .execute(pool)
+        .await
+        .expect("tag");
+    let rule = Rule {
+        id: Uuid::nil(),
+        name: unique(&format!("{label}-rule")),
+        kind: RuleKind::Mask {
+            mask_type: mask_type.to_string(),
+            value_expr: None,
+        },
+        selector: Selector::Tag {
+            key: tag_key.clone(),
+        },
+        exempt: PrincipalSet::default(),
+    };
+    let rule_id = perm.create_rule(&rule).await.expect("create rule");
+    (rule_id, tag_key)
+}
+
+#[tokio::test]
+async fn two_rules_masking_one_column_differently_refuse_the_whole_recompile() {
+    let Some(db) = test_db().await else {
+        eprintln!("skip: no DATABASE_URL");
+        return;
+    };
+    let f = seed_starrocks_engine_with_tag_rule(&db).await;
+    // The fixture's rule masks `sales.orders.email` with MASK_HASH. A second
+    // tag on the SAME column, carrying a rule with a DIFFERENT mask type, is
+    // F2's differing half.
+    let (second_rule, second_tag) =
+        create_tag_and_mask_rule(&f.perm, &db.pool, "ambig", "MASK_NULL").await;
+    tag_column(
+        &db.pool,
+        f.warehouse_id,
+        "sales",
+        "orders",
+        "email",
+        &second_tag,
+    )
+    .await;
+
+    let err = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect_err("a recompile that would emit the ambiguous pair must refuse");
+    let msg = err.to_string();
+    assert!(
+        matches!(
+            err,
+            egret_perm::CompileError::AmbiguousMaskOrFilterArbitration { .. }
+        ),
+        "the refusal must be the dedicated variant, not a generic Db error: {msg}"
+    );
+    // The message has to point at something the steward can edit: both policy
+    // names (each carrying its rule's uuid) and the resource that collided.
+    assert!(
+        msg.contains(&f.rule_id.to_string()) && msg.contains(&second_rule.to_string()),
+        "the refusal must name BOTH rules' compiled policies: {msg}"
+    );
+    assert!(
+        msg.contains("column=[email]"),
+        "the refusal must name the resource that collided: {msg}"
+    );
+    assert!(
+        msg.contains("mask"),
+        "the refusal must say which decision is ambiguous: {msg}"
+    );
+
+    // ⚠ The refusal is raised in `compile_desired`, BEFORE `apply_diff_in_tx`,
+    // so nothing is written: the profile's previously-compiled policy set is
+    // untouched and the installation keeps enforcing what it was enforcing.
+    // Asserted on the stored row rather than on the summary (there is no
+    // summary — the call returned an error).
+    let still_there: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM policy.authz_policies WHERE service_id = $1 \
+         AND (policy_jsonb->>'policyType') = '1'",
+    )
+    .bind(f.service_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("query");
+    assert_eq!(
+        still_there, 1,
+        "a refused recompile must write nothing — the fixture's one masking policy stands"
+    );
+}
+
+/// ⚠ **An ACCEPT-control, and it is the assertion that stops this guard being
+/// widened into something that breaks working installations.** SP4d-1 §8's
+/// other half is two masks on one column that AGREE (policies 8777 and 8801,
+/// both `dataMaskType: "MASK"`, no `valueExpr`) — a real artifact, on a real
+/// profile. Whichever evaluator runs first, the column is masked the same way,
+/// so nothing about enforcement is undetermined and the compile must succeed.
+///
+/// `egret-ranger-eval` still declines to PREDICT that pair, because a
+/// `MaskResult` names the policy that produced it; that is an explainability
+/// limit, not an enforcement one, and turning it into a compile-time refusal
+/// here would have broken the one measured artifact for no enforcement gain.
+#[tokio::test]
+async fn two_rules_masking_one_column_the_same_way_still_compile() {
+    let Some(db) = test_db().await else {
+        eprintln!("skip: no DATABASE_URL");
+        return;
+    };
+    let f = seed_starrocks_engine_with_tag_rule(&db).await;
+    let (_second_rule, second_tag) =
+        create_tag_and_mask_rule(&f.perm, &db.pool, "agree", "MASK_HASH").await;
+    tag_column(
+        &db.pool,
+        f.warehouse_id,
+        "sales",
+        "orders",
+        "email",
+        &second_tag,
+    )
+    .await;
+
+    let summary = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("an AGREEING tie must still compile");
+    assert_eq!(
+        summary.created, 1,
+        "the second rule's own policy is created; the first one is unchanged"
+    );
+    // Both policies really are present, both really are masks on the same
+    // column, and they really do agree — asserted on the stored bodies, so the
+    // test cannot pass by the second rule having compiled to nothing (the
+    // failure mode a bare `expect` would hide).
+    let masks: Vec<Value> = sqlx::query_scalar(
+        "SELECT policy_jsonb FROM policy.authz_policies WHERE service_id = $1 \
+         AND (policy_jsonb->>'policyType') = '1' ORDER BY name",
+    )
+    .bind(f.service_id)
+    .fetch_all(&db.pool)
+    .await
+    .expect("query");
+    assert_eq!(masks.len(), 2, "two masking policies, not one");
+    for m in &masks {
+        assert_eq!(
+            m["resources"]["column"]["values"][0], "email",
+            "both must select the same column, or this is not the tie under test"
+        );
+        assert_eq!(
+            m["dataMaskPolicyItems"][0]["dataMaskInfo"]["dataMaskType"], "MASK_HASH",
+            "both must carry the SAME mask type, or this is not an agreeing tie"
+        );
+    }
+    assert_eq!(
+        masks[0]["dataMaskPolicyItems"], masks[1]["dataMaskPolicyItems"],
+        "the decisive buckets must be equal — that is what makes the tie harmless"
+    );
+}

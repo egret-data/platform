@@ -1455,3 +1455,136 @@ async fn a_tag_masking_policy_is_refused_when_its_tag_is_on_a_whole_table() {
     f.store.delete_service(trino_svc.id).await.expect("cleanup");
     f.store.delete_service(tag_svc.id).await.expect("cleanup");
 }
+
+// ---------------------------------------------------------------------------
+// SP4d debt Task 6, item 1 — the POLICY EDITOR's half of the one rule.
+// ---------------------------------------------------------------------------
+//
+// The compiler's half is `egret-perm-compile/tests/recompile.rs`. This is the
+// surface a steward reaches by hand, and a route handler's guard is not covered
+// by `--lib` — so it is exercised through the real `POST`/`PUT /policies`
+// handlers, not through `refuse_ambiguous_arbitration` directly.
+
+/// A second row filter on a table that already has one, with a DIFFERENT
+/// expression, must be refused — SP4d-1 §8's F2 shape, authored by hand.
+///
+/// ⚠ Three accept-controls sit in the same test, because a refusal that fires
+/// for the wrong reason looks identical to one that fires for the right one:
+/// the FIRST row filter must be accepted (there is nothing to tie with), an
+/// AGREEING second one must be accepted, and a second one on a DIFFERENT table
+/// must be accepted.
+#[tokio::test]
+async fn a_second_row_filter_on_one_table_is_refused_only_when_it_disagrees() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ambigrf", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    let filter = |name: &str, table: &str, expr: &str| {
+        serde_json::json!({
+            "kind": "rowfilter", "name": name, "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                          "table": {"values": [table]}},
+            "items": [{"groups": ["public"], "filterExpr": expr}]
+        })
+    };
+    let post = |body: serde_json::Value| {
+        let app = f.app_empty();
+        let token = token.clone();
+        async move {
+            into_json(
+                app.oneshot(req("POST", "/policies", &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        }
+    };
+
+    // Control 1: the first one has nothing to tie with.
+    let (status, body) = post(filter("rf-us", "orders", "country = 'US'")).await;
+    assert_eq!(status, StatusCode::OK, "the first row filter; body={body}");
+
+    // Control 2: a DIFFERENT table is a different resource, so a different band.
+    let (status, body) = post(filter("rf-other", "invoices", "id > 2")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a filter on another table; body={body}"
+    );
+    let other_id = body["id"].as_i64().expect("id");
+
+    // Control 3: an AGREEING second filter on the SAME table is harmless —
+    // whichever evaluator runs first, the same rows are withheld.
+    let (status, body) = post(filter("rf-us-again", "orders", "country = 'US'")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an agreeing tie must be accepted; body={body}"
+    );
+
+    // The real case: same table, same priority, DIFFERENT expression.
+    let (status, body) = post(filter("rf-id", "orders", "id > 2")).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a disagreeing second filter on one table must be refused; body={body}"
+    );
+    let msg = body["error"]
+        .as_str()
+        .or_else(|| body["message"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        msg.contains("row filter") && msg.contains("table=[orders]"),
+        "the refusal must name the decision and the resource: {body}"
+    );
+    assert!(
+        msg.contains("\"rf-id\""),
+        "the refusal must name the policy being written: {body}"
+    );
+
+    // ⚠ **A PUT must not pair the new body against the row it REPLACES.**
+    // `rf-other` is the ONLY filter on `invoices`, so changing its expression
+    // is one policy changing and nothing else is in its band — the only thing
+    // that can tie with it is its own stored version. Without
+    // `refuse_ambiguous_arbitration`'s `replacing` argument this 400s, and
+    // every retry 400s the same way, so the steward can never edit a row
+    // filter's expression again. Deliberately done on `invoices` and not on
+    // `orders`: editing `rf-us` while `rf-us-again` still carries the old
+    // expression really WOULD create a new disagreeing pair, so that version
+    // of this assertion would have passed for the wrong reason.
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "PUT",
+                &format!("/policies/{other_id}"),
+                &token,
+                Some(filter("rf-other", "invoices", "id > 7")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a PUT must exclude the row it replaces from the comparison; body={body}"
+    );
+    // …and the edit really landed, so the 200 is not a no-op.
+    let (_, stored) = into_json(
+        f.app_empty()
+            .oneshot(req("GET", &format!("/policies/{other_id}"), &token, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        stored.to_string().contains("id > 7"),
+        "the PUT must have replaced the expression; body={stored}"
+    );
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}

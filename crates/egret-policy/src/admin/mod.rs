@@ -116,7 +116,14 @@ fn policy_type_name(t: i64) -> &'static str {
 }
 
 /// The item array key for each policy kind.
-fn item_key(policy_type: i64) -> &'static str {
+///
+/// `pub(crate)`: [`crate::ambiguous_arbitration`] needs the DECISIVE bucket of a
+/// mask or row-filter policy, and the two literals `"dataMaskPolicyItems"` /
+/// `"rowFilterPolicyItems"` must not be spelled a second time there — a second
+/// spelling that drifted would make the collision guard compare `Value::Null`
+/// against `Value::Null` and report every pair as agreeing, which is a silent
+/// pass rather than a visible break.
+pub(crate) fn item_key(policy_type: i64) -> &'static str {
     match policy_type {
         1 => "dataMaskPolicyItems",
         2 => "rowFilterPolicyItems",
@@ -1059,6 +1066,73 @@ fn tag_mask_addresses(body: &Value) -> Vec<&str> {
         .unwrap_or_default()
 }
 
+/// **The editor's half of SP4d debt Task 6's one rule.** Would storing `pol`
+/// under `service_id` leave that profile serving two mask (or two row-filter)
+/// policies that arbitrate one request differently? The rule itself is
+/// [`crate::ambiguous_arbitration::ambiguous_arbitration_in`], spelled once and
+/// shared with `egret_perm_compile::trigger::compile_desired`; the refusal is
+/// the same sentence from both.
+///
+/// `replacing` is the policy id a `PUT` is about to overwrite, excluded from the
+/// comparison set — **without it a `PUT` would pair the new body against the OLD
+/// version of itself**, which is a refusal that cannot be escaped (every retry
+/// hits the same stored row) and the first thing a reviewer should check here.
+///
+/// Reads nothing when the body is not a mask or a row filter, which is the
+/// common case: an access policy is not in this class at all (its arbitration
+/// is `>` and deny-wins makes order immaterial — see the guard's module doc).
+/// The read it does do is `enabled_policies_for_service`, the SAME assembler the
+/// download route and `explain` use, so the set compared is the set served.
+///
+/// Runs BEFORE the insert/update, so a refusal has written nothing and the route
+/// returns a plain 400 rather than rolling anything back — the same shape
+/// `unreadable_table_mask_for`'s callers have.
+async fn refuse_ambiguous_arbitration(
+    st: &PolicyAdminState,
+    service_id: i64,
+    replacing: Option<i64>,
+    pol: &RangerPolicy,
+) -> Result<(), PolicyHttpError> {
+    if !matches!(
+        pol.body.get("policyType").and_then(Value::as_i64),
+        Some(1) | Some(2)
+    ) {
+        return Ok(());
+    }
+    let existing: Vec<Value> = st
+        .store
+        .enabled_policies_for_service(service_id)
+        .await?
+        .into_iter()
+        .filter(|p| replacing.is_none_or(|id| p.get("id").and_then(Value::as_i64) != Some(id)))
+        .collect();
+    let candidates: Vec<(String, &Value)> = existing
+        .iter()
+        .map(|p| {
+            (
+                p.get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                p,
+            )
+        })
+        .chain(std::iter::once((pol.name.clone(), &pol.body)))
+        .collect();
+    if let Some(pair) =
+        crate::ambiguous_arbitration::ambiguous_arbitration_in(candidates.iter().map(
+            |(name, body)| crate::ambiguous_arbitration::PolicyUnderWrite {
+                service: service_id,
+                name,
+                body,
+            },
+        ))
+    {
+        return Err(PolicyHttpError::BadRequest(pair.refusal()));
+    }
+    Ok(())
+}
+
 /// Read the required `service` name from an editor policy body, or 400.
 fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
     v.get("service")
@@ -1128,6 +1202,14 @@ async fn create_policy(
                 return Err(PolicyHttpError::BadRequest(pair.refusal()));
             }
         }
+        // SP4d debt Task 6: a tag-addressed MASK or ROW FILTER is the same
+        // class as a path-addressed one — `tag_masking_to_ranger_json` and
+        // `tag_rowfilter_to_ranger_json` delegate to the very builders the
+        // resource path uses and only retarget the selector, so the pair is
+        // reachable here too. Checked against the TAG service's own set
+        // (`svc.id` is the tag service on this branch), which is the download
+        // the tag plugin polls.
+        refuse_ambiguous_arbitration(&st, svc.id, None, &pol).await?;
         let id = st.store.create_policy(svc.id, &pol.name, &pol.body).await?;
         if !pol.is_enabled {
             st.store
@@ -1145,6 +1227,9 @@ async fn create_policy(
             "policy name is required".into(),
         ));
     }
+    // SP4d debt Task 6, item 1 — the editor's half. See
+    // `refuse_ambiguous_arbitration`.
+    refuse_ambiguous_arbitration(&st, svc.id, None, &pol).await?;
     let id = st.store.create_policy(svc.id, &pol.name, &pol.body).await?;
     if !pol.is_enabled {
         // create_policy inserts with enabled=true (DB default); reflect the form's toggle.
@@ -1189,6 +1274,9 @@ async fn update_policy(
             "policy name is required".into(),
         ));
     }
+    // SP4d debt Task 6, item 1 — the editor's half, with `replacing: Some(id)`
+    // so the new body is not compared against the row it is replacing.
+    refuse_ambiguous_arbitration(&st, svc.id, Some(id), &pol).await?;
     st.store
         .update_policy(id, &pol.name, &pol.body, pol.is_enabled)
         .await?;

@@ -706,43 +706,77 @@ impl PolicyStore {
     /// is deleted, so no engine can be in the first state, and
     /// `registry.catalogs.name` is UNIQUE and immutable, so nothing renames a
     /// catalog at all.
+    ///
+    /// # ⚠ Why this is THREE statements and not one (SP4d debt Task 6, item 2)
+    ///
+    /// It used to be one, and it carried the engine-reachability leg
+    /// (`engine_catalog_attachments` ⋈ `engines` on `authz_service_id`) **as a
+    /// second copy of [`catalogs_for_service_via`]'s**. That copy is what
+    /// `explain` has to agree with: the tag set `explain` hands the evaluator
+    /// comes from [`resolved_tags_for_resource_via`], which scopes on
+    /// `a.warehouse_id = c.warehouse_id` and applies NO engine predicate at all,
+    /// and the two agreed only because `explain`'s own caller happens to narrow
+    /// the catalog through `catalogs_for_service_via` first. Nothing compared
+    /// them — no test, no `CHECK`, no shared helper — and a change to either leg
+    /// would have made `explain` resolve tags the engine never received, i.e. a
+    /// confident over-deny.
+    ///
+    /// So the leg is now spelled exactly ONCE, in `catalogs_for_service_via`,
+    /// and this function CALLS it. The three steps are: resolve which profile's
+    /// engines bind ([`engine_binding_profile_via`]), ask that one helper which
+    /// catalogs they attach, then read the assignments for exactly those
+    /// catalogs ([`tag_assignments_for_catalogs_via`]). `explain` and the
+    /// download can no longer disagree about reachability, because there is
+    /// nothing left to disagree with.
+    ///
+    /// **One behaviour change, and it is invisible on the wire.** The old single
+    /// statement had no `DISTINCT`, so a catalog attached to TWO engines that
+    /// both bind this profile yielded each assignment twice;
+    /// `catalogs_for_service_via` is `SELECT DISTINCT`, so it now yields once.
+    /// `ServiceTags::from_assignments` de-duplicates by `tag_id` and by
+    /// `(catalog, schema, table, column)` on the way in, so both inputs produce
+    /// byte-identical output — checked, not assumed, in that function.
+    ///
+    /// Two engines on one catalog is the ONLY way the old duplicate could
+    /// arise, and that is a schema fact rather than a judgement: migration
+    /// `0147` carries `CREATE UNIQUE INDEX catalogs_warehouse_id_key ON
+    /// registry.catalogs (warehouse_id) WHERE warehouse_id IS NOT NULL`, so a
+    /// warehouse has at most one catalog and "served under every catalog name
+    /// the engine attaches" is at most one name per warehouse today. Measured:
+    /// the first version of this task's set-equality fixture tried to give one
+    /// warehouse a second catalog and got `23505`.
+    ///
+    /// **What is still spelled more than once, named so the next reader does not
+    /// have to re-find it.** Three other statements apply an
+    /// `authz_service_id` reachability leg and are NOT routed through the
+    /// helper, because each answers a different question and merging them would
+    /// be wrong rather than tidy: [`services_for_catalog_via`] walks it
+    /// BACKWARDS (catalog → profiles), and
+    /// `egret_catalog_registry::tag_version`'s `bump_bound_tag_versions` and
+    /// `services_bound_to_warehouse` key it by WAREHOUSE rather than by
+    /// catalog. The one that does ask the same question is
+    /// [`tagged_columns_for_service_via`] — deliberately left alone here
+    /// because it feeds the rule compiler's StarRocks expansion rather than the
+    /// tag download, so changing its row set would change compiled artifacts,
+    /// which is not this task's subject. It is the next candidate.
     pub async fn tag_assignments_for_service(
         &self,
         service_id: i64,
     ) -> Result<Vec<TagAssignmentRow>, PolicyStoreError> {
-        // `$1` is the service the plugin polled. The Trino tag plugin polls the
-        // TAG service (`<profile>_tag`), but engines bind to the TRINO profile —
-        // so resolve the trino profile that owns this tag service (via its
-        // `tagService` config) and match engines on THAT. `COALESCE(tp.id, s.id)`
-        // also accepts the trino profile id directly, so callers that already hold
-        // it (and the unit tests) keep working. Passing the tag service id straight
-        // through — as the HTTP `download_tags` path did — matched no engine and
-        // made tag masking silently no-op.
-        Ok(sqlx::query_as::<_, TagAssignmentRow>(
-            r#"SELECT
-                   c.name           AS catalog,
-                   a.schema_name    AS schema_name,
-                   a.table_name     AS table_name,
-                   a.column_name    AS column_name,
-                   t.id::text       AS tag_id,
-                   t.name           AS tag_name
-               FROM catalog_tag_assignments a
-               JOIN tags t                 ON t.id = a.tag_id
-               JOIN policy.authz_services s ON s.id = $1
-               LEFT JOIN policy.authz_services tp
-                    ON tp.type = 'trino' AND tp.config_jsonb->>'tagService' = s.name
-               JOIN registry.catalogs c
-                    ON c.warehouse_id = a.warehouse_id
-               JOIN registry.engine_catalog_attachments ea
-                    ON ea.catalog_id = c.id
-               JOIN engine_mgmt.engines e
-                    ON e.id = ea.engine_id
-                   AND e.authz_service_id = COALESCE(tp.id, s.id)
-               ORDER BY catalog, schema_name, table_name, column_name, tag_name"#,
-        )
-        .bind(service_id)
-        .fetch_all(&self.db.pool)
-        .await?)
+        let mut conn = self.db.pool.acquire().await?;
+        let Some(profile_id) = engine_binding_profile_via(&mut conn, service_id).await? else {
+            // No such `policy.authz_services` row. The old single statement's
+            // `JOIN policy.authz_services s ON s.id = $1` returned no rows for
+            // this too.
+            return Ok(Vec::new());
+        };
+        // THE reachability leg, spelled once — see this function's doc.
+        let catalog_ids: Vec<uuid::Uuid> = catalogs_for_service_via(&mut conn, profile_id)
+            .await?
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        tag_assignments_for_catalogs_via(&mut conn, &catalog_ids).await
     }
 
     /// Registry catalogs reachable by `service_id`'s engine(s), through
@@ -835,8 +869,93 @@ pub async fn service_id_by_name_via(
     )
 }
 
+/// **Which profile's engine bindings decide what a polled service may serve.**
+///
+/// The Trino tag plugin polls the TAG service (`<profile>_tag`), but engines
+/// bind to the TRINO profile — so a tag-service id has to be resolved to the
+/// profile that names it in `config_jsonb->>'tagService'` before any
+/// reachability question can be asked about it. `COALESCE(tp.id, s.id)` also
+/// accepts a profile id directly, so a caller that already holds one (and every
+/// unit test) passes it straight through. Passing the tag service id through
+/// unresolved — as the HTTP `download_tags` path once did — matched no engine
+/// and made tag masking silently no-op.
+///
+/// `None` means `service_id` names no `policy.authz_services` row at all, which
+/// is the one case the caller must distinguish from "a real service that
+/// reaches no catalog": the first serves nothing because it does not exist.
+///
+/// Split out of [`PolicyStore::tag_assignments_for_service`] (SP4d debt Task 6)
+/// so that function could be composed onto [`catalogs_for_service_via`]; the
+/// `tagService` key is spelled as a literal here and cannot reference
+/// `egret_policy_api::TAG_SERVICE_CONFIG_KEY` (that would mean building the
+/// statement with `format!`), which is exactly what
+/// `store::tests::the_const_is_the_key_the_sql_and_the_migration_name` guards.
+pub async fn engine_binding_profile_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Option<i64>, PolicyStoreError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        r#"SELECT COALESCE(tp.id, s.id)
+           FROM policy.authz_services s
+           LEFT JOIN policy.authz_services tp
+                ON tp.type = 'trino' AND tp.config_jsonb->>'tagService' = s.name
+           WHERE s.id = $1"#,
+    )
+    .bind(service_id)
+    .fetch_optional(&mut *conn)
+    .await?)
+}
+
+/// Every catalog-tag assignment carried by the warehouses behind `catalog_ids`,
+/// served under each of those catalogs' names — the second half of
+/// [`PolicyStore::tag_assignments_for_service`], with **no engine predicate of
+/// its own**.
+///
+/// That absence is the point (SP4d debt Task 6, item 2). Reachability is
+/// decided once, by [`catalogs_for_service_via`], and handed in; this statement
+/// is left with exactly the `a.warehouse_id = c.warehouse_id` scoping that
+/// [`resolved_tags_for_resource_via`] uses, so the download writer and the
+/// resolver `explain` evaluates against now apply the same two rules in the
+/// same two places instead of two coincidentally-equal joins.
+///
+/// An empty `catalog_ids` returns no rows rather than every row: `= ANY('{}')`
+/// is false for every value, which is the fail-closed direction and the same
+/// answer the old single statement gave for a profile no engine binds.
+pub async fn tag_assignments_for_catalogs_via(
+    conn: &mut sqlx::PgConnection,
+    catalog_ids: &[uuid::Uuid],
+) -> Result<Vec<TagAssignmentRow>, PolicyStoreError> {
+    Ok(sqlx::query_as::<_, TagAssignmentRow>(
+        r#"SELECT
+               c.name           AS catalog,
+               a.schema_name    AS schema_name,
+               a.table_name     AS table_name,
+               a.column_name    AS column_name,
+               t.id::text       AS tag_id,
+               t.name           AS tag_name
+           FROM catalog_tag_assignments a
+           JOIN tags t ON t.id = a.tag_id
+           JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id
+           WHERE c.id = ANY($1)
+           ORDER BY catalog, schema_name, table_name, column_name, tag_name"#,
+    )
+    .bind(catalog_ids)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
 /// Connection-generic core of [`PolicyStore::catalogs_for_service`] — same
 /// rationale as [`get_service_by_id_via`].
+///
+/// **⚠ This is the ONE spelling of the engine-reachability leg in the forward
+/// direction, and two callers' agreement rests on that** (SP4d debt Task 6,
+/// item 2): `egret_perm_compile`'s `explain` narrows a catalog through it
+/// before resolving tags with [`resolved_tags_for_resource_via`], and
+/// [`PolicyStore::tag_assignments_for_service`] calls it to decide what the tag
+/// download may carry. Those two used to apply two separate copies of this
+/// join, compared by nothing; a change to either copy made `explain` resolve
+/// tags the engine never received — a confident over-deny. Change this one and
+/// both move.
 pub async fn catalogs_for_service_via(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
