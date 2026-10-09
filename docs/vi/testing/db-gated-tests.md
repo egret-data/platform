@@ -88,6 +88,33 @@ crate mà không gì tham chiếu. Đỏ-và-ồn tốt hơn xanh-và-im.
 **workflow** (khối `env:` ở đầu file, nên mọi job đều thừa hưởng),
 nên **thay đổi này không làm CI khác đi**. Nó chỉ đổi hành vi trên máy không có database.
 
+## Trục STORE: `just check` cấp store, chứ không bỏ qua nó
+
+`crates/egret-dataapi/tests/serving_shared_store.rs` (14 test) **panic** khi thiếu
+`EGRET_TEST_SHARED_STORE_URL`, cùng một kỷ luật như trên. `EGRET_ALLOW_STORE_SKIP=1` là
+opt-out.
+
+**GitHub CI hết quota, nên `just check` LÀ cổng.** Mà `check` từng quyết ba trục DB /
+ENGINE / DOCKER và để trục này **chưa quyết**: lần chạy workspace kết thúc
+`0 passed; 14 failed`, và chính dòng panic đó khuyên người đọc export
+`EGRET_ALLOW_STORE_SKIP=1`. Export một lần là từ đó mọi `just check` bỏ qua cả 14 test,
+với `eprintln!` bị libtest nuốt. Một recipe tự buộc người dùng tắt một phần của chính nó
+còn tệ hơn một recipe quên cổng.
+
+SP4d Task 8 quyết trục này bằng cách **CHẠY** suite:
+
+* `valkey` nằm trong `deploy/docker-compose.dev.yml` ở cổng **6399**, nên `just up` cấp nó
+  cạnh Postgres mà `check` vốn đã đòi. Không có Docker thì
+  `brew install valkey && valkey-server --port 6399` là đủ — suite cần một server giao thức
+  redis, không cần daemon.
+* `check` cấp `EGRET_TEST_SHARED_STORE_URL` **và** chà sạch opt-out
+  (`no_store_skip`), nên một biến export trong shell profile không thể làm nó rỗng.
+* `just test-no-db` đặt `EGRET_ALLOW_STORE_SKIP=1` **ngay trên dòng**, và cả hai recipe in
+  ra cuối terminal những gì màu xanh đó phủ và không phủ.
+* `just test-dataapi-shared-store` chạy riêng suite này với `--nocapture`.
+* `crates/egret-test-db/tests/every_test_recipe_refuses_the_skip.rs` kiểm bằng máy: recipe
+  chạy `cargo test` mà không nêu target và không quyết biến này thì guard đó đỏ, kèm số dòng.
+
 ## Test cần ENGINE là trục riêng
 
 Test cần một query engine sống vẫn tự bỏ qua, vì CI không có engine:
