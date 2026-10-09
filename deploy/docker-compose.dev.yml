@@ -17,6 +17,31 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  # The shared limiter + response cache store (SP4d Task 8). Valkey rather than Redis:
+  # same protocol, same client, BSD licence, and it is what `deploy/helm/egret` runs, so
+  # a dev stack exercises the same server a deployment gets — the same choice CI made.
+  #
+  # It is here because `just check` REQUIRES it, exactly as it requires the Postgres above.
+  # Before this, `check` left the store axis undecided: the workspace run ended
+  # `0 passed; 14 failed` on `crates/egret-dataapi/tests/serving_shared_store.rs` and the
+  # panic's remedy text told the reader to export `EGRET_ALLOW_STORE_SKIP=1`, after which
+  # every `check` on that machine skipped all fourteen silently. The cheapest fix to that
+  # is to make the service present, not to make the gate optional.
+  #
+  # 6399, not 6379: it is the port the suite's own panic message names, the port every plan
+  # doc in `docs/en/plans/` exports, and it stays clear of a system Redis on the default.
+  # No volume — the limiter and the cache are both reconstructible by definition, and a
+  # store that survives a restart would let one test run's keys reach the next.
+  valkey:
+    image: valkey/valkey:8
+    ports:
+      - "6399:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
