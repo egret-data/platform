@@ -234,8 +234,43 @@ pub async fn app_with_export_total(db: &Db, total: std::time::Duration) -> App {
     .await
 }
 
+/// [`app`], whose `WorkflowState::db` (the pool the workflow routes and the
+/// storage modules query) is `workflow_db`, while sessions, `WsContext` and
+/// the PDP use `db` (W9c Task 6: a test closes `workflow_db`'s pool to drive
+/// a database outage behind a route that has already authenticated).
+pub async fn app_with_workflow_db(db: &Db, workflow_db: &Db) -> App {
+    app_with_dbs(
+        db,
+        workflow_db,
+        Default::default(),
+        egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
+    )
+    .await
+}
+
 async fn app_with(
     db: &Db,
+    scripts: egret_workflow::scripts::ScriptSettings,
+    upload_idle_timeout: std::time::Duration,
+    upload_total_timeout: std::time::Duration,
+    export_total_timeout: std::time::Duration,
+) -> App {
+    app_with_dbs(
+        db,
+        db,
+        scripts,
+        upload_idle_timeout,
+        upload_total_timeout,
+        export_total_timeout,
+    )
+    .await
+}
+
+async fn app_with_dbs(
+    db: &Db,
+    workflow_db: &Db,
     scripts: egret_workflow::scripts::ScriptSettings,
     upload_idle_timeout: std::time::Duration,
     upload_total_timeout: std::time::Duration,
@@ -253,7 +288,7 @@ async fn app_with(
     );
     let (audit_sink, audit_rx) = egret_audit::AuditSink::new(16);
     let state = egret_workflow::WorkflowState {
-        db: db.clone(),
+        db: workflow_db.clone(),
         repo: egret_workflow::FlowRepo::new(db.clone()),
         executions: egret_workflow::ExecutionRepo::new(db.clone()),
         logs: egret_workflow::logs::LogRepo::new(db.pool.clone()),
@@ -422,6 +457,38 @@ pub async fn send_body(
         .header("Cookie", format!("egret_session={token}"));
     if !content_type.is_empty() {
         b = b.header("Content-Type", content_type);
+    }
+    app.router
+        .clone()
+        .oneshot(b.body(body).unwrap())
+        .await
+        .unwrap()
+}
+
+/// A request with a session for `user`, the given `headers` (each sent as
+/// given; none added) and `body` (W9c Task 6: the KV `PUT`'s `ttl` and
+/// `description` headers).
+pub async fn send_with(
+    app: &App,
+    method: &str,
+    path: &str,
+    user: UserId,
+    headers: &[(&str, &[u8])],
+    body: axum::body::Body,
+) -> axum::response::Response {
+    use tower::ServiceExt;
+    let token = app
+        .sessions
+        .create(user, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token;
+    let mut b = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("Cookie", format!("egret_session={token}"));
+    for (name, value) in headers {
+        b = b.header(*name, axum::http::HeaderValue::from_bytes(value).unwrap());
     }
     app.router
         .clone()

@@ -338,7 +338,11 @@ public class ShimRunContext extends DefaultRunContext {
 
     @Override
     public KVStore namespaceKv(String namespace) {
-        throw new EgretUnsupported("namespaceKv() needs the KV store, which egret does not provide yet (W9c)");
+        // 2026-10-07, W9c: the KV store is the core.kv tasks' and kv()'s; a plugin's namespaceKv() still
+        // throws, pointing at them. Nothing is staged for KV (task.json has no KV key).
+        throw new EgretUnsupported("namespaceKv(): egret gives flows the KV store through the "
+            + "`io.kestra.plugin.core.kv` tasks and the `kv()` function, not through a plugin's RunContext; "
+            + "use a `core.kv` task before or after this one.");
     }
 
     /**

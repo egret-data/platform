@@ -79,6 +79,27 @@ impl LockedSession {
         Ok(session)
     }
 
+    /// `pg_try_advisory_lock` on `key` on a pooled connection (W9c Task 3,
+    /// the KV expiry sweep): `Some(session)` holding it, or `None` when
+    /// another session holds it -- the connection then goes back to the
+    /// pool, holding nothing. Never waits for the lock.
+    pub(crate) async fn try_acquire(pool: &PgPool, key: i64) -> Result<Option<Self>> {
+        let conn = pool.acquire().await.map_err(db_err)?;
+        let mut session = Self::hold(conn);
+        let taken: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(key)
+            .fetch_one(session.conn())
+            .await
+            .map_err(db_err)?;
+        if !taken {
+            // Nothing is held: the connection may go back to the pool.
+            session.unlocked = true;
+            return Ok(None);
+        }
+        session.keys.push(key);
+        Ok(Some(session))
+    }
+
     /// The pruner's own bookkeeping: its `pg_try_advisory_lock` answered
     /// `false` (nothing to release), or its `pg_advisory_unlock` answered
     /// `true`. The connection may go back to the pool.

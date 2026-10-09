@@ -2013,7 +2013,7 @@ async fn namespace_files_setup(
     pool: &sqlx::PgPool,
     files: &egret_workflow::storage::FileStore,
 ) -> Uuid {
-    use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor};
+    use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Resource};
     use egret_workflow::storage::nsfiles::path::NsPath;
     use egret_workflow::storage::nsfiles::store::{put, Conflict};
     let (ws, user) = common::seed_workspace(&common::db().await.expect("DATABASE_URL")).await;
@@ -2025,7 +2025,7 @@ async fn namespace_files_setup(
         // W9b Task 5 fix round 1, I2: glob characters in a stored name.
         ("w9b.s3", "/reports/q[1].csv", "q,1"),
     ] {
-        let grant = authorize(ws, Actor::Api, ns, Access::Write).unwrap();
+        let grant = authorize(ws, Actor::Api, ns, Resource::NamespaceFiles, Access::Write).unwrap();
         put(
             pool,
             files,

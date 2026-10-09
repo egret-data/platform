@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use egret_metastore::Db;
 use egret_storage::{MemStore, ObjectStore, StorageError};
 use egret_workflow::storage;
-use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Grant};
+use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Grant, Resource};
 use egret_workflow::storage::nsfiles::path::NsPath;
 use egret_workflow::storage::nsfiles::store::{move_path, put, Conflict, NsEntry, Written};
 use egret_workflow::storage::nsfiles::{CreatedBy, NsError};
@@ -23,7 +23,7 @@ use uuid::Uuid;
 const W: &str = "w9b.t3";
 
 fn grant(ws: Uuid, access: Access) -> Grant {
-    authorize(ws, Actor::Api, W, access).unwrap()
+    authorize(ws, Actor::Api, W, Resource::NamespaceFiles, access).unwrap()
 }
 
 fn by() -> CreatedBy {

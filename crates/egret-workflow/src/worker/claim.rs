@@ -60,6 +60,8 @@
 //!   was invisible for a whole package: the only caller `resume` had was one
 //!   that had already moved the clock itself.
 
+use std::collections::VecDeque;
+
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool, Row};
@@ -71,11 +73,14 @@ use super::replay;
 use super::spawn::{self, Requested};
 use super::subflow;
 use super::timeout::{self, Budget};
+use super::txn::{transaction, Ended, Fetched, Finish, Gate, InTxn, Isolation, Txn};
 use super::{from_wire, Outcome, Registry, TaskInput, WorkerError, MAX_ROUNDS};
 use crate::executor::{
     advance, apply, build_plan, Attempt, Command, ExecutionMeta, ExecutionState, Plan, Resume,
     RunIx, RunState, TaskKind, TaskRun, Tick,
 };
+#[cfg(any(test, feature = "test-util"))]
+use crate::storage::prefetch::Prefetch;
 
 /// Keeps the `sqlx::Error` as the source rather than flattening it to text:
 /// the Display is unchanged, and `scheduler::fire` downcasts it to tell a
@@ -1217,7 +1222,7 @@ async fn run_one(
             other => cancel::guarded(reg, &input, other.duration()).await,
         }
     };
-    let (outcome, held) = match under_lease(
+    let (outcome, held, renewed_at) = match under_lease(
         pool,
         c,
         timing.renew_every(),
@@ -1227,7 +1232,11 @@ async fn run_one(
     )
     .await
     {
-        Leased::Kept { out, held } => (out, held),
+        Leased::Kept {
+            out,
+            held,
+            renewed_at,
+        } => (out, held, renewed_at),
         // **The fence moved: another worker holds this run now, and this one
         // records NOTHING** — no outcome, and no failed-attempt line, because
         // there is no failure to report: the task was not finished by anyone
@@ -1277,13 +1286,63 @@ async fn run_one(
     // **The fence is the LATEST renewed lease, not the claim's.** Every
     // renewal moved `claimed_at`, so the claim's own value would match no row
     // and a live worker's outcome would be refused as `LeaseLost`.
-    let renewed = Claimed {
-        claimed_at: held,
-        ..c.clone()
-    };
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    apply_outcome(&mut tx, &renewed, &outcome).await?;
-    tx.commit().await.map_err(db_err)?;
+    //
+    // W9c Task 9: the outcome's transaction runs in `txn::transaction!`,
+    // so a render in its `settle` that needs a read rolls the attempt back,
+    // the read is fetched with no transaction open, and the attempt runs
+    // again. **The fetch runs under the lease's renewal**, as the handler
+    // did: the run is no longer locked by an open transaction while it
+    // waits, so without the renewal a fetch longer than `working_timeout`
+    // would let the reaper take it. A renewal that finds the fence moved
+    // gives the run up exactly as during the handler.
+    let mut lease = (held, renewed_at);
+    let ended = transaction!(
+        pool,
+        Isolation::Default,
+        |at| {
+            let renewed = Claimed {
+                claimed_at: lease.0,
+                ..c.clone()
+            };
+            apply_outcome_with(at, &renewed, &outcome)
+                .await
+                .map(Finish::Commit)
+        },
+        |pf| {
+            let fetched = under_lease_with(
+                |h| renew_lease(pool, c.id, h),
+                c.id,
+                lease.0,
+                timing.renew_every(),
+                timing.working_timeout,
+                lease.1,
+                pf.fetch_pending(),
+            )
+            .await;
+            match fetched {
+                Leased::Kept {
+                    out,
+                    held,
+                    renewed_at,
+                } => {
+                    out?;
+                    lease = (held, renewed_at);
+                    Ok(Fetched::Again)
+                }
+                Leased::Lost => Ok(Fetched::GiveUp),
+            }
+        }
+    )?;
+    if let Ended::GaveUp = ended {
+        tracing::warn!(
+            execution = %c.execution_id,
+            run = %c.id,
+            task_id = %c.task_id,
+            "this worker lost the run's lease while it fetched what the run's successors \
+             read; it records no outcome"
+        );
+        return Ok(Committed::LeaseLost);
+    }
     // Only now: see "released AFTER the commit" above.
     if let Err(e) = reg.release(&input).await {
         tracing::warn!(
@@ -1309,8 +1368,14 @@ enum Committed {
 /// What [`under_lease`] ended with.
 enum Leased<T> {
     /// The work finished while this worker still held the lease; `held` is
-    /// the lease's latest value, the one [`apply_outcome`] must fence on.
-    Kept { out: T, held: DateTime<Utc> },
+    /// the lease's latest value, the one [`apply_outcome`] must fence on, and
+    /// `renewed_at` when the renewal that wrote it was sent (the self-fence's
+    /// clock, for a later [`under_lease_with`] that carries on from here).
+    Kept {
+        out: T,
+        held: DateTime<Utc>,
+        renewed_at: tokio::time::Instant,
+    },
     /// A renewal found the fence moved. The work was dropped unfinished.
     Lost,
 }
@@ -1439,7 +1504,13 @@ where
             biased;
             _ = renew_tick.tick() => {}
             _ = tokio::time::sleep_until(last_ok + fence_after) => {}
-            out = &mut work => return Leased::Kept { out, held },
+            out = &mut work => {
+                return Leased::Kept {
+                    out,
+                    held,
+                    renewed_at: last_ok,
+                }
+            }
         }
         let sent = tokio::time::Instant::now();
         let limit = std::cmp::max(last_ok + fence_after, sent + every);
@@ -1504,7 +1575,11 @@ async fn input_for(
     script_default: std::time::Duration,
 ) -> Result<(TaskInput, Budget)> {
     let mut conn = pool.acquire().await.map_err(db_err)?;
-    let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No, Stack::Fresh).await?;
+    // A reader: no `settle` runs on this context. The handler's render below
+    // is LIVE (`scope_for`, which takes this POOL connection -- never a
+    // transaction): it runs after this connection is returned, outside any
+    // transaction.
+    let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No, Stack::Reader).await?;
     let mut surface = Surface::load(&mut conn, &ctx).await?;
     // W9a Task 4: the claimed run's OWN execution -- an iteration's id inside
     // a `Loop` (spec §3), never the loop root -- reads through a snapshot of
@@ -1558,12 +1633,61 @@ async fn input_for(
 /// visibly finished run behind if — and only if — these statements are not in
 /// one transaction. That is the window
 /// `a_failure_partway_through_a_tick_leaves_nothing_half_applied` looks for.
+///
+/// # A caller-owned transaction reads nothing (W9c Task 9)
+///
+/// **Test-only** (`test-util`; final review m3): production applies an
+/// outcome in a transaction `worker::txn` owns ([`tick`]'s `run_one`,
+/// [`commit_outcome`]). `settle`'s renders read through a cache filled
+/// outside any transaction (`storage::prefetch`), and only an owner that can
+/// roll back, fetch and run again fills it. This entry point is the caller's
+/// transaction, so its cache stays empty: a render here that needs a read
+/// (`kv()`, `read()`, a namespace file, a `Loop`'s values file) renders a
+/// placeholder, and this answers `Err` -- the caller must not commit.
+#[cfg(any(test, feature = "test-util"))]
 pub async fn apply_outcome(
     conn: &mut PgConnection,
     claimed: &Claimed,
     outcome: &Outcome,
 ) -> Result<()> {
-    let (ctx, mut state, now) = load(conn, claimed.execution_id, Stack::Fresh).await?;
+    let pf = Prefetch::new();
+    let applied = apply_outcome_on(conn, &Gate::checked_by_caller(&pf), claimed, outcome).await;
+    if pf.has_pending() {
+        return Err(prefetch_miss());
+    }
+    applied
+}
+
+/// [`apply_outcome`] in a transaction of its own that this function owns:
+/// `run_one`'s commit, without the handler and without the lease's renewal
+/// (W9c Task 9). A render that needs a read is fetched with the transaction
+/// rolled back, and the outcome applied again; `Ok` once it committed.
+/// For a caller that holds an outcome but no handler -- a test, a driver.
+pub async fn commit_outcome(pool: &PgPool, claimed: &Claimed, outcome: &Outcome) -> Result<()> {
+    transaction!(pool, |at| {
+        apply_outcome_with(at, claimed, outcome).await
+    })
+}
+
+/// [`apply_outcome`] in an attempt of `worker::txn`, reading through its
+/// gate's cache: the only production entry, so an outcome is applied only
+/// where a miss is caught before the commit.
+async fn apply_outcome_with(at: &mut Txn, claimed: &Claimed, outcome: &Outcome) -> Result<()> {
+    let (conn, gate) = at.parts();
+    apply_outcome_on(conn, gate, claimed, outcome).await
+}
+
+/// The body of [`apply_outcome_with`] (and of the test-only
+/// [`apply_outcome`]). Private: a connection plus a gate is what only those
+/// two hand it.
+async fn apply_outcome_on(
+    conn: &mut PgConnection,
+    gate: &Gate,
+    claimed: &Claimed,
+    outcome: &Outcome,
+) -> Result<()> {
+    let (ctx, mut state, now) =
+        load(conn, claimed.execution_id, Stack::Fresh(gate.clone())).await?;
     let before = state.clone();
 
     // The output goes down BEFORE `settle` renders, because a successor's
@@ -1658,7 +1782,7 @@ pub async fn apply_outcome(
         conn,
         &ctx,
         &before,
-        &mut state,
+        state,
         now,
         Some(Lease {
             run_ix: claimed.run_ix,
@@ -1721,24 +1845,447 @@ pub(super) struct Lease {
 /// together or none does. That is the plan's Global Constraint one level up
 /// from where Task 2 left it: with a spawner, "the execution has not moved"
 /// includes "the iteration it started does not exist".
-pub(super) async fn settle(
+///
+/// `state` is MOVED into the walk's top frame (re-review 3 n1): nothing is
+/// written back to the owner, and every owner returns this function's result
+/// directly, so no owner reads its state after the settle.
+async fn settle(
+    conn: &mut PgConnection,
+    ctx: &ExecutionCtx,
+    before: &ExecutionState,
+    state: ExecutionState,
+    now: Tick,
+    release: Option<Lease>,
+) -> Result<()> {
+    walk(
+        conn,
+        Frame {
+            ctx: Held::Borrowed(ctx),
+            before: before.clone(),
+            state,
+            now,
+            release,
+            jobs: VecDeque::new(),
+            phase: Phase::Begin,
+        },
+    )
+    .await
+}
+
+/// The context a [`Frame`] settles: the owner's own, for the settle an owner
+/// starts ([`settle`]), or one the frame owns, for every settle started
+/// inside it.
+enum Held<'a> {
+    Borrowed(&'a ExecutionCtx),
+    Owned(Box<ExecutionCtx>),
+}
+
+impl std::ops::Deref for Held<'_> {
+    type Target = ExecutionCtx;
+    fn deref(&self) -> &ExecutionCtx {
+        match self {
+            Held::Borrowed(ctx) => ctx,
+            Held::Owned(ctx) => ctx,
+        }
+    }
+}
+
+/// **One settle, as data** (W9c Task 9 fix round 3, re-review C2/C3): its
+/// context and states, the phase it has reached, and the settles it started
+/// and has not run yet.
+///
+/// A settle starts other settles from its HEAD as well as from its tail: a
+/// `Loop` iteration's first settle (`spawn::open_batch`), a `Subflow` child's
+/// first settle and the completion of a refused or `wait: false` one
+/// (`subflow::spawn_one`), a replay's first settle or its refusal
+/// (`replay::spawn_due`). Each of those used to run inline, head AND walk, so
+/// a chain that came back through one of them -- a sequential `Loop` whose
+/// `Subflow` is refused (C2), a sequential `Loop` inside another (C3) --
+/// nested one settle per iteration on the Rust stack and aborted the
+/// process. Now none of them can run a settle at all: they return [`Job`]s,
+/// and only [`walk`] -- private to this module, called only by [`settle`],
+/// which only the transaction owners call -- runs one. A frame runs its jobs
+/// in order, each to the end of its own tail, before its next phase, which
+/// is exactly where the inline call ran it.
+pub(super) struct Frame<'a> {
+    ctx: Held<'a>,
+    before: ExecutionState,
+    state: ExecutionState,
+    now: Tick,
+    release: Option<Lease>,
+    /// Settles this one has started and not yet run, in order.
+    jobs: VecDeque<Job>,
+    phase: Phase,
+}
+
+impl Frame<'static> {
+    /// A new execution's first settle: from the empty state, at `Tick(0)` --
+    /// a `Tick` is milliseconds since the EXECUTION was created and this is
+    /// that instant, for the execution's own clock.
+    pub(super) fn first(ctx: ExecutionCtx) -> Self {
+        let empty = ExecutionState::new(&ctx.plan);
+        Frame {
+            state: empty.clone(),
+            before: empty,
+            ctx: Held::Owned(Box::new(ctx)),
+            now: Tick(0),
+            release: None,
+            jobs: VecDeque::new(),
+            phase: Phase::Begin,
+        }
+    }
+
+    /// A settle of a loaded execution, `state` being `before` with the
+    /// caller's commands applied.
+    pub(super) fn loaded(
+        ctx: ExecutionCtx,
+        before: ExecutionState,
+        state: ExecutionState,
+        now: Tick,
+    ) -> Self {
+        Frame {
+            ctx: Held::Owned(Box::new(ctx)),
+            before,
+            state,
+            now,
+            release: None,
+            jobs: VecDeque::new(),
+            phase: Phase::Begin,
+        }
+    }
+}
+
+/// A settle some code started, for [`walk`] to run: what every function that
+/// used to call `settle` returns instead.
+pub(super) enum Job {
+    /// A settle whose context and state are built.
+    Settle(Box<Frame<'static>>),
+    /// `subflow::complete`: load the execution, write the run's outputs and
+    /// message, apply the states, and settle -- opened when the walk reaches
+    /// it, which is where the call used to run.
+    Complete(subflow::Completion),
+}
+
+/// Where a [`Frame`]'s head has got to: steps 1-3 of the settle and the
+/// outbox, cut at every point that can start another settle.
+enum Phase {
+    /// Steps 1-2: render, drive, persist, the render side.
+    Begin,
+    /// Step 3, the loop spawner: one loop run's batch per advance, in the
+    /// order the runs were first asked for.
+    Loops {
+        surface: Surface,
+        runs: VecDeque<RunIx>,
+        spawns: Vec<Requested>,
+        subflows: Vec<subflow::Requested>,
+    },
+    /// Step 3, the subflow spawner: one request per advance.
+    Subflows {
+        surface: Surface,
+        subflows: Vec<subflow::Requested>,
+        next: usize,
+    },
+    /// The execution-delay loop.
+    Replay { surface: Surface },
+    /// The Flow-trigger outbox, then the tail.
+    Outbox { surface: Surface },
+}
+
+/// What a settle leaves to do once its head is done: step 4 (tell a parent)
+/// and the outage check -- its tail, carried as data so [`walk`] runs a chain
+/// of them without nesting one inside the next.
+#[derive(Debug)]
+pub(super) struct Settled {
+    /// The execution that settled.
+    id: Uuid,
+    /// The terminal it reached in this settle, if it reached one that
+    /// [`notifies_parent`].
+    terminal: Option<RunState>,
+    /// [`ExecutionCtx::caller`] of the settle: what a nested load passes.
+    caller: Caller,
+    /// The store outage a render of this settle met (spec §11).
+    outage: Option<String>,
+}
+
+/// One step of [`walk`].
+enum Step<'a> {
+    /// Advance a settle's head by one phase, or run its next job.
+    Frame(Box<Frame<'a>>),
+    /// Open a settle some code started.
+    Job(Job),
+    /// Tell the loop that spawned it (`spawn::on_execution_terminal`).
+    Loop(Settled),
+    /// Tell the run that started it (`subflow::on_child_terminal`).
+    Child(Settled),
+    /// The outage check.
+    Outage(Settled),
+}
+
+/// **THE walk: every settle of one transaction, run from one explicit
+/// stack**, so the Rust stack this uses is the same at any iteration count
+/// and any nesting (W9c Task 9 fix rounds 2 and 3; re-review N1, C2, C3).
+///
+/// The order is the order the recursion ran things in, because a step that
+/// starts a settle pushes it ABOVE what remains of its starter:
+///
+/// - a [`Frame`] runs its pending [`Job`]s one at a time -- each to the end
+///   of its own tail -- before its next phase, which is where the inline call
+///   ran it, and its next job only after that;
+/// - a finished head becomes its tail: `on_execution_terminal(s)` with the
+///   whole of what it started, then `on_child_terminal(s)` with the whole of
+///   what it started, then `s`'s outage check.
+///
+/// An `Err` returns at once, as the `?` of the recursion did.
+///
+/// Private, and called only by [`settle`]: no other function can run a
+/// settle, so nothing a settle calls can nest one.
+async fn walk<'a>(conn: &mut PgConnection, top: Frame<'a>) -> Result<()> {
+    let mut steps: Vec<Step<'a>> = vec![Step::Frame(Box::new(top))];
+    while let Some(step) = steps.pop() {
+        match step {
+            Step::Frame(mut frame) => {
+                if let Some(job) = frame.jobs.pop_front() {
+                    steps.push(Step::Frame(frame));
+                    steps.push(Step::Job(job));
+                    continue;
+                }
+                match Box::pin(advance_frame(conn, &mut frame)).await? {
+                    Some(settled) => steps.push(Step::Loop(settled)),
+                    None => steps.push(Step::Frame(frame)),
+                }
+            }
+            Step::Job(Job::Settle(frame)) => steps.push(Step::Frame(frame)),
+            Step::Job(Job::Complete(completion)) => {
+                if let Some(frame) = Box::pin(subflow::open_completion(conn, completion)).await? {
+                    steps.push(Step::Frame(Box::new(frame)));
+                }
+            }
+            Step::Loop(s) => {
+                let started = match s.terminal {
+                    Some(terminal) => {
+                        Box::pin(spawn::on_execution_terminal(
+                            conn,
+                            s.id,
+                            terminal,
+                            s.caller.clone(),
+                        ))
+                        .await?
+                    }
+                    None => None,
+                };
+                steps.push(Step::Child(s));
+                if let Some(job) = started {
+                    steps.push(Step::Job(job));
+                }
+            }
+            Step::Child(s) => {
+                // The other kind of link. `on_execution_terminal` reads
+                // `parent_execution_id` and this reads `trigger_execution_id`,
+                // and `workflow_executions_one_link_kind` makes it impossible
+                // for both to find something -- so the pair is a dispatch, not
+                // two chances to report the same terminal.
+                //
+                // **For a `CREATE_NEW_EXECUTION` replay NEITHER finds
+                // anything**, and that is why egret's answer for a replayed
+                // `Subflow` child is invariant rather than timing-dependent:
+                // `trigger_of` zips two NULL trigger columns, and `parent_of`
+                // zips a set `parent_execution_id` with a NULL `parent_run_ix`,
+                // which `workflow_executions_loop_run_whole_or_absent` keeps
+                // NULL for a row with no loop index. Registered as a
+                // divergence in `oracle-exec/README.md`'s coverage statement,
+                // item 16.
+                let started = match s.terminal {
+                    Some(terminal) => {
+                        Box::pin(subflow::on_child_terminal(
+                            conn,
+                            s.id,
+                            terminal,
+                            s.caller.clone(),
+                        ))
+                        .await?
+                    }
+                    None => None,
+                };
+                steps.push(Step::Outage(s));
+                if let Some(job) = started {
+                    steps.push(Step::Job(job));
+                }
+            }
+            // Spec §11 (fix round 1, I2): a render this settle ran met a store
+            // OUTAGE. It failed a run, and that failure is not the author's:
+            // an `Err` here rolls the caller's whole transaction back --
+            // `apply_outcome`'s write included -- so the lease lapses and the
+            // run is re-claimed with no attempt spent, exactly as a handler
+            // `Err` is.
+            Step::Outage(s) => {
+                if let Some(outage) = s.outage {
+                    return Err(Error::Internal(anyhow::anyhow!(
+                        "execution {}: {outage}",
+                        s.id
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Run one phase of `frame`'s head: the settle's tail when the head is done,
+/// otherwise `None` (with any settles the phase started queued as jobs).
+async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result<Option<Settled>> {
+    let Frame {
+        ctx,
+        before,
+        state,
+        now,
+        release,
+        jobs,
+        phase,
+    } = frame;
+    let ctx: &ExecutionCtx = ctx;
+    match std::mem::replace(phase, Phase::Begin) {
+        Phase::Begin => {
+            let (surface, spawns, subflows) =
+                begin(conn, ctx, before, state, *now, *release).await?;
+            // Grouped by the loop run, because the index is per loop run and
+            // two `Loop`s can be in flight in one execution.
+            let mut runs = VecDeque::new();
+            for r in &spawns {
+                if !runs.contains(&r.parent_run) {
+                    runs.push_back(r.parent_run);
+                }
+            }
+            *phase = Phase::Loops {
+                surface,
+                runs,
+                spawns,
+                subflows,
+            };
+        }
+        Phase::Loops {
+            surface,
+            mut runs,
+            spawns,
+            subflows,
+        } => match runs.pop_front() {
+            Some(run) => {
+                let batch: Vec<Requested> = spawns
+                    .iter()
+                    .filter(|r| r.parent_run == run)
+                    .cloned()
+                    .collect();
+                jobs.extend(spawn::open_batch(conn, ctx, state, run, &batch).await?);
+                *phase = Phase::Loops {
+                    surface,
+                    runs,
+                    spawns,
+                    subflows,
+                };
+            }
+            // **After `persist`, exactly like the loop spawner, and for the
+            // same reason**: the child's row names `(execution, run_ix)` and
+            // that run has to exist. `subflow::spawn_one` may complete the
+            // parent's own run (a `wait: false` subflow, or a target that does
+            // not resolve), and it does so through a nested settle on this
+            // same execution -- the same re-entrancy the loop spawner has via
+            // `on_execution_terminal` -- which is why the terminal check in
+            // the outbox phase reads `state`, this settle's in-memory copy,
+            // which a nested settle deliberately does not update, rather than
+            // the row: a nested settle that terminated the execution has
+            // ALREADY told its parent, and firing again from here would report
+            // one terminal twice.
+            None => {
+                *phase = Phase::Subflows {
+                    surface,
+                    subflows,
+                    next: 0,
+                }
+            }
+        },
+        Phase::Subflows {
+            surface,
+            subflows,
+            next,
+        } => match subflows.get(next) {
+            Some(r) => {
+                jobs.extend(subflow::spawn_one(conn, ctx, &surface, state, r).await?);
+                *phase = Phase::Subflows {
+                    surface,
+                    subflows,
+                    next: next + 1,
+                };
+            }
+            None => *phase = Phase::Replay { surface },
+        },
+        // **The execution-delay loop, and it is a different loop in the
+        // artifact too.** A `CREATE_NEW_EXECUTION` retry ends THIS execution
+        // `RETRIED` and leaves an `ExecutionDelay` behind (`retry::scan`'s
+        // `ScheduleRetry`); the replacement execution is started later, by
+        // whoever notices the deadline. Here that is every `settle`, because
+        // `resume` -- from `worker::wake` in production and from `pass_time` in
+        // the oracle's driver -- is the settle a due deadline produces. It
+        // reads `state`, so the round that scheduled the delay can see it too,
+        // and refuses on `not_before > now`.
+        Phase::Replay { surface } => {
+            jobs.extend(replay::spawn_due(conn, ctx, state, *now).await?);
+            *phase = Phase::Outbox { surface };
+        }
+        Phase::Outbox { surface } => {
+            outbox(conn, ctx, before, state).await?;
+            // Step 4 is the tail ([`walk`]): if this settle reached a
+            // terminal, tell the parent. `was != is` reads `state` -- this
+            // settle's in-memory copy, which a nested settle deliberately does
+            // not update -- so a nested settle that terminated the execution
+            // has ALREADY told its parent, and this one does not report the
+            // terminal twice.
+            let was = before.history.last().copied();
+            let is = state.history.last().copied();
+            return Ok(Some(Settled {
+                id: ctx.id,
+                terminal: is.filter(|s| was != Some(*s) && notifies_parent(*s)),
+                caller: ctx.caller(),
+                outage: surface.files_outage(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Steps 1-2 of a settle: the render scope, the SLA, `drive`, `persist` and
+/// the render side. Starts no settle. Returns the surface and what `drive`
+/// asked to spawn.
+async fn begin(
     conn: &mut PgConnection,
     ctx: &ExecutionCtx,
     before: &ExecutionState,
     state: &mut ExecutionState,
     now: Tick,
     release: Option<Lease>,
-) -> Result<()> {
+) -> Result<(Surface, Vec<Requested>, Vec<subflow::Requested>)> {
     let mut surface = Surface::load(conn, ctx).await?;
     // W9a Task 4: the snapshot every render of this settle reads files
     // through -- `runIf`, the five tier-B expressions, the SLA, a subflow's
     // inputs -- taken on `conn`, i.e. INSIDE the caller's transaction, which
     // is the only connection that sees the index rows of the task this
     // transaction has just finished.
+    //
+    // W9c Task 9: and it is the IN-TRANSACTION scope, which holds no store
+    // and no connect options. Every body, namespace-file and KV read is
+    // answered from the owner's cache (`ctx.gate`); a miss renders a
+    // placeholder and is fetched by the owner with this transaction rolled
+    // back (`worker::txn`). A context with no gate is a reader's, and a
+    // reader never settles.
+    let gate = ctx.gate.as_ref().ok_or_else(|| {
+        Error::Internal(anyhow::anyhow!(
+            "execution {}: a reader's context reached settle, which renders only under an \
+             attempt's gate",
+            ctx.id
+        ))
+    })?;
     let texts: Vec<&str> = std::iter::once(ctx.source.as_str())
         .chain(state.runs.iter().filter_map(|r| r.value.as_deref()))
         .collect();
-    let files = crate::storage::scope::scope_for(
+    let files = crate::storage::scope::scope_in_transaction(
         conn,
         crate::storage::current(),
         ctx.workspace_id,
@@ -1747,6 +2294,7 @@ pub(super) async fn settle(
         &surface.snapshot_values(),
         None,
         surface.flow().map(|f| f.namespace.clone()),
+        gate,
     )
     .await?;
     surface.attach_files(files);
@@ -1775,7 +2323,7 @@ pub(super) async fn settle(
     }
     // W9a Task 11: what a render produced beside the state -- the runs it
     // failed WITH a message, and a file `Loop`'s values -- written after the
-    // state `persist` writes and BEFORE `spawn_all`, which reads the values.
+    // state `persist` writes and BEFORE `spawn::open_batch`, which reads the values.
     let mut side = render::RenderSide::default();
     let (spawns, subflows) = drive(ctx, &surface, state, now, &mut marks, &mut seq, &mut side)?;
     persist(conn, ctx, before, state, release, &marks, seq).await?;
@@ -1787,29 +2335,16 @@ pub(super) async fn settle(
         // overflowed with either.
         write_render_side(conn, ctx.id, side).await?;
     }
-    spawn::spawn_all(conn, ctx, state, &spawns).await?;
-    // **After `persist`, exactly like the loop spawner, and for the same
-    // reason**: the child's row names `(execution, run_ix)` and that run has to
-    // exist. It differs in one way that matters for what comes next --
-    // `subflow::spawn_one` may complete the parent's own run (a `wait: false`
-    // subflow, or a target that does not resolve), and it does so through a
-    // nested `settle` on this same execution. That is the same re-entrancy
-    // `spawn::spawn_all` already has via `on_execution_terminal`, and it is why
-    // the terminal check below reads `state` -- this transaction's in-memory
-    // copy, which a nested settle deliberately does not update -- rather than
-    // the row: a nested settle that terminated the execution has ALREADY told
-    // its parent, and firing again from here would report one terminal twice.
-    subflow::spawn_all(conn, ctx, &surface, state, &subflows).await?;
-    // **The execution-delay loop, and it is a different loop in the artifact
-    // too.** A `CREATE_NEW_EXECUTION` retry ends THIS execution `RETRIED` and
-    // leaves an `ExecutionDelay` behind (`retry::scan`'s `ScheduleRetry`); the
-    // replacement execution is started later, by whoever notices the deadline.
-    // Here that is every `settle`, because `resume` -- from `worker::wake` in
-    // production and from `pass_time` in the oracle's driver -- is the settle a
-    // due deadline produces. It reads `state`, so the round that scheduled the
-    // delay can see it too, and refuses on `not_before > now`.
-    replay::spawn_due(conn, ctx, state, now).await?;
+    Ok((surface, spawns, subflows))
+}
 
+/// The Flow-trigger outbox of one settle.
+async fn outbox(
+    conn: &mut PgConnection,
+    ctx: &ExecutionCtx,
+    before: &ExecutionState,
+    state: &ExecutionState,
+) -> Result<()> {
     // **The Flow-trigger outbox (W13 spec §4.3), and it is the ONE statement
     // W13a adds to this transaction.** One event per state this settle
     // APPENDED to the execution's history, except `CREATED`, in the order they
@@ -1867,39 +2402,6 @@ pub(super) async fn settle(
         .map_err(db_err)?;
     }
 
-    let was = before.history.last().copied();
-    let is = state.history.last().copied();
-    if was != is {
-        if let Some(terminal) = is.filter(|s| notifies_parent(*s)) {
-            spawn::on_execution_terminal(conn, ctx.id, terminal, ctx.depth).await?;
-            // The other kind of link. `on_execution_terminal` reads
-            // `parent_execution_id` and this reads `trigger_execution_id`, and
-            // `workflow_executions_one_link_kind` makes it impossible for both
-            // to find something -- so the pair is a dispatch, not two chances
-            // to report the same terminal.
-            //
-            // **For a `CREATE_NEW_EXECUTION` replay NEITHER finds anything**,
-            // and that is why egret's answer for a replayed `Subflow` child is
-            // invariant rather than timing-dependent: `trigger_of` zips two
-            // NULL trigger columns, and `parent_of` zips a set
-            // `parent_execution_id` with a NULL `parent_run_ix`, which
-            // `workflow_executions_loop_run_whole_or_absent` keeps NULL for a
-            // row with no loop index. Registered as a divergence in
-            // `oracle-exec/README.md`'s coverage statement, item 16.
-            subflow::on_child_terminal(conn, ctx.id, terminal, ctx.depth).await?;
-        }
-    }
-    // Spec §11 (fix round 1, I2): a render this settle ran met a store OUTAGE.
-    // It failed a run above, and that failure is not the author's: an `Err`
-    // here rolls the caller's whole transaction back -- `apply_outcome`'s
-    // write included -- so the lease lapses and the run is re-claimed with no
-    // attempt spent, exactly as a handler `Err` is.
-    if let Some(outage) = surface.files_outage() {
-        return Err(Error::Internal(anyhow::anyhow!(
-            "execution {}: {outage}",
-            ctx.id
-        )));
-    }
     Ok(())
 }
 
@@ -1975,38 +2477,37 @@ pub async fn start_execution_with_trigger(
     inputs: serde_json::Value,
     trigger: Option<serde_json::Value>,
 ) -> Result<Uuid> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    let id = start_execution_in(
-        &mut tx,
-        NewExecution {
-            workspace_id,
-            flow_id,
-            source,
-            inputs,
-            trigger,
-            // Only the scheduler (W12 Task 4) fires a `Schedule` tick, and it
-            // calls `start_execution_in` directly on the transaction that
-            // advances `next_evaluation_date` -- this wrapper is never that
-            // caller.
-            scheduled_date: None,
-            // Likewise only the Flow-trigger processor (W13a Task 4) starts an
-            // execution because another one reached a state; this wrapper's
-            // callers -- the API, a webhook, the tests -- start at the bottom.
-            trigger_execution_id: None,
-            execution_depth: 0,
-            flow_trigger_event_id: None,
-            born_failed: false,
-            // A manual replay calls `start_execution_in` itself with the link.
-            replayed_from_execution_id: None,
-            // Only the start route uploads FILE inputs, and it calls
-            // `start_execution_in` itself with the id it uploaded under.
-            id: None,
-            input_files: Vec::new(),
-        },
-    )
-    .await?;
-    tx.commit().await.map_err(db_err)?;
-    Ok(id)
+    transaction!(pool, |at| {
+        start_execution_in_with(
+            at,
+            NewExecution {
+                workspace_id,
+                flow_id,
+                source,
+                inputs: inputs.clone(),
+                trigger: trigger.clone(),
+                // Only the scheduler (W12 Task 4) fires a `Schedule` tick, and it
+                // calls `start_execution_in` directly on the transaction that
+                // advances `next_evaluation_date` -- this wrapper is never that
+                // caller.
+                scheduled_date: None,
+                // Likewise only the Flow-trigger processor (W13a Task 4) starts an
+                // execution because another one reached a state; this wrapper's
+                // callers -- the API, a webhook, the tests -- start at the bottom.
+                trigger_execution_id: None,
+                execution_depth: 0,
+                flow_trigger_event_id: None,
+                born_failed: false,
+                // A manual replay calls `start_execution_in` itself with the link.
+                replayed_from_execution_id: None,
+                // Only the start route uploads FILE inputs, and it calls
+                // `start_execution_in` itself with the id it uploaded under.
+                id: None,
+                input_files: Vec::new(),
+            },
+        )
+        .await
+    })
 }
 
 /// Everything a caller supplies to create an execution. A struct because the
@@ -2069,7 +2570,43 @@ pub struct NewExecution<'a> {
 /// so the trigger's advance and the execution it fires commit or roll back
 /// together. `start_execution_with_trigger` is now the thin wrapper: begin,
 /// call this, commit.
+///
+/// # A caller-owned transaction reads nothing (W9c Task 9)
+///
+/// **Test-only** (`test-util`; final review m3), as [`apply_outcome`]: the
+/// first settle renders through a cache only an owner that can roll back and
+/// fetch fills, so here it stays empty, a render that needs a read renders a
+/// placeholder, and this answers `Err` -- the caller must not commit. The
+/// scheduler, the Flow-trigger processor, the routes and
+/// [`start_execution_with_trigger`] call [`start_execution_in_with`] inside
+/// `worker::txn`.
+#[cfg(any(test, feature = "test-util"))]
 pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) -> Result<Uuid> {
+    let pf = Prefetch::new();
+    let started = start_execution_in_on(conn, &Gate::checked_by_caller(&pf), new).await;
+    if pf.has_pending() {
+        return Err(prefetch_miss());
+    }
+    started
+}
+
+/// [`start_execution_in`] in an attempt of `worker::txn` (or a savepoint of
+/// one), reading through its gate's cache: the only production entry.
+pub(crate) async fn start_execution_in_with(
+    at: &mut impl InTxn,
+    new: NewExecution<'_>,
+) -> Result<Uuid> {
+    let (conn, gate) = at.parts();
+    start_execution_in_on(conn, gate, new).await
+}
+
+/// The body of [`start_execution_in_with`] (and of the test-only
+/// [`start_execution_in`]). Private, as [`apply_outcome_on`].
+async fn start_execution_in_on(
+    conn: &mut PgConnection,
+    gate: &Gate,
+    new: NewExecution<'_>,
+) -> Result<Uuid> {
     let NewExecution {
         workspace_id,
         flow_id,
@@ -2148,6 +2685,7 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
         seq: 0,
         // A caller that starts an execution is the bottom of the stack.
         depth: 0,
+        gate: Some(gate.clone()),
     };
     let empty = ExecutionState::new(&ctx.plan);
     let mut state = empty.clone();
@@ -2168,7 +2706,7 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
     // `Tick(0)` is the execution's own origin — `Tick` is milliseconds since
     // the execution was created (`executor::state::Tick`), and this is that
     // instant.
-    settle(conn, &ctx, &empty, &mut state, Tick(0), None).await?;
+    settle(conn, &ctx, &empty, state, Tick(0), None).await?;
     Ok(id)
 }
 
@@ -2185,12 +2723,16 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
 /// It takes the same lock and runs the same [`settle`] as every other writer,
 /// so a run created here and a run created by a finishing task are the same
 /// row written by the same code.
+///
+/// W9c Task 9: in `txn::transaction!`, so a render that needs a read is
+/// fetched with this transaction rolled back, and the settle runs again.
 pub async fn resume(pool: &PgPool, execution_id: Uuid) -> Result<()> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    let (ctx, mut state, now) = load(&mut tx, execution_id, Stack::Fresh).await?;
-    let before = state.clone();
-    settle(&mut tx, &ctx, &before, &mut state, now, None).await?;
-    tx.commit().await.map_err(db_err)
+    transaction!(pool, |at| {
+        let (conn, gate) = at.parts();
+        let (ctx, state, now) = load(conn, execution_id, Stack::Fresh(gate.clone())).await?;
+        let before = state.clone();
+        settle(conn, &ctx, &before, state, now, None).await
+    })
 }
 
 /// Everything a writer needs to know about the execution it is writing.
@@ -2258,6 +2800,34 @@ pub(super) struct ExecutionCtx {
     /// the whole measurement and who owns it. Loop links are counted here,
     /// because each one is a real frame.
     pub depth: usize,
+    /// W9c Task 9: the gate of the attempt this execution's `settle` renders
+    /// in, whose cache every render reads through (`storage::prefetch`) --
+    /// the transaction OWNER's, handed down by [`Stack`] to every nested
+    /// settle, so all the executions one transaction touches read through one
+    /// cache and the owner's check before its commit sees every miss.
+    /// `None` for a reader's context ([`Stack::Reader`]), which `settle`
+    /// refuses.
+    pub gate: Option<Gate>,
+}
+
+impl ExecutionCtx {
+    /// What a load nested inside this execution's `settle` passes as
+    /// [`Stack::Nested`]: this frame's depth, and the owner's cache.
+    pub(super) fn caller(&self) -> Caller {
+        Caller {
+            depth: self.depth,
+            gate: self.gate.clone(),
+        }
+    }
+}
+
+/// The frame a nested load sits inside: [`Stack::Nested`]'s payload.
+#[derive(Debug, Clone)]
+pub(super) struct Caller {
+    /// The calling `settle`'s [`ExecutionCtx::depth`].
+    pub depth: usize,
+    /// The calling `settle`'s [`ExecutionCtx::gate`].
+    pub gate: Option<Gate>,
 }
 
 /// Whether [`load_with`] takes the execution's row lock.
@@ -2298,25 +2868,45 @@ pub(super) enum Lock {
 /// `a_chain_of_subflows_that_COMPLETES_is_bounded_by_the_same_counter` is the
 /// control: it is the ascent, where the reset lived, as distinct from the
 /// descent the sibling test covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// # It carries the gate too (W9c Task 9)
+///
+/// For the same reason: a nested settle's renders must read through the
+/// transaction owner's cache, or the owner's check before its commit would
+/// not see their misses. `Fresh` takes the attempt's [`Gate`] (which only
+/// `worker::txn` makes) and `Nested` the caller's, so a load that settles
+/// cannot be written without one; `Reader` is the load that never settles,
+/// and `settle` refuses a context built by it.
+#[derive(Debug, Clone)]
 pub(super) enum Stack {
-    /// **This caller begins a fresh call stack.** The tick (`apply_outcome`),
-    /// [`resume`], and `input_for`, which runs before the tick's transaction
-    /// is even opened. Each is entered from `worker::run`, with nothing of
-    /// this crate's below it.
-    Fresh,
-    /// **This load happens inside a `settle` that is already `.0` deep**, and
-    /// the `settle` it is about to run nests inside that one — so the frame it
-    /// produces is `.0 + 1`.
-    Nested(usize),
+    /// **This caller begins a fresh call stack**, inside an attempt of
+    /// `worker::txn`: the tick (`apply_outcome_with`) and [`resume`]. Each is
+    /// entered from `worker::run`, with nothing of this crate's below it.
+    Fresh(Gate),
+    /// **This load happens inside a `settle` that is already `.0.depth`
+    /// deep**, and the `settle` it is about to run nests inside that one — so
+    /// the frame it produces is `.0.depth + 1`, reading through the same cache.
+    Nested(Caller),
+    /// **A reader**: `input_for` and `execution_render_context`, which build
+    /// a render context and run no `settle`. A fresh stack, and no gate.
+    Reader,
 }
 
 impl Stack {
     /// [`ExecutionCtx::depth`] for the context this load is building.
-    fn depth(self) -> usize {
+    fn depth(&self) -> usize {
         match self {
-            Stack::Fresh => 0,
-            Stack::Nested(caller) => caller + 1,
+            Stack::Fresh(_) | Stack::Reader => 0,
+            Stack::Nested(caller) => caller.depth + 1,
+        }
+    }
+
+    /// [`ExecutionCtx::gate`] for the context this load is building.
+    fn gate(&self) -> Option<Gate> {
+        match self {
+            Stack::Fresh(gate) => Some(gate.clone()),
+            Stack::Nested(caller) => caller.gate.clone(),
+            Stack::Reader => None,
         }
     }
 }
@@ -2403,6 +2993,7 @@ pub(super) async fn load_with(
         // it made the counter walk in place while the stack climbed. See
         // [`Stack`].
         depth: stack.depth(),
+        gate: stack.gate(),
     };
 
     let rows = sqlx::query(
@@ -2702,7 +3293,18 @@ fn sla_terminal(surface: &Surface, ctx: &ExecutionCtx, state: &ExecutionState) -
     // the bytecode, and for the assertion W8 Task 6 shipped saying the
     // opposite.
     let violation = crate::sla::first_execution_changed_violation(flow, &mut |p| {
-        p.render(&cx).map_err(|e| e.to_string())
+        let rendered = p.render(&cx).map_err(|e| e.to_string());
+        // W9c Task 9 (final review I2): an SLA condition belongs to no run,
+        // so a per-call read limit it met has no run to carry its message,
+        // and `workflow.executions` has no message column; it is logged.
+        let limit = surface.take_limit_failure();
+        if let (Err(_), Some(limit)) = (&rendered, limit) {
+            tracing::warn!(
+                execution = %ctx.id,
+                "an SLA condition did not render, and counts as violated: {limit}"
+            );
+        }
+        rendered
     })?;
     crate::sla::state_for(violation.behavior)
 }
@@ -2782,8 +3384,12 @@ fn drive(
             continue;
         }
 
+        // W9c Task 9: a render that missed rendered a placeholder and carried
+        // on (the user's ruling of 2026-10-08, "gather"): this attempt goes on
+        // driving, so every read it can reach is recorded, and the owner's
+        // gate rolls it back before any of it commits.
         let snapshot = state.clone();
-        if render::render_run_if(surface, plan, state) == Pass::Rendered {
+        if render::render_run_if(surface, plan, state, side) == Pass::Rendered {
             *seq += 1;
             marks.observe(&snapshot, state, *seq);
             continue;
@@ -2799,6 +3405,13 @@ fn drive(
         return Ok((spawns, subflows));
     }
     Err(worker_err(WorkerError::NoFixedPoint(ctx.id)))
+}
+
+/// The `Err` the test-only caller-owned wrappers ([`apply_outcome`],
+/// [`start_execution_in`]) answer when a render needed a read.
+#[cfg(any(test, feature = "test-util"))]
+fn prefetch_miss() -> Error {
+    worker_err(WorkerError::PrefetchMiss)
 }
 
 /// The decision point [`CREATE_BESIDE_A_CREATED_SIBLING`] counts: this round

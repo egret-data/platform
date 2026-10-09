@@ -26,7 +26,7 @@ use std::time::Duration;
 use egret_metastore::Db;
 use egret_storage::{Listing, MemStore, ObjectStore, StorageError};
 use egret_workflow::runners::{FileUnavailable, RenderFiles};
-use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor};
+use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Resource};
 use egret_workflow::storage::nsfiles::path::NsPath;
 use egret_workflow::storage::nsfiles::store::{put, soft_delete, Conflict};
 use egret_workflow::storage::nsfiles::CreatedBy;
@@ -1241,7 +1241,14 @@ async fn a_dependent_started_during_the_pass_keeps_its_source() {
 async fn a_prune_pass_leaves_namespace_files_untouched() {
     let _g = SERIAL.lock().await;
     let Some(w) = World::new().await else { return };
-    let g = authorize(w.ws, Actor::Api, NS, Access::Write).unwrap();
+    let g = authorize(
+        w.ws,
+        Actor::Api,
+        NS,
+        Resource::NamespaceFiles,
+        Access::Write,
+    )
+    .unwrap();
     for (p, body) in [
         ("/a.txt", "one"),
         ("/a.txt", "two"),
@@ -1330,5 +1337,115 @@ async fn a_prune_pass_leaves_namespace_files_untouched() {
     );
     for p in w.store.prefixes.lock().unwrap().iter() {
         assert!(!p.contains("/_files"), "delete_prefix {p}");
+    }
+}
+
+/// W9c Task 3: KV values of the flow's own namespace -- under the same
+/// `{ws}/w9a/t13/` directory its executions live under, at `_kv/` -- three
+/// revisions, one key soft-deleted, one expired, rows and objects aged far
+/// past every window, survive a pass that prunes an old execution and
+/// sweeps an old orphan of that namespace (the controls). The pruner never
+/// reads `workflow.kv_entries`; the KV expiry sweep is the only thing that
+/// removes KV values.
+#[tokio::test]
+async fn a_prune_pass_leaves_kv_untouched() {
+    use egret_workflow::storage::kv::key::KvKey;
+    use egret_workflow::storage::kv::store::{delete, set, NewValue};
+    use egret_workflow::storage::kv::value::{KvType, KvValue};
+
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let g = authorize(w.ws, Actor::Api, NS, Resource::Kv, Access::Write).unwrap();
+    for (k, v, ttl) in [
+        ("a", "one", None),
+        ("a", "two", None),
+        ("a", "three", None),
+        ("gone", "g", None),
+        ("old", "o", Some(chrono::TimeDelta::seconds(60))),
+    ] {
+        set(
+            &w.db.pool,
+            &w.fs,
+            &g,
+            &KvKey::parse(k).unwrap(),
+            NewValue {
+                value: KvValue::from_json(KvType::String, &serde_json::json!(v)).unwrap(),
+                description: None,
+                ttl,
+                overwrite: true,
+            },
+            CreatedBy::User(Uuid::nil()),
+        )
+        .await
+        .unwrap();
+    }
+    delete(
+        &w.db.pool,
+        &g,
+        &KvKey::parse("gone").unwrap(),
+        CreatedBy::User(Uuid::nil()),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE workflow.kv_entries SET created_at = now() - make_interval(days => 400), \
+           expires_at = CASE WHEN expires_at IS NULL THEN NULL \
+                             ELSE now() - make_interval(days => 399) END \
+          WHERE workspace_id = $1",
+    )
+    .bind(w.ws)
+    .execute(&w.db.pool)
+    .await
+    .unwrap();
+    let kv_prefix = format!("{}/w9a/t13/_kv/", w.ws);
+    let kv_keys = || -> Vec<String> {
+        let mut keys: Vec<String> = w
+            .store
+            .mem
+            .keys()
+            .into_iter()
+            .filter(|k| k.contains(&kv_prefix))
+            .collect();
+        keys.sort();
+        keys
+    };
+    let old = (chrono::Utc::now() - chrono::Duration::days(400)).to_rfc3339();
+    for k in kv_keys() {
+        w.store
+            .modified
+            .lock()
+            .unwrap()
+            .insert(key_of(&k), old.clone());
+    }
+    let rows = || async {
+        sqlx::query_as::<_, (String, i32, bool)>(
+            "SELECT key, revision, deleted FROM workflow.kv_entries \
+              WHERE workspace_id = $1 ORDER BY key, revision",
+        )
+        .bind(w.ws)
+        .fetch_all(&w.db.pool)
+        .await
+        .unwrap()
+    };
+    let (rows_before, keys_before) = (rows().await, kv_keys());
+    assert_eq!(
+        (rows_before.len(), keys_before.len()),
+        (5, 5),
+        "{rows_before:?}"
+    );
+    let ended = w.exec("SUCCESS", 400, None).await;
+    let pruned = w.file(ended, "a.txt").await;
+    let failed = w.exec("FAILED", 2, None).await;
+    let orphan = w.unindexed(failed, "old.txt").await;
+    w.age_object(&orphan, 25);
+
+    let report = w.pass().await;
+
+    assert!(w.gone(&pruned).await, "the prune control: {report:?}");
+    assert!(!w.stored(&orphan), "the sweep control: {report:?}");
+    assert_eq!(rows().await, rows_before, "a KV row was touched");
+    assert_eq!(kv_keys(), keys_before, "a KV object was deleted");
+    for p in w.store.prefixes.lock().unwrap().iter() {
+        assert!(!p.contains("/_kv"), "delete_prefix {p}");
     }
 }

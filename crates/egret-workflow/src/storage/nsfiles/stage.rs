@@ -35,7 +35,7 @@ use serde_json::Value;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use super::access::{authorize, Access, Actor};
+use super::access::{authorize, Access, Actor, Resource};
 use super::glob::PathMatcher;
 use super::path::NsPath;
 use super::store::{list_live, resolve, Want};
@@ -477,6 +477,7 @@ pub async fn stage(
                     namespace: flow_namespace,
                 },
                 ns,
+                Resource::NamespaceFiles,
                 Access::Read,
             ) {
                 Ok(g) => g,
@@ -644,6 +645,7 @@ pub async fn resolve_ns_file(
             namespace: flow_namespace,
         },
         &named.namespace,
+        Resource::NamespaceFiles,
         Access::Read,
     ) {
         Ok(g) => g,
@@ -704,7 +706,7 @@ pub(crate) mod testing {
     use sqlx::PgPool;
     use uuid::Uuid;
 
-    use crate::storage::nsfiles::access::{authorize, Access, Actor};
+    use crate::storage::nsfiles::access::{authorize, Access, Actor, Resource};
     use crate::storage::nsfiles::path::NsPath;
     use crate::storage::nsfiles::store::{put, soft_delete, Conflict, Written};
     use crate::storage::nsfiles::CreatedBy;
@@ -760,7 +762,8 @@ pub(crate) mod testing {
         path: &str,
         body: &str,
     ) -> u32 {
-        let grant = authorize(ws, Actor::Api, ns, Access::Write).expect("a writable namespace");
+        let grant = authorize(ws, Actor::Api, ns, Resource::NamespaceFiles, Access::Write)
+            .expect("a writable namespace");
         let path = NsPath::parse_file(path).expect("a file path");
         let mut reader = body.as_bytes();
         match put(
@@ -782,7 +785,8 @@ pub(crate) mod testing {
     }
 
     pub async fn delete(pool: &PgPool, ws: Uuid, ns: &str, path: &str) {
-        let grant = authorize(ws, Actor::Api, ns, Access::Write).expect("a writable namespace");
+        let grant = authorize(ws, Actor::Api, ns, Resource::NamespaceFiles, Access::Write)
+            .expect("a writable namespace");
         soft_delete(pool, &grant, &NsPath::parse_file(path).expect("a path"))
             .await
             .expect("soft-deleted");

@@ -30,7 +30,8 @@ use crate::trigger::{
     condition_keys, dependency_matches, depends_on_refusals, merge, satisfied, DepSource,
     ResolvedWindow, TimeWindow,
 };
-use crate::worker::{execution_render_context, start_execution_in, NewExecution};
+use crate::worker::txn::{transaction, Ended, Fetched, Finish, Isolation, Savepoint, Txn};
+use crate::worker::{execution_render_context, start_execution_in_with, NewExecution};
 
 fn db_err(e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!("{e}"))
@@ -118,8 +119,30 @@ pub struct EventReport {
     pub contended: usize,
 }
 
+impl EventReport {
+    /// Add what one event's committed transaction did to this pass's count.
+    fn absorb(&mut self, d: EventReport) {
+        let EventReport {
+            events,
+            fired,
+            born_failed,
+            refused,
+            errored,
+            accumulated,
+            contended,
+        } = d;
+        self.events += events;
+        self.fired += fired;
+        self.born_failed += born_failed;
+        self.refused += refused;
+        self.errored += errored;
+        self.accumulated += accumulated;
+        self.contended += contended;
+    }
+}
+
 /// The claimed event, as the claim read it under its row lock.
-#[derive(sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 struct Event {
     id: i64,
     source_execution_id: Uuid,
@@ -299,6 +322,21 @@ pub async fn process_events(pool: &PgPool) -> Result<EventReport> {
 /// and its own update -- counted as one `errored`, logged at `warn`, and its
 /// attempt counted apart (F1). `Err` is returned only when a transaction
 /// cannot even begin or the claim itself fails.
+///
+/// # A miss is not a failed attempt (W9c Task 9)
+///
+/// A fire's first settle renders through the event transaction's cache
+/// (`storage::prefetch`). A render that needs a read rolls the WHOLE event
+/// transaction back -- the event and window rows' locks with it -- in
+/// `worker::txn::transaction!`, which fetches the read with nothing held and
+/// claims again from the same cursor, so the same event (or, if another
+/// replica took it meanwhile, the next). A listener whose render missed
+/// renders a placeholder and the attempt goes on to every other listener
+/// (the user's ruling of 2026-10-08, "gather"), so one fetch answers the
+/// whole event; whatever the rolled-back attempt computed -- fates, counts,
+/// a failed start -- is discarded with it: it is never counted (`errored`,
+/// `attempts`), and the cursor moves only past an event whose attempt
+/// finished.
 pub async fn process_events_with(
     pool: &PgPool,
     limits: &PassLimits,
@@ -311,11 +349,80 @@ pub async fn process_events_with(
         if cancel.is_cancelled() {
             return Ok(report);
         }
-        let mut tx = pool
-            .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ")
-            .await
-            .map_err(db_err)?;
-        let claimed: std::result::Result<Option<Event>, sqlx::Error> = sqlx::query_as(
+        // The event the latest attempt claimed: what a failed transaction
+        // is counted against.
+        let mut claimed_ev: Option<Event> = None;
+        let ended = transaction!(
+            pool,
+            Isolation::RepeatableRead,
+            |at| { claim_and_process(at, cursor, limits, &mut claimed_ev).await },
+            |pf| {
+                pf.fetch_pending().await?;
+                Ok(Fetched::Again)
+            }
+        );
+        match (ended, claimed_ev) {
+            (Ok(Ended::Done(Step::Empty)), _) => return Ok(report),
+            (Ok(Ended::Done(Step::Again)), _) => continue,
+            (Ok(Ended::Done(Step::Event(ev, delta))), _) => {
+                cursor = ev.id;
+                report.absorb(delta);
+            }
+            (Ok(Ended::GaveUp), _) => {
+                return Err(Error::Internal(anyhow::anyhow!(
+                    "a flow-trigger event's plain fetch cannot give up"
+                )))
+            }
+            // A failure before any event was claimed: the begin or the claim.
+            (Err(e), None) => return Err(e),
+            // A failure of the event's TRANSACTION -- a savepoint, the final
+            // write, the COMMIT -- rolls back every fire it made and the
+            // event's own write with it. It does not end the pass: the cursor
+            // passes the event, so the pass moves on to newer events. The
+            // attempt is then counted OUTSIDE that transaction (final review
+            // F1), so an event whose transaction always fails is given up like
+            // a listener that always fails, instead of being retried for ever.
+            (Err(e), Some(ev)) => {
+                cursor = ev.id;
+                tracing::warn!(
+                    event_id = ev.id,
+                    source_execution_id = %ev.source_execution_id,
+                    error = %e,
+                    "a flow-trigger event's transaction failed and rolled back; left for the next pass"
+                );
+                report.errored += 1;
+                count_a_failed_transaction(pool, &ev, limits.retry_backoff).await;
+            }
+        }
+        report.events += 1;
+        if report.events >= limits.max_events || started.elapsed() >= limits.max_duration {
+            return Ok(report);
+        }
+    }
+}
+
+/// What one attempt of [`process_events_with`]'s transaction came to.
+enum Step {
+    /// Nothing is due.
+    Empty,
+    /// The claim met a serialization failure: claim again.
+    Again,
+    /// This event was processed; what it adds to the pass's report.
+    Event(Event, EventReport),
+}
+
+/// One attempt of [`process_events_with`]'s transaction: claim the oldest due
+/// event past `cursor`, process it, and finish it. `claimed` is set to the
+/// event as soon as it is claimed.
+async fn claim_and_process(
+    at: &mut Txn,
+    cursor: i64,
+    limits: &PassLimits,
+    claimed: &mut Option<Event>,
+) -> Result<Finish<Step>> {
+    *claimed = None;
+    {
+        let claimed_row: std::result::Result<Option<Event>, sqlx::Error> = sqlx::query_as(
             "SELECT id, source_execution_id, workspace_id, state, done, attempts \
                FROM workflow.flow_trigger_events \
               WHERE id > $1 \
@@ -325,64 +432,27 @@ pub async fn process_events_with(
               FOR UPDATE SKIP LOCKED",
         )
         .bind(cursor)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(at.conn())
         .await;
-        let ev = match claimed {
+        let ev = match claimed_row {
             Ok(Some(ev)) => ev,
-            Ok(None) => {
-                tx.rollback().await.map_err(db_err)?;
-                return Ok(report);
-            }
+            Ok(None) => return Ok(Finish::Rollback(Step::Empty)),
             // The one serialization failure this transaction can meet (see
             // the module doc, statement 2): another processor deleted or
             // updated the row our snapshot saw, after the snapshot and before
             // our lock. Nothing was done; a fresh snapshot no longer sees it.
-            Err(e) if is_serialization_failure(&e) => {
-                tx.rollback().await.map_err(db_err)?;
-                continue;
-            }
+            Err(e) if is_serialization_failure(&e) => return Ok(Finish::Rollback(Step::Again)),
             Err(e) => return Err(db_err(e)),
         };
-        cursor = ev.id;
+        // The cache is this event's: a retry that claims another one (this
+        // one was taken by another replica meanwhile) starts it over.
+        at.gate().prefetch().bind(&ev.id.to_string());
+        *claimed = Some(ev.clone());
         // What this event adds is kept only if its transaction commits.
-        let before = report.clone();
-
-        let body = match process_one(&mut tx, &ev, &mut report).await {
-            Ok((done, pending)) => {
-                finish_event(&mut tx, &ev, done, pending, limits.retry_backoff).await
-            }
-            Err(e) => Err(e),
-        };
-        let committed = match body {
-            Ok(()) => tx.commit().await.map_err(db_err),
-            Err(e) => {
-                // Best effort: dropping the transaction rolls it back too.
-                let _ = tx.rollback().await;
-                Err(e)
-            }
-        };
-        // A failure of the event's TRANSACTION -- a savepoint, the final
-        // write, the COMMIT -- rolls back every fire it made and the event's
-        // own write with it. It does not end the pass: the cursor has passed
-        // the event, so the pass moves on to newer events. The attempt is then
-        // counted OUTSIDE that transaction (final review F1), so an event
-        // whose transaction always fails is given up like a listener that
-        // always fails, instead of being retried for ever.
-        if let Err(e) = committed {
-            tracing::warn!(
-                event_id = ev.id,
-                source_execution_id = %ev.source_execution_id,
-                error = %e,
-                "a flow-trigger event's transaction failed and rolled back; left for the next pass"
-            );
-            report = before;
-            report.errored += 1;
-            count_a_failed_transaction(pool, &ev, limits.retry_backoff).await;
-        }
-        report.events += 1;
-        if report.events >= limits.max_events || started.elapsed() >= limits.max_duration {
-            return Ok(report);
-        }
+        let mut delta = EventReport::default();
+        let (done, pending) = process_one(at, &ev, &mut delta).await?;
+        finish_event(at.conn(), &ev, done, pending, limits.retry_backoff).await?;
+        Ok(Finish::Commit(Step::Event(ev, delta)))
     }
 }
 
@@ -474,7 +544,7 @@ struct Pending {
 /// with, including the ones an earlier pass finished, and the ones a later
 /// pass must retry.
 async fn process_one(
-    tx: &mut PgConnection,
+    at: &mut Txn,
     ev: &Event,
     report: &mut EventReport,
 ) -> Result<(Vec<String>, Pending)> {
@@ -511,7 +581,7 @@ async fn process_one(
     .bind(&ev.state)
     .bind(WORKFLOWS_FEATURE)
     .bind(workflows_feature_default())
-    .fetch_all(&mut *tx)
+    .fetch_all(at.conn())
     .await
     .map_err(db_err)?;
     let todo: Vec<&Listener> = listeners
@@ -525,7 +595,7 @@ async fn process_one(
     // The source and its render context, in a savepoint of their own: a
     // failure here must leave the transaction able to keep the event.
     let loaded = {
-        let mut sp = tx.begin().await.map_err(db_err)?;
+        let mut sp = at.conn().begin().await.map_err(db_err)?;
         match load_source(&mut sp, ev, state).await {
             Ok(v) => {
                 sp.commit().await.map_err(db_err)?;
@@ -554,7 +624,7 @@ async fn process_one(
 
     for l in todo {
         let key = l.key();
-        match listen(tx, ev, l, &source, &ctx).await? {
+        match listen(at, ev, l, &source, &ctx).await? {
             Fate::Fired => {
                 report.fired += 1;
                 done.push(key);
@@ -760,7 +830,7 @@ async fn load_source(
 /// One listener on one event. `Err` is a failure of the event's transaction
 /// itself; everything the listener can get wrong is a [`Fate`].
 async fn listen(
-    tx: &mut PgConnection,
+    at: &mut Txn,
     ev: &Event,
     l: &Listener,
     source: &Source,
@@ -787,7 +857,7 @@ async fn listen(
     // the row's `depends_on` copy: the two are written together by `sync`,
     // and the YAML is what the rest of this function obeys.
     if !spec.depends_on.is_empty() {
-        return listen_depends_on(tx, ev, l, &flow, trigger, spec, source, ctx).await;
+        return listen_depends_on(at, ev, l, &flow, trigger, spec, source, ctx).await;
     }
     let listener = match WindowFreeFlowTrigger::resolve(trigger) {
         Ok(r) => r,
@@ -801,15 +871,15 @@ async fn listen(
     // The listener's savepoint: whatever `start_execution_in` does -- its
     // insert, the first settle, an aborted statement -- rolls back alone, so a
     // sibling's fire in this transaction survives it (spec §4.4 point 1).
-    let mut sp = tx.begin().await.map_err(db_err)?;
+    let mut sp = at.savepoint().await?;
     let started = start_fire(&mut sp, ev, l, source, ctx, &fired).await?;
     Ok(match started {
         Ok(render_failure) => {
-            sp.commit().await.map_err(db_err)?;
+            sp.release().await?;
             fired_fate(render_failure)
         }
         Err(err) => {
-            sp.rollback().await.map_err(db_err)?;
+            sp.rollback().await?;
             failed_start_fate(&err)
         }
     })
@@ -882,8 +952,13 @@ fn failed_start_fate(err: &Error) -> Fate {
 /// it (born FAILED when `render_failure` is `Some`); `Ok(Err(e))` is
 /// `start_execution_in`'s failure, for the caller to roll its savepoint back
 /// and [`failed_start_fate`] it.
+///
+/// W9c Task 9: `sp` is a savepoint of the event's attempt, so the first
+/// settle renders under `process_events_with`'s gate; a start whose render
+/// missed is classified like any other, and the gate rolls the whole event
+/// back, its fate and counts with it.
 async fn start_fire(
-    conn: &mut PgConnection,
+    sp: &mut Savepoint<'_>,
     ev: &Event,
     l: &Listener,
     source: &Source,
@@ -912,8 +987,8 @@ async fn start_fire(
             Some(format!("inputs.{key} does not render: {error}")),
         ),
     };
-    let started = start_execution_in(
-        conn,
+    let started = start_execution_in_with(
+        sp,
         NewExecution {
             workspace_id: l.workspace_id,
             // Always the listener's uuid: the backstop index keys on it, and
@@ -954,7 +1029,7 @@ async fn start_fire(
 ///    listener.
 #[allow(clippy::too_many_arguments)]
 async fn listen_depends_on(
-    tx: &mut PgConnection,
+    at: &mut Txn,
     ev: &Event,
     l: &Listener,
     flow: &Flow,
@@ -1022,26 +1097,26 @@ async fn listen_depends_on(
         return Ok(Fate::Refused(NO_DEPENDENCY_MET.to_string()));
     }
 
-    let mut sp = tx.begin().await.map_err(db_err)?;
+    let mut sp = at.savepoint().await?;
     let step = window_step(
         &mut sp, ev, l, spec, &window, &keys, &met, source, ctx, &fired,
     )
     .await;
     Ok(match step {
         Ok(WindowStep::Done(fate)) => {
-            sp.commit().await.map_err(db_err)?;
+            sp.release().await?;
             fate
         }
         Ok(WindowStep::StartFailed(err)) => {
-            sp.rollback().await.map_err(db_err)?;
+            sp.rollback().await?;
             failed_start_fate(&err)
         }
         Err(StepError::Contended(why)) => {
-            sp.rollback().await.map_err(db_err)?;
+            sp.rollback().await?;
             Fate::Contended(why)
         }
         Err(StepError::Failed(e)) => {
-            sp.rollback().await.map_err(db_err)?;
+            sp.rollback().await?;
             Fate::Retry(format!("the listener's window: {e}"))
         }
     })
@@ -1103,7 +1178,7 @@ fn step_err(e: sqlx::Error) -> StepError {
 /// savepoint. Every statement is one of the module doc's statements 6-9.
 #[allow(clippy::too_many_arguments)]
 async fn window_step(
-    conn: &mut PgConnection,
+    sp: &mut Savepoint<'_>,
     ev: &Event,
     l: &Listener,
     spec: &FlowTrigger,
@@ -1118,7 +1193,7 @@ async fn window_step(
     // clock (W13b global constraint). At `REPEATABLE READ` it is the
     // transaction's start, the same instant for every listener of the event.
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
-        .fetch_one(&mut *conn)
+        .fetch_one(sp.conn())
         .await
         .map_err(step_err)?;
     let (start, end) = match window.bounds(now) {
@@ -1141,7 +1216,7 @@ async fn window_step(
     .bind(&l.trigger_id)
     .bind(start)
     .bind(end)
-    .execute(&mut *conn)
+    .execute(sp.conn())
     .await
     .map_err(step_err)?;
 
@@ -1157,7 +1232,7 @@ async fn window_step(
     )
     .bind(l.flow_id)
     .bind(&l.trigger_id)
-    .fetch_one(&mut *conn)
+    .fetch_one(sp.conn())
     .await
     .map_err(step_err)?;
 
@@ -1174,7 +1249,7 @@ async fn window_step(
         .bind(&l.trigger_id)
         .bind(start)
         .bind(end)
-        .execute(&mut *conn)
+        .execute(sp.conn())
         .await
         .map_err(step_err)?;
         (w_start, w_end) = (start, end);
@@ -1199,7 +1274,7 @@ async fn window_step(
         .bind(l.flow_id)
         .bind(&l.trigger_id)
         .bind(Json(&merged))
-        .execute(&mut *conn)
+        .execute(sp.conn())
         .await
         .map_err(step_err)?;
         return Ok(WindowStep::Done(Fate::Accumulated));
@@ -1209,14 +1284,14 @@ async fn window_step(
     // window (statement 9) under every mode -- no `resetOnSuccess` exists
     // (D1; measured for ALL, ANY and AT_LEAST). The merged results are not
     // written first: the row is deleted in this savepoint either way.
-    match start_fire(conn, ev, l, source, ctx, fired).await? {
+    match start_fire(sp, ev, l, source, ctx, fired).await? {
         Ok(render_failure) => {
             sqlx::query(
                 "DELETE FROM workflow.flow_trigger_windows WHERE flow_id = $1 AND trigger_id = $2",
             )
             .bind(l.flow_id)
             .bind(&l.trigger_id)
-            .execute(&mut *conn)
+            .execute(sp.conn())
             .await
             .map_err(step_err)?;
             Ok(WindowStep::Done(fired_fate(render_failure)))

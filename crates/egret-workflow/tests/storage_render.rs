@@ -16,9 +16,11 @@
 //! # How a file gets written
 //!
 //! [`finish_writing`] stands in for a handler that wrote a file: it claims
-//! the run, puts the bytes, and hands them to `apply_outcome` as
+//! the run, puts the bytes, and hands them to `commit_outcome` as
 //! `Outcome::files` -- which, since W9a Task 6, indexes them **in the
-//! transaction it then settles in**, and commits once. The script handler's
+//! transaction it then settles in**, and commits once (W9c Task 9: that
+//! transaction is `commit_outcome`'s own, so a read in `settle` is fetched
+//! with it rolled back, and the outcome applied again). The script handler's
 //! own path (a collected `outputFiles` URI staged by a later task) is
 //! [`a_later_task_stages_an_earlier_tasks_output_uri_end_to_end`].
 
@@ -34,7 +36,7 @@ use egret_metastore::Db;
 use egret_workflow::render_str;
 use egret_workflow::storage::{self, uri, FileStore, StoredFile};
 use egret_workflow::worker::{
-    apply_outcome, claim, execution_render_context, reap, start_execution, start_execution_in,
+    claim, commit_outcome, execution_render_context, reap, start_execution, start_execution_in,
     Handlers, NewExecution, Outcome,
 };
 use serde_json::json;
@@ -209,7 +211,7 @@ async fn finish_writing(
 
 /// [`finish_writing`]'s body: `bytes: None` indexes a file whose object was
 /// never stored (a prune race, an orphaned row); `outputs` builds the
-/// outputs from the URI. Commits only when `apply_outcome` answered `Ok`,
+/// outputs from the URI. Commits only when `commit_outcome` answered `Ok`,
 /// and returns that answer.
 #[allow(clippy::too_many_arguments)]
 async fn write_and_apply(
@@ -233,7 +235,6 @@ async fn write_and_apply(
     if let Some(bytes) = bytes {
         put(fs, ws, &file, bytes).await;
     }
-    let mut tx = pool.begin().await.unwrap();
     let outcome = Outcome {
         files: vec![StoredFile {
             uri: file.clone(),
@@ -241,10 +242,10 @@ async fn write_and_apply(
         }],
         ..Outcome::succeeded_with(outputs(&file))
     };
-    let applied = apply_outcome(&mut tx, c, &outcome).await;
-    if applied.is_ok() {
-        tx.commit().await.unwrap();
-    }
+    // W9c Task 9: in a transaction `commit_outcome` owns, as the worker's
+    // tick does, so a successor's `read()` in `settle` is fetched with the
+    // transaction rolled back and the outcome applied again.
+    let applied = commit_outcome(pool, c, &outcome).await;
     (file, applied)
 }
 
@@ -717,7 +718,7 @@ async fn an_outage_while_a_handler_renders_is_a_worker_error_and_spends_no_attem
 }
 
 /// I2, the settle half: an outage while `settle` renders a `runIf` is an `Err`
-/// from `apply_outcome`, so the caller's transaction -- the finished task's
+/// from `commit_outcome`, so the transaction -- the finished task's
 /// outcome, its index rows, the successor -- rolls back whole.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_outage_while_settle_renders_rolls_the_whole_transaction_back() {

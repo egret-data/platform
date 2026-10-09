@@ -123,7 +123,9 @@ class EgretPluginHostTest {
     void every_unprovided_collaborator_throws_egret_unsupported() {
         var shim = new ShimRunContext(tmp);
         var kv = assertThrows(EgretUnsupported.class, () -> shim.namespaceKv("ns"));
-        assertTrue(kv.getMessage().contains("W9c"), kv.getMessage());
+        assertEquals("namespaceKv(): egret gives flows the KV store through the `io.kestra.plugin.core.kv` tasks and the `kv()` function, not through a plugin's RunContext; use a `core.kv` task before or after this one.", kv.getMessage());
+        assertFalse(kv.getMessage().contains("W9c"), kv.getMessage());
+        assertFalse(kv.getMessage().contains("does not provide yet"), kv.getMessage());
         assertThrows(EgretUnsupported.class, shim::logFileURI);
         assertThrows(EgretUnsupported.class, () -> shim.decrypt("x"));
         assertThrows(EgretUnsupported.class, () -> shim.encrypt("x"));

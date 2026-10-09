@@ -57,7 +57,7 @@ use egret_workspace::context::WsContext;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, ReadBuf};
 
-use super::access::{authorize, Access, Actor, Grant};
+use super::access::{authorize, Access, Actor, Grant, Resource};
 use super::path::NsPath;
 use super::store::{self, Conflict, NsEntry, Want, Written};
 use super::{zip, CreatedBy, NsError};
@@ -190,16 +190,16 @@ where
     }
 }
 
-fn core_refusal(e: Error) -> Response {
+pub(crate) fn core_refusal(e: Error) -> Response {
     e.into_response()
 }
 
-fn bad_request(message: String) -> Response {
+pub(crate) fn bad_request(message: String) -> Response {
     core_refusal(Error::InvalidInput(message))
 }
 
 /// Spec §9's table.
-fn ns_refusal(e: NsError) -> Response {
+pub(crate) fn ns_refusal(e: NsError) -> Response {
     match e {
         NsError::Author(m) => bad_request(m),
         NsError::NotFound(m) => core_refusal(Error::NotFound(m)),
@@ -221,11 +221,13 @@ fn db_unavailable(e: sqlx::Error) -> Response {
 }
 
 /// The route's permission, then [`authorize`] -- in that order, so a caller
-/// without the permission learns nothing about the namespace.
-async fn grant(
+/// without the permission learns nothing about the namespace. `resource` is
+/// the store the route serves (W9c Task 6: the KV API shares this gate).
+pub(crate) async fn grant(
     st: &WorkflowState,
     ctx: &WorkspaceContext,
     namespace: &str,
+    resource: Resource,
     access: Access,
 ) -> Result<Grant, Response> {
     let permission = match access {
@@ -235,18 +237,18 @@ async fn grant(
     egret_core::authz::require(&*st.pdp, ctx, permission)
         .await
         .map_err(core_refusal)?;
-    authorize(ctx.workspace_id.0, Actor::Api, namespace, access).map_err(bad_request)
+    authorize(ctx.workspace_id.0, Actor::Api, namespace, resource, access).map_err(bad_request)
 }
 
 fn file_path(raw: &str) -> Result<NsPath, Response> {
     NsPath::parse_file(raw).map_err(bad_request)
 }
 
-fn no_store() -> Response {
+pub(crate) fn no_store() -> Response {
     refuse(
         StatusCode::SERVICE_UNAVAILABLE,
         "egret has no internal storage configured (the `[storage]` section of its \
-         configuration), so no namespace file can be stored or read"
+         configuration), so no namespace file or KV value can be stored or read"
             .into(),
     )
 }
@@ -390,7 +392,14 @@ pub(crate) async fn download_namespace_file(
     Path((_ws, namespace)): Path<(String, String)>,
     NsQuery(q): NsQuery<NsPathQuery>,
 ) -> Result<Response, Response> {
-    let grant = grant(&st, &ctx, &namespace, Access::Read).await?;
+    let grant = grant(
+        &st,
+        &ctx,
+        &namespace,
+        Resource::NamespaceFiles,
+        Access::Read,
+    )
+    .await?;
     let want = q.revision.map_or(Want::Latest, Want::Revision);
     let entry = {
         let mut c = conn(&st).await?;
@@ -453,7 +462,14 @@ pub(crate) async fn namespace_file_stats(
     Path((_ws, namespace)): Path<(String, String)>,
     NsQuery(q): NsQuery<NsDirQuery>,
 ) -> Result<Json<NsFileStatsDto>, Response> {
-    let grant = grant(&st, &ctx, &namespace, Access::Read).await?;
+    let grant = grant(
+        &st,
+        &ctx,
+        &namespace,
+        Resource::NamespaceFiles,
+        Access::Read,
+    )
+    .await?;
     let Some(raw) = q.path.as_deref().filter(|_| !is_root(q.path.as_deref())) else {
         // R3: a virtual root, never a row.
         return Ok(Json(NsFileStatsDto {
@@ -493,7 +509,14 @@ pub(crate) async fn namespace_file_revisions(
     Path((_ws, namespace)): Path<(String, String)>,
     NsQuery(q): NsQuery<NsTargetQuery>,
 ) -> Result<Json<Vec<NsFileRevisionDto>>, Response> {
-    let grant = grant(&st, &ctx, &namespace, Access::Read).await?;
+    let grant = grant(
+        &st,
+        &ctx,
+        &namespace,
+        Resource::NamespaceFiles,
+        Access::Read,
+    )
+    .await?;
     let mut c = conn(&st).await?;
     const WHAT: &str = "a directory has no revisions";
     let path = match NsPath::parse_file(&q.path) {
@@ -546,7 +569,14 @@ pub(crate) async fn search_namespace_files(
     Path((_ws, namespace)): Path<(String, String)>,
     NsQuery(q): NsQuery<NsSearchQuery>,
 ) -> Result<Json<Vec<String>>, Response> {
-    let grant = grant(&st, &ctx, &namespace, Access::Read).await?;
+    let grant = grant(
+        &st,
+        &ctx,
+        &namespace,
+        Resource::NamespaceFiles,
+        Access::Read,
+    )
+    .await?;
     let mut c = conn(&st).await?;
     let found = store::search(&mut c, &grant, &q.q, caps().max_namespace_files)
         .await
@@ -584,7 +614,14 @@ pub(crate) async fn list_namespace_directory(
     Path((_ws, namespace)): Path<(String, String)>,
     NsQuery(q): NsQuery<NsDirQuery>,
 ) -> Result<Json<Vec<NsFileStatsDto>>, Response> {
-    let grant = grant(&st, &ctx, &namespace, Access::Read).await?;
+    let grant = grant(
+        &st,
+        &ctx,
+        &namespace,
+        Resource::NamespaceFiles,
+        Access::Read,
+    )
+    .await?;
     let cap = caps().max_namespace_files;
     let mut c = conn(&st).await?;
     let dir = match q.path.as_deref() {
@@ -753,7 +790,14 @@ pub(crate) async fn export_namespace_files(
     WsContext(ctx): WsContext,
     Path((_ws, namespace)): Path<(String, String)>,
 ) -> Result<Response, Response> {
-    let grant = grant(&st, &ctx, &namespace, Access::Read).await?;
+    let grant = grant(
+        &st,
+        &ctx,
+        &namespace,
+        Resource::NamespaceFiles,
+        Access::Read,
+    )
+    .await?;
     let fs = crate::storage::current().ok_or_else(no_store)?;
     let cap = fs.caps.max_namespace_files;
     let files: Vec<NsEntry> = {
@@ -851,7 +895,7 @@ fn upload_too_large(limit: usize) -> Response {
     )
 }
 
-fn upload_timed_out(idle_for: std::time::Duration) -> Response {
+pub(crate) fn upload_timed_out(idle_for: std::time::Duration) -> Response {
     refuse(
         StatusCode::REQUEST_TIMEOUT,
         format!(
@@ -863,7 +907,7 @@ fn upload_timed_out(idle_for: std::time::Duration) -> Response {
 }
 
 /// The 408 of a body that took longer than `total` in all (re-review m-2).
-fn upload_took_too_long(total: std::time::Duration) -> Response {
+pub(crate) fn upload_took_too_long(total: std::time::Duration) -> Response {
     refuse(
         StatusCode::REQUEST_TIMEOUT,
         format!(
@@ -940,7 +984,14 @@ pub(crate) async fn upload_namespace_file(
     use axum::extract::FromRequest as _;
     use futures_util::StreamExt as _;
     // Everything that can refuse without the body, before a byte of it is read.
-    let grant = grant(&st, &ctx, &namespace, Access::Write).await?;
+    let grant = grant(
+        &st,
+        &ctx,
+        &namespace,
+        Resource::NamespaceFiles,
+        Access::Write,
+    )
+    .await?;
     let path = file_path(&q.path)?;
     if !crate::storage::multipart::is_multipart(req.headers()) {
         return Err(refuse(
@@ -1081,7 +1132,14 @@ pub(crate) async fn create_namespace_directory(
     Path((_ws, namespace)): Path<(String, String)>,
     NsQuery(q): NsQuery<NsTargetQuery>,
 ) -> Result<StatusCode, Response> {
-    let grant = grant(&st, &ctx, &namespace, Access::Write).await?;
+    let grant = grant(
+        &st,
+        &ctx,
+        &namespace,
+        Resource::NamespaceFiles,
+        Access::Write,
+    )
+    .await?;
     let dir = NsPath::parse_dir(&q.path).map_err(bad_request)?;
     let by = CreatedBy::User(ctx.principal.user_id.0);
     let e = store::create_directory(&st.db.pool, &grant, &dir, by)
@@ -1124,7 +1182,14 @@ pub(crate) async fn move_namespace_file(
     Path((_ws, namespace)): Path<(String, String)>,
     NsQuery(q): NsQuery<NsMoveQuery>,
 ) -> Result<StatusCode, Response> {
-    let grant = grant(&st, &ctx, &namespace, Access::Write).await?;
+    let grant = grant(
+        &st,
+        &ctx,
+        &namespace,
+        Resource::NamespaceFiles,
+        Access::Write,
+    )
+    .await?;
     // `to` must be a path at all before anything is looked up.
     let (to_file, to_dir) = (NsPath::parse_file(&q.to), NsPath::parse_dir(&q.to));
     if let (Err(rule), Err(_)) = (&to_file, &to_dir) {
@@ -1181,7 +1246,14 @@ pub(crate) async fn delete_namespace_file(
     Path((_ws, namespace)): Path<(String, String)>,
     NsQuery(q): NsQuery<NsTargetQuery>,
 ) -> Result<StatusCode, Response> {
-    let grant = grant(&st, &ctx, &namespace, Access::Write).await?;
+    let grant = grant(
+        &st,
+        &ctx,
+        &namespace,
+        Resource::NamespaceFiles,
+        Access::Write,
+    )
+    .await?;
     let found = {
         let mut c = conn(&st).await?;
         match resolve_any(&mut c, &grant, &q.path).await {

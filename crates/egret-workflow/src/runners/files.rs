@@ -2,6 +2,8 @@
 //! `fileExists`, `isFileEmpty` -- read through (spec §7.2).
 //!
 //! **No sqlx and no storage types here**: `runners` stays below `storage`.
+//! (W9c Task 4: [`KvAnswer`] carries `storage::kv::value::KvData`, which is
+//! plain data -- no connection, no store, no sqlx.)
 //! The one implementation that answers from the index is
 //! `storage::scope::Snapshot`, taken BEFORE the render on the caller's
 //! connection; this module only names the seam.
@@ -70,6 +72,14 @@ pub trait RenderFiles: Send + Sync {
     fn infrastructure_failure(&self) -> Option<String> {
         None
     }
+    /// W9c Task 9 (final review I2): the latest read this scope refused
+    /// because a per-call limit was spent (`storage::prefetch`'s rounds,
+    /// fetches or byte cap), taken (cleared) by the call. `settle` records it
+    /// as the message of the run whose render failed on it. `None` for every
+    /// scope but the in-transaction one.
+    fn take_limit_failure(&self) -> Option<String> {
+        None
+    }
     /// `workflow.storage.max_read_bytes` of the store this scope reads, the
     /// Ion reader's cap for a `Loop` over a file; `None` with no store.
     fn max_read_bytes(&self) -> Option<u64> {
@@ -92,6 +102,15 @@ pub trait RenderFiles: Send + Sync {
     fn flow_namespace(&self) -> Option<&str> {
         None
     }
+    /// W9c Task 4: the value of `args.key` in the KV store (W9c spec §6),
+    /// read as the running flow: with no `namespace`, the flow's own and then
+    /// each parent on a dot boundary; with one, that namespace only.
+    /// `Err`: refused -- the key rule, a refused namespace, no running flow,
+    /// or an outage, which ALSO sets [`Self::infrastructure_failure`].
+    /// Default: refused, naming that `kv()` needs a running execution of a flow.
+    fn kv(&self, args: &KvArgs<'_>) -> Result<KvAnswer, String> {
+        Err(needs_a_flow(args.key))
+    }
     /// W9b fix round 1 (I1): a render has ended. A scope that holds a
     /// connection for its namespace lookups releases it here, so none
     /// outlives the render that opened it. Called on the render thread by
@@ -105,6 +124,39 @@ fn needs_storage(path: &str) -> String {
         "namespace file '{path}' cannot be read: reading a namespace file needs a running \
          execution with egret's internal storage configured"
     )
+}
+
+/// The refusal of a scope that cannot reach the KV store.
+fn needs_a_flow(key: &str) -> String {
+    format!(
+        "key '{key}' cannot be read: the 'kv' function needs a running execution of a flow, \
+         whose namespace the KV store is read as"
+    )
+}
+
+/// W9c Task 4: what `kv()` was asked for, unparsed: storage parses the key
+/// (`storage::kv::key::check_key`) and the namespace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KvArgs<'a> {
+    pub key: &'a str,
+    /// `None`: the running flow's namespace WITH inheritance; `Some`: that
+    /// namespace only, no walk, even when it is the flow's own
+    /// (`KvFunction.java:64-66`).
+    pub namespace: Option<&'a str>,
+}
+
+/// W9c Task 4: what the KV store answered `kv()`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum KvAnswer {
+    /// The stored value as the KV store holds it (amended 2026-10-07:
+    /// `KvData`, not JSON, so a decimal reaches the render exactly).
+    /// `storage::kv::value::KvData` is plain data with no sqlx or store type
+    /// in it, so this module's "no storage types" rule admits it.
+    Value(crate::storage::kv::value::KvData),
+    /// Never written, soft-deleted or expired at every level looked at:
+    /// Kestra's sentence (w9c `kv_function`, `inheritance`), naming the
+    /// namespace Kestra's names.
+    Missing(String),
 }
 
 /// W9b: which kind of file a function's `path` names (spec §3, §6).

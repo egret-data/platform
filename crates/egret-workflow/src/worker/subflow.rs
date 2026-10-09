@@ -99,7 +99,7 @@ use uuid::Uuid;
 use super::render::Surface;
 use super::{claim, WorkerError};
 use crate::executor::{
-    apply, build_plan, Command, ExecutionState, RunIx, RunState, TaskIx, TaskKind, Tick,
+    apply, build_plan, Command, ExecutionState, RunIx, RunState, TaskIx, TaskKind,
 };
 use crate::models::{Flow, Subflow, Task, TaskKind as ModelTaskKind};
 use crate::runners::{render_str, RenderContext};
@@ -203,6 +203,12 @@ use crate::trigger::flow::DEFAULT_MAX_EXECUTION_DEPTH;
 /// | 498 | published | — |
 /// | 499 | **422** `Illegal genericflow source: YAML parsing error: Document nesting depth (1001) exceeds the maximum allowed (1000, from StreamReadConstraints.getMaxNestingDepth())` | — |
 ///
+/// *(The egret column is the measurement before W9c Task 9 fix round 3.
+/// Re-measured at round 3 (re-review 3, 2026-10-09): every settle now runs
+/// from `claim::walk`'s explicit stack, so 46 nested `Loop`s run to SUCCESS
+/// and 47 is refused by `plan::MAX_TASK_DEPTH` before anything runs; nothing
+/// in this table's range aborts any more.)*
+///
 /// So **Kestra imposes no semantic bound on `Loop` nesting at all**: its only
 /// refusal is Jackson's document-nesting limit in the YAML reader, two levels
 /// per `Loop`, and it is a *parse* error rather than a rule about flowables.
@@ -242,28 +248,16 @@ impl Requested {
     }
 }
 
-/// Execute every subflow spawn one round of `advance()` asked for.
+/// Resolve one `Subflow`'s target, create its execution, and return its first
+/// settle -- and, for `wait: false`, the completion of this run -- as jobs for
+/// the walk (W9c Task 9 fix round 3), or the job that fails this run when it is
+/// refused. What the settle's `Subflows` phase runs, once per request.
 ///
-/// The whole of it — the child row, its task runs, and whatever the child's own
-/// first round asks for — is on the caller's connection and therefore in the
-/// caller's transaction, for [`super::spawn::spawn_all`]'s reason: a child that
+/// The whole of it -- the child row, its task runs, and whatever the child's
+/// own first round asks for -- is on the caller's connection and therefore in
+/// the caller's transaction, for `spawn::open_batch`'s reason: a child that
 /// existed while its parent's run did not know it had been started is the
 /// window the plan's Global Constraint forbids.
-pub(super) async fn spawn_all(
-    conn: &mut PgConnection,
-    ctx: &claim::ExecutionCtx,
-    surface: &Surface,
-    state: &ExecutionState,
-    requested: &[Requested],
-) -> Result<()> {
-    for r in requested {
-        Box::pin(spawn_one(conn, ctx, surface, state, r)).await?;
-    }
-    Ok(())
-}
-
-/// Resolve one `Subflow`'s target, create its execution, and drive it until it
-/// is waiting on a worker.
 ///
 /// # The unresolvable target is a decision, and it is the artifact's
 ///
@@ -283,13 +277,13 @@ pub(super) async fn spawn_all(
 /// `notexecutedflowable`, whose falsy `runIf:` skips it first, and
 /// `tests/executor.rs`'s `the_only_unresolvable_subflow_target_in_the_corpus_is_skipped`
 /// re-derives that over all 345 flows rather than remembering it.
-async fn spawn_one(
+pub(super) async fn spawn_one(
     conn: &mut PgConnection,
     ctx: &claim::ExecutionCtx,
     surface: &Surface,
     state: &ExecutionState,
     r: &Requested,
-) -> Result<()> {
+) -> Result<Vec<claim::Job>> {
     let task_id = ctx
         .plan
         .tasks
@@ -327,20 +321,18 @@ async fn spawn_one(
     ) {
         (Ok(Some(ns)), Ok(Some(id))) => (ns, id),
         (Err(e), _) | (_, Err(e)) => {
-            return fail_run(conn, ctx, r.run, &format!("subflow target: {e}")).await;
+            return Ok(fail_run(ctx, r.run, &format!("subflow target: {e}")));
         }
         // `@NotEmpty`/`@NotNull` in Java, `Option` here because bean validation
         // is not parsing (`models::Subflow`). `spec::validate` refuses both, so
         // a flow reaching here without them has been started from a source that
         // never went through publish — which the oracle's driver does.
         _ => {
-            return fail_run(
-                conn,
+            return Ok(fail_run(
                 ctx,
                 r.run,
                 "subflow task has no namespace/flowId to resolve",
-            )
-            .await;
+            ));
         }
     };
 
@@ -355,22 +347,18 @@ async fn spawn_one(
     // walk and the FIRST version of this bound, which shared it, went down with
     // it and aborted the test binary instead of failing an assertion.
     if ctx.depth + 1 > MAX_SPAWN_CHAIN {
-        return fail_run(
-            conn,
+        return Ok(fail_run(
             ctx,
             r.run,
             &Refusal::TooDeep(ctx.depth).message(&namespace, &flow_id),
-        )
-        .await;
+        ));
     }
     if chain_holds(conn, ctx.id, &namespace, &flow_id).await? {
-        return fail_run(
-            conn,
+        return Ok(fail_run(
             ctx,
             r.run,
             &Refusal::Cycle.message(&namespace, &flow_id),
-        )
-        .await;
+        ));
     }
 
     let Some((child_flow, source)) = resolve(conn, ctx.workspace_id, &namespace, &flow_id).await?
@@ -378,29 +366,25 @@ async fn spawn_one(
         // The artifact's own message, kept close to it:
         // `"Unable to find flow '" + ns + "'.'" + id + "' with revision '0'"`.
         // egret has no revision, so the clause is dropped rather than faked.
-        return fail_run(
-            conn,
+        return Ok(fail_run(
             ctx,
             r.run,
             &format!("unable to find flow '{namespace}'.'{flow_id}'"),
-        )
-        .await;
+        ));
     };
 
     let child = match crate::spec::parse(&source) {
         Ok(f) => f,
         Err(e) => {
             // `Cannot execute an invalid flow` — `ExecutableUtils.java:200`.
-            return fail_run(
-                conn,
+            return Ok(fail_run(
                 ctx,
                 r.run,
                 &format!(
                     "cannot execute an invalid flow '{namespace}'.'{flow_id}': {}",
                     e.message
                 ),
-            )
-            .await;
+            ));
         }
     };
     // **The THIRD door, and it has to be here rather than in [`resolve`].**
@@ -429,25 +413,21 @@ async fn spawn_one(
     // divergence is pre-existing on the column door and this keeps it at one
     // rather than two.
     if child.disabled {
-        return fail_run(
-            conn,
+        return Ok(fail_run(
             ctx,
             r.run,
             &format!("unable to find flow '{namespace}'.'{flow_id}'"),
-        )
-        .await;
+        ));
     }
 
     let plan = match build_plan(&source) {
         Ok(p) => p,
         Err(e) => {
-            return fail_run(
-                conn,
+            return Ok(fail_run(
                 ctx,
                 r.run,
                 &format!("cannot execute an invalid flow '{namespace}'.'{flow_id}': {e}"),
-            )
-            .await;
+            ));
         }
     };
 
@@ -472,16 +452,14 @@ async fn spawn_one(
             .map_err(db_err)?;
     let child_depth = parent_depth.saturating_add(1);
     if i64::from(child_depth) > i64::from(DEFAULT_MAX_EXECUTION_DEPTH) {
-        return fail_run(
-            conn,
+        return Ok(fail_run(
             ctx,
             r.run,
             &format!(
                 "cannot execute flow '{namespace}'.'{flow_id}': the execution chain exceeded \
                  the maximum depth of {DEFAULT_MAX_EXECUTION_DEPTH}"
             ),
-        )
-        .await;
+        ));
     }
 
     // **The child's inputs are the `Subflow`'s own `inputs:`, rendered — NOT
@@ -498,7 +476,7 @@ async fn spawn_one(
     let inputs = match rendered_inputs(sub, &cx) {
         Ok(v) => v,
         Err(e) => {
-            return fail_run(conn, ctx, r.run, &format!("subflow inputs: {e}")).await;
+            return Ok(fail_run(ctx, r.run, &format!("subflow inputs: {e}")));
         }
     };
 
@@ -540,13 +518,11 @@ async fn spawn_one(
     .await?;
     if let Err(why) = checked {
         sp.rollback().await.map_err(db_err)?;
-        return fail_run(
-            conn,
+        return Ok(fail_run(
             ctx,
             r.run,
             &format!("subflow '{namespace}'.'{flow_id}': {why}"),
-        )
-        .await;
+        ));
     }
     sp.commit().await.map_err(db_err)?;
 
@@ -562,51 +538,39 @@ async fn spawn_one(
         // One deeper than its caller: the `settle` below runs inside this one.
         // See `ExecutionCtx::depth`, and the guard above that reads it.
         depth: ctx.depth + 1,
+        // The caller's cache: this settle runs in its transaction (W9c Task 9).
+        gate: ctx.gate.clone(),
     };
-    let empty = ExecutionState::new(&child_ctx.plan);
-    let mut child_state = empty.clone();
-    // Boxed: a subflow may call a subflow (`valids/subflow-parent` ->
-    // `subflow-child` -> `subflow-grand-child`), so `settle` -> here ->
-    // `settle` is a real cycle in the type graph. It is not a cycle in the
-    // data unless the AUTHOR wrote one — `invalids/recursive-flow` is that
-    // flow and `spec::validate`'s `self_dependency` refuses it — and a chain
-    // that is deep but finite terminates because each level is a different
-    // execution row.
-    Box::pin(claim::settle(
-        conn,
-        &child_ctx,
-        &empty,
-        &mut child_state,
-        Tick(0),
-        None,
-    ))
-    .await?;
-
     // `wait: false`: the parent does not wait, and what it sees is the child's
     // state at THIS instant rather than its terminal — measured, fact 3. The
     // run is already RUNNING (the `StartRun` beside the spawn), so this is the
     // second half of `CREATED RUNNING SUCCESS`, which is exactly what
     // `valids/subflow-parent-no-wait`'s golden holds.
     //
-    // It has to be read from the row rather than from `child_state`, because
-    // the settle above may have terminated the child already and Kestra's
+    // It has to be read from the row rather than from the child's state,
+    // because the child's settle may have terminated it already and Kestra's
     // answer is the state the child had when the parent stopped caring.
-    if !sub.wait {
-        return complete(
-            conn,
-            ctx.id,
-            r.run,
-            &[RunState::Success],
-            Some(json!({"executionId": child_id.to_string(), "state": "CREATED"})),
-            None,
+    //
+    // Two jobs, in this order: the child's first settle -- to the end of its
+    // tail -- and then this run's completion, a settle of THIS execution that
+    // nests inside its own (`claim::Frame`'s re-entrancy). The walk runs them
+    // where the inline calls ran.
+    let wait = sub.wait;
+    let mut jobs = vec![claim::Job::Settle(Box::new(claim::Frame::first(child_ctx)))];
+    if !wait {
+        jobs.push(claim::Job::Complete(Completion {
+            execution_id: ctx.id,
+            run: r.run,
+            states: vec![RunState::Success],
+            outputs: Some(json!({"executionId": child_id.to_string(), "state": "CREATED"})),
+            message: None,
             // `Nested`: this is inside this execution's own `settle`, and the
-            // one `complete` runs below nests inside it. It is the re-entrancy
-            // `claim::settle`'s step-3 comment names.
-            claim::Stack::Nested(ctx.depth),
-        )
-        .await;
+            // one the completion runs nests inside it.
+            stack: claim::Stack::Nested(ctx.caller()),
+            unless_terminal: false,
+        }));
     }
-    Ok(())
+    Ok(jobs)
 }
 
 /// One subflow child has reached a terminal state: tell the run that started it.
@@ -615,19 +579,21 @@ async fn spawn_one(
 /// reason: it is pure over `(plan, state, now)` and [`ExecutionState`] holds
 /// nothing about another execution.
 ///
-/// `Ok(())` and nothing else for an execution that is not a subflow child,
-/// which is almost all of them.
+/// `Ok(None)` and nothing else for an execution that is not a subflow child,
+/// which is almost all of them. Otherwise it returns the parent run's
+/// completion as a job for the walk (W9c Task 9 fix rounds 2-3), so a
+/// completing chain does not nest one settle inside the next.
 pub(super) async fn on_child_terminal(
     conn: &mut PgConnection,
     execution_id: Uuid,
     child_state: RunState,
-    caller_depth: usize,
-) -> Result<()> {
+    caller: claim::Caller,
+) -> Result<Option<claim::Job>> {
     Box::pin(on_child_terminal_inner(
         conn,
         execution_id,
         child_state,
-        caller_depth,
+        caller,
     ))
     .await
 }
@@ -636,10 +602,10 @@ async fn on_child_terminal_inner(
     conn: &mut PgConnection,
     execution_id: Uuid,
     child_state: RunState,
-    caller_depth: usize,
-) -> Result<()> {
+    caller: claim::Caller,
+) -> Result<Option<claim::Job>> {
     let Some((parent_id, parent_run)) = trigger_of(conn, execution_id).await? else {
-        return Ok(());
+        return Ok(None);
     };
     let run = usize::try_from(parent_run).map_err(|_| {
         worker_err(WorkerError::Corrupt(
@@ -649,12 +615,12 @@ async fn on_child_terminal_inner(
     })?;
     // **`Nested`, and this is the ASCENT the fix round 2 Critical lived on.**
     // This runs from `claim::settle` step 4 of the CHILD, which is itself
-    // nested inside the parent's `spawn_one`; the `settle` `complete` runs
+    // nested inside the parent's `spawn_one`; the settle its completion runs
     // below nests inside both. `Stack::Fresh` here -- which is what
     // `load_with`'s unconditional `depth: 0` amounted to -- reset the counter
     // once per link of a completing chain. See `claim::Stack`.
     let (ctx, state, _now) =
-        claim::load(conn, parent_id, claim::Stack::Nested(caller_depth)).await?;
+        claim::load(conn, parent_id, claim::Stack::Nested(caller.clone())).await?;
     let task = state.runs.get(run).map(|r| r.task).ok_or_else(|| {
         worker_err(WorkerError::Corrupt(
             parent_id,
@@ -707,7 +673,7 @@ async fn on_child_terminal_inner(
         .last()
         .is_some_and(|s| s.is_terminal())
     {
-        return Ok(());
+        return Ok(None);
     }
 
     let flow = crate::spec::parse(&ctx.source)
@@ -727,7 +693,7 @@ async fn on_child_terminal_inner(
     // would arrive later and overwrite both — turning `valids/subflow-parent-no-wait`
     // (SUCCESS on the artifact) into whatever its child happened to do.
     if !sub.wait {
-        return Ok(());
+        return Ok(None);
     }
 
     // Fact 4: the child's own state first, then `guessState` if it differs.
@@ -743,13 +709,12 @@ async fn on_child_terminal_inner(
     } else {
         vec![child_state, guessed]
     };
-    // See `complete` for why the SECOND state is a `Command::CompleteRun`.
-    complete(
-        conn,
-        parent_id,
+    // See `open_completion` for why the SECOND state is a `Command::CompleteRun`.
+    Ok(Some(claim::Job::Complete(Completion {
+        execution_id: parent_id,
         run,
-        &states,
-        Some(json!({
+        states,
+        outputs: Some(json!({
             "executionId": execution_id.to_string(),
             "state": child_state.wire(),
             // The flow-level `outputs:` block is not evaluated anywhere in
@@ -759,10 +724,10 @@ async fn on_child_terminal_inner(
             // `{{ outputs.sub.outputs.x }}` fails.
             "outputs": {},
         })),
-        None,
-        claim::Stack::Nested(caller_depth),
-    )
-    .await
+        message: None,
+        stack: claim::Stack::Nested(caller),
+        unless_terminal: false,
+    })))
 }
 
 /// `ExecutableUtils.guessState` — **whole since W8 Task 5**, except for the
@@ -899,23 +864,54 @@ fn guess_state(
 /// `type_id` for a `TaskKind::Executable`, so `claim`'s `type_id IS NOT NULL`
 /// predicate cannot take it and there is no token to check. The serialisation
 /// is the execution's own `FOR NO KEY UPDATE`, which `claim::load` takes here.
-pub(super) async fn complete(
+pub(super) struct Completion {
+    pub execution_id: Uuid,
+    pub run: RunIx,
+    pub states: Vec<RunState>,
+    pub outputs: Option<Value>,
+    pub message: Option<String>,
+    pub stack: claim::Stack,
+    /// Skip it when the run is already terminal (re-review m1): only the loop
+    /// spawner's FILE-input refusal sets it, where an iteration of the same
+    /// batch can have ended the loop run first. Every other caller completes
+    /// a run it knows is not (or, for a replay's `RETRIED` run, deliberately
+    /// moves one that is).
+    pub unless_terminal: bool,
+}
+
+/// Open a [`Completion`] when the walk reaches it: load the execution, write
+/// the outputs and message, apply the states, and hand back the settle --
+/// or `None` when `unless_terminal` and the run is already terminal.
+pub(super) async fn open_completion(
     conn: &mut PgConnection,
-    execution_id: Uuid,
-    run: RunIx,
-    states: &[RunState],
-    outputs: Option<Value>,
-    message: Option<&str>,
-    stack: claim::Stack,
-) -> Result<()> {
+    c: Completion,
+) -> Result<Option<claim::Frame<'static>>> {
+    let Completion {
+        execution_id,
+        run,
+        states,
+        outputs,
+        message,
+        stack,
+        unless_terminal,
+    } = c;
     let (ctx, mut state, now) = claim::load(conn, execution_id, stack).await?;
+    if unless_terminal
+        && state
+            .runs
+            .get(run)
+            .and_then(|r| r.history.last())
+            .is_some_and(|s| s.is_terminal())
+    {
+        return Ok(None);
+    }
     let before = state.clone();
     sqlx::query(
         "UPDATE workflow.task_runs SET outputs = $1, message = $2 \
           WHERE execution_id = $3 AND run_ix = $4",
     )
     .bind(&outputs)
-    .bind(message)
+    .bind(message.as_deref())
     .bind(execution_id)
     .bind(run as i32)
     .execute(&mut *conn)
@@ -943,32 +939,27 @@ pub(super) async fn complete(
         };
         apply(&mut state, &cmd);
     }
-    claim::settle(conn, &ctx, &before, &mut state, now, None).await
+    Ok(Some(claim::Frame::loaded(ctx, before, state, now)))
 }
 
-/// Fail one `Subflow` run with the reason it could not start.
+/// Fail one `Subflow` run with the reason it could not start: the job that
+/// completes it FAILED.
 ///
-/// Separate from [`complete`] only so that every call site reads as what it is;
-/// the message is what `tests/worker.rs` asserts on, because — like
+/// Separate from [`Completion`] only so that every call site reads as what it
+/// is; the message is what `tests/worker.rs` asserts on, because — like
 /// `handlers::fail` — nothing in `golden.json` records a failure message.
-async fn fail_run(
-    conn: &mut PgConnection,
-    ctx: &claim::ExecutionCtx,
-    run: RunIx,
-    message: &str,
-) -> Result<()> {
-    complete(
-        conn,
-        ctx.id,
+fn fail_run(ctx: &claim::ExecutionCtx, run: RunIx, message: &str) -> Vec<claim::Job> {
+    vec![claim::Job::Complete(Completion {
+        execution_id: ctx.id,
         run,
-        &[RunState::Failed],
-        None,
-        Some(message),
+        states: vec![RunState::Failed],
+        outputs: None,
+        message: Some(message.to_string()),
         // `Nested`: every caller of this is inside `spawn_one`, which is inside
         // its own execution's `settle`.
-        claim::Stack::Nested(ctx.depth),
-    )
-    .await
+        stack: claim::Stack::Nested(ctx.caller()),
+        unless_terminal: false,
+    })]
 }
 
 /// `(flow id, source)` of the flow named `(namespace, flow_id)` **in this

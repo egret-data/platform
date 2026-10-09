@@ -55,8 +55,9 @@ import jakarta.validation.ConstraintViolationException;
  * stdout    = "&lt;LEVEL&gt; &lt;message&gt;" lines; one "::{"outputs": {…}}::" on success;
  *             one "::{"egretFailure": {"code": n, "message": "…"}}::" before a non-zero exit
  * exit      = 0 ok | 2 refused/invalid | 3 plugin threw | 4 needs what egret does not provide
- *             (KV W9c, Kestra's secret key or services; namespace files are provided since W9b,
- *             2026-10-06, read-only)
+ *             (a plugin's namespaceKv(): the KV store is the core.kv tasks' and kv()'s since
+ *             2026-10-07, W9c; Kestra's secret key or services; namespace files are provided since
+ *             W9b, 2026-10-06, read-only)
  * SIGTERM   = the shutdown hook calls task.kill(), waits for run() up to EGRET_KILL_WAIT_MS, exits
  *
  * java … EgretPluginHost describe &lt;plugins-dir&gt;   -&gt; catalog.json on stdout

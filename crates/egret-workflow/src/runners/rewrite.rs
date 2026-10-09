@@ -182,7 +182,19 @@
 //! separated the two. The other three were added in Task 3 for exactly that
 //! reason. Semantics live in `runners::env::kestra_is_in`.
 //!
-//! # Comparison operators are left alone
+//! # Comparison operators are left alone -- by THIS pass
+//!
+//! **2026-10-08 (W9c Task 4 fix round 1, the user's option A):** this module
+//! still writes every comparison through verbatim, and a SECOND pass,
+//! [`super::cmp_rewrite`], then compiles each one in its output into a call
+//! to `super::compare` (`a > b` -> `kestra_gt(a, b)`), so a `BigDecimal` or
+//! `BigInteger` compares exactly and every other pair answers exactly as
+//! minijinja's own operator did. It is a separate pass, over minijinja
+//! syntax, on purpose: what minijinja makes of THIS module's output is what
+//! egret's comparisons have always meant, so that output is the thing to
+//! parse, with minijinja's grammar, to keep their grouping; and this
+//! module's byte-exact tests still describe this module alone. `env`'s
+//! `compile_source` runs the two in order.
 //!
 //! `>`, `>=`, `<`, `<=` already parse in minijinja and this module does not
 //! touch them. Kestra overrides all four (`GreaterThanExpression` and its
@@ -241,6 +253,15 @@ pub enum RewriteError {
          can nest the template parser deeper than the render stack holds"
     )]
     ExpressionTooLong { bytes: usize, limit: usize },
+    /// A `set`, `for` or `with` assigns a name starting with `kestra_`, the
+    /// prefix of the functions egret's rewriters call (`kestra_gt`,
+    /// `kestra_is_in`, …), which the variable would shadow. Raised by the
+    /// second pass, `super::cmp_rewrite` (W9c Task 4 cleanup, N2).
+    #[error(
+        "`{name}` cannot be assigned: names starting with `kestra_` are reserved for egret's \
+         own functions (a `set`, `for` or `with` target)"
+    )]
+    ReservedName { name: String },
 }
 
 /// What one byte of an expression can cost the **template parser's** stack.
@@ -419,6 +440,53 @@ pub fn rewrite(expr: &str) -> Result<String, RewriteError> {
     }
 
     Ok(out)
+}
+
+/// W9c Task 5: when `template` is exactly ONE `{{ … }}` region and nothing
+/// else -- no text before or after it, not even a space -- its content,
+/// without a `-` whitespace-control marker at either end; `None` otherwise.
+/// The region's end is found as [`rewrite`] finds it (string literals and
+/// brace nesting skipped), so `{{ {'a': {'b': 1}} }}` is one region and
+/// `{{ 1 }}{{ 2 }}` is two. An unterminated string answers `None`: the plain
+/// render then refuses the template in its own words.
+pub(crate) fn sole_expression(template: &str) -> Option<&str> {
+    let rest = template.strip_prefix("{{")?;
+    let close = find_region_close(template, 2, "}}").ok()??;
+    if close + 2 != template.len() {
+        return None;
+    }
+    let (_, inner, _) = split_whitespace_control(&rest[..close - 2]);
+    Some(inner)
+}
+
+/// W9c Task 5 fix round 1 (review M3): whether `inner` (a
+/// [`sole_expression`]) means the same once it is wrapped as `(inner)`: its
+/// brackets, read by the rewriter's own tokenizer (string literals skipped),
+/// pair up by kind and never close one that `inner` did not open, and no
+/// comma stands at the top level. `1) ~ (2` does not (wrapped, its `)` would
+/// close the wrapper's `(`, and `(1) ~ (2)` renders where the source is a
+/// syntax error); nor does `1, 2` (wrapped, a tuple). An unterminated
+/// string answers `false`.
+pub(crate) fn parenthesizes_safely(inner: &str) -> bool {
+    let Ok(tokens) = tokenize(inner) else {
+        return false;
+    };
+    let mut open: Vec<char> = Vec::new();
+    for t in &tokens {
+        match t {
+            Tok::LParen(_) => open.push(')'),
+            Tok::LBracket(_) => open.push(']'),
+            Tok::LBrace(_) => open.push('}'),
+            Tok::RParen(s) | Tok::RBracket(s) | Tok::RBrace(s) => {
+                if open.pop() != s.chars().next() {
+                    return false;
+                }
+            }
+            Tok::Text(s) if open.is_empty() && s.contains(',') => return false,
+            _ => {}
+        }
+    }
+    open.is_empty()
 }
 
 /// Splits a `-` whitespace-control marker off the front and/or back of a

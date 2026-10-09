@@ -76,9 +76,10 @@
 //! `0` success, the `::{"outputs": …}::` marker's map as the outputs, as it
 //! is; `2` the host refused the task (unknown type, invalid properties);
 //! `3` the plugin threw; `4` the plugin asked for something egret does not
-//! provide -- the KV store (W9c), and also
-//! `localPath`/`decrypt`/`sdk`/`services`. Internal storage is provided
-//! (W9a): a refused storage call (a write outside the prefix, a file not
+//! provide -- `localPath`/`decrypt`/`sdk`/`services`, and a plugin's
+//! `namespaceKv()` (2026-10-07, W9c: the KV store is the `core.kv` tasks'
+//! and `kv()`'s; a plugin's `namespaceKv()` still throws, pointing at
+//! them). Internal storage is provided (W9a): a refused storage call (a write outside the prefix, a file not
 //! staged) is the plugin's own failure, exit 3. So are namespace files
 //! (W9b, 2026-10-06): a namespace file not staged, or any namespace-file
 //! write, is the plugin's own failure, exit 3. Any other code (137: the JVM was OOM-killed) is
@@ -376,8 +377,7 @@ pub fn outcome_of(
         3 => failed(format!("the plugin failed: {}", said())),
         // W9b (2026-10-06): namespace files are provided, so no longer named here.
         4 => failed(format!(
-            "the plugin needs something egret does not provide yet (the KV store — W9c, or \
-             another Kestra service): {}",
+            "the plugin needs a Kestra service egret does not provide to plugins: {}",
             said()
         )),
         n => failed(format!("the plugin host exited with {n}")),
@@ -1295,10 +1295,15 @@ mod tests {
 
     // ---- the outcome ---------------------------------------------------------
 
+    /// The host's `namespaceKv()` reason, as `ShimRunContext` throws it.
+    const NAMESPACE_KV_REASON: &str = "namespaceKv(): egret gives flows the KV store through the \
+        `io.kestra.plugin.core.kv` tasks and the `kv()` function, not through a plugin's \
+        RunContext; use a `core.kv` task before or after this one.";
+
     /// **Each host exit code is a named reason.**
     #[tokio::test]
     async fn exit_codes_map_to_named_reasons() {
-        let cases: [(i32, Option<&str>, String); 5] = [
+        let cases: [(i32, Option<&str>, String); 6] = [
             (
                 2,
                 Some("invalid io.kestra.plugin.jdbc.postgresql.Query: sql: must not be null"),
@@ -1314,11 +1319,18 @@ mod tests {
             ),
             (
                 4,
-                Some("namespaceKv() needs the KV store, which egret does not provide yet (W9c)"),
+                Some(NAMESPACE_KV_REASON),
                 format!(
-                    "{QUERY}: the plugin needs something egret does not provide yet (the KV \
-                     store — W9c, or another Kestra service): namespaceKv() needs the KV store, \
-                     which egret does not provide yet (W9c)"
+                    "{QUERY}: the plugin needs a Kestra service egret does not provide to \
+                     plugins: {NAMESPACE_KV_REASON}"
+                ),
+            ),
+            (
+                4,
+                Some("decrypt(): egret has no secret key"),
+                format!(
+                    "{QUERY}: the plugin needs a Kestra service egret does not provide to \
+                     plugins: decrypt(): egret has no secret key"
                 ),
             ),
             (
@@ -1605,6 +1617,66 @@ mod tests {
             format!("SELECT '{}' AS u", upstream("b.ion")),
             "the quoted URI reaches the plugin as text"
         );
+    }
+
+    /// **Nothing is staged for KV (W9c Task 7):** no `task.json` key names
+    /// KV, in the runtime without internal storage.
+    #[tokio::test]
+    async fn task_json_has_no_kv_key() {
+        let spy = Spy::ok(ok(serde_json::json!({})));
+        handler(spy.clone())
+            .run(&task())
+            .await
+            .expect("no worker error");
+        let doc = task_json(&spy.only());
+        let keys: Vec<String> = doc.as_object().expect("a map").keys().cloned().collect();
+        assert!(
+            keys.iter().all(|k| !k.to_lowercase().contains("kv")),
+            "{keys:?}"
+        );
+        assert_eq!(keys.len(), 5, "{keys:?}");
+    }
+
+    /// **Nothing is staged for KV, with internal storage either (W9c Task 7):**
+    /// `baseUri` and `context` are present, and the key set is exactly the
+    /// known one.
+    #[tokio::test]
+    async fn task_json_with_storage_has_no_kv_key() {
+        let files = mem_files();
+        let spy = Spy::ok(ok(serde_json::json!({"rowCount": 2})));
+        let t = stored_task(
+            &files,
+            COPY_IN,
+            serde_json::json!({
+                "url": "jdbc:postgresql://pg:5432/w9a",
+                "table": "dst",
+                "from": "{{ outputs.q.a }}",
+            }),
+            Ok(indexed(&upstream("a.ion"), 7)),
+            Ok(indexed(&upstream("b.ion"), 9)),
+        );
+        let out = stored(COPY_IN, spy.clone(), Some(files.clone()))
+            .run(&t)
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        let doc = task_json(&spy.only());
+        let mut keys: Vec<&String> = doc.as_object().expect("a map").keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "baseUri",
+                "context",
+                "mask",
+                "maxTaskBytes",
+                "namespaceFiles",
+                "properties",
+                "storage",
+                "type"
+            ]
+        );
+        assert!(keys.iter().all(|k| !k.to_lowercase().contains("kv")));
     }
 
     /// **`task.json` holds `storage`, `baseUri`, `maxTaskBytes` and

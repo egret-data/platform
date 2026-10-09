@@ -273,7 +273,7 @@ fn the_staging_sweep_deletes_an_old_orphan_on_minio() -> Result<(), String> {
             let g = egret_workflow::storage::nsfiles::access::authorize(
                 ws,
                 egret_workflow::storage::nsfiles::access::Actor::Api,
-                NS,
+                NS, egret_workflow::storage::nsfiles::access::Resource::NamespaceFiles,
                 egret_workflow::storage::nsfiles::access::Access::Write,
             )?;
             let p = egret_workflow::storage::nsfiles::path::NsPath::parse_file("/kept.txt")?;

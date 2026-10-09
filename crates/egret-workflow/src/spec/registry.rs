@@ -272,6 +272,39 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         aliases: &[],
         references: &[],
     },
+    // ── W9c Task 5: the core KV tasks (`worker::handlers::kv`), FQCN only,
+    // as the namespace rows above. They need the pool and are registered by
+    // `handlers::kv::register`, which `runtime::handlers_for` calls. ──
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::kv::SET,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::kv::GET,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::kv::GET_KEYS,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::kv::DELETE,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::kv::PUT,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::kv::PURGE_KV,
+        aliases: &[],
+        references: &[],
+    },
 ];
 
 /// The row for `t`, matching the canonical spelling **or any alias**.

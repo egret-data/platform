@@ -89,11 +89,18 @@ mod replay;
 mod spawn;
 mod subflow;
 mod timeout;
+pub(crate) mod txn;
 
+pub(crate) use claim::start_execution_in_with;
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
+/// Test-only (`test-util`; W9c Task 9, final review m3): an outcome or a
+/// start in the CALLER's transaction, answering `Err` when a render needed a
+/// read. Production goes through `worker::txn`.
+#[cfg(any(test, feature = "test-util"))]
+pub use claim::{apply_outcome, start_execution_in};
 pub use claim::{
-    apply_outcome, claim, due_retries, resume, start_execution, start_execution_in,
-    start_execution_with_trigger, tick, tick_with, wake, Claimed, NewExecution, WorkerTiming,
+    claim, commit_outcome, due_retries, resume, start_execution, start_execution_with_trigger,
+    tick, tick_with, wake, Claimed, NewExecution, WorkerTiming,
 };
 pub use reaper::reap;
 pub use registry::Handlers;
@@ -572,6 +579,19 @@ pub enum WorkerError {
     /// causes.
     #[error("advance() did not reach a fixed point in {MAX_ROUNDS} rounds on execution {0}")]
     NoFixedPoint(uuid::Uuid),
+
+    /// W9c Task 9: a render inside this transaction needed a read its cache
+    /// did not hold (`storage::prefetch`). Never committed and never the
+    /// author's: the transaction's owner (`worker::txn`) rolls back, fetches
+    /// the read with no transaction open, and runs the transaction again. Only
+    /// the test-only wrappers that run in their CALLER's transaction
+    /// (`apply_outcome`, `start_execution_in`) answer it, and their caller
+    /// must roll back.
+    #[error(
+        "a render in this transaction needs a value read before the transaction; the \
+         transaction is rolled back, the value fetched, and the transaction run again"
+    )]
+    PrefetchMiss,
 
     /// The stored `source` no longer builds a plan.
     #[error("execution {0} holds a source that no longer plans: {1}")]

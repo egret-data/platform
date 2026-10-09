@@ -9704,6 +9704,179 @@ task edited anything.
 | 4 | (beside the brief's three) `-w W9b` in the W5b and W9a specs | **7** EN (W5b 3, W9a 4), **7** VI | **3** per language: the W5b spec's shim line and exit code 4, and the W9a spec's *"`fileURI` stays refused, now naming W9b"* (dated notes). **Left**: scope and out-of-scope lines that assign the work to W9b, which stay true |
 
 
+### W9c — the KV store
+
+**108 before W9c and 108 after, both measured; no entry moved, as expected.**
+Before: the `executor_matches_golden` line printed with `--nocapture` at the
+package base (W9c Task 1, `w9c-baseline-ratchet.txt`, code = `35fbaeee`, on
+`origin/main` `11782600`): **294 golden entries, 108 mismatching, 108
+baselined, 0 broken**. After: the same line at W9c Task 8 (HEAD `1e9832a4`;
+the rebase was a no-op, because `origin/main` was still `11782600`):
+**294 golden entries, 108 mismatching, 108 baselined, 0 broken**
+(`executor_matches_golden -- --nocapture`, 1 passed). `golden.json`,
+`baseline.txt` and `corpus/` are byte-identical to `origin/main`'s
+(`git diff --quiet 11782600 HEAD -- …golden.json …baseline.txt …corpus` exits
+0). W9c's spec (§12, §13) predicted no change, and a change would have been a
+finding to explain, not a bank.
+
+| | ratchet (measured) | what the task shipped |
+|---|---|---|
+| package base `35fbaeee` | 108 (Task 1) | -- |
+| Task 1 | 108 | the artifact measured (`oracle-exec/w9c-kv.json`); the `_kv` count |
+| Tasks 2-3 | `executor_matches_golden` passed in each gate | migration 0175 (`workflow.kv_entries`), the key rule, `Resource::Kv`, reads, revisions and the inheritance walk; writes over W9b's staging, soft delete, `Put`'s locked merge, the purge by row id, the hourly expiry sweep |
+| Task 4 | 108 (`7c1a9baa`) | `kv()`; `secret_in_kv_value` at publish; exact comparisons (the comparator rewrite pass) |
+| Task 5 | 108 | the six `io.kestra.plugin.core.kv` tasks |
+| Task 6 | `executor_matches_golden` passed in each gate | the seven API routes |
+| Task 7 | `executor_matches_golden` passed in its gate | the plugin host's `namespaceKv()` message |
+| Task 8 | **108** (above; Task 8a measured the same at `1e9832a4`) | the end to end on a temporary kind cluster, this section, the specs' corrections, the full local gate |
+
+**The fixture: 444 cells, 266 measured, 11 code, 167 chosen.**
+`oracle-exec/w9c-kv.json`, re-counted at Task 8 by the package's checker
+(`cells 444 (measured 266, code 11, chosen 167); chosen_cells 167; errors 0`).
+Task 1 committed 431 cells (274 / 12 / 145); the user's rulings and the fix
+rounds of Tasks 1, 3 and 5 moved cells from measured to chosen (each with
+Kestra's measured answer under `kestra` and the reason under `why`) and added
+cells. A **measured** cell is Kestra's answer and egret's; a **code** cell is
+computed by running the artifact's own class in jshell (`Put.mergeValues`'s
+edge cases); a **chosen** cell is egret's deliberate divergence, every one
+listed in `egret_expected_basis.chosen_cells`.
+
+**The two corpus flows, before and after.**
+
+- `valids/retry-with-flowable-errors` (`baseline.txt:614`). Before: a draft
+  refused at publish (an unknown `kv.Set`) and a baselined golden entry.
+  After: it **publishes** (the census moved `LIVE` 247 → 248 and
+  `UNKNOWN_TYPE_REFUSED` 66 → 65 at Task 5, `oracle-exec/driver.rs`), and its
+  golden entry **stays baselined**, because it also needs the `AllowFailure`
+  flowable, which egret still plans opaque. W9c alone cannot bank it.
+- `valids/kv`. No golden entry before or after: the artifact's harvest did not
+  run it standalone (`harvest-run.txt:150`, *not-standalone*). It publishes
+  before and after (`tests/publish.rs`,
+  `valids_kv_and_retry_with_flowable_errors_publish`).
+
+**The `_kv`-namespace count (Task 1), the population the new publish refusal
+reaches.** 0 of 345 corpus flows have a namespace with a `_kv` segment, and 0
+published flows on the dev Postgres (one read-only `SELECT`; that database
+held no flows, so its zero cannot disagree; `kv_segment_namespaces` in the
+fixture). A deployment with such a flow sees the refusal on its next save.
+
+What the ratchet can see of W9c: in principle the six `core.kv` tasks and
+`kv()`; in practice one flow, `retry-with-flowable-errors`, which stays
+baselined for `AllowFailure`. Every W9c behaviour rests on the tests below and
+the end to end.
+
+#### What is covered live, and by which gate
+
+**Live on a real cluster, through egret's API** (W9c Task 8, a temporary kind
+cluster `egret-w9c-e2e`, kind v0.29.0, its own kubeconfig so the shared
+`kind-egret` context was never touched; the chart from this branch with
+`workflow.workerEnabled=true`, `containerRunner` left at `none`, RustFS with
+**distinct** root credentials, and the backend image built at `1e9832a4`;
+transcripts `w9c-e2e-0-setup.txt` … `w9c-e2e-6.txt` and
+`w9c-e2e-server-log.txt` in the package's working notes, every figure below
+copied from them). **6 of 6 passed; no product defect was found.**
+
+1. **The API's `PUT` bodies, `GET`, revisions** (`w9c-e2e-1.txt`). `{a:1}` →
+   JSON, `1` → NUMBER, `hello world` → STRING (the whole text, the raw-text
+   ruling), `1.50` → NUMBER `1.5`, an offset timestamp → DATETIME in UTC,
+   `2025-01-02` → DATE, `not ion {a:` → the raw text. A blob, an s-expression,
+   a blob nested in a struct and a whitespace-only body each answered 400, and
+   a `GET` of each refused key 404, so nothing was written. `description` and
+   `ttl: PT1H` came back. A second `PUT` of `cfg` gave revisions
+   `[{revision:1,size:5},{revision:2,size:13}]`, each readable. Exact decimals:
+   `123456789012345678901234567890.5` and a 33-digit integer kept every digit,
+   `0.0000001` came back plain. The bucket keys follow §3's layout
+   (`…/e2e/w9c/_kv/cfg.ion` and `cfg.ion.v2`).
+2. **`kv()`, inheritance, `errorOnMissing`, expired = missing**
+   (`w9c-e2e-2.txt`). From `e2e.w9c.child.leaf`: `kv('n')` → `1`,
+   `kv('cfg').a` → `2`, `kv('dec') == 1.5` → `true`; a leaf `Set` shadowed the
+   parent's `n`; an explicit namespace did not walk; `Get` with the flow's
+   namespace walked, and with another did not. `kv('nope')` failed naming the
+   key; `Get` with `errorOnMissing: true` failed with Kestra's message.
+   Keys written with `ttl: PT3S` (by the API and by `Set`) were missing to
+   every reader after 6 s (`kv()`, `Get`, the API's 404, `revisions`
+   `expired: true`), the walk skipped an expired level to the parent's value,
+   and the `workflow.kv_entries` rows were the same before and after every
+   read (reads never write).
+3. **`Set`, `Get`, `GetKeys`, `Put`, `Delete`, `PurgeKV`, with the API's
+   revisions after each** (`w9c-e2e-3.txt`). A YAML map `Set` was stored
+   typed (R-a); `overwrite: false` failed with Kestra's message; `Put` deep
+   merged (a list appended, a dotted key nested, the description carried
+   over); a conflicting `q.r`/`q` patch was refused naming both and wrote
+   nothing; `Delete` answered `true` then `false` and a soft-deleted revision
+   stayed readable by number (R1); `PurgeKV` by `keepAmount: 1` (`size: 2`),
+   by `before` (`size: 1`, Kestra's superseded-at rule) and the default
+   expired purge (`size: 1`) each left exactly the expected revisions and
+   objects; a version purge with neither property was refused.
+4. **`secret()` in a `Set` or `Put` value** (`w9c-e2e-4.txt`): refused at
+   publish with `secret_in_kv_value`, at `tasks.leak.value` and at a nested
+   `Put` leaf; the control published and ran.
+5. **Isolation** (`w9c-e2e-5.txt`). A second workspace reading the first's
+   namespace saw nothing (`kv()` null or "does not exist", `Get` `{}`,
+   `GetKeys` `[]`); its purge, `Delete` and bulk delete touched nothing; its
+   API answered **byte for byte** as for a namespace that never held anything
+   (listings `200 []`, key, revision and `revisions` reads 404). A flow
+   writing its parent, sibling or child namespace (`Set`, `Put`, `Delete`,
+   `PurgeKV`) failed naming both namespaces and the rule; the control
+   succeeded; the other rows (md5) and objects (sha) were identical before and
+   after.
+6. **The hourly expiry sweep, observed live** (`w9c-e2e-6.txt`). There is no
+   config knob (`KvSweepConfig::default()`, `interval_at`: the first pass an
+   hour after start), so the run waited for the first pass on the unmodified
+   pod: the server logged `expired KV keys swept removed=4`, and the four
+   expired keys' rows and objects were gone across both workspaces, while the
+   controls (no ttl, and a `PT1H` ttl not yet expired) kept theirs.
+
+**Live, driven by tests, each gated** (without its gate a case reports IGNORED
+or fails, never passes; all were run during the package with the gates set):
+
+| test | gate | what it runs |
+|---|---|---|
+| `tests/kv_s3_live.rs` (1 case, `harness = false`) | `EGRET_TEST_S3_ENDPOINT` + `_KEY`/`_SECRET`/`_BUCKET`, `DATABASE_URL` | a value of exactly `max_read_bytes` (10 MiB) written through staging and read back, one byte over refused, `Put`'s merge, a delete, a purge and the sweep deleting real objects, under a fenced throwaway prefix |
+| `tests/kv_store.rs`, `kv_sweep.rs`, `kv_tasks.rs`, `kv_render.rs`, `kv_api.rs`, `kv_api_small_cap.rs`, `kv_api_no_store.rs` | `DATABASE_URL` (Postgres; the store is `MemStore`, or a probe over it) | the store, the concurrency cases (`overwrite: false`, two `Put`s, revision numbering), the sweep (two in parallel, a key rewritten between listing and lock), the six tasks and their re-claims, `kv()` in `runIf`/`If`/`Switch` and its outage, every API status (409, 413, 408, 503 included) |
+| `plugin-host` `EgretPluginHostTest` | none: `mvn -f plugin-host/pom.xml verify`, Java 25, after `plugin-host/fetch-plugins.sh plugin-host/target/plugins` | the `namespaceKv()` message, exactly |
+| `worker::handlers::kestra` unit tests | none | the exit-4 prefix, and that no `task.json` key names KV |
+
+**Not measured live, and stated so nobody infers it:**
+
+1. **The plugin host under a container runner.** `containerRunner` was
+   `none`, so no plugin pod ran: neither the no-regression check of a
+   `kestra.…postgresql.Query` nor `namespaceKv()` (no catalog plugin calls
+   it). The new message is pinned by Task 7's tests only.
+2. **409, 413, 408 and 503 were not driven live**: the lock wait, the caps,
+   the body timeouts and the no-store answer rest on `kv_api*.rs`.
+3. **The sweep's concurrency**: two replicas at once, a busy key skipped, a
+   key rewritten between listing and lock, a failed object delete. The
+   in-process tests in `kv_sweep.rs` and `kv_s3_live.rs` cover them.
+4. **The frontend** was not built; the e2e drove the API only.
+5. **The ratchet cannot judge any of this**, for the reason above.
+
+#### The release note
+
+The programme spec's W9c correction (§9) carries it; in short: migration
+**0175** (`workflow.kv_entries`); `workflow.storage.max_read_bytes` must be at
+least 4096, checked at boot; the hourly expiry sweep on every process with a
+store; the bulk delete's 1,000-key cap and 1 MiB body; the 1,000-digit number
+limit and the dense-value limit; `secret()` refused in a `Set`/`Put` value; a
+`_kv` namespace segment refused at publish; exact decimals and comparisons
+(the comparator rewrite pass, `kestra_` names reserved, chained comparisons
+evaluating every operand); `Put`'s limits; seven API routes, no new
+permission; the plugin host's new `namespaceKv()` message; the known limits of
+the W9c spec's §15.
+
+#### The sweep: messages and docs that described W9c's absence
+
+Counted with `/usr/bin/grep` with file arguments at `1e9832a4`, before this
+task edited anything.
+
+| # | population | examined | corrected |
+|---|---|---:|---:|
+| 1 | `\bW9c\b` in `crates/egret-workflow/src`, `plugin-host/src` and both programme specs | **120** lines (src 98, `plugin-host/src` 4, spec EN 9, VI 9) | **0** in code: every code line is a provenance tag or describes W9c as present; no message says KV "needs W9c" or "does not provide yet" (`functions.rs`'s *"`kv` still names W9c"* is a dated W9b-era history line, followed in the same doc by the 2026-10-07 line that took `kv` out). Per spec **8** of 9 lines, each with a dated note rather than a rewrite: §3 finding 4 (two lines, one note), the W9 row, the W5b correction's *"only KV still waits, for W9c"*, the W9a release note's *"`namespaceKv()` W9c"* and its *"What is still not true … the KV store (W9c)"*, the W9b release note's *"`namespaceKv()` still exits 4 naming W9c"* and its *"What is still not true … the KV store (W9c)"*; plus a new W9c correction. **Left**: the W9a correction's account of the split, which stays true |
+| 2 | lines naming `kv` beside `REFUSED`, `not_yet`, *"stays refused"* or *"refuses `kv`"*, in `crates/egret-workflow/src`, `docs/`, `plugin-host/src` and this README; plus the `REFUSED` table's own doc (`functions.rs:262-282`) | **15** lines, and the doc | **2**: the W9a spec's *"`kv` names W9c"*, EN and VI (dated note). **Left**: the W9c spec's §1 table (the state at the base) and §6/§12 (the change itself), the plans' task text, `functions.rs`'s `kv_without_a_scope_refuses_by_name` doc (a render with no scope still refuses `kv()` by name, which is true), and the `REFUSED` doc, whose last dated line already says `kv` is implemented. The expression oracle's `oracle/README.md` already carries a W9c Task 4 paragraph |
+| 3 | `namespaceKv` in `docs/`, `crates/egret-workflow/src`, `plugin-host/src` and this README | **40** lines (W9c spec 7+7, W9c plan 8, W9a plan 1, programme spec 2+2, W5b spec 1+1, `kestra.rs` 4, `plugin-host/src` 6, this README 1) | **2**: the W5b spec's shim line, EN and VI (dated note); the programme spec's 4 are row 1's. **Left**: the code and Java lines (Task 7 rewrote each), the W9c spec and plan (the change), the W9a plan's task text, and this README's W9a release note (that section's record) |
+| 4 | `the namespace KV store` (the old refusal's wording) | **4** lines (W9c spec §1 EN and VI, the W9a plan, the W9c plan) | **0**: each quotes the old refusal as the state at the base or as task text |
+| 5 | (beside the brief's four) `\bW9c\b` in the W5b, W9a and W9b specs | **7** EN (W5b 3, W9a 3, W9b 1), **7** VI | **2** per language: the W5b spec's exit code 4, and the W9a spec's `kv` line (counted in row 2 too). **Left**: scope and out-of-scope lines that assign the KV store to W9c, which stay true |
+
 ### What this ratchet does **not** prove
 
 Each of these has a section of its own above with the derivation; they are
@@ -11383,6 +11556,13 @@ unlisted over-refusal, reported by name with its message.
 > 47 → **45** — `valids/flow-trigger-fire-once-true-flow-listen` no longer
 > parses, because `models::Window` refuses `fireOnce` as the pinned artifact
 > does (422), and its two `dependsOn` lookups went with it.
+> *Three later moves, each recorded in `driver.rs`'s `LIVE` doc (annotated at
+> W9c Task 8, 2026-10-08):* `LIVE` 247 → **245** at W5b's final fix round
+> (`valids/secrets` and `valids/webhook-secret-key` refused at publish), 245 →
+> **247** at W9a Task 11 (the two `core.storage.Write` flows), and 247 →
+> **248** at W9c Task 5 (`valids/retry-with-flowable-errors`, once
+> `TASK_TYPES` held the six `core.kv` FQCNs); `UNKNOWN_TYPE_REFUSED` went
+> 68 → 66 → **65** with the last two.
 > **The current value of every one of them is a `const` in
 > `oracle-exec/driver.rs` that `driver::census`, `driver::target_census` and
 > `driver::lookup_census` compare on every run**, which is where a reader should

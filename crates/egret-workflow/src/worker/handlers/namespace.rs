@@ -127,7 +127,7 @@ use super::storage::{no_storage, outage, spec};
 use crate::logs::LogLevel;
 use crate::models::Property;
 use crate::runners::files::is_namespace_file_uri;
-use crate::storage::nsfiles::access::{authorize, Access, Actor, Grant};
+use crate::storage::nsfiles::access::{authorize, Access, Actor, Grant, Resource};
 use crate::storage::nsfiles::glob::{wildcard_match, wildcard_matches, PathMatcher};
 use crate::storage::nsfiles::path::NsPath;
 use crate::storage::nsfiles::stage::{resolve_input_uri, ListProp, MAX_NAMESPACES};
@@ -228,7 +228,7 @@ pub fn register(
 
 /// The running flow's namespace: the render scope's (Task 5's
 /// `flow_namespace`) and nothing else.
-fn flow_namespace(task: &TaskInput) -> Option<String> {
+pub(super) fn flow_namespace(task: &TaskInput) -> Option<String> {
     task.render
         .files()
         .and_then(|f| f.0.flow_namespace().map(str::to_string))
@@ -242,7 +242,7 @@ fn not_a_flow_run() -> String {
 
 /// `NsError::{Store, Db}` are infrastructure (`Err`); anything else is the
 /// author's, the message of a failed run.
-fn split(type_id: &str, e: NsError) -> Result<String> {
+pub(super) fn split(type_id: &str, e: NsError) -> Result<String> {
     match e {
         NsError::Db(e) => Err(e),
         NsError::Store(m) => Err(Error::Internal(anyhow::anyhow!("{type_id}: {m}"))),
@@ -624,6 +624,7 @@ impl TaskHandler for UploadFiles {
             task.workspace_id,
             Actor::Flow { namespace: &own },
             &target,
+            Resource::NamespaceFiles,
             Access::Write,
         ) {
             Ok(g) => g,
@@ -996,6 +997,7 @@ impl TaskHandler for DownloadFiles {
             task.workspace_id,
             Actor::Flow { namespace: &own },
             &namespace,
+            Resource::NamespaceFiles,
             Access::Read,
         ) {
             Ok(g) => g,
@@ -1175,6 +1177,7 @@ impl TaskHandler for DeleteFiles {
             task.workspace_id,
             Actor::Flow { namespace: &own },
             &target,
+            Resource::NamespaceFiles,
             Access::Write,
         ) {
             Ok(g) => g,
@@ -1683,6 +1686,7 @@ impl TaskHandler for PurgeFiles {
                 task.workspace_id,
                 Actor::Flow { namespace: &own },
                 ns,
+                Resource::NamespaceFiles,
                 Access::Purge,
             ) {
                 return fail(why);
@@ -1766,6 +1770,7 @@ impl TaskHandler for PurgeFiles {
                 task.workspace_id,
                 Actor::Flow { namespace: &own },
                 ns,
+                Resource::NamespaceFiles,
                 Access::Purge,
             ) {
                 Ok(g) => grants.push(g),

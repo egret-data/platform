@@ -165,6 +165,14 @@ starlark = "0.14"
 # to close -- minijinja exposes no way to enumerate filters or tests at
 # runtime, so nothing else could notice. Bumping this means re-deriving
 # `MINIJINJA_DEFAULT_FILTERS`/`_TESTS` from the new version's `defaults.rs`.
+# **Keep `macros` and `multi_template` off for egret-workflow too** (W9c final
+# review C-M4). The reserved-name check (`runners::rewrite`, names starting
+# with `kestra_`) refuses only the assignments this build can parse: `set`,
+# `for` and `with`. Enabling `macros` would let a macro's arguments bind a
+# `kestra_*` name (shadowing `kestra_gt` and the other functions egret's
+# rewriters call), and `cmp_rewrite` does not compile comparisons inside
+# `{% macro %}`/`{% call %}` arguments; `multi_template` adds `import`/`from`
+# bindings. Enabling either means revisiting that check and that pass first.
 minijinja = { version = "=2.24.0", default-features = false, features = [
     "builtins",
     "serde",
@@ -274,4 +282,11 @@ split-debuginfo = "unpacked"
 # 0.46 s), so a dev server or a test previewing a few MiB of Ion would take
 # minutes. Optimising this one dependency keeps dev time close to release.
 [profile.dev.package.ion-rs]
+opt-level = 3
+
+# W9c Task 2 fix round 3: `ion-rs` parses and prints a big int or a decimal's
+# coefficient with `num-bigint`, which unoptimised made a 10 MiB KV value of
+# 1,000-digit numbers (the most digits a KV number has) take about 1.8 s to
+# decode in a dev build. Optimised for the same reason as `ion-rs` above.
+[profile.dev.package.num-bigint]
 opt-level = 3

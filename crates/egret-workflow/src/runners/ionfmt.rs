@@ -261,7 +261,9 @@ pub(crate) fn write_ion_element(out: &mut String, element: &ion_rs::Element) {
     }
 }
 
-/// One JSON value as Ion text, for [`write_ion_row`]. Recursion is bounded by
+/// One JSON value as Ion text, for [`write_ion_row`] (the KV store's
+/// `storage::kv::value::encode` writes its own tree with [`write_ion_float`],
+/// [`write_ion_string`] and [`write_symbol`]). Recursion is bounded by
 /// the JSON's own depth, which `serde_json` caps when it parses.
 fn write_ion_json(out: &mut String, value: &serde_json::Value) {
     use serde_json::Value as J;
@@ -324,7 +326,7 @@ fn write_ion_json(out: &mut String, value: &serde_json::Value) {
 ///
 /// So `1.0` and `1.0e100` disagree about whether the `.0` survives, which no
 /// single rule about "trailing zeros" predicts. `-0.0` is `-0e0`.
-fn write_ion_float(out: &mut String, x: f64) {
+pub(crate) fn write_ion_float(out: &mut String, x: f64) {
     // `Double.toString`'s three special values. Ion text spells them
     // differently; Jackson's `IonGenerator.writeNumber(double)` hands them to
     // `IonWriter.writeFloat`, which writes these. No corpus entry reaches
@@ -354,7 +356,7 @@ fn write_ion_float(out: &mut String, x: f64) {
 }
 
 /// A `"`-delimited Ion string.
-fn write_ion_string(out: &mut String, s: &str) {
+pub(crate) fn write_ion_string(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
         match c {
@@ -374,7 +376,7 @@ fn write_ion_string(out: &mut String, s: &str) {
 /// keyword set is case-sensitive and much smaller than YAML's, which is the
 /// opposite of what the `yaml` filter in the same batch does with the same
 /// keys.
-fn write_symbol(out: &mut String, s: &str) {
+pub(crate) fn write_symbol(out: &mut String, s: &str) {
     if is_ion_identifier(s) {
         out.push_str(s);
         return;
@@ -1103,7 +1105,11 @@ fn ion_number(token: &str) -> Option<Result<MjValue, String>> {
     // wrong SPELLING is recorded; a wrong COMPARISON is not acceptable, so the
     // scale is what gives way. Five entries record what that costs, and
     // `filter-number-bigdecimal-is-not-a-number-here` records the same hole on
-    // the `number(type='BIGDECIMAL')` path, which still has it.
+    // the `number(type='BIGDECIMAL')` path, which still has it for
+    // arithmetic. (2026-10-08, W9c Task 4 fix round 1: its COMPARISONS are
+    // exact now -- `super::cmp_rewrite` compiles every comparison to a
+    // `super::compare` call -- but arithmetic is still refused, so the
+    // reasoning above still holds for this path.)
     let signed = if negative {
         format!("-{cleaned}")
     } else {

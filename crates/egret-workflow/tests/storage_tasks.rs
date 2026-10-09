@@ -19,7 +19,7 @@ use egret_metastore::Db;
 use egret_storage::{ObjectStore, StorageError};
 use egret_workflow::storage::{self, uri, FileStore, StoredFile};
 use egret_workflow::worker::{
-    apply_outcome, claim, reap, start_execution, start_execution_in, tick, Handlers, NewExecution,
+    claim, commit_outcome, reap, start_execution, start_execution_in, tick, Handlers, NewExecution,
     Outcome,
 };
 use serde_json::{json, Value};
@@ -1537,7 +1537,7 @@ async fn a_loop_iterates_a_binary_ion_file() {
     let root = start_execution(&db.pool, ws, None, &source, json!({}))
         .await
         .unwrap();
-    // A run that wrote the binary file, indexed by `apply_outcome`.
+    // A run that wrote the binary file, indexed by `commit_outcome`.
     let claimed = claim(&db.pool, 1).await.unwrap();
     let c = &claimed[0];
     let file = format!(
@@ -1548,9 +1548,10 @@ async fn a_loop_iterates_a_binary_ion_file() {
         .put(&fs.object_uri(ws, &file).unwrap(), bytes.clone())
         .await
         .unwrap();
-    let mut tx = db.pool.begin().await.unwrap();
-    apply_outcome(
-        &mut tx,
+    // W9c Task 9: in a transaction `commit_outcome` owns, so the loop's
+    // values file is downloaded with that transaction rolled back.
+    commit_outcome(
+        &db.pool,
         c,
         &Outcome {
             files: vec![StoredFile {
@@ -1562,7 +1563,6 @@ async fn a_loop_iterates_a_binary_ion_file() {
     )
     .await
     .unwrap();
-    tx.commit().await.unwrap();
     drain(&db.pool).await;
     let (state, _, message) = result_in(&db.pool, root, "loop").await;
     assert_eq!(state, "SUCCESS", "{message:?}");

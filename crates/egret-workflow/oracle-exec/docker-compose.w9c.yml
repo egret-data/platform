@@ -1,0 +1,11 @@
+# W9c Task 1: the pinned artifact on host port 18090, so it can run beside a W9b
+# stack (18080) or an egret dev server (8080).
+#
+#   docker compose -p w9coracle -f docker-compose.yml -f docker-compose.w9c.yml up -d postgres kestra
+#
+# Compose concatenates `ports` across files, so the base mapping is replaced with
+# `!override`. Nothing else changes: same image digest, configuration and volume.
+services:
+  kestra:
+    ports: !override
+      - "18090:8080"

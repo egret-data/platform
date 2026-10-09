@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use egret_storage::{Listing, ObjectStore, S3Store, StorageConfig, StorageError};
-use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Grant};
+use egret_workflow::storage::nsfiles::access::{authorize, Access, Actor, Grant, Resource};
 use egret_workflow::storage::nsfiles::path::NsPath;
 use egret_workflow::storage::nsfiles::store::{
     move_path, open, purge_revisions, put, resolve, revisions, Conflict, Want, Written,
@@ -138,7 +138,8 @@ where
             retention_days: 30,
         });
         let (ws, _) = common::seed_workspace(&db).await;
-        let g = authorize(ws, Actor::Api, NS, Access::Write).map_err(|e| e.to_string())?;
+        let g = authorize(ws, Actor::Api, NS, Resource::NamespaceFiles, Access::Write)
+            .map_err(|e| e.to_string())?;
         // On its own task: a panic in the case is a JoinError here, and the
         // cleanup below still runs (fix round 1, M8).
         let result = match tokio::spawn(case(db, fs, g)).await {
@@ -293,7 +294,14 @@ fn move_and_purge() -> Result<(), String> {
                 return Err(format!("the source's revision {n} object is still there"));
             }
         }
-        let purge = authorize(g.workspace(), Actor::Api, NS, Access::Purge).unwrap();
+        let purge = authorize(
+            g.workspace(),
+            Actor::Api,
+            NS,
+            Resource::NamespaceFiles,
+            Access::Purge,
+        )
+        .unwrap();
         let purged = purge_revisions(&db.pool, &fs, &purge, &file(to), &[1])
             .await
             .map_err(|e| e.to_string())?;

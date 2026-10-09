@@ -7,9 +7,10 @@
 //! and out of every **JSON value** of the render context (inputs, the outputs
 //! of every terminated task, `execution`, `item`) and resolves all of them at
 //! once through [`super::resolve_readable_many`] -- the one readability
-//! decision -- on the caller's connection. Inside `settle` that is the
-//! transaction that has just indexed the finished task's files, which a pool
-//! would not see.
+//! decision -- on the caller's POOL connection: a [`Snapshot`] reads, so it is
+//! never built inside a transaction (below). Inside `settle` the same
+//! resolution is taken by [`scope_in_transaction`] on the transaction that
+//! has just indexed the finished task's files, which a pool would not see.
 //!
 //! That covers every URI a template can reach without building it from pieces.
 //! **A URI assembled at render (`'kestra:///…' ~ execution.id ~ '/x'`) is not
@@ -22,6 +23,19 @@
 //! [`Snapshot::take`]; the render thread is a plain OS thread
 //! (`runners::env::render_str`), and the tokio worker that spawned it waits in
 //! `join`. That needs the multi-thread runtime (global constraints).
+//!
+//! **Only outside a transaction** (W9c Task 9, the user's ruling on W9c's
+//! final review F2): a [`Snapshot`] is the scope of a handler's render and of
+//! the prefetch's fetch. A render INSIDE a transaction -- `settle`'s -- gets
+//! [`scope_in_transaction`], whose scope (`storage::prefetch::InTransaction`)
+//! holds the same resolutions, taken the same way, but no store and no
+//! connect options: every body, namespace-file and KV read there is answered
+//! from the transaction owner's cache, and a miss is fetched by a
+//! [`Snapshot`] with the transaction rolled back. **The types keep the two
+//! apart** (final review m2): [`Snapshot::take`] and [`scope_for`] take a
+//! `PoolConnection`, which a transaction is not, and
+//! [`scope_in_transaction`] takes the attempt's `worker::txn::Gate`, which
+//! only a gated attempt has.
 //!
 //! # Namespace files (W9b Task 4, 2026-10-05)
 //!
@@ -45,19 +59,23 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use egret_core::Result;
 use regex::Regex;
+use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgConnectOptions;
-use sqlx::{Connection, PgConnection};
+use sqlx::{Connection, PgConnection, Postgres};
 use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
-use super::nsfiles::access::{authorize, Access, Actor, Grant};
+use super::kv::key::KvKey;
+use super::kv::store as kv_store;
+use super::nsfiles::access::{authorize, Access, Actor, Grant, Resource};
 use super::nsfiles::path::NsPath;
 use super::nsfiles::store::{self as ns_store, NsEntry, Want};
 use super::nsfiles::NsError;
 use super::{decode_utf8, readable_executions, resolve_readable_many, uri};
 use super::{FileStore, IndexedFile, Unreadable};
 use crate::runners::files::{
-    FileMeta, FileScope, FileUnavailable, NsFileArgs, NsFileMeta, RenderFiles, NSFILE_SCHEME,
+    FileMeta, FileScope, FileUnavailable, KvAnswer, KvArgs, NsFileArgs, NsFileMeta, RenderFiles,
+    NSFILE_SCHEME,
 };
 
 /// A `kestra:///` URI in text: the scheme, then the whole run of characters
@@ -94,7 +112,7 @@ impl Snapshot {
     /// With no URI anywhere the database is not touched.
     #[allow(clippy::too_many_arguments)]
     pub async fn take(
-        conn: &mut PgConnection,
+        conn: &mut PoolConnection<Postgres>,
         store: Arc<FileStore>,
         workspace: Uuid,
         execution: Uuid,
@@ -103,20 +121,7 @@ impl Snapshot {
         task_prefix: Option<String>,
         flow_namespace: Option<String>,
     ) -> Result<Self> {
-        let mut found = BTreeSet::new();
-        for text in texts {
-            collect(text, &mut found);
-        }
-        for value in json {
-            walk(value, &mut found);
-        }
-        let files = if found.is_empty() {
-            BTreeMap::new()
-        } else {
-            let readable = readable_executions(conn, workspace, execution).await?;
-            let uris: Vec<String> = found.into_iter().collect();
-            resolve_readable_many(conn, workspace, &readable, &uris).await?
-        };
+        let files = reachable(conn, workspace, execution, texts, json).await?;
         Ok(Self {
             files,
             store,
@@ -133,11 +138,7 @@ impl Snapshot {
     /// The indexed file, or why it is not readable here, naming the URI --
     /// what staging (T5) and the bridge (T9) call.
     pub fn resolve(&self, uri: &str) -> std::result::Result<&IndexedFile, String> {
-        match self.files.get(uri) {
-            Some(Ok(file)) => Ok(file),
-            Some(Err(why)) => Err(why.to_string()),
-            None => Err(not_in_snapshot(uri)),
-        }
+        resolve_in(&self.files, uri)
     }
 
     pub fn into_scope(self) -> FileScope {
@@ -178,6 +179,38 @@ impl Snapshot {
         self
     }
 
+    /// W9c Task 9: a live snapshot for the prefetch's fetch
+    /// (`storage::prefetch`), which runs with no transaction open: `files`
+    /// are the resolutions the rolled-back attempt recorded (its index rows
+    /// were rolled back with it), and namespace and KV lookups connect with
+    /// `ns_db`, as every render's do. Built on the runtime (it captures the
+    /// handle), read on a thread that may block.
+    pub(crate) fn for_fetch(
+        files: BTreeMap<String, std::result::Result<IndexedFile, Unreadable>>,
+        store: Arc<FileStore>,
+        workspace: Uuid,
+        flow_namespace: Option<String>,
+        ns_db: Option<Arc<PgConnectOptions>>,
+    ) -> Self {
+        Self {
+            files,
+            store,
+            workspace,
+            handle: tokio::runtime::Handle::current(),
+            task_prefix: None,
+            outage: Mutex::new(None),
+            flow_namespace,
+            ns_db,
+            ns_conn: Mutex::new(None),
+        }
+    }
+
+    /// W9c Task 9: the outage the last read recorded, cleared, so the
+    /// prefetch can tell which of several reads on one snapshot met it.
+    pub(crate) fn take_outage(&self) -> Option<String> {
+        self.outage.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+
     /// Record an outage (the first one wins) and hand back its message.
     fn outage(&self, message: String) -> String {
         let mut held = self.outage.lock().unwrap_or_else(|p| p.into_inner());
@@ -192,7 +225,7 @@ impl Snapshot {
 /// the same `uri::parse` that `resolve_readable_many` runs first -- it can
 /// only refine a refusal, never make anything readable. Everything else was
 /// assembled at render, which the user's ruling refuses.
-fn not_in_snapshot(uri: &str) -> String {
+pub(super) fn not_in_snapshot(uri: &str) -> String {
     match uri::parse(uri) {
         Err(reason) => Unreadable::Malformed {
             uri: uri.to_string(),
@@ -277,6 +310,7 @@ impl Snapshot {
             self.workspace,
             Actor::Flow { namespace: own },
             &namespace,
+            Resource::NamespaceFiles,
             Access::Read,
         )
         .map_err(refused)?;
@@ -351,22 +385,9 @@ impl Snapshot {
             target.grant.namespace()
         );
         self.may_block(&what).map_err(FileUnavailable::Refused)?;
-        let mut held = self.ns_conn.lock().unwrap_or_else(|p| p.into_inner());
-        let found = self.handle.block_on(async {
-            let mut reused = held.is_some();
-            loop {
-                if held.is_none() {
-                    let Some(opts) = self.ns_db.as_deref() else {
-                        return Err(NsError::Author(format!(
-                            "{what} cannot be read: this egret process has no database \
-                             connection for namespace files"
-                        )));
-                    };
-                    let conn = PgConnection::connect_with(opts).await.map_err(db_err)?;
-                    *held = Some(conn);
-                }
-                let conn = held.as_mut().expect("opened above");
-                let looked = match find(conn, target).await {
+        let found = self.on_ns_conn(&what, |mut conn| {
+            Box::pin(async move {
+                let looked = match find(&mut conn, target).await {
                     Ok(entry) => match read_cap {
                         None => Ok((entry, None)),
                         Some(cap) => match self.ns_read(target, &entry, cap).await {
@@ -376,22 +397,62 @@ impl Snapshot {
                     },
                     Err(e) => Err(e),
                 };
-                match looked {
+                (conn, looked)
+            })
+        });
+        found.map_err(|e| self.ns_unavailable(&what, e))
+    }
+
+    /// Run `work` on this scope's one namespace connection, opening it first
+    /// if this render has not yet, and holding the scope's connection mutex
+    /// for exactly as long as `work` runs: the mutex is released when this
+    /// returns. Blocks the render thread on [`Self::handle`]; the caller has
+    /// checked [`Self::may_block`].
+    ///
+    /// `work` is handed the connection by value and hands it back, so its
+    /// future borrows nothing of this frame. A database outage (a failed
+    /// connect or query) closes the connection, never reused; on a connection
+    /// an earlier lookup of the same render opened (the server may have ended
+    /// it since), it reconnects once before it is the answer (W9b fix round
+    /// 1, I1). Shared by W9b's namespace files and W9c's `kv()`.
+    fn on_ns_conn<'w, T>(
+        &self,
+        what: &str,
+        mut work: impl FnMut(PgConnection) -> OnConn<'w, T>,
+    ) -> std::result::Result<T, NsError> {
+        let mut held = self.ns_conn.lock().unwrap_or_else(|p| p.into_inner());
+        self.handle.block_on(async {
+            let mut reused = held.is_some();
+            loop {
+                let conn = match held.take() {
+                    Some(conn) => conn,
+                    None => {
+                        let Some(opts) = self.ns_db.as_deref() else {
+                            return Err(NsError::Author(format!(
+                                "{what} cannot be read: this egret process has no database \
+                                 connection for namespace files or the KV store"
+                            )));
+                        };
+                        PgConnection::connect_with(opts).await.map_err(db_err)?
+                    }
+                };
+                let (conn, answered) = work(conn).await;
+                match answered {
                     Err(e) if is_db_outage(&e) => {
                         // The connection may be the broken thing: never reuse it.
-                        if let Some(broken) = held.take() {
-                            let _ = broken.close().await;
-                        }
+                        let _ = conn.close().await;
                         if std::mem::take(&mut reused) {
                             continue;
                         }
                         return Err(e);
                     }
-                    other => return other,
+                    other => {
+                        *held = Some(conn);
+                        return other;
+                    }
                 }
             }
-        });
-        found.map_err(|e| self.ns_unavailable(&what, e))
+        })
     }
 
     /// For tests: whether this scope holds a namespace connection now.
@@ -453,7 +514,133 @@ impl Snapshot {
             other => FileUnavailable::Refused(other.to_string()),
         }
     }
+
+    /// W9c: why `kv()` could not answer. An outage (the database or the
+    /// store unreachable, or a value that changed while it was read) is
+    /// recorded, so the run is re-claimed with no attempt spent (spec §11);
+    /// anything else is the author's error, its message as the store wrote it.
+    fn kv_unavailable(&self, what: &str, e: NsError) -> String {
+        if is_db_outage(&e) {
+            return self.outage(format!(
+                "{what} could not be looked up: the database is unavailable: {e}"
+            ));
+        }
+        match e {
+            NsError::Store(m) => self.outage(m),
+            other => other.to_string(),
+        }
+    }
+
+    /// W9c Task 4: `kv()` (spec §6). See [`RenderFiles::kv`].
+    ///
+    /// 1. [`Self::may_block`]; the key rule ([`KvKey::parse`]).
+    /// 2. The levels: the `namespace` argument alone, or the running flow's
+    ///    namespace and its parents ([`kv_store::ancestors`]); each through
+    ///    THE access decision, `authorize(…, Resource::Kv, Access::Read)`,
+    ///    as the flow, in this scope's workspace (the execution's). The first
+    ///    refusal is the answer.
+    /// 3. One statement on the render's namespace connection
+    ///    ([`Self::on_ns_conn`]): [`kv_store::resolve_first_live`]. Then the
+    ///    connection mutex is released.
+    /// 4. [`kv_store::read_sized`], holding no connection of this scope: it
+    ///    downloads, then decodes on the blocking pool.
+    /// 5. Only when the object is not the size its row records:
+    ///    [`kv_store::other_size`] re-reads the row by id on the render's OWN
+    ///    connection, through [`Self::on_ns_conn`] again (W9c Task 4 fix
+    ///    round 1, review M2: it replaced a lazy one-connection pool private
+    ///    to the call, so a mismatch no longer opens a second connection).
+    ///
+    /// Nothing here writes: an expired or soft-deleted level is missing
+    /// there, and the walk goes on (spec §4.5, §4.6).
+    fn kv_read(&self, args: &KvArgs<'_>) -> std::result::Result<KvAnswer, String> {
+        let raw = args.key;
+        self.may_block(&format!("key '{raw}'"))?;
+        let key = KvKey::parse(raw)?;
+        let own = self.flow_namespace.as_deref().ok_or_else(|| {
+            format!(
+                "key '{raw}' cannot be read: this render has no running flow, whose namespace \
+                 the KV store is read as"
+            )
+        })?;
+        let levels: Vec<&str> = match args.namespace {
+            Some(ns) => vec![ns],
+            None => kv_store::ancestors(own),
+        };
+        let grants = levels
+            .iter()
+            .map(|ns| {
+                authorize(
+                    self.workspace,
+                    Actor::Flow { namespace: own },
+                    ns,
+                    Resource::Kv,
+                    Access::Read,
+                )
+            })
+            .collect::<std::result::Result<Vec<Grant>, String>>()?;
+        // The namespace Kestra's missing-key sentence names: the one asked
+        // for, the flow's own when walking (w9c `inheritance.kv_child`).
+        let asked = levels[0];
+        let what = format!("key '{key}' in namespace '{asked}'");
+        let found = self.on_ns_conn(&what, |mut conn| {
+            let (grants, key) = (&grants, &key);
+            Box::pin(async move {
+                let found = kv_store::resolve_first_live(&mut conn, grants, key).await;
+                (conn, found)
+            })
+        });
+        // The connection mutex is released: nothing below holds it.
+        let entry = match found {
+            Ok(Some(entry)) => entry,
+            Ok(None) => {
+                return Ok(KvAnswer::Missing(format!(
+                    "The key '{key}' does not exist in the namespace '{asked}'."
+                )))
+            }
+            Err(e) => return Err(self.kv_unavailable(&what, e)),
+        };
+        let grant = grants
+            .iter()
+            .find(|g| g.namespace() == entry.namespace)
+            .ok_or_else(|| {
+                format!(
+                    "{what}: egret's KV walk answered namespace '{}', which it did not ask",
+                    entry.namespace
+                )
+            })?;
+        let read = match self
+            .handle
+            .block_on(kv_store::read_sized(&self.store, grant, &entry))
+        {
+            Ok(read) => read,
+            Err(e) => return Err(self.kv_unavailable(&what, e)),
+        };
+        let other = match read {
+            Ok(data) => return Ok(KvAnswer::Value(data)),
+            Err(other) => other,
+        };
+        // The size-mismatch path: one statement, on this render's own
+        // connection (the mutex is free again: step 3 released it).
+        let judged: std::result::Result<std::convert::Infallible, NsError> =
+            self.on_ns_conn(&what, |mut conn| {
+                let (store, entry) = (&self.store, &entry);
+                Box::pin(async move {
+                    let e = kv_store::other_size(&mut conn, store, grant, entry, other).await;
+                    (conn, Err(e))
+                })
+            });
+        match judged {
+            Ok(never) => match never {},
+            Err(e) => Err(self.kv_unavailable(&what, e)),
+        }
+    }
 }
+
+/// The work [`Snapshot::on_ns_conn`] runs: a future that owns the connection
+/// it was handed and hands it back beside its answer.
+type OnConn<'w, T> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = (PgConnection, std::result::Result<T, NsError>)> + 'w>,
+>;
 
 /// What a namespace-file reference names, before any access decision: its
 /// namespace, its path as written, and -- for a `kestra:///…/_files/…[.vN]`
@@ -583,16 +770,40 @@ fn ns_over_cap(entry: &NsEntry, ns: &str, cap: u64) -> String {
     )
 }
 
+/// The resolutions a render may read: what `fileSize`, `fileExists`,
+/// `isFileEmpty` and `fileURI` answer from, with no I/O. Shared by the live
+/// [`Snapshot`] and the in-transaction scope (`storage::prefetch`), so the
+/// two answer metadata identically.
+pub(super) fn lookup_in(
+    files: &BTreeMap<String, std::result::Result<IndexedFile, Unreadable>>,
+    uri: &str,
+) -> std::result::Result<FileMeta, FileUnavailable> {
+    match files.get(uri) {
+        Some(Ok(file)) => Ok(FileMeta { size: file.size }),
+        Some(Err(missing @ Unreadable::Missing { .. })) => {
+            Err(FileUnavailable::Missing(missing.to_string()))
+        }
+        Some(Err(why)) => Err(FileUnavailable::Refused(why.to_string())),
+        None => Err(FileUnavailable::Refused(not_in_snapshot(uri))),
+    }
+}
+
+/// The indexed file `uri` resolved to, or why it is not readable here: the
+/// first step of every body read, live or in a transaction.
+pub(super) fn resolve_in<'f>(
+    files: &'f BTreeMap<String, std::result::Result<IndexedFile, Unreadable>>,
+    uri: &str,
+) -> std::result::Result<&'f IndexedFile, String> {
+    match files.get(uri) {
+        Some(Ok(file)) => Ok(file),
+        Some(Err(why)) => Err(why.to_string()),
+        None => Err(not_in_snapshot(uri)),
+    }
+}
+
 impl RenderFiles for Snapshot {
     fn lookup(&self, uri: &str) -> std::result::Result<FileMeta, FileUnavailable> {
-        match self.files.get(uri) {
-            Some(Ok(file)) => Ok(FileMeta { size: file.size }),
-            Some(Err(missing @ Unreadable::Missing { .. })) => {
-                Err(FileUnavailable::Missing(missing.to_string()))
-            }
-            Some(Err(why)) => Err(FileUnavailable::Refused(why.to_string())),
-            None => Err(FileUnavailable::Refused(not_in_snapshot(uri))),
-        }
+        lookup_in(&self.files, uri)
     }
 
     fn read_utf8(&self, uri: &str) -> std::result::Result<String, String> {
@@ -714,6 +925,10 @@ impl RenderFiles for Snapshot {
         self.flow_namespace.as_deref()
     }
 
+    fn kv(&self, args: &KvArgs<'_>) -> std::result::Result<KvAnswer, String> {
+        self.kv_read(args)
+    }
+
     /// Close this render's namespace connection, if it opened one (I1):
     /// `close()`, so the server sees a goodbye and not an unexpected EOF.
     fn end_render(&self) {
@@ -768,15 +983,25 @@ impl RenderFiles for Unconfigured {
     fn flow_namespace(&self) -> Option<&str> {
         None
     }
+    fn kv(&self, args: &KvArgs<'_>) -> std::result::Result<KvAnswer, String> {
+        Err(format!(
+            "key '{}' cannot be read: egret has no internal storage configured (the \
+             `[storage]` section of its configuration), so kv is unavailable",
+            args.key
+        ))
+    }
 }
 
-/// The scope a render inside a running execution gets: a [`Snapshot`] over
-/// the installed store, or -- with [`super::current`] `None` -- a scope whose
-/// every answer names `[storage]`. A wiring point (the module doc of
-/// `storage`): `worker::claim` calls this and nothing else does.
+/// The scope a render inside a running execution gets OUTSIDE any
+/// transaction (a handler's): a [`Snapshot`] over the installed store, or --
+/// with [`super::current`] `None` -- a scope whose every answer names
+/// `[storage]`. A wiring point (the module doc of `storage`): `worker::claim`
+/// calls this and nothing else does. `conn` is a pool connection, so a
+/// transaction cannot be handed in: a scope that downloads and connects is
+/// never built where a transaction is open (W9c Task 9, final review m2).
 #[allow(clippy::too_many_arguments)]
 pub async fn scope_for(
-    conn: &mut PgConnection,
+    conn: &mut PoolConnection<Postgres>,
     store: Option<Arc<FileStore>>,
     workspace: Uuid,
     execution: Uuid,
@@ -800,6 +1025,67 @@ pub async fn scope_for(
         .await?
         .into_scope()),
     }
+}
+
+/// W9c Task 9: the scope a render INSIDE a transaction gets -- `settle`'s,
+/// and through it every nested settle's. The execution-file resolutions are
+/// taken on `conn` exactly as [`scope_for`]'s (the one readability decision,
+/// statements only, and the only connection that sees the index rows this
+/// transaction has just written); every body, namespace-file and KV read is
+/// answered from `gate`'s cache (`storage::prefetch`), never from the store
+/// or the database. The scope it returns holds no store and no connect
+/// options, so it cannot do I/O; `store` is read here only for its cap.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn scope_in_transaction(
+    conn: &mut PgConnection,
+    store: Option<Arc<FileStore>>,
+    workspace: Uuid,
+    execution: Uuid,
+    texts: &[&str],
+    json: &[&serde_json::Value],
+    task_prefix: Option<String>,
+    flow_namespace: Option<String>,
+    gate: &crate::worker::txn::Gate,
+) -> Result<FileScope> {
+    match store {
+        None => Ok(FileScope(Arc::new(Unconfigured))),
+        Some(store) => {
+            let files = reachable(conn, workspace, execution, texts, json).await?;
+            Ok(FileScope(Arc::new(super::prefetch::InTransaction::new(
+                files,
+                workspace,
+                task_prefix,
+                flow_namespace,
+                store.caps.max_read_bytes,
+                gate.prefetch().clone(),
+            ))))
+        }
+    }
+}
+
+/// Every `kestra:///…` string in `texts` and `json` (see [`Snapshot::take`]),
+/// resolved at once through `resolve_readable_many` on `conn`. With no URI
+/// anywhere the database is not touched.
+async fn reachable(
+    conn: &mut PgConnection,
+    workspace: Uuid,
+    execution: Uuid,
+    texts: &[&str],
+    json: &[&serde_json::Value],
+) -> Result<BTreeMap<String, std::result::Result<IndexedFile, Unreadable>>> {
+    let mut found = BTreeSet::new();
+    for text in texts {
+        collect(text, &mut found);
+    }
+    for value in json {
+        walk(value, &mut found);
+    }
+    if found.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let readable = readable_executions(conn, workspace, execution).await?;
+    let uris: Vec<String> = found.into_iter().collect();
+    resolve_readable_many(conn, workspace, &readable, &uris).await
 }
 
 fn collect(text: &str, found: &mut BTreeSet<String>) {

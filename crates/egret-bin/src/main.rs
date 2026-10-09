@@ -1870,8 +1870,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     if let Some(fs) = egret_workflow::storage::current() {
         egret_workflow::storage::nsfiles::staging::spawn_staging_sweeper(
             db.pool.clone(),
-            fs,
+            fs.clone(),
             egret_workflow::storage::nsfiles::staging::StagingSweepConfig::default(),
+            reaper_cancel.clone(),
+        );
+        // W9c spec §11: the hourly KV expiry sweep, its first pass an hour
+        // after start, over every workspace. On every replica with a store:
+        // each key is try-locked, so two replicas never sweep one key twice.
+        egret_workflow::storage::kv::sweep::spawn_kv_expiry_sweeper(
+            db.pool.clone(),
+            fs.clone(),
+            Default::default(),
             reaper_cancel.clone(),
         );
     }
