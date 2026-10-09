@@ -1157,7 +1157,7 @@ fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
     request_body = Object,
     responses(
         (status = 200, description = "Policy created", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input, missing policy name, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)", body = ErrorBody),
+        (status = 400, description = "Invalid editor input, missing policy name, a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter policy that would be served alongside another one selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
@@ -1249,7 +1249,7 @@ async fn create_policy(
     request_body = Object,
     responses(
         (status = 200, description = "Policy replaced", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input or missing policy name", body = ErrorBody),
+        (status = 400, description = "Invalid editor input, missing policy name, or a mask/row-filter body that would be served alongside another policy selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
