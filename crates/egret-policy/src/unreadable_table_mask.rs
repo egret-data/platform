@@ -43,10 +43,14 @@
 //!
 //! Three surfaces author the MASK half or the ATTACHMENT half, and **either
 //! half can be created second** — a guard keyed to one creation order leaves
-//! the hole open, which is a defect this programme has produced four times. So
-//! the rule lives in ONE function, [`unreadable_table_mask_for`], whose single
-//! `match` has one arm per half; a surface cannot implement a different rule
-//! because there is only one rule, and both arms build the same
+//! the hole open, which is a defect this programme has produced four times. A
+//! fourth surface writes NEITHER half and completes the pair anyway, by moving
+//! the name the two are joined on (the RENAME, below). So the rule lives in ONE
+//! function, [`unreadable_table_mask_for`], whose `match` has one arm per write
+//! that can complete the pair, and the two half-predicates
+//! (`table_level_attachment_of`, `tag_mask_naming`) are each spelled exactly
+//! once and shared between the arms. A surface cannot implement a different
+//! rule because there is only one rule, and every arm builds the same
 //! [`UnreadableTableMask`].
 //!
 //! * **The MASK half, via the permission model.** `POST`/`PATCH
@@ -66,9 +70,25 @@
 //!   /api/control-plane/warehouses/{id}/resource-tags` with `column` absent or
 //!   `""` → `egret_bi::CatalogTagRepo::assign_catalog`. That is the only
 //!   `INSERT` into `catalog_tag_assignments` in any `src/`.
+//! * **NEITHER half — the JOIN.** `PATCH /api/control-plane/tags/{id}` →
+//!   `egret_bi::TagRepo::update`, the only production `UPDATE tags SET name`
+//!   in any `src/`. An editor tag policy carries the tag NAME as a plain
+//!   string that nothing resolves at authoring time, so a mask naming a tag
+//!   that does not exist yet is legal, a table-level attachment of a
+//!   differently-named tag is legal, and renaming that tag INTO the masked
+//!   name completes the pair through neither guarded half. **SP4d debt Task
+//!   15**, confirmed before being fixed: the sequence was driven through all
+//!   three real routes and the resulting pair was read back out of the Ranger
+//!   plugin's OWN downloads — the tag map carried the masked name on the whole
+//!   table and `tagPolicies` carried the mask — in
+//!   `egret-bi/tests/tag_rename_unreadable_pair.rs`. Renaming a tag OUT of a
+//!   masked name is deliberately still allowed; see [`TagWrite::Rename`] for
+//!   why that is the steward's only escape from a pair that already exists.
 //!
 //! Stated BY CODE PATH and not by authorship, because five such claims in this
-//! programme have been wrong while the behaviour claim beside them was right.
+//! programme have been wrong while the behaviour claim beside them was right —
+//! and Task 5's own enumeration, written that way, still missed the rename,
+//! which is why this list says what each path WRITES rather than who uses it.
 //!
 //! **What is NOT in the class, measured rather than assumed.** A tag-addressed
 //! ROW FILTER is table-granular on both engines by construction (Trino's tag
@@ -116,7 +136,7 @@
 //!    unrepresentable for every writer forever.
 //!
 //! The consequence, stated plainly because it is the cost of this ruling: a
-//! writer that is not one of the three routes above — `psql`, a route added
+//! writer that is not one of the four routes above — `psql`, a route added
 //! later — can still create the pair. `egret_policy::admin`'s own
 //! `refuse_if_generated` has the same shape of reach and the same limit.
 //!
@@ -130,7 +150,7 @@
 //! intersection is empty — no bound services at all — two concurrent
 //! transactions can each write one half and both pass. Nothing is being
 //! enforced in that state either (there is no profile to download a policy),
-//! and the next write to either half through any of the three routes refuses,
+//! and the next write to either half through any of the four routes refuses,
 //! so the window is narrow and loud rather than silent. It is not closed, and a
 //! trigger would not close it (point 2 above).
 
@@ -211,8 +231,10 @@ impl UnreadableTableMask {
     }
 }
 
-/// The half of the pair a caller is about to write. One variant per half,
-/// because **either half can be created second**.
+/// The write a caller is about to make. One variant per half of the pair,
+/// because **either half can be created second** — plus the RENAME, which
+/// writes neither half and completes the pair anyway by moving the name the two
+/// are joined on.
 #[derive(Debug, Clone, Copy)]
 pub enum TagWrite<'a> {
     /// A tag-addressed MASK is being authored. The caller supplies the tag the
@@ -242,6 +264,39 @@ pub enum TagWrite<'a> {
         /// is the ordinary working configuration and never refused.
         column: &'a str,
     },
+    /// A tag is being RENAMED — `egret_bi::TagRepo::update`, behind `PATCH
+    /// /api/control-plane/tags/{id}`.
+    ///
+    /// **This is a THIRD authoring surface and neither of the other two sits on
+    /// it** (SP4d debt Task 15). An editor tag policy stores the tag NAME as a
+    /// plain string and nothing resolves it at authoring time, so: a mask
+    /// addressing a name no tag carries yet is legal, a table-level attachment
+    /// of some other tag is legal, and renaming that tag INTO the masked name
+    /// completes the pair having passed through neither guard. Measured end to
+    /// end through the real routes, down to what the Ranger plugin downloads,
+    /// in `egret-bi/tests/tag_rename_unreadable_pair.rs`.
+    ///
+    /// **Renaming OUT of a masked name stays allowed, and that is a ruling
+    /// rather than an omission.** The engine matches a tag policy on the name
+    /// too, so moving the name away genuinely removes the pair (Task 5's
+    /// concern 5, which judged that direction correctly). It is also the only
+    /// product remedy for a pair that already exists — one a `psql` writer or a
+    /// pre-guard installation left behind, and four such pairs exist on this
+    /// development host — so refusing it would trap the steward instead of
+    /// protecting them. The same reasoning 0166 records for `DELETE
+    /// …/resource-tags`: removing half the pair is the remedy, never the
+    /// hazard.
+    ///
+    /// The refusal reads the same sentence as the other two surfaces, naming
+    /// the NEW name, because that is the state the write would land on and the
+    /// string the steward just typed. A rename-specific prefix was considered
+    /// and left out: one sentence from every path is what stops the three
+    /// directions describing the same state differently.
+    Rename {
+        tag_id: Uuid,
+        /// The name the tag is being renamed TO.
+        new_name: &'a str,
+    },
 }
 
 /// How the caller's own table names a tag. `perm.rules.tag_key` references
@@ -251,6 +306,134 @@ pub enum TagWrite<'a> {
 pub enum TagRef<'a> {
     Key(&'a str),
     Name(&'a str),
+}
+
+/// How the two half-predicates below locate the tag: a `perm.rules` row names
+/// it by `tags.key`, a tag policy by `tags.name` (D6) — and a RENAME by id,
+/// because the name is the thing in flight and so identifies nothing.
+#[derive(Debug, Clone, Copy)]
+enum TagBy<'a> {
+    Key(&'a str),
+    Name(&'a str),
+    Id(Uuid),
+}
+
+impl<'a> From<TagRef<'a>> for TagBy<'a> {
+    fn from(t: TagRef<'a>) -> Self {
+        match t {
+            TagRef::Key(k) => TagBy::Key(k),
+            TagRef::Name(n) => TagBy::Name(n),
+        }
+    }
+}
+
+/// **THE ATTACHMENT HALF, spelled once.** Is this tag attached to a whole
+/// TABLE, and if so which one?
+///
+/// `column_name = ''` is migration 0081's table-level sentinel (which 0166
+/// deliberately keeps storable — the sentinel is legal, the PAIR is not), and
+/// **this is the one place that spelling appears**: the Mask arm asks the
+/// question by key or by name, the Rename arm asks it by id, and the three
+/// reach the same predicate rather than a copy of it. Task 5's own mutation M4
+/// caught a second spelling of "table-level" inside its first fix (commit
+/// `95c15014`), which is why this is a function and not three queries.
+///
+/// Returns `(tags.name, schema, table)`. Exactly one of the three bindings is
+/// non-NULL by construction of [`TagBy`]; the `IS NULL OR` shape is what lets
+/// one statement serve all three.
+async fn table_level_attachment_of(
+    conn: &mut sqlx::PgConnection,
+    tag: TagBy<'_>,
+) -> Result<Option<(String, String, String)>, sqlx::Error> {
+    let (key, name, id) = match tag {
+        TagBy::Key(k) => (Some(k), None, None),
+        TagBy::Name(n) => (None, Some(n), None),
+        TagBy::Id(i) => (None, None, Some(i)),
+    };
+    sqlx::query_as(
+        "SELECT t.name, a.schema_name, a.table_name \
+           FROM catalog_tag_assignments a \
+           JOIN tags t ON t.id = a.tag_id \
+          WHERE a.column_name = '' \
+            AND ($1::text IS NULL OR t.key = $1) \
+            AND ($2::text IS NULL OR t.name = $2) \
+            AND ($3::uuid IS NULL OR t.id = $3) \
+          ORDER BY a.schema_name, a.table_name \
+          LIMIT 1",
+    )
+    .bind(key)
+    .bind(name)
+    .bind(id)
+    .fetch_optional(conn)
+    .await
+}
+
+/// **THE MASK HALF, spelled once, both mask surfaces in one statement.** Does
+/// any tag-addressed MASK name this tag?
+///
+/// `rules_tag` is the tag id a `perm.rules` row could select, or **`None` when
+/// a `perm.rules` row cannot pair with the write being checked at all**. That
+/// is the rename case, and it is a ruling rather than an optimisation:
+/// `perm.rules.tag_key` references `tags.key` (migration 0154) and a rename
+/// writes `name` only, so a rename can neither create nor remove the
+/// rules-direction pair. Asking anyway would refuse the rename of a tag that is
+/// ALREADY in that pair — a steward with no way out, which is the opposite of a
+/// guard. A NULL `$1` matches no `perm.rules` row, which is exactly that and is
+/// deliberate, not incidental.
+///
+/// The `ORDER BY 1, 2` puts a `perm.rules` row ahead of an editor policy, which
+/// matters for the message rather than for the verdict: a rule's own compiled
+/// artifact IS one of the `policyType = 1` tag policies the second branch
+/// finds, and naming the RULE is what points the steward at the thing they can
+/// edit.
+async fn tag_mask_naming(
+    conn: &mut sqlx::PgConnection,
+    rules_tag: Option<Uuid>,
+    tag_name: &str,
+) -> Result<Option<(MaskOrigin, String)>, sqlx::Error> {
+    let row: Option<(i32, String)> = sqlx::query_as(
+        "SELECT 0 AS origin, r.name \
+           FROM perm.rules r \
+           JOIN tags t ON t.key = r.tag_key \
+          WHERE t.id = $1 \
+            AND r.selector_kind::text = 'tag' \
+            AND r.kind::text = 'mask' \
+         UNION ALL \
+         SELECT 1, p.name \
+           FROM policy.authz_policies p \
+           JOIN policy.authz_services s \
+             ON s.id = p.service_id AND s.type = 'tag' \
+          WHERE (p.policy_jsonb ->> 'policyType') = '1' \
+            AND (p.policy_jsonb -> 'resources' -> 'tag' -> 'values') \
+                @> to_jsonb($2::text) \
+          ORDER BY 1, 2 \
+          LIMIT 1",
+    )
+    .bind(rules_tag)
+    .bind(tag_name)
+    .fetch_optional(conn)
+    .await?;
+    Ok(row.map(|(origin, mask)| {
+        let origin = if origin == 0 {
+            MaskOrigin::Rule
+        } else {
+            MaskOrigin::Policy
+        };
+        (origin, mask)
+    }))
+}
+
+/// `tags.name` for an id — the string a tag POLICY addresses (D6). Read on the
+/// caller's own connection, so an attachment write checks against the state its
+/// own transaction will land on.
+async fn tag_name_of(
+    conn: &mut sqlx::PgConnection,
+    tag_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT name FROM tags WHERE id = $1")
+        .bind(tag_id)
+        .fetch_optional(conn)
+        .await
 }
 
 /// **The whole rule.** `Ok(Some(_))` means the write would complete the refused
@@ -272,36 +455,15 @@ pub async fn unreadable_table_mask_for(
     write: TagWrite<'_>,
 ) -> Result<Option<UnreadableTableMask>, sqlx::Error> {
     match write {
-        TagWrite::Mask { tag, origin, name } => {
-            let (key, tag_name) = match tag {
-                TagRef::Key(k) => (Some(k), None),
-                TagRef::Name(n) => (None, Some(n)),
-            };
-            // THE ATTACHMENT HALF. `column_name = ''` is migration 0081's
-            // table-level sentinel and 0166 deliberately keeps it storable; this
-            // is the one place that spelling appears.
-            let row: Option<(String, String, String)> = sqlx::query_as(
-                "SELECT t.name, a.schema_name, a.table_name \
-                   FROM catalog_tag_assignments a \
-                   JOIN tags t ON t.id = a.tag_id \
-                  WHERE a.column_name = '' \
-                    AND ($1::text IS NULL OR t.key = $1) \
-                    AND ($2::text IS NULL OR t.name = $2) \
-                  ORDER BY a.schema_name, a.table_name \
-                  LIMIT 1",
-            )
-            .bind(key)
-            .bind(tag_name)
-            .fetch_optional(&mut *conn)
-            .await?;
-            Ok(row.map(|(tag, schema, table)| UnreadableTableMask {
+        TagWrite::Mask { tag, origin, name } => Ok(table_level_attachment_of(conn, tag.into())
+            .await?
+            .map(|(tag, schema, table)| UnreadableTableMask {
                 mask_origin: origin,
                 mask: name.to_string(),
                 tag,
                 schema,
                 table,
-            }))
-        }
+            })),
         TagWrite::Attachment {
             tag_id,
             schema,
@@ -313,45 +475,48 @@ pub async fn unreadable_table_mask_for(
             if !column.is_empty() {
                 return Ok(None);
             }
-            // THE MASK HALF, both surfaces, in one statement. The `ORDER BY 1`
-            // puts a `perm.rules` row ahead of an editor policy, which matters
-            // for the message rather than for the verdict: a rule's own compiled
-            // artifact IS one of the `policyType = 1` tag policies this second
-            // branch finds, and naming the RULE is what points the steward at the
-            // thing they can edit.
-            let row: Option<(i32, String, String)> = sqlx::query_as(
-                "SELECT 0 AS origin, r.name, t.name \
-                   FROM perm.rules r \
-                   JOIN tags t ON t.key = r.tag_key \
-                  WHERE t.id = $1 \
-                    AND r.selector_kind::text = 'tag' \
-                    AND r.kind::text = 'mask' \
-                 UNION ALL \
-                 SELECT 1, p.name, t.name \
-                   FROM policy.authz_policies p \
-                   JOIN policy.authz_services s \
-                     ON s.id = p.service_id AND s.type = 'tag' \
-                   JOIN tags t ON t.id = $1 \
-                  WHERE (p.policy_jsonb ->> 'policyType') = '1' \
-                    AND (p.policy_jsonb -> 'resources' -> 'tag' -> 'values') \
-                        @> to_jsonb(t.name) \
-                  ORDER BY 1, 2 \
-                  LIMIT 1",
-            )
-            .bind(tag_id)
-            .fetch_optional(&mut *conn)
-            .await?;
-            Ok(row.map(|(origin, mask, tag)| UnreadableTableMask {
-                mask_origin: if origin == 0 {
-                    MaskOrigin::Rule
-                } else {
-                    MaskOrigin::Policy
-                },
-                mask,
-                tag,
-                schema: schema.to_string(),
-                table: table.to_string(),
-            }))
+            // The tag's own NAME is what an editor tag policy addresses. A tag
+            // id with no row pairs with nothing, and the `INSERT` this guard
+            // runs before would fail its foreign key anyway.
+            let Some(tag_name) = tag_name_of(&mut *conn, tag_id).await? else {
+                return Ok(None);
+            };
+            Ok(tag_mask_naming(conn, Some(tag_id), &tag_name)
+                .await?
+                .map(|(mask_origin, mask)| UnreadableTableMask {
+                    mask_origin,
+                    mask,
+                    tag: tag_name,
+                    schema: schema.to_string(),
+                    table: table.to_string(),
+                }))
+        }
+        TagWrite::Rename { tag_id, new_name } => {
+            // THE ATTACHMENT HALF, asked about the tag being renamed — the
+            // SAME predicate the Mask arm asks, located by id because the name
+            // is the thing in flight. A tag with no table-level attachment
+            // cannot be half of this pair whatever it is called.
+            let Some((_old_name, schema, table)) =
+                table_level_attachment_of(&mut *conn, TagBy::Id(tag_id)).await?
+            else {
+                return Ok(None);
+            };
+            // THE MASK HALF, asked about the name the tag is ABOUT to have —
+            // which is the whole difference between this arm and the other two.
+            // `None` for the rules side: see `tag_mask_naming`, and note that
+            // this is what keeps renaming a tag that is ALREADY in the
+            // rules-direction pair possible.
+            Ok(tag_mask_naming(conn, None, new_name)
+                .await?
+                .map(|(mask_origin, mask)| UnreadableTableMask {
+                    mask_origin,
+                    mask,
+                    // The NEW name: it is what the engine would match the
+                    // policy on the moment the rename commits.
+                    tag: new_name.to_string(),
+                    schema,
+                    table,
+                }))
         }
     }
 }

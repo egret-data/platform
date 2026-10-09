@@ -561,3 +561,226 @@ async fn a_table_level_attachment_of_another_tag_is_accepted() {
         "the guard is anchored on the tag being written, not on the table"
     );
 }
+
+// ── The RENAME arm: the third surface (SP4d debt Task 15) ───────────────────
+//
+// A rename writes NEITHER half. It moves `tags.name`, which is the column the
+// editor-policy half of the pair is joined on, so it can complete the pair from
+// the outside — confirmed end to end through the real routes, down to what the
+// Ranger plugin downloads, in `egret-bi/tests/tag_rename_unreadable_pair.rs`
+// before this arm existed. The route-level 400 lives with its route
+// (`PATCH /api/control-plane/tags/{id}` → `egret_bi::TagRepo::update`), because
+// a route handler's guard is not covered from here.
+
+/// **Renaming a table-attached tag INTO a masked name is refused.** The mask
+/// was authored against a name nothing carried; the attachment was authored for
+/// a tag nothing masked; the rename is what makes them the same tag.
+#[tokio::test]
+async fn renaming_a_table_attached_tag_into_a_masked_name_is_refused() {
+    let Some(db) = db().await else { return };
+    let store = PolicyStore::new(db.clone());
+    seed_tag(&store).await.expect("seed tag def");
+    let t = tag(&db.pool, "l").await;
+    attach(&db.pool, &t, "orders", "").await;
+    // The masked name belongs to NO tag — which is exactly why the editor
+    // accepted this policy, and why neither of Task 5's guards ran.
+    let masked_name = format!("UTM-N-renamed-{}", Uuid::new_v4().simple());
+    let pol = policy(&store, "tag", 1, &masked_name).await;
+
+    let mut conn = db.pool.acquire().await.expect("acquire");
+    let pair = unreadable_table_mask_for(
+        &mut conn,
+        TagWrite::Rename {
+            tag_id: t.id,
+            new_name: &masked_name,
+        },
+    )
+    .await
+    .expect("query")
+    .expect("the pair must be refused");
+
+    assert_eq!(pair.mask_origin, MaskOrigin::Policy);
+    assert_eq!(pair.mask, pol, "the refusal names the POLICY to edit");
+    assert_eq!(
+        pair.tag, masked_name,
+        "the refusal names the NEW name — the one the engine would match on, and the one \
+         the steward just typed; the old name is not part of the state being refused"
+    );
+    assert_eq!(
+        (pair.schema.as_str(), pair.table.as_str()),
+        ("sales", "orders"),
+        "and the table that would become unreadable"
+    );
+}
+
+/// **⚠ Renaming a table-attached tag OUT of a masked name is ACCEPTED, and this
+/// test is load-bearing.**
+///
+/// The fixture here is a pair that ALREADY EXISTS — the state four databases on
+/// this development host are in, left by `psql` or by a pre-guard installation.
+/// The engine matches a tag policy on the NAME, so moving the name away
+/// genuinely removes the pair (Task 5's concern 5, which judged this direction
+/// correctly and must not be undone), and it is the only product remedy for
+/// that state: a tag policy cannot be edited at all today
+/// (`PUT /policies/{id}` has no tag branch), so refusing the rename would leave
+/// the steward with nothing to do. If this test ever goes red, a steward
+/// somewhere is trapped.
+#[tokio::test]
+async fn renaming_a_table_attached_tag_out_of_a_masked_name_is_accepted() {
+    let Some(db) = db().await else { return };
+    let store = PolicyStore::new(db.clone());
+    seed_tag(&store).await.expect("seed tag def");
+    let t = tag(&db.pool, "m").await;
+    attach(&db.pool, &t, "orders", "").await;
+    policy(&store, "tag", 1, &t.name).await; // the pair, already in the database
+
+    let mut conn = db.pool.acquire().await.expect("acquire");
+    // Proof the fixture really holds the state this test guards — a test whose
+    // fixture cannot hold it is not a test.
+    assert!(
+        unreadable_table_mask_for(
+            &mut conn,
+            TagWrite::Attachment {
+                tag_id: t.id,
+                schema: "sales",
+                table: "orders",
+                column: "",
+            },
+        )
+        .await
+        .expect("query")
+        .is_some(),
+        "the fixture must BE the pair, or this test is measuring nothing"
+    );
+    let free_name = format!("UTM-N-escaped-{}", Uuid::new_v4().simple());
+    assert!(
+        unreadable_table_mask_for(
+            &mut conn,
+            TagWrite::Rename {
+                tag_id: t.id,
+                new_name: &free_name,
+            },
+        )
+        .await
+        .expect("query")
+        .is_none(),
+        "renaming OUT of the masked name is how the steward escapes the pair; refusing it \
+         would trap them with no remedy at all"
+    );
+}
+
+/// The rename accept-controls, each one character away from the refused shape
+/// and each a configuration somebody is using.
+#[tokio::test]
+async fn the_renames_that_cannot_create_the_pair_are_accepted() {
+    let Some(db) = db().await else { return };
+    let store = PolicyStore::new(db.clone());
+    seed_tag(&store).await.expect("seed tag def");
+    let mut conn = db.pool.acquire().await.expect("acquire");
+
+    // 1. The tag is attached to a COLUMN, not to the whole table — the ordinary
+    //    working configuration, and the remedy the refusal names.
+    let masked = format!("UTM-N-col-{}", Uuid::new_v4().simple());
+    let t = tag(&db.pool, "n").await;
+    attach(&db.pool, &t, "orders", "email").await;
+    policy(&store, "tag", 1, &masked).await;
+    assert!(
+        unreadable_table_mask_for(
+            &mut conn,
+            TagWrite::Rename {
+                tag_id: t.id,
+                new_name: &masked,
+            },
+        )
+        .await
+        .expect("query")
+        .is_none(),
+        "a column-attached tag may be renamed into a masked name: the mask then type-checks \
+         against that column alone, which is the whole point of the remedy"
+    );
+
+    // 2. Nothing masks the new name — the ordinary rename.
+    let t = tag(&db.pool, "o").await;
+    attach(&db.pool, &t, "orders", "").await;
+    assert!(
+        unreadable_table_mask_for(
+            &mut conn,
+            TagWrite::Rename {
+                tag_id: t.id,
+                new_name: &format!("UTM-N-plain-{}", Uuid::new_v4().simple()),
+            },
+        )
+        .await
+        .expect("query")
+        .is_none(),
+        "a rename into a name no mask addresses is just a rename"
+    );
+
+    // 3. The new name is addressed by a tag ACCESS policy (`policyType = 0`,
+    //    what a clearance compiles to) or a tag ROW FILTER policy
+    //    (`policyType = 2`). Neither type-checks against a column, and a
+    //    clearance on a table-level tag is SP4c's designed behaviour.
+    for policy_type in [0, 2] {
+        let t = tag(&db.pool, "p").await;
+        attach(&db.pool, &t, "orders", "").await;
+        let name = format!("UTM-N-pt{policy_type}-{}", Uuid::new_v4().simple());
+        policy(&store, "tag", policy_type, &name).await;
+        assert!(
+            unreadable_table_mask_for(
+                &mut conn,
+                TagWrite::Rename {
+                    tag_id: t.id,
+                    new_name: &name,
+                },
+            )
+            .await
+            .expect("query")
+            .is_none(),
+            "policyType {policy_type} is not a mask; refusing this rename would withdraw a \
+             working control (a clearance, for 0)"
+        );
+    }
+
+    // 4. **The rules-direction pair is name-blind, so a rename cannot create it
+    //    and must not be refused on account of it.** `perm.rules.tag_key`
+    //    references `tags.key`, which no rename touches: this tag is ALREADY in
+    //    the rules-direction pair, the rename leaves that pair exactly as it
+    //    was, and refusing it would be refusing a write that changes nothing
+    //    about the hazard — with the tag's own steward left no way to rename it.
+    let t = tag(&db.pool, "q").await;
+    attach(&db.pool, &t, "orders", "").await;
+    rule(&db.pool, &t, "mask", "tag").await;
+    // The fixture really is the rules-direction pair, measured from the
+    // attachment arm rather than assumed — otherwise this would be a green from
+    // a state that cannot exercise the behaviour.
+    assert!(
+        unreadable_table_mask_for(
+            &mut conn,
+            TagWrite::Attachment {
+                tag_id: t.id,
+                schema: "sales",
+                table: "orders",
+                column: "",
+            },
+        )
+        .await
+        .expect("query")
+        .is_some(),
+        "the fixture must BE the rules-direction pair, or case 4 measures nothing"
+    );
+    assert!(
+        unreadable_table_mask_for(
+            &mut conn,
+            TagWrite::Rename {
+                tag_id: t.id,
+                new_name: &format!("UTM-N-rules-{}", Uuid::new_v4().simple()),
+            },
+        )
+        .await
+        .expect("query")
+        .is_none(),
+        "a rename must not be refused because a `perm.rules` mask selects the tag by KEY — \
+         the rename cannot change that pair in either direction, and refusing it would leave \
+         the tag unrenameable forever"
+    );
+}

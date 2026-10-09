@@ -1925,6 +1925,156 @@ async fn who_can_access_lists_principals_and_gates() {
 
 // ---------- Tag catalog (Access P3.1) ----------
 
+/// **SP4d debt Task 15 at the route: `PATCH /api/control-plane/tags/{id}` is the
+/// third surface that can create the pair that makes a table unreadable, and it
+/// refuses with a 400 carrying both remedies.**
+///
+/// A tag-addressed MASK plus a TABLE-level attachment of the same tag makes the
+/// engine type-check that one mask against every column of the scanned table —
+/// `SELECT item`, `SELECT id` and even `count(*)` fail, measured live on Trino
+/// 470 (`egret_policy::unreadable_table_mask`). Task 5 guarded the two halves;
+/// a RENAME writes neither and completes the pair by moving the name they are
+/// joined on.
+///
+/// This test exists at the ROUTE because the repo-level refusal
+/// (`egret_bi::TagRepo::update`) is not the thing the Tags console sees: what it
+/// renders is `err.message` out of the HTTP body, so the two assertions that
+/// matter here are the STATUS (`BiError::BadRequest` → `CpError::BadRequest` →
+/// 400, not the 500 a raw error would give) and the remedies surviving into the
+/// body. The guard's own matrix is
+/// `egret-policy/tests/unreadable_table_mask_db.rs`, and the three-route
+/// sequence that confirmed the hole is
+/// `egret-bi/tests/tag_rename_unreadable_pair.rs`.
+#[tokio::test]
+async fn renaming_a_tag_into_a_masked_name_is_refused_at_the_route() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let manager = session_for(&f, "t15mgr", true).await;
+    let suffix = Uuid::new_v4().simple().to_string();
+
+    // The tag, created through the route, and attached to a WHOLE table. The
+    // attachment goes in by SQL because its own route lives in egret-bi (where
+    // Task 5's attachment-direction route test is); what this test drives is
+    // the rename.
+    let key = format!("t15-tag-{}", &suffix[..12]);
+    let (status, j) = into_json(
+        f.app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/tags",
+                &manager,
+                Some(serde_json::json!({ "key": key, "name": format!("PII-{suffix}") })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create tag; body={j}");
+    let tag_id: Uuid = j["id"].as_str().unwrap().parse().unwrap();
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments \
+             (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1, $2, 'sales', 'orders', '')",
+    )
+    .bind(tag_id)
+    .bind(Uuid::new_v4())
+    .execute(&f.db.pool)
+    .await
+    .expect("table-level attachment");
+
+    // The mask half: a hand-authored `policyType: 1` policy under a TAG
+    // service, addressing a name NO tag carries — which is why the policy
+    // editor accepted it and why neither of Task 5's guards ran.
+    let masked_name = format!("SENSITIVE-{suffix}");
+    let policy_name = format!("t15-mask-{suffix}");
+    sqlx::query(
+        "INSERT INTO policy.authz_service_defs (id, name, def_jsonb) \
+         VALUES ($1, $2, '{}'::jsonb) ON CONFLICT DO NOTHING",
+    )
+    .bind(900_000_000_i64 + (suffix.as_bytes()[0] as i64))
+    .bind("tag")
+    .execute(&f.db.pool)
+    .await
+    .expect("tag service def");
+    let svc: i64 = sqlx::query_scalar(
+        "INSERT INTO policy.authz_services (name, type, config_jsonb) \
+         VALUES ($1, 'tag', '{}'::jsonb) RETURNING id",
+    )
+    .bind(format!("t15-tagsvc-{suffix}"))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("tag service");
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb) \
+         VALUES ($1, $2, jsonb_build_object( \
+             'policyType', 1, 'serviceType', 'tag', \
+             'resources', jsonb_build_object('tag', \
+                 jsonb_build_object('values', jsonb_build_array($3::text)))))",
+    )
+    .bind(svc)
+    .bind(&policy_name)
+    .bind(&masked_name)
+    .execute(&f.db.pool)
+    .await
+    .expect("tag masking policy");
+
+    // The rename INTO the masked name → 400, both remedies in the body.
+    let (status, j) = into_json(
+        f.app
+            .clone()
+            .oneshot(req(
+                "PATCH",
+                &format!("/tags/{tag_id}"),
+                &manager,
+                Some(serde_json::json!({ "name": masked_name })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "renaming a table-attached tag into a masked name must be a 400, not a 500 and not a          silent 200; body={j}"
+    );
+    let msg = j["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("sales.orders") && msg.contains(&policy_name) && msg.contains(&masked_name),
+        "the refusal must name the table, the policy to edit and the tag; got {msg}"
+    );
+    assert!(
+        msg.contains("to the columns that need masking instead of to the table")
+            && msg.contains("by catalog/schema/table/column path instead of by tag"),
+        "the refusal must carry BOTH remedies into the HTTP body — the Tags console renders \
+         exactly this string; got {msg}"
+    );
+
+    // Nothing was committed, and the OTHER direction still works through the
+    // same route: renaming to a name nothing masks is how a steward escapes.
+    let (status, j) = into_json(
+        f.app
+            .clone()
+            .oneshot(req(
+                "PATCH",
+                &format!("/tags/{tag_id}"),
+                &manager,
+                Some(serde_json::json!({ "name": format!("BENIGN-{suffix}") })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a rename into an unmasked name must still be accepted; body={j}"
+    );
+    assert_eq!(j["name"], format!("BENIGN-{suffix}"), "body={j}");
+}
+
 /// `GET/POST/PATCH/DELETE /api/control-plane/tags`: `tag:read` gates the list,
 /// `tag:manage` gates every write. Proves the full CRUD lifecycle plus the two
 /// permission gates and the repo's duplicate-key `Conflict` → 409 mapping.

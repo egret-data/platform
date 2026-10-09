@@ -175,6 +175,7 @@ async fn create_tag(
     request_body = UpdateTag,
     responses(
         (status = 200, description = "Tag updated", body = TagDto),
+        (status = 400, description = "The new name is masked by a tag masking policy while this tag is attached to a whole TABLE (which would make that table unreadable rather than masked)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing tag:manage permission", body = ErrorBody),
         (status = 404, description = "No such tag", body = ErrorBody),
