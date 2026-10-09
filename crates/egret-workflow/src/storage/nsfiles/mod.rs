@@ -34,6 +34,11 @@ use std::sync::{Arc, OnceLock};
 use sqlx::postgres::PgConnectOptions;
 use uuid::Uuid;
 
+/// The start of an `Author` message that reports egret's own bug, not the
+/// author's (a wrong grant, a row egret would not have written): failed once,
+/// never re-claimed. The KV API answers it 500, not 400 (W9c re-review R2).
+pub const EGRET_BUG: &str = "internal error (an egret bug, not retried): ";
+
 /// Why a namespace-file operation failed. `Author` .. `TooLarge` are the
 /// author's (a failed task, a 4xx); `Store` and `Db` are infrastructure (a
 /// handler returns `Err`, a route answers 503), spec §11.

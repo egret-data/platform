@@ -87,7 +87,7 @@ use crate::storage::nsfiles::routes::{
     core_refusal, grant, no_store, upload_timed_out, upload_took_too_long, NsQuery,
 };
 use crate::storage::nsfiles::store::Want;
-use crate::storage::nsfiles::{CreatedBy, NsError};
+use crate::storage::nsfiles::{CreatedBy, NsError, EGRET_BUG};
 use crate::storage::FileStore;
 
 /// The audit resource type of every write here (plan item 14).
@@ -195,9 +195,15 @@ pub struct KvRevisionQuery {
 /// store's message sent as it is (w9c `api.headers.h_ttl_bad` and
 /// `api.routes.get_missing` compare it exactly, with no `invalid input: `
 /// or `not found: ` prefix), and a database failure logged with a fixed
-/// message that is all the client sees.
+/// message that is all the client sees. An `Author` message that reports
+/// egret's own bug ([`EGRET_BUG`]) is 500: the request was not wrong (W9c
+/// re-review R2).
 fn kv_refusal(e: NsError) -> Response {
     let (status, message) = match e {
+        NsError::Author(m) if m.starts_with(EGRET_BUG) => {
+            tracing::error!(error = %m, "a KV route hit an egret bug");
+            (StatusCode::INTERNAL_SERVER_ERROR, m)
+        }
         NsError::Author(m) => (StatusCode::BAD_REQUEST, m),
         NsError::NotFound(m) => (StatusCode::NOT_FOUND, m),
         NsError::Conflict(m) => (StatusCode::CONFLICT, m),
@@ -799,4 +805,24 @@ pub(crate) async fn delete_kv_values(
         }),
     );
     Ok(Json(KvKeysBody { keys: gone }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_egret_bug_is_500_and_an_authors_mistake_is_400() {
+        // Arrange
+        let bug = NsError::Author(format!("{EGRET_BUG}a revision past i32"));
+        let mistake = NsError::Author("the key 'a b' is not a valid key".into());
+
+        // Act
+        let bug = kv_refusal(bug).status();
+        let mistake = kv_refusal(mistake).status();
+
+        // Assert
+        assert_eq!(bug, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(mistake, StatusCode::BAD_REQUEST);
+    }
 }

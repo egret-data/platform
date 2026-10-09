@@ -83,7 +83,7 @@ use crate::storage::lock::{
 use crate::storage::nsfiles::access::{require, Access, Grant, Resource};
 use crate::storage::nsfiles::staging;
 use crate::storage::nsfiles::store::{writer, Want};
-use crate::storage::nsfiles::{CreatedBy, NsError};
+use crate::storage::nsfiles::{CreatedBy, NsError, EGRET_BUG};
 use crate::storage::FileStore;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -166,11 +166,9 @@ type Row = (
 /// have written, a revision past `i32`, a closed semaphore. Failed once,
 /// as [`wrong_grant`] fails (W9c final review F3): `NsError::Db` is what a
 /// task handler treats as an outage and re-claims forever, and no retry
-/// changes an egret bug. The API answers it 400, as it answers a wrong grant.
+/// changes an egret bug. The API answers it 500 (`EGRET_BUG`).
 fn internal(message: String) -> NsError {
-    NsError::Author(format!(
-        "internal error (an egret bug, not retried): {message}"
-    ))
+    NsError::Author(format!("{EGRET_BUG}{message}"))
 }
 
 /// A KV function handed a grant of the other resource, or a Read grant for a
@@ -178,7 +176,7 @@ fn internal(message: String) -> NsError {
 /// outage and re-claims forever; an `Author` error fails the task, loudly and
 /// once (W9b's `wrong_grant`).
 fn wrong_grant(e: egret_core::Error) -> NsError {
-    NsError::Author(format!("internal error (an egret bug, not retried): {e}"))
+    NsError::Author(format!("{EGRET_BUG}{e}"))
 }
 
 fn need(grant: &Grant, access: Access) -> Result<(), NsError> {
