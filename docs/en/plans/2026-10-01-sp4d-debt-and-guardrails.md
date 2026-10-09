@@ -473,6 +473,31 @@ possible, "edit the policy to address it by path" becomes a third and better one
 
 ---
 
+## Two corrections to this plan's own record (2026-10-10)
+
+**1. "Ranger defines no order between them" was never measured, and I repeated it as fact.** Two comments
+in `ranger_json.rs` carried that claim since SP4a, and my Task 6 brief restated it as "an artifact whose
+enforced outcome is **undefined**". The repo's own disassembly says otherwise:
+`PolicyEvalOrderComparator.compareNormal` (quoted at
+`docs/en/plans/2026-09-28-sp4c-d0b-starrocks-result.md:141` and in `differential.rs`) is a **total** order
+ending at the policy name, so **the engine is deterministic**. The defect is that the winner is decided by
+a rule's **uuid** rather than by anything a steward chose — not that it varies between queries.
+
+The guard Task 6 shipped is unaffected. **What would have been wrong is the sentence a steward reads**: a
+refusal saying "your filter may change between queries" would have been a false alarm. Anyone revisiting
+this should settle whether `compareNormal` runs past `getEvalOrder()` — upstream also ships a separate
+`PolicyNameComparator`, and if it stops earlier the tie falls to sort stability, i.e. the download's row
+order. Task 6 recorded both readings and chose a claim true under either.
+
+**2. The host's databases were cleaned between sessions, so three measurements no longer reproduce.** Task
+5 swept **44** databases and Task 13 swept **43**; on 2026-10-10 there are **8**, and **`egret_sp4d2b` is
+gone**. With it went the four deliberate instances of the unreadable-table pair that Task 5 left as a
+fixture of the real shape, and the reproducibility of Task 5's §3.
+
+Nothing is wrong with those tasks' conclusions — they were measured when taken. But **a sweep is a
+statement about a moment**, and this plan's pre-merge steps below inherit that: re-run them rather than
+citing the old counts.
+
 ## Pre-merge steps
 
 1. **Run migration 0166's own listing query** (`migrations/0166_…sql:124`) against any cluster that
