@@ -553,7 +553,9 @@ async fn the_pair_the_rename_would_create_is_the_shape_the_engine_downloads() {
     assert!(
         msg.contains("to the columns that need masking instead of to the table")
             && msg.contains("by catalog/schema/table/column path instead of by tag"),
-        "the refusal must carry BOTH remedies; got {msg}"
+        // Task 16 added a THIRD remedy to the shared sentence; the two asserted
+        // here are the ones a RENAME writer can act on.
+        "the refusal must carry both tag-side remedies; got {msg}"
     );
 
     // Nothing was written: the rename is refused on its own transaction before

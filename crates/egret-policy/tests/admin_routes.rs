@@ -1327,7 +1327,8 @@ async fn scoped_permission_policies_read_and_create() {
 /// the reachable half open.
 ///
 /// Four assertions, and the last two are what a DB-level test cannot make: the
-/// refusal is a 400, it carries both remedies, nothing was stored under the tag
+/// refusal is a 400, it carries all three remedies (Task 16 added the third),
+/// nothing was stored under the tag
 /// service, and the same policy authored as a tag ROW FILTER — which carries no
 /// column type check — is still accepted through the same route.
 #[tokio::test]
@@ -1410,10 +1411,16 @@ async fn a_tag_masking_policy_is_refused_when_its_tag_is_on_a_whole_table() {
         msg.contains("sales.orders") && msg.contains(&policy_name),
         "the refusal must name the table and the policy; got {msg}"
     );
+    // SP4d debt Task 16 changed this from BOTH to ALL THREE: `PUT
+    // /policies/{id}` now has a tag branch, so "edit the policy so it addresses
+    // the table by path" exists as a remedy and the shared `refusal()` names it.
+    // Before that branch the remedy for an editor-origin pair was
+    // delete-and-recreate, which is why the sentence had only two.
     assert!(
         msg.contains("to the columns that need masking instead of to the table")
-            && msg.contains("by catalog/schema/table/column path instead of by tag"),
-        "the refusal must carry BOTH remedies; got {msg}"
+            && msg.contains("by catalog/schema/table/column path instead of by tag")
+            && msg.contains("so it addresses sales.orders by path"),
+        "the refusal must carry all THREE remedies; got {msg}"
     );
     assert_eq!(
         f.store
@@ -1587,4 +1594,702 @@ async fn a_second_row_filter_on_one_table_is_refused_only_when_it_disagrees() {
     );
 
     f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+// ---------------------------------------------------------------------------
+// SP4d debt Task 9 — the same "silently inert" symptom on the LEGITIMATE type.
+// ---------------------------------------------------------------------------
+//
+// Task 2's guards test key PRESENCE, deliberately, to agree with migration
+// 0165's `->>`. So `{"tagService": ""}` was accepted, and a Trino profile with
+// no `tagService` at all was accepted too — and then the readers of that field
+// disagreed: the tag editor's write target fell back to `{profile}_tag` and
+// filed policies there, while `download_policies` read the field with no
+// fallback and shipped the download with NO `tagPolicies` block, so every one
+// of those policies was inert. These are route tests because a route handler's
+// guard is not covered by `--lib`.
+
+/// Step 4: the VALUE shape is refused at the profile write path, and the row is
+/// absent afterwards — a refusal that still inserted would be the same silence
+/// with a nicer log line.
+///
+/// ⚠ The accept-controls are in the same test. An empty, whitespace-only or
+/// non-string `tagService` is refused; a REAL tag profile name (what
+/// `bind_trino_profile` writes) and a profile with no `tagService` key at all
+/// are both still created. Without those, "refuses everything" would pass.
+#[tokio::test]
+async fn create_profile_refuses_a_tag_service_that_names_nothing() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t9_tsval", true).await;
+    egret_policy::seed_trino(&f.store)
+        .await
+        .expect("seed trino");
+    egret_policy::seed_tag(&f.store)
+        .await
+        .expect("seed tag def");
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tag_name = format!("t9ts-{suffix}");
+    let tag_svc = f
+        .store
+        .create_service(&tag_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("create tag service");
+
+    // Every shape that reads as "unset" through `as_str()` — which is how four
+    // of the five readers of this key read it — while `->>` renders it as text.
+    for (i, value) in [
+        serde_json::json!(""),
+        serde_json::json!("   "),
+        serde_json::json!(7),
+        serde_json::json!(true),
+        serde_json::json!(["x"]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let name = format!("t9bad{i}-{suffix}");
+        let (status, body) = into_json(
+            f.app_empty()
+                .oneshot(req(
+                    "POST",
+                    "/policies/services",
+                    &token,
+                    Some(serde_json::json!({
+                        "name": name, "type": "trino",
+                        "config": { "tagService": value.clone() },
+                    })),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a tagService of {value} names no profile and must be refused; body={body}"
+        );
+        let msg = body["error"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("tagService"),
+            "the 400 must name the key to fix; value={value} body={body}"
+        );
+        assert!(
+            msg.contains("tagPolicies"),
+            "the 400 must name the consequence (the download omits the block); \
+             value={value} body={body}"
+        );
+        assert!(
+            f.store.get_service(&name).await.is_err(),
+            "the refused profile must NOT have been inserted; value={value}"
+        );
+    }
+
+    // ACCEPT control 1: the shape `bind_trino_profile` writes.
+    let good = format!("t9good-{suffix}");
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies/services",
+                &token,
+                Some(serde_json::json!({
+                    "name": good, "type": "trino",
+                    "config": { "tagService": tag_name },
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a real name must create; body={body}"
+    );
+    let good_svc = f.store.get_service(&good).await.expect("created");
+
+    // ACCEPT control 2: no `tagService` key at all is the ordinary console
+    // profile (`createProfile(name, type)` sends no config) and must still work.
+    let bare = format!("t9bare-{suffix}");
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies/services",
+                &token,
+                Some(serde_json::json!({ "name": bare, "type": "trino" })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "no tagService key; body={body}");
+    let bare_svc = f.store.get_service(&bare).await.expect("created");
+
+    f.store.delete_service(good_svc.id).await.expect("cleanup");
+    f.store.delete_service(bare_svc.id).await.expect("cleanup");
+    f.store.delete_service(tag_svc.id).await.expect("cleanup");
+}
+
+/// Steps 2 + 3: the tag editor's WRITE target no longer falls back to
+/// `{profile}_tag`, so it cannot file a policy into a profile the plugin
+/// download does not serve.
+///
+/// The premise is the state `engines.rs:2595` documents as real — a stranded
+/// `{profile}_tag` row "left by a deleted same-name engine: reuse, never
+/// delete" — beside a profile whose `config` carries no link. Before Task 9
+/// this POST returned **200** and stored the policy in `p_tag`, while
+/// `download_policies` served the profile with no `tagPolicies` block at all.
+///
+/// ⚠ Three controls, because "refuses tag policies" would pass the first
+/// assertion on its own:
+/// 1. the SAME request against a profile whose `tagService` IS configured is
+///    accepted, and the policy is served in the download's `tagPolicies`;
+/// 2. `list_profiles` still offers `tag_service` for the fallback profile —
+///    that read-side fallback is pinned behaviour and checks existence first,
+///    so it cannot invent a write target; keeping it is what lets the Tags tab
+///    still LIST what is stranded there;
+/// 3. a STARROCKS profile with a stranded `{name}_tag` is refused too. A
+///    non-Trino profile can never carry a `tagService` (Task 2 + migration
+///    0165), so the removed fallback was also Task 2's hole on this surface.
+#[tokio::test]
+async fn a_tag_policy_is_refused_when_the_profile_configures_no_tag_service() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t9_nofb", true).await;
+    egret_policy::seed_trino(&f.store)
+        .await
+        .expect("seed trino");
+    egret_policy::seed_starrocks(&f.store)
+        .await
+        .expect("seed starrocks");
+    egret_policy::seed_tag(&f.store)
+        .await
+        .expect("seed tag def");
+
+    let suffix = Uuid::new_v4().simple().to_string();
+
+    // ── The premise: a profile with NO `tagService`, beside a stranded
+    // `{profile}_tag` row that the old fallback would have resolved to.
+    let unlinked = format!("t9unlinked-{suffix}");
+    let unlinked_svc = f
+        .store
+        .create_service(&unlinked, "trino", &serde_json::json!({}))
+        .await
+        .expect("create unlinked trino profile");
+    let stranded = f
+        .store
+        .create_service(&format!("{unlinked}_tag"), "tag", &serde_json::json!({}))
+        .await
+        .expect("create stranded tag service");
+
+    let body_for = |profile: &str, name: &str| {
+        serde_json::json!({
+            "kind": "tag-masking", "name": name, "service": profile,
+            "tag": "pii", "isEnabled": true,
+            "items": [{"groups": ["pii"], "maskType": "MASK_HASH"}]
+        })
+    };
+
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies",
+                &token,
+                Some(body_for(&unlinked, &format!("t9m-{suffix}"))),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a tag policy against a profile with no configured tagService must be refused, \
+         not filed into the stranded `{{profile}}_tag`; body={body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains(&unlinked) && msg.contains("tagService"),
+        "the 400 must name the profile and the missing link; got {msg}"
+    );
+    assert!(
+        msg.contains("tagPolicies"),
+        "the 400 must say WHY (the download would carry no tagPolicies block); got {msg}"
+    );
+    assert_eq!(
+        f.store
+            .enabled_policies_for_service(stranded.id)
+            .await
+            .expect("enabled policies")
+            .len(),
+        0,
+        "nothing may have been mis-filed into the stranded tag service"
+    );
+
+    // ── CONTROL 2: `list_profiles`' read-side fallback is UNCHANGED, so the
+    // Tags tab can still discover what is stranded. The two fallbacks are
+    // different things and only one of them was the defect.
+    let (status, profiles) = into_json(
+        f.app_empty()
+            .oneshot(req("GET", "/policies/services", &token, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "list profiles; body={profiles}");
+    let listed = profiles
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|p| p["id"] == serde_json::json!(unlinked_svc.id))
+        .unwrap_or_else(|| panic!("profile not listed; body={profiles}"));
+    assert_eq!(
+        listed["tag_service"],
+        serde_json::json!(format!("{unlinked}_tag")),
+        "the READ-side fallback stays: it checks existence, so it cannot invent a \
+         write target; body={profiles}"
+    );
+
+    // ── CONTROL 1: with the link configured, the same request is accepted and
+    // the policy really is in the download the tag plugin polls.
+    let linked_tag = format!("t9lt-{suffix}");
+    let linked_tag_svc = f
+        .store
+        .create_service(&linked_tag, "tag", &serde_json::json!({}))
+        .await
+        .expect("create tag service");
+    let linked = format!("t9linked-{suffix}");
+    let linked_svc = f
+        .store
+        .create_service(
+            &linked,
+            "trino",
+            &serde_json::json!({ "tagService": linked_tag }),
+        )
+        .await
+        .expect("create linked trino profile");
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies",
+                &token,
+                Some(body_for(&linked, &format!("t9ok-{suffix}"))),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a configured tagService must still accept the same policy; body={body}"
+    );
+    assert_eq!(
+        f.store
+            .enabled_policies_for_service(linked_tag_svc.id)
+            .await
+            .expect("enabled policies")
+            .len(),
+        1,
+        "the accepted policy is served under the CONFIGURED tag service"
+    );
+
+    // ── CONTROL 3: a StarRocks profile with a stranded `{name}_tag`. It can
+    // never carry a `tagService`, so the old fallback ALWAYS fired for one.
+    let sr = format!("t9sr-{suffix}");
+    let sr_svc = f
+        .store
+        .create_service(&sr, "starrocks", &serde_json::json!({}))
+        .await
+        .expect("create starrocks profile");
+    let sr_stranded = f
+        .store
+        .create_service(&format!("{sr}_tag"), "tag", &serde_json::json!({}))
+        .await
+        .expect("create stranded tag service");
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies",
+                &token,
+                Some(body_for(&sr, &format!("t9srm-{suffix}"))),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a tag policy aimed at a StarRocks profile must be refused; body={body}"
+    );
+    assert_eq!(
+        f.store
+            .enabled_policies_for_service(sr_stranded.id)
+            .await
+            .expect("enabled policies")
+            .len(),
+        0,
+        "nothing mis-filed under the StarRocks profile's stranded tag service"
+    );
+
+    f.store
+        .delete_service(sr_stranded.id)
+        .await
+        .expect("cleanup");
+    f.store.delete_service(sr_svc.id).await.expect("cleanup");
+    f.store
+        .delete_service(linked_svc.id)
+        .await
+        .expect("cleanup");
+    f.store
+        .delete_service(linked_tag_svc.id)
+        .await
+        .expect("cleanup");
+    f.store.delete_service(stranded.id).await.expect("cleanup");
+    f.store
+        .delete_service(unlinked_svc.id)
+        .await
+        .expect("cleanup");
+}
+
+// ---------------------------------------------------------------------------
+// SP4d debt Task 16 — a tag policy can now be EDITED, not only created and
+// deleted.
+// ---------------------------------------------------------------------------
+
+/// `PUT /policies/{id}` with a `tag-*` kind used to answer 400 "unknown policy
+/// kind: tag-masking", because the handler had no `is_tag_kind` branch. The UI
+/// reaches it: `PolicyEditorPage`'s `buildPayload` sends `{kind:"tag-masking",
+/// service:<trino profile>, tag}` and the Tags tab links every row through the
+/// main profile.
+///
+/// Asserts the round trip the editor actually performs, and the three things a
+/// "replaced it somehow" assertion would miss: the row stays under the TAG
+/// service (not the trino profile), the body keeps `serviceType:"tag"` and the
+/// single `tag` resource, and the new `isEnabled` is honoured.
+#[tokio::test]
+async fn a_tag_policy_can_be_edited_through_put_policies() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t16edit", true).await;
+    egret_policy::seed_trino(&f.store)
+        .await
+        .expect("seed trino");
+    egret_policy::seed_tag(&f.store)
+        .await
+        .expect("seed tag def");
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tag_name = format!("t16tag-{suffix}");
+    let tag_svc = f
+        .store
+        .create_service(&tag_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("create tag service");
+    let trino_name = format!("t16trino-{suffix}");
+    let trino_svc = f
+        .store
+        .create_service(
+            &trino_name,
+            "trino",
+            &serde_json::json!({ "tagService": tag_name }),
+        )
+        .await
+        .expect("create trino profile");
+
+    let policy_name = format!("t16-mask-{suffix}");
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies",
+                &token,
+                Some(serde_json::json!({
+                    "kind": "tag-masking", "name": policy_name, "service": trino_name,
+                    "tag": "pii", "isEnabled": true,
+                    "items": [{"groups": ["analysts"], "maskType": "MASK_HASH"}]
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create tag mask; body={body}");
+    let id = body["id"].as_i64().expect("id");
+
+    // The edit the editor sends: a different tag, a different mask type, a
+    // different principal, disabled.
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "PUT",
+                &format!("/policies/{id}"),
+                &token,
+                Some(serde_json::json!({
+                    "kind": "tag-masking", "name": policy_name, "service": trino_name,
+                    "tag": "phi", "isEnabled": false,
+                    "items": [{"groups": ["auditors"], "maskType": "MASK_NULL"}]
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a tag policy must be EDITABLE, not only creatable and deletable; body={body}"
+    );
+    assert_eq!(body["id"].as_i64(), Some(id), "same row; body={body}");
+
+    // It is still the tag service's row, still a tag body, and the edit landed.
+    let served = f
+        .store
+        .enabled_policies_for_service(tag_svc.id)
+        .await
+        .expect("enabled policies");
+    assert_eq!(
+        served.len(),
+        0,
+        "the edit set isEnabled:false, so the tag service serves nothing now"
+    );
+    let stored = f.store.get_policy(id).await.expect("get policy");
+    assert!(
+        !stored.enabled,
+        "the form's disabled toggle must be honoured"
+    );
+    assert_eq!(
+        stored.service_id, tag_svc.id,
+        "the row must still live under the TAG service, not the trino profile"
+    );
+    assert_eq!(stored.policy_jsonb["serviceType"], "tag");
+    assert_eq!(stored.policy_jsonb["service"], tag_name.as_str());
+    assert_eq!(
+        stored.policy_jsonb["resources"]["tag"]["values"][0], "phi",
+        "the new tag must be the one selector; body={}",
+        stored.policy_jsonb
+    );
+    assert_eq!(
+        stored.policy_jsonb["dataMaskPolicyItems"][0]["dataMaskInfo"]["dataMaskType"], "MASK_NULL",
+        "the new mask type must have replaced the old; body={}",
+        stored.policy_jsonb
+    );
+    assert_eq!(
+        stored.policy_jsonb["dataMaskPolicyItems"][0]["groups"][0], "auditors",
+        "the new principal must have replaced the old; body={}",
+        stored.policy_jsonb
+    );
+
+    f.store.delete_service(trino_svc.id).await.expect("cleanup");
+    f.store.delete_service(tag_svc.id).await.expect("cleanup");
+}
+
+/// The edit branch runs the SAME guards the create branch runs — Task 5's
+/// unreadable-table-mask refusal and Task 6's ambiguous-arbitration refusal —
+/// because an edit is an authoring surface. Before Task 16 this was vacuously
+/// true: there was no branch to guard.
+///
+/// ⚠ Both accept-controls are in this test, and the second is the one that
+/// matters most: re-PUTting a policy's OWN body must be accepted. Without
+/// `replacing: Some(id)` the arbitration guard pairs the new body against the
+/// stored version of itself and produces a refusal no retry can escape.
+#[tokio::test]
+async fn editing_a_tag_policy_runs_the_same_refusals_as_creating_one() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t16guard", true).await;
+    egret_policy::seed_trino(&f.store)
+        .await
+        .expect("seed trino");
+    egret_policy::seed_tag(&f.store)
+        .await
+        .expect("seed tag def");
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tag_svc_name = format!("t16gtag-{suffix}");
+    let tag_svc = f
+        .store
+        .create_service(&tag_svc_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("create tag service");
+    let trino_name = format!("t16gtrino-{suffix}");
+    let trino_svc = f
+        .store
+        .create_service(
+            &trino_name,
+            "trino",
+            &serde_json::json!({ "tagService": tag_svc_name }),
+        )
+        .await
+        .expect("create trino profile");
+
+    // A tag attached to a WHOLE TABLE — Task 5's half. The key and the name are
+    // different strings so a key/name confusion cannot read as a pass.
+    let table_tag_name = format!("T16-TBL-{suffix}");
+    let tag_id: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("t16-k-{suffix}"))
+            .bind(&table_tag_name)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("tag");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments \
+             (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1, $2, 'sales', 'orders', '')",
+    )
+    .bind(tag_id)
+    .bind(Uuid::new_v4())
+    .execute(&f.db.pool)
+    .await
+    .expect("table-level attachment");
+
+    // A mask on a tag nothing attaches — accepted, and the row we will edit.
+    let policy_name = format!("t16g-mask-{suffix}");
+    let create = serde_json::json!({
+        "kind": "tag-masking", "name": policy_name, "service": trino_name,
+        "tag": format!("t16-unattached-{suffix}"), "isEnabled": true,
+        "items": [{"groups": ["analysts"], "maskType": "MASK_HASH"}]
+    });
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req("POST", "/policies", &token, Some(create.clone())))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create tag mask; body={body}");
+    let id = body["id"].as_i64().expect("id");
+
+    // ── Task 5's guard, on the EDIT: repoint the mask at the table-level tag.
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "PUT",
+                &format!("/policies/{id}"),
+                &token,
+                Some(serde_json::json!({
+                    "kind": "tag-masking", "name": policy_name, "service": trino_name,
+                    "tag": table_tag_name, "isEnabled": true,
+                    "items": [{"groups": ["analysts"], "maskType": "MASK_HASH"}]
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an EDIT that creates the unreadable-table pair must be refused too; body={body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("sales.orders") && msg.contains(&policy_name),
+        "the refusal must name the table and the policy; got {msg}"
+    );
+    // Task 16's own change to that sentence: with editing possible, "edit the
+    // policy to address it by path" is a third and better remedy, and it comes
+    // from the ONE shared `refusal()` so every write path gained it together.
+    assert!(
+        msg.contains("so it addresses sales.orders by path"),
+        "the refusal must now name the edit-in-place remedy; got {msg}"
+    );
+    let stored = f.store.get_policy(id).await.expect("get policy");
+    assert_ne!(
+        stored.policy_jsonb["resources"]["tag"]["values"][0],
+        serde_json::json!(table_tag_name),
+        "a refused edit must have written nothing; body={}",
+        stored.policy_jsonb
+    );
+
+    // ── Task 6's guard, on the EDIT: a second mask on the same tag with
+    // different items. Create it on a DIFFERENT tag first (accepted), then edit
+    // it onto the first mask's tag.
+    let second_name = format!("t16g-mask2-{suffix}");
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies",
+                &token,
+                Some(serde_json::json!({
+                    "kind": "tag-masking", "name": second_name, "service": trino_name,
+                    "tag": format!("t16-other-{suffix}"), "isEnabled": true,
+                    "items": [{"groups": ["auditors"], "maskType": "MASK_NULL"}]
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "create second tag mask; body={body}"
+    );
+    let second_id = body["id"].as_i64().expect("id");
+
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "PUT",
+                &format!("/policies/{second_id}"),
+                &token,
+                Some(serde_json::json!({
+                    "kind": "tag-masking", "name": second_name, "service": trino_name,
+                    "tag": format!("t16-unattached-{suffix}"), "isEnabled": true,
+                    "items": [{"groups": ["auditors"], "maskType": "MASK_NULL"}]
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an EDIT onto a tag another mask already selects, with different items, must be \
+         refused; body={body}"
+    );
+
+    // ── ACCEPT control, and the one that proves `replacing: Some(id)` is
+    // wired: re-PUT the first policy's own body. Without the exclusion this is
+    // a refusal no retry could escape.
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "PUT",
+                &format!("/policies/{id}"),
+                &token,
+                Some(create.clone()),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "re-saving a tag policy's own body must be accepted — the arbitration guard must \
+         not pair it against the row it replaces; body={body}"
+    );
+
+    f.store.delete_service(trino_svc.id).await.expect("cleanup");
+    f.store.delete_service(tag_svc.id).await.expect("cleanup");
 }

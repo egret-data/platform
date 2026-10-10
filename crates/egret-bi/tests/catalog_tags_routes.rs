@@ -327,7 +327,7 @@ async fn resource_tag_assign_list_unassign_and_gating() {
 /// measurement).
 ///
 /// Four assertions per surface, and the last two are the ones a DB-level test
-/// cannot make: the refusal is a 400, the body carries both remedies verbatim
+/// cannot make: the refusal is a 400, the body carries the remedies verbatim
 /// (`CatalogTagEditor` renders `assign.error.message` straight into the page),
 /// nothing was stored, and a COLUMN-level assignment of the very same tag still
 /// succeeds — the remedy the message names, through the same route.
@@ -452,7 +452,9 @@ async fn a_table_level_assignment_is_refused_when_a_tag_mask_names_the_tag() {
         assert!(
             body.contains("to the columns that need masking instead of to the table")
                 && body.contains("by catalog/schema/table/column path instead of by tag"),
-            "the refusal must carry BOTH remedies; got {body}"
+            // Task 16 added a THIRD remedy to the shared sentence; this still asserts
+            // the two an ATTACHMENT writer can act on.
+            "the refusal must carry both attachment-side remedies; got {body}"
         );
 
         // Nothing was stored — the assertion a status-only test cannot make.

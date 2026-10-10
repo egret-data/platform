@@ -664,7 +664,14 @@ pub struct CreatedProfile {
 /// auto-bind, so a StarRocks profile can exist without an egret-provisioned
 /// engine.
 ///
-/// `config` is stored VERBATIM, which makes this the one reachable surface that
+/// `config` is stored VERBATIM except for two refusals — the type rule below,
+/// and SP4d debt Task 9's value-shape rule: a `tagService` whose value is not a
+/// non-empty string names no profile, and four of the five readers of that field
+/// go through `as_str()` while the fifth reads `->>`, so the shape produces four
+/// different behaviours. See `egret_policy::store`'s
+/// `refuse_unnameable_tag_service`.
+///
+/// This makes it the one reachable surface that
 /// could pair a non-Trino `type` with a `tagService` — a state in which every tag
 /// policy under the profile is silently inert, because the tag download writes the
 /// resource level `schema` and only Trino's service-def has one. `create_service`
@@ -678,7 +685,7 @@ pub struct CreatedProfile {
     request_body = CreateProfileBody,
     responses(
         (status = 200, description = "Profile created", body = CreatedProfile),
-        (status = 400, description = "Invalid type, missing name, or a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert)", body = ErrorBody),
+        (status = 400, description = "Invalid type, missing name, a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no policy profile, and the plugin download would carry no `tagPolicies` block)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
         (status = 409, description = "A profile with this name already exists", body = ErrorBody),
@@ -1019,9 +1026,45 @@ pub struct SeedResult {
 
 /// Resolve the tag service a tag policy is stored under and build its body.
 /// The editor form's `service` is the trino PROFILE; its tag service is that
-/// profile's `config.tagService` link, falling back to the `<profile>_tag`
-/// naming convention. Returns the tag `ServiceRow` + the serialized policy
-/// (body bound to the tag service, `serviceType:"tag"`).
+/// profile's `config.tagService` link. Returns the tag `ServiceRow` + the
+/// serialized policy (body bound to the tag service, `serviceType:"tag"`).
+///
+/// # SP4d debt Task 9: the `{profile}_tag` fallback is GONE from here
+///
+/// This used to fall back to the `<profile>_tag` naming convention when the
+/// profile carried no usable `tagService`. **Measured: that fallback had no
+/// correct-outcome population at all.** It fired exactly when
+/// `config.tagService` was absent, JSON `null`, a non-string, or empty — and in
+/// every one of those cases `download_policies` reads the same field with
+/// `as_str()` and **no fallback**, so it resolves `None` and ships the download
+/// with no `tagPolicies` block. The resource plugin therefore never consults the
+/// tag policies this path had just filed: every mask and row filter under them
+/// silently inert, which is Task 2's symptom on the SUPPORTED profile type.
+/// `egret_perm_compile::trigger::recompile_service` reads it the same way and
+/// skips with a warning, and `usable_tag_service`'s SQL join reads it the same
+/// way and makes `PUT /engines/{id}` refuse the bind. So the fallback's entire
+/// firing population was the mis-filing one, and nothing could rely on it for a
+/// served outcome.
+///
+/// Two further findings from that measurement:
+///
+/// * **It was also Task 2's hole on the editor-write side.** Nothing here checks
+///   that `profile` is a `trino` profile. A StarRocks profile can never carry a
+///   `tagService` (`refuse_tag_service_on_non_trino_profile` + migration 0165),
+///   so the fallback ALWAYS fired for one, and a stranded `{sr}_tag` row —
+///   `engines.rs`'s "left by a deleted same-name engine: reuse, never delete" —
+///   made the write succeed. Requiring the configured link closes that without a
+///   second type check: a non-Trino profile cannot have one.
+/// * **`list_profiles`' fallback is a different thing and stays.** It checks
+///   `names.contains(candidate)` before offering the name, so it cannot invent a
+///   write target; it is the Tags tab's discovery convenience for a stranded
+///   `{profile}_tag`, and `list_profiles_surfaces_tag_service` pins it. The
+///   consequence is that the Tags tab can still LIST policies already filed in a
+///   stranded tag profile while this refuses to write new ones there — read
+///   convenience kept, mis-filing closed. That the tab is offered at all for a
+///   profile whose download carries no `tagPolicies` is a remaining divergence,
+///   recorded in the Task 9/16 report rather than fixed here, because closing it
+///   means reversing that pinned assertion.
 async fn resolve_tag_service_and_body(
     st: &PolicyAdminState,
     v: &Value,
@@ -1035,13 +1078,30 @@ async fn resolve_tag_service_and_body(
             PolicyHttpError::BadRequest("tag policy requires a `service` (trino profile)".into())
         })?;
     let trino = st.store.get_service(profile).await?;
+    // Read the field exactly the way `download_policies`, `trigger.rs` and
+    // `usable_tag_service` read it — `as_str()`, and a value that names
+    // something — so a policy this path stores is one the plugin can be served.
+    // No fallback: see this function's doc comment for the measurement.
     let tag_service_name = trino
         .config_jsonb
         .get(egret_policy_api::TAG_SERVICE_CONFIG_KEY)
         .and_then(Value::as_str)
+        .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{profile}_tag"));
+        .ok_or_else(|| {
+            PolicyHttpError::BadRequest(format!(
+                "policy profile {profile:?} has no `tagService` configured, so a tag policy \
+                 authored against it could not be enforced: the plugin download reads that \
+                 field with no fallback, and would ship this profile's policies with no \
+                 `tagPolicies` block at all — every tag mask and row filter in it silently \
+                 inert. Nothing updates an existing profile's config, so the link has to be \
+                 there when the profile is created: creating an engine on it auto-binds a \
+                 `{profile}_tag` service and writes the link, or `POST \
+                 /api/control-plane/policies/services` accepts \
+                 `config.tagService` directly."
+            ))
+        })?
+        .to_string();
     let tag_svc = st.store.get_service(&tag_service_name).await?;
     let pol = tag_editor_to_ranger_json(v, &tag_svc.name).map_err(PolicyHttpError::BadRequest)?;
     Ok((tag_svc, pol))
@@ -1133,6 +1193,70 @@ async fn refuse_ambiguous_arbitration(
     Ok(())
 }
 
+/// **Every guard a TAG-policy authoring write runs, in one place — SP4d debt
+/// Task 16.**
+///
+/// Task 16's defect was that `PUT /policies/{id}` had no `is_tag_kind` branch at
+/// all, so an editor-authored tag mask could be created and deleted but never
+/// edited (`editor_to_ranger_json` answered `"unknown policy kind:
+/// tag-masking"`). Adding the branch means a second authoring surface for the
+/// same shapes, and the thing most likely to go wrong is that the two surfaces
+/// end up running different guards. So they run this, and the only argument that
+/// differs between them is `replacing`.
+///
+/// `replacing` is `None` for a create and `Some(id)` for an edit; it reaches
+/// [`refuse_ambiguous_arbitration`], which excludes that row from the comparison
+/// set — without it a `PUT` pairs the new body against the OLD version of
+/// itself and produces a refusal no retry can escape.
+///
+/// **Task 2's `tagService`-on-non-Trino refusal is reached by construction, not
+/// by a call from here.** That guard lives on the profile write
+/// (`create_service`, plus migration 0165's `CHECK`), and
+/// [`resolve_tag_service_and_body`] now requires a CONFIGURED `tagService` — a
+/// thing a non-Trino profile cannot have — so both authoring surfaces refuse a
+/// tag policy aimed at one before this function runs. Before Task 9 removed the
+/// `{profile}_tag` fallback that was NOT true: the fallback let a tag policy be
+/// filed under a StarRocks profile's stranded tag service.
+async fn guard_tag_policy_authoring(
+    st: &PolicyAdminState,
+    tag_service_id: i64,
+    replacing: Option<i64>,
+    pol: &RangerPolicy,
+) -> Result<(), PolicyHttpError> {
+    if pol.name.trim().is_empty() {
+        return Err(PolicyHttpError::BadRequest(
+            "policy name is required".into(),
+        ));
+    }
+    // **The editor's half of SP4d debt Task 5's one rule.** A tag MASKING
+    // policy whose tag is attached to a whole TABLE makes that table
+    // unreadable rather than masked — measured live on Trino 470 — and this
+    // is the second surface that can author that half, alongside
+    // `POST /api/control-plane/perm/rules`. `egret_bi`'s resource-tag write
+    // calls the SAME function from the attachment side; read
+    // `crate::unreadable_table_mask` for the measurement and for why there is
+    // no migration. Task 16 note: that module's write-path enumeration used to
+    // record `PUT /policies/{id}` as unable to reach this shape *because the
+    // tag branch did not exist*; it does now, and it is this call that keeps
+    // the ruling true.
+    for tag in tag_mask_addresses(&pol.body) {
+        if let Some(pair) = st
+            .store
+            .unreadable_table_mask_for_tag_mask(tag, &pol.name)
+            .await?
+        {
+            return Err(PolicyHttpError::BadRequest(pair.refusal()));
+        }
+    }
+    // SP4d debt Task 6: a tag-addressed MASK or ROW FILTER is the same class as
+    // a path-addressed one — `tag_masking_to_ranger_json` and
+    // `tag_rowfilter_to_ranger_json` delegate to the very builders the resource
+    // path uses and only retarget the selector, so the pair is reachable here
+    // too. Checked against the TAG service's own set, which is the download the
+    // tag plugin polls.
+    refuse_ambiguous_arbitration(st, tag_service_id, replacing, pol).await
+}
+
 /// Read the required `service` name from an editor policy body, or 400.
 fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
     v.get("service")
@@ -1157,7 +1281,7 @@ fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
     request_body = Object,
     responses(
         (status = 200, description = "Policy created", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input, missing policy name, a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter policy that would be served alongside another one selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)", body = ErrorBody),
+        (status = 400, description = "Invalid editor input, missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter policy that would be served alongside another one selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
@@ -1178,38 +1302,19 @@ async fn create_policy(
     // rowfilter path below is unchanged.
     if is_tag_kind(&v) {
         let (svc, pol) = resolve_tag_service_and_body(&st, &v).await?;
-        if pol.name.trim().is_empty() {
-            return Err(PolicyHttpError::BadRequest(
-                "policy name is required".into(),
-            ));
-        }
-        // **The editor's half of SP4d debt Task 5's one rule.** A tag MASKING
-        // policy whose tag is attached to a whole TABLE makes that table
-        // unreadable rather than masked — measured live on Trino 470 — and this
-        // route is the second surface that can author that half, alongside
-        // `POST /api/control-plane/perm/rules`. `egret_bi`'s resource-tag write
-        // calls the SAME function from the attachment side; read
-        // `crate::unreadable_table_mask` for the measurement, the full
-        // write-path enumeration (including why `PUT /policies/{id}` and
-        // `PUT /policies/{id}/enabled` cannot reach this shape) and why there is
-        // no migration.
-        for tag in tag_mask_addresses(&pol.body) {
-            if let Some(pair) = st
-                .store
-                .unreadable_table_mask_for_tag_mask(tag, &pol.name)
-                .await?
-            {
-                return Err(PolicyHttpError::BadRequest(pair.refusal()));
-            }
-        }
-        // SP4d debt Task 6: a tag-addressed MASK or ROW FILTER is the same
-        // class as a path-addressed one — `tag_masking_to_ranger_json` and
-        // `tag_rowfilter_to_ranger_json` delegate to the very builders the
-        // resource path uses and only retarget the selector, so the pair is
-        // reachable here too. Checked against the TAG service's own set
-        // (`svc.id` is the tag service on this branch), which is the download
-        // the tag plugin polls.
-        refuse_ambiguous_arbitration(&st, svc.id, None, &pol).await?;
+        // **SP4d debt Task 6's concern 5, taken here.** `store.create_policy`
+        // makes its refusals INSIDE its own transaction, i.e. after the editor
+        // guards below, so a steward adding a hand-written policy to a
+        // compiler-owned profile was told "this would be ambiguous" (400) when
+        // the operative fact is "this profile is compiled, edit its grants and
+        // rules" (409). `preflight_policy_insert` runs the SAME function in the
+        // SAME order on a pooled connection — not a second reading of `origin`,
+        // which is what Task 6 declined to write, and not a second ORDERING
+        // either: lifting `refuse_if_generated` alone inverted the ruling that
+        // a reserved NAME wins over a compiled PROFILE, and
+        // `generated_profile_guard` caught it.
+        st.store.preflight_policy_insert(svc.id, &pol.name).await?;
+        guard_tag_policy_authoring(&st, svc.id, None, &pol).await?;
         let id = st.store.create_policy(svc.id, &pol.name, &pol.body).await?;
         if !pol.is_enabled {
             st.store
@@ -1227,6 +1332,9 @@ async fn create_policy(
             "policy name is required".into(),
         ));
     }
+    // Task 6's concern 5 again, on the resource-addressed half — see the tag
+    // branch above for why the shared pre-flight and not a second `origin` read.
+    st.store.preflight_policy_insert(svc.id, &pol.name).await?;
     // SP4d debt Task 6, item 1 — the editor's half. See
     // `refuse_ambiguous_arbitration`.
     refuse_ambiguous_arbitration(&st, svc.id, None, &pol).await?;
@@ -1241,6 +1349,27 @@ async fn create_policy(
 }
 
 /// PUT /policies/{id} — replace a policy's body (any kind).
+///
+/// # SP4d debt Task 16: the tag branch
+///
+/// Until Task 16 this handler had no `is_tag_kind` branch, so a `tag-*` form
+/// reached `editor_to_ranger_json` and came back `"unknown policy kind:
+/// tag-masking"`. `create_policy` had the branch and `delete_policy_handler`
+/// needs none, so an editor-authored tag mask or tag row filter could be
+/// **created and deleted but never edited** — reachable straight from the UI,
+/// which sends `updatePolicy(id, {kind: "tag-masking", service: <trino
+/// profile>, …})` whenever the Tags tab's row link is followed
+/// (`frontend/src/routes/governance/PolicyEditorPage.tsx`, `buildPayload`).
+///
+/// That gap is why `crate::unreadable_table_mask`'s refusal named only two
+/// remedies: "edit the policy to address it by path" was not available, so the
+/// real remedy for an editor-origin pair was delete-and-recreate — a workflow
+/// nobody would write down. The branch and that third remedy land together.
+///
+/// Both authoring verbs run the same guards through
+/// [`guard_tag_policy_authoring`]; the one argument that differs is
+/// `replacing: Some(id)`, so the arbitration guard does not pair the new body
+/// against the row it is replacing.
 #[utoipa::path(
     put,
     path = "/api/control-plane/policies/{id}",
@@ -1249,7 +1378,7 @@ async fn create_policy(
     request_body = Object,
     responses(
         (status = 200, description = "Policy replaced", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input, missing policy name, or a mask/row-filter body that would be served alongside another policy selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)", body = ErrorBody),
+        (status = 400, description = "Invalid editor input, missing policy name, a tag policy whose profile has no configured `tagService`, a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter body that would be served alongside another policy selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
@@ -1264,6 +1393,27 @@ async fn update_policy(
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+
+    // SP4d debt Task 16 — mirrors `create_policy`'s branch. The form's
+    // `service` is the trino PROFILE (that is what the editor route carries and
+    // what the Tags tab links through), and the row itself lives under that
+    // profile's tag service, so the arbitration set is the tag service's own.
+    //
+    // `refuse_if_generated` is deliberately NOT lifted here, unlike on the
+    // create path: SP4a Task 8 fix round 2 (I-1) moved the EDIT/DELETE guard
+    // from profile scope to policy scope precisely because a profile-wide
+    // refusal on an edit built a one-way door. `store.update_policy`'s
+    // `refuse_if_compiler_owned` is the right guard and it runs inside the
+    // write transaction.
+    if is_tag_kind(&v) {
+        let (svc, pol) = resolve_tag_service_and_body(&st, &v).await?;
+        guard_tag_policy_authoring(&st, svc.id, Some(id), &pol).await?;
+        st.store
+            .update_policy(id, &pol.name, &pol.body, pol.is_enabled)
+            .await?;
+        return Ok(Json(json!({ "id": id })));
+    }
+
     let service_name = require_service(&v)?;
     // Resolve the target service's Ranger type (and validate it exists) so the
     // serialized body carries the correct `serviceType` (trino|starrocks).

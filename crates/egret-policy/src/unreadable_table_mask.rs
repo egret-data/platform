@@ -60,12 +60,24 @@
 //! * **The MASK half, via the policy editor.** `POST
 //!   /api/control-plane/policies` with `kind: "tag-masking"` →
 //!   `egret_policy::admin::create_policy`'s tag branch, which writes a
-//!   `policyType: 1` body under the profile's tag service. `PUT /policies/{id}`
-//!   cannot reach this shape (`editor_to_ranger_json` rejects every `tag-*`
-//!   kind with "unknown policy kind"), and `PUT /policies/{id}/enabled` cannot
-//!   either, because this guard ignores `isEnabled` — a tag mask that would
-//!   pair is refused at CREATE whether it is enabled or not, so there is never
-//!   a disabled one waiting to be switched on.
+//!   `policyType: 1` body under the profile's tag service.
+//!
+//!   **This entry's ruling CHANGED DIRECTION in SP4d debt Task 16, and the
+//!   change is recorded here rather than silently applied.** Task 5 wrote that
+//!   `PUT /policies/{id}` "cannot reach this shape (`editor_to_ranger_json`
+//!   rejects every `tag-*` kind with 'unknown policy kind')". That was true and
+//!   it was true *because of a defect*: the handler had no `is_tag_kind` branch,
+//!   so an editor-authored tag mask could be created and deleted but never
+//!   edited. Task 16 added the branch, so the `PUT` **can** reach the shape and
+//!   is guarded — through `guard_tag_policy_authoring`, the one function both
+//!   authoring verbs run. A write-path enumeration that rests on something being
+//!   unimplemented has to be re-ruled when it gets implemented; this is that
+//!   re-ruling.
+//!
+//!   `PUT /policies/{id}/enabled` still cannot reach it, for a reason that does
+//!   not depend on any missing branch: this guard ignores `isEnabled`, so a tag
+//!   mask that would pair is refused at authoring time whether it is enabled or
+//!   not, and there is never a disabled one waiting to be switched on.
 //! * **The ATTACHMENT half.** `PUT
 //!   /api/control-plane/warehouses/{id}/resource-tags` with `column` absent or
 //!   `""` → `egret_bi::CatalogTagRepo::assign_catalog`. That is the only
@@ -197,11 +209,30 @@ impl UnreadableTableMask {
     /// one message, so the two directions cannot describe the same state
     /// differently.
     ///
-    /// It leads with the REMEDY's subject and names both remedies: attach the
-    /// tag to the columns, or address the mask by path instead of by tag. The
-    /// consequence gets one clause, because a steward who is told only "this
-    /// is refused" files a bug, and one who is told only the mechanism still
-    /// does not know which box to change.
+    /// It leads with the REMEDY's subject and names the remedies: attach the tag
+    /// to the columns, address the mask by path instead of by tag, or — **added
+    /// in SP4d debt Task 16** — edit the existing policy so it addresses the
+    /// table by path. The consequence gets one clause, because a steward who is
+    /// told only "this is refused" files a bug, and one who is told only the
+    /// mechanism still does not know which box to change.
+    ///
+    /// # Why the third remedy was missing, and why it is the best one
+    ///
+    /// Task 5 named two remedies, and the omission was not an oversight about
+    /// wording: for an **editor-origin** mask the obvious third remedy did not
+    /// exist. `PUT /policies/{id}` had no `is_tag_kind` branch, so the only way
+    /// to change an existing tag mask was to DELETE and recreate it, and a
+    /// message that said so would have documented a defect as a workflow. Task
+    /// 16 added the branch; the sentence changes with it, in this ONE function,
+    /// so every write path's refusal gains the remedy together — a clause added
+    /// in a caller would have given the perm-model surface and the editor
+    /// surface two different accounts of the same state.
+    ///
+    /// It is the best remedy of the three for an existing pair because it is the
+    /// only one that changes nothing else: attaching the tag to columns instead
+    /// alters what every OTHER policy keyed on that tag selects, and renaming
+    /// the tag out of the masked name (the escape [`TagWrite::Rename`] keeps
+    /// open) moves every attachment of it at once.
     ///
     /// Surfaced verbatim by all three UIs, checked rather than assumed:
     /// `RuleDialog` renders `(e as ApiError).message` into `saveError` and
@@ -225,8 +256,9 @@ impl UnreadableTableMask {
              {mask:?} masks that same tag. The engine type-checks a tag-addressed mask against \
              EVERY column of the table being read, so together these make {schema}.{table} \
              unreadable rather than masked — selecting any column, and even count(*), fails. \
-             Attach {tag:?} to the columns that need masking instead of to the table, or address \
-             {mask:?} by catalog/schema/table/column path instead of by tag."
+             Attach {tag:?} to the columns that need masking instead of to the table, address \
+             {mask:?} by catalog/schema/table/column path instead of by tag, or edit {mask:?} \
+             so it addresses {schema}.{table} by path."
         )
     }
 }
@@ -279,13 +311,22 @@ pub enum TagWrite<'a> {
     /// **Renaming OUT of a masked name stays allowed, and that is a ruling
     /// rather than an omission.** The engine matches a tag policy on the name
     /// too, so moving the name away genuinely removes the pair (Task 5's
-    /// concern 5, which judged that direction correctly). It is also the only
-    /// product remedy for a pair that already exists — one a `psql` writer or a
-    /// pre-guard installation left behind, and four such pairs exist on this
-    /// development host — so refusing it would trap the steward instead of
-    /// protecting them. The same reasoning 0166 records for `DELETE
-    /// …/resource-tags`: removing half the pair is the remedy, never the
-    /// hazard.
+    /// concern 5, which judged that direction correctly). It is a product remedy
+    /// for a pair that already exists — one a `psql` writer or a pre-guard
+    /// installation left behind — so refusing it would trap the steward instead
+    /// of protecting them. The same reasoning 0166 records for `DELETE
+    /// …/resource-tags`: removing half the pair is the remedy, never the hazard.
+    ///
+    /// Task 5 called it the **only** product remedy, and **that is no longer
+    /// true**: SP4d debt Task 16 gave `PUT /policies/{id}` a tag branch, so an
+    /// editor-origin mask can now be edited to address its table by path —
+    /// which the refusal now names as its third remedy, and which is a better
+    /// one here because it touches one policy instead of every attachment of the
+    /// tag. The rename is still the only remedy for a pair whose mask half is
+    /// compiler-owned, where the editor cannot write at all. Task 5's "four such
+    /// pairs exist on this development host" is also no longer checkable: the
+    /// database holding them (`egret_sp4d2b`) was dropped between sessions — a
+    /// sweep is a statement about a moment.
     ///
     /// The refusal reads the same sentence as the other two surfaces, naming
     /// the NEW name, because that is the state the write would land on and the
@@ -525,15 +566,25 @@ pub async fn unreadable_table_mask_for(
 mod tests {
     use super::*;
 
-    /// The refusal must carry **both** remedies and the table, from either
+    /// The refusal must carry **all three** remedies and the table, from either
     /// direction — the steward needs to know which box to change, and there are
-    /// two boxes.
+    /// three boxes.
+    ///
+    /// **This assertion CHANGED DIRECTION in SP4d debt Task 16, deliberately,
+    /// and the change is stated here at the site.** It was
+    /// `the_refusal_names_the_table_and_both_remedies` and it asserted exactly
+    /// two remedies. The third ("edit the policy so it addresses the table by
+    /// path") did not exist as a remedy while `PUT /policies/{id}` had no
+    /// `is_tag_kind` branch — the only way to change an editor-authored tag mask
+    /// was delete-and-recreate. Task 16 added the branch, so a two-remedy
+    /// assertion would now be pinning a worse message as the desired one.
     ///
     /// Asserted by substring and not against a golden string: a golden copy of
     /// the sentence is a second place to edit it, and the thing that must not
-    /// regress is the presence of the two remedies, not the wording around them.
+    /// regress is the presence of the three remedies, not the wording around
+    /// them.
     #[test]
-    fn the_refusal_names_the_table_and_both_remedies() {
+    fn the_refusal_names_the_table_and_all_three_remedies() {
         for (origin, noun) in [
             (MaskOrigin::Rule, "mask rule"),
             (MaskOrigin::Policy, "tag masking policy"),
@@ -559,6 +610,12 @@ mod tests {
             assert!(
                 msg.contains("by catalog/schema/table/column path instead of by tag"),
                 "names the resource-addressed remedy: {msg}"
+            );
+            // Remedy 3 (Task 16): edit the mask that already exists, now that
+            // `PUT /policies/{id}` can edit a tag policy at all.
+            assert!(
+                msg.contains("so it addresses sales.orders by path"),
+                "names the edit-in-place remedy, and names the table in it: {msg}"
             );
         }
     }

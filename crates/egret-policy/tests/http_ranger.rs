@@ -193,3 +193,190 @@ async fn download_unknown_service_404() {
         .unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }
+
+/// A capturing `tracing::Subscriber`, so a test can assert that a handler
+/// SAID something — SP4d debt Task 9, step 3b.
+///
+/// `download_policies` used to resolve a dangling `tagService` with `if let
+/// Ok(tsvc)`, and the observable HTTP response of that swallow is IDENTICAL to
+/// the fixed code's: 200 with no `tagPolicies` block. So a test that asserts
+/// only the response cannot tell the fix from the defect, and restoring the
+/// swallow would leave it green. The thing that changed is that the omission is
+/// now AUDIBLE (and that a database error propagates instead of serving a
+/// mask-free download). The warning is the half a test can reach, so it is
+/// asserted; the DB-error arm is reachable only with a fault injector and is
+/// held by the `match` being exhaustive.
+///
+/// Hand-rolled on `tracing` alone rather than pulling in `tracing-subscriber`:
+/// the only thing needed is the event's fields as text.
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<std::sync::Mutex<Vec<String>>>);
+
+struct FieldText(String);
+
+impl tracing::field::Visit for FieldText {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.push_str(&format!(" {}={:?}", field.name(), value));
+    }
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.push_str(&format!(" {}={}", field.name(), value));
+    }
+}
+
+impl tracing::Subscriber for CapturedLogs {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut text = FieldText(String::new());
+        event.record(&mut text);
+        self.0
+            .lock()
+            .expect("log mutex")
+            .push(format!("{}{}", event.metadata().level(), text.0));
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// **SP4d debt Task 9, step 3b — the third mechanism.** `download_policies`
+/// resolved the profile's `tagService` with `if let Ok(tsvc)`, which collapsed
+/// "names no profile" and "the database read failed" into one unlogged omission
+/// of the `tagPolicies` block. The plugin then caches a complete-looking
+/// download in which every tag-addressed mask and row filter is simply absent.
+///
+/// This pins the two outcomes that are now distinguishable:
+/// * a dangling `tagService` still serves **200 with no `tagPolicies`** — a 404
+///   here would strip the plugin of its RESOURCE policies too — and the handler
+///   now logs a warning saying so, which is what `trigger.rs` already did for
+///   the same shape;
+/// * a resolvable one embeds the block, with the tag service's own def and its
+///   enabled policies.
+///
+/// The second half is the accept-control: "always omits the block" would pass
+/// the first assertion on its own, and omitting it is precisely the silent
+/// failure being fixed. The DB-error arm (now propagated instead of swallowed)
+/// is not reachable from here without a fault injector; it is the arm that
+/// changed from a FAIL-OPEN to a 500.
+#[tokio::test]
+async fn a_dangling_tag_service_omits_the_block_and_a_real_one_embeds_it() {
+    let Some(url) = egret_test_db::url().await else {
+        eprintln!("skip");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let store = PolicyStore::new(db);
+    seed_trino(&store).await.expect("seed trino");
+    egret_policy::seed_tag(&store).await.expect("seed tag def");
+    let app = ranger_router(RangerState {
+        store: store.clone(),
+        auth_token: Arc::from(TOKEN),
+    });
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+
+    // ── A `tagService` naming no policy profile at all.
+    let dangling = format!("t9dang_{suffix}");
+    let missing = format!("t9missing_{suffix}");
+    store
+        .create_service(&dangling, "trino", &json!({ "tagService": missing }))
+        .await
+        .expect("create profile with a dangling tagService");
+    let logs = CapturedLogs::default();
+    let log_guard = tracing::subscriber::set_default(logs.clone());
+    let r = app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/plugins/policies/download/{dangling}"),
+            Some(TOKEN),
+            None,
+        ))
+        .await
+        .unwrap();
+    drop(log_guard);
+    let captured = logs.0.lock().expect("log mutex").clone();
+    assert!(
+        captured.iter().any(|l| l.starts_with("WARN")
+            && l.contains("names no policy profile")
+            && l.contains(&missing)
+            && l.contains(&dangling)),
+        "the omission must be AUDIBLE — a WARN naming the profile and the tagService it \
+         could not resolve. This is the assertion the restored `if let Ok(_)` swallow \
+         fails, because the HTTP response is identical either way. captured={captured:#?}"
+    );
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "a dangling tagService must not fail the whole download — the plugin would lose \
+         its resource policies too"
+    );
+    let sp: Value =
+        serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(
+        sp.get("tagPolicies").is_none() || sp["tagPolicies"].is_null(),
+        "a dangling tagService carries no tagPolicies block: {sp}"
+    );
+    assert_eq!(
+        sp["serviceName"], dangling,
+        "the resource half is still served: {sp}"
+    );
+
+    // ── ACCEPT CONTROL: a resolvable `tagService` embeds the block, with the
+    // tag service's own def and its enabled policies.
+    let tag_name = format!("t9real_{suffix}_tag");
+    let tag_svc = store
+        .create_service(&tag_name, "tag", &json!({}))
+        .await
+        .expect("create tag service");
+    let linked = format!("t9real_{suffix}");
+    store
+        .create_service(&linked, "trino", &json!({ "tagService": tag_name }))
+        .await
+        .expect("create linked profile");
+    store
+        .create_policy(
+            tag_svc.id,
+            "tp1",
+            &json!({
+                "name": "tp1", "policyType": 1, "serviceType": "tag",
+                "service": tag_name,
+                "resources": {"tag": {"values": ["pii"], "isExcludes": false, "isRecursive": false}},
+                "dataMaskPolicyItems": [
+                    {"groups": ["analysts"], "accesses": [{"type": "select", "isAllowed": true}],
+                     "dataMaskInfo": {"dataMaskType": "MASK_HASH"}}
+                ]
+            }),
+        )
+        .await
+        .expect("create tag policy");
+
+    let r = app
+        .oneshot(req(
+            "GET",
+            &format!("/plugins/policies/download/{linked}"),
+            Some(TOKEN),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let sp: Value =
+        serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        sp["tagPolicies"]["serviceName"], tag_name,
+        "a resolvable tagService must embed the block: {sp}"
+    );
+    assert_eq!(sp["tagPolicies"]["serviceDef"]["name"], "tag", "{sp}");
+    assert_eq!(
+        sp["tagPolicies"]["policies"].as_array().map(Vec::len),
+        Some(1),
+        "the tag service's enabled policies must be in the block: {sp}"
+    );
+}

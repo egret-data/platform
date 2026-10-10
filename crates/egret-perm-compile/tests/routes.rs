@@ -5902,7 +5902,8 @@ async fn explain_reads_the_profile_through_the_download_routes_own_assembler() {
 /// the row back from one that stored it.
 ///
 /// Three assertions, and the third is the one a shape-only test cannot make:
-/// the refusal is a 400, the message carries BOTH remedies, and the rule is NOT
+/// the refusal is a 400, the message carries the two rule-side remedies (Task 16
+/// added a third, edit-the-policy one to the shared sentence), and the rule is NOT
 /// in `perm.rules` afterwards.
 ///
 /// The fixture's tag is ALREADY attached to `sales.orders.email` at column
