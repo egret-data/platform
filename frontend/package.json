@@ -11,6 +11,7 @@
     "test:bundle:xlsx": "node scripts/assert-xlsx-lazy.mjs",
     "test:bundle:csp": "node scripts/assert-csp-allows-entry.mjs",
     "test:bundle:monaco": "node scripts/assert-monaco-lazy.mjs",
+    "test:bundle:workflows": "node scripts/assert-workflows-lazy.mjs",
     "gen:api": "orval && node scripts/encode-path-params.mjs && node scripts/write-api-digest.mjs",
     "lint": "eslint . && node scripts/lint-legacy.mjs",
     "lint:legacy": "node scripts/lint-legacy.mjs",

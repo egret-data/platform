@@ -140,7 +140,7 @@ Routes are declared in `frontend/src/App.tsx`. A route is wrapped in the guard i
 
 #### FE-ROUTE-2 — New feature areas are lazy · MUST
 Every new feature area, starting with Workflow, is code-split with `React.lazy` and `Suspense`, with a skeleton fallback.
-**Do this:** example: `frontend/src/components/monaco/MonacoEditor.tsx` (`lazy` with a fallback). **Checked by:** test: a bundle test like `npm run test:bundle:monaco` (`frontend/scripts/assert-monaco-lazy.mjs`). No such test covers routes yet: W7, the first lazy area, adds it, modelled on `assert-monaco-lazy.mjs`.
+**Do this:** a route area: `workflows/*` in `frontend/src/App.tsx` (`lazy(() => import("@/routes/workflows/WorkflowsRoutes"))` under `Suspense` with a skeleton fallback); a component: `frontend/src/components/monaco/MonacoEditor.tsx`. **Checked by:** test: a bundle test per lazy area, `npm run test:bundle:workflows` (`frontend/scripts/assert-workflows-lazy.mjs`) for the Workflows routes and `npm run test:bundle:monaco` (`frontend/scripts/assert-monaco-lazy.mjs`) for Monaco.
 
 #### FE-ROUTE-3 — Kebab-case, workspace-scoped URLs · MUST
 URLs are kebab-case and workspace-scoped under `/explore/:workspace/…`.
@@ -226,7 +226,7 @@ Every frontend change passes, from `frontend/`:
 - `npx tsc -b`
 - `npm run test`
 - `npm run build`
-- the bundle tests the change touches (`npm run test:bundle`, `test:bundle:xlsx`, `test:bundle:csp`, `test:bundle:monaco`)
+- the bundle tests the change touches (`npm run test:bundle`, `test:bundle:xlsx`, `test:bundle:csp`, `test:bundle:monaco`, `test:bundle:workflows`)
 
 **Do this:** the scripts in `frontend/package.json`. **Checked by:** review: the reviewer confirms the gate ran.
 
@@ -313,7 +313,7 @@ Counted on 2026-10-10. These are **grep counts, not an inventory**: each is a ro
 | FE-STATE-2 | "Loading…" texts; spinners used for content (not counted) | (4) 28 lines |
 | FE-STATE-3 | hand-written "No X" empty texts, and dashed empty blocks | (5) 20 lines of the form `"No <word> yet\|found`; (6) 12 `border-dashed` lines |
 | FE-DATA-2 | the `cp` and `control-plane` key prefixes for one domain | (7) 30 `["cp"` lines; (8) 52 `["control-plane"` lines |
-| FE-ROUTE-2 | no route in `App.tsx` is lazy | (9) 0 `lazy(` in `App.tsx` |
+| FE-ROUTE-2 | only the Workflows area in `App.tsx` is lazy; the areas before it are eager | (9) 1 `lazy(` in `App.tsx` (Workflows, W7a) |
 | docs | `docs/vi/ui-conventions.md` has drifted from `docs/en/ui-conventions.md` | (10) 664 lines against 2,227 |
 
 ```bash

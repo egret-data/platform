@@ -142,7 +142,7 @@ Route được khai báo trong `frontend/src/App.tsx`. Mỗi route được bọ
 
 #### FE-ROUTE-2 — Khu vực tính năng mới được lazy-load · PHẢI
 Mọi khu vực tính năng mới, bắt đầu từ Workflow, được tách code bằng `React.lazy` và `Suspense`, với fallback là skeleton.
-**Làm thế này:** ví dụ: `frontend/src/components/monaco/MonacoEditor.tsx` (`lazy` có fallback). **Kiểm bằng:** test: một bundle test kiểu `npm run test:bundle:monaco` (`frontend/scripts/assert-monaco-lazy.mjs`). Hiện chưa có test nào như vậy cho route: W7, khu vực lazy đầu tiên, thêm nó, theo mẫu `assert-monaco-lazy.mjs`.
+**Làm thế này:** một khu vực route: `workflows/*` trong `frontend/src/App.tsx` (`lazy(() => import("@/routes/workflows/WorkflowsRoutes"))` dưới `Suspense` với fallback là skeleton); một component: `frontend/src/components/monaco/MonacoEditor.tsx`. **Kiểm bằng:** test: mỗi khu vực lazy một bundle test, `npm run test:bundle:workflows` (`frontend/scripts/assert-workflows-lazy.mjs`) cho các route Workflows và `npm run test:bundle:monaco` (`frontend/scripts/assert-monaco-lazy.mjs`) cho Monaco.
 
 #### FE-ROUTE-3 — URL kebab-case, thuộc workspace · PHẢI
 URL viết kebab-case và thuộc workspace, dưới `/explore/:workspace/…`.
@@ -228,7 +228,7 @@ Mọi thay đổi frontend qua được, chạy từ `frontend/`:
 - `npx tsc -b`
 - `npm run test`
 - `npm run build`
-- các bundle test mà thay đổi chạm tới (`npm run test:bundle`, `test:bundle:xlsx`, `test:bundle:csp`, `test:bundle:monaco`)
+- các bundle test mà thay đổi chạm tới (`npm run test:bundle`, `test:bundle:xlsx`, `test:bundle:csp`, `test:bundle:monaco`, `test:bundle:workflows`)
 
 **Làm thế này:** các script trong `frontend/package.json`. **Kiểm bằng:** review: reviewer xác nhận cổng kiểm đã chạy.
 
@@ -315,7 +315,7 @@ Mỗi dòng là một danh sách legacy trong `frontend/eslint-rules/legacy.js`:
 | FE-STATE-2 | chữ "Loading…"; spinner dùng cho nội dung (chưa đếm) | (4) 28 dòng |
 | FE-STATE-3 | chữ rỗng "No X" tự viết, và khối rỗng viền đứt | (5) 20 dòng dạng `"No <từ> yet\|found`; (6) 12 dòng `border-dashed` |
 | FE-DATA-2 | hai tiền tố key `cp` và `control-plane` cho cùng một domain | (7) 30 dòng `["cp"`; (8) 52 dòng `["control-plane"` |
-| FE-ROUTE-2 | không route nào trong `App.tsx` được lazy-load | (9) 0 `lazy(` trong `App.tsx` |
+| FE-ROUTE-2 | chỉ khu vực Workflows trong `App.tsx` được lazy-load; các khu vực có trước nó vẫn eager | (9) 1 `lazy(` trong `App.tsx` (Workflows, W7a) |
 | tài liệu | `docs/vi/ui-conventions.md` đã lệch so với `docs/en/ui-conventions.md` | (10) 664 dòng so với 2.227 |
 
 ```bash

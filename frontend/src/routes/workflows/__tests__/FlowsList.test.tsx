@@ -1,0 +1,312 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { TooltipProvider } from "@/components/ui/tooltip";
+
+// No msw in this repo: the page's two data sources are mocked at the module,
+// as `Endpoints.test.tsx` does.
+vi.mock("@/api/generated/workflow/workflow");
+vi.mock("@/api/members");
+
+import * as api from "@/api/generated/workflow/workflow";
+import * as members from "@/api/members";
+import type { FlowListItemDto } from "@/api/generated/model";
+import FlowsList, { nsCollapseKey } from "@/routes/workflows/FlowsList";
+
+const ALICE = "11111111-1111-1111-1111-111111111111";
+
+function flow(namespace: string, flow_id: string, over: Partial<FlowListItemDto> = {}): FlowListItemDto {
+  return {
+    id: `id-${namespace}-${flow_id}`,
+    namespace,
+    flow_id,
+    state: "draft",
+    created_by: ALICE,
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-02T00:00:00Z",
+    ...over,
+  };
+}
+
+/**
+ * UNSORTED on purpose (FE-TEST-1): a child namespace arrives before its
+ * parent, flows within a namespace arrive in reverse, and `companyx` shares
+ * `company`'s prefix without being inside it.
+ */
+const FLOWS: FlowListItemDto[] = [
+  flow("company.team", "sync", { state: "live" }),
+  flow("companyx", "other", { state: "disabled" }),
+  flow("company", "root-b"),
+  flow("company.team", "etl"),
+  flow("company", "root-a", { state: "live" }),
+];
+
+function mockList(over: Partial<{ data: unknown; isLoading: boolean; isError: boolean; error: unknown }> = {}) {
+  vi.mocked(api.useWorkflowListFlows).mockReturnValue({
+    data: undefined,
+    isLoading: false,
+    isError: false,
+    error: null,
+    ...over,
+  } as unknown as ReturnType<typeof api.useWorkflowListFlows>);
+}
+
+function mockFlows(flows: FlowListItemDto[]) {
+  mockList({ data: { status: 200, data: flows } });
+}
+
+/** Prints the router's current search string, so a test can read the URL. */
+function LocationProbe() {
+  const loc = useLocation();
+  return <output data-testid="search">{loc.search}</output>;
+}
+
+function renderAt(search = "") {
+  return render(
+    <TooltipProvider>
+      <MemoryRouter initialEntries={[`/explore/eng/workflows/flows${search}`]}>
+        <Routes>
+          <Route
+            path="/explore/:workspace/workflows/flows"
+            element={
+              <>
+                <FlowsList />
+                <LocationProbe />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    </TooltipProvider>,
+  );
+}
+
+function searchParams(): URLSearchParams {
+  return new URLSearchParams(screen.getByTestId("search").textContent ?? "");
+}
+
+/** The flow ids on screen, top to bottom, as their links read. */
+function flowLinks(): string[] {
+  return within(screen.getByRole("table"))
+    .queryAllByRole("link")
+    .map((a) => a.textContent ?? "");
+}
+
+/** The namespace header rows on screen, top to bottom. */
+function headers(): string[] {
+  return screen.queryAllByRole("rowheader").map((h) => within(h).getByRole("button").getAttribute("aria-label") ?? "");
+}
+
+beforeEach(() => {
+  localStorage.clear();
+  vi.mocked(members.useWorkspaceMembers).mockReturnValue({
+    data: [{ principal_type: "user", principal_id: ALICE, principal_name: "alice@example.com" }],
+  } as unknown as ReturnType<typeof members.useWorkspaceMembers>);
+});
+
+afterEach(() => vi.clearAllMocks());
+
+describe("FlowsList — the three states", () => {
+  it("shows a skeleton while loading", () => {
+    mockList({ isLoading: true });
+    renderAt();
+    expect(screen.getByTestId("list-skeleton")).toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  it("shows the error, never the empty state, when the list fails", () => {
+    mockList({ isError: true, error: new Error("upstream said no") });
+    renderAt();
+    expect(screen.getByRole("alert")).toHaveTextContent("upstream said no");
+    expect(screen.queryByText("No flows yet")).not.toBeInTheDocument();
+  });
+
+  it("falls back to its own words when the error carries none", () => {
+    mockList({ isError: true, error: new Error("") });
+    renderAt();
+    expect(screen.getByRole("alert")).toHaveTextContent(/flows could not be loaded/i);
+  });
+
+  it("shows EmptyState with New flow for an empty workspace", () => {
+    mockFlows([]);
+    renderAt();
+    const empty = screen.getByText("No flows yet").parentElement as HTMLElement;
+    expect(within(empty).getByRole("link", { name: "New flow" })).toHaveAttribute(
+      "href",
+      "/explore/eng/workflows/flows/new",
+    );
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  it("says a filter matched nothing, and clears it on request, instead of the empty state", async () => {
+    const user = userEvent.setup();
+    mockFlows(FLOWS);
+    renderAt("?q=nothing-is-called-this");
+    expect(screen.getByText("No flows match the current filters.")).toBeInTheDocument();
+    expect(screen.queryByText("No flows yet")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(searchParams().has("q")).toBe(false);
+    expect(flowLinks()).toHaveLength(FLOWS.length);
+  });
+
+  it("puts New flow in the header, as a link to the create page", () => {
+    mockFlows(FLOWS);
+    renderAt();
+    expect(screen.getByRole("heading", { level: 1, name: "Flows" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "New flow" })).toHaveAttribute("href", "/explore/eng/workflows/flows/new");
+  });
+});
+
+describe("FlowsList — the namespace tree", () => {
+  it("groups rows under the tree: a namespace's own flows, then its children, siblings sorted", () => {
+    mockFlows(FLOWS);
+    renderAt();
+    expect(headers()).toEqual(["company (4)", "company.team (2)", "companyx (1)"]);
+    expect(flowLinks()).toEqual(["root-a", "root-b", "etl", "sync", "other"]);
+  });
+
+  it("links each flow to its editor", () => {
+    mockFlows(FLOWS);
+    renderAt();
+    expect(screen.getByRole("link", { name: "etl" })).toHaveAttribute(
+      "href",
+      "/explore/eng/workflows/flows/id-company.team-etl/edit",
+    );
+  });
+
+  it("shows each flow's state chip, its creator by name, and never its folder", () => {
+    mockFlows([flow("a", "one", { state: "live", folder_id: "folder-secret" })]);
+    renderAt();
+    const row = screen.getByRole("link", { name: "one" }).closest("tr") as HTMLElement;
+    expect(within(row).getByText("Live")).toBeInTheDocument();
+    expect(within(row).getByText("alice@example.com")).toBeInTheDocument();
+    expect(screen.queryByText(/folder-secret/)).not.toBeInTheDocument();
+  });
+
+  it("falls back to a short id for a creator it cannot name", () => {
+    mockFlows([flow("a", "one", { created_by: "99999999-0000-0000-0000-000000000000" })]);
+    renderAt();
+    expect(screen.getByText("99999999")).toBeInTheDocument();
+  });
+
+  it("collapsing a namespace hides its own flows AND everything beneath it", async () => {
+    const user = userEvent.setup();
+    mockFlows(FLOWS);
+    renderAt();
+    const toggle = screen.getByRole("button", { name: "company (4)" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    await user.click(toggle);
+
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(headers()).toEqual(["company (4)", "companyx (1)"]);
+    expect(flowLinks()).toEqual(["other"]);
+  });
+
+  it("toggles from the keyboard", async () => {
+    const user = userEvent.setup();
+    mockFlows(FLOWS);
+    renderAt();
+    const toggle = screen.getByRole("button", { name: "company.team (2)" });
+    toggle.focus();
+    await user.keyboard("{Enter}");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(flowLinks()).toEqual(["root-a", "root-b", "other"]);
+    await user.keyboard(" ");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(flowLinks()).toEqual(["root-a", "root-b", "etl", "sync", "other"]);
+  });
+
+  it("remembers what the viewer collapsed, per workspace, across a remount", async () => {
+    const user = userEvent.setup();
+    mockFlows(FLOWS);
+    const first = renderAt();
+    await user.click(screen.getByRole("button", { name: "company.team (2)" }));
+    first.unmount();
+
+    renderAt();
+    expect(screen.getByRole("button", { name: "company.team (2)" })).toHaveAttribute("aria-expanded", "false");
+    // The key the page wrote is the key the page exports, under this workspace.
+    expect(JSON.parse(localStorage.getItem(nsCollapseKey("eng")) ?? "[]")).toEqual(["company.team"]);
+  });
+
+  it("still renders when localStorage throws", () => {
+    const spy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("denied");
+    });
+    mockFlows(FLOWS);
+    renderAt();
+    expect(flowLinks()).toHaveLength(FLOWS.length);
+    spy.mockRestore();
+  });
+});
+
+describe("FlowsList — filters live in the URL", () => {
+  it("writes the search to the URL as it is typed", async () => {
+    const user = userEvent.setup();
+    mockFlows(FLOWS);
+    renderAt();
+    await user.type(screen.getByLabelText("Search flows"), "et");
+    expect(searchParams().get("q")).toBe("et");
+    // `etl` by its id; nothing else contains "et".
+    expect(flowLinks()).toEqual(["etl"]);
+  });
+
+  it("searches the namespace too, not only the flow id", async () => {
+    const user = userEvent.setup();
+    mockFlows(FLOWS);
+    renderAt();
+    await user.type(screen.getByLabelText("Search flows"), "companyx");
+    expect(flowLinks()).toEqual(["other"]);
+  });
+
+  it("writes the namespace and state pickers to the URL, and a reload reads all three back", async () => {
+    const user = userEvent.setup();
+    mockFlows(FLOWS);
+    const first = renderAt();
+
+    await user.click(screen.getByLabelText("Namespace"));
+    await user.click(await screen.findByRole("option", { name: "company" }));
+    await user.click(screen.getByLabelText("State"));
+    await user.click(await screen.findByRole("option", { name: "Live" }));
+    await user.type(screen.getByLabelText("Search flows"), "s");
+
+    const written = searchParams();
+    expect(written.get("namespace")).toBe("company");
+    expect(written.get("state")).toBe("live");
+    expect(written.get("q")).toBe("s");
+    first.unmount();
+
+    // The reload: a fresh mount from nothing but the URL that was written.
+    renderAt(`?${written.toString()}`);
+    expect(screen.getByLabelText("Search flows")).toHaveValue("s");
+    expect(screen.getByLabelText("Namespace")).toHaveTextContent("company");
+    expect(screen.getByLabelText("State")).toHaveTextContent("Live");
+    // live, inside company's subtree, matching "s": only `sync`.
+    expect(flowLinks()).toEqual(["sync"]);
+  });
+
+  it("filters a namespace to its whole subtree and not to a sibling sharing its prefix", () => {
+    mockFlows(FLOWS);
+    renderAt("?namespace=company");
+    expect(flowLinks()).toEqual(["root-a", "root-b", "etl", "sync"]);
+  });
+
+  it("filters by state", () => {
+    mockFlows(FLOWS);
+    renderAt("?state=disabled");
+    expect(flowLinks()).toEqual(["other"]);
+  });
+
+  it("counts what the filters leave, in total and by state", () => {
+    mockFlows(FLOWS);
+    renderAt("?namespace=company");
+    const strip = screen.getByTestId("flows-summary");
+    expect(strip).toHaveTextContent("4flows");
+    expect(strip).toHaveTextContent("2live");
+    expect(strip).toHaveTextContent("2draft");
+    expect(strip).toHaveTextContent("0disabled");
+  });
+});

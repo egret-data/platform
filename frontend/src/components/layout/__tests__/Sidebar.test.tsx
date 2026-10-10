@@ -11,7 +11,7 @@
  *   - QueryClientProvider (useWorkspaceFeatures reads useMyWorkspaces)
  *   - collapsed: boolean + onToggle: () => void props
  */
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -72,8 +72,8 @@ describe("Sidebar – workspace zones", () => {
     expect(screen.getByText("Data API")).toBeInTheDocument();
     expect(screen.getByText("Manage")).toBeInTheDocument();
     // Automate and Data Engineering each held exactly one placeholder item
-    // (Workflows, Pipelines). Both items are gone in W0; the real Workflows
-    // group lands in W7, so neither heading should exist in between.
+    // (Workflows, Pipelines). Both were removed in W0, and Workflows came back
+    // in W7a as its own group (tested below), not under either old heading.
     expect(screen.queryByText("Automate")).not.toBeInTheDocument();
     expect(screen.queryByText("Data Engineering")).not.toBeInTheDocument();
     expect(screen.queryByText("Data Governance")).not.toBeInTheDocument();
@@ -101,7 +101,8 @@ describe("Sidebar – workspace zones", () => {
       "href",
       "/explore/eng/settings/members",
     );
-    // W0 removed both placeholders; nothing should link to them.
+    // Workflows is a GROUP (Flows/Executions), like Data API, so there is no
+    // "Workflows" link; Pipelines was a W0 placeholder and stays gone.
     expect(screen.queryByRole("link", { name: "Workflows" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Pipelines" })).not.toBeInTheDocument();
   });
@@ -468,6 +469,51 @@ describe("Sidebar – permission-based filtering", () => {
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
+  });
+});
+
+describe("Sidebar – Workflows group", () => {
+  const wsResponse = (features: string[]) =>
+    Promise.resolve(
+      new Response(
+        JSON.stringify([{ id: "1", slug: "eng", name: "Engineering", features }]),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+  test("shows Workflows with Flows and Executions when the workspace has workflows", async () => {
+    renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () => wsResponse(["sql_lab", "workflows"]));
+    // Wait on Datasets DISAPPEARING: the optimistic loading state already shows
+    // every group, so waiting on Workflows appearing would prove nothing.
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Datasets" })).not.toBeInTheDocument());
+    const heading = screen.getByRole("button", { name: /^Workflows$/i });
+    const group = heading.parentElement as HTMLElement;
+    expect(within(group).getByRole("link", { name: "Flows" })).toHaveAttribute(
+      "href",
+      "/explore/eng/workflows/flows",
+    );
+    expect(within(group).getByRole("link", { name: "Executions" })).toHaveAttribute(
+      "href",
+      "/explore/eng/workflows/executions",
+    );
+  });
+
+  test("hides the whole Workflows group when the workspace lacks workflows", async () => {
+    renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () => wsResponse(["sql_lab", "data_api"]));
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Flows" })).not.toBeInTheDocument());
+    expect(screen.queryByRole("link", { name: "Executions" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Workflows")).not.toBeInTheDocument();
+    // Unaffected groups still render.
+    expect(screen.getByRole("link", { name: "Endpoints" })).toBeInTheDocument();
+  });
+
+  test("Workflows sits after Data API and before Manage", () => {
+    renderSidebar("/explore/eng/sql-lab");
+    const dataApi = screen.getByRole("button", { name: /^Data API$/i });
+    const workflows = screen.getByRole("button", { name: /^Workflows$/i });
+    const manage = screen.getByRole("button", { name: /^Manage$/i });
+    expect(dataApi.compareDocumentPosition(workflows) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(workflows.compareDocumentPosition(manage) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
 
