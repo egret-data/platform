@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { MigrationRecord } from './migrationRecord';
 import type { ProposedObjects } from './proposedObjects';
 
 /**
@@ -24,4 +25,5 @@ export interface ClassifiedPolicy {
      */
   blockers: string[];
   proposed?: null | ProposedObjects;
+  migrated?: null | MigrationRecord;
 }
