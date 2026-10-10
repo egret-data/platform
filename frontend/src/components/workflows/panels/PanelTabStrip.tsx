@@ -25,17 +25,7 @@ import {
 } from "@/components/workflows/panels/layout";
 import type { TabDefinition } from "@/components/workflows/panels/registry";
 import { cn } from "@/lib/utils";
-
-/** What a drop target says it is, read back in `MultiPanel`'s `onDragEnd`. */
-export type DropData =
-  | { kind: "tab"; panel: string; tab: TabId }
-  | { kind: "strip"; panel: string }
-  | { kind: "edge"; panel: string; side: "left" | "right" };
-
-/** What a dragged tab says it is. */
-export type DragData = { tab: TabId };
-
-export const dragId = (tab: TabId) => `tab:${tab}`;
+import { dragId, type DragData, type DropData } from "@/components/workflows/panels/dnd";
 
 /** A tab's title, or its id when nothing registered it (a layout is normalised before it gets here). */
 export function tabTitle(defs: Map<TabId, TabDefinition<never>>, tab: TabId): string {

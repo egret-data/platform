@@ -6,14 +6,11 @@ import {
   DragOverlay,
   KeyboardSensor,
   PointerSensor,
-  closestCenter,
-  pointerWithin,
   useDndContext,
   useDroppable,
   useSensor,
   useSensors,
   type Announcements,
-  type CollisionDetection,
   type DragEndEvent,
   type DragStartEvent,
   type Over,
@@ -27,30 +24,15 @@ import {
   type TabId,
 } from "@/components/workflows/panels/layout";
 import {
-  PanelTabStrip,
-  tabTitle,
+  collisions,
+  dropIndex,
+  jumpBetweenTargets,
   type DragData,
   type DropData,
-} from "@/components/workflows/panels/PanelTabStrip";
-import { getTabs, type TabDefinition } from "@/components/workflows/panels/registry";
+} from "@/components/workflows/panels/dnd";
+import { PanelTabStrip, tabTitle } from "@/components/workflows/panels/PanelTabStrip";
+import { getTabs, useTabsVersion, type TabDefinition } from "@/components/workflows/panels/registry";
 import { cn } from "@/lib/utils";
-
-/**
- * Pointer hits first, ranked so the most specific target wins: a tab inside a
- * strip is under the pointer together with its strip, and the tab (insert
- * here) means more than the strip (append). The keyboard sensor has no
- * pointer, so it falls back to the nearest target.
- */
-const RANK: Record<DropData["kind"], number> = { tab: 0, strip: 1, edge: 2 };
-const collisions: CollisionDetection = (args) => {
-  const hits = pointerWithin(args);
-  if (hits.length === 0) return closestCenter(args);
-  const rank = (id: string | number) => {
-    const data = args.droppableContainers.find((c) => c.id === id)?.data.current as DropData | undefined;
-    return data ? RANK[data.kind] : 3;
-  };
-  return [...hits].sort((a, b) => rank(a.id) - rank(b.id));
-};
 
 /**
  * A panel's left or right edge, where a dropped tab splits the panel. It is
@@ -105,6 +87,8 @@ type Props<C> = {
  * panels without losing it (moving remounts it under another parent anyway).
  */
 export function MultiPanel<C>({ layout, onChange, context }: Props<C>) {
+  // A tab registered after the first render (a lazily loaded package) re-renders the frame.
+  useTabsVersion();
   const defs = new Map(getTabs<C>().map((d) => [d.id, d as unknown as TabDefinition<never>]));
   const baseId = useId();
   const tabDomId = (tab: TabId) => `${baseId}-tab-${tab}`;
@@ -139,7 +123,8 @@ export function MultiPanel<C>({ layout, onChange, context }: Props<C>) {
   const sensors = useSensors(
     // 6px before a press becomes a drag, so a click still selects the tab.
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(KeyboardSensor),
+    // Arrows jump from one drop target to the next rather than 25 px at a time.
+    useSensor(KeyboardSensor, { coordinateGetter: jumpBetweenTargets }),
   );
 
   const panelIndex = (id: string) => layout.panels.findIndex((p) => p.id === id) + 1;
@@ -166,8 +151,7 @@ export function MultiPanel<C>({ layout, onChange, context }: Props<C>) {
     if (!tab || !d) return;
     if (d.kind === "tab") {
       if (d.tab === tab) return;
-      const target = layout.panels.find((p) => p.id === d.panel);
-      if (target) change(moveTab(layout, tab, d.panel, target.tabs.indexOf(d.tab)), tab);
+      change(moveTab(layout, tab, d.panel, dropIndex(layout, tab, d.panel, d.tab)), tab);
     } else if (d.kind === "strip") {
       const target = layout.panels.find((p) => p.id === d.panel);
       if (target) change(moveTab(layout, tab, d.panel, target.tabs.length), tab);
@@ -232,7 +216,9 @@ export function MultiPanel<C>({ layout, onChange, context }: Props<C>) {
                     aria-labelledby={tabDomId(panel.active)}
                     className="relative min-h-0 flex-1 overflow-auto"
                   >
-                    {def?.render(context)}
+                    {/* Keyed by tab: two tabs that render the same component type must
+                        not share one React instance when the panel switches between them. */}
+                    <Fragment key={panel.active}>{def?.render(context)}</Fragment>
                     <EdgeZone panelId={panel.id} side="left" />
                     <EdgeZone panelId={panel.id} side="right" />
                   </div>

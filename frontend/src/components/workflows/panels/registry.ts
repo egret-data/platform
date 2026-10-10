@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useSyncExternalStore, type ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 import type { TabId } from "@/components/workflows/panels/layout";
 
@@ -24,10 +24,31 @@ export type TabDefinition<C = unknown> = {
 };
 
 const tabs = new Map<TabId, TabDefinition<never>>();
+let version = 0;
+const listeners = new Set<() => void>();
 
-/** Register a tab kind. Registering an id again replaces it (hot reload). */
+/**
+ * Register a tab kind. Registering an id again replaces it (hot reload).
+ *
+ * A tab may be registered after the editor has mounted, for example from a
+ * lazily loaded W7c or W7d chunk: the frame re-renders, and
+ * `usePersistedLayout` reads the stored layout again so a tab it names is
+ * kept rather than dropped (see there for the one case where it is not).
+ */
 export function registerTab<C>(def: TabDefinition<C>): void {
   tabs.set(def.id, def as TabDefinition<never>);
+  version++;
+  for (const l of listeners) l();
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+/** A number that changes whenever a tab is registered; re-renders the caller then. */
+export function useTabsVersion(): number {
+  return useSyncExternalStore(subscribe, () => version, () => version);
 }
 
 /** Every registered tab, in registration order. */

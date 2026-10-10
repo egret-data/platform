@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { normalise, parseLayout, type Layout } from "@/components/workflows/panels/layout";
-import { getTabs } from "@/components/workflows/panels/registry";
+import { getTabs, useTabsVersion } from "@/components/workflows/panels/registry";
 
 /** `egret.wf.layout.<flow uuid>` (spec §5.1). */
 export const LAYOUT_KEY_PREFIX = "egret.wf.layout.";
@@ -55,12 +55,21 @@ function write(key: string, layout: Layout): void {
  */
 export function usePersistedLayout(flowKey: string, defaults: Layout): [Layout, (l: Layout) => void] {
   const key = flowKey ? `${LAYOUT_KEY_PREFIX}${flowKey}` : null;
-  const [state, setState] = useState(() => ({ key, layout: read(key, defaults) }));
+  const version = useTabsVersion();
+  const [state, setState] = useState(() => ({ key, version, edited: false, layout: read(key, defaults) }));
   // Another flow: read its layout during render rather than after, so the
   // previous flow's layout is never painted under the new flow's name.
+  //
+  // A tab registered late (a lazy chunk): `read` dropped it as unknown, so read
+  // again now that it is known. Nothing has been written meanwhile unless the
+  // viewer changed the layout first; then their layout stands, and a late tab
+  // it does not name stays closed until reopened from "+".
   let current = state;
   if (state.key !== key) {
-    current = { key, layout: read(key, defaults) };
+    current = { key, version, edited: false, layout: read(key, defaults) };
+    setState(current);
+  } else if (state.version !== version) {
+    current = { ...state, version, layout: state.edited ? state.layout : read(key, defaults) };
     setState(current);
   }
 
@@ -77,12 +86,12 @@ export function usePersistedLayout(flowKey: string, defaults: Layout): [Layout, 
   useEffect(() => flush, [key, flush]);
 
   const setLayout = useCallback((layout: Layout) => {
-    setState({ key, layout });
+    setState({ key, version, edited: true, layout });
     if (key === null) return;
     pending.current = { key, layout };
     if (timer.current !== null) clearTimeout(timer.current);
     timer.current = setTimeout(flush, WRITE_DEBOUNCE_MS);
-  }, [key, flush]);
+  }, [key, version, flush]);
 
   return [current.layout, setLayout];
 }

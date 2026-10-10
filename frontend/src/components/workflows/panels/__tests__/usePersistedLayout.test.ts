@@ -103,4 +103,30 @@ describe("usePersistedLayout", () => {
     expect(result.current[0]).toEqual(STORED);
     expect(() => unmount()).not.toThrow();
   });
+
+  // Last in the file: these register `files`, and the registry is module-wide.
+  it("keeps a stored tab whose kind is registered after the first render", () => {
+    const stored = JSON.stringify({ panels: [
+      { id: "p1", size: 60, tabs: [CODE_TAB], active: CODE_TAB },
+      { id: "p2", size: 40, tabs: ["files", "docs"], active: "files" },
+    ] });
+    localStorage.setItem(KEY, stored);
+    const { result } = renderHook(() => usePersistedLayout(FLOW, DEFAULT_FLOW_LAYOUT));
+    expect(result.current[0].panels[1].tabs).toEqual(["docs"]);
+
+    act(() => registerTab({ id: "files", title: "Files", icon: FileText, closable: true, render: () => null }));
+    expect(result.current[0].panels[1]).toEqual({ id: "p2", size: 40, tabs: ["files", "docs"], active: "files" });
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(localStorage.getItem(KEY)).toBe(stored);
+  });
+
+  it("keeps the viewer's own change over a re-read when a tab registers after it", () => {
+    localStorage.setItem(KEY, JSON.stringify({ panels: [
+      { id: "p1", size: 100, tabs: [CODE_TAB, "outline"], active: CODE_TAB },
+    ] }));
+    const { result } = renderHook(() => usePersistedLayout(FLOW, DEFAULT_FLOW_LAYOUT));
+    act(() => result.current[1](STORED));
+    act(() => registerTab({ id: "outline", title: "Outline", icon: FileText, closable: true, render: () => null }));
+    expect(result.current[0]).toEqual(STORED);
+  });
 });

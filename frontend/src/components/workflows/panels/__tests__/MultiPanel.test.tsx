@@ -227,4 +227,24 @@ describe("MultiPanel", () => {
     render(<Harness />);
     expect(screen.getAllByRole("separator")).toHaveLength(1);
   });
+
+  // Last in the file: registers two more tabs, and the registry is module-wide.
+  it("gives each tab its own instance when two tabs render the same component", async () => {
+    function Counter({ name }: { name: string }) {
+      const [n, setN] = useState(0);
+      return <button type="button" onClick={() => setN(n + 1)}>{`${name} count ${n}`}</button>;
+    }
+    for (const id of ["alpha", "beta"]) {
+      registerTab<Ctx>({ id, title: id, icon: FileText, closable: true, render: () => <Counter name={id} /> });
+    }
+    const user = userEvent.setup();
+    render(<Harness initial={{ panels: [
+      { id: "p1", size: 100, tabs: [CODE_TAB, "alpha", "beta"], active: "alpha" },
+    ] }} />);
+    await user.click(screen.getByRole("button", { name: "alpha count 0" }));
+    expect(screen.getByRole("button", { name: "alpha count 1" })).toBeInTheDocument();
+    await user.click(within(strip(1)).getByRole("tab", { name: "beta" }));
+    // One shared instance would show "beta count 1": React would keep alpha's state.
+    expect(screen.getByRole("button", { name: "beta count 0" })).toBeInTheDocument();
+  });
 });

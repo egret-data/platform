@@ -43,6 +43,7 @@ The engine runs flows in production (W10 onwards), but a user can only author an
 | Editor panels: Code, No-code, Topology, Docs, Files, Blueprints | Code, Docs, Problems in W7a; Topology with W7c; Files with W7d; no No-code and no Blueprints | Out of W7 by the user's ruling. Problems is egret's: Kestra shows findings in the editor and a banner |
 | `/flows/validate` takes YAML with `revision: N+1` prefixed, and detects an `outdated` save | `POST …/flows/validate` takes the YAML as is. A stale save is refused by `PUT` with `if_updated_at` (§5.3) | egret has no revision counter on drafts |
 | The run form follows the latest revision | The run form follows the **live version**, and says so when the draft differs | Executions run the live version, never the draft (W1) |
+| The editor's panels: each panel has a dots menu (move panel, close all tabs, close all panels); a tab dropped on the frame's outer left or right edge makes a new panel there; `KeepAlive` keeps a panel's hidden tabs mounted, and panels are keyed by index | One "Tab actions: <title>" menu per panel, acting on its selected tab (Move to panel…, Split left, Split right, Close); a tab dropped on **any panel's** left or right edge splits beside that panel; only each panel's selected tab is mounted, and a change to the set of panels remounts the panels (§5.1) | A `tablist` may own only tabs, so a menu button inside each tab would break its semantics; one menu per panel keeps them and still gives every tab its menu in two keystrokes. Splitting beside any panel is the spec's model. React has no `KeepAlive`: tab state lives outside the tab, and Task 4 keeps Monaco's model and view state across a remount (`path`, `keepCurrentModel`, `saveViewState`). A reparenting portal is the fallback if another tab needs to stay mounted |
 
 Any further difference found while comparing against a running Kestra (§9) is added to this table with its reason.
 
@@ -102,18 +103,19 @@ Any further difference found while comparing against a running Kestra (§9) is a
   - reopen a tab, through the panel's "+" menu, which lists the closed tabs;
   - resize.
   - A panel with no tabs is removed. The Code tab cannot be closed.
-- **Pointer:** tabs drag with `@dnd-kit`. Dropping on another strip moves the tab; dropping on a panel's left or right edge splits.
+- **Pointer:** tabs drag with `@dnd-kit`. Dropping on a tab inserts before it; dropping on a strip past its tabs appends; dropping on the left or right edge zone of **any** panel's body splits beside that panel. Releasing over none of these changes nothing.
 - **Keyboard (FE-A11Y-3):**
-  - every tab has a menu with "Move to panel…", "Split left", "Split right" and "Close";
-  - dnd-kit's keyboard sensor is enabled;
+  - every tab has a menu with "Move to panel…", "Split left", "Split right" and "Close". It is one "Tab actions: <title>" menu per panel, acting on the panel's selected tab: a `tablist` may own only tabs, so a menu button inside each tab would break the tab semantics. Select a tab with the arrows, then Tab to its menu. Delete also closes a closable tab;
+  - dnd-kit's keyboard sensor is enabled, and its arrows jump from one drop target to the next;
   - the tab strip is a `tablist` with arrow-key navigation.
 - **Persistence.**
   - The layout is stored per flow in `localStorage`, under the key `egret.wf.layout.<flow uuid>`. It is a per-viewer preference (FE-DATA-3).
   - Every read and write is wrapped. A missing, unparsable or invalid layout falls back to the default. An unknown tab id, for example from a later package that was rolled back, is dropped.
   - New flows use the default layout.
 - **Default:** two panels, `[Code] | [Docs, Problems]`, sized 60/40.
+- **Mounting.** Only each panel's selected tab is mounted, keyed by its tab id. A change to the set of panels (a split, or a close or move that empties a panel) remounts the panels, so that their sizes always match the layout. A tab therefore keeps its state outside itself: the Code tab keeps Monaco's model and view state across a remount (`path`, `keepCurrentModel`, `saveViewState`; Task 4), and the page disposes that model when it leaves the flow. §2 records the difference from Kestra's `KeepAlive`.
 
-**The tab registry.** Each tab kind is registered once with `{ id, title, icon, closable, component }`. W7c registers Topology and W7d registers Files without changing the frame.
+**The tab registry.** Each tab kind is registered once with `registerTab({ id, title, icon, closable, render })`; `render(context)` receives the `context` the page hands the frame. W7c registers Topology and W7d registers Files without changing the frame. A tab registered after the editor has mounted (a lazy chunk) is picked up: the frame re-renders, and a stored layout that names it keeps it, unless the viewer changed the layout before it registered.
 
 ### 5.2 The Code, Docs and Problems tabs
 

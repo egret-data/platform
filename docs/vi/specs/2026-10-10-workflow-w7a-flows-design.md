@@ -45,6 +45,7 @@ Engine đã chạy flow trong production (từ W10), nhưng người dùng chỉ
 | Panel editor: Code, No-code, Topology, Docs, Files, Blueprints | Code, Docs, Problems ở W7a; Topology cùng W7c; Files cùng W7d; không có No-code và Blueprints | Ngoài W7 theo phán quyết của người dùng. Problems là của egret: Kestra hiện lỗi trong editor và trên một banner |
 | `/flows/validate` nhận YAML có thêm tiền tố `revision: N+1`, và phát hiện lần save `outdated` | `POST …/flows/validate` nhận YAML nguyên như vậy. Lần save trên bản cũ bị `PUT` từ chối nhờ `if_updated_at` (§5.3) | draft của egret không có bộ đếm revision |
 | Form run theo revision mới nhất | Form run theo **version đang live**, và nói rõ khi draft khác | Execution chạy version live, không bao giờ chạy draft (W1) |
+| Panel của editor: mỗi panel có một menu chấm (chuyển panel, đóng mọi tab, đóng mọi panel); thả tab lên mép trái hoặc phải ngoài cùng của khung thì tạo panel mới ở đó; `KeepAlive` giữ các tab ẩn của panel luôn mount, và panel được key theo chỉ số | Mỗi panel có một menu "Tab actions: <title>", tác động lên tab đang chọn (Move to panel…, Split left, Split right, Close); thả tab lên mép trái hoặc phải của **bất kỳ panel nào** thì tách cạnh panel đó; mỗi panel chỉ mount tab đang chọn, và khi tập panel đổi thì các panel được mount lại (§5.1) | Một `tablist` chỉ được chứa tab, nên đặt nút menu trong từng tab sẽ phá ngữ nghĩa đó; một menu mỗi panel giữ được ngữ nghĩa mà mọi tab vẫn tới được menu của mình trong hai phím. Tách cạnh bất kỳ panel nào là mô hình của spec. React không có `KeepAlive`: trạng thái của tab nằm ngoài tab, và Task 4 giữ model và view state của Monaco qua lần mount lại (`path`, `keepCurrentModel`, `saveViewState`). Nếu một tab khác cần luôn mount thì phương án dự phòng là portal đổi cha |
 
 Mọi khác biệt khác tìm thấy khi đối chiếu với một Kestra đang chạy (§9) được thêm vào bảng này kèm lý do.
 
@@ -104,18 +105,19 @@ Mọi khác biệt khác tìm thấy khi đối chiếu với một Kestra đang
   - mở lại một tab, qua menu "+" của panel, menu này liệt kê các tab đã đóng;
   - đổi kích thước.
   - Panel không còn tab nào thì bị xoá. Tab Code không đóng được.
-- **Chuột:** tab kéo được bằng `@dnd-kit`. Thả lên một dải tab khác thì chuyển tab; thả lên mép trái hoặc phải của một panel thì tách panel.
+- **Chuột:** tab kéo được bằng `@dnd-kit`. Thả lên một tab thì chèn trước tab đó; thả lên dải tab, sau các tab, thì thêm vào cuối; thả lên vùng mép trái hoặc phải trong thân của **bất kỳ panel nào** thì tách cạnh panel đó. Thả ở chỗ không thuộc vùng nào thì không có gì thay đổi.
 - **Bàn phím (FE-A11Y-3):**
-  - mọi tab có menu gồm "Move to panel…", "Split left", "Split right" và "Close";
-  - bật bộ cảm biến bàn phím của dnd-kit;
+  - mọi tab có menu gồm "Move to panel…", "Split left", "Split right" và "Close". Đó là một menu "Tab actions: <title>" cho mỗi panel, tác động lên tab đang chọn của panel: một `tablist` chỉ được chứa tab, nên nút menu trong từng tab sẽ phá ngữ nghĩa tab. Chọn tab bằng phím mũi tên, rồi Tab tới menu. Phím Delete cũng đóng một tab đóng được;
+  - bật bộ cảm biến bàn phím của dnd-kit, và phím mũi tên nhảy từ đích thả này sang đích thả kế tiếp;
   - dải tab là một `tablist`, điều hướng bằng phím mũi tên.
 - **Lưu bố cục.**
   - Bố cục được lưu theo từng flow trong `localStorage`, với key `egret.wf.layout.<flow uuid>`. Đây là tuỳ chọn của từng người xem (FE-DATA-3).
   - Mọi lần đọc và ghi đều được bọc. Bố cục thiếu, không parse được hoặc không hợp lệ thì quay về mặc định. Một tab id lạ, ví dụ của một package sau đã bị rollback, bị bỏ qua.
   - Flow mới dùng bố cục mặc định.
 - **Mặc định:** hai panel `[Code] | [Docs, Problems]`, tỷ lệ 60/40.
+- **Mount.** Mỗi panel chỉ mount tab đang chọn, key theo tab id. Khi tập panel đổi (tách, hoặc đóng hay chuyển làm một panel trống) thì các panel được mount lại, để kích thước luôn khớp bố cục. Vì vậy tab giữ trạng thái bên ngoài chính nó: tab Code giữ model và view state của Monaco qua lần mount lại (`path`, `keepCurrentModel`, `saveViewState`; Task 4), và trang dispose model đó khi rời flow. §2 ghi khác biệt với `KeepAlive` của Kestra.
 
-**Registry tab.** Mỗi loại tab được đăng ký một lần với `{ id, title, icon, closable, component }`. W7c đăng ký Topology và W7d đăng ký Files mà không sửa khung.
+**Registry tab.** Mỗi loại tab được đăng ký một lần bằng `registerTab({ id, title, icon, closable, render })`; `render(context)` nhận `context` mà trang đưa cho khung. W7c đăng ký Topology và W7d đăng ký Files mà không sửa khung. Tab đăng ký sau khi editor đã mount (một chunk lazy) vẫn được nhận: khung render lại, và bố cục đã lưu có nhắc tới tab đó thì giữ nó, trừ khi người xem đã đổi bố cục trước khi tab được đăng ký.
 
 ### 5.2 Tab Code, Docs và Problems
 
