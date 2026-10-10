@@ -12,7 +12,8 @@
     "test:bundle:csp": "node scripts/assert-csp-allows-entry.mjs",
     "test:bundle:monaco": "node scripts/assert-monaco-lazy.mjs",
     "gen:api": "orval && node scripts/encode-path-params.mjs",
-    "lint": "eslint .",
+    "lint": "eslint . && node scripts/lint-legacy.mjs",
+    "lint:legacy": "node scripts/lint-legacy.mjs",
     "lint:harness": "cd .. && frontend/node_modules/.bin/eslint --config frontend/eslint.config.js scripts/harness",
     "test:e2e": "playwright test"
   },
@@ -76,6 +77,7 @@
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.5",
     "eslint": "^10.8.1",
+    "eslint-plugin-jsx-a11y-x": "0.2.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.4",
     "globals": "^17.11.0",
