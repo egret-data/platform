@@ -37051,7 +37051,7 @@
               "string",
               "null"
             ],
-            "description": "The classification-tag policy service this Trino profile carries its\ntag-based masking/row-filters in (the configured `tagService` or the\n`<name>_tag` convention), if such a service exists. `None` otherwise — the\nFE shows a \"Tags\" tab only when this is set."
+            "description": "The classification-tag policy service this Trino profile carries its\ntag-based masking/row-filters in: the profile's OWN `config.tagService`,\nresolved to a real profile. `None` when the profile carries no link or\nthe link names nothing — the FE shows a \"Tags\" tab only when this is set.\n\n**SP4d debt Task 9 fix round:** this no longer falls back to the\n`<name>_tag` naming convention. It is the same answer\n`usable_tag_service` gives before letting an engine bind, and the same\none the plugin download serves, so a tab is offered only when a tag\npolicy authored in it could actually be enforced."
           },
           "origin": {
             "type": "string",
