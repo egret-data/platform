@@ -18,7 +18,7 @@ import type { ExplainTargetLevel } from './explainTargetLevel';
  * holds for nothing else.
  *
  * ⚠ **This carried FOUR variants until SP4d debt Task 3.** `StoredLevelEmpty` and
- * `StoredWildcard` were the other two, and migration 0166's
+ * `StoredWildcard` were the other two, and migration 0177's
  * `catalog_tag_assignments_levels_are_present_and_literal` makes both states
  * unrepresentable: no running egret can read such a row, so no response can
  * report one. They are removed rather than left unreachable — an API variant a
