@@ -1,34 +1,60 @@
+import { parse } from "yaml";
 import type { FlowVersionDto } from "@/api/generated/model";
 import type { ServerValidation } from "@/components/workflows/editor/useServerValidation";
 
 /**
- * The flow header's state rules (spec §5.3): the draft indicator, and when
- * Save, Publish and Run are enabled, each with the reason shown on the control
- * when it is not (FE-ACTION-4).
+ * The flow header's state rules (spec §5.3): the changes indicator, and when
+ * Save, Create version and Run are enabled, each with the reason shown on the
+ * control when it is not (FE-ACTION-4).
+ *
+ * **Every execution runs the saved draft** (the user's ruling, 2026-10-10):
+ * API starts, schedules, webhooks and subflows all read `workflow.flows.source`
+ * and never a version. A version (`POST …/publish`) is a numbered snapshot to
+ * compare and restore; it changes nothing that runs.
  */
 
 /** An action is allowed, or refused with the sentence the control shows. */
 export type Enablement = { ok: true } | { ok: false; reason: string };
 
 /**
- * Does the saved draft differ from the live version? A byte comparison of the
- * two YAML texts (FE-STATE-4): it goes out again when the draft is edited back
- * to the live text and saved. Never a timestamp: `updated_at` moves on every
- * save and on every publish, whether or not the text changed.
+ * Does the saved draft differ from a version? A byte comparison of the two
+ * YAML texts (FE-STATE-4): it goes out again when the draft is edited back to
+ * the version's text and saved. Never a timestamp: `updated_at` moves on every
+ * save and on every version created, whether or not the text changed.
  */
-export function draftDiffersFromLive(draftSource: string, liveSource: string): boolean {
-  return draftSource !== liveSource;
+export function changedSinceVersion(draftSource: string, versionSource: string): boolean {
+  return draftSource !== versionSource;
 }
 
 /**
- * The live version's YAML, as published: `snapshot.source` (`publish.rs`,
- * step 8, freezes the draft's source there byte for byte). `undefined` when
- * the snapshot carries no string source, which the header reports as unknown
- * rather than as "no difference".
+ * A version's YAML: `snapshot.source` (`publish.rs`, step 8, freezes the
+ * draft's source there byte for byte). `undefined` when the snapshot carries
+ * no string source, which the header reports as unknown rather than as "no
+ * changes".
  */
-export function liveSourceOf(version: FlowVersionDto | undefined): string | undefined {
+export function versionSourceOf(version: FlowVersionDto | undefined): string | undefined {
   const source = version?.snapshot?.source;
   return typeof source === "string" ? source : undefined;
+}
+
+/** The highest-numbered version, which "Changes since v{n}" compares against. */
+export function latestVersion(versions: FlowVersionDto[]): FlowVersionDto | undefined {
+  return versions.reduce<FlowVersionDto | undefined>((top, v) => (!top || v.version > top.version ? v : top), undefined);
+}
+
+/**
+ * Is the flow switched off? Either door the backend's `startable_flow`
+ * closes: the `state` column, or the YAML's own `disabled: true`. A source
+ * that does not parse is not known to be disabled; validation reports it.
+ */
+export function isFlowDisabled(state: string, source: string): boolean {
+  if (state === "disabled") return true;
+  try {
+    const doc: unknown = parse(source);
+    return typeof doc === "object" && doc !== null && (doc as { disabled?: unknown }).disabled === true;
+  } catch {
+    return false;
+  }
 }
 
 /** Spec §5.3: Save stays enabled with validation errors; a draft may be invalid. */
@@ -38,13 +64,22 @@ export function canSave({ dirty, saving }: { dirty: boolean; saving: boolean }):
   return { ok: true };
 }
 
+const errorCount = (n: number) => (n === 1 ? "1 error" : `${n} errors`);
+
 /**
- * Publish creates the version executions run, from the SAVED draft. So it
- * waits for the editor to be saved, and for a validation answer with no
+ * The validation half of Create version and Run: a validation answer with no
  * errors. A failed validation request is not "no errors" (spec §10).
  * `errors` counts every error the Problems tab lists, schema and server alike.
  */
-export function canPublish({
+function validated(errors: number, validationStatus: ServerValidation["status"], action: string): Enablement {
+  if (validationStatus === "error") return { ok: false, reason: "Validation unavailable" };
+  if (errors > 0) return { ok: false, reason: `Fix ${errorCount(errors)} to ${action}` };
+  if (validationStatus === "validating") return { ok: false, reason: "Validating the flow…" };
+  return { ok: true };
+}
+
+/** Create version snapshots the SAVED draft, so it waits for a save and a clean validation. */
+export function canCreateVersion({
   dirty,
   errors,
   validationStatus,
@@ -54,31 +89,29 @@ export function canPublish({
   validationStatus: ServerValidation["status"];
 }): Enablement {
   if (dirty) return { ok: false, reason: "Save first" };
-  if (validationStatus === "error") return { ok: false, reason: "Validation unavailable" };
-  if (errors > 0) {
-    return { ok: false, reason: errors === 1 ? "Fix 1 error to publish" : `Fix ${errors} errors to publish` };
-  }
-  if (validationStatus === "validating") return { ok: false, reason: "Validating the flow…" };
-  return { ok: true };
+  return validated(errors, validationStatus, "create a version");
 }
 
 /**
- * Run starts the live version (W1), so it needs one; and the run form reads
- * that version's inputs (spec §6.1), so it waits for its source. `live` is
- * left out by a caller that does not read it, and counts as known.
+ * Run starts the SAVED draft, and the run form reads that draft's inputs, so
+ * it waits for a save, a clean validation, and a flow that is not disabled.
+ * It needs no version.
  */
 export function canRun({
-  liveVersionId,
   manage,
-  live = "known",
+  dirty,
+  errors,
+  validationStatus,
+  disabled,
 }: {
-  liveVersionId: string | null | undefined;
   manage: boolean;
-  live?: "loading" | "unknown" | "known";
+  dirty: boolean;
+  errors: number;
+  validationStatus: ServerValidation["status"];
+  disabled: boolean;
 }): Enablement {
   if (!manage) return { ok: false, reason: "Running a flow needs the workflow:manage permission" };
-  if (!liveVersionId) return { ok: false, reason: "Publish the flow before running it" };
-  if (live === "loading") return { ok: false, reason: "Loading the live version…" };
-  if (live === "unknown") return { ok: false, reason: "Live version unknown" };
-  return { ok: true };
+  if (disabled) return { ok: false, reason: "The flow is disabled" };
+  if (dirty) return { ok: false, reason: "Save first: Run uses the saved draft" };
+  return validated(errors, validationStatus, "run");
 }

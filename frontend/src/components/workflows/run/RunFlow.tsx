@@ -49,26 +49,27 @@ export interface RunFlowProps {
   flowId: string;
   /** `namespace.flow_id`, for the title. */
   flowName: string;
-  /** The live version's number, and its frozen YAML (`snapshot.source`): the inputs come from here. */
-  liveVersion: number;
-  liveSource: string;
-  /** The editor's text differs from the live version's. */
-  draftDiffers: boolean;
+  /**
+   * The saved draft's YAML (`FlowDto.source`): what the server starts, so the
+   * inputs come from here. The header offers Run only with no unsaved edits.
+   */
+  source: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
 /**
- * Run (W7a spec §6): the live version's inputs as a form, in a confirm, a
+ * Run (W7a spec §6): the saved draft's inputs as a form, in a confirm, a
  * dialog or a right-hand drawer by how many inputs there are and what kind.
  * Kestra's `FlowRun.vue`/`InputsForm.vue` give the structure: one labelled
  * control per input, its description under it, Run at the foot.
  *
- * The parent keys this by the live version, so a new version starts a new
- * form; while the version stays, closing and reopening keeps what was typed.
+ * Every execution runs the saved draft (the user's ruling, 2026-10-10). The
+ * parent keys this by that text, so a new save starts a new form; while it
+ * stays, closing and reopening keeps what was typed.
  */
 export function RunFlow(props: RunFlowProps) {
-  const parsed = useMemo(() => inputsFromSource(props.liveSource), [props.liveSource]);
+  const parsed = useMemo(() => inputsFromSource(props.source), [props.source]);
   const inputs = "inputs" in parsed ? parsed.inputs : [];
   return <RunForm {...props} inputs={inputs} sourceError={"error" in parsed ? parsed.error : null} />;
 }
@@ -77,8 +78,6 @@ function RunForm({
   ws,
   flowId,
   flowName,
-  liveVersion,
-  draftDiffers,
   open,
   onOpenChange,
   inputs,
@@ -97,7 +96,7 @@ function RunForm({
   const unsupported = unsupportedInputs(inputs);
   const container = sourceError ? "dialog" : containerFor(inputs);
   const runState: Enablement = sourceError
-    ? { ok: false, reason: "The live version's inputs could not be read" }
+    ? { ok: false, reason: "The flow's inputs could not be read" }
     : unsupported.length > 0
       ? { ok: false, reason: `${unsupported.map((u) => `${u.id} (${u.type})`).join(", ")} cannot be entered in this form` }
       : submitting
@@ -165,15 +164,10 @@ function RunForm({
 
   const notices = (
     <>
-      {draftDiffers ? (
-        <p role="note" className="rounded-md border border-highlight/40 bg-highlight/10 px-3 py-2 text-sm">
-          Runs live v{liveVersion}; your draft is not published
-        </p>
-      ) : null}
       {sourceError ? (
         <Alert variant="destructive">
           <AlertDescription>
-            The live version's inputs could not be read: {sourceError}. Publish the flow again, then run it.
+            The flow's inputs could not be read: {sourceError}. Fix the YAML, save, then run it.
           </AlertDescription>
         </Alert>
       ) : null}
@@ -206,7 +200,7 @@ function RunForm({
           <AlertDialogHeader>
             <AlertDialogTitle>Run {flowName}?</AlertDialogTitle>
             <AlertDialogDescription>
-              This starts an execution of live v{liveVersion}. The flow has no inputs.
+              This starts an execution of the saved draft. The flow has no inputs.
             </AlertDialogDescription>
           </AlertDialogHeader>
           {notices}
@@ -235,7 +229,7 @@ function RunForm({
         <form className="grid gap-4" onSubmit={(e) => void submit(e)} noValidate>
           <DialogHeader>
             <DialogTitle>Run {flowName}</DialogTitle>
-            <DialogDescription>Starts an execution of live v{liveVersion}.</DialogDescription>
+            <DialogDescription>Starts an execution of the saved draft.</DialogDescription>
           </DialogHeader>
           {notices}
           {/* An unsupported input has no control; the notice above names it with its type. */}

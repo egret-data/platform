@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { History, Play, RotateCw, Save, Trash2, Upload } from "lucide-react";
+import { History, Milestone, Play, RotateCw, Save, Trash2 } from "lucide-react";
 import { ApiError } from "@/api/client";
 import {
   useWorkflowDeleteFlow,
@@ -24,11 +24,13 @@ import { PublishDialog } from "@/components/workflows/PublishDialog";
 import { RunFlow } from "@/components/workflows/run/RunFlow";
 import { StaleSaveDialog } from "@/components/workflows/StaleSaveDialog";
 import {
-  canPublish,
+  canCreateVersion,
   canRun,
   canSave,
-  draftDiffersFromLive,
-  liveSourceOf,
+  changedSinceVersion,
+  isFlowDisabled,
+  latestVersion,
+  versionSourceOf,
 } from "@/components/workflows/draftState";
 import { useFlowEditor } from "@/components/workflows/editor/EditorContext";
 import { disposeFlowModel } from "@/components/workflows/editor/flowModel";
@@ -149,7 +151,7 @@ function FlowWorkspace({
   ws: string;
   id: string;
   tab: FlowTab;
-  /** The latest answer of `GET …/flows/{id}`: state, live version and permission come from here. */
+  /** The latest answer of `GET …/flows/{id}`: state, source and permission come from here. */
   flow: FlowDto;
   refetchFlow: () => Promise<{ isError: boolean; data?: { status: number; data: unknown } }>;
 }) {
@@ -257,7 +259,8 @@ function FlowWorkspace({
       if (res.status !== 200) throw new Error("The flow could not be saved.");
       adopt(res.data);
       setStaleOpen(false);
-      toast.success("Flow saved");
+      // Every execution runs the saved draft (the user's ruling, 2026-10-10), so a save changes what runs.
+      toast.success("Saved. New runs use this version of the flow.");
     } catch (e) {
       if (!overwrite && e instanceof ApiError && e.status === 409 && e.code === DRAFT_CHANGED_CODE) {
         setStaleOpen(true);
@@ -288,11 +291,11 @@ function FlowWorkspace({
 
   const runPublish = async (note: string) => {
     const res = await publish.mutateAsync({ workspace: ws, id, data: note ? { note } : {} });
-    if (res.status !== 200) throw new Error("The flow could not be published.");
+    if (res.status !== 200) throw new Error("The version could not be created.");
     const version = res.data;
     void queryClient.invalidateQueries({ queryKey: workflowsKeys.versions(id) });
     void queryClient.invalidateQueries({ queryKey: workflowsKeys.flows(ws) });
-    // Publishing moves the draft's `updated_at` too (`set_live`), so the next
+    // Creating a version moves the draft's `updated_at` too (`set_live`), so the next
     // conditional save needs the new one. It is taken only while the saved
     // draft is still the text this editor holds; if someone saved in between,
     // the next save is refused, which is the point of the precondition.
@@ -301,10 +304,10 @@ function FlowWorkspace({
     // A failed read leaves the pre-publish `updated_at`; the next save reads first.
     if (!fresh) needsReread.current = true;
     else if (fresh.source === ours.source) setBaseline({ source: ours.source, updatedAt: fresh.updated_at });
-    if (liveSourceOf(version) !== undefined && liveSourceOf(version) !== ours.source) {
-      toast.warning(`Published v${version.version} from the saved draft, which someone changed since you opened it.`);
+    if (versionSourceOf(version) !== undefined && versionSourceOf(version) !== ours.source) {
+      toast.warning(`Created v${version.version} from the saved draft, which someone changed since you opened it.`);
     } else {
-      toast.success(`Published v${version.version}`);
+      toast.success(`Created v${version.version}`);
     }
   };
 
@@ -320,25 +323,26 @@ function FlowWorkspace({
     }
   };
 
-  // The draft indicator (spec §5.3, FE-STATE-4): the SAVED draft against the
-  // live version's frozen source, byte for byte.
-  const liveVersion = flow.live_version_id ? versions?.find((v) => v.id === flow.live_version_id) : undefined;
-  const liveSource = liveSourceOf(liveVersion);
-  let livePill: string | null = null;
-  if (flow.live_version_id) {
-    if (versionsQuery.isError) livePill = "Live version unknown";
-    else if (versions && liveSource === undefined) livePill = "Live version unknown";
-    else if (liveVersion && liveSource !== undefined && draftDiffersFromLive(baseline.source, liveSource)) {
-      livePill = `Draft differs from live v${liveVersion.version}`;
-    }
+  // The changes indicator (spec §5.3, FE-STATE-4): the SAVED draft against the
+  // latest version's frozen source, byte for byte. No version, no pill; a
+  // version list that could not be read is said, never shown as "no changes".
+  const latest = versions ? latestVersion(versions) : undefined;
+  const latestSource = versionSourceOf(latest);
+  let changesPill: string | null = null;
+  if (versionsQuery.isError) changesPill = "Versions unknown";
+  else if (latest && latestSource === undefined) changesPill = "Versions unknown";
+  else if (latest && latestSource !== undefined && changedSinceVersion(baseline.source, latestSource)) {
+    changesPill = `Changes since v${latest.version}`;
   }
 
   const errors = editor.problems.filter((p) => p.severity === "error").length;
+  const validationStatus = editor.validation.status;
   const saveState = canSave({ dirty, saving });
-  const publishState = canPublish({ dirty, errors, validationStatus: editor.validation.status });
-  // The run form reads the live version's inputs (spec §6.1), so Run waits for its source.
-  const live = versionsQuery.isError || (versions && liveSource === undefined) ? "unknown" : versions ? "known" : "loading";
-  const runState = canRun({ liveVersionId: flow.live_version_id, manage, live });
+  const versionState = canCreateVersion({ dirty, errors, validationStatus });
+  // Run starts the saved draft (spec §6.1); with no unsaved edits, the editor's
+  // text, its validation and the form's inputs are all that draft.
+  const disabled = isFlowDisabled(flow.state, flow.source);
+  const runState = canRun({ manage, dirty, errors, validationStatus, disabled });
   const nextVersion = versions ? Math.max(0, ...versions.map((v) => v.version)) + 1 : null;
   const flowName = `${flow.namespace}.${flow.flow_id}`;
   const reasonsId = useId();
@@ -353,7 +357,7 @@ function FlowWorkspace({
           <div className="mt-1 flex flex-wrap items-center gap-2">
             <h1 className="truncate text-xl font-semibold">{flow.flow_id}</h1>
             <StateChip state={flow.state} kind="flow" />
-            {livePill && <Badge variant="outline">{livePill}</Badge>}
+            {changesPill && <Badge variant="outline">{changesPill}</Badge>}
             {dirty && <Badge variant="secondary">Unsaved changes</Badge>}
           </div>
           <p className="text-sm text-muted-foreground">{flow.namespace}</p>
@@ -365,9 +369,9 @@ function FlowWorkspace({
                 <Save aria-hidden />
                 Save
               </ReasonButton>
-              <ReasonButton enablement={publishState} reasonId={`${reasonsId}-publish`} onClick={() => setPublishOpen(true)}>
-                <Upload aria-hidden />
-                Publish
+              <ReasonButton enablement={versionState} reasonId={`${reasonsId}-version`} onClick={() => setPublishOpen(true)}>
+                <Milestone aria-hidden />
+                Create version
               </ReasonButton>
               <ReasonButton enablement={runState} reasonId={`${reasonsId}-run`} variant="outline" onClick={() => setRunOpen(true)}>
                 <Play aria-hidden />
@@ -381,7 +385,7 @@ function FlowWorkspace({
             <DisabledReasons
               actions={[
                 { id: `${reasonsId}-save`, label: "Save", enablement: saveState },
-                { id: `${reasonsId}-publish`, label: "Publish", enablement: publishState },
+                { id: `${reasonsId}-version`, label: "Create version", enablement: versionState },
                 { id: `${reasonsId}-run`, label: "Run", enablement: runState },
               ]}
             />
@@ -407,7 +411,7 @@ function FlowWorkspace({
             variant="dashed"
             icon={History}
             title="Revisions are not listed here yet"
-            description="Published versions and their differences arrive in a later release."
+            description="Versions and their differences arrive in a later release."
           />
         </TabsContent>
       </Tabs>
@@ -425,17 +429,15 @@ function FlowWorkspace({
         nextVersion={nextVersion}
         onPublish={runPublish}
       />
-      {manage && liveVersion && liveSource !== undefined ? (
-        // Keyed by the live version: a new one starts a new form; the same one keeps what was typed.
+      {manage ? (
+        // The run form reads the SAVED draft's inputs (`FlowDto.source`), the text the server
+        // starts. Keyed by that text: a new save starts a new form; reopening keeps what was typed.
         <RunFlow
-          key={liveVersion.id}
+          key={flow.source}
           ws={ws}
           flowId={id}
           flowName={flowName}
-          liveVersion={liveVersion.version}
-          liveSource={liveSource}
-          // What is in the editor, saved or not, against what will run.
-          draftDiffers={draftDiffersFromLive(editor.source, liveSource)}
+          source={flow.source}
           open={runOpen}
           onOpenChange={setRunOpen}
         />

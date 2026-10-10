@@ -83,7 +83,7 @@ export function StaleSaveDialog({
             <AlertDialogHeader>
               <AlertDialogTitle>The draft changed since you opened it</AlertDialogTitle>
               <AlertDialogDescription>
-                Someone saved or published this flow after you opened it, so your save was refused and nothing was
+                Someone saved this flow or created a version of it after you opened it, so your save was refused and nothing was
                 written. Reload the saved draft, or overwrite it with your text.
               </AlertDialogDescription>
             </AlertDialogHeader>

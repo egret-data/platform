@@ -52,7 +52,7 @@ function Where() {
   return <output data-testid="path">{useLocation().pathname}</output>;
 }
 
-function renderRun(source: string, { draftDiffers = false } = {}) {
+function renderRun(source: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const onOpenChange = vi.fn();
   render(
@@ -66,9 +66,7 @@ function renderRun(source: string, { draftDiffers = false } = {}) {
                 ws={WS}
                 flowId={FLOW}
                 flowName="company.team.hello"
-                liveVersion={3}
-                liveSource={source}
-                draftDiffers={draftDiffers}
+                source={source}
                 open
                 onOpenChange={onOpenChange}
               />
@@ -94,7 +92,7 @@ describe("RunFlow: the container", () => {
     const calls = serve();
     renderRun(flowWith(""));
     const confirm = await screen.findByRole("alertdialog", { name: "Run company.team.hello?" });
-    expect(within(confirm).getByText(/live v3/)).toBeInTheDocument();
+    expect(within(confirm).getByText(/saved draft/)).toBeInTheDocument();
     expect(starts(calls)).toHaveLength(0);
     await userEvent.click(within(confirm).getByRole("button", { name: "Run" }));
     await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent(`/explore/${WS}/workflows/executions/${EXEC}`));
@@ -259,17 +257,21 @@ describe("RunFlow: submitting", () => {
 });
 
 describe("RunFlow: what it says", () => {
-  it('says "Runs live v{n}; your draft is not published" only when the draft differs', async () => {
-    serve();
-    renderRun(flowWith("  - id: who\n    type: STRING"), { draftDiffers: true });
-    expect(await screen.findByRole("note")).toHaveTextContent("Runs live v3; your draft is not published");
-  });
-
-  it("does not say it when the draft matches live", async () => {
+  it("says it runs the saved draft, and names no version", async () => {
     serve();
     renderRun(flowWith("  - id: who\n    type: STRING"));
-    await screen.findByRole("dialog");
-    expect(screen.queryByText(/your draft is not published/)).not.toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Starts an execution of the saved draft.")).toBeInTheDocument();
+    expect(within(dialog).queryByText(/\bv\d+\b|live|publish/i)).not.toBeInTheDocument();
+  });
+
+  it("reports a draft whose inputs cannot be read, and disables Run", async () => {
+    serve();
+    renderRun("id: hello\ninputs: [unclosed\n");
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/The flow's inputs could not be read: .*Fix the YAML, save, then run it\./)).toBeInTheDocument();
+    expect(runButton()).toBeDisabled();
+    expect(runButton()).toHaveAccessibleDescription("The flow's inputs could not be read");
   });
 
   it("disables Run for an unsupported input, naming it and its type", async () => {

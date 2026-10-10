@@ -67,14 +67,14 @@ const MARKERS = [
   // `monaco-yaml`'s worker file, which is a non-entry chunk and harmless.
   ["node_modules/yaml (via src/components/workflows/editor/yamlPath.ts)", "BLOCK_AS_IMPLICIT_KEY", "editor"],
   // The flow pages (W7a Task 5).
-  ["src/routes/workflows/FlowDetail.tsx", "Draft differs from live v", "editor"],
+  ["src/routes/workflows/FlowDetail.tsx", "Changes since v", "editor"],
   // The create page's template.
   ["src/routes/workflows/FlowNew.tsx", "Hello from egret", "editor"],
   ["src/components/workflows/PublishDialog.tsx", "What changed in this version", "editor"],
   ["src/components/workflows/StaleSaveDialog.tsx", "Discard and reload", "editor"],
-  ["src/components/workflows/draftState.ts", "Publish the flow before running it", "editor"],
+  ["src/components/workflows/draftState.ts", "Save first: Run uses the saved draft", "editor"],
   // The run form (W7a Task 6), opened from the flow page.
-  ["src/components/workflows/run/RunFlow.tsx", "your draft is not published", "editor"],
+  ["src/components/workflows/run/RunFlow.tsx", "Fix the YAML, save, then run it.", "editor"],
   ["src/components/workflows/run/inputControls.tsx", "This input depends on other inputs", "editor"],
   ["src/components/workflows/run/inputModel.ts", "Add at least one item.", "editor"],
   // The minimal execution page (W7a Task 6), in the area's own chunk with the list.

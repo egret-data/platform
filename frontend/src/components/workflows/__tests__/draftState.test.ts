@@ -1,41 +1,43 @@
 import { describe, expect, it } from "vitest";
 import type { FlowVersionDto } from "@/api/generated/model";
 import {
-  canPublish,
+  canCreateVersion,
   canRun,
   canSave,
-  draftDiffersFromLive,
-  liveSourceOf,
+  changedSinceVersion,
+  isFlowDisabled,
+  latestVersion,
+  versionSourceOf,
 } from "@/components/workflows/draftState";
 
 const LIVE = "id: a\nnamespace: n\ntasks:\n  - id: t\n    type: core.log\n";
 
-describe("draftDiffersFromLive", () => {
+describe("changedSinceVersion", () => {
   it("compares bytes, so a change in whitespace alone is a difference", () => {
-    expect(draftDiffersFromLive(LIVE, LIVE)).toBe(false);
-    expect(draftDiffersFromLive(`${LIVE} `, LIVE)).toBe(true);
-    expect(draftDiffersFromLive(LIVE.replace("core.log", "core.Log"), LIVE)).toBe(true);
+    expect(changedSinceVersion(LIVE, LIVE)).toBe(false);
+    expect(changedSinceVersion(`${LIVE} `, LIVE)).toBe(true);
+    expect(changedSinceVersion(LIVE.replace("core.log", "core.Log"), LIVE)).toBe(true);
   });
 
   it("is a content comparison: an identical text built separately does not differ", () => {
     const rebuilt = ["id: a", "namespace: n", "tasks:", "  - id: t", "    type: core.log", ""].join("\n");
-    expect(draftDiffersFromLive(rebuilt, LIVE)).toBe(false);
+    expect(changedSinceVersion(rebuilt, LIVE)).toBe(false);
   });
 });
 
-describe("liveSourceOf", () => {
+describe("versionSourceOf", () => {
   const version = (snapshot: Record<string, unknown>): FlowVersionDto => ({
     id: "v", flow_id: "f", version: 3, snapshot, note: "", created_at: "2026-10-10T00:00:00Z",
   });
 
   it("reads the snapshot's frozen source", () => {
-    expect(liveSourceOf(version({ source: LIVE, plan: {} }))).toBe(LIVE);
+    expect(versionSourceOf(version({ source: LIVE, plan: {} }))).toBe(LIVE);
   });
 
   it("is undefined, not empty, when the snapshot has no string source", () => {
-    expect(liveSourceOf(version({ plan: {} }))).toBeUndefined();
-    expect(liveSourceOf(version({ source: 42 }))).toBeUndefined();
-    expect(liveSourceOf(undefined)).toBeUndefined();
+    expect(versionSourceOf(version({ plan: {} }))).toBeUndefined();
+    expect(versionSourceOf(version({ source: 42 }))).toBeUndefined();
+    expect(versionSourceOf(undefined)).toBeUndefined();
   });
 });
 
@@ -47,46 +49,79 @@ describe("canSave", () => {
   });
 });
 
-describe("canPublish", () => {
+describe("canCreateVersion", () => {
   it("is allowed with a saved draft and a clean validation", () => {
-    expect(canPublish({ dirty: false, errors: 0, validationStatus: "ok" })).toEqual({ ok: true });
+    expect(canCreateVersion({ dirty: false, errors: 0, validationStatus: "ok" })).toEqual({ ok: true });
   });
 
   it("asks for a save first while there are unsaved edits, whatever else holds", () => {
-    expect(canPublish({ dirty: true, errors: 0, validationStatus: "ok" })).toEqual({ ok: false, reason: "Save first" });
-    expect(canPublish({ dirty: true, errors: 3, validationStatus: "error" })).toEqual({ ok: false, reason: "Save first" });
+    expect(canCreateVersion({ dirty: true, errors: 0, validationStatus: "ok" })).toEqual({ ok: false, reason: "Save first" });
+    expect(canCreateVersion({ dirty: true, errors: 3, validationStatus: "error" })).toEqual({ ok: false, reason: "Save first" });
   });
 
   it("counts the errors, with the page's own plural", () => {
-    expect(canPublish({ dirty: false, errors: 1, validationStatus: "ok" })).toEqual({ ok: false, reason: "Fix 1 error to publish" });
-    expect(canPublish({ dirty: false, errors: 4, validationStatus: "ok" })).toEqual({ ok: false, reason: "Fix 4 errors to publish" });
+    expect(canCreateVersion({ dirty: false, errors: 1, validationStatus: "ok" })).toEqual({ ok: false, reason: "Fix 1 error to create a version" });
+    expect(canCreateVersion({ dirty: false, errors: 4, validationStatus: "ok" })).toEqual({ ok: false, reason: "Fix 4 errors to create a version" });
   });
 
   it("never reads a failed validation as no errors", () => {
-    expect(canPublish({ dirty: false, errors: 0, validationStatus: "error" })).toEqual({ ok: false, reason: "Validation unavailable" });
+    expect(canCreateVersion({ dirty: false, errors: 0, validationStatus: "error" })).toEqual({ ok: false, reason: "Validation unavailable" });
   });
 
   it("waits for a validation in flight", () => {
-    expect(canPublish({ dirty: false, errors: 0, validationStatus: "validating" })).toEqual({ ok: false, reason: "Validating the flow…" });
+    expect(canCreateVersion({ dirty: false, errors: 0, validationStatus: "validating" })).toEqual({ ok: false, reason: "Validating the flow…" });
+  });
+});
+
+describe("latestVersion", () => {
+  const v = (version: number): FlowVersionDto => ({
+    id: `v${version}`, flow_id: "f", version, snapshot: {}, note: "", created_at: "2026-10-10T00:00:00Z",
+  });
+  it("is the highest number, whatever order the list comes in", () => {
+    expect(latestVersion([v(2), v(7), v(3)])?.version).toBe(7);
+    expect(latestVersion([])).toBeUndefined();
+  });
+});
+
+describe("isFlowDisabled", () => {
+  it("is either door: the state column, or the YAML's own disabled: true", () => {
+    expect(isFlowDisabled("disabled", LIVE)).toBe(true);
+    expect(isFlowDisabled("draft", `${LIVE}disabled: true\n`)).toBe(true);
+    expect(isFlowDisabled("live", LIVE)).toBe(false);
+    expect(isFlowDisabled("draft", `${LIVE}disabled: false\n`)).toBe(false);
+    // Only the boolean: a string is not the YAML switching the flow off.
+    expect(isFlowDisabled("draft", `${LIVE}disabled: "true"\n`)).toBe(false);
+    expect(isFlowDisabled("draft", "id: [unclosed\n")).toBe(false);
   });
 });
 
 describe("canRun", () => {
-  it("needs a live version", () => {
-    expect(canRun({ liveVersionId: "v1", manage: true })).toEqual({ ok: true });
-    expect(canRun({ liveVersionId: null, manage: true })).toEqual({ ok: false, reason: "Publish the flow before running it" });
-    expect(canRun({ liveVersionId: undefined, manage: true })).toEqual({ ok: false, reason: "Publish the flow before running it" });
+  const ready = { manage: true, dirty: false, errors: 0, validationStatus: "ok" as const, disabled: false };
+
+  it("runs the saved draft: it needs no version", () => {
+    expect(canRun(ready)).toEqual({ ok: true });
   });
 
   it("needs workflow:manage", () => {
-    expect(canRun({ liveVersionId: "v1", manage: false }).ok).toBe(false);
+    expect(canRun({ ...ready, manage: false }).ok).toBe(false);
   });
 
-  it("waits for the live version's source, which the run form reads its inputs from", () => {
-    expect(canRun({ liveVersionId: "v1", manage: true, live: "loading" })).toEqual({ ok: false, reason: "Loading the live version…" });
-    expect(canRun({ liveVersionId: "v1", manage: true, live: "unknown" })).toEqual({ ok: false, reason: "Live version unknown" });
-    expect(canRun({ liveVersionId: "v1", manage: true, live: "known" })).toEqual({ ok: true });
-    // No live version outranks an unread one.
-    expect(canRun({ liveVersionId: null, manage: true, live: "loading" })).toEqual({ ok: false, reason: "Publish the flow before running it" });
+  it("asks for a save first, because Run uses the saved draft", () => {
+    expect(canRun({ ...ready, dirty: true })).toEqual({ ok: false, reason: "Save first: Run uses the saved draft" });
+  });
+
+  it("counts the errors, with the page's own plural", () => {
+    expect(canRun({ ...ready, errors: 1 })).toEqual({ ok: false, reason: "Fix 1 error to run" });
+    expect(canRun({ ...ready, errors: 3 })).toEqual({ ok: false, reason: "Fix 3 errors to run" });
+  });
+
+  it("never reads a failed validation as no errors, and waits for one in flight", () => {
+    expect(canRun({ ...ready, validationStatus: "error" })).toEqual({ ok: false, reason: "Validation unavailable" });
+    expect(canRun({ ...ready, validationStatus: "validating" })).toEqual({ ok: false, reason: "Validating the flow…" });
+  });
+
+  it("says the flow is disabled before anything a save could fix", () => {
+    expect(canRun({ ...ready, disabled: true })).toEqual({ ok: false, reason: "The flow is disabled" });
+    expect(canRun({ ...ready, disabled: true, dirty: true, errors: 2 })).toEqual({ ok: false, reason: "The flow is disabled" });
   });
 });

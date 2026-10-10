@@ -54,46 +54,46 @@ const type = (box: HTMLElement, text: string) => fireEvent.change(box, { target:
 const button = (name: string) => screen.getByRole("button", { name });
 const puts = () => server.callsTo("PUT", FLOW_PATH);
 
-/** A flow whose live v1 is `live`, and whose saved draft is `draft`. */
+/** A flow whose only version, v1, is `live`, and whose saved draft is `draft`. */
 function liveFlow(live: string, draft = live) {
   server = new FakeWorkflowServer({ source: live });
   server.publishNow();
   server.flow = { ...server.flow!, source: draft };
 }
 
-describe("FlowDetail: the draft indicator", () => {
-  it("lights after a saved change, and goes out when the draft is saved back to the live text", async () => {
+describe("FlowDetail: the changes indicator", () => {
+  it("lights after a saved change, and goes out when the draft is saved back to the version's text", async () => {
     const live = flowSource("live");
     liveFlow(live);
     renderAt();
     const box = await editorBox();
     expect(await screen.findByRole("heading", { level: 1, name: "hello" })).toBeInTheDocument();
     await waitFor(() => expect(server.callsTo("GET", `${FLOW_PATH}/versions`).length).toBeGreaterThan(0));
-    expect(screen.queryByText(/Draft differs from live/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Changes since/)).not.toBeInTheDocument();
 
     // An unsaved edit is its own indicator, and does not light the draft pill.
     type(box, flowSource("changed"));
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
-    expect(screen.queryByText(/Draft differs from live/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Changes since/)).not.toBeInTheDocument();
 
     await userEvent.click(button("Save"));
-    expect(await screen.findByText("Draft differs from live v1")).toBeInTheDocument();
+    expect(await screen.findByText("Changes since v1")).toBeInTheDocument();
     expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
 
-    // Back to the live text, byte for byte, and saved: the content matches again.
+    // Back to the version's text, byte for byte, and saved: the content matches again.
     type(box, flowSource("live"));
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
     // Still lit: what is SAVED still differs until the save lands.
-    expect(screen.getByText("Draft differs from live v1")).toBeInTheDocument();
+    expect(screen.getByText("Changes since v1")).toBeInTheDocument();
     await userEvent.click(button("Save"));
-    await waitFor(() => expect(screen.queryByText(/Draft differs from live/)).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText(/Changes since/)).not.toBeInTheDocument());
     expect(puts()).toHaveLength(2);
   });
 
-  it("is lit on load when the saved draft already differs, and names the live version", async () => {
+  it("is lit on load when the saved draft already differs, and names the version", async () => {
     liveFlow(flowSource("live"), flowSource("draft"));
     renderAt();
-    expect(await screen.findByText("Draft differs from live v1")).toBeInTheDocument();
+    expect(await screen.findByText("Changes since v1")).toBeInTheDocument();
     expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
   });
 });
@@ -106,7 +106,7 @@ describe("FlowDetail: Save", () => {
     await userEvent.click(button("Save"));
     await waitFor(() => expect(puts()).toHaveLength(1));
     expect(puts()[0].body).toEqual({ source: flowSource("two"), folder_id: null, if_updated_at: "2026-10-10T09:47:08.618779Z" });
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Flow saved"));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Saved. New runs use this version of the flow."));
   });
 
   it("chains: the second save sends the updated_at the first one returned", async () => {
@@ -200,7 +200,7 @@ describe("FlowDetail: Save", () => {
     // The reloaded draft is the new baseline: the next save is not refused.
     type(screen.getByRole("textbox", { name: "Flow source" }), flowSource("after reload"));
     await userEvent.click(button("Save"));
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Flow saved"));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Saved. New runs use this version of the flow."));
     expect(server.flow!.source).toBe(flowSource("after reload"));
   });
 
@@ -245,14 +245,14 @@ describe("FlowDetail: the two kinds of 409", () => {
   });
 });
 
-describe("FlowDetail: Publish", () => {
+describe("FlowDetail: Create version", () => {
   it("is disabled with \"Save first\" while there are unsaved edits", async () => {
     server = new FakeWorkflowServer();
     renderAt();
-    await waitFor(() => expect(button("Publish")).toBeEnabled(), LONG);
+    await waitFor(() => expect(button("Create version")).toBeEnabled(), LONG);
     type(await editorBox(), flowSource("two"));
-    expect(button("Publish")).toBeDisabled();
-    expect(button("Publish")).toHaveAccessibleDescription("Save first");
+    expect(button("Create version")).toBeDisabled();
+    expect(button("Create version")).toHaveAccessibleDescription("Save first");
     // Shown as text too, for keyboard and touch users, who never see a tooltip.
     expect(screen.getByText("Save first")).toBeVisible();
   });
@@ -270,8 +270,8 @@ describe("FlowDetail: Publish", () => {
       },
     };
     renderAt();
-    await waitFor(() => expect(button("Publish")).toHaveAccessibleDescription("Fix 2 errors to publish"), LONG);
-    expect(button("Publish")).toBeDisabled();
+    await waitFor(() => expect(button("Create version")).toHaveAccessibleDescription("Fix 2 errors to create a version"), LONG);
+    expect(button("Create version")).toBeDisabled();
     // The same count the Problems tab carries.
     expect(screen.getByRole("tab", { name: /Problems, 2 errors/ })).toBeInTheDocument();
   });
@@ -280,72 +280,72 @@ describe("FlowDetail: Publish", () => {
     server = new FakeWorkflowServer();
     server.validation = { status: 500, body: { error: "internal error" } };
     renderAt();
-    await waitFor(() => expect(button("Publish")).toHaveAccessibleDescription("Validation unavailable"), LONG);
-    expect(button("Publish")).toBeDisabled();
+    await waitFor(() => expect(button("Create version")).toHaveAccessibleDescription("Validation unavailable"), LONG);
+    expect(button("Create version")).toBeDisabled();
   });
 
   it("sends the note, refreshes the versions, and re-reads the draft so the next save is not refused", async () => {
     server = new FakeWorkflowServer();
     renderAt();
-    await waitFor(() => expect(button("Publish")).toBeEnabled(), LONG);
+    await waitFor(() => expect(button("Create version")).toBeEnabled(), LONG);
     const versionReads = server.callsTo("GET", `${FLOW_PATH}/versions`).length;
-    await userEvent.click(button("Publish"));
+    await userEvent.click(button("Create version"));
 
-    const dialog = await screen.findByRole("dialog", { name: "Publish company.team.hello" });
+    const dialog = await screen.findByRole("dialog", { name: "Create a version of company.team.hello" });
     await userEvent.type(within(dialog).getByLabelText("Note (optional)"), "First release");
-    await userEvent.click(within(dialog).getByRole("button", { name: "Publish" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create version" }));
 
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Published v1"));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Created v1"));
     expect(server.callsTo("POST", `${FLOW_PATH}/publish`)[0].body).toEqual({ note: "First release" });
     await waitFor(() => expect(server.callsTo("GET", `${FLOW_PATH}/versions`).length).toBeGreaterThan(versionReads));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(await screen.findByText("Live")).toBeInTheDocument();
-    const movedByPublish = server.flow!.updated_at;
-    expect(movedByPublish).not.toBe("2026-10-10T09:47:08.618779Z");
+    const movedByVersion = server.flow!.updated_at;
+    expect(movedByVersion).not.toBe("2026-10-10T09:47:08.618779Z");
 
-    // Publishing moved `updated_at`; the editor re-read it, so this save goes through.
+    // Creating the version moved `updated_at`; the editor re-read it, so this save goes through.
     type(screen.getByRole("textbox", { name: "Flow source" }), flowSource("after publish"));
     await userEvent.click(button("Save"));
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Flow saved"));
-    expect((puts()[0].body as { if_updated_at: string }).if_updated_at).toBe(movedByPublish);
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Saved. New runs use this version of the flow."));
+    expect((puts()[0].body as { if_updated_at: string }).if_updated_at).toBe(movedByVersion);
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(server.flow!.source).toBe(flowSource("after publish"));
   });
 
-  it("keeps the note and shows the server's message when publishing fails", async () => {
+  it("keeps the note and shows the server's message when creating a version fails", async () => {
     server = new FakeWorkflowServer();
     renderAt();
-    await waitFor(() => expect(button("Publish")).toBeEnabled(), LONG);
-    await userEvent.click(button("Publish"));
+    await waitFor(() => expect(button("Create version")).toBeEnabled(), LONG);
+    await userEvent.click(button("Create version"));
     const dialog = await screen.findByRole("dialog");
     await userEvent.type(within(dialog).getByLabelText("Note (optional)"), "Keep me");
     server.flow = null; // publish now answers 404
-    await userEvent.click(within(dialog).getByRole("button", { name: "Publish" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create version" }));
     expect(await within(dialog).findByText("not found: flow")).toBeInTheDocument();
     expect(within(dialog).getByLabelText("Note (optional)")).toHaveValue("Keep me");
   });
 });
 
-describe("FlowDetail: a failed read after Publish", () => {
+describe("FlowDetail: a failed read after Create version", () => {
   async function publishWithFailedReread() {
     renderAt();
-    await waitFor(() => expect(button("Publish")).toBeEnabled(), LONG);
-    await userEvent.click(button("Publish"));
+    await waitFor(() => expect(button("Create version")).toBeEnabled(), LONG);
+    await userEvent.click(button("Create version"));
     const dialog = await screen.findByRole("dialog");
     server.getFlowFailures = 1; // the re-read that follows the publish
-    await userEvent.click(within(dialog).getByRole("button", { name: "Publish" }));
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Published v1"));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create version" }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Created v1"));
     expect(server.getFlowFailures).toBe(0);
   }
 
   it("reads the draft before the next save, so the save is not refused as stale", async () => {
     server = new FakeWorkflowServer();
     await publishWithFailedReread();
-    const movedByPublish = server.flow!.updated_at;
+    const movedByVersion = server.flow!.updated_at;
     type(screen.getByRole("textbox", { name: "Flow source" }), flowSource("after"));
     await userEvent.click(button("Save"));
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Flow saved"));
-    expect((puts()[0].body as { if_updated_at: string }).if_updated_at).toBe(movedByPublish);
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Saved. New runs use this version of the flow."));
+    expect((puts()[0].body as { if_updated_at: string }).if_updated_at).toBe(movedByVersion);
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
@@ -363,45 +363,100 @@ describe("FlowDetail: a failed read after Publish", () => {
 });
 
 describe("FlowDetail: Run", () => {
-  it("is disabled until a version is live", async () => {
+  const INPUTS = (id: string) =>
+    `id: hello\nnamespace: company.team\ninputs:\n  - id: ${id}\n    type: STRING\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n`;
+
+  it("needs no version: a flow never versioned runs its saved draft", async () => {
     server = new FakeWorkflowServer({ live_version_id: null });
     renderAt();
     await editorBox();
-    expect(button("Run")).toBeDisabled();
-    expect(button("Run")).toHaveAccessibleDescription("Publish the flow before running it");
+    await waitFor(() => expect(button("Run")).toBeEnabled(), LONG);
+    expect(server.versions).toHaveLength(0);
   });
 
-  it("is enabled once a version is live and its source has loaded", async () => {
-    liveFlow(flowSource("live"));
+  it("opens the run form on the SAVED draft's inputs, not a version's", async () => {
+    // v1 has one input; the saved draft has another, and the draft is what the server starts.
+    liveFlow(INPUTS("version_only"), INPUTS("draft_only"));
     renderAt();
     await editorBox();
-    await waitFor(() => expect(button("Run")).toBeEnabled());
-  });
-
-  it("opens the run form on the LIVE version's inputs, saying the draft is not what runs", async () => {
-    // Live v1 has one input; the saved draft has a different one, which the form must not offer.
-    const live = `id: hello\nnamespace: company.team\ninputs:\n  - id: live_only\n    type: STRING\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n`;
-    const draft = live.replace("live_only", "draft_only");
-    liveFlow(live, draft);
-    renderAt();
-    await editorBox();
-    await waitFor(() => expect(button("Run")).toBeEnabled());
+    await waitFor(() => expect(button("Run")).toBeEnabled(), LONG);
     await userEvent.click(button("Run"));
     const dialog = await screen.findByRole("dialog", { name: "Run company.team.hello" });
-    expect(within(dialog).getByLabelText(/^live_only/)).toBeInTheDocument();
-    expect(within(dialog).queryByLabelText(/^draft_only/)).not.toBeInTheDocument();
-    expect(within(dialog).getByRole("note")).toHaveTextContent("Runs live v1; your draft is not published");
+    expect(within(dialog).getByLabelText(/^draft_only/)).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText(/^version_only/)).not.toBeInTheDocument();
+    expect(within(dialog).getByText("Starts an execution of the saved draft.")).toBeInTheDocument();
   });
 
-  it("says nothing about the draft when the editor holds the live text", async () => {
-    liveFlow(flowSource("live"));
+  it("is disabled while there are unsaved edits, saying Run uses the saved draft, and enabled again once saved", async () => {
+    server = new FakeWorkflowServer();
+    renderAt();
+    const box = await editorBox();
+    await waitFor(() => expect(button("Run")).toBeEnabled(), LONG);
+    type(box, flowSource("two"));
+    expect(button("Run")).toBeDisabled();
+    expect(button("Run")).toHaveAccessibleDescription("Save first: Run uses the saved draft");
+    expect(screen.getByText("Save first: Run uses the saved draft")).toBeVisible();
+    await userEvent.click(button("Save"));
+    await waitFor(() => expect(button("Run")).toBeEnabled(), LONG);
+  });
+
+  it("is disabled with the error count while validation reports errors", async () => {
+    server = new FakeWorkflowServer();
+    server.validation = {
+      status: 200,
+      body: { errors: [{ code: "a", message: "first", path: "tasks" }], warnings: [] },
+    };
+    renderAt();
+    await waitFor(() => expect(button("Run")).toHaveAccessibleDescription("Fix 1 error to run"), LONG);
+    expect(button("Run")).toBeDisabled();
+    expect(screen.getByText("Fix 1 error to run")).toBeVisible();
+  });
+
+  it("is disabled with \"Validation unavailable\" when validation fails", async () => {
+    server = new FakeWorkflowServer();
+    server.validation = { status: 500, body: { error: "internal error" } };
+    renderAt();
+    await waitFor(() => expect(button("Run")).toHaveAccessibleDescription("Validation unavailable"), LONG);
+    expect(button("Run")).toBeDisabled();
+  });
+
+  it("is disabled while the flow is disabled by its state", async () => {
+    server = new FakeWorkflowServer({ state: "disabled" });
     renderAt();
     await editorBox();
-    await waitFor(() => expect(button("Run")).toBeEnabled());
-    await userEvent.click(button("Run"));
-    // No inputs: the confirm.
-    const confirm = await screen.findByRole("alertdialog", { name: "Run company.team.hello?" });
-    expect(within(confirm).queryByText(/your draft is not published/)).not.toBeInTheDocument();
+    await waitFor(() => expect(button("Run")).toHaveAccessibleDescription("The flow is disabled"), LONG);
+    expect(button("Run")).toBeDisabled();
+    expect(screen.getByText("The flow is disabled")).toBeVisible();
+  });
+
+  it("is disabled while the saved YAML says disabled: true", async () => {
+    server = new FakeWorkflowServer({ source: `${flowSource("off")}disabled: true\n` });
+    renderAt();
+    await editorBox();
+    await waitFor(() => expect(button("Run")).toHaveAccessibleDescription("The flow is disabled"), LONG);
+    expect(button("Run")).toBeDisabled();
+  });
+});
+
+describe("FlowDetail: the changes indicator, without a version", () => {
+  it("shows no pill for a flow that has no version", async () => {
+    server = new FakeWorkflowServer();
+    renderAt();
+    await editorBox();
+    await waitFor(() => expect(server.callsTo("GET", `${FLOW_PATH}/versions`).length).toBeGreaterThan(0));
+    expect(screen.queryByText(/Changes since|Versions unknown/)).not.toBeInTheDocument();
+  });
+
+  it("compares with the LATEST version, not the first", async () => {
+    server = new FakeWorkflowServer({ source: flowSource("one") });
+    server.publishNow();
+    server.flow = { ...server.flow!, source: flowSource("two") };
+    server.publishNow();
+    // The saved draft goes back to v1's text: it equals v1 and differs from v2, the latest.
+    server.flow = { ...server.flow!, source: flowSource("one") };
+    renderAt();
+    expect(await screen.findByText("Changes since v2")).toBeInTheDocument();
+    expect(screen.queryByText("Changes since v1")).not.toBeInTheDocument();
   });
 });
 
@@ -423,13 +478,13 @@ describe("FlowDetail: Delete", () => {
 });
 
 describe("FlowDetail: a read-only viewer", () => {
-  it("sees no Save, Publish, Run or Delete, and the banner saying why", async () => {
+  it("sees no Save, Create version, Run or Delete, and the banner saying why", async () => {
     server = new FakeWorkflowServer({ can_manage: false });
     renderAt();
     const box = await editorBox();
     expect(box).toHaveAttribute("readonly");
     expect(screen.getByRole("note")).toHaveTextContent("Read only. Editing a flow needs the workflow:manage permission.");
-    for (const name of ["Save", "Publish", "Run", "Delete"]) {
+    for (const name of ["Save", "Create version", "Publish", "Run", "Delete"]) {
       expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
     }
     // Ctrl+S does nothing, and the server is never asked to validate.

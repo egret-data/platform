@@ -121,7 +121,7 @@ export function ReasonButton({
 }
 
 /**
- * The reasons of the disabled actions, as visible text under them: "Publish:
+ * The reasons of the disabled actions, as visible text under them: "Create version:
  * Save first". Each reason's element has the id its button names in
  * `aria-describedby`; the action's name is `aria-hidden` there, so the
  * button's description is the reason alone.

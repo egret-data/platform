@@ -11,7 +11,7 @@ import {
   type RunInput,
 } from "@/components/workflows/run/inputModel";
 
-/** The `inputs:` of a flow, parsed the way the run form reads the live version. */
+/** The `inputs:` of a flow, parsed the way the run form reads the saved draft. */
 function inputs(yaml: string): RunInput[] {
   const parsed = inputsFromSource(`id: f\nnamespace: n\ninputs:\n${yaml}\ntasks: []\n`);
   if ("error" in parsed) throw new Error(parsed.error);

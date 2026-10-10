@@ -14,7 +14,10 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 
 /**
- * Publish the saved draft as a new version (spec §5.3), with an optional note.
+ * "Create version" (spec §5.3): snapshot the saved draft as a numbered version,
+ * with an optional note, to compare and restore later. It changes nothing that
+ * runs: every execution runs the saved draft (the user's ruling, 2026-10-10).
+ * The identifiers keep "publish", the backend route's name (`POST …/publish`).
  *
  * `onPublish` rejects with the server's message on failure; the dialog then
  * shows it and keeps the note (FE-ACTION-3). It closes only on success.
@@ -46,7 +49,7 @@ export function PublishDialog({
       setNote("");
       onOpenChange(false);
     } catch (e) {
-      setError(e instanceof Error && e.message ? e.message : "The flow could not be published. Try again.");
+      setError(e instanceof Error && e.message ? e.message : "The version could not be created. Try again.");
     } finally {
       setPending(false);
     }
@@ -63,10 +66,12 @@ export function PublishDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Publish {flowName}</DialogTitle>
+          <DialogTitle>Create a version of {flowName}</DialogTitle>
           <DialogDescription>
-            {nextVersion !== null ? `The saved draft becomes version ${nextVersion}. ` : "The saved draft becomes a new version. "}
-            Executions run the published version, never the draft.
+            {nextVersion !== null
+              ? `Version ${nextVersion} will be a snapshot of the saved draft, to compare and restore later. `
+              : "The new version will be a snapshot of the saved draft, to compare and restore later. "}
+            It does not change what runs: runs always use the saved draft.
           </DialogDescription>
         </DialogHeader>
         <form
@@ -80,7 +85,7 @@ export function PublishDialog({
             <Label htmlFor="publish-note">Note (optional)</Label>
             <Textarea
               id="publish-note"
-              // The dialog opened because the user asked to publish (FE-A11Y-6).
+              // The dialog opened because the user asked to create a version (FE-A11Y-6).
               autoFocus
               value={note}
               onChange={(e) => setNote(e.target.value)}
@@ -99,7 +104,7 @@ export function PublishDialog({
             </Button>
             <Button type="submit" disabled={pending}>
               {pending && <Loader2 aria-hidden className="animate-spin" />}
-              Publish
+              Create version
             </Button>
           </DialogFooter>
         </form>

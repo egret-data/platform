@@ -59,7 +59,10 @@ describe("WorkflowsRoutes", () => {
 
   it("keeps a known tab, and opens the flow page there", async () => {
     renderAt("/explore/eng/workflows/flows/f-1/revisions");
-    await waitFor(() => expect(api.useWorkflowGetFlow).toHaveBeenCalledWith("eng", "f-1", expect.anything()));
+    // The flow page is a lazy chunk that vitest transforms on first import, cold: measured at
+    // 1.0–1.7 s on a loaded machine, at this commit and the one before it, so the default 1 s
+    // wait failed on time alone.
+    await waitFor(() => expect(api.useWorkflowGetFlow).toHaveBeenCalledWith("eng", "f-1", expect.anything()), { timeout: 10000 });
     expect(screen.getByTestId("path")).toHaveTextContent("/explore/eng/workflows/flows/f-1/revisions");
   });
 
