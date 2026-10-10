@@ -59,6 +59,15 @@ describe("usePersistedLayout", () => {
     expect(JSON.parse(localStorage.getItem(KEY)!)).toEqual(STORED);
   });
 
+  it("writes a pending change when the page goes away inside the debounce (a reload)", () => {
+    // A reload does not unmount React: only `pagehide` runs. Found in W7a Task 8's end-to-end run.
+    const { result } = renderHook(() => usePersistedLayout(FLOW, DEFAULT_FLOW_LAYOUT));
+    act(() => result.current[1](STORED));
+    expect(localStorage.getItem(KEY)).toBeNull();
+    window.dispatchEvent(new Event("pagehide"));
+    expect(JSON.parse(localStorage.getItem(KEY)!)).toEqual(STORED);
+  });
+
   it("keeps each flow's layout under its own key", () => {
     localStorage.setItem(KEY, JSON.stringify(STORED));
     const { result, rerender } = renderHook(({ flow }) => usePersistedLayout(flow, DEFAULT_FLOW_LAYOUT), {

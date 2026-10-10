@@ -2051,7 +2051,9 @@ async fn start_flow_execution(
         // client orval generates for this route's two content types sends no
         // `Content-Type`. So a headerless body is read as JSON: empty is `{}`
         // as before, anything else is parsed (and refused if it is not JSON).
-        // An explicit type that is neither JSON nor multipart stays 415.
+        // An explicit type that is neither JSON nor multipart stays 415 --
+        // and a browser's `fetch` labels a string body `text/plain`, so the
+        // web UI says `application/json` itself (W7a Task 8, `RunFlow.tsx`).
         let req = if req.headers().contains_key(axum::http::header::CONTENT_TYPE) {
             req
         } else {

@@ -10,7 +10,7 @@ const FLOW = "0a7c1d2e-0000-4000-8000-000000000001";
 const EXEC = "5e5e5e5e-0000-4000-8000-0000000000aa";
 const START = `/api/ws/${WS}/workflows/flows/${FLOW}/executions`;
 
-type Call = { method: string; path: string; body: unknown };
+type Call = { method: string; path: string; body: unknown; contentType: string | null };
 
 /** `POST …/executions` answers `reply`; every request is recorded with its body (JSON parsed, FormData kept). */
 function serve(reply: { status: number; body: unknown } = { status: 201, body: execution() }) {
@@ -18,7 +18,7 @@ function serve(reply: { status: number; body: unknown } = { status: 201, body: e
   vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
     const method = (init?.method ?? "GET").toUpperCase();
     const body = typeof init?.body === "string" ? JSON.parse(init.body) : init?.body;
-    calls.push({ method, path: String(input), body });
+    calls.push({ method, path: String(input), body, contentType: new Headers(init?.headers).get("content-type") });
     return new Response(JSON.stringify(reply.body), { status: reply.status, headers: { "content-type": "application/json" } });
   }));
   return calls;
@@ -98,6 +98,8 @@ describe("RunFlow: the container", () => {
     await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent(`/explore/${WS}/workflows/executions/${EXEC}`));
     expect(starts(calls)).toHaveLength(1);
     expect(starts(calls)[0].body).toEqual({ inputs: {} });
+    // Said, not left to `fetch`: a string body would go out as `text/plain`, which the route refuses (415).
+    expect(starts(calls)[0].contentType).toBe("application/json");
   });
 
   it("opens a dialog for at most three scalar inputs", async () => {
@@ -209,6 +211,7 @@ describe("RunFlow: the controls", () => {
     await userEvent.click(runButton());
     await waitFor(() => expect(starts(calls)).toHaveLength(1));
     expect(starts(calls)[0].body).toEqual({ inputs: { n: 12, b: true, sel: "us" } });
+    expect(starts(calls)[0].contentType).toBe("application/json");
   });
 });
 
@@ -230,6 +233,8 @@ describe("RunFlow: submitting", () => {
     expect(body).toBeInstanceOf(FormData);
     expect(((body as FormData).get("f") as File).name).toBe("rows.exe");
     expect((body as FormData).get("who")).toBe("ada");
+    // No type of ours: the browser writes `multipart/form-data; boundary=…` for a FormData body.
+    expect(starts(calls)[0].contentType).toBeNull();
     // Nothing typed is cleared, and the form is still open.
     expect(screen.getByLabelText(/^who/)).toHaveValue("ada");
     expect(screen.getByText("Chosen: rows.exe")).toBeInTheDocument();

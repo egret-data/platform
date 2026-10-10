@@ -50,8 +50,9 @@ function write(key: string, layout: Layout): void {
  * - `flowKey` is the flow's uuid. An empty key (a flow not created yet) keeps
  *   the layout in memory only.
  * - A change is written 300 ms after the last one, so dragging a gutter is one
- *   write; a change still pending when the flow changes or the editor unmounts
- *   is written then, under the key it was made for.
+ *   write; a change still pending when the flow changes, the editor unmounts
+ *   or the page goes away (`pagehide`) is written then, under the key it was
+ *   made for.
  */
 export function usePersistedLayout(flowKey: string, defaults: Layout): [Layout, (l: Layout) => void] {
   const key = flowKey ? `${LAYOUT_KEY_PREFIX}${flowKey}` : null;
@@ -84,6 +85,11 @@ export function usePersistedLayout(flowKey: string, defaults: Layout): [Layout, 
   }, []);
 
   useEffect(() => flush, [key, flush]);
+  // A reload or a closed tab unmounts nothing, so the page going away writes a pending change too.
+  useEffect(() => {
+    window.addEventListener("pagehide", flush);
+    return () => window.removeEventListener("pagehide", flush);
+  }, [flush]);
 
   const setLayout = useCallback((layout: Layout) => {
     setState({ key, version, edited: true, layout });

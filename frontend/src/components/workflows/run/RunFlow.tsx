@@ -85,7 +85,10 @@ function RunForm({
 }: RunFlowProps & { inputs: RunInput[]; sourceError: string | null }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const start = useWorkflowStartFlowExecution();
+  // The route takes JSON or multipart, so orval writes no `Content-Type` for it, and a
+  // browser's `fetch` labels a string body `text/plain`, which the route refuses with 415
+  // (found in W7a Task 8's end-to-end run; the vitest fetch stub never looked at headers).
+  const start = useWorkflowStartFlowExecution({ request: { headers: { "Content-Type": "application/json" } } });
   const idPrefix = useId();
   const [form, setForm] = useState(() => formFromInputs(inputs));
   const [clientErrors, setClientErrors] = useState<Record<string, string>>({});
