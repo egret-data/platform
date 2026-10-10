@@ -99,7 +99,7 @@ Icon lấy từ `lucide-react`, và mỗi trang có tối đa một điểm nh�
 **Làm thế này:** icon như trong `frontend/src/components/explore/RowActionsMenu.tsx`; `--highlight` và `--accent` định nghĩa trong `frontend/src/index.css`. **Kiểm bằng:** review.
 
 #### FE-VISUAL-6 — Chart giữ palette Metabase và các dấu hiệu của nó · PHẢI
-Chart giữ palette series của Metabase cùng các dấu hiệu không phụ thuộc màu: kiểu đường, marker và decal. Giá trị màu cụ thể bên trong code dựng option của chart được phép, vì ECharts cần giá trị cụ thể.
+Chart giữ palette series của Metabase cùng các dấu hiệu không phụ thuộc màu: kiểu đường và hình marker theo từng series, và phần mô tả dữ liệu `aria`. Decal vẫn tắt, theo quyết định ở chart 05 (#360); `palette.ts` ghi lý do. Giá trị màu cụ thể bên trong code dựng option của chart được phép, vì ECharts cần giá trị cụ thể.
 **Làm thế này:** `frontend/src/components/chart/echarts/palette.ts`. **Kiểm bằng:** review.
 
 ## 5. Form (FE-FORM)
@@ -163,8 +163,8 @@ Mọi phần tử bấm được đều dùng được bằng bàn phím. Phần
 **Làm thế này:** `frontend/src/components/ui/icon-button.tsx` cho nút chỉ có icon. **Kiểm bằng:** review.
 
 #### FE-A11Y-4 — Không bao giờ chỉ dùng màu · PHẢI
-Thông tin không bao giờ chỉ truyền bằng màu; chart giữ decal và marker của nó (FE-VISUAL-6).
-**Làm thế này:** `frontend/src/components/chart/echarts/palette.ts` (hình marker và kiểu đường theo từng series). **Kiểm bằng:** review.
+Thông tin không bao giờ chỉ truyền bằng màu; chart giữ kiểu đường, marker và mô tả `aria` của nó (FE-VISUAL-6).
+**Làm thế này:** `frontend/src/components/chart/echarts/palette.ts` (hình marker và kiểu đường theo từng series, và mô tả `aria`). **Kiểm bằng:** review.
 
 #### FE-A11Y-5 — Tôn trọng giảm chuyển động · PHẢI
 Chuyển động tôn trọng `prefers-reduced-motion`.
@@ -252,7 +252,7 @@ Mỗi lần review một task frontend trả lời từng mục áp dụng đư�
 - [ ] FE-VISUAL-2 — Style inline dùng `var(--token)`; SVG data URL nhận giá trị đã đọc ra.
 - [ ] FE-VISUAL-4 — Số dùng `tabular-nums`; thay đổi màu đã kiểm ở light và dark trên mọi bề mặt.
 - [ ] FE-VISUAL-5 — (NÊN) Icon từ `lucide-react`; tối đa một `--highlight` mỗi trang; `--accent` không dùng làm điểm nhấn.
-- [ ] FE-VISUAL-6 — Chart giữ palette Metabase, kiểu đường, marker và decal.
+- [ ] FE-VISUAL-6 — Chart giữ palette Metabase, kiểu đường, hình marker và mô tả `aria`; decal vẫn tắt.
 - [ ] FE-FORM-1 — State của form bằng `useState` hoặc hook riêng; không thư viện form.
 - [ ] FE-FORM-3 — Tập giá trị đã biết thì dùng picker hoặc combobox có trợ giúp.
 - [ ] FE-FORM-4 — Lỗi validate nằm cạnh field, bằng lời của server nếu lỗi do server trả về.

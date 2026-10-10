@@ -97,7 +97,7 @@ Icons come from `lucide-react`, and a page has at most one `--highlight` emphasi
 **Do this:** icons as in `frontend/src/components/explore/RowActionsMenu.tsx`; `--highlight` and `--accent` are defined in `frontend/src/index.css`. **Checked by:** review.
 
 #### FE-VISUAL-6 — Charts keep the Metabase palette and its cues · MUST
-Charts keep the Metabase series palette and its colour-independent cues: line styles, markers and decals. Literal colours inside chart option builders are allowed; ECharts needs concrete values.
+Charts keep the Metabase series palette and its colour-independent cues: line styles and marker shapes per series, and the `aria` data description. Decal patterns stay off, as decided in chart 05 (#360); `palette.ts` records why. Literal colours inside chart option builders are allowed; ECharts needs concrete values.
 **Do this:** `frontend/src/components/chart/echarts/palette.ts`. **Checked by:** review.
 
 ## 5. Forms (FE-FORM)
@@ -161,8 +161,8 @@ Every clickable element works from the keyboard. A non-button element made click
 **Do this:** `frontend/src/components/ui/icon-button.tsx` for an icon-only button. **Checked by:** review.
 
 #### FE-A11Y-4 — Never colour alone · MUST
-Information is never carried by colour alone; charts keep their decals and markers (FE-VISUAL-6).
-**Do this:** `frontend/src/components/chart/echarts/palette.ts` (marker shapes and line styles per series). **Checked by:** review.
+Information is never carried by colour alone; charts keep their line styles, markers and `aria` description (FE-VISUAL-6).
+**Do this:** `frontend/src/components/chart/echarts/palette.ts` (marker shapes and line styles per series, and the `aria` description). **Checked by:** review.
 
 #### FE-A11Y-5 — Respect reduced motion · MUST
 Motion respects `prefers-reduced-motion`.
@@ -250,7 +250,7 @@ Every frontend task review answers each applicable item: **pass**, **fail**, or 
 - [ ] FE-VISUAL-2 — Inline styles use `var(--token)`; SVG data URLs get a resolved value.
 - [ ] FE-VISUAL-4 — Numbers use `tabular-nums`; colour changes checked in light and dark on every surface.
 - [ ] FE-VISUAL-5 — (SHOULD) Icons from `lucide-react`; at most one `--highlight` per page; `--accent` is not emphasis.
-- [ ] FE-VISUAL-6 — Charts keep the Metabase palette, line styles, markers and decals.
+- [ ] FE-VISUAL-6 — Charts keep the Metabase palette, line styles, marker shapes and the `aria` description; decals stay off.
 - [ ] FE-FORM-1 — Form state in `useState` or a dedicated hook; no form library.
 - [ ] FE-FORM-3 — Known value sets get a picker or combobox with help.
 - [ ] FE-FORM-4 — Validation errors sit beside their field, in the server's words when the server produced it.
