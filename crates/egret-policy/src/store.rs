@@ -1896,6 +1896,44 @@ impl PolicyStore {
         Ok(id)
     }
 
+    /// [`upsert_policy`](Self::upsert_policy) for egret's OWN infrastructure
+    /// policies (`infra_names`): identical, except the row is stamped
+    /// `managed_by = 'infra'` rather than the human default `'operator'`.
+    /// On conflict the owner is re-stamped too, so a row an operator
+    /// pre-created under an infrastructure name becomes infrastructure.
+    pub async fn upsert_infra_policy(
+        &self,
+        service_id: i64,
+        name: &str,
+        policy: &Value,
+    ) -> Result<i64, PolicyStoreError> {
+        refuse_reserved_name(name)?;
+        let mut tx = self.db.pool.begin().await?;
+        let id: i64 = sqlx::query_scalar::<_, i64>(
+            r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by)
+               VALUES ($1,$2,$3,'infra')
+               ON CONFLICT (service_id, name) DO UPDATE
+                 SET policy_jsonb = EXCLUDED.policy_jsonb,
+                     managed_by = 'infra',
+                     version = policy.authz_policies.version + 1,
+                     updated_at = now()
+               RETURNING id"#,
+        )
+        .bind(service_id)
+        .bind(name)
+        .bind(policy)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
+        )
+        .bind(service_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(id)
+    }
+
     /// Insert a policy, or update its body in place if `(service_id, name)`
     /// already exists, bumping the policy's `version` and the service's
     /// `policy_version` atomically. Returns the policy id.

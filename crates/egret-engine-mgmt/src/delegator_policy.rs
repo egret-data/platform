@@ -8,8 +8,11 @@ use serde_json::{json, Value};
 
 /// The Trino service user egret authenticates as for impersonate-mode delegation.
 pub const DELEGATOR_USERNAME: &str = "egret_delegator";
-pub const IMPERSONATE_POLICY_NAME: &str = "egret-delegator-impersonate";
-pub const QUERY_TIMEOUT_POLICY_NAME: &str = "egret-query-timeout";
+// Declared in `egret_policy_api::infra_names` so the guard, the backfill and this
+// producer read one list. Re-exported rather than moved outright: `engines.rs`
+// refers to them as `dp::IMPERSONATE_POLICY_NAME` / `dp::QUERY_TIMEOUT_POLICY_NAME`
+// and those call sites are correct as they stand.
+pub use egret_policy_api::infra_names::{IMPERSONATE_POLICY_NAME, QUERY_TIMEOUT_POLICY_NAME};
 const QUERY_TIMEOUT_PROPERTY: &str = "query_max_run_time";
 
 fn policy(service: &str, name: &str, resources: Value, users: Value, access: &str) -> Value {

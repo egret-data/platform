@@ -13,6 +13,7 @@
 //! map. This produces all 13 hierarchies in the def (the catalog/schema/
 //! table/column chain plus the 9 standalone/attached admin resources).
 
+use crate::infra_names::{ADMIN_ALL_ACCESS_NAME_PREFIX, DEFAULT_ALL_ACCESS_NAME_PREFIX};
 use crate::service_def::{starrocks_service_def, trino_service_def};
 use crate::{PolicyStore, PolicyStoreError};
 // The hierarchy walker lives in `egret-ranger-eval` (SP4d Task 4), which
@@ -130,14 +131,14 @@ impl PolicyStore {
             &def,
             service_name,
             "trino",
-            "all",
+            DEFAULT_ALL_ACCESS_NAME_PREFIX,
             &[],
             &[admin_principal.to_string()],
         );
 
         let mut created = 0usize;
         for (name, body) in &policies {
-            self.create_policy(service_id, name, body).await?;
+            self.upsert_infra_policy(service_id, name, body).await?;
             created += 1;
         }
         Ok(created)
@@ -163,12 +164,18 @@ impl PolicyStore {
         } else {
             trino_service_def()?
         };
-        let policies =
-            build_default_policies(&def, service_name, service_type, "egret-admin", users, &[]);
+        let policies = build_default_policies(
+            &def,
+            service_name,
+            service_type,
+            ADMIN_ALL_ACCESS_NAME_PREFIX,
+            users,
+            &[],
+        );
 
         let mut count = 0usize;
         for (name, body) in &policies {
-            self.upsert_policy(service_id, name, body).await?;
+            self.upsert_infra_policy(service_id, name, body).await?;
             count += 1;
         }
         Ok(count)

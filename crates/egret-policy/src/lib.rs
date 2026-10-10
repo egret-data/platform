@@ -18,6 +18,9 @@ pub use admin::{
 pub use ambiguous_arbitration::{
     ambiguous_arbitration_in, AmbiguousArbitration, Arbitrated, PolicyUnderWrite,
 };
+// Declared in the leaf contract crate so `egret-engine-mgmt` can reach it in
+// production; re-exported so the canonical path stays `egret_policy::infra_names`.
+pub use egret_policy_api::infra_names;
 pub use error::PolicyStoreError;
 pub use ranger::{ranger_router, RangerState};
 pub use service_def::{
