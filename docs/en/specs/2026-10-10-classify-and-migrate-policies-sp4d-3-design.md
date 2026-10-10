@@ -121,13 +121,18 @@ the branch merged as #656. Two countermeasures, not one:
 
 ### The classifier
 
-`GET /api/control-plane/policies/services/{id}/classify` answers, per policy:
+`GET /api/control-plane/perm/policies/services/{id}/classify` answers, per policy:
 
 - `managed_by` and the category (`compiler` / `infra` / `operator`)
 - `migratable: bool`
 - `blockers: [...]` — for a refusal, every attribute that blocks it, each as a sentence an
   operator can act on, naming the offending value
 - for a migratable policy, the model objects it would become
+- `migrated` — the `perm.migrated_from` row, when the policy has been migrated (Task 7). A
+  migrated original is `enabled = false`, exactly like a policy switched off by hand, so
+  without this the page would give it the switched-off advice ("switch it on first") and an
+  operator following it would enforce the policy twice. A migrated policy is never
+  `migratable`, and its one blocker sentence says it was migrated and how to undo it.
 
 A refusal that does not name its blocker is useless, and it is also unmeasurable — see Part 4,
 where refusals are asserted, not just accepts.
@@ -228,13 +233,20 @@ Entry points are the three pure functions SP4d-1 exposes: `evaluate`, `evaluate_
 ### Routes
 
 ```
-GET  /api/control-plane/policies/services/{id}/classify
-POST /api/control-plane/policies/services/{id}/migrate   { policy_names[], dry_run }
-POST /api/control-plane/policies/services/{id}/migrate/undo { policy_names[] }
+GET  /api/control-plane/perm/policies/services/{id}/classify
+POST /api/control-plane/perm/policies/services/{id}/migrate      { policy_names[], dry_run }
+POST /api/control-plane/perm/policies/services/{id}/migrate/undo { policy_names[] }
 ```
 
-`migrate` returns the probe table (before → after, per plugin version) and the artifact diff.
-It writes only when `dry_run` is false. Dry-run runs the **same code** and differs in exactly
+(Corrected in Task 7: the routes live on the `perm` router, under `/perm/`, where the classify
+route already was; an earlier draft of this section omitted the segment.)
+
+`migrate` returns the probe table (before → after, per plugin version) and the artifact diff:
+every profile the gate evaluated, with the policy names its download loses and gains, the
+number of probe evaluations, and every disagreement as a structured row plus one readable
+sentence. It answers 200 when the gate proved the write on every affected profile and 422, with
+the same body, when it did not (the disagreements, or why the gate refused to answer). It
+writes only when `dry_run` is false. Dry-run runs the **same code** and differs in exactly
 one place: it always rolls back.
 
 ### One transaction, in this order
@@ -252,10 +264,20 @@ one place: it always rolls back.
    downloads **does not contain the policy at all**, rather than containing a copy marked
    disabled. `set_policy_enabled(id, enabled)` already exists for this and already runs
    `refuse_if_compiler_owned`, so it refuses a compiler-owned row — and must refuse an `infra`
-   row too once Part 1's column exists.
-4. Insert provenance.
-5. **Re-run the equivalence gate against the state just written, inside the transaction, and
-   `ROLLBACK` on any disagreement.**
+   row too once Part 1's column exists. (Task 7 split its body out as
+   `set_policy_enabled_via`, the same guards on the caller's connection, so the flip commits or
+   rolls back with the migration; `set_policy_enabled` now calls it.)
+4. Insert provenance. Its `probes_proved` is written after step 5 passes, in the same
+   transaction.
+5. **Re-run the equivalence gate against the state just written, inside the transaction, over
+   EVERY affected profile, and `ROLLBACK` on any disagreement.** The affected set is the union
+   of `affected_services_for_grant` / `_rule` over the inserted objects plus the profiles whose
+   download carried the original; one case per member, the count asserted; a member with no
+   bound engine is refused, not skipped. Before the gate runs, its preconditions are enforced:
+   no fold-divergent tag-assignment coordinate or policy resource value, a probe-evaluation
+   count under `migrate::MAX_PROBE_EVALUATIONS` (refused, never truncated), and a non-vacuous
+   comparison (each before/after is two reads, and the original is in every carrier's before
+   and in no carrier's after).
 
 Step 5 is the point of the ordering. The gate proves its claim about **the artifact the engine
 will actually download after the write**, not about a predicted one. That is the lesson SP4d-2a
@@ -276,8 +298,24 @@ could not be written.
 
 ### Idempotency and refusal order
 
-A policy that already has a provenance row answers 409, never a duplicate. The 409-before-400
-ordering reuses `refuse_before_policy_insert`, which spells that order once; no second copy.
+A policy that already has a provenance row answers 409, never a duplicate. The order, over
+every name in the request before anything is written:
+
+1. **404** — no such profile, or no policy of that name in it.
+2. **409** — a migration is already on record (checked before classification, so a migrated
+   original — which is switched off — is answered "already migrated", not "switched off"); then
+   a policy that is not `operator`-owned (`compiler`, `infra`).
+3. **400** — the classifier, re-run inside the transaction, says it is not migratable.
+4. **409** — a rule name the migration would create is already taken (`perm.rules.name` is
+   unique; the grammar names a policy's N rules `{name} #i`).
+
+Then the gate's own refusals (fold divergence, no bound engine, the probe cap, a vacuous
+comparison) answer 422 with the refusal sentence. A racing second migration that passes all of
+the above is stopped by the provenance `UNIQUE` and answers 409.
+
+(Corrected in Task 7: an earlier draft said this order "reuses `refuse_before_policy_insert`".
+It cannot — that function orders the two refusals a policy INSERT can hit, and a migration
+inserts no hand-written policy. The order above is spelled once, in `migrate::migrate_in_tx`.)
 
 ### A consequence to state plainly
 

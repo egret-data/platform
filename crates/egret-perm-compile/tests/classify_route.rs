@@ -452,7 +452,10 @@ async fn every_policy_in_a_resource_profile_is_classified_in_id_order() {
 
     let off = by_id(&body, switched_off);
     assert_eq!(off["enabled"], false, "{off}");
-    assert_refused_with(off, &["switched off"]);
+    assert_refused_with(off, &["switched off", "no migration on record"]);
+    // Switched off by hand, never migrated: no marker.
+    assert_eq!(off["migrated"], Value::Null, "{off}");
+    assert_eq!(ok["migrated"], Value::Null, "{ok}");
 
     // Registered, but not served here: the scoped lookup refuses it.
     assert_refused_with(
@@ -555,4 +558,64 @@ async fn an_unknown_profile_is_a_404() {
     // The handler's own 404, not the router's empty fallback for a path it
     // does not know.
     assert_eq!(body, json!({"error": "not found"}));
+}
+
+/// SP4d-3 Task 7: a migrated original is `enabled = false` exactly like one
+/// switched off by hand. The classifier tells them apart by provenance, and
+/// gives the migrated one ONE sentence — migrated, and how to undo it — not
+/// the switched-off advice to switch it on, which would enforce it twice.
+#[tokio::test]
+async fn a_migrated_original_is_reported_as_migrated_not_as_switched_off() {
+    let Some(f) = setup().await else { return };
+    let cat = f.served_catalog.clone();
+    let p = f.trino_id;
+    let by_hand = insert(
+        &f,
+        p,
+        "switched off by hand",
+        "operator",
+        false,
+        access_policy(&cat, &["select"]),
+    )
+    .await;
+    let migrated = insert(
+        &f,
+        p,
+        "migrated away",
+        "operator",
+        false,
+        access_policy(&cat, &["select"]),
+    )
+    .await;
+    let grant_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO perm.migrated_from (service_id, policy_name, grant_ids, probes_proved, migrated_by) \
+         VALUES ($1, 'migrated away', ARRAY[$2]::uuid[], 330, 'steward@egret.local')",
+    )
+    .bind(p)
+    .bind(grant_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("provenance");
+
+    let (status, body) = classify(&f, p).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let m = by_id(&body, migrated);
+    assert_eq!(m["enabled"], false, "{m}");
+    assert_eq!(m["migratable"], false, "{m}");
+    assert_eq!(m["migrated"]["grant_ids"], json!([grant_id]), "{m}");
+    assert_eq!(m["migrated"]["probes_proved"], 330, "{m}");
+    assert_eq!(m["migrated"]["migrated_by"], "steward@egret.local", "{m}");
+    let bs = blockers(m);
+    assert_eq!(bs.len(), 1, "{m}");
+    assert!(
+        bs[0].contains("was migrated") && bs[0].contains("undo the migration"),
+        "{bs:?}"
+    );
+    assert!(!bs[0].contains("Switch it on"), "{bs:?}");
+
+    let h = by_id(&body, by_hand);
+    assert_eq!(h["migrated"], Value::Null, "{h}");
+    assert_refused_with(h, &["switched off", "Switch it on first"]);
 }

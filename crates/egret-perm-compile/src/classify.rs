@@ -41,13 +41,22 @@
 //! migrating it would turn an effect nobody has today into live grants. (A
 //! policy already migrated is switched off by Task 7's write path, so this is
 //! also what keeps a migrated original from being offered a second time.)
+//!
+//! **A migrated original is reported AS migrated, not as switched off**
+//! (SP4d-3 Task 7). After a migration the original's `enabled` is `false`,
+//! which is byte-for-byte what an operator switching it off by hand leaves,
+//! and [`Blocker::Disabled`]'s advice for that state ("switch it on first")
+//! would, for a migrated policy, re-enable a duplicate of what the model now
+//! enforces. So the classifier reads `perm.migrated_from` and a row with
+//! provenance gets [`ClassifiedPolicy::migrated`] and ONE sentence saying it
+//! was migrated and how to undo it, in place of whatever the grammar says.
 
 use std::collections::HashMap;
 
-use egret_perm::EngineType;
+use egret_perm::{EngineType, Grant, Rule};
 use egret_policy::{
     catalogs_for_service_via, get_service_by_id_via, tag_names_for_keys_via, PolicyStoreError,
-    TAG_DEF_NAME,
+    ServiceRow, TAG_DEF_NAME,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -71,6 +80,31 @@ pub struct ClassifiedPolicy {
     pub blockers: Vec<String>,
     /// For a migratable policy, the model objects it would become.
     pub proposed: Option<ProposedObjects>,
+    /// Present iff `perm.migrated_from` records this policy as migrated —
+    /// which is what tells a migrated original apart from one switched off by
+    /// hand (both have `enabled = false`). A migrated policy is never
+    /// `migratable`, and its one blocker sentence says how to undo it.
+    pub migrated: Option<MigrationRecord>,
+}
+
+/// One `perm.migrated_from` row, as the classifier and the page read it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema, sqlx::FromRow)]
+pub struct MigrationRecord {
+    pub grant_ids: Vec<Uuid>,
+    pub rule_ids: Vec<Uuid>,
+    /// How many probe evaluations agreed when the migration was proved.
+    pub probes_proved: i32,
+    pub migrated_by: String,
+    /// RFC 3339, UTC.
+    pub migrated_at: String,
+}
+
+/// The model objects a migratable policy becomes, as the grammar produced
+/// them (every id [`Uuid::nil`] until inserted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Candidates {
+    Grants(Vec<Grant>),
+    Rules(Vec<Rule>),
 }
 
 /// How many model objects a migratable policy becomes. No `clearances`:
@@ -102,21 +136,41 @@ pub fn service_target(service_type: &str) -> Option<(ServiceKind, EngineType)> {
 
 /// Classify one policy. Pure: every database fact arrives as an argument.
 /// `target` is [`service_target`] of the profile; `Err` carries the profile's
-/// type when it is not one egret compiles to.
+/// type when it is not one egret compiles to. Never reports `migrated` — that
+/// is a database fact [`ServiceInputs::classify`] adds.
 pub fn classify_policy(
     rec: &PolicyRecord,
     target: Result<(ServiceKind, EngineType), &str>,
     catalog_ids: &dyn Fn(&str) -> Option<Uuid>,
     tag_names: &dyn Fn(&str) -> Option<String>,
 ) -> ClassifiedPolicy {
-    let refuse = |blockers: Vec<String>| ClassifiedPolicy {
-        id: rec.id,
-        name: rec.name.clone(),
-        managed_by: rec.managed_by.clone(),
-        enabled: rec.enabled,
-        migratable: false,
-        blockers,
-        proposed: None,
+    classify_policy_objects(rec, target, catalog_ids, tag_names).0
+}
+
+/// [`classify_policy`], plus the model objects themselves for a migratable
+/// policy — the ONE derivation both `classify` (which reports their counts)
+/// and the migration (which inserts them) use, so the page's "it would become
+/// 1 grant" and what the migration writes cannot be two answers.
+pub fn classify_policy_objects(
+    rec: &PolicyRecord,
+    target: Result<(ServiceKind, EngineType), &str>,
+    catalog_ids: &dyn Fn(&str) -> Option<Uuid>,
+    tag_names: &dyn Fn(&str) -> Option<String>,
+) -> (ClassifiedPolicy, Option<Candidates>) {
+    let refuse = |blockers: Vec<String>| {
+        (
+            ClassifiedPolicy {
+                id: rec.id,
+                name: rec.name.clone(),
+                managed_by: rec.managed_by.clone(),
+                enabled: rec.enabled,
+                migratable: false,
+                blockers,
+                proposed: None,
+                migrated: None,
+            },
+            None,
+        )
     };
 
     match rec.managed_by.as_str() {
@@ -171,31 +225,57 @@ pub fn classify_policy(
         Some(1) | Some(2)
     );
     let outcome = if is_rule {
-        rules_from_mask_or_filter_policy(&body, engine, catalog_ids, tag_names, service).map(|c| {
-            ProposedObjects {
-                grants: 0,
-                rules: c.rules.len(),
-            }
-        })
+        rules_from_mask_or_filter_policy(&body, engine, catalog_ids, tag_names, service)
+            .map(|c| Candidates::Rules(c.rules))
     } else {
-        grants_from_access_policy(&body, engine, catalog_ids, service).map(|c| ProposedObjects {
-            grants: c.grants.len(),
-            rules: 0,
-        })
+        grants_from_access_policy(&body, engine, catalog_ids, service)
+            .map(|c| Candidates::Grants(c.grants))
     };
 
     match outcome {
-        Ok(proposed) => ClassifiedPolicy {
-            id: rec.id,
-            name: rec.name.clone(),
-            managed_by: rec.managed_by.clone(),
-            enabled: rec.enabled,
-            migratable: true,
-            blockers: Vec::new(),
-            proposed: Some(proposed),
-        },
+        Ok(candidates) => {
+            let proposed = match &candidates {
+                Candidates::Grants(g) => ProposedObjects {
+                    grants: g.len(),
+                    rules: 0,
+                },
+                Candidates::Rules(r) => ProposedObjects {
+                    grants: 0,
+                    rules: r.len(),
+                },
+            };
+            (
+                ClassifiedPolicy {
+                    id: rec.id,
+                    name: rec.name.clone(),
+                    managed_by: rec.managed_by.clone(),
+                    enabled: rec.enabled,
+                    migratable: true,
+                    blockers: Vec::new(),
+                    proposed: Some(proposed),
+                    migrated: None,
+                },
+                Some(candidates),
+            )
+        }
         Err(blockers) => refuse(blockers.iter().map(render_blocker).collect()),
     }
+}
+
+/// The one sentence a migrated original carries, in place of every other.
+pub fn migrated_sentence(record: &MigrationRecord) -> String {
+    let n_grants = record.grant_ids.len();
+    let n_rules = record.rule_ids.len();
+    format!(
+        "This policy was migrated into egret's permission model on {at} by {by} ({n_grants} \
+         grant(s), {n_rules} rule(s), proved on {probes} probe evaluations) and switched off; \
+         the model now enforces what it did. Do not switch it back on by hand — that would \
+         enforce it twice. To return to the hand-written policy, undo the migration, which \
+         deletes those grants and rules and switches this policy back on.",
+        at = record.migrated_at,
+        by = record.migrated_by,
+        probes = record.probes_proved,
+    )
 }
 
 fn quoted(values: &[String]) -> String {
@@ -291,9 +371,9 @@ pub fn render_blocker(b: &Blocker) -> String {
         ),
         Blocker::Disabled => "This policy is switched off, so the engine does not download it \
              and it enforces nothing today. Migrating it would create grants or rules that \
-             enforce immediately (a policy that has already been migrated is switched off the \
-             same way, and nothing here tells the two apart yet). Switch it on first only if it \
-             was switched off by hand and never migrated."
+             enforce immediately. (This policy has no migration on record — a migrated policy is \
+             reported as migrated, not as switched off.) Switch it on first only if it is meant \
+             to enforce."
             .to_string(),
         Blocker::DenyAllElse => "The policy denies everything its items do not allow \
              (`isDenyAllElse`); egret has no equivalent. Clear 'deny all else', or keep the \
@@ -480,65 +560,137 @@ pub fn render_blocker(b: &Blocker) -> String {
     }
 }
 
+/// Everything classification reads from the database for one profile — the
+/// ONE loader, used by `classify` and by the migration's transaction (which
+/// re-classifies inside the transaction rather than trusting the client). See
+/// the module doc for how each input is derived and why.
+pub struct ServiceInputs {
+    pub svc: ServiceRow,
+    pub target: Option<(ServiceKind, EngineType)>,
+    catalogs: HashMap<String, Uuid>,
+    tags: HashMap<String, String>,
+    /// Every policy of the profile, ordered by `id`.
+    pub rows: Vec<PolicyRecord>,
+    /// `perm.migrated_from` rows of this profile, by policy name.
+    pub migrated: HashMap<String, MigrationRecord>,
+}
+
+impl ServiceInputs {
+    /// Load the inputs for `service_id`. `NotFound` for an unknown profile.
+    pub async fn load(
+        conn: &mut sqlx::PgConnection,
+        service_id: i64,
+    ) -> Result<Self, PolicyStoreError> {
+        let svc = get_service_by_id_via(conn, service_id).await?;
+        let target = service_target(&svc.r#type);
+
+        // The catalog scope: this profile's engines, or — for a tag service —
+        // the engines of every resource profile that names it (module doc).
+        let mut scope_profiles = vec![service_id];
+        if matches!(target, Some((ServiceKind::Tag, _))) {
+            let linked: Vec<i64> = sqlx::query_scalar(
+                "SELECT id FROM policy.authz_services WHERE config_jsonb ->> 'tagService' = $1",
+            )
+            .bind(&svc.name)
+            .fetch_all(&mut *conn)
+            .await?;
+            scope_profiles.extend(linked);
+        }
+        let mut catalogs: HashMap<String, Uuid> = HashMap::new();
+        for id in scope_profiles {
+            for c in catalogs_for_service_via(conn, id).await? {
+                catalogs.insert(c.name, c.id);
+            }
+        }
+
+        let rows: Vec<PolicyRecord> = sqlx::query_as(
+            "SELECT id, name, managed_by, enabled, policy_jsonb FROM policy.authz_policies \
+             WHERE service_id = $1 ORDER BY id",
+        )
+        .bind(service_id)
+        .fetch_all(&mut *conn)
+        .await?;
+
+        // Every string a tag-addressed body names, resolved in one round trip.
+        let mut keys: Vec<String> = rows
+            .iter()
+            .filter_map(|r| r.policy_jsonb.pointer("/resources/tag/values"))
+            .filter_map(Value::as_array)
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        keys.sort();
+        keys.dedup();
+        let tags: HashMap<String, String> = tag_names_for_keys_via(conn, &keys)
+            .await?
+            .into_iter()
+            .collect();
+
+        let migrated: Vec<(String, MigrationRecord)> =
+            sqlx::query_as::<_, (String, Vec<Uuid>, Vec<Uuid>, i32, String, String)>(
+                "SELECT policy_name, grant_ids, rule_ids, probes_proved, migrated_by, \
+                    to_char(migrated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
+               FROM perm.migrated_from WHERE service_id = $1",
+            )
+            .bind(service_id)
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .map(
+                |(name, grant_ids, rule_ids, probes_proved, migrated_by, migrated_at)| {
+                    (
+                        name,
+                        MigrationRecord {
+                            grant_ids,
+                            rule_ids,
+                            probes_proved,
+                            migrated_by,
+                            migrated_at,
+                        },
+                    )
+                },
+            )
+            .collect();
+
+        Ok(Self {
+            svc,
+            target,
+            catalogs,
+            tags,
+            rows,
+            migrated: migrated.into_iter().collect(),
+        })
+    }
+
+    /// Classify one of [`Self::rows`], with its model objects when it is
+    /// migratable. A policy with a migration on record is reported as
+    /// migrated and never migratable, whatever the grammar says.
+    pub fn classify(&self, rec: &PolicyRecord) -> (ClassifiedPolicy, Option<Candidates>) {
+        let catalog_ids = |name: &str| self.catalogs.get(name).copied();
+        let tag_names = |key: &str| self.tags.get(key).cloned();
+        let target = self.target.ok_or(self.svc.r#type.as_str());
+        let (mut classified, candidates) =
+            classify_policy_objects(rec, target, &catalog_ids, &tag_names);
+        if let Some(record) = self.migrated.get(&rec.name) {
+            classified.migratable = false;
+            classified.proposed = None;
+            classified.blockers = vec![migrated_sentence(record)];
+            classified.migrated = Some(record.clone());
+            return (classified, None);
+        }
+        (classified, candidates)
+    }
+}
+
 /// Classify every policy of `service_id`, ordered by `id`. `NotFound` for an
 /// unknown profile.
 pub async fn classify_service(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
 ) -> Result<Vec<ClassifiedPolicy>, PolicyStoreError> {
-    let svc = get_service_by_id_via(conn, service_id).await?;
-    let target = service_target(&svc.r#type);
-
-    // The catalog scope: this profile's engines, or — for a tag service — the
-    // engines of every resource profile that names it (module doc).
-    let mut scope_profiles = vec![service_id];
-    if matches!(target, Some((ServiceKind::Tag, _))) {
-        let linked: Vec<i64> = sqlx::query_scalar(
-            "SELECT id FROM policy.authz_services WHERE config_jsonb ->> 'tagService' = $1",
-        )
-        .bind(&svc.name)
-        .fetch_all(&mut *conn)
-        .await?;
-        scope_profiles.extend(linked);
-    }
-    let mut catalogs: HashMap<String, Uuid> = HashMap::new();
-    for id in scope_profiles {
-        for c in catalogs_for_service_via(conn, id).await? {
-            catalogs.insert(c.name, c.id);
-        }
-    }
-
-    let rows: Vec<PolicyRecord> = sqlx::query_as(
-        "SELECT id, name, managed_by, enabled, policy_jsonb FROM policy.authz_policies \
-         WHERE service_id = $1 ORDER BY id",
-    )
-    .bind(service_id)
-    .fetch_all(&mut *conn)
-    .await?;
-
-    // Every string a tag-addressed body names, resolved in one round trip.
-    let mut keys: Vec<String> = rows
-        .iter()
-        .filter_map(|r| r.policy_jsonb.pointer("/resources/tag/values"))
-        .filter_map(Value::as_array)
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect();
-    keys.sort();
-    keys.dedup();
-    let tags: HashMap<String, String> = tag_names_for_keys_via(conn, &keys)
-        .await?
-        .into_iter()
-        .collect();
-
-    let catalog_ids = |name: &str| catalogs.get(name).copied();
-    let tag_names = |key: &str| tags.get(key).cloned();
-    let target = target.ok_or(svc.r#type.as_str());
-    Ok(rows
-        .iter()
-        .map(|r| classify_policy(r, target, &catalog_ids, &tag_names))
-        .collect())
+    let inputs = ServiceInputs::load(conn, service_id).await?;
+    Ok(inputs.rows.iter().map(|r| inputs.classify(r).0).collect())
 }
 
 #[cfg(test)]

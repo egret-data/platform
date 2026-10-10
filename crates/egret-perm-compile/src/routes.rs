@@ -62,7 +62,8 @@ use egret_perm::{
 };
 use egret_policy::{
     catalog_is_assigned_to_workspace_via, catalog_names_for_ids_via, catalogs_for_service_via,
-    clearance_gates_for_tags_via, get_service_by_id_via, resolved_tags_for_resource_via,
+    clearance_gates_for_tags_via, enabled_policies_for_service_via, get_service_by_id_via,
+    get_service_def_via, resolved_tags_for_resource_via, service_id_by_name_via,
     services_for_catalog_via, tag_assignment_coordinates_via, tag_keys_by_ids_via,
     tag_names_for_keys_via, unreadable_table_mask_for, MaskOrigin, PolicyStore, ServiceRow, TagRef,
     TagWrite,
@@ -129,6 +130,14 @@ pub fn perm_router() -> Router<PermState> {
             "/perm/policies/services/{service_id}/classify",
             get(classify_service_policies),
         )
+        .route(
+            "/perm/policies/services/{service_id}/migrate",
+            post(migrate_service_policies),
+        )
+        .route(
+            "/perm/policies/services/{service_id}/migrate/undo",
+            post(undo_service_policy_migration),
+        )
 }
 
 /// The `perm` surface's OpenAPI document, merged into the top-level doc by
@@ -153,7 +162,9 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         preview,
         explain,
         compile,
-        classify_service_policies
+        classify_service_policies,
+        migrate_service_policies,
+        undo_service_policy_migration
     ),
     components(schemas(
         NewGrant,
@@ -199,6 +210,17 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         CompileResponse,
         crate::classify::ClassifiedPolicy,
         crate::classify::ProposedObjects,
+        crate::classify::MigrationRecord,
+        crate::migrate::MigrateRequest,
+        crate::migrate::MigrateResponse,
+        crate::migrate::MigratedPolicy,
+        crate::migrate::GatedProfile,
+        crate::migrate::WireDisagreement,
+        crate::migrate::WireCheck,
+        crate::migrate::WireTagging,
+        crate::migrate::UndoRequest,
+        crate::migrate::UndoResponse,
+        crate::migrate::UndonePolicy,
         CreatedResponse,
         SkipReport,
         Grant,
@@ -804,7 +826,7 @@ pub struct CompileResponse {
 }
 
 impl CompileResponse {
-    fn from_summaries(services: Vec<i64>, summaries: &[CompileSummary]) -> Self {
+    pub(crate) fn from_summaries(services: Vec<i64>, summaries: &[CompileSummary]) -> Self {
         let mut out = CompileResponse {
             services,
             ..Default::default()
@@ -836,10 +858,10 @@ pub struct CreatedResponse {
 
 /// What a model write did: the id the row now has, the services the write
 /// recompiled, and what each recompile wrote.
-struct WriteOutcome {
-    id: Uuid,
-    services: Vec<i64>,
-    summaries: Vec<CompileSummary>,
+pub(crate) struct WriteOutcome {
+    pub(crate) id: Uuid,
+    pub(crate) services: Vec<i64>,
+    pub(crate) summaries: Vec<CompileSummary>,
 }
 
 impl WriteOutcome {
@@ -863,7 +885,7 @@ impl WriteOutcome {
 /// from the row as it stands now and the set derived from the row as it will
 /// stand — read before the write, merged by
 /// [`crate::trigger::merge_service_ids`], locked ascending, recompiled once.
-async fn write_grant(
+pub(crate) async fn write_grant(
     tx: &mut Transaction<'_, Postgres>,
     id: Option<Uuid>,
     body: NewGrant,
@@ -1050,7 +1072,7 @@ async fn ensure_rule_still_covered(
 /// here for a second reason: a patch can turn a path selector into a tag
 /// selector or the other way round, so the two sets can differ by the whole
 /// installation rather than by one profile.
-async fn write_rule(
+pub(crate) async fn write_rule(
     tx: &mut Transaction<'_, Postgres>,
     id: Option<Uuid>,
     body: NewRule,
@@ -1623,7 +1645,7 @@ async fn preview(
 ///
 /// Four properties of the implementation below are load-bearing:
 ///
-/// 1. **The artifact is assembled by [`artifact_for`], which mirrors
+/// 1. **The artifact is assembled by [`artifact_via`], which mirrors
 ///    `download_policies` field for field and loads each profile's policy set
 ///    through `enabled_policies_for_service` — the same assembler the download
 ///    route uses, not `list_policies`.** "What explain evaluated" and "what the
@@ -1744,7 +1766,7 @@ async fn explain(
             continue;
         };
 
-        let artifact = artifact_for(&st.policy, &svc).await?;
+        let artifact = artifact_via(&mut conn, &svc).await?;
         // `ServiceDef::parse` of the envelope's OWN `serviceDef`, not of a def
         // looked up separately: the plugin evaluates against the def it was
         // handed, and the tag block's def (which the tag-policy tier check also
@@ -1769,7 +1791,7 @@ async fn explain(
         // passthrough that could add one. The other half of the super-user
         // question, a `serviceConfig` map inside the DOWNLOAD, cannot arise
         // either: `ServicePolicies` has no such field, so the envelope
-        // `artifact_for` builds never carries one, and
+        // `artifact_via` builds never carries one, and
         // `Unmodelled::ServiceConfig` would refuse the decision if it did.
         //
         // The one field added on top is `engine`, which arms the def
@@ -1840,7 +1862,7 @@ async fn explain(
         }
 
         // Read off the artifact THIS profile's plugin downloads — the same
-        // `artifact_for` the verdicts above were computed from, so the count and
+        // `artifact_via` the verdicts above were computed from, so the count and
         // the answers cannot be about different downloads. A profile with no
         // bound tag service has no tag block and counts `0`, and so does one
         // whose block is present but empty (`bind_trino_profile` creates exactly
@@ -2189,7 +2211,7 @@ pub async fn confine_rule_selector(
 /// `egret_perm::EngineType` → the evaluator's own. Two enums for one fact
 /// because `egret-ranger-eval` is a pure crate that depends on neither
 /// `egret-perm` nor `egret-policy`; this is the single crossing.
-fn ranger_engine(engine: EngineType) -> egret_ranger_eval::eval::EngineType {
+pub(crate) fn ranger_engine(engine: EngineType) -> egret_ranger_eval::eval::EngineType {
     match engine {
         EngineType::Trino => egret_ranger_eval::eval::EngineType::Trino,
         EngineType::StarRocks => egret_ranger_eval::eval::EngineType::StarRocks,
@@ -2256,12 +2278,17 @@ fn request_resource(engine: EngineType, catalog_name: &str, target: &Scope) -> R
 ///
 /// The one thing it does not reproduce is the `lastKnownVersion` 304
 /// short-circuit, which is a caching protocol and carries no policy content.
-async fn artifact_for(
-    policy: &PolicyStore,
+///
+/// **Connection-generic since SP4d-3 Task 7**, so the migration gate assembles
+/// the download through THIS function inside its own transaction — before the
+/// write and again after the recompile — rather than through a second
+/// assembler. `explain` passes its pooled connection.
+pub(crate) async fn artifact_via(
+    conn: &mut sqlx::PgConnection,
     svc: &ServiceRow,
 ) -> Result<ServicePolicySet, PermHttpError> {
-    let def = policy.get_service_def(&svc.r#type).await?.def_jsonb;
-    let policies = policy.enabled_policies_for_service(svc.id).await?;
+    let def = get_service_def_via(conn, &svc.r#type).await?.def_jsonb;
+    let policies = enabled_policies_for_service_via(conn, svc.id).await?;
     let tag_service = svc
         .config_jsonb
         .get(egret_policy_api::TAG_SERVICE_CONFIG_KEY)
@@ -2279,9 +2306,10 @@ async fn artifact_for(
     // nothing just omits the block, because that is what the plugin would
     // receive.
     if let Some(name) = tag_service {
-        if let Ok(tsvc) = policy.get_service(&name).await {
-            let tdef = policy.get_service_def(&tsvc.r#type).await?.def_jsonb;
-            let tpolicies = policy.enabled_policies_for_service(tsvc.id).await?;
+        if let Some(tid) = service_id_by_name_via(conn, &name).await? {
+            let tsvc = get_service_by_id_via(conn, tid).await?;
+            let tdef = get_service_def_via(conn, &tsvc.r#type).await?.def_jsonb;
+            let tpolicies = enabled_policies_for_service_via(conn, tsvc.id).await?;
             envelope.tag_policies = Some(Box::new(ServicePolicies::new(
                 tsvc.name,
                 tsvc.id,
@@ -2658,7 +2686,7 @@ const FOLD_DIVERGENT: [char; 25] = [
 /// left exactly that pair open. `resolved_tags_for_target` checks the target's
 /// three values and `stored_coordinate_is_fold_divergent` checks each stored
 /// coordinate; one predicate, two call sites, so they cannot drift.
-fn fold_divergent(value: &str) -> bool {
+pub(crate) fn fold_divergent(value: &str) -> bool {
     value.chars().any(|c| FOLD_DIVERGENT.contains(&c))
 }
 
@@ -2759,7 +2787,7 @@ fn fold_divergent(value: &str) -> bool {
 /// [`resolved_tags_for_target`]. A `*` an operator types is a literal there,
 /// because `getMatchType` takes the wildcard from the POLICY position only — and
 /// 0177 does not constrain the request, only what can be stored.
-fn stored_coordinate_is_fold_divergent(schema: &str, table: &str, column: &str) -> bool {
+pub(crate) fn stored_coordinate_is_fold_divergent(schema: &str, table: &str, column: &str) -> bool {
     [schema, table, column].into_iter().any(fold_divergent)
 }
 
@@ -3082,6 +3110,96 @@ async fn classify_service_policies(
     Ok(Json(
         crate::classify::classify_service(&mut conn, service_id).await?,
     ))
+}
+
+/// SP4d-3 Task 7: migrate hand-written policies of one profile into the
+/// permission model, PROVABLY — see `crate::migrate` for the transaction, its
+/// order, and the refusal order. The equivalence gate runs inside the
+/// transaction over every profile the new objects compile into, against the
+/// downloads as they stand after the write.
+///
+/// **`dry_run` runs the identical code and differs in exactly one place: the
+/// line below that decides to commit.** A proven migration answers 200; one
+/// the gate did not prove answers 422 with the same body shape (its
+/// disagreements, or why the gate refused), and nothing is written.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/policies/services/{service_id}/migrate",
+    tag = "perm",
+    params(("service_id" = i64, Path, description = "policy.authz_services id")),
+    request_body = crate::migrate::MigrateRequest,
+    responses(
+        (status = 200, description = "Proved equivalent on every affected profile; committed unless `dry_run`", body = crate::migrate::MigrateResponse),
+        (status = 400, description = "A named policy is not migratable (the classifier's sentences), or the request names no policy / a policy twice", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "No such profile, or no policy of that name in it", body = ErrorBody),
+        (status = 409, description = "Already migrated, not hand-written (compiler or infra owned), or a rule name it would create is taken", body = ErrorBody),
+        (status = 422, description = "Not proved: the disagreements on any affected profile, or why the gate could not answer. Nothing was written", body = crate::migrate::MigrateResponse),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn migrate_service_policies(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(service_id): Path<i64>,
+    Json(body): Json<crate::migrate::MigrateRequest>,
+) -> Result<
+    (
+        axum::http::StatusCode,
+        Json<crate::migrate::MigrateResponse>,
+    ),
+    PermHttpError,
+> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    let mut response = crate::migrate::migrate_in_tx(&mut tx, service_id, &body, &p).await?;
+    // THE one place a dry run differs.
+    let commit = response.equivalent && !body.dry_run;
+    if commit {
+        tx.commit().await.map_err(PermHttpError::db)?;
+    } else {
+        tx.rollback().await.map_err(PermHttpError::db)?;
+    }
+    response.committed = commit;
+    let status = if response.equivalent {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY
+    };
+    Ok((status, Json(response)))
+}
+
+/// SP4d-3 Task 7: undo migrations — delete the grants and rules provenance
+/// names, recompile, switch each original back on, delete the provenance. One
+/// transaction.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/policies/services/{service_id}/migrate/undo",
+    tag = "perm",
+    params(("service_id" = i64, Path, description = "policy.authz_services id")),
+    request_body = crate::migrate::UndoRequest,
+    responses(
+        (status = 200, description = "Every named migration undone", body = crate::migrate::UndoResponse),
+        (status = 400, description = "The request names no policy, or a policy twice", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "No such profile, or no migration on record for a named policy", body = ErrorBody),
+        (status = 409, description = "The original policy no longer exists, so there is nothing to restore", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn undo_service_policy_migration(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(service_id): Path<i64>,
+    Json(body): Json<crate::migrate::UndoRequest>,
+) -> Result<Json<crate::migrate::UndoResponse>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    let response = crate::migrate::undo_in_tx(&mut tx, service_id, &body).await?;
+    tx.commit().await.map_err(PermHttpError::db)?;
+    Ok(Json(response))
 }
 
 #[cfg(test)]

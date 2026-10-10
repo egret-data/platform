@@ -765,13 +765,8 @@ impl PolicyStore {
     }
 
     pub async fn get_service_def(&self, name: &str) -> Result<ServiceDefRow, PolicyStoreError> {
-        sqlx::query_as::<_, ServiceDefRow>(
-            r#"SELECT id, name, def_jsonb FROM policy.authz_service_defs WHERE name = $1"#,
-        )
-        .bind(name)
-        .fetch_optional(&self.db.pool)
-        .await?
-        .ok_or_else(|| PolicyStoreError::NotFound(format!("service-def {name}")))
+        let mut conn = self.db.pool.acquire().await?;
+        get_service_def_via(&mut conn, name).await
     }
 
     pub async fn list_service_defs(&self) -> Result<Vec<ServiceDefRow>, PolicyStoreError> {
@@ -1920,6 +1915,91 @@ pub async fn tag_names_for_keys_via(
     )
 }
 
+/// Connection-generic core of [`PolicyStore::get_service_def`] — SP4d-3 Task
+/// 7 assembles a profile's download INSIDE its migration transaction, before
+/// and after the write, and a pooled read there would not see the write.
+pub async fn get_service_def_via(
+    conn: &mut sqlx::PgConnection,
+    name: &str,
+) -> Result<ServiceDefRow, PolicyStoreError> {
+    sqlx::query_as::<_, ServiceDefRow>(
+        r#"SELECT id, name, def_jsonb FROM policy.authz_service_defs WHERE name = $1"#,
+    )
+    .bind(name)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or_else(|| PolicyStoreError::NotFound(format!("service-def {name}")))
+}
+
+/// Connection-generic core of [`PolicyStore::enabled_policies_for_service`] —
+/// the ONE assembler of the policies a download serves, so the migration gate
+/// (SP4d-3 Task 7) and the download route read the same rows the same way.
+pub async fn enabled_policies_for_service_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Vec<Value>, PolicyStoreError> {
+    // Inject the DB-assigned numeric `id`, `version`, and `isEnabled` into each policy.
+    // The Ranger policy engine NPEs on a policy whose `id` is null, and clients only send
+    // these on the response/CRUD path — the stored body keeps the client's original JSON.
+    let rows = sqlx::query_as::<_, (i64, i64, bool, Value)>(
+        r#"SELECT id, version, enabled, policy_jsonb FROM policy.authz_policies
+           WHERE service_id = $1 AND enabled = true ORDER BY id"#,
+    )
+    .bind(service_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, version, enabled, mut p)| {
+            if let Value::Object(m) = &mut p {
+                m.insert("id".into(), Value::from(id));
+                m.insert("version".into(), Value::from(version));
+                m.insert("isEnabled".into(), Value::from(enabled));
+            }
+            p
+        })
+        .collect())
+}
+
+/// Connection-generic core of [`PolicyStore::set_policy_enabled`], with the
+/// SAME two guards in the same order (a compiler-owned name in a generated
+/// profile, then an `infra` row). SP4d-3 Task 7 switches a migrated original
+/// off — and `undo` switches it back on — inside the migration's own
+/// transaction, so the flip commits or rolls back with the model write; a
+/// second, unguarded `UPDATE` there would be a write path the guards do not
+/// cover. Does not begin or commit.
+pub async fn set_policy_enabled_via(
+    conn: &mut sqlx::PgConnection,
+    id: i64,
+    enabled: bool,
+) -> Result<(), PolicyStoreError> {
+    let row: Option<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
+        r#"SELECT service_id, name FROM policy.authz_policies WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((service_id, current_name)) = row else {
+        return Err(PolicyStoreError::NotFound(format!("policy id {id}")));
+    };
+    refuse_if_compiler_owned(conn, service_id, &current_name).await?;
+    refuse_if_infrastructure_owned(conn, id).await?;
+    sqlx::query(
+        r#"UPDATE policy.authz_policies SET enabled=$2, version=version+1, updated_at=now() WHERE id=$1"#,
+    )
+    .bind(id)
+    .bind(enabled)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
+    )
+    .bind(service_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 /// One registry catalog: `(id, name)`.
 #[derive(Debug, sqlx::FromRow)]
 pub struct CatalogRow {
@@ -2184,37 +2264,8 @@ impl PolicyStore {
     /// Flip a policy's enabled flag without rewriting its body; bumps versions.
     pub async fn set_policy_enabled(&self, id: i64, enabled: bool) -> Result<(), PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
-        let row: Option<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
-            r#"SELECT service_id, name FROM policy.authz_policies WHERE id = $1"#,
-        )
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some((service_id, current_name)) = row else {
-            tx.rollback().await?;
-            return Err(PolicyStoreError::NotFound(format!("policy id {id}")));
-        };
-        if let Err(e) = refuse_if_compiler_owned(&mut tx, service_id, &current_name).await {
-            tx.rollback().await?;
-            return Err(e);
-        }
-        if let Err(e) = refuse_if_infrastructure_owned(&mut tx, id).await {
-            tx.rollback().await?;
-            return Err(e);
-        }
-        sqlx::query(
-            r#"UPDATE policy.authz_policies SET enabled=$2, version=version+1, updated_at=now() WHERE id=$1"#,
-        )
-        .bind(id)
-        .bind(enabled)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
-        )
-        .bind(service_id)
-        .execute(&mut *tx)
-        .await?;
+        // A refusal drops `tx`, which rolls it back — nothing was written yet.
+        set_policy_enabled_via(&mut tx, id, enabled).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -2284,27 +2335,8 @@ impl PolicyStore {
         &self,
         service_id: i64,
     ) -> Result<Vec<Value>, PolicyStoreError> {
-        // Inject the DB-assigned numeric `id`, `version`, and `isEnabled` into each policy.
-        // The Ranger policy engine NPEs on a policy whose `id` is null, and clients only send
-        // these on the response/CRUD path — the stored body keeps the client's original JSON.
-        let rows = sqlx::query_as::<_, (i64, i64, bool, Value)>(
-            r#"SELECT id, version, enabled, policy_jsonb FROM policy.authz_policies
-               WHERE service_id = $1 AND enabled = true ORDER BY id"#,
-        )
-        .bind(service_id)
-        .fetch_all(&self.db.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|(id, version, enabled, mut p)| {
-                if let Value::Object(m) = &mut p {
-                    m.insert("id".into(), Value::from(id));
-                    m.insert("version".into(), Value::from(version));
-                    m.insert("isEnabled".into(), Value::from(enabled));
-                }
-                p
-            })
-            .collect())
+        let mut conn = self.db.pool.acquire().await?;
+        enabled_policies_for_service_via(&mut conn, service_id).await
     }
 }
 

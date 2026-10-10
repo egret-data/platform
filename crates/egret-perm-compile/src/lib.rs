@@ -66,8 +66,11 @@ pub mod equivalence;
 // the `Grant`s it is equivalent to, or every named reason it is not. Pure; the
 // inverse of `grants::compile_grant` — see that module's own doc comment.
 pub mod grammar;
+// SP4d-3 Task 7: the migration transaction (re-classify, write, recompile,
+// switch off, provenance, re-gate every affected profile) and its undo.
 pub mod grants;
 pub(crate) mod members;
+pub mod migrate;
 pub mod role_membership;
 pub mod routes;
 pub mod rules;

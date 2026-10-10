@@ -142,6 +142,63 @@ pub struct Disagreement {
     pub after: String,
 }
 
+/// `Ranger 2.5.0` / `Ranger 2.8.0` — how a version reads on the page.
+pub fn plugin_version_label(v: PluginVersion) -> &'static str {
+    match v {
+        PluginVersion::Ranger2_5_0 => "Ranger 2.5.0",
+        PluginVersion::Ranger2_8_0 => "Ranger 2.8.0",
+    }
+}
+
+impl std::fmt::Display for Check {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Check::Access => "access",
+            Check::DataMask => "masking",
+            Check::RowFilter => "row filter",
+        })
+    }
+}
+
+/// One line an operator can read, naming everything the disagreement carries:
+/// profile, plugin version, question, principal (with the synthetic member's
+/// group or role), access type, resource, tags and whether that tagging is
+/// today's, and both answers. E.g.
+///
+/// `profile "trino-prod" (#7), Ranger 2.5.0: access for user alice, select on
+/// wh.sales.orders.email: allowed (policy "sales read") → denied (no policy
+/// matched)`
+impl std::fmt::Display for Disagreement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "profile \"{}\" (#{}), {}: {} for user {}",
+            self.service_name,
+            self.service_id,
+            plugin_version_label(self.plugin_version),
+            self.check,
+            self.user
+        )?;
+        if !self.groups.is_empty() {
+            write!(f, " (in group {})", self.groups.join(", "))?;
+        }
+        if !self.roles.is_empty() {
+            write!(f, " (holding role {})", self.roles.join(", "))?;
+        }
+        write!(f, ", {} on {}", self.access_type, self.resource)?;
+        match (self.tagging, self.tags.is_empty()) {
+            (Tagging::Actual, false) => write!(f, " (tagged {})", self.tags.join(", "))?,
+            (Tagging::Hypothetical, _) => write!(
+                f,
+                " (only if it were tagged {} — no column need carry it today)",
+                self.tags.join(", ")
+            )?,
+            (Tagging::Actual, true) => {}
+        }
+        write!(f, ": {} → {}", self.before, self.after)
+    }
+}
+
 /// One affected profile, as [`compare_profiles`] takes it.
 #[derive(Debug, Clone)]
 pub struct ProfileCase<'a> {
