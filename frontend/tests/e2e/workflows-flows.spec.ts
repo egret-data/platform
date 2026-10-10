@@ -14,36 +14,39 @@ import { firstWorkspace, loginLocalAdmin } from "./helpers";
  * tasks: default deployment settings allow no container image, so no script
  * type is offered.
  *
- * HOW IT WAS RUN (W7a Task 8), on a stack of its own and never the shared dev
- * stack (no Postgres :5432, no shared bucket, no kind):
+ * HOW TO RUN IT, on a stack of its own and never the shared dev stack (no
+ * Postgres :5432, no shared bucket, no kind cluster). From the egret repo root:
  *
  * ```bash
- * # A database of its own on the branch's Postgres, a private RustFS with one bucket.
+ * # 1. A database of its own on the branch's Postgres (:5441), a private RustFS with one bucket.
  * docker exec egret-w7-postgres psql -U egret -d postgres -c "CREATE DATABASE egret_w7a_e2e"
  * docker run -d --name w7a-t8-rustfs -p 9447:9000 \
  *   -e RUSTFS_ACCESS_KEY=egret -e RUSTFS_SECRET_KEY=egretsecret rustfs/rustfs:1.0.1
  * curl --aws-sigv4 "aws:amz:us-east-1:s3" --user egret:egretsecret -X PUT http://localhost:9447/warehouse
  *
- * # The backend, from the repo root.
+ * # 2. The backend on :8097, pointed only at those two.
  * export DATABASE_URL=postgres://egret:egret@localhost:5441/egret_w7a_e2e
  * export EGRET_DATABASE__URL=$DATABASE_URL EGRET_SERVER__PORT=8097 EGRET_SERVER__HOST=127.0.0.1
  * export EGRET_OIDC__ENABLED=false EGRET_WORKFLOW__WORKER_ENABLED=true
  * export EGRET_STORAGE__ENDPOINT=http://localhost:9447 EGRET_STORAGE__BUCKET=warehouse
  * export EGRET_STORAGE__ACCESS_KEY=egret EGRET_STORAGE__SECRET_KEY=egretsecret
+ * # Only while iterating, and only on this private backend, NEVER on a shared stack: sign-in
+ * # is limited to 5 attempts per 5 minutes, and every run signs in once.
+ * # export EGRET_RATE_LIMIT__LOGIN_MAX_ATTEMPTS=200
  * cargo build -p egret-bin
  * ./target/debug/egret migrate && ./target/debug/egret init   # admin@egret.local / Admin12345!
  * ./target/debug/egret serve
  *
- * # The frontend: `vite.config.ts` with `/api` proxied to :8097 and the dev server on :5197
- * # (a config outside the repo that imports this one and overrides `server`).
- * npx vite --config <scratch>/vite.config.mts
+ * # 3. The frontend on :5197, proxying /api to :8097 (the committed config next to this spec;
+ * #    EGRET_E2E_VITE_PORT and EGRET_E2E_API override the two).
+ * cd frontend && npx vite --config tests/e2e/vite.e2e.config.mts
  *
- * # The spec.
+ * # 4. The spec.
  * cd frontend && EGRET_E2E_WORKFLOWS=1 EGRET_E2E_BASE_URL=http://localhost:5197 \
  *   npx playwright test workflows-flows
  *
- * # Afterwards: stop both servers, `docker rm -f w7a-t8-rustfs`, and
- * # docker exec egret-w7-postgres psql -U egret -d postgres -c "DROP DATABASE egret_w7a_e2e"
+ * # 5. Afterwards: stop both servers, `docker rm -f w7a-t8-rustfs`, and drop the database by its name:
+ * docker exec egret-w7-postgres psql -U egret -d postgres -c "DROP DATABASE egret_w7a_e2e"
  * ```
  */
 const ENABLED = process.env.EGRET_E2E_WORKFLOWS === "1";
@@ -165,8 +168,8 @@ test.describe("W7a flows: author, run, version, panels", () => {
     // `tasks.say`). An unknown type would do less: egret only warns about one.
     await replaceSource(page, `${SOURCE}  - id: say\n    type: io.kestra.plugin.core.log.Log\n    message: again\n`);
     await expect(codeEditor(page).locator(".squiggly-error").first()).toBeVisible({ timeout: 15_000 });
-    // Chromium names it "Problems , 1 error": the count is visually hidden text, which it joins with a space.
-    const problemsTab = tab(page, /^Problems ?, 1 error$/);
+    // Named by its aria-label, exactly (a hidden count once read "Problems , 1 error" in Chromium).
+    const problemsTab = tab(page, /^Problems, 1 error$/);
     await expect(problemsTab).toBeVisible({ timeout: 15_000 });
     await problemsTab.click();
     const problem = page.getByRole("list", { name: "Problems" }).getByRole("button", { name: /declared more than once/ });

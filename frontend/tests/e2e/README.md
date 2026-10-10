@@ -278,11 +278,18 @@ and by keyboard (the tab actions menu), and compare v1 with the draft in Revisio
 
 It needs a backend with the workflow worker on (`EGRET_WORKFLOW__WORKER_ENABLED=true`)
 and the break-glass local admin; it uses only core tasks, because default settings
-allow no script image. It was run on a stack of its own (a dedicated database on the
-branch's Postgres, a private RustFS, `serve` and Vite on free ports), never on the
-shared dev stack: the exact commands are in the spec file's header.
+allow no script image. Run it on a stack of its own, never on the shared dev stack:
+a dedicated database on the branch's Postgres, a private RustFS, `serve` on a free
+port, and Vite through the committed `tests/e2e/vite.e2e.config.mts` (port
+`EGRET_E2E_VITE_PORT`, default 5197; backend `EGRET_E2E_API`, default
+`http://localhost:8097`). Every command, setup and teardown, is in the spec file's header.
+
+Sign-in is limited to 5 attempts per 5 minutes and each run signs in once. When
+iterating, raise the limit **on the private backend only** with
+`EGRET_RATE_LIMIT__LOGIN_MAX_ATTEMPTS=200`; never do that on a shared stack.
 
 ```bash
+cd frontend && npx vite --config tests/e2e/vite.e2e.config.mts   # in one shell
 cd frontend && EGRET_E2E_WORKFLOWS=1 EGRET_E2E_BASE_URL=http://localhost:5197 \
   npx playwright test workflows-flows
 ```
