@@ -525,6 +525,29 @@ that true or say what the cap actually bounds.
 
 ---
 
+### Task 18: the console can never create a tag-capable profile
+
+**Files:** `frontend/src/api/policies.ts` (`createProfile`), the profile create/update routes
+
+**Found by Tasks 9+16 and verified by me on the code path.** `createProfile(name, type)` sends **only**
+name and type — no `config` — and Task 2 established, with a documented sweep, that **no `UPDATE` of
+`config_jsonb` exists anywhere in `src/`**. So a console-created profile has no `tagService` and **nothing
+can ever give it one**. The only path that sets it is `bind_trino_profile`, i.e. provisioning an engine.
+
+So tag policies are authorable **only** on an auto-bound profile. That is a product gap, not an operator
+mistake — and after Tasks 9+16 it is at least **visible**: the write path refuses rather than mis-filing.
+
+- [ ] **Step 1: Decide which surface closes it** — `config` on create, or a profile-config update route. A
+  config update route is the bigger change and Task 2's guards are written on the assumption that **no such
+  statement exists**; adding one means re-reading those rulings, not just adding a handler.
+- [ ] **Step 2: Whichever it is, it goes through the same guards** the create path takes — Task 2's
+  non-Trino refusal and migration 0165's `CHECK` both exist precisely because this field decides whether
+  tag policy is enforced at all.
+- [ ] **Step 3: Say in the UI what a profile without a tag service cannot do**, rather than offering a tab
+  that cannot complete.
+
+---
+
 ## Pre-merge steps
 
 1. **Run migration 0166's own listing query** (`migrations/0166_…sql:124`) against any cluster that
