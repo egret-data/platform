@@ -129,7 +129,17 @@ pub struct ValidationReport {
 ///
 /// The three that remain un-narrowed were re-checked the same way:
 /// `concurrency`, `checks` and `quotas` have W1 model shapes and no reader
-/// outside this validator, and `triggers` is W6's.
+/// outside this validator.
+///
+/// **`triggers` is the second row to narrow** -- W7a's final review. The row
+/// said "enforcement lands in W6", and W7a's Problems tab showed that sentence
+/// on every flow with a trigger. It was false for the three typed kinds:
+/// `Schedule` fires from `scheduler::{sync,fire}` (W6), `Webhook` from
+/// `webhook_routes` (W12) and `Flow` from `flow_trigger` (W13). A trigger of
+/// any other `type` parses to `TriggerKind::Leaf`, which nothing reads, so it
+/// is declared and never fires: for that flow the warning is true. So the row
+/// stays, its package names no W-number, and [`FeaturePresence::triggers`] is
+/// now *declares a `Leaf` trigger*.
 /// `oracle-exec/README.md`'s unclaimed table records the same split for
 /// `sla:`. **It no longer has a row for flow `concurrency:` and that does not
 /// change this one**: W8 Task 1
@@ -149,7 +159,10 @@ const NOT_YET_ENFORCED: &[(&str, &str)] = &[
     ("sla", "W8"),
     ("checks", "W8"),
     ("quotas", "W8"),
-    ("triggers", "W6"),
+    (
+        "triggers",
+        "a later package; egret fires only Schedule, Webhook and Flow triggers",
+    ),
 ];
 
 /// Whether a Kestra `io.kestra.plugin.core.flow.*` class that changes what
@@ -518,7 +531,12 @@ pub fn validate_for_run(flow: &Flow) -> ValidationReport {
             .any(|s| matches!(s, Sla::MaxDuration { .. })),
         checks: !flow.checks.is_empty(),
         quotas: !flow.quotas.is_empty(),
-        triggers: !flow.triggers.is_empty(),
+        // Narrowed at W7a's final review: Schedule, Webhook and Flow fire;
+        // only a trigger of another type (`Leaf`) is declared and unenforced.
+        triggers: flow
+            .triggers
+            .iter()
+            .any(|t| matches!(t.kind, TriggerKind::Leaf { .. })),
     };
 
     check_retry(&flow.retry, "retry", &mut report);
@@ -2586,7 +2604,10 @@ mod tests {
                 ("sla", "W8"),
                 ("checks", "W8"),
                 ("quotas", "W8"),
-                ("triggers", "W6"),
+                (
+                    "triggers",
+                    "a later package; egret fires only Schedule, Webhook and Flow triggers"
+                ),
             ],
             "a row added here is a claim that egret does NOT enforce that \
              feature; a row removed is a claim that it now does. Both need the \
@@ -2637,6 +2658,52 @@ mod tests {
              beside it does not: {:?}",
             r.warnings
         );
+    }
+
+    /// **The `triggers` row narrowed** -- W7a's final review. The three
+    /// trigger kinds egret fires must not warn, one flow per kind so no single
+    /// kind can hide behind another; a trigger of any other type still warns.
+    #[test]
+    fn only_a_trigger_egret_does_not_fire_warns_not_yet_enforced() {
+        let triggers_warning = |yaml: &str| {
+            let r = validate(&parse(yaml).unwrap());
+            r.warnings
+                .iter()
+                .filter(|w| w.code == "not_yet_enforced" && w.path == "triggers")
+                .map(|w| w.message.clone())
+                .collect::<Vec<_>>()
+        };
+        for kind in [
+            "  - id: s\n    type: io.kestra.plugin.core.trigger.Schedule\n    cron: \"0 * * * *\"\n",
+            "  - id: w\n    type: io.kestra.plugin.core.trigger.Webhook\n    key: k1234567\n",
+            "  - id: f\n    type: io.kestra.plugin.core.trigger.Flow\n    conditions: []\n",
+            "  - id: s\n    type: core.schedule\n    cron: \"0 * * * *\"\n",
+        ] {
+            let yaml = format!("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\ntriggers:\n{kind}");
+            assert_eq!(
+                triggers_warning(&yaml),
+                Vec::<String>::new(),
+                "egret fires this trigger, so `not yet enforced` would be false:\n{yaml}"
+            );
+        }
+
+        // POSITIVE CONTROL: a trigger egret does not fire, alone and beside a Schedule.
+        let leaf = "  - id: q\n    type: io.kestra.plugin.aws.sqs.Trigger\n    queueUrl: https://example\n";
+        for extra in [
+            "",
+            "  - id: s\n    type: core.schedule\n    cron: \"0 * * * *\"\n",
+        ] {
+            let yaml = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\ntriggers:\n{leaf}{extra}"
+            );
+            let found = triggers_warning(&yaml);
+            assert_eq!(found.len(), 1, "{yaml}");
+            assert!(
+                found[0].contains("egret fires only Schedule, Webhook and Flow triggers")
+                    && !found[0].contains("W6"),
+                "{found:?}"
+            );
+        }
     }
 
     /// **The `sla` row narrowed rather than went** — W8 Task 6, and both halves
