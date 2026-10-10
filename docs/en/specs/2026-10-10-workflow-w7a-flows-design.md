@@ -25,6 +25,8 @@
   - `monaco-yaml` uses a JSON schema served by a new read-only endpoint, built from the same registry the backend validates against and filtered by the workspace's features. This gives completion, hover and structural errors as you type.
   - A debounced server validation feeds semantic findings into the editor and a Problems tab.
 
+- **(2026-10-10, the user's ruling while planning) The schema's property data comes from Kestra's own JSON schema, filtered to egret.** egret's registry holds only type names and aliases, and `catalog.json` holds properties for nine JDBC classes, so there was no property data to serve. Kestra's flow schema for the pinned version is exported once from the local Kestra image and committed as an artifact, like the oracle fixtures. It is filtered to the types egret accepts, minus the properties egret ignores. egret's own types (`egret.*`, `core.http`, `core.slack`, the script types) get hand-written schemas (§7.1).
+
 ## 1. Why
 
 The engine runs flows in production (W10 onwards), but a user can only author and run them with `curl`. W7a is the first package where a user writes, publishes and runs a flow in the browser. It also sets up the frame the other four W7 packages plug into: the nav group, lazy routes, the tab registry, and the state vocabulary.
@@ -235,7 +237,18 @@ While the execution is not terminal, it polls `GET …/executions/{id}` every 2 
   - the flow shape (`id`, `namespace`, `description`, `labels`, `inputs`, `variables`, `tasks`, `errors`, `finally`, `triggers`, `pluginDefaults`, `concurrency`, `disabled`, …);
   - a `oneOf` over task types, keyed by `type`, for `tasks`/`errors`/`finally` (recursively for flowable children), and the same over trigger types for `triggers`.
 - **Each type's entry** carries the description, `properties` with types, required, defaults and descriptions, and `outputs` (as an `x-egret-outputs` extension, for the Docs tab).
-- **Source.** It is built from the registry (`spec/registry.rs`) and the plugin catalog (`plugins/catalog.json`) that publish and validation already use. A Rust test asserts that the set of `type` values in the schema equals the set the registry accepts for the same features, so the schema cannot list a type that publish refuses, or miss one it accepts.
+- **Source** *(the user's ruling, 2026-10-10)*. The schema is assembled at build time from three committed inputs:
+  1. **`kestra-flow-schema.json`.** Kestra's flow JSON schema, exported once from the local `kestra/kestra` image (`GET /api/v1/plugins/schemas/flow`). Its Kestra version is recorded in the file, and the export command is in its header comment or README.
+  2. **`egret-task-schemas.json`.** Hand-written schemas for the types Kestra does not have: `egret.*`, `core.http`, `core.slack`, and the script types if Kestra's definitions do not match egret's.
+  3. **The registry** (`spec/registry.rs`), together with the flowable set in `models/task.rs`.
+- **Filtering.**
+  - Only types egret accepts are kept, by canonical FQCN, with their aliases added.
+  - Properties egret parses but ignores are removed, so completion never suggests something egret silently drops. An example is the root task properties that egret drops on non-script tasks (`assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`, `workerSelector`).
+  - The plan's first task measures, per type, how egret treats each property Kestra documents (honoured, ignored or refused) before fixing the filter.
+- **Tests.**
+  - A Rust test asserts that the set of `type` values in the served schema equals the set the registry accepts for the same features.
+  - A second test asserts that no served property is one egret is known to ignore.
+- **Precedence.** `catalog.json`'s nine JDBC classes keep their catalog properties where they differ from Kestra's export.
 - **Features.**
   - With `workflow_kestra_plugins` off, the Kestra plugin types are absent.
   - With `workflow_containers` off, the container types are absent.
@@ -247,7 +260,7 @@ While the execution is not terminal, it polls `GET …/executions/{id}` every 2 
 - **Permission:** `workflow:manage`, the same as the existing validate-by-id route.
 - **Body:** `{ "source": string }`, under the same body limit as create.
 - **Response:** the same `ValidationReportDto` as `POST …/flows/{id}/validate`, computed by the same function. Nothing is written.
-- **Errors:** the route answers 200 with findings for invalid YAML; 400 is only for a malformed request body.
+- **Errors:** as in the existing route, YAML that does not parse answers 400, with the parser's message carrying the line and column. The editor turns that message into a marker at that position and a Problems entry. A document that parses but does not validate answers 200 with findings.
 
 ### 7.3 `if_updated_at` on `PUT /flows/{id}`
 

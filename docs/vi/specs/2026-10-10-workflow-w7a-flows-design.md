@@ -27,6 +27,8 @@
   - `monaco-yaml` dùng một JSON schema do một endpoint chỉ đọc mới cung cấp. Schema dựng từ chính registry mà backend dùng để validate, và lọc theo feature của workspace. Nhờ đó có gợi ý, hover và lỗi cấu trúc ngay khi gõ.
   - Một lần validate trên server (có debounce) đưa lỗi ngữ nghĩa vào editor và vào tab Problems.
 
+- **(2026-10-10, phán quyết của người dùng khi lập plan) Dữ liệu thuộc tính của schema lấy từ JSON schema của chính Kestra, lọc theo egret.** Registry của egret chỉ có tên type và alias, còn `catalog.json` chỉ có thuộc tính của chín class JDBC, nên không có dữ liệu thuộc tính nào để trả về. Flow schema của Kestra cho bản đã ghim được xuất một lần từ image Kestra trên máy và commit thành một artifact, giống các fixture oracle. Schema được lọc chỉ giữ các type egret chấp nhận, và bỏ các thuộc tính egret bỏ qua. Các type riêng của egret (`egret.*`, `core.http`, `core.slack`, các type script) có schema viết bằng tay (§7.1).
+
 ## 1. Vì sao
 
 Engine đã chạy flow trong production (từ W10), nhưng người dùng chỉ viết và chạy được flow bằng `curl`. W7a là package đầu tiên cho người dùng viết, publish và chạy flow trên trình duyệt. Nó cũng dựng khung để bốn package W7 còn lại gắn vào: nhóm nav, route lazy, registry tab và bộ từ vựng state.
@@ -237,7 +239,18 @@ Khi execution chưa kết thúc, trang poll `GET …/executions/{id}` mỗi 2 gi
   - khung flow (`id`, `namespace`, `description`, `labels`, `inputs`, `variables`, `tasks`, `errors`, `finally`, `triggers`, `pluginDefaults`, `concurrency`, `disabled`, …);
   - một `oneOf` theo kiểu task, chọn theo `type`, cho `tasks`/`errors`/`finally` (đệ quy cho task con của task flowable), và tương tự theo kiểu trigger cho `triggers`.
 - **Mục của mỗi kiểu** gồm mô tả, `properties` với kiểu, bắt buộc, mặc định và mô tả, và `outputs` (dưới dạng phần mở rộng `x-egret-outputs`, dùng cho tab Docs).
-- **Nguồn.** Schema dựng từ registry (`spec/registry.rs`) và catalog plugin (`plugins/catalog.json`), đúng những thứ publish và validate đang dùng. Một test Rust khẳng định tập giá trị `type` trong schema bằng đúng tập registry chấp nhận với cùng tổ hợp feature. Nhờ vậy schema không thể liệt kê một kiểu mà publish từ chối, hay bỏ sót một kiểu publish chấp nhận.
+- **Nguồn** *(phán quyết của người dùng, 2026-10-10)*. Schema được ghép lúc build từ ba đầu vào đã commit:
+  1. **`kestra-flow-schema.json`.** Flow JSON schema của Kestra, xuất một lần từ image `kestra/kestra` trên máy (`GET /api/v1/plugins/schemas/flow`). Phiên bản Kestra được ghi trong file, và lệnh xuất nằm trong comment đầu file hoặc README.
+  2. **`egret-task-schemas.json`.** Schema viết bằng tay cho các type Kestra không có: `egret.*`, `core.http`, `core.slack`, và các type script nếu định nghĩa của Kestra không khớp với egret.
+  3. **Registry** (`spec/registry.rs`), cùng tập flowable trong `models/task.rs`.
+- **Lọc.**
+  - Chỉ giữ các type egret chấp nhận, theo FQCN chính thức, kèm alias của chúng.
+  - Bỏ các thuộc tính egret parse nhưng bỏ qua, để gợi ý không bao giờ đề xuất thứ egret lặng lẽ bỏ đi. Ví dụ là các thuộc tính gốc của task mà egret bỏ qua trên task không phải script (`assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`, `workerSelector`).
+  - Task đầu tiên của plan đo, với từng type, cách egret xử lý từng thuộc tính Kestra mô tả (tôn trọng, bỏ qua hay từ chối) trước khi chốt bộ lọc.
+- **Test.**
+  - Một test Rust khẳng định tập giá trị `type` trong schema trả về bằng đúng tập registry chấp nhận với cùng tổ hợp feature.
+  - Một test thứ hai khẳng định không thuộc tính nào được trả về là thuộc tính egret đã biết là bỏ qua.
+- **Thứ tự ưu tiên.** Với chín class JDBC, thuộc tính trong `catalog.json` được giữ ở những chỗ khác với bản xuất của Kestra.
 - **Feature.**
   - Tắt `workflow_kestra_plugins` thì không có các kiểu plugin Kestra.
   - Tắt `workflow_containers` thì không có các kiểu container.
@@ -249,7 +262,7 @@ Khi execution chưa kết thúc, trang poll `GET …/executions/{id}` mỗi 2 gi
 - **Quyền:** `workflow:manage`, giống route validate theo id hiện có.
 - **Body:** `{ "source": string }`, cùng giới hạn kích thước body như route tạo.
 - **Phản hồi:** cùng `ValidationReportDto` như `POST …/flows/{id}/validate`, tính bằng cùng một hàm. Không ghi gì.
-- **Lỗi:** YAML không hợp lệ vẫn trả 200 kèm kết quả validate; 400 chỉ dành cho body request sai định dạng.
+- **Lỗi:** giống route hiện có, YAML không parse được trả 400, với thông báo của parser có dòng và cột. Editor biến thông báo đó thành một marker tại vị trí ấy và một mục trong Problems. Tài liệu parse được nhưng không validate được thì trả 200 kèm kết quả.
 
 ### 7.3 `if_updated_at` trong `PUT /flows/{id}`
 
