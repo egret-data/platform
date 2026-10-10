@@ -13,6 +13,9 @@ struct Fixture {
     user: UserId,
     ws: WorkspaceId,
     app: Uuid,
+    /// A published version of `app`: since migration 0163 a run session's
+    /// `version_id` must name a version of its own app (`app_sessions_version_app_fk`).
+    version: Uuid,
     login_sid: Uuid,
 }
 
@@ -56,11 +59,20 @@ impl Fixture {
         .fetch_one(&db.pool)
         .await
         .expect("insert app");
+        let version: Uuid = sqlx::query_scalar(
+            "INSERT INTO analytics.app_versions (app_id, version_no) \
+             VALUES ($1, 1) RETURNING id",
+        )
+        .bind(app)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert version");
         Self {
             db,
             user: UserId(user),
             ws: WorkspaceId(ws),
             app,
+            version,
             login_sid,
         }
     }
@@ -70,9 +82,11 @@ impl Fixture {
             user_id: self.user,
             workspace_id: self.ws,
             app_id: self.app,
-            version_id: Some(Uuid::new_v4()),
+            version_id: Some(self.version),
             mode: AppMode::Run,
             login_sid: self.login_sid,
+            grant_id: None,
+            impersonator: None,
         }
     }
 
@@ -106,6 +120,35 @@ impl Fixture {
             .execute(&self.db.pool)
             .await
             .expect("exec");
+    }
+
+    async fn insert_user(&self, tag: &str) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO users (provider, email, name, status, password_hash) \
+             VALUES ('local', $1, 'test', 'active', 'x') RETURNING id",
+        )
+        .bind(format!("{tag}_{}@egret.local", Uuid::new_v4().simple()))
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("insert user")
+    }
+
+    /// An unredeemed edit-less run grant for this fixture's app and version.
+    async fn insert_grant(&self) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO analytics.app_grants \
+               (ticket_hash, user_id, workspace_id, app_id, version_id, mode, login_sid, ticket_expires_at) \
+             VALUES ($1, $2, $3, $4, $5, 'run', $6, now() + interval '1 minute') RETURNING id",
+        )
+        .bind(format!("t{}", Uuid::new_v4().simple()))
+        .bind(self.user.0)
+        .bind(self.ws.0)
+        .bind(self.app)
+        .bind(self.version)
+        .bind(self.login_sid)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("insert grant")
     }
 
     async fn exec_with_hash(&self, sql: &'static str, token: &str) {
@@ -214,6 +257,122 @@ async fn session_workspace_must_match_the_apps_workspace() {
     bad.workspace_id = WorkspaceId(other_ws);
     let repo = AppSessionRepo::new(fx.db.clone());
     assert_eq!(sqlstate(repo.mint(&bad, IDLE, ABS).await), "23503");
+}
+
+#[tokio::test]
+async fn revoke_by_id_kills_one_session_and_only_that_one() {
+    let fx = Fixture::new().await;
+    let repo = AppSessionRepo::new(fx.db.clone());
+    let a = repo.mint(&fx.new_run(), IDLE, ABS).await.unwrap();
+    let b = repo.mint(&fx.new_run(), IDLE, ABS).await.unwrap();
+    let id = repo.resolve(&a, IDLE).await.unwrap().unwrap().id;
+    repo.revoke_by_id(id).await.unwrap();
+    assert!(repo.resolve(&a, IDLE).await.unwrap().is_none());
+    assert!(repo.resolve(&b, IDLE).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn revoke_for_login_session_kills_every_token_minted_under_it() {
+    let fx = Fixture::new().await;
+    let repo = AppSessionRepo::new(fx.db.clone());
+    let a = repo.mint(&fx.new_run(), IDLE, ABS).await.unwrap();
+    let b = repo.mint(&fx.new_run(), IDLE, ABS).await.unwrap();
+    assert_eq!(
+        repo.revoke_for_login_session(fx.login_sid).await.unwrap(),
+        2
+    );
+    assert!(repo.resolve(&a, IDLE).await.unwrap().is_none());
+    assert!(repo.resolve(&b, IDLE).await.unwrap().is_none());
+    // revoking again touches nothing: already-revoked rows are not counted
+    assert_eq!(
+        repo.revoke_for_login_session(fx.login_sid).await.unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn revoke_for_grant_kills_the_tokens_of_that_grant_only() {
+    let fx = Fixture::new().await;
+    let repo = AppSessionRepo::new(fx.db.clone());
+    let grant = fx.insert_grant().await;
+    let mut under_grant = fx.new_run();
+    under_grant.grant_id = Some(grant);
+    let a = repo.mint(&under_grant, IDLE, ABS).await.unwrap();
+    let other = repo.mint(&fx.new_run(), IDLE, ABS).await.unwrap();
+    assert_eq!(repo.revoke_for_grant(grant).await.unwrap(), 1);
+    assert!(repo.resolve(&a, IDLE).await.unwrap().is_none());
+    assert!(repo.resolve(&other, IDLE).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn the_impersonator_is_stored_and_comes_back_on_resolve() {
+    let fx = Fixture::new().await;
+    let repo = AppSessionRepo::new(fx.db.clone());
+    let admin = fx.insert_user("admin").await;
+    let mut new = fx.new_run();
+    new.impersonator = Some(UserId(admin));
+    let token = repo.mint(&new, IDLE, ABS).await.unwrap();
+    let s = repo.resolve(&token, IDLE).await.unwrap().expect("live");
+    assert_eq!(s.impersonator, Some(UserId(admin)));
+    let plain = repo.mint(&fx.new_run(), IDLE, ABS).await.unwrap();
+    assert_eq!(
+        repo.resolve(&plain, IDLE)
+            .await
+            .unwrap()
+            .unwrap()
+            .impersonator,
+        None
+    );
+}
+
+#[tokio::test]
+async fn an_expired_but_undeleted_login_session_stops_its_app_tokens() {
+    let fx = Fixture::new().await;
+    let repo = AppSessionRepo::new(fx.db.clone());
+    let token = repo.mint(&fx.new_run(), IDLE, ABS).await.unwrap();
+    assert!(repo.resolve(&token, IDLE).await.unwrap().is_some());
+    // The login session row is still there; only its idle window has lapsed.
+    fx.exec(
+        "UPDATE sessions SET idle_expires_at = now() - interval '1 second' WHERE id = $1",
+        fx.login_sid,
+    )
+    .await;
+    assert!(repo.resolve(&token, IDLE).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn sweep_deletes_old_dead_rows_and_keeps_live_and_recent_ones() {
+    let fx = Fixture::new().await;
+    let repo = AppSessionRepo::new(fx.db.clone());
+    let live = repo.mint(&fx.new_run(), IDLE, ABS).await.unwrap();
+    let old_revoked = repo.mint(&fx.new_run(), IDLE, ABS).await.unwrap();
+    let recent_revoked = repo.mint(&fx.new_run(), IDLE, ABS).await.unwrap();
+    let old_expired = repo.mint(&fx.new_run(), IDLE, ABS).await.unwrap();
+    repo.revoke(&old_revoked).await.unwrap();
+    repo.revoke(&recent_revoked).await.unwrap();
+    fx.exec_with_hash(
+        "UPDATE analytics.app_sessions SET revoked_at = now() - interval '2 days' WHERE token_hash = $1",
+        &old_revoked,
+    )
+    .await;
+    fx.exec_with_hash(
+        "UPDATE analytics.app_sessions SET idle_expires_at = now() - interval '2 days' WHERE token_hash = $1",
+        &old_expired,
+    )
+    .await;
+    let swept = repo
+        .sweep_expired(Duration::from_secs(24 * 3600))
+        .await
+        .unwrap();
+    assert!(swept >= 2, "swept {swept}");
+    let remaining: i64 = fx
+        .scalar("SELECT count(*) FROM analytics.app_sessions WHERE app_id = $1")
+        .await;
+    assert_eq!(
+        remaining, 2,
+        "the live and the recently revoked row survive"
+    );
+    assert!(repo.resolve(&live, IDLE).await.unwrap().is_some());
 }
 
 /// SQLSTATE of the database error a failed `mint` carries.

@@ -409,3 +409,248 @@ async fn a_trigger_dependency_naming_a_nonexistent_flow_fails_the_same_way() {
         .expect_err("must fail");
     assert!(matches!(err, egret_core::Error::NotFound(_)), "{err:?}");
 }
+
+/// W9b: the save-time refusal of a namespace with a `_files` segment, through
+/// publish (its unit twin is `spec::validate`'s
+/// `publish_refuses_a_files_segment_namespace_by_name`; the run-time twin is
+/// `nsfiles::access`'s `a_files_segment_namespace_is_refused_for_every_access_and_actor`).
+#[tokio::test]
+async fn publish_refuses_a_files_segment_namespace_by_name() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let bad = common::draft(
+        &repo,
+        ws,
+        user,
+        "id: f\nnamespace: a._files.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n",
+    )
+    .await;
+    let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, bad.id, "")
+        .await
+        .expect_err("a `_files` namespace segment must not publish");
+    match err {
+        egret_core::Error::InvalidInput(m) => assert!(
+            m.contains("'a._files.b'") && m.contains("'_files'") && m.contains("(namespace)"),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    // The control: the same flow one character away publishes.
+    let good = common::draft(
+        &repo,
+        ws,
+        user,
+        "id: g\nnamespace: a.files.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n",
+    )
+    .await;
+    egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
+        .await
+        .expect("a.files.b publishes");
+}
+
+/// W9c: the save-time refusal of a namespace with a `_kv` segment, through
+/// publish (its unit twin is `spec::validate`'s
+/// `publish_refuses_a_kv_segment_namespace_by_name`; the run-time twin is
+/// `nsfiles::access`'s `a_kv_segment_namespace_is_refused_for_every_resource_access_and_actor`).
+#[tokio::test]
+async fn publish_refuses_a_kv_segment_namespace_by_name() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let bad = common::draft(
+        &repo,
+        ws,
+        user,
+        "id: f\nnamespace: a._kv.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n",
+    )
+    .await;
+    let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, bad.id, "")
+        .await
+        .expect_err("a `_kv` namespace segment must not publish");
+    match err {
+        egret_core::Error::InvalidInput(m) => assert!(
+            m.contains("'a._kv.b'") && m.contains("'_kv'") && m.contains("(namespace)"),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    // The control: the same flow one character away publishes.
+    let good = common::draft(
+        &repo,
+        ws,
+        user,
+        "id: g\nnamespace: a.kv.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n",
+    )
+    .await;
+    egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
+        .await
+        .expect("a.kv.b publishes");
+}
+
+/// A `WorkingDirectory` flow whose `namespaceFiles` block is `block` (YAML,
+/// indented under the key).
+fn working_directory(id: &str, block: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: w9b.wd\ntasks:\n  - id: wd\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    namespaceFiles:\n{block}    tasks:\n      - id: t\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n"
+    )
+}
+
+/// W9b Task 5 (spec §7, the user's ruling): a `WorkingDirectory`'s
+/// `namespaceFiles` is parsed at publish by the script tasks' own parse; a
+/// malformed block is refused naming the property, a valid one publishes.
+#[tokio::test]
+async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name_and_a_valid_one_publishes(
+) {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    for (id, block, property) in [
+        (
+            "bad-ns",
+            "      namespaces: w9b.s1\n",
+            "namespaceFiles.namespaces",
+        ),
+        (
+            "bad-if",
+            "      ifExists: NOPE\n",
+            "namespaceFiles.ifExists",
+        ),
+        ("bad-key", "      unknown: 1\n", "namespaceFiles.unknown"),
+    ] {
+        let bad = common::draft(&repo, ws, user, &working_directory(id, block)).await;
+        let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, bad.id, "")
+            .await
+            .expect_err("a malformed namespaceFiles must not publish");
+        match err {
+            egret_core::Error::InvalidInput(m) => {
+                // Fix round 1, M7: the finding's whole path, task prefix
+                // included, as the report closes with it.
+                assert!(m.contains(&format!("(tasks.wd.{property})")), "{m}")
+            }
+            other => panic!("{id}: {other:?}"),
+        }
+    }
+    // The control: the corpus flow's block, and a templated one, publish.
+    for (id, block) in [
+        (
+            "good",
+            "      namespaces: [io.test.first, io.test.second]\n      enabled: true\n      folderPerNamespace: true\n      exclude: [/ignore/**]\n",
+        ),
+        (
+            "templated",
+            "      enabled: \"{{ true }}\"\n      ifExists: WARN\n      include: [\"{{ flow.id }}/**\"]\n",
+        ),
+        // Fix round 1, M4: the four properties Kestra types as `Property`
+        // take an expression, checked once it renders.
+        (
+            "expressions",
+            "      ifExists: \"{{ inputs.mode }}\"\n      namespaces: \"{{ inputs.nss }}\"\n      include: \"{{ inputs.inc }}\"\n      exclude: \"{% if true %}[]{% endif %}\"\n",
+        ),
+    ] {
+        let good = common::draft(&repo, ws, user, &working_directory(id, block)).await;
+        egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
+            .await
+            .unwrap_or_else(|e| panic!("{id} publishes: {e:?}"));
+    }
+}
+
+/// The block is kept in the model, verbatim: serialize -> parse -> equal,
+/// and the parse of the kept value is the parse of the written one.
+#[tokio::test]
+async fn a_working_directory_namespace_files_round_trips_through_the_model() {
+    use egret_workflow::models::{Task, TaskKind};
+    let yaml = "id: wd\ntype: io.kestra.plugin.core.flow.WorkingDirectory\nnamespaceFiles:\n  namespaces: [a.b, c]\n  include: ['**.txt']\n  ifExists: FAIL\n  folderPerNamespace: true\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+    let task: Task = serde_norway::from_str(yaml).expect("a task");
+    let TaskKind::WorkingDirectory(w) = &task.kind else {
+        panic!("{:?}", task.kind)
+    };
+    let kept = w.namespace_files.clone().expect("namespaceFiles is kept");
+    assert_eq!(
+        kept,
+        serde_json::json!({
+            "namespaces": ["a.b", "c"], "include": ["**.txt"], "ifExists": "FAIL",
+            "folderPerNamespace": true,
+        })
+    );
+    let value = serde_json::to_value(&task).expect("serialize");
+    assert_eq!(value["namespaceFiles"], kept, "{value}");
+    let again: Task = serde_json::from_value(value).expect("parse again");
+    assert_eq!(again, task);
+    let spec = egret_workflow::storage::nsfiles::stage::NamespaceFilesSpec::parse(&kept).unwrap();
+    assert_eq!(
+        spec.if_exists,
+        egret_workflow::storage::nsfiles::stage::IfExistsProp::Value(
+            egret_workflow::storage::nsfiles::stage::IfExists::Fail
+        )
+    );
+    // Absent stays absent, and is not serialized.
+    let bare: Task = serde_norway::from_str(
+        "id: wd\ntype: io.kestra.plugin.core.flow.WorkingDirectory\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n",
+    )
+    .unwrap();
+    let value = serde_json::to_value(&bare).unwrap();
+    assert!(value.get("namespaceFiles").is_none(), "{value}");
+}
+
+/// W9c Task 4 (W9c spec §7): a `Set` or `Put` whose `value` calls `secret()`
+/// is refused at publish with its own message, naming the task and the
+/// property, and not with the generic `secret()` refusal for that property.
+/// Its unit twin is `spec::validate`'s
+/// `a_secret_in_a_set_or_put_value_is_refused_with_its_own_code_and_message`.
+#[tokio::test]
+async fn a_secret_in_a_kv_value_is_refused_at_publish_by_its_own_message() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    for (id, ty) in [
+        ("set", "io.kestra.plugin.core.kv.Set"),
+        ("put", "io.kestra.plugin.core.kv.Put"),
+    ] {
+        let f = common::draft(
+            &repo,
+            ws,
+            user,
+            &format!(
+                "id: {id}\nnamespace: a.b\ntasks:\n  - id: s\n    type: {ty}\n    key: k\n    \
+                 value:\n      token: \"{{{{ secret('API') }}}}\"\n"
+            ),
+        )
+        .await;
+        let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, f.id, "")
+            .await
+            .expect_err("a secret in a KV value must not publish");
+        let want = egret_workflow::plugins::secret_in_kv_value_message("s", "tasks.s.value.token");
+        match err {
+            egret_core::Error::InvalidInput(m) => {
+                assert!(m.contains(&want), "{ty}: {m}");
+                assert!(
+                    !m.contains("resolves only on `kestra.*` plugin tasks"),
+                    "{ty}: the generic refusal too: {m}"
+                );
+            }
+            other => panic!("{ty}: {other:?}"),
+        }
+    }
+}
+
+/// W9c Task 4: the corpus's `valids/kv` (two `kv()` calls in `Return`
+/// tasks) publishes. `valids/retry-with-flowable-errors` carries no
+/// `secret()` either; it stopped only at the unknown `kv.Set` type until W9c
+/// Task 5 registered the six KV tasks, and it publishes now (it still needs
+/// the `AllowFailure` flowable to run as Kestra ran it).
+#[tokio::test]
+async fn valids_kv_and_retry_with_flowable_errors_publish() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    for source in [
+        include_str!("../oracle-exec/corpus/valids/kv.yaml"),
+        include_str!("../oracle-exec/corpus/valids/retry-with-flowable-errors.yaml"),
+    ] {
+        let draft = common::draft(&repo, ws, user, source).await;
+        egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "")
+            .await
+            .unwrap_or_else(|e| panic!("{e}: {source}"));
+    }
+}

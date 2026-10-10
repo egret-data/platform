@@ -504,11 +504,15 @@ function-fromion-decimal-multiplication-loses-the-scale
 
 # KNOWN and PRE-EXISTING, on the path that still routes into that hole:
 # `number(type='BIGDECIMAL')` returns the same `Object`, so arithmetic on it is
-# an error here and `> 1` is unconditionally true. Recorded rather than fixed
-# because fixing it means a numeric `ValueRepr`, which is the scale again --
-# but recorded, because before this round nothing in the corpus could see it.
+# an error here. Recorded rather than fixed because fixing it means a numeric
+# `ValueRepr`, which is the scale again -- but recorded, because before this
+# round nothing in the corpus could see it.
+# 2026-10-08 (W9c Task 4 fix round 1): its COMPARISONS are fixed --
+# `runners::cmp_rewrite` compiles every comparison to a `runners::compare` call
+# that compares a `BigDecimal`/`BigInteger` exactly -- so
+# `filter-number-bigdecimal-comparison` left this file. Arithmetic stays a
+# named refusal (the W9c ruling), so this one stays.
 filter-number-bigdecimal-is-not-a-number-here
-filter-number-bigdecimal-comparison
 
 # DELIBERATE: `IonValue.toString()` re-serialises CANONICALLY and egret keeps
 # the source text, so the two agree only where the source already is canonical.

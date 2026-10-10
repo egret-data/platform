@@ -96,8 +96,7 @@ pub async fn grant(db: &Db, ws: Uuid, user: UserId, perms: &[&str]) {
 /// Turn `feature` OFF for `ws` -- the row the platform-admin feature-toggle
 /// API would write. An absent row means the key's `default_enabled` (ON for
 /// every key but `workflow_containers`), so this is the only way to say "off"
-/// for those; mirrors `crates/egret-notebook/tests/feature_gate.rs`'s
-/// `disable`.
+/// for those.
 pub async fn disable_feature(db: &Db, ws: Uuid, feature: &str) {
     sqlx::query(
         "INSERT INTO workspace_features (workspace_id, feature, enabled) VALUES ($1, $2, false)",
@@ -186,6 +185,97 @@ pub async fn app(db: &Db) -> App {
 /// [`app`], with the platform half of the W5a script-task gate
 /// (`plugin_configurations`, the default runner) set to `scripts`.
 pub async fn app_with_scripts(db: &Db, scripts: egret_workflow::scripts::ScriptSettings) -> App {
+    app_with(
+        db,
+        scripts,
+        egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
+    )
+    .await
+}
+
+/// [`app`], with the namespace file upload's idle timeout set to `idle` (W9b
+/// Task 8 fix round 1, I-2: a test drives the 408 in milliseconds).
+pub async fn app_with_upload_idle(db: &Db, idle: std::time::Duration) -> App {
+    app_with(
+        db,
+        Default::default(),
+        idle,
+        egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
+    )
+    .await
+}
+
+/// [`app`], with the namespace file upload's total timeout set to `total`
+/// (W9b Task 8 re-review m-2: a test drives that 408 in milliseconds).
+pub async fn app_with_upload_total(db: &Db, total: std::time::Duration) -> App {
+    app_with(
+        db,
+        Default::default(),
+        egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        total,
+        egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
+    )
+    .await
+}
+
+/// [`app`] with a namespace export's total time bound set to `total` (W9b
+/// Task 9 fix round 1, M-7).
+pub async fn app_with_export_total(db: &Db, total: std::time::Duration) -> App {
+    app_with(
+        db,
+        Default::default(),
+        egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        total,
+    )
+    .await
+}
+
+/// [`app`], whose `WorkflowState::db` (the pool the workflow routes and the
+/// storage modules query) is `workflow_db`, while sessions, `WsContext` and
+/// the PDP use `db` (W9c Task 6: a test closes `workflow_db`'s pool to drive
+/// a database outage behind a route that has already authenticated).
+pub async fn app_with_workflow_db(db: &Db, workflow_db: &Db) -> App {
+    app_with_dbs(
+        db,
+        workflow_db,
+        Default::default(),
+        egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
+    )
+    .await
+}
+
+async fn app_with(
+    db: &Db,
+    scripts: egret_workflow::scripts::ScriptSettings,
+    upload_idle_timeout: std::time::Duration,
+    upload_total_timeout: std::time::Duration,
+    export_total_timeout: std::time::Duration,
+) -> App {
+    app_with_dbs(
+        db,
+        db,
+        scripts,
+        upload_idle_timeout,
+        upload_total_timeout,
+        export_total_timeout,
+    )
+    .await
+}
+
+async fn app_with_dbs(
+    db: &Db,
+    workflow_db: &Db,
+    scripts: egret_workflow::scripts::ScriptSettings,
+    upload_idle_timeout: std::time::Duration,
+    upload_total_timeout: std::time::Duration,
+    export_total_timeout: std::time::Duration,
+) -> App {
     let sessions = egret_auth::session::SessionService::new(
         db.clone(),
         chrono::Duration::hours(24),
@@ -198,14 +288,13 @@ pub async fn app_with_scripts(db: &Db, scripts: egret_workflow::scripts::ScriptS
     );
     let (audit_sink, audit_rx) = egret_audit::AuditSink::new(16);
     let state = egret_workflow::WorkflowState {
-        db: db.clone(),
+        db: workflow_db.clone(),
         repo: egret_workflow::FlowRepo::new(db.clone()),
         executions: egret_workflow::ExecutionRepo::new(db.clone()),
         logs: egret_workflow::logs::LogRepo::new(db.pool.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             flows: egret_workflow::FlowRepo::new(db.clone()),
             dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
-            notebooks: std::sync::Arc::new(UnreachableNotebooks),
         }),
         sessions: sessions.clone(),
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
@@ -213,6 +302,9 @@ pub async fn app_with_scripts(db: &Db, scripts: egret_workflow::scripts::ScriptS
         pdp,
         audit: audit_sink,
         scripts,
+        upload_idle_timeout,
+        upload_total_timeout,
+        export_total_timeout,
     };
     let router = axum::Router::new()
         .nest("/api", egret_workflow::management_router())
@@ -253,13 +345,12 @@ pub fn audit_mutations(app: &App) -> Vec<(String, Option<String>, serde_json::Va
     out
 }
 
-/// A `WorkflowRefs` whose data-API and notebook ports must never be asked --
-/// for a direct `publish` of a flow that names neither.
+/// A `WorkflowRefs` whose data-API port must never be asked -- for a direct
+/// `publish` of a flow that does not name one.
 pub fn workflow_refs(db: &Db) -> egret_workflow::WorkflowRefs {
     egret_workflow::WorkflowRefs {
         flows: egret_workflow::FlowRepo::new(db.clone()),
         dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
-        notebooks: std::sync::Arc::new(UnreachableNotebooks),
     }
 }
 
@@ -272,39 +363,6 @@ struct UnreachableDataApi;
 impl egret_dataapi_api::DataApiEndpointPort for UnreachableDataApi {
     async fn workspace_of(&self, _id: Uuid) -> egret_core::Result<Option<Uuid>> {
         unreachable!("tests/routes.rs must not publish a flow with a dataapi.call task")
-    }
-}
-struct UnreachableNotebooks;
-#[async_trait::async_trait]
-impl egret_analytics_api::NotebookDocsPort for UnreachableNotebooks {
-    async fn get_summary(
-        &self,
-        _id: Uuid,
-    ) -> egret_core::Result<Option<(egret_analytics_api::NotebookSummary, Uuid)>> {
-        unreachable!("tests/routes.rs must not publish a flow with an egret.python task")
-    }
-    async fn list_engine_options(
-        &self,
-        _ws: Uuid,
-    ) -> egret_core::Result<Vec<egret_analytics_api::EngineOption>> {
-        unreachable!()
-    }
-    async fn record_output(
-        &self,
-        _nb: Uuid,
-        _cid: Uuid,
-        _outputs: &[egret_analytics_api::CellOutput],
-        _execution_count: Option<i32>,
-        _elapsed_ms: Option<i32>,
-    ) -> egret_core::Result<()> {
-        unreachable!()
-    }
-    async fn build_runtime(
-        &self,
-        _ws: Uuid,
-        _user_id: UserId,
-    ) -> egret_core::Result<egret_analytics_api::NotebookRuntime> {
-        unreachable!()
     }
 }
 
@@ -338,6 +396,103 @@ async fn send(
             )
             .unwrap(),
         )
+        .await
+        .unwrap()
+}
+
+/// A request with a session for `user`, a `Content-Type` of the caller's
+/// choosing and a raw body -- for the multipart start route (W9a Task 7),
+/// which [`post`]'s JSON body cannot express. An empty `content_type`
+/// sends none.
+pub async fn send_raw(
+    app: &App,
+    method: &str,
+    path: &str,
+    user: UserId,
+    content_type: &str,
+    body: Vec<u8>,
+) -> axum::response::Response {
+    use tower::ServiceExt;
+    let token = app
+        .sessions
+        .create(user, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token;
+    let mut b = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("Cookie", format!("egret_session={token}"));
+    // An empty `content_type` sends no header at all.
+    if !content_type.is_empty() {
+        b = b.header("Content-Type", content_type);
+    }
+    app.router
+        .clone()
+        .oneshot(b.body(axum::body::Body::from(body)).unwrap())
+        .await
+        .unwrap()
+}
+
+/// [`send_raw`] with the body given as an `axum::body::Body` -- a stream, so
+/// a test can count how much of it the server pulled, or make it fail.
+pub async fn send_body(
+    app: &App,
+    method: &str,
+    path: &str,
+    user: UserId,
+    content_type: &str,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    use tower::ServiceExt;
+    let token = app
+        .sessions
+        .create(user, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token;
+    let mut b = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("Cookie", format!("egret_session={token}"));
+    if !content_type.is_empty() {
+        b = b.header("Content-Type", content_type);
+    }
+    app.router
+        .clone()
+        .oneshot(b.body(body).unwrap())
+        .await
+        .unwrap()
+}
+
+/// A request with a session for `user`, the given `headers` (each sent as
+/// given; none added) and `body` (W9c Task 6: the KV `PUT`'s `ttl` and
+/// `description` headers).
+pub async fn send_with(
+    app: &App,
+    method: &str,
+    path: &str,
+    user: UserId,
+    headers: &[(&str, &[u8])],
+    body: axum::body::Body,
+) -> axum::response::Response {
+    use tower::ServiceExt;
+    let token = app
+        .sessions
+        .create(user, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token;
+    let mut b = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("Cookie", format!("egret_session={token}"));
+    for (name, value) in headers {
+        b = b.header(*name, axum::http::HeaderValue::from_bytes(value).unwrap());
+    }
+    app.router
+        .clone()
+        .oneshot(b.body(body).unwrap())
         .await
         .unwrap()
 }
@@ -516,7 +671,6 @@ pub async fn webhook_app_with_guard(
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             flows: egret_workflow::FlowRepo::new(db.clone()),
             dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
-            notebooks: std::sync::Arc::new(UnreachableNotebooks),
         }),
         sessions,
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
@@ -524,6 +678,9 @@ pub async fn webhook_app_with_guard(
         pdp,
         audit: egret_audit::AuditSink::new(16).0,
         scripts: Default::default(),
+        upload_idle_timeout: egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        upload_total_timeout: egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        export_total_timeout: egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
     };
     WebhookApp {
         router: axum::Router::new()

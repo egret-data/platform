@@ -90,7 +90,16 @@ fn a_catalog_fqcn_with_the_prefix_parses() {
         );
         assert!(plugins::lookup(fqcn).is_none(), "{fqcn} bare");
     }
-    assert_eq!(plugins::catalog().classes.len(), 5);
+    // W9a Task 9: W5b's five, and the four it excluded as needing storage.
+    assert_eq!(plugins::catalog().classes.len(), 9);
+    for fqcn in [
+        "io.kestra.plugin.jdbc.postgresql.Batch",
+        "io.kestra.plugin.jdbc.mysql.Batch",
+        "io.kestra.plugin.jdbc.postgresql.CopyIn",
+        "io.kestra.plugin.jdbc.postgresql.CopyOut",
+    ] {
+        assert!(plugins::catalog().classes.contains_key(fqcn), "{fqcn}");
+    }
 }
 
 #[test]
@@ -151,47 +160,89 @@ fn a_missing_required_property_is_refused_by_name() {
     assert_refused(&errs, "url", plugins::CODE_PROPERTY_REQUIRED, "'url'");
 }
 
-#[test]
-fn fetch_type_store_is_refused_naming_w9() {
-    let errs = refusals(PG_QUERY, pg(json!({"fetchType": "STORE"})));
-    assert_refused(
-        &errs,
-        "fetchType",
-        plugins::CODE_PROPERTY_NEEDS_STORAGE,
-        "W9",
-    );
-    let errs = refusals(PG_QUERY, pg(json!({"store": true})));
-    assert_refused(&errs, "store", plugins::CODE_PROPERTY_NEEDS_STORAGE, "W9");
-    // `inputFile` on MySQL needs storage whatever its value.
-    let errs = refusals(
-        MYSQL_QUERY,
-        json!({"url": "jdbc:mysql://h:9030/", "sql": "select 1", "inputFile": "{{ x }}"}),
-    );
-    assert_refused(
-        &errs,
-        "inputFile",
-        plugins::CODE_PROPERTY_NEEDS_STORAGE,
-        "W9",
-    );
-    // The controls: the other fetch types, and `store: false`, parse.
-    for v in [
-        json!({"fetchType": "FETCH"}),
-        json!({"fetchType": "FETCH_ONE"}),
-        json!({"store": false}),
-    ] {
-        plugins::parse(&prefixed(PG_QUERY), &pg(v.clone()))
-            .unwrap_or_else(|e| panic!("{v}: {e:?}"));
-    }
+fn w9a_fixture() -> Value {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/oracle-exec/w9a-storage.json");
+    serde_json::from_str(&std::fs::read_to_string(path).expect("read w9a-storage.json"))
+        .expect("parse w9a-storage.json")
 }
 
-/// The table egret refuses by value is Task 1's measurement, not a copy
-/// that can drift from it.
+/// A spec for `fqcn` holding every property the catalog requires (but the
+/// ones the `Task` model consumes), each a plain string.
+fn minimal(fqcn: &str) -> Value {
+    let class = &plugins::catalog().classes[fqcn];
+    let mut spec = serde_json::Map::new();
+    for (name, prop) in &class.properties {
+        if prop.required && !plugins::HANDLED_BY_TASK_MODEL.contains(&name.as_str()) {
+            spec.insert(name.clone(), json!(format!("{name}-value")));
+        }
+    }
+    Value::Object(spec)
+}
+
+/// **W9a Task 9 flips W5b's `fetch_type_store_is_refused_naming_w9`**: every
+/// value W5b refused as needing storage -- each row of `w5b-plugins.json`'s
+/// `refused_values`, `fetchType: STORE`, `store: true`, `inputFile` and
+/// `from` -- now parses on its class, which is in the catalog. The run-time
+/// proofs that these plugins RUN are the handler's
+/// `fetch_type_store_runs_and_its_file_is_indexed` (spy) and
+/// `plugin_host_live`'s storage chain (Docker, a real Postgres, RustFS).
 #[test]
-fn the_refused_values_table_is_task_1s_measurement() {
-    assert_eq!(
-        plugins::refused_values_json(),
-        fixture()["egret_expected"]["refused_values"]
-    );
+fn every_value_w5b_refused_for_storage_now_parses() {
+    let uri = "kestra:///w9a/plugins/f/executions/00000000-0000-0000-0000-000000000001/tasks/q/\
+               00000000-0000-0000-0000-000000000002/1.ion";
+    let refused = fixture()["egret_expected"]["refused_values"].clone();
+    let refused = refused.as_object().expect("W5b's table");
+    let mut parsed = 0;
+    for (fqcn, props) in refused {
+        for (property, values) in props.as_object().expect("a class row") {
+            let values: Vec<Value> = match values {
+                Value::String(any) => {
+                    assert_eq!(any, "any");
+                    vec![json!(uri), json!("{{ outputs.q.uri }}")]
+                }
+                Value::Array(vs) => vs.clone(),
+                other => panic!("{fqcn}.{property}: {other}"),
+            };
+            for v in values {
+                let mut spec = minimal(fqcn);
+                spec[property] = v.clone();
+                plugins::parse(&prefixed(fqcn), &spec)
+                    .unwrap_or_else(|e| panic!("{fqcn} {property}: {v}: {e:?}"));
+                parsed += 1;
+            }
+        }
+    }
+    // 8 classes; 5 × (STORE, true) + 2 inputFile × 2 + 3 from × 2 = 20.
+    assert_eq!(refused.len(), 8);
+    assert_eq!(parsed, 20, "every row was tried");
+    // `CopyOut` needed storage as a class (it always writes): it parses too.
+    plugins::parse(
+        &prefixed("io.kestra.plugin.jdbc.postgresql.CopyOut"),
+        &minimal("io.kestra.plugin.jdbc.postgresql.CopyOut"),
+    )
+    .expect("CopyOut parses");
+}
+
+/// **What egret still refuses for storage is W9a Task 1's re-measurement**,
+/// `w9a-storage.json`'s `plugin_storage.still_refused_values` -- which is
+/// empty (every W5b row ran its storage part on the artifact), so no refusal
+/// table exists any more. Was: `REFUSED_VALUES` equals `w5b-plugins.json`'s
+/// `refused_values`.
+#[test]
+fn nothing_is_refused_for_storage_as_w9a_task_1_measured() {
+    let doc = w9a_fixture();
+    let ps = &doc["egret_expected"]["plugin_storage"];
+    assert_eq!(ps["basis"], "measured");
+    assert_eq!(ps["still_refused_values"], json!({}));
+    // The control: the same fixture records each re-admitted class as run.
+    for fqcn in [
+        "io.kestra.plugin.jdbc.postgresql.CopyOut",
+        "io.kestra.plugin.jdbc.postgresql.CopyIn",
+        "io.kestra.plugin.jdbc.postgresql.Batch",
+        "io.kestra.plugin.jdbc.mysql.Batch",
+    ] {
+        assert!(ps[fqcn].is_object(), "{fqcn} measured");
+    }
 }
 
 #[test]
@@ -679,7 +730,8 @@ async fn a_version_carrying_plugin_defaults_runs_and_the_defaults_apply_nothing(
     )
     .await
     .expect("an execution of a source carrying pluginDefaults starts");
-    let handlers = egret_workflow::worker::Handlers::with_core_tasks();
+    let handlers =
+        egret_workflow::worker::Handlers::with_core_tasks(egret_workflow::storage::current());
     for _ in 0..16 {
         if egret_workflow::worker::tick(&pool, 8, &handlers)
             .await

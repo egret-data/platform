@@ -27,10 +27,10 @@ import {
  *   - `member-sso` — column-mask on `item` + row-filter country='US' → sees only
  *     the 2 US rows, with `item` masked (never the real value).
  * The same admin≠member split must hold IDENTICALLY on SQL Lab, dataset preview,
- * chart data, dashboard tile, and (best-effort) a notebook kernel query.
+ * chart data, and dashboard tile.
  *
  * No backend change — this proves enforcement is already consistent across the
- * five surfaces. Opt-in (EGRET_E2E_KIND=1) against a RANGER-ON kind deploy; NOT in
+ * four surfaces. Opt-in (EGRET_E2E_KIND=1) against a RANGER-ON kind deploy; NOT in
  * `npm test` / GitHub CI. Run via `just e2e-kind-per-user`.
  */
 const ENABLED = process.env.EGRET_E2E_KIND === "1";
@@ -78,7 +78,7 @@ test.describe("per-user enforcement across surfaces on kind", () => {
   test.setTimeout(900_000);
 
   // Break-glass admin session (control-plane setup only — no refresh token, so it
-  // cannot drive the data plane / notebook kernel).
+  // cannot drive the data plane).
   let adminPage: Page; // break-glass admin browser page
   let request: APIRequestContext;
   let h: Record<string, string>;
@@ -179,28 +179,7 @@ test.describe("per-user enforcement across surfaces on kind", () => {
     await addWorkspaceMember(request, h, ws.slug, "admin-sso@egret.local", "ws_admin");
     await addWorkspaceMember(request, h, ws.slug, "member-sso@egret.local", "ws_editor");
 
-    // 9. Notebook-enable the trino engine for the workspace (best-effort — notebook
-    //    is a soft surface; a failure here must not break the API-surface gates).
-    try {
-      const settings = await (await request.get(`/api/ws/${ws.slug}/notebook-settings`)).json();
-      const conns: Array<{ id: string; engine?: string }> = settings.engines ?? [];
-      const trinoConn = conns.find((c) => c.engine === "trino");
-      if (trinoConn) {
-        const put = await request.put(`/api/ws/${ws.slug}/notebook-settings`, {
-          headers: h,
-          data: { engine_ids: [trinoConn.id] },
-        });
-        if (!put.ok()) {
-          console.warn(`notebook-settings PUT → ${put.status()} ${await put.text()}`);
-        }
-      } else {
-        console.warn("no trino connection in notebook-settings — notebook surface may skip");
-      }
-    } catch (e) {
-      console.warn(`notebook-settings enable failed (best-effort): ${e}`);
-    }
-
-    // 10. Resolve the SQL Lab db id for the engine — AS the break-glass admin, since
+    // 9. Resolve the SQL Lab db id for the engine — AS the break-glass admin, since
     //     the databases list is gated on workspace:manage_members. Robust to the
     //     response shape (array or {databases|items:[]}) and retried, since the
     //     engine's SQL Lab database is materialized asynchronously after assign.
@@ -218,7 +197,7 @@ test.describe("per-user enforcement across surfaces on kind", () => {
       dbId = (list.find((d) => engineRe.test(d.name ?? "")) ?? list[0]).id;
     }).toPass({ timeout: 60_000, intervals: [3_000] });
 
-    // 11. Seed the governed table AS admin-sso (has full Ranger access). The first
+    // 10. Seed the governed table AS admin-sso (has full Ranger access). The first
     //     CREATE is wrapped in a retry to absorb the Ranger execute/impersonate poll.
     await expect(async () => {
       await runQueryByDb(adminReq, adminH, ws.slug, dbId, "CREATE SCHEMA IF NOT EXISTS egret.gov");
@@ -238,7 +217,7 @@ test.describe("per-user enforcement across surfaces on kind", () => {
       "INSERT INTO egret.gov.sales VALUES ('US','book',10),('US','pen',5),('VN','lamp',7),('SG','desk',9)",
     );
 
-    // 12. Create the BI objects AS admin-sso, all pointing at the same governed table.
+    // 11. Create the BI objects AS admin-sso, all pointing at the same governed table.
     datasetId = await createDataset(adminReq, adminH, ws.slug, {
       name: `b-ds-${RUN_ID}`,
       database_id: dbId,
@@ -323,66 +302,4 @@ test.describe("per-user enforcement across surfaces on kind", () => {
       assertMember(cells(await m.json()));
     }).toPass({ timeout: 90_000, intervals: [5_000] });
   });
-
-  test("Notebook enforces per-user (best-effort)", async () => {
-    // The notebook kernel is a soft surface (per-user kernel pod cold-start + JWT
-    // mint from a refresh token). If the kernel path doesn't cooperate we log and
-    // pass — the four API surfaces above are the hard enforcement gate.
-    try {
-      const admin = await runNotebookQuery(ssoAdminPage, ws.slug, engineName);
-      expect(admin.rows, "admin notebook sees all 4 rows").toBe(4);
-
-      const member = await runNotebookQuery(memberPage, ws.slug, engineName);
-      expect(member.rows, "member notebook sees only 2 US rows").toBe(2);
-      expect(member.countries.every((c) => c === "US"), "member notebook only US rows").toBeTruthy();
-      expect(
-        member.items.every((i) => !REAL_ITEMS.has(i)),
-        "member notebook `item` is masked",
-      ).toBeTruthy();
-    } catch (e) {
-      console.warn(`notebook surface skipped (best-effort, kernel path failed): ${e}`);
-    }
-  });
 });
-
-/**
- * Drive a notebook as the logged-in user: create a notebook, set the first cell to a
- * `trino(...)` DataFrame query over the governed table, run it, and parse the printed
- * markers. Mirrors `notebook-ecommerce.spec.ts` (Monaco via `window.monaco`).
- */
-async function runNotebookQuery(
-  page: Page,
-  wsSlug: string,
-  engineName: string,
-): Promise<{ rows: number; countries: string[]; items: string[] }> {
-  await page.goto(`/explore/${wsSlug}/notebooks`);
-  await page.getByRole("button", { name: "+ Notebook" }).click();
-  await page.getByRole("textbox", { name: "Name" }).fill(`per-user ${Date.now()}`);
-  await page.getByRole("button", { name: "Create", exact: true }).click();
-  await page.waitForURL(/\/notebooks\/[0-9a-f-]{36}$/, { timeout: 20_000 });
-
-  const cell = [
-    "import daft",
-    `df = trino("SELECT country, item FROM egret.gov.sales ORDER BY country, item", engine="${engineName}")`,
-    "d = df.to_pydict()",
-    "print('EGRET_NB_ROWS=' + str(len(d.get('country', []))))",
-    "print('EGRET_NB_COUNTRIES=' + ','.join(str(x) for x in d.get('country', [])))",
-    "print('EGRET_NB_ITEMS=' + ','.join(str(x) for x in d.get('item', [])))",
-  ].join("\n");
-
-  await page.waitForFunction(() => (window as any).monaco?.editor?.getEditors?.().length > 0, null, {
-    timeout: 20_000,
-  });
-  await page.evaluate((src) => (window as any).monaco.editor.getEditors()[0].setValue(src), cell);
-  await page.getByRole("button", { name: "Run all" }).click();
-
-  // First run cold-starts the per-user kernel pod → generous wait for the marker.
-  await expect(page.getByText(/EGRET_NB_ROWS=/)).toBeVisible({ timeout: 150_000 });
-  const body = await page.locator("body").innerText();
-  const rows = Number(/EGRET_NB_ROWS=(\d+)/.exec(body)?.[1] ?? "NaN");
-  const countries = (/EGRET_NB_COUNTRIES=([^\n]*)/.exec(body)?.[1] ?? "")
-    .split(",")
-    .filter(Boolean);
-  const items = (/EGRET_NB_ITEMS=([^\n]*)/.exec(body)?.[1] ?? "").split(",").filter(Boolean);
-  return { rows, countries, items };
-}

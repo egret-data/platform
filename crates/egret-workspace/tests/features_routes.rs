@@ -224,7 +224,7 @@ async fn put_disables_a_feature_and_list_reflects_it() {
     let put = f
         .put(
             &format!("/admin/workspaces/{}/features", f.ws_id),
-            r#"{"features":{"notebooks":false}}"#,
+            r#"{"features":{"apps":false}}"#,
         )
         .await;
     assert_eq!(put.status(), StatusCode::OK);
@@ -239,7 +239,7 @@ async fn put_disables_a_feature_and_list_reflects_it() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|x| x["key"] == "notebooks")
+        .find(|x| x["key"] == "apps")
         .unwrap();
     assert_eq!(nb["enabled"], false);
 }
@@ -254,7 +254,7 @@ async fn put_rejects_an_unknown_key_and_writes_nothing() {
     let put = f
         .put(
             &format!("/admin/workspaces/{}/features", f.ws_id),
-            r#"{"features":{"notebooks":false,"teleporter":false}}"#,
+            r#"{"features":{"apps":false,"teleporter":false}}"#,
         )
         .await;
 
@@ -271,13 +271,13 @@ async fn put_rejects_an_unknown_key_and_writes_nothing() {
 }
 
 /// `PUT` is a merge, not a full replacement, despite the verb: a body naming
-/// only `notebooks` must leave a previously-disabled `datasets` disabled. This
+/// only `apps` must leave a previously-disabled `datasets` disabled. This
 /// pins the behaviour deliberately (see `SetFeatures`'s doc comment for the
 /// forward-compatibility reasoning) — without this test a future refactor
 /// that "fixed" `set_features` into resetting omitted keys would silently
 /// flip the semantics back.
 ///
-/// Uses `datasets`/`notebooks` rather than `charts` deliberately: neither
+/// Uses `datasets`/`apps` rather than `charts` deliberately: neither
 /// participates in the `dashboards`-requires-`charts` dependency, so this
 /// test stays about merge semantics and not about that rule (which has its
 /// own dedicated tests below).
@@ -297,13 +297,13 @@ async fn put_merges_leaving_omitted_keys_untouched() {
     assert_eq!(disable_datasets.status(), StatusCode::OK);
 
     // A second PUT naming only a DIFFERENT key.
-    let disable_notebooks = f
+    let disable_apps = f
         .put(
             &format!("/admin/workspaces/{}/features", f.ws_id),
-            r#"{"features":{"notebooks":false}}"#,
+            r#"{"features":{"apps":false}}"#,
         )
         .await;
-    assert_eq!(disable_notebooks.status(), StatusCode::OK);
+    assert_eq!(disable_apps.status(), StatusCode::OK);
 
     let json = f
         .json(
@@ -313,14 +313,14 @@ async fn put_merges_leaving_omitted_keys_untouched() {
         .await;
     let arr = json.as_array().unwrap();
     let datasets = arr.iter().find(|x| x["key"] == "datasets").unwrap();
-    let notebooks = arr.iter().find(|x| x["key"] == "notebooks").unwrap();
+    let apps = arr.iter().find(|x| x["key"] == "apps").unwrap();
     assert_eq!(
         datasets["enabled"], false,
         "datasets must remain disabled: it was never mentioned in the second PUT"
     );
     assert_eq!(
-        notebooks["enabled"], false,
-        "notebooks was disabled by the second PUT"
+        apps["enabled"], false,
+        "apps was disabled by the second PUT"
     );
 }
 
@@ -471,7 +471,7 @@ async fn a_user_without_workspace_update_cannot_toggle() {
     let put = f
         .put(
             &format!("/admin/workspaces/{}/features", f.ws_id),
-            r#"{"features":{"notebooks":false}}"#,
+            r#"{"features":{"apps":false}}"#,
         )
         .await;
 
@@ -494,7 +494,7 @@ async fn put_features_emits_an_audit_event_naming_the_actor() {
     let put = f
         .put(
             &format!("/admin/workspaces/{}/features", f.ws_id),
-            r#"{"features":{"notebooks":false}}"#,
+            r#"{"features":{"apps":false}}"#,
         )
         .await;
     assert_eq!(put.status(), StatusCode::OK);
@@ -529,8 +529,8 @@ async fn put_features_emits_an_audit_event_naming_the_actor() {
                 .map(|v| v.as_str().unwrap().to_string())
                 .collect();
             assert!(
-                after.contains(&"notebooks".to_string()),
-                "detail.after must record notebooks as disabled; detail={detail}"
+                after.contains(&"apps".to_string()),
+                "detail.after must record apps as disabled; detail={detail}"
             );
         }
         other => panic!("expected a Mutation event, got {other:?}"),
@@ -545,7 +545,7 @@ async fn my_workspaces_reports_enabled_features() {
     };
     f.put(
         &format!("/admin/workspaces/{}/features", f.ws_id),
-        r#"{"features":{"notebooks":false}}"#,
+        r#"{"features":{"apps":false}}"#,
     )
     .await;
 
@@ -564,7 +564,7 @@ async fn my_workspaces_reports_enabled_features() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert!(features.contains(&"charts"));
-    assert!(!features.contains(&"notebooks"));
+    assert!(!features.contains(&"apps"));
     // W5a: the off-by-default key is absent from a workspace with no row.
     assert!(!features.contains(&"workflow_containers"), "{features:?}");
     assert!(features.contains(&"workflows"), "{features:?}");
@@ -589,11 +589,11 @@ async fn my_workspaces_reports_each_workspaces_own_disabled_set_when_batched() {
         return;
     };
 
-    // Disable `notebooks` on the first (fixture) workspace.
+    // Disable `apps` on the first (fixture) workspace.
     let put1 = f
         .put(
             &format!("/admin/workspaces/{}/features", f.ws_id),
-            r#"{"features":{"notebooks":false}}"#,
+            r#"{"features":{"apps":false}}"#,
         )
         .await;
     assert_eq!(put1.status(), StatusCode::OK);
@@ -628,7 +628,7 @@ async fn my_workspaces_reports_each_workspaces_own_disabled_set_when_batched() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert!(!ws1_features.contains(&"notebooks"));
+    assert!(!ws1_features.contains(&"apps"));
     assert!(ws1_features.contains(&"datasets"));
 
     let ws2 = arr.iter().find(|w| w["id"] == ws2_id).unwrap();
@@ -639,5 +639,5 @@ async fn my_workspaces_reports_each_workspaces_own_disabled_set_when_batched() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert!(!ws2_features.contains(&"datasets"));
-    assert!(ws2_features.contains(&"notebooks"));
+    assert!(ws2_features.contains(&"apps"));
 }

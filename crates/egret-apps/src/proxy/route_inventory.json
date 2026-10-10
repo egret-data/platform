@@ -1,0 +1,644 @@
+[
+  {
+    "method": "GET",
+    "path": "/",
+    "surface": "both",
+    "why": "the editor / run app shell"
+  },
+  {
+    "method": "GET",
+    "path": "/@file/{filename_and_length:path}",
+    "surface": "both",
+    "why": "virtual files from the kernel's registry (mo.image, mo.download outputs)"
+  },
+  {
+    "method": "POST",
+    "path": "/api/ai/chat",
+    "surface": "deny",
+    "why": "AI chat/completion and MCP use pod-side provider keys; no egret policy over them"
+  },
+  {
+    "method": "POST",
+    "path": "/api/ai/completion",
+    "surface": "deny",
+    "why": "AI chat/completion and MCP use pod-side provider keys; no egret policy over them"
+  },
+  {
+    "method": "POST",
+    "path": "/api/ai/inline_completion",
+    "surface": "deny",
+    "why": "AI chat/completion and MCP use pod-side provider keys; no egret policy over them"
+  },
+  {
+    "method": "POST",
+    "path": "/api/ai/invoke_tool",
+    "surface": "deny",
+    "why": "AI chat/completion and MCP use pod-side provider keys; no egret policy over them"
+  },
+  {
+    "method": "POST",
+    "path": "/api/ai/mcp/refresh",
+    "surface": "deny",
+    "why": "AI chat/completion and MCP use pod-side provider keys; no egret policy over them"
+  },
+  {
+    "method": "GET",
+    "path": "/api/ai/mcp/status",
+    "surface": "deny",
+    "why": "AI chat/completion and MCP use pod-side provider keys; no egret policy over them"
+  },
+  {
+    "method": "POST",
+    "path": "/api/cache/clear",
+    "surface": "deny",
+    "why": "reads/clears the pod's shared cache dir"
+  },
+  {
+    "method": "POST",
+    "path": "/api/cache/info",
+    "surface": "deny",
+    "why": "reads/clears the pod's shared cache dir"
+  },
+  {
+    "method": "POST",
+    "path": "/api/datasources/discover",
+    "surface": "deny",
+    "why": "pod-side DB connections and schema previews; data goes only through egret's gateway"
+  },
+  {
+    "method": "POST",
+    "path": "/api/datasources/preview_column",
+    "surface": "deny",
+    "why": "pod-side DB connections and schema previews; data goes only through egret's gateway"
+  },
+  {
+    "method": "POST",
+    "path": "/api/datasources/preview_datasource_connection",
+    "surface": "deny",
+    "why": "pod-side DB connections and schema previews; data goes only through egret's gateway"
+  },
+  {
+    "method": "POST",
+    "path": "/api/datasources/preview_sql_schema_list",
+    "surface": "deny",
+    "why": "pod-side DB connections and schema previews; data goes only through egret's gateway"
+  },
+  {
+    "method": "POST",
+    "path": "/api/datasources/preview_sql_table",
+    "surface": "deny",
+    "why": "pod-side DB connections and schema previews; data goes only through egret's gateway"
+  },
+  {
+    "method": "POST",
+    "path": "/api/datasources/preview_sql_table_list",
+    "surface": "deny",
+    "why": "pod-side DB connections and schema previews; data goes only through egret's gateway"
+  },
+  {
+    "method": "POST",
+    "path": "/api/document/transaction",
+    "surface": "edit",
+    "why": "edit the in-memory document"
+  },
+  {
+    "method": "GET",
+    "path": "/api/documentation/snippets",
+    "surface": "edit",
+    "why": "static snippet text for the editor"
+  },
+  {
+    "method": "GET",
+    "path": "/api/environment",
+    "surface": "deny",
+    "why": "leaks OS, binary and dependency versions"
+  },
+  {
+    "method": "POST",
+    "path": "/api/export/auto_export/html",
+    "surface": "deny",
+    "why": "writes html/md/ipynb beside the notebook on the pod"
+  },
+  {
+    "method": "POST",
+    "path": "/api/export/auto_export/ipynb",
+    "surface": "deny",
+    "why": "writes html/md/ipynb beside the notebook on the pod"
+  },
+  {
+    "method": "POST",
+    "path": "/api/export/auto_export/markdown",
+    "surface": "deny",
+    "why": "writes html/md/ipynb beside the notebook on the pod"
+  },
+  {
+    "method": "GET",
+    "path": "/api/export/availability",
+    "surface": "edit",
+    "why": "which export formats exist"
+  },
+  {
+    "method": "POST",
+    "path": "/api/export/html",
+    "surface": "edit",
+    "why": "the notebook in another format, to the requester (shows code: edit only)"
+  },
+  {
+    "method": "POST",
+    "path": "/api/export/ipynb",
+    "surface": "edit",
+    "why": "as above"
+  },
+  {
+    "method": "POST",
+    "path": "/api/export/markdown",
+    "surface": "edit",
+    "why": "as above"
+  },
+  {
+    "method": "POST",
+    "path": "/api/export/pdf",
+    "surface": "edit",
+    "why": "as above"
+  },
+  {
+    "method": "POST",
+    "path": "/api/export/requirements/install",
+    "surface": "deny",
+    "why": "installs export dependencies"
+  },
+  {
+    "method": "POST",
+    "path": "/api/export/script",
+    "surface": "edit",
+    "why": "as above"
+  },
+  {
+    "method": "POST",
+    "path": "/api/export/update_cell_outputs",
+    "surface": "edit",
+    "why": "as above"
+  },
+  {
+    "method": "POST",
+    "path": "/api/files/copy",
+    "surface": "deny",
+    "why": "arbitrary file browse/read/create/move/delete/download in the workspace dir"
+  },
+  {
+    "method": "POST",
+    "path": "/api/files/create",
+    "surface": "deny",
+    "why": "arbitrary file browse/read/create/move/delete/download in the workspace dir"
+  },
+  {
+    "method": "POST",
+    "path": "/api/files/delete",
+    "surface": "deny",
+    "why": "arbitrary file browse/read/create/move/delete/download in the workspace dir"
+  },
+  {
+    "method": "GET",
+    "path": "/api/files/download",
+    "surface": "deny",
+    "why": "arbitrary file browse/read/create/move/delete/download in the workspace dir"
+  },
+  {
+    "method": "POST",
+    "path": "/api/files/file_details",
+    "surface": "deny",
+    "why": "arbitrary file browse/read/create/move/delete/download in the workspace dir"
+  },
+  {
+    "method": "POST",
+    "path": "/api/files/list_files",
+    "surface": "deny",
+    "why": "arbitrary file browse/read/create/move/delete/download in the workspace dir"
+  },
+  {
+    "method": "POST",
+    "path": "/api/files/move",
+    "surface": "deny",
+    "why": "arbitrary file browse/read/create/move/delete/download in the workspace dir"
+  },
+  {
+    "method": "POST",
+    "path": "/api/files/open",
+    "surface": "deny",
+    "why": "arbitrary file browse/read/create/move/delete/download in the workspace dir"
+  },
+  {
+    "method": "GET",
+    "path": "/api/files/roots",
+    "surface": "deny",
+    "why": "arbitrary file browse/read/create/move/delete/download in the workspace dir"
+  },
+  {
+    "method": "POST",
+    "path": "/api/files/search",
+    "surface": "deny",
+    "why": "arbitrary file browse/read/create/move/delete/download in the workspace dir"
+  },
+  {
+    "method": "POST",
+    "path": "/api/files/update",
+    "surface": "deny",
+    "why": "arbitrary file browse/read/create/move/delete/download in the workspace dir"
+  },
+  {
+    "method": "POST",
+    "path": "/api/home/recent_files",
+    "surface": "deny",
+    "why": "workspace file listing, recent files, tutorial open (creates a file), other sessions' shutdown"
+  },
+  {
+    "method": "POST",
+    "path": "/api/home/running_notebooks",
+    "surface": "deny",
+    "why": "workspace file listing, recent files, tutorial open (creates a file), other sessions' shutdown"
+  },
+  {
+    "method": "POST",
+    "path": "/api/home/shutdown_session",
+    "surface": "deny",
+    "why": "workspace file listing, recent files, tutorial open (creates a file), other sessions' shutdown"
+  },
+  {
+    "method": "POST",
+    "path": "/api/home/tutorial/open",
+    "surface": "deny",
+    "why": "workspace file listing, recent files, tutorial open (creates a file), other sessions' shutdown"
+  },
+  {
+    "method": "POST",
+    "path": "/api/home/workspace_files",
+    "surface": "deny",
+    "why": "workspace file listing, recent files, tutorial open (creates a file), other sessions' shutdown"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/code_autocomplete",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/copy",
+    "surface": "deny",
+    "why": "creates a second notebook file on the pod, outside the draft store"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/delete",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/execute",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/focus_cell",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/format",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/function_call",
+    "surface": "run",
+    "why": "core run-page traffic (run surface unmeasured; confirmed in P5)"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/install_missing_packages",
+    "surface": "deny",
+    "why": "installs packages from a cell's imports"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/instantiate",
+    "surface": "run",
+    "why": "core run-page traffic (run surface unmeasured; confirmed in P5)"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/interrupt",
+    "surface": "run",
+    "why": "core run-page traffic (run surface unmeasured; confirmed in P5)"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/pdb/breakpoints",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/pdb/pm",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/read_code",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/rename",
+    "surface": "deny",
+    "why": "renames the notebook file, detaching it from the draft binding"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/restart_session",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/run",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/save",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/save_app_config",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/save_user_config",
+    "surface": "deny",
+    "why": "writes the shared marimo.toml for every editor on the pod"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/scratchpad/run",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/set_cell_config",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/set_model_value",
+    "surface": "run",
+    "why": "core run-page traffic (run surface unmeasured; confirmed in P5)"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/set_ui_element_value",
+    "surface": "run",
+    "why": "core run-page traffic (run surface unmeasured; confirmed in P5)"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/shutdown",
+    "surface": "edit",
+    "why": "editing"
+  },
+  {
+    "method": "GET",
+    "path": "/api/kernel/status",
+    "surface": "run",
+    "why": "core run-page traffic (run surface unmeasured; confirmed in P5)"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/stdin",
+    "surface": "run",
+    "why": "core run-page traffic (run surface unmeasured; confirmed in P5)"
+  },
+  {
+    "method": "POST",
+    "path": "/api/kernel/takeover",
+    "surface": "run",
+    "why": "core run-page traffic (run surface unmeasured; confirmed in P5)"
+  },
+  {
+    "method": "GET",
+    "path": "/api/lsp/health",
+    "surface": "deny",
+    "why": "starts language-server subprocesses"
+  },
+  {
+    "method": "POST",
+    "path": "/api/lsp/restart",
+    "surface": "deny",
+    "why": "starts language-server subprocesses"
+  },
+  {
+    "method": "POST",
+    "path": "/api/packages/add",
+    "surface": "deny",
+    "why": "installs/removes packages in the shared pod environment"
+  },
+  {
+    "method": "GET",
+    "path": "/api/packages/list",
+    "surface": "deny",
+    "why": "installs/removes packages in the shared pod environment"
+  },
+  {
+    "method": "POST",
+    "path": "/api/packages/manifest",
+    "surface": "deny",
+    "why": "installs/removes packages in the shared pod environment"
+  },
+  {
+    "method": "POST",
+    "path": "/api/packages/remove",
+    "surface": "deny",
+    "why": "installs/removes packages in the shared pod environment"
+  },
+  {
+    "method": "POST",
+    "path": "/api/packages/sandbox",
+    "surface": "deny",
+    "why": "installs/removes packages in the shared pod environment"
+  },
+  {
+    "method": "POST",
+    "path": "/api/packages/sync",
+    "surface": "deny",
+    "why": "installs/removes packages in the shared pod environment"
+  },
+  {
+    "method": "GET",
+    "path": "/api/packages/tree",
+    "surface": "deny",
+    "why": "installs/removes packages in the shared pod environment"
+  },
+  {
+    "method": "POST",
+    "path": "/api/secrets/create",
+    "surface": "deny",
+    "why": "reads/writes secret keys and .env files on the pod filesystem"
+  },
+  {
+    "method": "POST",
+    "path": "/api/secrets/delete",
+    "surface": "deny",
+    "why": "reads/writes secret keys and .env files on the pod filesystem"
+  },
+  {
+    "method": "POST",
+    "path": "/api/secrets/keys",
+    "surface": "deny",
+    "why": "reads/writes secret keys and .env files on the pod filesystem"
+  },
+  {
+    "method": "GET",
+    "path": "/api/sessions",
+    "surface": "deny",
+    "why": "lists every session on the pod, including other viewers'"
+  },
+  {
+    "method": "POST",
+    "path": "/api/sql/validate",
+    "surface": "edit",
+    "why": "parses SQL with sqlglot; no connection made"
+  },
+  {
+    "method": "GET",
+    "path": "/api/status",
+    "surface": "deny",
+    "why": "server status and every user's connection counts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/status/connections",
+    "surface": "deny",
+    "why": "server status and every user's connection counts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/storage/download",
+    "surface": "deny",
+    "why": "lists/downloads objects from storage backends configured on the pod"
+  },
+  {
+    "method": "POST",
+    "path": "/api/storage/list_entries",
+    "surface": "deny",
+    "why": "lists/downloads objects from storage backends configured on the pod"
+  },
+  {
+    "method": "GET",
+    "path": "/api/usage",
+    "surface": "deny",
+    "why": "leaks host memory/CPU totals"
+  },
+  {
+    "method": "GET",
+    "path": "/api/version",
+    "surface": "both",
+    "why": "version string"
+  },
+  {
+    "method": "WEBSOCKET",
+    "path": "/assets",
+    "surface": "both",
+    "why": "the /assets static mount (listed as WEBSOCKET only because it has no method list)"
+  },
+  {
+    "method": "GET",
+    "path": "/auth/login",
+    "surface": "deny",
+    "why": "marimo's own login pages; the proxy injects the pod token"
+  },
+  {
+    "method": "POST",
+    "path": "/auth/login",
+    "surface": "deny",
+    "why": "marimo's own login pages; the proxy injects the pod token"
+  },
+  {
+    "method": "GET",
+    "path": "/auth/token",
+    "surface": "deny",
+    "why": "marimo's own login pages; the proxy injects the pod token"
+  },
+  {
+    "method": "GET",
+    "path": "/health",
+    "surface": "both",
+    "why": "liveness"
+  },
+  {
+    "method": "GET",
+    "path": "/healthz",
+    "surface": "both",
+    "why": "liveness"
+  },
+  {
+    "method": "GET",
+    "path": "/og/thumbnail",
+    "surface": "deny",
+    "why": "serves notebook thumbnails from __marimo__/ on the pod"
+  },
+  {
+    "method": "GET",
+    "path": "/public-files-sw.js",
+    "surface": "both",
+    "why": "service worker for /public"
+  },
+  {
+    "method": "GET",
+    "path": "/public/{filepath:path}",
+    "surface": "both",
+    "why": "files under <notebook dir>/public; the proxy pins X-Notebook-Id"
+  },
+  {
+    "method": "GET",
+    "path": "/sse",
+    "surface": "both",
+    "why": "server-sent kernel messages"
+  },
+  {
+    "method": "WEBSOCKET",
+    "path": "/terminal/ws",
+    "surface": "deny",
+    "why": "PTY shell as the pod user; never for authors"
+  },
+  {
+    "method": "WEBSOCKET",
+    "path": "/ws",
+    "surface": "both",
+    "why": "the live document/kernel channel"
+  },
+  {
+    "method": "WEBSOCKET",
+    "path": "/ws_sync",
+    "surface": "edit",
+    "why": "real-time collaboration channel; marimo RTC is locked off, kept open for edit only because S0 measured editing with it open"
+  },
+  {
+    "method": "GET",
+    "path": "/{path:path}",
+    "surface": "both",
+    "why": "the frontend bundle (static files)"
+  }
+]

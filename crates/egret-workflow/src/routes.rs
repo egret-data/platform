@@ -15,6 +15,9 @@
 //! GET    /api/ws/{workspace}/workflows/executions
 //! GET    /api/ws/{workspace}/workflows/executions/{id}
 //! GET    /api/ws/{workspace}/workflows/executions/{id}/logs
+//! GET    /api/ws/{workspace}/workflows/executions/{id}/file          (storage::routes)
+//! GET    /api/ws/{workspace}/workflows/executions/{id}/file/metas
+//! GET    /api/ws/{workspace}/workflows/executions/{id}/file/preview
 //! POST   /api/ws/{workspace}/workflows/executions/{id}/resume
 //! POST   /api/ws/{workspace}/workflows/executions/{id}/replay
 //! ```
@@ -82,6 +85,16 @@ use crate::repo::{
     MAX_PAGE_LIMIT,
 };
 use crate::spec::{parse, validate, Finding, ValidationReport};
+use crate::storage::multipart::{
+    is_length_limit, is_multipart, multipart_body_limit, multipart_refusal, HeaderBudget,
+    MultipartGate,
+};
+/// Moved to [`crate::storage::multipart`] (W9b Task 8); re-exported where
+/// W9a's tests and callers name them.
+pub use crate::storage::multipart::{
+    EXPORT_TOTAL_TIMEOUT, MAX_MULTIPART_HEADER_BYTES, MULTIPART_OVERHEAD_BYTES,
+    UPLOAD_IDLE_TIMEOUT, UPLOAD_TOTAL_TIMEOUT,
+};
 use egret_workflow_api::WorkflowRefPort;
 
 /// View flow drafts, their validation report, and their published versions.
@@ -201,6 +214,21 @@ pub struct WorkflowState {
     /// (`workflow.plugin_configurations`, the default runner). The workspace
     /// half, `workflow_containers`, is read from `workspaces` per publish.
     pub scripts: crate::scripts::ScriptSettings,
+    /// W9b Task 8: how long a namespace file upload's body may go without a
+    /// byte arriving before the upload is refused with 408 --
+    /// [`UPLOAD_IDLE_TIMEOUT`] in production; a field so a test can drive the
+    /// refusal in milliseconds (fix round 1, I-2).
+    pub upload_idle_timeout: std::time::Duration,
+    /// W9b Task 8 re-review m-2: how long a namespace file upload's body may
+    /// take in all before the upload is refused with 408 --
+    /// [`UPLOAD_TOTAL_TIMEOUT`] (12 hours) in production; a field so a test
+    /// can drive the refusal in milliseconds.
+    pub upload_total_timeout: std::time::Duration,
+    /// W9b Task 9 fix round 1, M-7: how long a namespace export's response
+    /// body may take in all before it is aborted -- [`EXPORT_TOTAL_TIMEOUT`]
+    /// (12 hours) in production; a field so a test can drive it in
+    /// milliseconds.
+    pub export_total_timeout: std::time::Duration,
 }
 
 impl FromRef<WorkflowState> for SessionService {
@@ -1016,6 +1044,12 @@ pub struct TaskRunDto {
     /// The parent run's `run_ix` — a gantt's nesting, `NULL` at the top level.
     pub parent_ix: Option<i32>,
     pub value: Option<String>,
+    /// The run's rendered expression (an `If`'s condition, a `Switch`'s
+    /// value, a `Loop`'s `values:`, ...), `NULL` until it is rendered. For a
+    /// `Loop` whose `values:` named a file it is `"<kestra:/// URI>\n<count>"`
+    /// -- the file and how many records it holds -- and **never the records**
+    /// (W9a Task 11 fix round 1): they are the file's, read through the
+    /// execution file API, and stay out of every task-run response.
     pub rendered: Option<String>,
     pub rendered_run_if: Option<String>,
     pub state: String,
@@ -1707,6 +1741,69 @@ fn start_inputs(body: Option<Json<StartExecutionRequest>>) -> EgretResult<serde_
     }
 }
 
+/// `POST .../flows/{id}/executions` as `multipart/form-data` (W9a spec §7.1,
+/// Kestra's shape) -- the schema is for the OpenAPI document only; the
+/// handler reads the parts one by one and never builds this type.
+///
+/// **Each part is named by an input id.** A part with a file name is that
+/// `FILE` input's file: it is streamed to
+/// `kestra:///{namespace}/{flow}/executions/{execution}/inputs/{input}/{file name}`
+/// and the input's value is that URI. Any other part is a text value. A part
+/// naming no declared input, or one named twice, is refused naming it.
+///
+/// The values are `format: binary` (fix round 1, M3), so a generated client
+/// types a part as a file (`Blob`) rather than JSON. A text part is a binary
+/// value too on the wire: multipart carries bytes either way.
+pub struct StartExecutionMultipart(pub std::collections::BTreeMap<String, String>);
+
+impl utoipa::PartialSchema for StartExecutionMultipart {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        use utoipa::openapi::schema::{KnownFormat, ObjectBuilder, SchemaFormat, Type};
+        ObjectBuilder::new()
+            .description(Some(
+                "`POST .../flows/{id}/executions` as `multipart/form-data`. **Each part is \
+                 named by an input id.** A part with a file name is that `FILE` input's file: \
+                 it is streamed to \
+                 `kestra:///{namespace}/{flow}/executions/{execution}/inputs/{input}/{file name}` \
+                 and the input's value is that URI. Any other part is a text value. A part \
+                 naming no declared input, or one named twice, is refused naming it. One start \
+                 carries at most `workflow.storage.max_file_bytes` + 1 MiB in total.",
+            ))
+            .additional_properties(Some(
+                ObjectBuilder::new()
+                    .schema_type(Type::String)
+                    .format(Some(SchemaFormat::KnownFormat(KnownFormat::Binary))),
+            ))
+            .into()
+    }
+}
+
+impl utoipa::ToSchema for StartExecutionMultipart {}
+
+/// The JSON body's cap on the start route: axum's own default, unchanged by
+/// W9a. The multipart cap is [`multipart_body_limit`].
+const MAX_JSON_START_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// One text part's cap. A text part is held in memory whole -- unlike a file,
+/// which is streamed -- so it has a cap of its own, far below the body's.
+pub const MAX_TEXT_PART_BYTES: usize = 1024 * 1024;
+
+/// An error response in [`egret_core::http::ErrorBody`]'s shape, for the
+/// statuses `egret_core::Error` has no variant for (413, 503).
+pub(crate) fn refuse(status: StatusCode, error: String) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    (
+        status,
+        Json(egret_core::http::ErrorBody { error, code: None }),
+    )
+        .into_response()
+}
+
+fn core_refusal(e: Error) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    e.into_response()
+}
+
 #[utoipa::path(
     post,
     path = "/api/ws/{workspace}/workflows/flows/{id}/executions",
@@ -1715,42 +1812,107 @@ fn start_inputs(body: Option<Json<StartExecutionRequest>>) -> EgretResult<serde_
         WorkspacePath,
         ("id" = Uuid, Path, description = "Flow id"),
     ),
-    request_body = StartExecutionRequest,
+    request_body(
+        description = "The flow's `inputs`. **JSON** (`StartExecutionRequest`, at most 2 MiB): a `FILE` input's value must be a `kestra://` URI readable from the execution being created -- in practice one a `Subflow`, a `Flow` trigger or a replay passes on; any other string is refused naming the input. **`multipart/form-data`** (`StartExecutionMultipart`; one start carries at most `workflow.storage.max_file_bytes` + 1 MiB in total, and each part's headers at most 64 KiB): each part is named by an input id; a part with a file name is that `FILE` input's file (its `allowedFileExtensions` enforced, at most `max_file_bytes`), stored as `inputs/{input}/{file name}` of the new execution; any other part is a text value (at most 1 MiB). **A multipart caller must build the body itself** as a `FormData` (one entry per input id, a `File`/`Blob` for each `FILE` input) and send it with the browser's own `multipart/form-data; boundary=…` header: the generated client serialises this operation's `data` with `JSON.stringify` and sets no `Content-Type`, which reaches the JSON branch.",
+        content(
+            (StartExecutionRequest = "application/json"),
+            (StartExecutionMultipart = "multipart/form-data"),
+        ),
+    ),
     responses(
-        (status = 201, description = "The execution was created and driven as far as it goes without a worker; the body is its detail, read back after the start committed", body = ExecutionDto),
-        (status = 400, description = "`inputs` is not a JSON object, or the flow's stored source does not parse or plan", body = egret_core::http::ErrorBody),
+        (status = 201, description = "The execution was created and driven as far as it goes without a worker; the body is its detail, read back after the start committed. Its uploaded files and its row were committed in one transaction.", body = ExecutionDto),
+        (status = 400, description = "`inputs` is not a JSON object; the flow's stored source does not parse or plan; a `FILE` input's value is not a readable `kestra://` URI or its extension is not allowed; a multipart part names no declared input, names one twice, carries a file for a non-`FILE` input, or has a file name no storage URI can hold; or egret has no internal storage (`[storage]`) for an upload. The message names the input.", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough** — starting an execution is a write.", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such flow in this workspace, or it is in the trash. **A flow belonging to another workspace answers exactly this**, indistinguishably from one that never existed.", body = egret_core::http::ErrorBody),
         (status = 409, description = "The flow is disabled — by its `state` column or by its own YAML's `disabled: true`", body = egret_core::http::ErrorBody),
+        (status = 413, description = "An uploaded file is over `workflow.storage.max_file_bytes` (the message names the input and the cap), a text part is over 1 MiB, or the JSON body is over 2 MiB. Nothing is created.", body = egret_core::http::ErrorBody),
+        (status = 415, description = "A `Content-Type` that is neither `application/json` nor `multipart/form-data`. A request with no `Content-Type` is read as JSON (an empty body is `{}`).", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+        (status = 503, description = "Internal storage failed while an uploaded file was being stored. Nothing is created; the request can be retried.", body = egret_core::http::ErrorBody),
     ),
 )]
+#[allow(clippy::result_large_err)]
 async fn start_flow_execution(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
-    body: Option<Json<StartExecutionRequest>>,
-) -> EgretResult<(StatusCode, Json<ExecutionDto>)> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    req: axum::extract::Request,
+) -> std::result::Result<(StatusCode, Json<ExecutionDto>), axum::response::Response> {
+    use axum::extract::FromRequest as _;
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE)
+        .await
+        .map_err(core_refusal)?;
     // Scoping, the trash and both disabled doors, in the one place `replay`
     // also has to come through -- see [`startable_flow`] for the over-acceptance
     // that made it a function instead of a run of `if`s in this handler.
-    let flow = startable_flow(&st, ctx.workspace_id.0, id).await?;
-    let inputs = start_inputs(body)?;
-    // **`start_execution`, not a second creation path.** The webhook calls
-    // `start_execution_with_trigger` because it HAS a trigger record; an API
-    // start has none, and `start_execution` is that function with `None`
-    // already written in. Nothing about the row, the first settle or the
-    // transaction differs between the two callers.
-    let execution_id = crate::worker::start_execution(
-        &st.db.pool,
-        ctx.workspace_id.0,
-        Some(flow.id),
-        &flow.source,
-        inputs,
-    )
-    .await?;
+    // Before the body is read: a refused start stores nothing.
+    let flow = startable_flow(&st, ctx.workspace_id.0, id)
+        .await
+        .map_err(core_refusal)?;
+    let execution_id = if is_multipart(req.headers()) {
+        start_multipart(&st, ctx.workspace_id.0, &flow, req).await?
+    } else {
+        // The JSON body keeps axum's 2 MiB: the route's own limit is off
+        // (`DefaultBodyLimit::disable` in [`management_router`]) so that the
+        // multipart branch can follow `max_file_bytes`, and a JSON body is
+        // buffered whole, so it must not inherit that.
+        let req = req.map(|b| {
+            axum::body::Body::new(http_body_util::Limited::new(b, MAX_JSON_START_BODY_BYTES))
+        });
+        // **No `Content-Type` is JSON** (controller decision on W9a Task 7's
+        // concern 2). `Option<Json>` alone reads a headerless request as "no
+        // body" and would start a headerless JSON body with `{}` -- and the
+        // client orval generates for this route's two content types sends no
+        // `Content-Type`. So a headerless body is read as JSON: empty is `{}`
+        // as before, anything else is parsed (and refused if it is not JSON).
+        // An explicit type that is neither JSON nor multipart stays 415.
+        let req = if req.headers().contains_key(axum::http::header::CONTENT_TYPE) {
+            req
+        } else {
+            let (mut parts, body) = req.into_parts();
+            // Only the limit is a 413 (fix round 1, M2); a body that fails to
+            // arrive is the request's, a 400.
+            let bytes = axum::body::to_bytes(body, usize::MAX).await.map_err(|e| {
+                if is_length_limit(&e) {
+                    refuse(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        format!("the JSON body is over {MAX_JSON_START_BODY_BYTES} bytes"),
+                    )
+                } else {
+                    refuse(
+                        StatusCode::BAD_REQUEST,
+                        format!("the request body could not be read: {e}"),
+                    )
+                }
+            })?;
+            if !bytes.is_empty() {
+                parts.headers.insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("application/json"),
+                );
+            }
+            axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))
+        };
+        let body = Option::<Json<StartExecutionRequest>>::from_request(req, &st)
+            .await
+            .map_err(axum::response::IntoResponse::into_response)?;
+        let inputs = start_inputs(body).map_err(core_refusal)?;
+        // **`start_execution`, not a second creation path.** The webhook calls
+        // `start_execution_with_trigger` because it HAS a trigger record; an
+        // API start has none, and `start_execution` is that function with
+        // `None` already written in. A FILE input given here is checked by
+        // `start_execution_in` (`storage::inputs::check_file_inputs`).
+        crate::worker::start_execution(
+            &st.db.pool,
+            ctx.workspace_id.0,
+            Some(flow.id),
+            &flow.source,
+            inputs,
+        )
+        .await
+        .map_err(core_refusal)?
+    };
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ctx.workspace_id.0),
@@ -1767,8 +1929,241 @@ async fn start_flow_execution(
     // drives `advance()` to a fixed point inside its own transaction, so a
     // flow with no runnable task is already terminal by the time this returns
     // and a DTO built from `"CREATED"` would be a guess that is usually wrong.
-    let detail = st.executions.get(ctx.workspace_id.0, execution_id).await?;
+    let detail = st
+        .executions
+        .get(ctx.workspace_id.0, execution_id)
+        .await
+        .map_err(core_refusal)?;
     Ok((StatusCode::CREATED, Json(ExecutionDto::from(detail))))
+}
+
+/// The multipart start (W9a spec §7.1), in its order: the execution id is
+/// generated first; each file part is streamed to `inputs/{input}/{file}` of
+/// it ([`crate::storage::inputs::upload_input`]); then ONE transaction
+/// inserts the row, checks the FILE inputs, indexes the uploads and runs the
+/// first settle (`start_execution_in`). Any failure after an upload began
+/// deletes the execution's prefix, best effort: a start that never committed
+/// has no execution for the pruner to find. (A client that disconnects drops
+/// this future: the in-flight upload is aborted by `put_stream`'s guard and
+/// any finished one is left for the orphan sweep.)
+#[allow(clippy::result_large_err)]
+async fn start_multipart(
+    st: &WorkflowState,
+    workspace: Uuid,
+    flow: &crate::repo::FlowRow,
+    req: axum::extract::Request,
+) -> std::result::Result<Uuid, axum::response::Response> {
+    use axum::extract::FromRequest as _;
+    let Some(fs) = crate::storage::current() else {
+        return Err(core_refusal(Error::InvalidInput(
+            "an uploaded FILE input needs internal storage, and egret has none configured \
+             (the `[storage]` section of its configuration)"
+                .into(),
+        )));
+    };
+    let parsed = parse(&flow.source).map_err(|e| {
+        core_refusal(Error::InvalidInput(format!(
+            "the flow does not parse: {}",
+            e.message
+        )))
+    })?;
+    let limit = multipart_body_limit(fs.caps);
+    let gate = Arc::new(MultipartGate::default());
+    let req = req.map(|b| {
+        let limited = axum::body::Body::new(http_body_util::Limited::new(b, limit));
+        axum::body::Body::from_stream(HeaderBudget {
+            inner: Box::pin(limited.into_data_stream()),
+            pending: axum::body::Bytes::new(),
+            gate: gate.clone(),
+            yielded: false,
+        })
+    });
+    let mut multipart = axum::extract::Multipart::from_request(req, &())
+        .await
+        .map_err(axum::response::IntoResponse::into_response)?;
+    let execution = Uuid::new_v4();
+    let mut uploading = false;
+    let started = read_parts_and_start(
+        st,
+        &fs,
+        workspace,
+        flow,
+        &parsed,
+        execution,
+        &mut multipart,
+        &gate,
+        limit,
+        &mut uploading,
+    )
+    .await;
+    if started.is_err() && uploading {
+        let prefix = fs.execution_prefix(workspace, &parsed.namespace, &parsed.id, execution);
+        if let Err(e) = fs.store.delete_prefix(&prefix).await {
+            tracing::warn!(
+                prefix = %prefix,
+                error = %e,
+                "a refused start's uploaded files could not be deleted; the orphan sweep will"
+            );
+        }
+    }
+    started
+}
+
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
+async fn read_parts_and_start(
+    st: &WorkflowState,
+    fs: &crate::storage::FileStore,
+    workspace: Uuid,
+    flow: &crate::repo::FlowRow,
+    parsed: &crate::models::Flow,
+    execution: Uuid,
+    multipart: &mut axum::extract::Multipart,
+    gate: &MultipartGate,
+    limit: usize,
+    uploading: &mut bool,
+) -> std::result::Result<Uuid, axum::response::Response> {
+    use futures_util::StreamExt as _;
+    let bad = |m: String| core_refusal(Error::InvalidInput(m));
+    let mut inputs = serde_json::Map::new();
+    let mut files = Vec::new();
+    loop {
+        // The header budget is spent only here, while multer looks for the
+        // next part's headers (I1); a part's data is bounded by its own caps.
+        gate.start_headers();
+        let next = multipart.next_field().await;
+        gate.end_headers();
+        let Some(field) =
+            next.map_err(|e| multipart_refusal(gate, limit, e.status(), e.body_text()))?
+        else {
+            break;
+        };
+        let Some(name) = field.name().map(str::to_string) else {
+            return Err(bad(
+                "a multipart part has no name: each part is named by the input it is for".into(),
+            ));
+        };
+        let Some(input) = parsed.inputs.iter().find(|i| i.id == name) else {
+            return Err(bad(format!(
+                "the flow declares no input `{name}`: each multipart part is named by an input id"
+            )));
+        };
+        if inputs.contains_key(&name) {
+            return Err(bad(format!(
+                "input `{name}` is given by more than one part"
+            )));
+        }
+        let value = match field.file_name().map(str::to_string) {
+            Some(file_name) => {
+                *uploading = true;
+                let mut body = tokio_util::io::StreamReader::new(
+                    field.map(|chunk| chunk.map_err(std::io::Error::other)),
+                );
+                let stored = crate::storage::inputs::upload_input(
+                    fs,
+                    workspace,
+                    &parsed.namespace,
+                    &parsed.id,
+                    execution,
+                    input,
+                    &file_name,
+                    &mut body,
+                )
+                .await
+                .map_err(|e| upload_refusal(e, gate, limit))?;
+                let uri = stored.uri.clone();
+                files.push(stored);
+                uri
+            }
+            None => read_text_part(field, &name, gate, limit).await?,
+        };
+        inputs.insert(name, serde_json::Value::String(value));
+    }
+    // W9c Task 9: in `worker::txn::transaction!`, so a first settle that
+    // needs a read is rolled back, the read fetched, and the start run again
+    // -- with the same id and the same uploads: they happened above, before
+    // any transaction, and are not repeated.
+    crate::worker::txn::transaction!(&st.db.pool, |at| {
+        crate::worker::start_execution_in_with(
+            at,
+            crate::worker::NewExecution {
+                workspace_id: workspace,
+                flow_id: Some(flow.id),
+                source: &flow.source,
+                inputs: serde_json::Value::Object(inputs.clone()),
+                trigger: None,
+                scheduled_date: None,
+                trigger_execution_id: None,
+                execution_depth: 0,
+                flow_trigger_event_id: None,
+                born_failed: false,
+                replayed_from_execution_id: None,
+                id: Some(execution),
+                input_files: files.clone(),
+            },
+        )
+        .await
+    })
+    .map_err(core_refusal)
+}
+
+/// A text part, whole, at most [`MAX_TEXT_PART_BYTES`], as UTF-8.
+#[allow(clippy::result_large_err)]
+async fn read_text_part(
+    mut field: axum::extract::multipart::Field<'_>,
+    name: &str,
+    gate: &MultipartGate,
+    limit: usize,
+) -> std::result::Result<String, axum::response::Response> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| multipart_refusal(gate, limit, e.status(), e.body_text()))?
+    {
+        if bytes.len() + chunk.len() > MAX_TEXT_PART_BYTES {
+            return Err(refuse(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "Invalid value for input `{name}`: a text part is at most \
+                     {MAX_TEXT_PART_BYTES} bytes; upload a file for a FILE input"
+                ),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        core_refusal(Error::InvalidInput(format!(
+            "Invalid value for input `{name}`: a text part must be UTF-8"
+        )))
+    })
+}
+
+/// [`crate::storage::inputs::UploadError`] as the response: the caller's
+/// errors are 4xx naming the input, a store failure is a 503 (spec §11: not
+/// the caller's fault, and retryable). A body cut off by the route's own
+/// limit is the BODY's refusal, naming that limit (M1).
+fn upload_refusal(
+    e: crate::storage::inputs::UploadError,
+    gate: &MultipartGate,
+    limit: usize,
+) -> axum::response::Response {
+    use crate::storage::inputs::UploadError;
+    match e {
+        UploadError::Author(m) => core_refusal(Error::InvalidInput(m)),
+        UploadError::TooLarge(m) => refuse(StatusCode::PAYLOAD_TOO_LARGE, m),
+        UploadError::Body { message, source } => {
+            let status = source
+                .get_ref()
+                .and_then(|e| e.downcast_ref::<axum::extract::multipart::MultipartError>())
+                .map(|m| m.status())
+                .unwrap_or(StatusCode::BAD_REQUEST);
+            multipart_refusal(gate, limit, status, message)
+        }
+        UploadError::Store(m) => {
+            tracing::warn!(error = %m, "a FILE input upload failed in internal storage");
+            refuse(StatusCode::SERVICE_UNAVAILABLE, m)
+        }
+    }
 }
 
 #[utoipa::path(
@@ -1853,11 +2248,11 @@ async fn resume_execution(
     ),
     responses(
         (status = 201, description = "A NEW execution, started from the replayed one's frozen source and inputs. The body is the new execution, not the old one — read its `id`.", body = ExecutionDto),
-        (status = 400, description = "The **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The execution is a **loop iteration** (replay its loop root instead); or the **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed — **or its flow is in the trash, or no longer exists at all**. A replay is a run of the flow and answers to the flow's current state.", body = egret_core::http::ErrorBody),
-        (status = 409, description = "The execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`). A replay of something still running would put two copies of one flow in flight with nothing recording that they are related — see the handler's doc for why no link column is available.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "The execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`). A replay of something still running would put two copies of one flow in flight at once.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -1873,7 +2268,7 @@ async fn resume_execution(
 /// trace."* Starting from the draft is what `POST .../flows/{id}/executions`
 /// is for, and the two routes exist to be different.
 ///
-/// # Why the replacement names no parent, which is NOT a choice
+/// # The link is `replayed_from_execution_id`, not a parent
 ///
 /// `replay::spawn_due` links its replacement with `parent_execution_id` set and
 /// `parent_run_ix` NULL. That slot is **one per execution and already spoken
@@ -1884,19 +2279,25 @@ async fn resume_execution(
 /// replay that took the slot would make a later retry-replay of the same
 /// execution fail a unique constraint, and a second manual replay fail one too.
 ///
-/// `start_execution` has no parent parameter and this task does not add one, so
-/// the replacement is unlinked: **the relationship between a manual replay and
-/// what it replays is in the audit trail and nowhere in the data.** Stated
-/// rather than discovered. What it would take is a link that is not that index's
-/// — a nullable `replayed_from` column of its own — which is a migration and a
-/// schema decision, not a route.
+/// So the replacement has no parent, and the link has a column of its own:
+/// `replayed_from_execution_id` (migration 0166, W9a spec §4.4 item 3), written
+/// here through `start_execution_in` in one transaction with the row. It is
+/// what lets a replay read its source's files (a replay copies its source's
+/// inputs verbatim, and those may be `kestra://` URIs of the source). The audit
+/// record still carries both ids.
+///
+/// # Not a loop iteration
+///
+/// An iteration (`parent_execution_id` with a `loop_index`) is refused (400)
+/// naming its loop root: it is a part of the root's run, `replay::spawn_due`
+/// never replays one, and a replay of it would be a top-level run of the
+/// loop's body alone.
 ///
 /// # Terminal only
 ///
-/// A non-terminal execution is refused (409) rather than replayed. With no link
-/// column there is nothing to tell an operator that two RUNNING executions of
-/// one flow are a replay and its original, and the narrow door cannot
-/// over-accept. `RunState::is_terminal` is the predicate — read through
+/// A non-terminal execution is refused (409) rather than replayed: two RUNNING
+/// executions of one flow, a replay and its original, would be in flight at
+/// once, and the narrow door cannot over-accept. `RunState::is_terminal` is the predicate — read through
 /// `worker::from_wire`, which is derived from `RunState::ALL`, so a state added
 /// to the enum is classified here without anyone remembering to come back.
 async fn replay_execution(
@@ -1906,6 +2307,18 @@ async fn replay_execution(
 ) -> EgretResult<(StatusCode, Json<ExecutionDto>)> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
     let source = st.executions.get(ctx.workspace_id.0, id).await?;
+    // **A loop iteration is not replayed** (user ruling, W9a Task 3 fix round
+    // 1): it is a part of its loop root's run, not a run of the flow, and
+    // `replay::spawn_due` never replays one either. Its loop root is.
+    if let (Some(root), Some(index)) = (
+        source.execution.parent_execution_id,
+        source.execution.loop_index,
+    ) {
+        return Err(Error::InvalidInput(format!(
+            "execution {id} is iteration {index} of a Loop in execution {root}, not a run of \
+             the flow, and cannot be replayed on its own; replay its loop root {root}"
+        )));
+    }
     // **The same gate `start_flow_execution` passes**, and fix round 1 is what
     // put it here: this handler used to check terminality and NOTHING else, so
     // a replay ran a flow that was trashed, disabled, or both — every door
@@ -1940,22 +2353,37 @@ async fn replay_execution(
             source.execution.state
         )));
     }
-    let replacement = crate::worker::start_execution(
-        &st.db.pool,
-        ctx.workspace_id.0,
-        source.execution.flow_id,
-        &source.source,
-        source.execution.inputs,
-    )
-    .await?;
+    // W9c Task 9: in `worker::txn::transaction!`, so a first settle that
+    // needs a read is rolled back, the read fetched, and the start run again.
+    let replacement = crate::worker::txn::transaction!(&st.db.pool, |at| {
+        crate::worker::start_execution_in_with(
+            at,
+            crate::worker::NewExecution {
+                workspace_id: ctx.workspace_id.0,
+                flow_id: source.execution.flow_id,
+                source: &source.source,
+                inputs: source.execution.inputs.clone(),
+                trigger: None,
+                scheduled_date: None,
+                trigger_execution_id: None,
+                execution_depth: 0,
+                flow_trigger_event_id: None,
+                born_failed: false,
+                // The link (this handler's doc), committed with the row.
+                replayed_from_execution_id: Some(id),
+                id: None,
+                input_files: Vec::new(),
+            },
+        )
+        .await
+    })?;
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ctx.workspace_id.0),
         "workflow_execution:replay",
         "workflow_execution",
         Some(replacement.to_string()),
-        // **Both ids, and the replayed one is the only record of the link.**
-        // See this handler's doc: no column carries it.
+        // Both ids; `replayed_from_execution_id` carries the link in the data.
         serde_json::json!({ "replayed_from": id, "replacement": replacement }),
     ));
     let detail = st.executions.get(ctx.workspace_id.0, replacement).await?;
@@ -1985,7 +2413,10 @@ pub fn management_router() -> Router<WorkflowState> {
         )
         .route(
             "/ws/{workspace}/workflows/flows/{id}/executions",
-            post(start_flow_execution),
+            // The handler applies its own limit per content type -- 2 MiB for
+            // JSON, `max_file_bytes` + 1 MiB for multipart (W9a spec §7.1) --
+            // so the router's default is off here and only here.
+            post(start_flow_execution).layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route(
             "/ws/{workspace}/workflows/flows/{id}/versions",
@@ -2003,6 +2434,85 @@ pub fn management_router() -> Router<WorkflowState> {
         .route(
             "/ws/{workspace}/workflows/executions/{id}/logs",
             get(get_execution_logs),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/file",
+            get(crate::storage::routes::download_execution_file),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/file/metas",
+            get(crate::storage::routes::execution_file_metas),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/file/preview",
+            get(crate::storage::routes::preview_execution_file),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/files",
+            get(crate::storage::nsfiles::routes::download_namespace_file)
+                // The upload applies its own limit (`max_file_bytes` + 1 MiB,
+                // W9a's multipart bound), so the router's default is off for
+                // it, as for the start route.
+                .post(crate::storage::nsfiles::routes::upload_namespace_file)
+                .layer(axum::extract::DefaultBodyLimit::disable())
+                .put(crate::storage::nsfiles::routes::move_namespace_file)
+                .delete(crate::storage::nsfiles::routes::delete_namespace_file),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/files/stats",
+            get(crate::storage::nsfiles::routes::namespace_file_stats),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/files/revisions",
+            get(crate::storage::nsfiles::routes::namespace_file_revisions),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/files/search",
+            get(crate::storage::nsfiles::routes::search_namespace_files),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/files/export",
+            get(crate::storage::nsfiles::routes::export_namespace_files),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/files/directory",
+            get(crate::storage::nsfiles::routes::list_namespace_directory)
+                .post(crate::storage::nsfiles::routes::create_namespace_directory),
+        )
+        // W9c Task 6: the KV API (spec §9). The static `/kv/inheritance`
+        // is matched before `/kv/{key}`, so a key named `inheritance` is
+        // written and deleted on it (its GET is the listing, as in Kestra).
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/kv",
+            get(crate::storage::kv::routes::list_kv).delete(
+                // The bulk body's own cap, refused with egret's text.
+                axum::handler::Handler::layer(
+                    crate::storage::kv::routes::delete_kv_values,
+                    axum::extract::DefaultBodyLimit::max(
+                        crate::storage::kv::routes::MAX_BULK_BODY_BYTES,
+                    ),
+                ),
+            ),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/kv/inheritance",
+            get(crate::storage::kv::routes::list_inherited_kv)
+                .put(crate::storage::kv::routes::put_kv_inheritance_key)
+                .layer(axum::extract::DefaultBodyLimit::disable())
+                .delete(crate::storage::kv::routes::delete_kv_inheritance_key),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/kv/{key}",
+            get(crate::storage::kv::routes::get_kv_value)
+                // The PUT applies its own limit (`max_read_bytes`), so the
+                // router's default is off for it, as for the upload.
+                .put(crate::storage::kv::routes::put_kv_value)
+                .layer(axum::extract::DefaultBodyLimit::disable())
+                .delete(crate::storage::kv::routes::delete_kv_value),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/kv/{key}/revisions",
+            get(crate::storage::kv::routes::kv_revisions),
         )
         .route(
             "/ws/{workspace}/workflows/executions/{id}/resume",
@@ -2029,9 +2539,29 @@ pub fn management_router() -> Router<WorkflowState> {
         list_executions,
         get_execution,
         get_execution_logs,
+        crate::storage::routes::download_execution_file,
+        crate::storage::routes::execution_file_metas,
+        crate::storage::routes::preview_execution_file,
         start_flow_execution,
         resume_execution,
         replay_execution,
+        crate::storage::nsfiles::routes::download_namespace_file,
+        crate::storage::nsfiles::routes::namespace_file_stats,
+        crate::storage::nsfiles::routes::namespace_file_revisions,
+        crate::storage::nsfiles::routes::search_namespace_files,
+        crate::storage::nsfiles::routes::export_namespace_files,
+        crate::storage::nsfiles::routes::list_namespace_directory,
+        crate::storage::nsfiles::routes::upload_namespace_file,
+        crate::storage::nsfiles::routes::create_namespace_directory,
+        crate::storage::nsfiles::routes::move_namespace_file,
+        crate::storage::nsfiles::routes::delete_namespace_file,
+        crate::storage::kv::routes::list_kv,
+        crate::storage::kv::routes::list_inherited_kv,
+        crate::storage::kv::routes::get_kv_value,
+        crate::storage::kv::routes::kv_revisions,
+        crate::storage::kv::routes::put_kv_value,
+        crate::storage::kv::routes::delete_kv_value,
+        crate::storage::kv::routes::delete_kv_values,
     ),
     components(schemas(
         FindingDto,
@@ -2048,9 +2578,20 @@ pub fn management_router() -> Router<WorkflowState> {
         ExecutionDto,
         ExecutionPageDto,
         StartExecutionRequest,
+        StartExecutionMultipart,
         LogLevel,
         LogLineDto,
         LogPageDto,
+        crate::storage::routes::FileMetasDto,
+        crate::storage::routes::FilePreviewDto,
+        crate::storage::nsfiles::routes::NsFileStatsDto,
+        crate::storage::nsfiles::routes::NsFileRevisionDto,
+        crate::storage::nsfiles::routes::NsFileUploadForm,
+        crate::storage::kv::routes::KvEntryDto,
+        crate::storage::kv::routes::KvInheritedDto,
+        crate::storage::kv::routes::KvDetailDto,
+        crate::storage::kv::routes::KvRevisionDto,
+        crate::storage::kv::routes::KvKeysBody,
     )),
     tags((name = "workflow", description = "Flow drafts and published versions (W1)"))
 )]

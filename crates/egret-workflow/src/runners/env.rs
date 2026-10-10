@@ -117,9 +117,11 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
+use super::files::{FileScope, FileScopeObject, FILE_SCOPE};
 use super::filters;
 use super::functions;
 use super::rewrite::{rewrite, RewriteError};
+use crate::storage::kv::value::{too_deep, KvData, KvNumber, Unstorable};
 
 /// `VariableRenderer.MAX_RENDERING_AMOUNT`. A render whose output is itself a
 /// template renders again; this bounds that.
@@ -324,8 +326,15 @@ pub enum RenderError {
 ///
 /// W2 does not build an execution context — that is W3's job (see the crate
 /// doc). This type is the shape W3 will fill.
+///
+/// **W9a Task 4: and the files it may read.** [`RenderContext::with_files`]
+/// attaches a [`FileScope`]; both render threads then bind it as the
+/// [`FILE_SCOPE`] global, and without one the four file functions refuse.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RenderContext(Vec<(String, MjValue)>);
+pub struct RenderContext {
+    bindings: Vec<(String, MjValue)>,
+    files: Option<FileScope>,
+}
 
 impl RenderContext {
     /// An empty context. A template that references any variable will fail
@@ -341,16 +350,35 @@ impl RenderContext {
     pub fn insert(&mut self, key: impl Into<String>, value: JsonValue) -> &mut Self {
         let key = key.into();
         let value = json_to_minijinja(&value);
-        match self.0.iter_mut().find(|(name, _)| *name == key) {
+        match self.bindings.iter_mut().find(|(name, _)| *name == key) {
             Some(slot) => slot.1 = value,
-            None => self.0.push((key, value)),
+            None => self.bindings.push((key, value)),
         }
         self
     }
 
     /// The bindings, in order, for callers that need to inspect them.
     pub fn bindings(&self) -> &[(String, MjValue)] {
-        &self.0
+        &self.bindings
+    }
+
+    /// The same bindings, with the files the four file functions read.
+    pub fn with_files(mut self, files: FileScope) -> Self {
+        self.files = Some(files);
+        self
+    }
+
+    /// The attached file scope, `None` where the four file functions refuse.
+    pub fn files(&self) -> Option<&FileScope> {
+        self.files.as_ref()
+    }
+
+    /// A render against this context has ended: the file scope releases what
+    /// it held for it ([`super::files::RenderFiles::end_render`]).
+    pub(crate) fn end_render(&self) {
+        if let Some(files) = &self.files {
+            files.0.end_render();
+        }
     }
 
     /// Builds a context from a JSON object.
@@ -386,7 +414,7 @@ impl RenderContext {
     /// than falling back to [`RenderContext::new`].
     pub fn from_json_object(value: &JsonValue) -> Option<Self> {
         let object = value.as_object()?;
-        Some(Self(
+        Some(Self::from_bindings(
             object
                 .iter()
                 .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
@@ -404,9 +432,27 @@ impl RenderContext {
         serde_json::from_str(json)
     }
 
+    fn from_bindings(bindings: Vec<(String, MjValue)>) -> Self {
+        Self {
+            bindings,
+            files: None,
+        }
+    }
+
     /// The context as one minijinja value: an order-preserving map object.
-    fn to_minijinja(&self) -> MjValue {
-        MjValue::from_object(OrderedMap::new(self.0.clone()))
+    pub(crate) fn to_minijinja(&self) -> MjValue {
+        MjValue::from_object(OrderedMap::new(self.bindings.clone()))
+    }
+
+    /// Binds [`FILE_SCOPE`] when a scope is attached. Called by BOTH render
+    /// threads, after anything that could unbind it.
+    fn bind_files(&self, env: &mut Environment<'static>) {
+        if let Some(files) = &self.files {
+            env.add_global(
+                FILE_SCOPE,
+                MjValue::from_object(FileScopeObject(files.clone())),
+            );
+        }
     }
 }
 
@@ -856,7 +902,7 @@ impl<'de> Deserialize<'de> for RenderContext {
                 // is the one map in the crate that does not go through
                 // `OrderedMap`. `RenderContext::insert` has always collapsed a
                 // rebinding in place; the deserialiser did not.
-                Ok(RenderContext(last_value_wins(entries)))
+                Ok(RenderContext::from_bindings(last_value_wins(entries)))
             }
         }
 
@@ -866,7 +912,7 @@ impl<'de> Deserialize<'de> for RenderContext {
 
 impl From<BTreeMap<String, JsonValue>> for RenderContext {
     fn from(map: BTreeMap<String, JsonValue>) -> Self {
-        Self(
+        Self::from_bindings(
             map.iter()
                 .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
                 .collect(),
@@ -1287,7 +1333,7 @@ pub(super) fn write_json(out: &mut String, value: &MjValue, omit_nulls: bool) {
 /// `\b \t \n \f \r` have named escapes — which is why no existing golden
 /// moved when this was fixed and why only W2 Task 6's `toJson` sweep found
 /// it. Verified: the mismatch count is unchanged either side of this fix.
-fn write_json_string(out: &mut String, s: &str) {
+pub(crate) fn write_json_string(out: &mut String, s: &str) {
     match serde_json::to_string(s) {
         Ok(quoted) => out.push_str(&uppercase_unicode_escapes(&quoted)),
         // `to_string` on a `&str` cannot fail; this arm keeps the writer
@@ -1358,7 +1404,7 @@ fn uppercase_unicode_escapes(quoted: &str) -> String {
 /// break the tie differently down there. No corpus entry reaches it and no
 /// plausible flow does; recorded so the claim above is not read as
 /// unconditional.
-pub(super) fn write_java_double(out: &mut String, x: f64) {
+pub(crate) fn write_java_double(out: &mut String, x: f64) {
     if x.is_nan() {
         out.push_str("NaN");
         return;
@@ -1782,7 +1828,10 @@ pub(crate) fn environment() -> Environment<'static> {
     // - `kestra_null_coalesce`, `kestra_undefined_coalesce` and `kestra_is_in`
     //   stay: `super::rewrite` compiles Kestra's `??`, `???` and `isIn`
     //   operators into calls to them, so they are a seam this crate cannot do
-    //   without. They are egret-only and the fixture says so.
+    //   without. They are egret-only and the fixture says so. Since W9c Task 4
+    //   fix round 1 (2026-10-08) nine more are the same kind of seam:
+    //   `super::cmp_rewrite` compiles every comparison operator into a call to
+    //   one of `super::compare`'s `kestra_eq` .. `kestra_compare_chain`.
     //
     // `pprint` and `debug` were already removed in Task 3 for a different
     // reason (both dump internal state); they are two of the 62 and are now
@@ -1847,8 +1896,20 @@ pub(crate) fn environment() -> Environment<'static> {
     env.add_function("kestra_null_coalesce", kestra_null_coalesce);
     env.add_function("kestra_undefined_coalesce", kestra_undefined_coalesce);
     env.add_function("kestra_is_in", kestra_is_in);
+    // W9c Task 4 fix round 1: the comparison operators, which
+    // [`compile_source`]'s second pass compiles into calls to these.
+    super::compare::register(&mut env);
 
     env
+}
+
+/// What the engine parses: Kestra's operators reshaped by [`rewrite`], then
+/// every comparison compiled to a `super::compare` call
+/// (`super::cmp_rewrite`, W9c Task 4 fix round 1). Every path that hands a
+/// template to the parser goes through this one function, so a probe
+/// ([`referenced_roots`], [`name_in_code`]) sees what a render runs.
+fn compile_source(protected: &str) -> Result<String, RewriteError> {
+    super::compare::compile_comparisons(&rewrite(protected)?)
 }
 
 /// Renders a template string against `cx`, mirroring
@@ -1877,6 +1938,206 @@ pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderEr
             "internal: render_str refused the root `{root}` with no forbidden list"
         ))),
     }
+}
+
+/// Kestra's `renderTyped` (`Set.java:111`, `VariableRenderer.renderTyped`):
+/// a `template` that is exactly ONE `{{ … }}` with no other text, not even
+/// surrounding spaces (w9c `typed_render.tr_ws`: ` {{ 1 }} ` is the string
+/// `" 1 "`), keeps the type its expression evaluates to, as KV data.
+/// Anything else is [`render_str`]'s `String` (`x {{ 1 }}`, `{{ 1 }}{{ 2 }}`,
+/// a literal `42`). Against w9c `typed_render` (W9c Task 5). An expression
+/// the wrapper would change (brackets that do not pair up, `{{ 1) ~ (2 }}`;
+/// a top-level comma) is never wrapped: it fails, as Pebble fails it
+/// (`rewrite::parenthesizes_safely`; Task 5 review M3).
+///
+/// # How the type is kept (W9c final review F1)
+///
+/// The expression is rendered as `{{ (…) | <TYPED_JSON> }}`, a filter
+/// registered for this render only. It writes exactly `toJson`'s text, and
+/// it also converts the value it was given straight to [`KvData`]
+/// ([`typed_data`]), so an exact number keeps its kind and digits: a
+/// `BigDecimal` (a decimal `kv()` read, `number(type='BIGDECIMAL')`) is a
+/// `KvNumber::Decimal`, a `BigInteger` a `KvNumber::Int`. Through `toJson`'s
+/// text alone, `serde_json` and `KvData::from_json`, the decimal
+/// `123456789012345678901234567890.5` became the float
+/// `1.2345678901234568e29`.
+///
+/// Every other value converts as that JSON round trip would: an integer is an
+/// int at any size, a float a float, a null map entry dropped, a map in its
+/// own order (`serde_json`'s `preserve_order`). A flow's own literal keeps
+/// `serde_json`'s semantics: `{{ 1.5 }}` is a minijinja float, so a float.
+///
+/// The render is still the fixpoint [`render_str`] runs. When a later pass
+/// changed the filter's text (a string in the value held a template, which
+/// the next pass evaluated), the converted value is not what was rendered,
+/// and the final text is read back as JSON instead, as before F1: an exact
+/// decimal in such a value becomes a float (spec §15).
+///
+/// The outer `Err` is the render's; the inner one is the value's
+/// ([`Unstorable`]: a number over `MAX_NUMBER_DIGITS`, nesting past
+/// `storage::ion::MAX_DEPTH`), kept typed so a caller maps the class.
+pub fn render_typed(
+    template: &str,
+    cx: &RenderContext,
+) -> Result<Result<KvData, Unstorable>, RenderError> {
+    let Some(inner) = super::rewrite::sole_expression(template) else {
+        return render_str(template, cx).map(|text| Ok(KvData::String(text)));
+    };
+    if !super::rewrite::parenthesizes_safely(inner) {
+        // Wrapped, the expression would mean something else (`{{ 1) ~ (2 }}`
+        // would become `(1) ~ (2)`): the template as written is rendered,
+        // so its syntax error is the renderer's own words. Should it render,
+        // it is still refused: its type cannot be kept without the wrapper.
+        render_str(template, cx)?;
+        return Err(RenderError::Template(format!(
+            "the expression {template:?} cannot be typed: its brackets do not pair up, or a \
+             comma stands outside them"
+        )));
+    }
+    // The FIRST call's text and value. A later pass that calls the filter
+    // again is evaluating text an earlier pass produced, never the
+    // expression, so it is not recorded.
+    type Slot = Arc<std::sync::Mutex<Option<(String, Result<KvData, Unstorable>)>>>;
+    let slot: Slot = Arc::default();
+    let filled = Arc::clone(&slot);
+    let extend = move |env: &mut Environment<'static>| {
+        let filled = Arc::clone(&filled);
+        env.add_filter(
+            TYPED_JSON,
+            move |value: MjValue| -> Result<MjValue, MjError> {
+                let text = filters::to_json(value.clone())?;
+                let mut slot = filled.lock().unwrap_or_else(|e| e.into_inner());
+                if slot.is_none() {
+                    let written = text.as_str().unwrap_or_default().to_string();
+                    *slot = Some((written, typed_data(&value, 0)));
+                }
+                Ok(text)
+            },
+        );
+    };
+    let source = format!("{{{{ ({inner}) | {TYPED_JSON} }}}}");
+    let text = match render_guarded_with(&source, cx, &[], &extend, Passes::Fixpoint)? {
+        GuardedRender::Rendered(text) => text,
+        GuardedRender::Forbidden(root) => {
+            return Err(RenderError::Template(format!(
+                "internal: render_typed refused the root `{root}` with no forbidden list"
+            )))
+        }
+    };
+    let first = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some((written, data)) = first {
+        if written == text {
+            return Ok(data);
+        }
+    }
+    let json: JsonValue = serde_json::from_str(&text).map_err(|e| {
+        RenderError::Template(format!(
+            "the expression {template:?} rendered a value egret cannot read back as JSON: {e}"
+        ))
+    })?;
+    Ok(KvData::from_json(&json))
+}
+
+/// The filter [`render_typed`] wraps its expression in, registered only on
+/// that render's environment. `kestra_` names are egret's own (a template
+/// cannot assign one, spec §15).
+const TYPED_JSON: &str = "kestra_typed_json";
+
+/// W9c final review F1: `value` as KV data, exactly as `toJson`'s text
+/// ([`write_json`], nulls omitted) read back by `serde_json` and
+/// `KvData::from_json` would be, except that an exact number (a
+/// `BigNumber`) keeps its kind and its digits instead of passing through a
+/// JSON number: a `BigDecimal` is `KvNumber::Decimal` (its plain digits), a
+/// `BigInteger` `KvNumber::Int`. `depth` is the containers above `value`;
+/// a container past `storage::ion::MAX_DEPTH` is refused as
+/// `KvData::from_json` refuses it, which also bounds this recursion.
+pub(super) fn typed_data(value: &MjValue, depth: usize) -> Result<KvData, Unstorable> {
+    // `serde_json`'s text of a number, by `KvData::from_json`'s rule.
+    let number = |text: &str| KvNumber::of_json_text(text).map(KvData::Number);
+    let container = |depth: usize| {
+        if depth >= crate::storage::ion::MAX_DEPTH {
+            Err(too_deep())
+        } else {
+            Ok(())
+        }
+    };
+    Ok(match value.kind() {
+        ValueKind::Undefined | ValueKind::None => KvData::Null,
+        ValueKind::Bool => KvData::Bool(value.is_true()),
+        ValueKind::Number => {
+            if value.is_integer() {
+                number(&value.to_string())?
+            } else {
+                match f64::try_from(value.clone()) {
+                    Ok(f) if !f.is_finite() => {
+                        let mut text = String::new();
+                        write_java_double(&mut text, f);
+                        KvData::String(text)
+                    }
+                    Ok(f) => {
+                        let mut text = String::new();
+                        write_java_double(&mut text, f);
+                        number(&text)?
+                    }
+                    Err(_) => number(&value.to_string())?,
+                }
+            }
+        }
+        ValueKind::Seq | ValueKind::Iterable => {
+            container(depth)?;
+            let mut items = Vec::new();
+            if let Ok(iter) = value.try_iter() {
+                for item in iter {
+                    items.push(typed_data(&item, depth + 1)?);
+                }
+            }
+            KvData::List(items)
+        }
+        ValueKind::Map => {
+            container(depth)?;
+            let mut fields: Vec<(String, KvData)> = Vec::new();
+            let mut at: std::collections::HashMap<String, usize> = Default::default();
+            if let Ok(keys) = value.try_iter() {
+                for key in keys {
+                    let Ok(item) = value.get_item(&key) else {
+                        continue;
+                    };
+                    if item.is_none() || item.is_undefined() {
+                        continue;
+                    }
+                    let name = key.to_string();
+                    let data = typed_data(&item, depth + 1)?;
+                    // Two keys with one text: `serde_json`'s map keeps the
+                    // first place and the last value.
+                    match at.get(&name) {
+                        Some(&i) => fields[i].1 = data,
+                        None => {
+                            at.insert(name.clone(), fields.len());
+                            fields.push((name, data));
+                        }
+                    }
+                }
+            }
+            KvData::Struct(fields)
+        }
+        _ if filters::big_number_plain(value).is_some() => {
+            let plain = filters::big_number_plain(value).expect("checked");
+            let exact = match filters::big_number_class(value) {
+                Some("java.math.BigInteger") => KvNumber::int(plain),
+                _ => KvNumber::decimal(plain),
+            };
+            match exact {
+                Some(n) => {
+                    KvNumber::check_exact_digits(plain)?;
+                    KvData::Number(n)
+                }
+                // Not reachable for a `BigNumber` egret built; kept total:
+                // the number `toJson` writes, as before F1.
+                None => number(&filters::big_number_text(value).expect("checked"))?,
+            }
+        }
+        _ => KvData::String(value.to_string()),
+    })
 }
 
 /// ONE pass of the renderer, on a copy of the environment that `extend` has
@@ -1995,21 +2256,101 @@ fn render_guarded_with(
     // scoped borrow and not a copy -- `render_context_crosses_a_thread`
     // pins that, because the day it stops being true this has to become a
     // serialise-and-rebuild and nothing else would say so.
-    std::thread::scope(|scope| {
-        let worker = std::thread::Builder::new()
-            .name("egret-render".to_string())
-            .stack_size(RENDER_STACK_BYTES)
-            .spawn_scoped(scope, || {
-                render_on_this_thread(template, cx, forbidden, extend, passes)
-            })
-            .map_err(|e| RenderError::Template(format!("could not start a render thread: {e}")))?;
-        match worker.join() {
-            Ok(result) => result,
-            // A panic below is still a panic -- it is resumed on this thread
-            // when the scope ends, so `tests/oracle.rs`'s guard still sees it.
-            Err(_) => Err(RenderError::Template("the render panicked".to_string())),
-        }
+    off_the_runtime(|| {
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("egret-render".to_string())
+                .stack_size(RENDER_STACK_BYTES)
+                .spawn_scoped(scope, || {
+                    // W9b fix round 1 (I1): nothing the render opened outlives
+                    // it -- a drop guard, so a panic below cannot skip it.
+                    let _end = EndRender(cx);
+                    render_on_this_thread(template, cx, forbidden, extend, passes)
+                })
+                .map_err(|e| {
+                    RenderError::Template(format!("could not start a render thread: {e}"))
+                })?;
+            match worker.join() {
+                Ok(result) => result,
+                // A panic below is still a panic -- it is resumed on this thread
+                // when the scope ends, so `tests/oracle.rs`'s guard still sees it.
+                Err(_) => Err(RenderError::Template("the render panicked".to_string())),
+            }
+        })
     })
+}
+
+/// Ends the render's namespace connection when dropped, so a panic in the
+/// render cannot skip it (W9b Task 4 re-review, R1-m1).
+struct EndRender<'a>(&'a RenderContext);
+
+impl Drop for EndRender<'_> {
+    fn drop(&mut self) {
+        self.0.end_render();
+    }
+}
+
+/// Run `f` on a thread of its own and wait for it, the way a render runs --
+/// for a caller that reads a file through a `FileScope` outside a template.
+///
+/// W9a Task 11: `worker::render` reads a `Loop`'s `values:` file in `settle`,
+/// on a tokio worker, and `Snapshot::read_bytes` refuses a runtime thread
+/// (`block_on` would panic there). This is the render's own arrangement --
+/// [`off_the_runtime`] around a scoped thread -- so the runtime keeps running
+/// while the read blocks. `Err` when the thread cannot start or panics.
+///
+/// **W9b Task 4 re-review, R1-m2.** It takes the `FileScope` the work reads
+/// through and ends that scope's render when `f` returns (or panics), as a
+/// template render does: a namespace connection a non-template read opens
+/// (Task 5's staging, Task 9's bridge) cannot outlive its work.
+pub(crate) fn on_a_render_thread<T: Send>(
+    files: &FileScope,
+    f: impl FnOnce() -> T + Send,
+) -> Result<T, String> {
+    struct EndScope<'a>(&'a FileScope);
+    impl Drop for EndScope<'_> {
+        fn drop(&mut self) {
+            self.0 .0.end_render();
+        }
+    }
+    off_the_runtime(|| {
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("egret-render".to_string())
+                .stack_size(RENDER_STACK_BYTES)
+                .spawn_scoped(scope, || {
+                    let _end = EndScope(files);
+                    f()
+                })
+                .map_err(|e| format!("could not start a render thread: {e}"))?;
+            worker
+                .join()
+                .map_err(|_| "the render thread panicked".to_string())
+        })
+    })
+}
+
+/// Run `join`-on-a-render-thread `f` so the runtime keeps running under it.
+///
+/// **W9a Task 4 fix round 1, C1.** A render can block its own thread on the
+/// runtime (`read()`, `storage::scope::Snapshot::read_utf8`), and the thread
+/// that spawned the render waits in `join`. On a tokio WORKER that join used
+/// to park the worker with its core, so with every worker parked nothing
+/// drove the IO and timer drivers and the runtime wedged for good -- measured
+/// with one worker and one render, and with 2/2 and 4/4.
+/// `block_in_place` hands this worker's core to another thread first.
+///
+/// Only on the multi-thread runtime: `block_in_place` panics on a
+/// current-thread one, which has no other thread to hand anything to --
+/// `read()` refuses there instead (`Snapshot::read_utf8`). Off any runtime
+/// this is just `f()`.
+fn off_the_runtime<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
 }
 
 /// The top-level names a template refers to, as the PARSER sees them.
@@ -2037,7 +2378,7 @@ fn render_guarded_with(
 /// which message a refusal carries.
 pub fn referenced_roots(template: &str) -> Result<std::collections::BTreeSet<String>, RenderError> {
     let (protected, _replacers) = replace_raw_tags(template);
-    let rewritten = rewrite(&protected)?;
+    let rewritten = compile_source(&protected)?;
     let env = environment();
     let tmpl = env
         .template_from_str(&rewritten)
@@ -2062,7 +2403,7 @@ pub fn referenced_roots(template: &str) -> Result<std::collections::BTreeSet<Str
 #[allow(clippy::let_and_return)]
 pub(crate) fn name_in_code(template: &str, name: &str) -> bool {
     let (protected, _replacers) = replace_raw_tags(template);
-    let Ok(rewritten) = rewrite(&protected) else {
+    let Ok(rewritten) = compile_source(&protected) else {
         return true;
     };
     let env = environment();
@@ -2104,6 +2445,8 @@ fn render_on_this_thread(
             cx.bindings().iter().map(|(name, _)| name.clone()).collect(),
         )),
     );
+    // W9a Task 4: after `extend`, for the same reason as the scope above.
+    cx.bind_files(&mut env);
     let env = env;
 
     // W2 Task 8 fix round 1: one budget for the whole render, shared by every
@@ -2156,7 +2499,7 @@ fn render_once(
     variables: &MjValue,
 ) -> Result<String, RenderError> {
     let (protected, replacers) = replace_raw_tags(source);
-    let rewritten = rewrite(&protected)?;
+    let rewritten = compile_source(&protected)?;
     let template = env
         .template_from_str(&rewritten)
         .map_err(|e| RenderError::Template(e.to_string()))?;
@@ -2272,16 +2615,24 @@ pub(crate) fn render_bound(
     // out anyway: the value of this function is that ONE code path produces
     // both halves of the answer, and a second path that produces `(text, [])`
     // is a second place for the two to disagree about what "no values" means.
-    std::thread::scope(|scope| {
-        let worker = std::thread::Builder::new()
-            .name("egret-render-bound".to_string())
-            .stack_size(RENDER_STACK_BYTES)
-            .spawn_scoped(scope, || bind_on_this_thread(template, cx))
-            .map_err(|e| RenderError::Template(format!("could not start a render thread: {e}")))?;
-        match worker.join() {
-            Ok(result) => result,
-            Err(_) => Err(RenderError::Template("the render panicked".to_string())),
-        }
+    off_the_runtime(|| {
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("egret-render-bound".to_string())
+                .stack_size(RENDER_STACK_BYTES)
+                .spawn_scoped(scope, || {
+                    // W9b fix round 1 (I1): as `render_guarded_with`.
+                    let _end = EndRender(cx);
+                    bind_on_this_thread(template, cx)
+                })
+                .map_err(|e| {
+                    RenderError::Template(format!("could not start a render thread: {e}"))
+                })?;
+            match worker.join() {
+                Ok(result) => result,
+                Err(_) => Err(RenderError::Template("the render panicked".to_string())),
+            }
+        })
     })
 }
 
@@ -2298,6 +2649,10 @@ fn bind_on_this_thread(
             cx.bindings().iter().map(|(name, _)| name.clone()).collect(),
         )),
     );
+    // W9a Task 4: `egret.sql`'s `sql:` reads files too -- this thread is the
+    // second of the two, and a scope bound on only one of them is the defect
+    // `the_file_functions_render_inside_an_egret_sql_statement` exists for.
+    cx.bind_files(&mut env);
     // AFTER `environment()`, which sets `json_writer_formatter`. Order is the
     // whole of it: the other way round, Kestra's formatter would win and every
     // value would be written into the SQL.
@@ -2465,6 +2820,84 @@ mod tests {
 
     fn render(template: &str, ctx: JsonValue) -> Result<String, RenderError> {
         render_str(template, &cx(ctx))
+    }
+
+    /// R1-m1 and R1-m2: the render's end is unconditional. A scope whose
+    /// namespace lookup panics still has `end_render` called, on a template
+    /// render and on `on_a_render_thread`.
+    mod the_render_ends_even_when_it_panics {
+        use super::*;
+        use crate::runners::files::{
+            FileMeta, FileScope, FileUnavailable, NsFileArgs, NsFileMeta, RenderFiles,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct Panicky(AtomicUsize);
+
+        impl RenderFiles for Panicky {
+            fn lookup(&self, _: &str) -> Result<FileMeta, FileUnavailable> {
+                Err(FileUnavailable::Refused("none".into()))
+            }
+            fn read_utf8(&self, _: &str) -> Result<String, String> {
+                Err("none".into())
+            }
+            fn read_bytes(&self, _: &str, _: &str) -> Result<Vec<u8>, String> {
+                Err("none".into())
+            }
+            fn task_prefix(&self) -> Option<&str> {
+                None
+            }
+            fn namespace_file(&self, _: &NsFileArgs<'_>) -> Result<NsFileMeta, FileUnavailable> {
+                panic!("a lookup that panics");
+            }
+            fn end_render(&self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn scope() -> (Arc<Panicky>, FileScope) {
+            let fake = Arc::new(Panicky::default());
+            (fake.clone(), FileScope(fake))
+        }
+
+        #[test]
+        fn a_template_render_that_panics_still_ends() {
+            let (fake, files) = scope();
+            let cx = RenderContext::new().with_files(files);
+            let out = render_str("{{ fileExists('a.txt') }}", &cx);
+            assert!(
+                matches!(&out, Err(RenderError::Template(m)) if m == "the render panicked"),
+                "the lookup's panic is an error, not a hang: {out:?}"
+            );
+            assert_eq!(
+                fake.0.load(Ordering::SeqCst),
+                1,
+                "render_guarded_with ended it"
+            );
+        }
+
+        #[test]
+        fn a_bound_render_that_panics_still_ends() {
+            let (fake, files) = scope();
+            let cx = RenderContext::new().with_files(files);
+            let out = render_bound("{{ fileExists('a.txt') }}", &cx);
+            assert!(
+                matches!(&out, Err(RenderError::Template(m)) if m == "the render panicked"),
+                "the lookup's panic is an error, not a hang: {out:?}"
+            );
+            assert_eq!(fake.0.load(Ordering::SeqCst), 1, "render_bound ended it");
+        }
+
+        #[test]
+        fn on_a_render_thread_ends_the_scope_after_the_work_and_after_a_panic() {
+            let (fake, files) = scope();
+            assert_eq!(on_a_render_thread(&files, || 7), Ok(7));
+            assert_eq!(fake.0.load(Ordering::SeqCst), 1, "ended after the work");
+            let out = on_a_render_thread(&files, || -> u8 { panic!("the work panics") });
+            assert!(out.is_err());
+            assert_eq!(fake.0.load(Ordering::SeqCst), 2, "ended after a panic");
+        }
     }
 
     // -----------------------------------------------------------------
@@ -2752,7 +3185,7 @@ mod tests {
         // A row cannot be deleted to make a failure go away: these three are
         // `host.Oracle dump`'s own counts for the built engine, plus Pebble's
         // core/escaper/i18n extensions.
-        assert_eq!(rows, 177, "row count");
+        assert_eq!(rows, 186, "row count");
         assert_eq!(counts.get("filter"), Some(&63), "engine filter count");
         assert_eq!(counts.get("function"), Some(&37), "engine function count");
         assert_eq!(counts.get("test"), Some(&8), "engine test count");

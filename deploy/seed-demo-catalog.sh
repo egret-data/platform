@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Seed a ready-to-test demo embedded catalog against a RUNNING egret server:
-#   - a MinIO storage connection + a provisioned "demo-catalog" warehouse (demo ws)
+#   - a RustFS storage connection + a provisioned "demo-catalog" warehouse (demo ws)
 #   - an ENGINE role (catalog write) + client that creates the tables
 #   - two namespaces with five Iceberg tables
 #   - a READER role (external) granted read on ONLY two tables + its client
@@ -17,18 +17,24 @@ BASE="${EGRET_BASE_URL:-http://localhost:8080}"
 PGURL="${DATABASE_URL:-postgres://egret:egret@localhost:5432/egret}"
 S3_ENDPOINT="${SEED_S3_ENDPOINT:-http://localhost:9000}"
 BUCKET="${SEED_BUCKET:-warehouse}"
-MINIO_CONTAINER="${MINIO_CONTAINER:-egret-dev-minio-1}"
-AK="${MINIO_ROOT_USER:-egret}"
-SK="${MINIO_ROOT_PASSWORD:-egretsecret}"
+RUSTFS_CONTAINER="${RUSTFS_CONTAINER:-egret-dev-rustfs-1}"
+AK="${RUSTFS_ACCESS_KEY:-egret}"
+SK="${RUSTFS_SECRET_KEY:-egretsecret}"
 ADMIN_EMAIL="${EGRET_ADMIN_EMAIL:-admin@egret.local}"
 ADMIN_PASS="${EGRET_ADMIN_PASSWORD:-Admin12345!}"
 
 get() { python3 -c "import sys,json;print(json.load(sys.stdin).get('$1',''))"; }
 
 # 0. Make sure the target bucket exists (reset clears objects but keeps buckets).
-docker exec "$MINIO_CONTAINER" sh -c \
-  "mc alias set lo http://localhost:9000 '$AK' '$SK' >/dev/null 2>&1 && mc mb --ignore-existing lo/$BUCKET >/dev/null 2>&1" \
-  2>/dev/null || echo "  (minio '$MINIO_CONTAINER' not reachable — assuming bucket '$BUCKET' exists)"
+# The RustFS image ships no S3 client, so one runs beside it, in its network namespace.
+s3() {
+  docker run --rm --network "container:$RUSTFS_CONTAINER" \
+    -e AWS_ACCESS_KEY_ID="$AK" -e AWS_SECRET_ACCESS_KEY="$SK" \
+    -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ENDPOINT_URL=http://localhost:9000 \
+    "${S3_CLIENT_IMAGE:-amazon/aws-cli:2.37.9}" "$@"
+}
+{ s3 s3api head-bucket --bucket "$BUCKET" || s3 s3api create-bucket --bucket "$BUCKET"; } >/dev/null 2>&1 \
+  || echo "  (rustfs '$RUSTFS_CONTAINER' not reachable — assuming bucket '$BUCKET' exists)"
 
 # 1. Admin session.
 J=$(mktemp); trap 'rm -f "$J"' EXIT
@@ -46,9 +52,9 @@ fi
 
 echo "→ storage connection + warehouse (provisioning lakekeeper)…"
 SC_ID=$(api -X POST "$BASE/api/control-plane/storage" -d "{
-  \"name\":\"demo-minio\",\"provider\":\"s3\",\"endpoint\":\"$S3_ENDPOINT\",
+  \"name\":\"demo-rustfs\",\"provider\":\"s3\",\"endpoint\":\"$S3_ENDPOINT\",
   \"region\":\"us-east-1\",\"bucket\":\"$BUCKET\",\"access_key\":\"$AK\",
-  \"new_secret\":{\"name\":\"demo-minio-secret\",\"value\":\"$SK\"},\"path_style\":true}" | get id)
+  \"new_secret\":{\"name\":\"demo-rustfs-secret\",\"value\":\"$SK\"},\"path_style\":true}" | get id)
 WH=$(api -X POST "$BASE/api/control-plane/warehouses" \
   -d "{\"name\":\"demo-catalog\",\"workspaceId\":\"$DEMO_WS\",\"storageConnectionId\":\"$SC_ID\"}")
 WH_ID=$(echo "$WH" | get id)

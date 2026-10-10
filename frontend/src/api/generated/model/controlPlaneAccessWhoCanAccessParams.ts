@@ -8,7 +8,7 @@
 
 export type ControlPlaneAccessWhoCanAccessParams = {
 /**
- * Object kind: chart | dashboard | dataset | notebook | saved_query | folder
+ * Object kind: chart | dashboard | dataset | notebook | saved_query | folder | app
  */
 kind: string;
 /**

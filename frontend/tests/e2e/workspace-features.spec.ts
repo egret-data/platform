@@ -5,9 +5,9 @@ import { loginLocalAdmin, firstWorkspace } from "./helpers";
  * Per-workspace feature entitlements against the ordinary dev stack (docker
  * compose + `just serve` + `npm run dev` — see README.md), NOT the in-cluster
  * kind deploy: this is pure browser UI with no k8s provisioning, so it targets
- * the plain local stack like `notebook.spec.ts` / `embedded-catalog.spec.ts`.
- * Opt-in via `EGRET_E2E_FEATURES=1`, matching the `EGRET_E2E_CATALOG` gating
- * convention for a live-stack-but-not-kind spec.
+ * the plain local stack like `embedded-catalog.spec.ts`. Opt-in via
+ * `EGRET_E2E_FEATURES=1`, matching the `EGRET_E2E_CATALOG` gating convention
+ * for a live-stack-but-not-kind spec.
  *
  * Proves a platform admin turning a module OFF for a workspace (Control Plane
  * → Workspaces → detail → Features tab) actually enforces, not just decorates
@@ -25,10 +25,10 @@ import { loginLocalAdmin, firstWorkspace } from "./helpers";
  *
  * The suite has no disposable-workspace helper (only `firstWorkspace`, the
  * shared seeded workspace other specs also read), so this mutates that shared
- * workspace's Notebooks entitlement and restores it in a `finally` — matching
+ * workspace's Apps entitlement and restores it in a `finally` — matching
  * the cleanup idiom used elsewhere in this suite (e.g. `dataplane-kind.spec.ts`
  * deleting its engine in `finally`) — so a failure mid-test can't leave
- * Notebooks off and poison a later run. The `try` starts right before the
+ * Apps off and poison a later run. The `try` starts right before the
  * switch is flipped off (the only step that needs undoing), not after all the
  * assertions, so any assertion failure below still runs the restore.
  *
@@ -59,43 +59,43 @@ test.describe("workspace feature entitlements", () => {
   test.skip(!ENABLED, "opt-in: set EGRET_E2E_FEATURES=1 with the live dev stack up");
   test.setTimeout(90_000);
 
-  test("disabling Notebooks hides the nav item, blocks the route and the API, and leaves Charts reachable", async ({
+  test("disabling Apps hides the nav item, blocks the route and the API, and leaves Charts reachable", async ({
     page,
   }) => {
     await loginLocalAdmin(page);
     const { id: wsId, slug } = await firstWorkspace(page.request);
 
-    // Baseline: Notebooks is on before we touch anything (the seeded workspace
+    // Baseline: Apps is on before we touch anything (the seeded workspace
     // starts with every module enabled — an absent row means enabled).
-    await page.goto(`/explore/${slug}/notebooks`);
+    await page.goto(`/explore/${slug}/apps`);
     await expect(page.getByText("403 — Forbidden")).toHaveCount(0);
-    await expect(page.getByRole("heading", { name: "Notebooks" })).toBeVisible();
-    await expect(page.locator("nav").getByRole("link", { name: "Notebooks" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Apps" })).toBeVisible();
+    await expect(page.locator("nav").getByRole("link", { name: "Apps" })).toBeVisible();
 
     // Control Plane → Workspaces → detail → Features tab.
     const gotoFeaturesTab = () => page.goto(`/control-plane/workspaces/${wsId}?tab=features`);
-    const notebooksSwitch: Locator = page.getByRole("switch", { name: "Notebooks" });
+    const appsSwitch: Locator = page.getByRole("switch", { name: "Apps" });
     await gotoFeaturesTab();
-    await expect(notebooksSwitch).toBeVisible();
-    await expect(notebooksSwitch).toBeChecked();
+    await expect(appsSwitch).toBeVisible();
+    await expect(appsSwitch).toBeChecked();
 
     try {
-      // Turn Notebooks off and save.
-      await notebooksSwitch.click();
-      await expect(notebooksSwitch).not.toBeChecked();
+      // Turn Apps off and save.
+      await appsSwitch.click();
+      await expect(appsSwitch).not.toBeChecked();
       await saveFeatures(page);
 
-      // 1. Explore nav: Notebooks is gone, Charts (left on) is still there.
+      // 1. Explore nav: Apps is gone, Charts (left on) is still there.
       await page.goto(`/explore/${slug}/charts`);
-      await expect(page.locator("nav").getByRole("link", { name: "Notebooks" })).toHaveCount(0);
+      await expect(page.locator("nav").getByRole("link", { name: "Apps" })).toHaveCount(0);
       await expect(page.locator("nav").getByRole("link", { name: "Charts" })).toBeVisible();
 
-      // 2. Direct navigation to the notebooks URL is blocked — Forbidden renders,
-      // the notebooks page does not.
-      await page.goto(`/explore/${slug}/notebooks`);
+      // 2. Direct navigation to the apps URL is blocked — Forbidden renders,
+      // the apps page does not.
+      await page.goto(`/explore/${slug}/apps`);
       await expect(page.getByText("403 — Forbidden")).toBeVisible();
       await expect(page.getByText("You don't have access to this page.")).toBeVisible();
-      await expect(page.getByRole("heading", { name: "Notebooks" })).toHaveCount(0);
+      await expect(page.getByRole("heading", { name: "Apps" })).toHaveCount(0);
 
       // 3. A module that stayed on is still reachable (not Forbidden).
       await page.goto(`/explore/${slug}/charts`);
@@ -104,28 +104,28 @@ test.describe("workspace feature entitlements", () => {
 
       // The API enforces the same thing server-side (WsContext), independent of
       // this client-side nav/route gating: 403 with the machine-readable code.
-      const notebooksApi = await page.request.get(`/api/ws/${slug}/notebooks`);
-      expect(notebooksApi.status(), await notebooksApi.text()).toBe(403);
-      expect((await notebooksApi.json()).code).toBe("feature_disabled");
+      const appsApi = await page.request.get(`/api/ws/${slug}/apps`);
+      expect(appsApi.status(), await appsApi.text()).toBe(403);
+      expect((await appsApi.json()).code).toBe("feature_disabled");
 
       // Charts' own API is unaffected.
       const chartsApi = await page.request.get(`/api/ws/${slug}/charts`);
       expect(chartsApi.ok(), await chartsApi.text()).toBeTruthy();
     } finally {
-      // Restore Notebooks so the shared workspace isn't left poisoned for
+      // Restore Apps so the shared workspace isn't left poisoned for
       // later runs (this spec's own baseline check included).
       await gotoFeaturesTab();
-      if (!(await notebooksSwitch.isChecked())) {
-        await notebooksSwitch.click();
-        await expect(notebooksSwitch).toBeChecked();
+      if (!(await appsSwitch.isChecked())) {
+        await appsSwitch.click();
+        await expect(appsSwitch).toBeChecked();
         await saveFeatures(page);
       }
     }
 
-    // Confirm the restore actually took: Notebooks is reachable again.
-    await page.goto(`/explore/${slug}/notebooks`);
+    // Confirm the restore actually took: Apps is reachable again.
+    await page.goto(`/explore/${slug}/apps`);
     await expect(page.getByText("403 — Forbidden")).toHaveCount(0);
-    await expect(page.getByRole("heading", { name: "Notebooks" })).toBeVisible();
-    await expect(page.locator("nav").getByRole("link", { name: "Notebooks" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Apps" })).toBeVisible();
+    await expect(page.locator("nav").getByRole("link", { name: "Apps" })).toBeVisible();
   });
 });

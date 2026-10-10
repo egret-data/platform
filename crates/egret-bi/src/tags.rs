@@ -254,9 +254,9 @@ impl TagRepo {
         .fetch_all(&mut **tx)
         .await?;
         for warehouse_id in warehouses {
-            egret_catalog_registry::bump_bound_tag_versions(&mut **tx, warehouse_id).await?;
+            egret_catalog_registry::bump_bound_tag_versions(tx, warehouse_id).await?;
         }
-        let services = egret_perm_compile::affected_services_for_tag_rename(&mut **tx, key).await?;
+        let services = egret_perm_compile::affected_services_for_tag_rename(tx, key).await?;
         egret_perm_compile::lock_services_in_tx(tx, &services).await?;
         for service_id in services {
             let summary = egret_perm_compile::recompile_service_in_tx(tx, service_id).await?;
@@ -552,7 +552,7 @@ impl ClassificationPolicyRepo {
     pub(crate) async fn recompile_for_clearance_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> Result<Vec<egret_perm_compile::SkippedItem>, BiError> {
-        let services = egret_perm_compile::affected_services_for_classification(&mut **tx).await?;
+        let services = egret_perm_compile::affected_services_for_classification(tx).await?;
         let mut skipped: Vec<egret_perm_compile::SkippedItem> = Vec::new();
         for summary in egret_perm_compile::recompile_services_in_tx(tx, &services).await? {
             if !summary.skipped.is_empty() {

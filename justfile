@@ -11,7 +11,7 @@ set dotenv-load := true
 # server boots from. Naming it explicitly on the recipe line overrides the dotenv value.
 test_database_url := "postgres://egret:egret@localhost:5432/egret_test"
 
-# Start the local dev stack (Postgres, MinIO, Trino, StarRocks)
+# Start the local dev stack (Postgres, RustFS, Trino, StarRocks)
 up:
     docker compose -f deploy/docker-compose.dev.yml up -d
 
@@ -156,6 +156,21 @@ test-ranger-gates:
     @echo "   here means the differential did NOT run, which is the thing to know."
     {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-policy --test ranger_engine_gate --no-fail-fast
     {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture
+
+# The Kestra plugin host's Java tests (`plugin-host/`, W5b), including the pins of its refusal
+# messages (`EgretPluginHostTest`: `namespaceKv()`'s since W9c Task 7).
+#
+# The plugin jars are NOT Maven dependencies: `fetch-plugins.sh` downloads them into
+# `plugin-host/target/plugins`, checked against `plugins.lock` (a jar already there is
+# re-verified, not downloaded again), and surefire puts them on the tests' classpath. On a
+# fresh checkout `mvn verify` alone cannot load a plugin, so the fetch comes first. Needs JDK 25
+# (`JAVA_HOME`) and Maven. No GitHub CI job runs it, so run it before merging a change under
+# `plugin-host/` or to the plugin handler's messages.
+#
+# Fetch the plugin jars, then run the plugin host's Java tests.
+test-plugin-host:
+    plugin-host/fetch-plugins.sh plugin-host/target/plugins
+    mvn -f plugin-host/pom.xml verify
 
 # egret-workflow's tests, compiled under the resolution the BINARY ships.
 #
@@ -302,7 +317,7 @@ test-workflow-docker:
 migrate:
     cargo run -p egret-bin -- migrate
 
-# Reset local test data (keeps users + demo/eng; wipes catalog, test workspaces, MinIO)
+# Reset local test data (keeps users + demo/eng; wipes catalog, test workspaces, RustFS)
 reset-testdata:
     ./deploy/reset-testdata.sh
 
@@ -329,39 +344,84 @@ k8s-up:
 k8s-down:
     kind delete cluster --name egret
 
-# Build all egret images (backend + frontend + kernel + renderer).
+# Build all egret images (backend + frontend + apps + renderer).
 images-build:
     docker build -f deploy/docker/backend.Dockerfile -t egret-backend:dev .
     docker build -f frontend/Dockerfile -t egret-frontend:dev frontend
-    docker build -t egret-kernel:dev kernel-image
+    docker build -t egret-apps:dev apps-image
     docker build -t egret-renderer:dev renderer
 
 # Build images, load them into the kind `egret` cluster, and (re)install the chart.
 # Force fresh pods onto the just-loaded `:dev` images. A `helm upgrade` with an
 # unchanged image tag does NOT restart pods, so a rebuilt `:dev` image is ignored
-# without this — the classic same-tag gotcha. Also refreshes per-user kernel pods
-# (spawned on-demand, they'd otherwise keep the old kernel image). NOTE: never run
-# two image builds concurrently — both tag `:dev` and the last to finish wins,
-# which can deploy stale code.
+# without this — the classic same-tag gotcha. NOTE: never run two image builds
+# concurrently — both tag `:dev` and the last to finish wins, which can deploy
+# stale code.
 _kind-refresh:
     kubectl rollout restart deploy/egret deploy/egret-frontend -n egret-system
     kubectl rollout status deploy/egret -n egret-system --timeout=180s
-    kubectl delete pods -n egret-notebooks --all --ignore-not-found=true
 
 deploy-kind: images-build
-    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev egret-renderer:dev --name egret
+    kind load docker-image egret-backend:dev egret-frontend:dev egret-renderer:dev egret-apps:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m
     just _kind-refresh
     @echo "egret SPA: http://localhost:30080  (login admin@egret.local / Admin12345!)"
 
 # Like deploy-kind but OIDC-on + ingress (Milestone B) — required for the data-plane e2e.
-# Also enables the k8s per-user kernel launcher: this is the canonical notebook-execution path.
 deploy-kind-oidc: images-build
-    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev --name egret
+    kind load docker-image egret-backend:dev egret-frontend:dev egret-apps:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
-      --set oidc.enabled=true --set ingress.enabled=true --set kernel.launcher=kubernetes
+      --set oidc.enabled=true --set ingress.enabled=true
     just _kind-refresh
     @echo "egret SPA: http://egret.localtest.me  (login admin@egret.local / Admin12345!)"
+
+# ── Data Apps on kind (P4e) ──────────────────────────────────────────────────────────────
+# A SEPARATE release, `egret-verify` in namespace `egret-verify`, on hosts `verify.localtest.me` and
+# `apps.verify.localtest.me`, OIDC off, TLS self-signed, with its own Postgres, engine and app-pod
+# namespaces and image tag `p4e`. Never a re-deploy of the live `egret` release: that one carries
+# four user-supplied values, runs migrations on restart, and serves plain http — and the `__Host-`
+# cookies the apps origin depends on exist only over HTTPS.
+#
+# Re-running this after a code change is safe and is what ROLLS the pods: the tag never changes, so
+# Kubernetes sees nothing to roll — hence the explicit `rollout restart`. Check pod AGE, not helm.
+apps_host := "verify.localtest.me"
+
+deploy-kind-apps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tls=$(mktemp -d); trap 'rm -rf "$tls"' EXIT
+    openssl req -x509 -newkey rsa:2048 -nodes -days 7 -keyout "$tls/tls.key" -out "$tls/tls.crt" \
+      -subj "/CN={{apps_host}}" -addext "subjectAltName=DNS:{{apps_host}},DNS:apps.{{apps_host}}"
+    docker build -f deploy/docker/backend.Dockerfile -t egret-backend:p4e .
+    docker build -f frontend/Dockerfile -t egret-frontend:p4e frontend
+    docker build -t egret-apps:p4e apps-image
+    # The chart renders the renderer Deployment unconditionally: without its image `--wait` below
+    # sits on ImagePullBackOff until the timeout and the post-install hooks never run.
+    docker build -t egret-renderer:p4e renderer
+    kind load docker-image egret-backend:p4e egret-frontend:p4e egret-apps:p4e egret-renderer:p4e --name egret
+    helm upgrade --install egret-verify deploy/helm/egret -n egret-verify --create-namespace --wait --timeout 10m \
+      --set backend.image.tag=p4e --set frontend.image.tag=p4e --set frontend.nodePort=30081 \
+      --set renderer.image.tag=p4e \
+      --set ingress.enabled=true --set ingress.host={{apps_host}} --set ingress.tls.enabled=true \
+      --set-file ingress.tls.cert="$tls/tls.crt" --set-file ingress.tls.key="$tls/tls.key" \
+      --set apps.origin=https://apps.{{apps_host}} --set apps.egretOrigin=https://{{apps_host}} \
+      --set apps.pod.launcher=kubernetes --set apps.pod.namespace=egret-verify-apps --set apps.pod.image=egret-apps:p4e \
+      --set engineNamespace=egret-verify-engines --set createEngineNamespace=true
+    kubectl -n egret-verify rollout restart deploy/egret deploy/egret-frontend
+    kubectl -n egret-verify rollout status deploy/egret --timeout=300s
+    kubectl -n egret-verify rollout status deploy/egret-frontend --timeout=120s
+    echo "egret (apps): https://{{apps_host}}  — login admin@egret.local / Admin12345! (self-signed certificate)"
+
+# The browser half of spec §10 for edit mode, against the release above. The login endpoint allows 5
+# attempts per 5 minutes and the file logs in ONCE; re-run no more than a few times in that window.
+e2e-kind-apps:
+    cd frontend && EGRET_E2E_APPS=1 EGRET_E2E_BASE_URL=https://{{apps_host}} EGRET_E2E_INSECURE_TLS=1 \
+      npx playwright test apps-edit-kind
+
+# Remove the verification release and its three namespaces (the live `egret` release is untouched).
+undeploy-kind-apps:
+    helm uninstall egret-verify -n egret-verify
+    kubectl delete namespace egret-verify egret-verify-apps egret-verify-engines --ignore-not-found
 
 # Opt-in data-plane e2e against the in-cluster kind deploy (egret.localtest.me).
 # One-time prereq: just k8s-up && just ingress-install && just coredns-rewrite
@@ -370,29 +430,12 @@ e2e-kind: deploy-kind-oidc
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       npx playwright test dataplane-kind
 
-# Opt-in notebook write-isolation e2e: an admin reserves the workspace's notebook
-# (scratch) warehouse + namespace, then a real per-user kernel round-trips a Daft
-# frame through that private Iceberg namespace and a raw out-of-namespace write is
-# denied by the catalog guard. NO Ranger — the notebook kernel stack suffices.
-e2e-kind-notebook-write: deploy-kind-oidc
-    ./deploy/k8s/wait-ready.sh
-    cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
-      npx playwright test notebook-write-isolation-kind
-
-# Opt-in notebook visualization e2e: a real per-user kernel renders a plotly figure
-# (application/vnd.plotly.v1+json → notebook-plotly + lazy plotly.js) and a matplotlib
-# figure (image/png → inline <img>). NO Ranger — the notebook kernel stack suffices.
-e2e-kind-notebook-viz: deploy-kind-oidc
-    ./deploy/k8s/wait-ready.sh
-    cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
-      npx playwright test notebook-viz-kind
-
 # Like deploy-kind-oidc but ALSO Ranger-on — provisioned Trino engines bind Ranger
 # (egret embeds the Ranger admin at /service). For the governance enforcement e2e.
 deploy-kind-governance: images-build
-    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev --name egret
+    kind load docker-image egret-backend:dev egret-frontend:dev egret-apps:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
-      --set oidc.enabled=true --set ingress.enabled=true --set ranger.enabled=true --set kernel.launcher=kubernetes
+      --set oidc.enabled=true --set ingress.enabled=true --set ranger.enabled=true
     just _kind-refresh
     @echo "egret (ranger-on): http://egret.localtest.me"
 
@@ -401,7 +444,7 @@ e2e-kind-governance: deploy-kind-governance
     ./deploy/k8s/wait-ready.sh
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       EGRET_E2E_BUCKET=e2e \
-      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000 \
       npx playwright test governance-kind
 
 # Opt-in auto-admin e2e: admin queries a governed engine with NO hand-seeded policy
@@ -410,28 +453,29 @@ e2e-kind-ranger-auto: deploy-kind-governance
     ./deploy/k8s/wait-ready.sh
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       EGRET_E2E_BUCKET=e2e \
-      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000 \
       npx playwright test ranger-auto-admin-kind
 
 # Opt-in per-user-enforcement e2e: drives two OIDC identities (admin-sso full vs
-# member-sso masked+row-filtered) against the same table/dataset/chart/dashboard/
-# notebook, proving per-user Ranger enforcement is consistent across all surfaces.
+# member-sso masked+row-filtered) against the same table via SQL Lab, dataset
+# preview, chart data, and dashboard tile, proving per-user Ranger enforcement
+# is consistent across all four surfaces.
 e2e-kind-per-user: deploy-kind-governance
     ./deploy/k8s/wait-ready.sh
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       EGRET_E2E_BUCKET=e2e \
-      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000 \
       npx playwright test per-user-enforcement-kind
 
 # Opt-in STS token-broker e2e: a break-glass local admin (NO Keycloak refresh token)
-# queries a governed StarRocks engine from a notebook purely off an egret-minted
+# queries a governed StarRocks engine via SQL Lab purely off an egret-minted
 # token, and admin-sso/member-sso Ranger enforcement (full vs masked) still holds
 # under that same egret-minted-token path.
 e2e-kind-sts: deploy-kind-governance
     ./deploy/k8s/wait-ready.sh
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       EGRET_E2E_BUCKET=e2e \
-      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000 \
       npx playwright test sts-broker-kind
 
 # Opt-in: default provision (no delegationMode) => both engines come up jwt-delegated.
@@ -439,7 +483,7 @@ e2e-kind-delegation-default: deploy-kind-governance
     ./deploy/k8s/wait-ready.sh
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       EGRET_E2E_BUCKET=e2e \
-      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000 \
       npx playwright test delegation-default-kind
 
 # Opt-in local user-management e2e: admin creates a local user, the user logs in and
@@ -450,7 +494,7 @@ e2e-kind-local-user: deploy-kind-governance
     ./deploy/k8s/wait-ready.sh
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       EGRET_E2E_BUCKET=e2e \
-      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000 \
       npx playwright test local-user-mgmt-kind
 
 # Opt-in back-channel logout e2e: Keycloak force-logout → egret session revoked.
@@ -467,7 +511,7 @@ e2e-kind-backchannel-logout: deploy-kind-governance
     sleep 3
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       EGRET_E2E_KC_ADMIN_URL=http://127.0.0.1:18080 \
-      EGRET_E2E_BUCKET=e2e EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      EGRET_E2E_BUCKET=e2e EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000 \
       npx playwright test backchannel-logout-kind
 
 # Uninstall the egret release (leaves the kind cluster + operators up).
@@ -477,7 +521,7 @@ kind-undeploy:
 # Install the kind-flavored ingress-nginx controller (needs a cluster created with the ingress-ready label + :80 map).
 ingress-install:
     kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
-    kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=180s
+    kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=600s
 
 # Make egret.localtest.me resolve cluster-wide to the ingress controller (so in-cluster
 # pods — incl. provisioned engines fetching the OIDC JWKS — reach it). Run AFTER ingress-install.
@@ -488,3 +532,7 @@ coredns-rewrite:
 # See deploy/prune-target.sh for the measurement that motivated it.
 prune-target:
     ./deploy/prune-target.sh
+
+# apps-image: unit/contract tests of egret_marimo (own venv, Python 3.12).
+apps-image-test:
+    cd apps-image && python3.12 -m venv .venv && .venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt -c constraints.txt -e . && .venv/bin/pytest -q

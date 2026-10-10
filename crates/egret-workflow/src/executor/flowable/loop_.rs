@@ -40,13 +40,12 @@
 //! terminal state is supplied by the caller rather than decided here, and every
 //! iteration after the first batch is neither spawned nor compared.
 //!
-//! # One shape of `values:` is a named gap, not a limitation of the harness
+//! # The third shape of `values:`, an ION file, is read by the WORKER
 //!
-//! Kestra documents three, and [`iteration_values`] implements two. An **ION
-//! file URI** is resolved by a different code path entirely, before
-//! `resolveValues` is reached, and egret has no path for it — see
-//! [`iteration_values`] for the two corpus entries that costs and for what
-//! closing it would require.
+//! Kestra documents three shapes and [`iteration_values`] implements two. The
+//! third, an ION file URI, was a named gap here until W9a Task 11
+//! (2026-10-03); it is closed in `worker::render`, before `advance()` is asked,
+//! so this module still performs no I/O -- see [`iteration_values`].
 
 use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx, TaskKind};
@@ -93,7 +92,7 @@ pub(crate) fn open(
     let Some(rendered) = state.runs[run].rendered.as_deref() else {
         return Step::Waiting;
     };
-    let Ok(values) = iteration_values(rendered) else {
+    let Ok(values) = resolve_loop_values(rendered) else {
         return Step::Commands(vec![Command::SetRunState {
             run,
             state: RunState::Failed,
@@ -107,17 +106,19 @@ pub(crate) fn open(
     }
 
     let limit = first_batch(concurrency_limit, values.len());
+    let spawn = |value| Command::SpawnExecution {
+        task,
+        value,
+        parent_run: run,
+    };
     let mut cmds = start(plan, run, task, now);
-    cmds.extend(
-        values
-            .into_iter()
-            .take(limit)
-            .map(|value| Command::SpawnExecution {
-                task,
-                value,
-                parent_run: run,
-            }),
-    );
+    match values {
+        LoopValues::Listed(values) => cmds.extend(values.into_iter().take(limit).map(spawn)),
+        // A file's values are not in the state (see [`rendered_from_file`]):
+        // each spawn carries an EMPTY value, and the worker's spawner reads
+        // the iteration's value by its index (`worker::spawn`).
+        LoopValues::FromFile { .. } => cmds.extend((0..limit).map(|_| spawn(String::new()))),
+    }
     Step::Commands(cmds)
 }
 
@@ -166,47 +167,56 @@ fn first_batch(concurrency_limit: u32, size: usize) -> usize {
 /// - **Anything else** — an error. Kestra's own message is "Unknown value type:
 ///   NUMBER" for a scalar, and unparseable text throws before that.
 ///
-/// # A NAMED GAP: Kestra has a THIRD `values:` shape and this does not
+/// # The THIRD shape, an ION file URI, is resolved before this is called
 ///
-/// **An ION file URI is not implemented, and it is a hole in `advance()` rather
-/// than in the harness.** `Loop.java:210-214` documents three shapes, and the
-/// third is "an ION file URI, each line will be deserialized as an ION object
-/// then coalesced to a string". It is not reached through `resolveValues` at
-/// all: `FlowableUtils.resolveLoopValuesUri` (`FlowableUtils.java:519`) renders
-/// `values` first, asks `URIFetcher.supports` whether the result is a URI, and
-/// if it is, `Loop.initFromUri` (`Loop.java:404`) reads the file and counts its
-/// lines **before** this function's arm would ever run.
+/// `Loop.java:210-214` documents three shapes; the third is "an ION file URI,
+/// each line will be deserialized as an ION object then coalesced to a
+/// string". Kestra does not reach `resolveValues` for it:
+/// `FlowableUtils.resolveLoopValuesUri` (`FlowableUtils.java:519`) renders
+/// `values`, asks `URIFetcher.supports`, and `Loop.initFromUri`
+/// (`Loop.java:404`) reads the file.
 ///
-/// So a rendered `kestra:///….ion` arrives here as a plain string, is not JSON,
-/// and takes the error arm. Two comparable entries are that shape —
-/// **`valids/loop-outputs-auto` and `valids/loop-values-from-uri`**, both
-/// writing `values: "{{ outputs.write.uri }}"` — and they would fail here even
-/// with a perfect render context. Task 6's first account attributed them wholly
-/// to the oracle's narrow `outputs`-less context, and that was half the reason.
+/// **Until W9a Task 11 this was a NAMED GAP here**: a rendered `kestra:///….ion`
+/// arrived as a plain string, was not JSON, and took the error arm, which
+/// failed `valids/loop-outputs-auto` and `valids/loop-values-from-uri` (both
+/// `values: "{{ outputs.write.uri }}"`) inside the executor whatever the
+/// render context held.
 ///
-/// **The test that asserted both causes no longer exists and has no
-/// successor**, which is why this correction names the gap instead of a name:
-/// `the_caller_can_render_every_expression_except_the_ones_named` was deleted
-/// with W3a's four-tier harness at W3b Task 5, along with the render tier it
-/// pinned. Rendering lives in `worker::render` and is tested there; nothing
-/// asserts these two entries' second cause today, and both remain baselined.
-/// (Corrected by W6 Task 3, the first package to open this directory.)
+/// **Since W9a Task 11 (2026-10-03) the worker reads the file** --
+/// `worker::render::render_expressions` and `Surface::loop_values_from_file`,
+/// in `settle`, BEFORE `advance()` is asked: the URI is resolved through the
+/// render snapshot (the one readability decision), the file is read whole as
+/// bytes, capped by `workflow.storage.max_read_bytes` (no loop-width limit
+/// exists to reuse), parsed one top-level Ion value at a time by
+/// `storage::ion` (text or binary Ion), each value coalesced as Kestra's
+/// `FlowableUtils.ionValueToString` (`storage::ion::loop_values`, Kestra's
+/// decimals, doubles and `java.time` forms), and what lands in
+/// [`TaskRun::rendered`](crate::executor::TaskRun::rendered) -- the caller's
+/// answer, as for an `If` -- is [`rendered_from_file`]'s form: the URI and
+/// how many records the file holds. The records themselves go to
+/// `workflow.loop_file_values` (fix round 1: `rendered` is read by every load
+/// of the execution, and a values file is up to 10 MiB). This function
+/// refuses that form; [`resolve_loop_values`] counts it, and [`open`] stays
+/// pure: it spawns the first batch with empty values, which the worker's
+/// spawner fills by index, every record an iteration.
 ///
-/// **What closing it would take**, so that whoever does it is not designing from
-/// scratch: `advance()` performs no I/O, so it cannot fetch the file. The caller
-/// would have to resolve `values` all the way to a JSON array — fetching the ION
-/// file and coalescing its lines — and put *that* in
-/// [`TaskRun::rendered`](crate::executor::TaskRun::rendered), which is already
-/// what `rendered` means for an `If`: the caller's answer, not the author's
-/// source. That is a decision about the W3b contract and it has not been taken.
-/// Neither of the two entries could bank on it alone, because this oracle has
-/// neither the `outputs` context nor the storage the file lives in.
+/// **No `distinct()` for a file** (the user's ruling of 2026-10-03; until
+/// then the array went down the array arm and a record the file held twice
+/// iterated once): Kestra's URI path, `readLoopValuesFromUri`, has none.
+/// One consequence remains, registered by W9a Task 11: the file is read whole
+/// before the first iteration, so a `null` record fails the loop before any
+/// iteration where Kestra fails it at the batch that reaches it.
+/// `valids/loop-values-from-uri` banks; `valids/loop-outputs-auto` iterates as
+/// Kestra does and is still baselined on the `Loop`'s own `outputs:` (STORE
+/// mode, `executions/{iteration}/{n}.ion`), which egret does not produce --
+/// out of W9a by the user's ruling of 2026-10-03 (spec §15).
 ///
 /// # `distinct()` is on the array arm and NOT on the object arm
 ///
 /// Kestra deduplicates the array's resolved values
 /// (`.stream().distinct().toList()`, twice — once in each of its two array
-/// arms) and does not deduplicate the object's. Both are reproduced. No corpus
+/// arms) and does not deduplicate the object's -- nor a file's (above). All
+/// three are reproduced. No corpus
 /// flow has a duplicate value, so
 /// `kestra_deduplicates_a_list_of_values_and_not_a_map_of_them` is what holds
 /// it rather than an entry.
@@ -231,6 +241,12 @@ fn first_batch(concurrency_limit: u32, size: usize) -> usize {
 /// at 128 and returns `Err` past it, which lands on the `FAILED` arm of
 /// [`open`] rather than on the stack.
 pub fn iteration_values(rendered: &str) -> Result<Vec<String>, String> {
+    if values_name_a_file(rendered) {
+        return Err(format!(
+            "values were read from a file ({}); they are read by index, not listed",
+            rendered.lines().next().unwrap_or(rendered)
+        ));
+    }
     let parsed: serde_json::Value =
         serde_json::from_str(rendered).map_err(|e| format!("values is not JSON: {e}"))?;
     match parsed {
@@ -281,4 +297,80 @@ pub fn iteration_values(rendered: &str) -> Result<Vec<String>, String> {
             }
         )),
     }
+}
+
+/// Kestra's `URIFetcher.supports(String)`, verbatim: a `Loop`'s rendered
+/// `values:` names a FILE when it STARTS with `kestra://`, `file://` or
+/// `nsfile://` (`URIFetcher.java:19,65-67`) -- nothing is trimmed, and
+/// anything else is one of the two JSON shapes.
+///
+/// The worker routes on it (`worker::render::render_expressions` reads the
+/// file), and [`resolve_loop_values`] on it again to know that `rendered` is
+/// [`rendered_from_file`]'s form: a rendered text that names a file never
+/// reaches `rendered` as itself, so the two cannot be confused.
+pub fn values_name_a_file(rendered: &str) -> bool {
+    ["kestra://", "file://", "nsfile://"]
+        .iter()
+        .any(|scheme| rendered.starts_with(scheme))
+}
+
+/// A `Loop` run's values, as its `rendered` holds them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopValues {
+    /// An inline `values:`: [`iteration_values`]'s list.
+    Listed(Vec<String>),
+    /// A file's (W9a Task 11, fix round 1): `count` records, NOT in the
+    /// state. The worker wrote them to `workflow.loop_file_values`, one row
+    /// per record in file order, when it rendered the run, and reads an
+    /// iteration's value from there by its index when it spawns it.
+    FromFile { count: usize },
+}
+
+impl LoopValues {
+    /// How many iterations the loop has.
+    pub fn len(&self) -> usize {
+        match self {
+            LoopValues::Listed(values) => values.len(),
+            LoopValues::FromFile { count } => *count,
+        }
+    }
+
+    /// Whether the loop has no iteration.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// A `Loop` run's `rendered`, resolved: [`iteration_values`] for an inline
+/// `values:`, the count for [`rendered_from_file`]'s form.
+pub fn resolve_loop_values(rendered: &str) -> Result<LoopValues, String> {
+    if !values_name_a_file(rendered) {
+        return iteration_values(rendered).map(LoopValues::Listed);
+    }
+    let Some((uri, count)) = rendered.rsplit_once('\n') else {
+        return Err(format!(
+            "values names the file {rendered}, which the worker has not read"
+        ));
+    };
+    count
+        .parse()
+        .map(|count| LoopValues::FromFile { count })
+        .map_err(|e| format!("the count of the values read from {uri} is not a number: {e}"))
+}
+
+/// What the worker stores in a `Loop` run's `rendered` once it has read the
+/// file `uri` names: the URI, a newline, and how many records it holds --
+/// **not the records** (W9a Task 11, fix round 1). `rendered` is read by
+/// every load of the execution and returned by the task-run API, and a
+/// values file is up to `workflow.storage.max_read_bytes`; the records go to
+/// `workflow.loop_file_values` (migration 0167) in the same transaction, and
+/// stay there unchanged for the run's life.
+///
+/// It starts with the URI, so [`values_name_a_file`] tells it apart from
+/// every inline `values:`; the count holds no newline, so the LAST newline
+/// is the separator, whatever the URI holds. Every record is an iteration,
+/// duplicates included: Kestra's URI path has no `distinct()` (the user's
+/// ruling of 2026-10-03).
+pub fn rendered_from_file(uri: &str, count: usize) -> String {
+    format!("{uri}\n{count}")
 }

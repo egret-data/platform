@@ -554,6 +554,10 @@ pub struct AllowFailure {
 // kestra: WorkingDirectory.java -- also `extends Sequential`; `cache`,
 // `namespaceFiles`, `inputFiles`, `outputFiles` are execution-plane concerns
 // dropped here (the same curation the brief applied to `Subflow`).
+// *(2026-10-05, W9b Task 5: `namespaceFiles` is KEPT, verbatim, and validated
+// at publish by `NamespaceFilesSpec::parse` (`spec::validate`); it is not run,
+// because egret does not run `WorkingDirectory` -- spec §7, the user's ruling.
+// `cache`, `inputFiles` and `outputFiles` are still dropped.)*
 //
 // `tasks` carries the same `@NotEmpty`-on-`AbstractBranch` (via `Sequential`)
 // debt `Sequential` documents above (Task 4 fix round 3).
@@ -562,6 +566,14 @@ pub struct AllowFailure {
 pub struct WorkingDirectory {
     #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub tasks: Vec<Task>,
+    /// Kept verbatim (W9b Task 5); validated at publish by
+    /// `storage::nsfiles::stage::NamespaceFilesSpec::parse`, never run.
+    #[serde(
+        default,
+        rename = "namespaceFiles",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub namespace_files: Option<serde_json::Value>,
 }
 
 // Used only for the `#[serde(default = "...")]` case: the key is *absent*,

@@ -7,6 +7,11 @@
 //!   `? :`, `isIn`) into syntax minijinja already understands, or into calls
 //!   to functions `env` registers. It has no context and evaluates nothing —
 //!   see `rewrite`'s module doc for why a regex cannot do this job.
+//! - `cmp_rewrite` is the rewrite's second pass (W9c Task 4 fix round 1): it
+//!   reads `rewrite`'s output with minijinja's own grammar and turns every
+//!   comparison into a call to `compare`, whose functions compare a
+//!   `BigDecimal`/`BigInteger` exactly and every other pair as minijinja
+//!   does.
 //! - `filters` is all 35 of Kestra's filters, registered onto that engine.
 //!   Two of its names (`indent`, `string`) override minijinja built-ins
 //!   rather than adding to them.
@@ -37,7 +42,10 @@
 //!   `render_str_with` that resolves it for `kestra.*` plugin tasks only. The
 //!   shared environment keeps refusing it (see `secrets`' module doc).
 
+mod cmp_rewrite;
+mod compare;
 pub mod env;
+pub mod files;
 mod filters;
 mod functions;
 mod ionfmt;
@@ -55,9 +63,25 @@ mod yamlfmt;
 // sentinel). `render_str` is the supported entry point -- see
 // `env::environment`'s doc for the measured table.
 pub use env::{
-    referenced_roots, render_str, render_str_guarded, GuardedRender, RenderContext, RenderError,
+    referenced_roots, render_str, render_str_guarded, render_typed, GuardedRender, RenderContext,
+    RenderError,
 };
+pub use files::{FileMeta, FileScope, FileUnavailable, RenderFiles};
+/// W9c final review F1: `storage::kv::value::coerce` writes a decimal under
+/// `kvType: STRING` as Java's `BigDecimal.toString()`.
+pub(crate) use filters::big_decimal_to_string;
+/// W9a: `storage::uri` builds Kestra's URIs from these two (`Slugify.of`, and
+/// the base62 of `IdUtils.from`).
+pub(crate) use filters::slugify_str;
+pub(crate) use functions::base62;
 /// The refusal every render but a `kestra.*` task's gives `secret()`, also
 /// the message of `spec::validate`'s publish-time refusal (W5b fix round 1).
 pub(crate) use functions::SECRET_REFUSAL;
+pub(crate) use ionfmt::{
+    write_ion_element, write_ion_float, write_ion_row, write_ion_string,
+    write_symbol as write_ion_symbol,
+};
+/// W9a Task 12: `core.storage.Split`'s `regexPattern` is a `java.util.regex`
+/// pattern, compiled by the same translation the `regex*` filters use.
+pub(crate) use javare::{compile as compile_java_regex, JavaRegex};
 pub use rewrite::{rewrite, RewriteError};

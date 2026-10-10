@@ -405,18 +405,6 @@ pub static PERMISSIONS: &[Permission] = &[
         Scope::Platform
     ),
     perm!(
-        "notebook:read",
-        "Notebooks",
-        "View notebooks",
-        Scope::Workspace
-    ),
-    perm!(
-        "notebook:write",
-        "Notebooks",
-        "Create and edit notebooks",
-        Scope::Workspace
-    ),
-    perm!(
         "app:read",
         "Apps",
         "Open published data apps",
@@ -426,6 +414,12 @@ pub static PERMISSIONS: &[Permission] = &[
         "app:write",
         "Apps",
         "Author, publish and restore data apps",
+        Scope::Workspace
+    ),
+    perm!(
+        "app:manage",
+        "Apps",
+        "Manage data-app shares",
         Scope::Workspace
     ),
     perm!(

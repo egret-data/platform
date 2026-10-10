@@ -17,8 +17,8 @@ export default defineConfig(({ mode }) => ({
     "process.env": "{}",
   },
   server: {
-    // `ws: true` proxies WebSocket upgrades (the notebook kernel `/channels` WS)
-    // to the backend; without it, notebooks can't connect a kernel in dev.
+    // `ws: true` proxies WebSocket upgrades (the Data Apps pod proxy and engine
+    // log streaming) to the backend; without it, those connections fail in dev.
     // `/catalog` (embedded Iceberg REST) + `/oauth` (mini-IdP) let engines and the
     // catalog e2e reach the backend through the dev server, same-origin.
     proxy: {

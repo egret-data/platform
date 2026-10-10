@@ -336,10 +336,8 @@ async fn update_user(
 /// `DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,
 /// not the last active platform admin (`guard_not_last_admin`, shared with the
 /// disable branch of `update_user`). Cleans up the user's sessions, group
-/// memberships, and platform role/permission grants, reassigns the target's
-/// notebooks to the deleting admin (`p.user_id`, since `owner_user_id` is NOT
-/// NULL), then removes the row itself, in one transaction
-/// (`UserRepo::hard_delete`).
+/// memberships, and platform role/permission grants, then removes the row
+/// itself, in one transaction (`UserRepo::hard_delete`).
 #[utoipa::path(
     delete,
     path = "/api/control-plane/users/{id}",
@@ -367,7 +365,7 @@ async fn delete_user(
         .await?
         .ok_or(CpError::NotFound)?;
     guard_not_last_admin(&st, &p, user_id).await?;
-    st.users.hard_delete(user_id, p.user_id).await?;
+    st.users.hard_delete(user_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1326,7 +1324,7 @@ struct WhoCanAccessQuery {
     path = "/api/control-plane/access/who-can-access",
     tag = "control-plane-access",
     params(
-        ("kind" = String, Query, description = "Object kind: chart | dashboard | dataset | notebook | saved_query | folder"),
+        ("kind" = String, Query, description = "Object kind: chart | dashboard | dataset | notebook | saved_query | folder | app"),
         ("id" = Uuid, Query, description = "Object UUID"),
     ),
     responses(

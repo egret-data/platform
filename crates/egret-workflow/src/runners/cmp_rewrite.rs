@@ -1,0 +1,995 @@
+//! The rewriter's second pass (W9c Task 4 fix round 1, the user's option A,
+//! 2026-10-08): every comparison in the minijinja source becomes a call to
+//! `super::compare`'s functions.
+//!
+//! # Why a second pass, and why it parses minijinja rather than Pebble
+//!
+//! [`super::rewrite`] reads KESTRA syntax and writes minijinja source; it
+//! leaves `==`, `!=`, `<`, `<=`, `>`, `>=` and `in` where they are (see its
+//! "Comparison operators" section). What minijinja then makes of that source
+//! is, by definition, what egret's comparisons have meant until now. So this
+//! pass reads the rewriter's OUTPUT with **minijinja's own grammar** --
+//! `compiler/parser.rs` of the pinned 2.24.0, mirrored function for function
+//! below -- and changes nothing but the comparisons:
+//!
+//! | minijinja source | becomes |
+//! |---|---|
+//! | `a > b` | `kestra_gt(a, b)` |
+//! | `a not in b` | `kestra_not_in(a, b)` |
+//! | `a < b < c` (minijinja chains it) | `kestra_compare_chain(a, 'lt', b, 'lt', c)` |
+//!
+//! Each operand is exactly the token range minijinja's parser gives that
+//! comparison, so precedence and associativity are minijinja's by
+//! construction: `not a == b` stays `not (a == b)`, `a ~ b == c` stays
+//! `(a ~ b) == c`, a filter or a test binds tighter, a parenthesised group is
+//! one operand. A call argument is a full expression, so no operand can bind
+//! differently inside the call than it did beside the operator.
+//!
+//! # What is preserved besides the value
+//!
+//! - **Every byte outside a comparison**, including all whitespace and every
+//!   newline: the call name goes right after the token that precedes the
+//!   comparison, and each operator is replaced by a `,` in place. minijinja
+//!   attributes an operator's error and a call's alike to the line of the
+//!   operand it compiled last, so keeping every newline where it was keeps
+//!   the line an error names (measured both ways by
+//!   `compare::tests::an_undefined_operand_raises_the_same_error_on_the_same_line`).
+//! - **What minijinja would refuse is left for minijinja to refuse.** A region
+//!   this pass cannot parse the way minijinja would (a syntax error, an
+//!   unbalanced bracket, a construct outside the mirrored grammar) is copied
+//!   through untouched, so it fails -- or answers -- exactly as it did. A
+//!   template this pass cannot even LEX is returned whole and unchanged.
+//! - `{% do %}` is left untouched on purpose: minijinja refuses a `do` whose
+//!   expression is not a call, and turning `{% do a > b %}` into a call
+//!   would turn that refusal into an answer.
+//! - **A `{% raw %}` block is copied through whole**, found the way
+//!   minijinja's lexer finds it (`skip_basic_tag`), whatever its whitespace
+//!   control. egret's own raw protection (`env::replace_raw_tags`, Kestra's
+//!   `RAW_PATTERN`) does not know the `+` form, so `{%+ raw %}` reaches this
+//!   pass; skipping just that block keeps every comparison around it
+//!   compiled (W9c Task 4 cleanup, N1).
+//!
+//! # The one refusal of its own: a `kestra_` assignment target
+//!
+//! The calls this pass and [`super::rewrite`] write are named `kestra_…`
+//! and are looked up like any other name, so a template variable of that
+//! name would stand in for the function: `{% set kestra_gt = 1 %}{{ a > b }}`
+//! would call `1`. The prefix is therefore reserved: a `set`, `for` or
+//! `with` that assigns a name starting with `kestra_` is refused at compile
+//! time with [`RewriteError::ReservedName`] (W9c Task 4 cleanup, N2). An
+//! attribute (`x.kestra_gt`) is not a variable and is not refused.
+//!
+//! The functions answer with minijinja's own `PartialEq`/`Ord` for every pair
+//! that is not a `BigNumber` against a number, after the same undefined checks
+//! in the same order (`super::compare`'s doc), so for those pairs the pass
+//! changes the spelling and not the answer.
+
+use super::compare::{CmpOp, CHAIN_FUNCTION};
+use super::rewrite::RewriteError;
+
+/// The deepest bracket nesting this pass follows. minijinja's parser refuses
+/// past 150 levels of `parse_expr`/`parse_primary` (`MAX_RECURSION`), and
+/// every bracket level is at least one of those, so anything deeper is a
+/// template minijinja refuses anyway -- it is copied through untouched for
+/// minijinja to refuse, and this pass's own recursion stays bounded.
+const MAX_GROUP_DEPTH: usize = 160;
+
+/// The prefix of every function name egret's rewriters write, which a
+/// template may therefore not assign (see the module doc).
+pub(crate) const RESERVED_PREFIX: &str = "kestra_";
+
+/// Compiles every comparison in `source` (the rewriter's output) to a call.
+///
+/// Its one refusal is a `kestra_` assignment target
+/// ([`RewriteError::ReservedName`]). Anything else this pass does not
+/// understand is left as it was.
+pub(crate) fn compile_comparisons(source: &str) -> Result<String, RewriteError> {
+    match compile(source) {
+        Some(Ok(out)) => Ok(out),
+        Some(Err(name)) => Err(RewriteError::ReservedName { name }),
+        None => Ok(source.to_string()),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Ident,
+    Str,
+    /// `int_like`: an `Int`/`Int128` token, which is what may follow a `.`.
+    Num {
+        int_like: bool,
+    },
+    Op(&'static str),
+    Open(u8),
+    Close(u8),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Tok {
+    kind: Kind,
+    start: usize,
+    end: usize,
+    /// For an `Open`, the index of its `Close`.
+    pair: usize,
+}
+
+/// The whole template: copy the data, rewrite each `{{ }}` and `{% %}`.
+/// `None` when the lexer cannot follow minijinja's; `Some(Err(name))` for a
+/// reserved assignment target in a region that parsed.
+fn compile(src: &str) -> Option<Result<String, String>> {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len() + src.len() / 4);
+    let mut i = 0usize;
+    loop {
+        // `find_start_marker_memchr`: the next `{` followed by `{`, `%` or `#`.
+        let Some(found) = (i..bytes.len().saturating_sub(1))
+            .find(|&k| bytes[k] == b'{' && matches!(bytes[k + 1], b'{' | b'%' | b'#'))
+        else {
+            out.push_str(&src[i..]);
+            return Some(Ok(out));
+        };
+        out.push_str(&src[i..found]);
+        let marker = bytes[found + 1];
+        // `Whitespace::from_byte`: a `-` or `+` right after the marker is part
+        // of it.
+        let mut content_start = found + 2;
+        if matches!(bytes.get(content_start), Some(b'-' | b'+')) {
+            content_start += 1;
+        }
+        if marker == b'#' {
+            // `handle_start_marker(Comment)`: up to the first `#}`.
+            let end = src[content_start..].find("#}")? + content_start + 2;
+            out.push_str(&src[found..end]);
+            i = end;
+            continue;
+        }
+        if marker == b'%' {
+            // `handle_start_marker(Block)`: a raw tag starts a block that
+            // minijinja reads as data up to its `endraw`, so it is copied
+            // through whole and the pass goes on after it.
+            if let Some(open) = skip_basic_tag(&src[content_start..], "raw", false) {
+                // No `endraw`: minijinja refuses ("unexpected end of raw
+                // block"), so the template is left for it to refuse.
+                let end = raw_block_end(src, content_start + open)?;
+                out.push_str(&src[found..end]);
+                i = end;
+                continue;
+            }
+        }
+        let close: &str = if marker == b'{' { "}}" } else { "%}" };
+        let (toks, content_end, region_end) = lex_region(src, content_start, close)?;
+        if marker == b'%'
+            && toks
+                .first()
+                .is_some_and(|t| t.kind == Kind::Ident && &src[t.start..t.end] == "raw")
+        {
+            // A `raw` that is not a raw tag (`{% raw x %}`): minijinja
+            // refuses it, so leave the whole template for it to refuse.
+            return None;
+        }
+        out.push_str(&src[found..content_start]);
+        let mut parser = Parser {
+            src,
+            toks: &toks,
+            pos: 0,
+            end: toks.len(),
+            depth: 0,
+            sites: Vec::new(),
+            reserved: None,
+        };
+        let parsed = if marker == b'{' {
+            parser.whole_expression()
+        } else {
+            parser.block()
+        };
+        if let (Ok(()), Some(at)) = (parsed, parser.reserved) {
+            return Some(Err(parser.text_at(at).to_string()));
+        }
+        match parsed {
+            Ok(()) => emit(
+                src,
+                &toks,
+                &parser.sites,
+                content_start,
+                content_end,
+                &mut out,
+            ),
+            Err(()) => out.push_str(&src[content_start..content_end]),
+        }
+        out.push_str(&src[content_end..region_end]);
+        i = region_end;
+    }
+}
+
+/// Lexes one `{{ }}`/`{% %}` region from `start` (just past the opening
+/// marker), as `tokenize_block_or_var` does. Returns the tokens, where the
+/// content ends (the closing marker, including a `-`/`+`, starts there) and
+/// where the region ends.
+fn lex_region(src: &str, start: usize, close: &str) -> Option<(Vec<Tok>, usize, usize)> {
+    let bytes = src.as_bytes();
+    let mut toks: Vec<Tok> = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
+    let mut balance: i64 = 0;
+    let mut p = start;
+    loop {
+        while p < bytes.len() && bytes[p].is_ascii_whitespace() {
+            p += 1;
+        }
+        if p >= bytes.len() {
+            return None;
+        }
+        let rest = &src[p..];
+        if balance == 0 {
+            if matches!(bytes[p], b'-' | b'+') && rest[1..].starts_with(close) {
+                return finish(toks, &stack, p, p + 1 + close.len());
+            }
+            if rest.starts_with(close) {
+                return finish(toks, &stack, p, p + close.len());
+            }
+        }
+        let two = rest.get(..2);
+        let op2 = match two {
+            Some("//") => Some("//"),
+            Some("**") => Some("**"),
+            Some("==") => Some("=="),
+            Some("!=") => Some("!="),
+            Some(">=") => Some(">="),
+            Some("<=") => Some("<="),
+            _ => None,
+        };
+        if let Some(op) = op2 {
+            toks.push(tok(Kind::Op(op), p, p + 2));
+            p += 2;
+            continue;
+        }
+        let c = bytes[p];
+        let op1 = match c {
+            b'+' => Some("+"),
+            b'-' => Some("-"),
+            b'*' => Some("*"),
+            b'/' => Some("/"),
+            b'%' => Some("%"),
+            b'.' => Some("."),
+            b',' => Some(","),
+            b':' => Some(":"),
+            b'~' => Some("~"),
+            b'|' => Some("|"),
+            b'=' => Some("="),
+            b'>' => Some(">"),
+            b'<' => Some("<"),
+            _ => None,
+        };
+        if let Some(op) = op1 {
+            toks.push(tok(Kind::Op(op), p, p + 1));
+            p += 1;
+            continue;
+        }
+        match c {
+            b'(' | b'[' | b'{' => {
+                balance += 1;
+                stack.push(toks.len());
+                toks.push(tok(Kind::Open(c), p, p + 1));
+                p += 1;
+            }
+            b')' | b']' | b'}' => {
+                balance -= 1;
+                let open = match c {
+                    b')' => b'(',
+                    b']' => b'[',
+                    _ => b'{',
+                };
+                let here = toks.len();
+                toks.push(tok(Kind::Close(c), p, p + 1));
+                // A mismatched or unmatched closer is a syntax error to
+                // minijinja, and it also moves minijinja's `paren_balance`
+                // off zero, so where the region ends is no longer something
+                // this pass can follow: leave the whole template alone.
+                match stack.pop() {
+                    Some(o) if toks[o].kind == Kind::Open(open) => toks[o].pair = here,
+                    _ => return None,
+                }
+                p += 1;
+            }
+            b'\'' | b'"' => {
+                // `eat_string`: up to the first unescaped delimiter.
+                let mut k = p + 1;
+                let mut escaped = false;
+                while k < bytes.len() {
+                    let b = bytes[k];
+                    if escaped {
+                        escaped = false;
+                    } else if b == b'\\' {
+                        escaped = true;
+                    } else if b == c {
+                        break;
+                    }
+                    k += 1;
+                }
+                if k >= bytes.len() {
+                    return None;
+                }
+                toks.push(tok(Kind::Str, p, k + 1));
+                p = k + 1;
+            }
+            b'0'..=b'9' => {
+                let (len, int_like) = number_len(&src[p..]);
+                toks.push(tok(Kind::Num { int_like }, p, p + len));
+                p += len;
+            }
+            _ => {
+                let len = ident_len(rest);
+                if len == 0 {
+                    return None;
+                }
+                toks.push(tok(Kind::Ident, p, p + len));
+                p += len;
+            }
+        }
+    }
+}
+
+/// minijinja's `skip_basic_tag` with `%}` as the block end: `name` after
+/// optional whitespace (and, with `skip_ws_control`, an optional leading
+/// `-`/`+`), then optional whitespace, an optional `-`/`+` and `%}`. The
+/// length it spans, or `None`.
+fn skip_basic_tag(s: &str, name: &str, skip_ws_control: bool) -> Option<usize> {
+    let mut ptr = s;
+    if skip_ws_control {
+        if let Some(rest) = ptr.strip_prefix(['-', '+']) {
+            ptr = rest;
+        }
+    }
+    ptr = ptr.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    ptr = ptr.strip_prefix(name)?;
+    ptr = ptr.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    if let Some(rest) = ptr.strip_prefix(['-', '+']) {
+        ptr = rest;
+    }
+    ptr.strip_prefix("%}").map(|rest| s.len() - rest.len())
+}
+
+/// `handle_raw_tag`: from just past a raw tag, the end of the first
+/// `{%` … `endraw` … `%}` tag, or `None` if there is none.
+fn raw_block_end(src: &str, body: usize) -> Option<usize> {
+    let mut ptr = body;
+    while let Some(block) = src[ptr..].find("{%") {
+        ptr += block + 2;
+        if let Some(len) = skip_basic_tag(&src[ptr..], "endraw", true) {
+            return Some(ptr + len);
+        }
+    }
+    None
+}
+
+fn finish(
+    toks: Vec<Tok>,
+    stack: &[usize],
+    content_end: usize,
+    region_end: usize,
+) -> Option<(Vec<Tok>, usize, usize)> {
+    // An unclosed opener never lets `balance` reach 0, so the closing marker
+    // is never seen and the lexer runs off the end (`None` above). Reaching
+    // here with one open would need a negative excursion first, which
+    // `lex_region` already refused.
+    if !stack.is_empty() {
+        return None;
+    }
+    Some((toks, content_end, region_end))
+}
+
+fn tok(kind: Kind, start: usize, end: usize) -> Tok {
+    Tok {
+        kind,
+        start,
+        end,
+        pair: usize::MAX,
+    }
+}
+
+/// `lex_identifier` without the `unicode` feature: `[A-Za-z_][A-Za-z0-9_]*`.
+fn ident_len(s: &str) -> usize {
+    s.bytes()
+        .enumerate()
+        .take_while(|&(idx, c)| {
+            c == b'_'
+                || if idx == 0 {
+                    c.is_ascii_alphabetic()
+                } else {
+                    c.is_ascii_alphanumeric()
+                }
+        })
+        .count()
+}
+
+/// `eat_number`'s length, and whether the token is an integer.
+fn number_len(s: &str) -> (usize, bool) {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        RadixInteger,
+        Integer,
+        Fraction,
+        Exponent,
+        ExponentSign,
+    }
+    let bytes = s.as_bytes();
+    let radix = match bytes.get(..2) {
+        Some(b"0b" | b"0B") => 2,
+        Some(b"0o" | b"0O") => 8,
+        Some(b"0x" | b"0X") => 16,
+        _ => 10,
+    };
+    let (offset, mut state) = if radix == 10 {
+        (0, State::Integer)
+    } else {
+        (2, State::RadixInteger)
+    };
+    let rest = &bytes[offset..];
+    let mut num_len = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+    for &c in &rest[num_len..] {
+        state = match (c, state) {
+            (b'.', State::Integer) => {
+                let is_exp = matches!(rest.get(num_len + 1), Some(b'e' | b'E'))
+                    && matches!(rest.get(num_len + 2), Some(b'+' | b'-' | b'0'..=b'9'));
+                if !is_exp && ident_len(&s[offset + num_len + 1..]) > 0 {
+                    break;
+                }
+                State::Fraction
+            }
+            (b'E' | b'e', State::Integer | State::Fraction) => State::Exponent,
+            (b'+' | b'-', State::Exponent) => State::ExponentSign,
+            (b'0'..=b'9', State::Exponent) => State::ExponentSign,
+            (b'0'..=b'9', state) => state,
+            (b'a'..=b'f' | b'A'..=b'F', State::RadixInteger) if radix == 16 => state,
+            (b'_', state) => state,
+            _ => break,
+        };
+        num_len += 1;
+    }
+    (
+        offset + num_len,
+        matches!(state, State::Integer | State::RadixInteger),
+    )
+}
+
+/// One comparison minijinja's parser would build, as token indices.
+#[derive(Debug)]
+struct Site {
+    /// The first token of the left operand.
+    start: usize,
+    /// The last token of the last operand.
+    end: usize,
+    /// Each operator: its first and last token (`not in` is two), and what
+    /// it is.
+    ops: Vec<(usize, usize, CmpOp)>,
+}
+
+struct Parser<'a> {
+    src: &'a str,
+    toks: &'a [Tok],
+    pos: usize,
+    end: usize,
+    depth: usize,
+    sites: Vec<Site>,
+    /// The first assignment target named with [`RESERVED_PREFIX`].
+    reserved: Option<usize>,
+}
+
+type Parsed = Result<(), ()>;
+
+impl Parser<'_> {
+    fn kind(&self) -> Option<Kind> {
+        (self.pos < self.end).then(|| self.toks[self.pos].kind)
+    }
+
+    fn kind_at(&self, at: usize) -> Option<Kind> {
+        (at < self.end).then(|| self.toks[at].kind)
+    }
+
+    fn text_at(&self, at: usize) -> &str {
+        let t = self.toks[at];
+        &self.src[t.start..t.end]
+    }
+
+    fn is_ident(&self, word: &str) -> bool {
+        self.kind() == Some(Kind::Ident) && self.text_at(self.pos) == word
+    }
+
+    fn is_op(&self, op: &str) -> bool {
+        matches!(self.kind(), Some(Kind::Op(o)) if o == op)
+    }
+
+    fn at_end(&self) -> bool {
+        self.pos >= self.end
+    }
+
+    /// Records the first variable in tokens `from..to` (an assignment
+    /// target) that is named with [`RESERVED_PREFIX`]. An attribute after a
+    /// `.` is not a variable.
+    fn check_targets(&mut self, from: usize, to: usize) {
+        for at in from..to.min(self.end) {
+            if self.reserved.is_none()
+                && self.toks[at].kind == Kind::Ident
+                && self.text_at(at).starts_with(RESERVED_PREFIX)
+                && !(at > from && self.toks[at - 1].kind == Kind::Op("."))
+            {
+                self.reserved = Some(at);
+            }
+        }
+    }
+
+    fn expect_end(&self) -> Parsed {
+        if self.at_end() {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    // ----- statements (`parse_stmt_unprotected`) -----
+
+    /// A `{{ }}` region: one expression and nothing after it.
+    fn whole_expression(&mut self) -> Parsed {
+        self.ifexpr()?;
+        self.expect_end()
+    }
+
+    /// A `{% %}` region, for the statements the pinned feature set parses.
+    fn block(&mut self) -> Parsed {
+        if self.kind() != Some(Kind::Ident) {
+            return Err(());
+        }
+        let keyword = self.text_at(self.pos).to_string();
+        self.pos += 1;
+        match keyword.as_str() {
+            // `parse_if_cond`: `parse_expr_noif`, then the end of the block.
+            "if" | "elif" => {
+                self.or()?;
+                self.expect_end()
+            }
+            // `parse_for_stmt`.
+            "for" => {
+                let target_end = self.find_top_level(|p, at| {
+                    p.kind_at(at) == Some(Kind::Ident) && p.text_at(at) == "in"
+                })?;
+                self.check_targets(self.pos, target_end);
+                self.pos = target_end + 1;
+                self.or()?;
+                if self.is_ident("if") {
+                    self.pos += 1;
+                    self.ifexpr()?;
+                }
+                if self.is_ident("recursive") {
+                    self.pos += 1;
+                }
+                self.expect_end()
+            }
+            // `parse_set`.
+            "set" => match self.find_top_level(|p, at| p.kind_at(at) == Some(Kind::Op("="))) {
+                Ok(eq) => {
+                    self.check_targets(self.pos, eq);
+                    self.pos = eq + 1;
+                    self.ifexpr()?;
+                    while self.is_op(",") {
+                        self.pos += 1;
+                        if self.at_end() {
+                            break;
+                        }
+                        self.ifexpr()?;
+                    }
+                    self.expect_end()
+                }
+                Err(()) => {
+                    // A set block: the target, then an optional filter chain.
+                    match self.find_top_level(|p, at| p.kind_at(at) == Some(Kind::Op("|"))) {
+                        Ok(pipe) => {
+                            self.check_targets(self.pos, pipe);
+                            self.pos = pipe + 1;
+                            self.filter_chain()
+                        }
+                        Err(()) => {
+                            self.check_targets(self.pos, self.end);
+                            Ok(())
+                        }
+                    }
+                }
+            },
+            // `parse_with_block`.
+            "with" => {
+                let mut first = true;
+                while !self.at_end() {
+                    if !first {
+                        if !self.is_op(",") {
+                            return Err(());
+                        }
+                        self.pos += 1;
+                    }
+                    first = false;
+                    let target = self.pos;
+                    match self.kind() {
+                        Some(Kind::Open(b'(')) => self.pos = self.toks[self.pos].pair + 1,
+                        Some(Kind::Ident) => self.pos += 1,
+                        _ => return Err(()),
+                    }
+                    self.check_targets(target, self.pos);
+                    if !self.is_op("=") {
+                        return Err(());
+                    }
+                    self.pos += 1;
+                    self.ifexpr()?;
+                }
+                Ok(())
+            }
+            "autoescape" => self.whole_expression(),
+            "filter" => self.filter_chain(),
+            "else" | "endif" | "endfor" | "endwith" | "endset" | "endautoescape" | "endfilter" => {
+                self.expect_end()
+            }
+            // `do` (see the module doc) and everything minijinja refuses.
+            _ => Err(()),
+        }
+    }
+
+    /// The first token at this bracket level matching `pred`, from `pos`.
+    fn find_top_level(&self, pred: impl Fn(&Self, usize) -> bool) -> Result<usize, ()> {
+        let mut at = self.pos;
+        while at < self.end {
+            if pred(self, at) {
+                return Ok(at);
+            }
+            at = match self.toks[at].kind {
+                Kind::Open(_) => self.toks[at].pair + 1,
+                _ => at + 1,
+            };
+        }
+        Err(())
+    }
+
+    /// `parse_filter_chain`, positioned after a leading `|` if there was one.
+    fn filter_chain(&mut self) -> Parsed {
+        let mut first = true;
+        while !self.at_end() {
+            if !first {
+                if !self.is_op("|") {
+                    return Err(());
+                }
+                self.pos += 1;
+            }
+            first = false;
+            self.filter_test_name()?;
+            if self.kind() == Some(Kind::Open(b'(')) {
+                self.group()?;
+            }
+        }
+        Ok(())
+    }
+
+    // ----- expressions (`parse_ifexpr` down to `parse_primary`) -----
+
+    /// `parse_ifexpr`, iteratively: `a if b else c if d else e` recursed
+    /// on its `else` branch, and that recursion consumed every following
+    /// `if` -- so restarting the loop is the same parse.
+    fn ifexpr(&mut self) -> Parsed {
+        'expr: loop {
+            self.or()?;
+            while self.is_ident("if") {
+                self.pos += 1;
+                self.or()?;
+                if self.is_ident("else") {
+                    self.pos += 1;
+                    continue 'expr;
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    fn or(&mut self) -> Parsed {
+        self.and()?;
+        while self.is_ident("or") {
+            self.pos += 1;
+            self.and()?;
+        }
+        Ok(())
+    }
+
+    fn and(&mut self) -> Parsed {
+        self.not()?;
+        while self.is_ident("and") {
+            self.pos += 1;
+            self.not()?;
+        }
+        Ok(())
+    }
+
+    /// `unaryop!(parse_not, parse_compare, not)`, iteratively.
+    fn not(&mut self) -> Parsed {
+        while self.is_ident("not") {
+            self.pos += 1;
+        }
+        self.compare()
+    }
+
+    /// `parse_compare`: a `math1`, then any number of operator + `math1`.
+    fn compare(&mut self) -> Parsed {
+        let start = self.pos;
+        self.math1()?;
+        let mut ops = Vec::new();
+        loop {
+            let op_start = self.pos;
+            let op = match self.kind() {
+                Some(Kind::Op("==")) => CmpOp::Eq,
+                Some(Kind::Op("!=")) => CmpOp::Ne,
+                Some(Kind::Op("<")) => CmpOp::Lt,
+                Some(Kind::Op("<=")) => CmpOp::Le,
+                Some(Kind::Op(">")) => CmpOp::Gt,
+                Some(Kind::Op(">=")) => CmpOp::Ge,
+                Some(Kind::Ident) if self.text_at(self.pos) == "in" => CmpOp::In,
+                Some(Kind::Ident) if self.text_at(self.pos) == "not" => {
+                    self.pos += 1;
+                    if !self.is_ident("in") {
+                        return Err(());
+                    }
+                    CmpOp::NotIn
+                }
+                _ => break,
+            };
+            let op_end = self.pos;
+            self.pos += 1;
+            ops.push((op_start, op_end, op));
+            self.math1()?;
+        }
+        if !ops.is_empty() {
+            self.sites.push(Site {
+                start,
+                end: self.pos - 1,
+                ops,
+            });
+        }
+        Ok(())
+    }
+
+    fn math1(&mut self) -> Parsed {
+        self.concat()?;
+        while self.is_op("+") || self.is_op("-") {
+            self.pos += 1;
+            self.concat()?;
+        }
+        Ok(())
+    }
+
+    fn concat(&mut self) -> Parsed {
+        self.math2()?;
+        while self.is_op("~") {
+            self.pos += 1;
+            self.math2()?;
+        }
+        Ok(())
+    }
+
+    fn math2(&mut self) -> Parsed {
+        self.pow()?;
+        while self.is_op("*") || self.is_op("/") || self.is_op("//") || self.is_op("%") {
+            self.pos += 1;
+            self.pow()?;
+        }
+        Ok(())
+    }
+
+    fn pow(&mut self) -> Parsed {
+        self.unary()?;
+        while self.is_op("**") {
+            self.pos += 1;
+            self.unary()?;
+        }
+        Ok(())
+    }
+
+    /// `parse_unary`: unary minus, postfix, then filters and tests.
+    fn unary(&mut self) -> Parsed {
+        self.unary_only()?;
+        self.postfix()?;
+        self.filter_expr()
+    }
+
+    /// `unaryop!(parse_unary_only, parse_primary, -)`, iteratively.
+    fn unary_only(&mut self) -> Parsed {
+        while self.is_op("-") {
+            self.pos += 1;
+        }
+        self.primary()
+    }
+
+    fn primary(&mut self) -> Parsed {
+        match self.kind() {
+            Some(Kind::Ident) | Some(Kind::Num { .. }) => {
+                self.pos += 1;
+                Ok(())
+            }
+            // Adjacent string literals are one constant.
+            Some(Kind::Str) => {
+                while self.kind() == Some(Kind::Str) {
+                    self.pos += 1;
+                }
+                Ok(())
+            }
+            Some(Kind::Open(_)) => self.group(),
+            _ => Err(()),
+        }
+    }
+
+    fn postfix(&mut self) -> Parsed {
+        loop {
+            match self.kind() {
+                Some(Kind::Op(".")) => {
+                    self.pos += 1;
+                    match self.kind() {
+                        Some(Kind::Ident) | Some(Kind::Num { int_like: true }) => self.pos += 1,
+                        _ => return Err(()),
+                    }
+                }
+                Some(Kind::Open(b'[')) | Some(Kind::Open(b'(')) => self.group()?,
+                _ => return Ok(()),
+            }
+        }
+    }
+
+    /// `parse_filter_test_name`: `name(.name)*`.
+    fn filter_test_name(&mut self) -> Parsed {
+        if self.kind() != Some(Kind::Ident) {
+            return Err(());
+        }
+        self.pos += 1;
+        while self.is_op(".") {
+            self.pos += 1;
+            if self.kind() != Some(Kind::Ident) {
+                return Err(());
+            }
+            self.pos += 1;
+        }
+        Ok(())
+    }
+
+    /// `parse_filter_expr`.
+    fn filter_expr(&mut self) -> Parsed {
+        loop {
+            if self.is_op("|") {
+                self.pos += 1;
+                self.filter_test_name()?;
+                if self.kind() == Some(Kind::Open(b'(')) {
+                    self.group()?;
+                }
+            } else if self.is_ident("is") {
+                self.pos += 1;
+                if self.is_ident("not") {
+                    self.pos += 1;
+                }
+                self.filter_test_name()?;
+                match self.kind() {
+                    Some(Kind::Open(b'(')) => self.group()?,
+                    // The one-argument form: an identifier, a literal, a
+                    // sign, a list or a map -- but not `and`/`or`/`else`/`is`.
+                    Some(Kind::Ident)
+                        if matches!(self.text_at(self.pos), "and" | "or" | "else" | "is") => {}
+                    Some(
+                        Kind::Ident
+                        | Kind::Str
+                        | Kind::Num { .. }
+                        | Kind::Op("+")
+                        | Kind::Op("-")
+                        | Kind::Open(b'[')
+                        | Kind::Open(b'{'),
+                    ) => {
+                        self.unary_only()?;
+                        self.postfix()?;
+                    }
+                    _ => {}
+                }
+            } else {
+                return Ok(());
+            }
+        }
+    }
+
+    /// A bracketed group: a call's arguments, a list, a map, a tuple, a
+    /// subscript or a slice. All of them are expressions separated by `,`
+    /// and `:`, each optionally a keyword argument (`name=`) or a splat
+    /// (`*`, `**`), so one reading serves all six.
+    fn group(&mut self) -> Parsed {
+        let open = self.pos;
+        let close = self.toks[open].pair;
+        if self.depth >= MAX_GROUP_DEPTH {
+            return Err(());
+        }
+        let (saved_end, saved_depth) = (self.end, self.depth);
+        self.depth += 1;
+        self.pos = open + 1;
+        self.end = close;
+        let result = self.group_contents();
+        self.end = saved_end;
+        self.depth = saved_depth;
+        self.pos = close + 1;
+        result
+    }
+
+    fn group_contents(&mut self) -> Parsed {
+        while !self.at_end() {
+            if self.is_op("**") || self.is_op("*") {
+                self.pos += 1;
+            } else if self.kind() == Some(Kind::Ident)
+                && self.kind_at(self.pos + 1) == Some(Kind::Op("="))
+            {
+                self.pos += 2;
+            }
+            loop {
+                if self.at_end() || self.is_op(",") {
+                    break;
+                }
+                if self.is_op(":") {
+                    self.pos += 1;
+                    continue;
+                }
+                self.ifexpr()?;
+                if !(self.at_end() || self.is_op(",") || self.is_op(":")) {
+                    return Err(());
+                }
+            }
+            if self.is_op(",") {
+                self.pos += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Writes one region's content with its comparisons compiled.
+fn emit(
+    src: &str,
+    toks: &[Tok],
+    sites: &[Site],
+    content_start: usize,
+    content_end: usize,
+    out: &mut String,
+) {
+    let n = toks.len();
+    let mut prefix: Vec<Option<String>> = vec![None; n];
+    let mut replacement: Vec<Option<String>> = vec![None; n];
+    let mut suffixes: Vec<usize> = vec![0; n];
+    for site in sites {
+        let chained = site.ops.len() > 1;
+        let name = if chained {
+            CHAIN_FUNCTION
+        } else {
+            site.ops[0].2.function()
+        };
+        // A leading space: the token before may be an identifier (`if`,
+        // `and`, `not`), and gluing would make one name of the two.
+        prefix[site.start] = Some(format!(" {name}("));
+        for &(first, last, op) in &site.ops {
+            replacement[first] = Some(if chained {
+                format!(", '{}',", op.word())
+            } else {
+                ",".to_string()
+            });
+            if last != first {
+                replacement[last] = Some(String::new());
+            }
+        }
+        suffixes[site.end] += 1;
+    }
+    let mut cursor = content_start;
+    for (i, t) in toks.iter().enumerate() {
+        if let Some(p) = &prefix[i] {
+            out.push_str(p);
+        }
+        out.push_str(&src[cursor..t.start]);
+        match &replacement[i] {
+            Some(r) => out.push_str(r),
+            None => out.push_str(&src[t.start..t.end]),
+        }
+        for _ in 0..suffixes[i] {
+            out.push(')');
+        }
+        cursor = t.end;
+    }
+    out.push_str(&src[cursor..content_end]);
+}

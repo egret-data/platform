@@ -191,37 +191,43 @@ deps:
   mailpit:
     enabled: true
     image: axllent/mailpit:latest
-  # docker.io/minio/minio and docker.io/minio/mc no longer exist (MinIO moved
-  # its images to quay.io); `:latest` 404s and wedges `helm upgrade --wait`
-  # forever waiting on a deployment that can never pull. Pinned to specific
-  # quay.io releases, each verified with `docker pull` + a live run before
-  # being committed here.
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772
-    mcImage: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+  # The bundled S3 server is RustFS. It replaced MinIO when MinIO withdrew its
+  # public images (docker.io/minio/* and quay.io/minio/* answer 401) and a fresh
+  # install wedged on a deployment that could never pull. egret needs STS
+  # AssumeRole from this server (the embedded catalog vends credentials through
+  # it), which is what ruled the other candidates out.
+  rustfs:
+    image: rustfs/rustfs:1.0.1
+    # Any image with a shell and the `aws` CLI: it creates the bucket once.
+    clientImage: amazon/aws-cli:2.37.9
     rootUser: egret
     rootPassword: egretsecret
     bucket: warehouse
 storage:
   region: us-east-1
   pathStyle: true
-kernel:
-  launcher: subprocess        # "kubernetes" enables per-user kernel pods
-  namespace: egret-notebooks
-  image: egret-kernel:dev
-  imagePullPolicy: IfNotPresent
-  pullSecret: ""
-  # Break-glass ONLY: disable engine-TLS verification in the kernel entirely
-  # (accepts any cert — MITM-unsafe). Leave false: the kernel securely PINS the
-  # engine's self-signed cert (delivered via the engine-token endpoint), so
-  # self-signed engines work without disabling verification.
-  engineTlsInsecure: false
-  resources:
-    cpuRequest: "250m"
-    memRequest: "512Mi"
-    cpuLimit: "1000m"
-    memLimit: "2Gi"
-  networkPolicy:
-    enabled: true
 # master/secret keys: generated-and-persisted by the chart (see secret.yaml); do
 # NOT put real secrets here.
+
+# Data Apps (marimo): the apps host, and the pods that run an author's edit session.
+apps:
+  # Where marimo is served to the browser: a SIBLING subdomain of ingress.host (`apps.<host>`),
+  # never another port on the same host (cookies are not isolated by port). Empty = the apps
+  # iframe is off and the apps listener is not started.
+  origin: ""
+  # egret's own browser-facing origin: the only one allowed to frame the apps origin.
+  egretOrigin: ""
+  pod:
+    launcher: none            # "kubernetes" starts one hardened Pod per author per workspace
+    namespace: egret-apps     # chart-managed; Pod Security `restricted` is enforced there
+    image: egret-apps:dev
+    imagePullPolicy: IfNotPresent
+    resources: { cpuRequest: 250m, memRequest: 512Mi, cpuLimit: 1000m, memLimit: 2Gi }
+    readyTimeoutSecs: 60
+    idleSecs: 1800            # an edit pod unused this long is stopped
+    networkPolicy: { enabled: true }
+    # Run pods (D24: one per viewer per published version, never shared).
+    run:
+      idleSecs: 300           # shorter than idleSecs above: an abandoned tab costs less than an author's work
+      sessionCap: 8           # that one viewer's own open tabs, not concurrent strangers (D24)
+      kernelMode: thread      # "thread" (default, safe because D24 makes one pod one viewer) or "forced_ipc"

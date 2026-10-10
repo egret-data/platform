@@ -1,5 +1,385 @@
 {
   "classes" : {
+    "io.kestra.plugin.jdbc.mysql.Batch" : {
+      "outputs" : [ "rowCount", "updatedCount" ],
+      "properties" : {
+        "allowFailure" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "reliability",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "allowWarning" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "reliability",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "assets" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "$ref" : "#/$defs/io.kestra.core.models.assets.AssetsDeclaration"
+          }
+        },
+        "chunk" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "main",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "main",
+              "default" : "1000",
+              "type" : "integer"
+            }, {
+              "$dynamic" : true,
+              "$group" : "main",
+              "default" : "1000",
+              "type" : "string"
+            } ],
+            "default" : "1000"
+          }
+        },
+        "columns" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "processing",
+            "items" : {
+              "$dynamic" : true,
+              "$group" : "processing",
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "connectionPoolSize" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "10",
+              "type" : "integer"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "10",
+              "type" : "string"
+            } ],
+            "default" : "10"
+          }
+        },
+        "connectionPooling" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "true",
+              "type" : "boolean"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "true",
+              "type" : "string"
+            } ],
+            "default" : "true"
+          }
+        },
+        "description" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "disabled" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "execution",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "from" : {
+          "required" : true,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "main",
+            "$internalStorageURI" : true,
+            "type" : "string"
+          }
+        },
+        "id" : {
+          "required" : true,
+          "schema" : {
+            "maxLength" : 256,
+            "minLength" : 1,
+            "pattern" : "^[a-zA-Z0-9][a-zA-Z0-9_-]*",
+            "type" : "string"
+          }
+        },
+        "inputHandling" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "default" : "AUTO",
+            "enum" : [ "AUTO", "STREAM", "LOCAL" ],
+            "type" : "string"
+          }
+        },
+        "localBufferMaxBytes" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "104857600",
+              "type" : "integer"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "104857600",
+              "type" : "string"
+            } ],
+            "default" : "104857600"
+          }
+        },
+        "logLevel" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "logging",
+            "enum" : [ "ERROR", "WARN", "INFO", "DEBUG", "TRACE" ],
+            "type" : "string"
+          }
+        },
+        "logToFile" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "logging",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "maxRetries" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "execution",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "execution",
+              "default" : "3",
+              "type" : "integer"
+            }, {
+              "$dynamic" : true,
+              "$group" : "execution",
+              "default" : "3",
+              "type" : "string"
+            } ],
+            "default" : "3"
+          }
+        },
+        "password" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "policyRefs" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "items" : {
+              "$dynamic" : false,
+              "$group" : "advanced",
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "resumeOnRetry" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "true",
+              "type" : "boolean"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "true",
+              "type" : "string"
+            } ],
+            "default" : "true"
+          }
+        },
+        "retry" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "reliability",
+            "anyOf" : [ {
+              "$dynamic" : false,
+              "$group" : "reliability",
+              "$ref" : "#/$defs/io.kestra.core.models.tasks.retrys.Constant"
+            }, {
+              "$dynamic" : false,
+              "$group" : "reliability",
+              "$ref" : "#/$defs/io.kestra.core.models.tasks.retrys.Exponential"
+            }, {
+              "$dynamic" : false,
+              "$group" : "reliability",
+              "$ref" : "#/$defs/io.kestra.core.models.tasks.retrys.Random"
+            } ]
+          }
+        },
+        "retryBackoff" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "PT1S",
+              "format" : "duration",
+              "type" : "string"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "PT1S",
+              "type" : "string"
+            } ],
+            "default" : "PT1S"
+          }
+        },
+        "retryScope" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "default" : "INPUT",
+            "enum" : [ "NONE", "INPUT", "ALL" ],
+            "type" : "string"
+          }
+        },
+        "runIf" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "reliability",
+            "default" : "true",
+            "type" : "string"
+          }
+        },
+        "sql" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "processing",
+            "$language" : "sql",
+            "type" : "string"
+          }
+        },
+        "table" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "taskCache" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "$ref" : "#/$defs/io.kestra.core.models.tasks.Cache"
+          }
+        },
+        "timeZoneId" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "timeout" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "execution",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "execution",
+              "format" : "duration",
+              "type" : "string"
+            }, {
+              "$dynamic" : true,
+              "$group" : "execution",
+              "type" : "string"
+            } ]
+          }
+        },
+        "type" : {
+          "required" : true,
+          "schema" : {
+            "const" : "io.kestra.plugin.jdbc.mysql.Batch"
+          }
+        },
+        "url" : {
+          "required" : true,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "username" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "version" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "workerSelector" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "execution",
+            "$ref" : "#/$defs/io.kestra.core.models.tasks.WorkerSelector"
+          }
+        }
+      }
+    },
     "io.kestra.plugin.jdbc.mysql.Queries" : {
       "outputs" : [ "outputs" ],
       "properties" : {
@@ -646,6 +1026,1340 @@
           "required" : true,
           "schema" : {
             "const" : "io.kestra.plugin.jdbc.mysql.Query"
+          }
+        },
+        "url" : {
+          "required" : true,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "username" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "version" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "workerSelector" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "execution",
+            "$ref" : "#/$defs/io.kestra.core.models.tasks.WorkerSelector"
+          }
+        }
+      }
+    },
+    "io.kestra.plugin.jdbc.postgresql.Batch" : {
+      "outputs" : [ "rowCount", "updatedCount" ],
+      "properties" : {
+        "allowFailure" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "reliability",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "allowWarning" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "reliability",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "assets" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "$ref" : "#/$defs/io.kestra.core.models.assets.AssetsDeclaration"
+          }
+        },
+        "chunk" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "main",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "main",
+              "default" : "1000",
+              "type" : "integer"
+            }, {
+              "$dynamic" : true,
+              "$group" : "main",
+              "default" : "1000",
+              "type" : "string"
+            } ],
+            "default" : "1000"
+          }
+        },
+        "columns" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "processing",
+            "items" : {
+              "$dynamic" : true,
+              "$group" : "processing",
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "connectionPoolSize" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "10",
+              "type" : "integer"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "10",
+              "type" : "string"
+            } ],
+            "default" : "10"
+          }
+        },
+        "connectionPooling" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "true",
+              "type" : "boolean"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "true",
+              "type" : "string"
+            } ],
+            "default" : "true"
+          }
+        },
+        "description" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "disabled" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "execution",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "from" : {
+          "required" : true,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "main",
+            "$internalStorageURI" : true,
+            "type" : "string"
+          }
+        },
+        "id" : {
+          "required" : true,
+          "schema" : {
+            "maxLength" : 256,
+            "minLength" : 1,
+            "pattern" : "^[a-zA-Z0-9][a-zA-Z0-9_-]*",
+            "type" : "string"
+          }
+        },
+        "inputHandling" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "default" : "AUTO",
+            "enum" : [ "AUTO", "STREAM", "LOCAL" ],
+            "type" : "string"
+          }
+        },
+        "localBufferMaxBytes" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "104857600",
+              "type" : "integer"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "104857600",
+              "type" : "string"
+            } ],
+            "default" : "104857600"
+          }
+        },
+        "logLevel" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "logging",
+            "enum" : [ "ERROR", "WARN", "INFO", "DEBUG", "TRACE" ],
+            "type" : "string"
+          }
+        },
+        "logToFile" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "logging",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "maxRetries" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "execution",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "execution",
+              "default" : "3",
+              "type" : "integer"
+            }, {
+              "$dynamic" : true,
+              "$group" : "execution",
+              "default" : "3",
+              "type" : "string"
+            } ],
+            "default" : "3"
+          }
+        },
+        "password" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "policyRefs" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "items" : {
+              "$dynamic" : false,
+              "$group" : "advanced",
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "resumeOnRetry" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "true",
+              "type" : "boolean"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "true",
+              "type" : "string"
+            } ],
+            "default" : "true"
+          }
+        },
+        "retry" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "reliability",
+            "anyOf" : [ {
+              "$dynamic" : false,
+              "$group" : "reliability",
+              "$ref" : "#/$defs/io.kestra.core.models.tasks.retrys.Constant"
+            }, {
+              "$dynamic" : false,
+              "$group" : "reliability",
+              "$ref" : "#/$defs/io.kestra.core.models.tasks.retrys.Exponential"
+            }, {
+              "$dynamic" : false,
+              "$group" : "reliability",
+              "$ref" : "#/$defs/io.kestra.core.models.tasks.retrys.Random"
+            } ]
+          }
+        },
+        "retryBackoff" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "PT1S",
+              "format" : "duration",
+              "type" : "string"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "PT1S",
+              "type" : "string"
+            } ],
+            "default" : "PT1S"
+          }
+        },
+        "retryScope" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "default" : "INPUT",
+            "enum" : [ "NONE", "INPUT", "ALL" ],
+            "type" : "string"
+          }
+        },
+        "runIf" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "reliability",
+            "default" : "true",
+            "type" : "string"
+          }
+        },
+        "sql" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "processing",
+            "$language" : "sql",
+            "type" : "string"
+          }
+        },
+        "ssl" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "false",
+              "type" : "boolean"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "default" : "false",
+              "type" : "string"
+            } ],
+            "default" : "false"
+          }
+        },
+        "sslCert" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "sslKey" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "sslKeyPassword" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "$secret" : true,
+            "type" : "string"
+          }
+        },
+        "sslMode" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "enum" : [ "DISABLE", "ALLOW", "PREFER", "REQUIRE", "VERIFY_CA", "VERIFY_FULL" ],
+            "type" : "string"
+          }
+        },
+        "sslRootCert" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "table" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "taskCache" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "$ref" : "#/$defs/io.kestra.core.models.tasks.Cache"
+          }
+        },
+        "timeZoneId" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "timeout" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "execution",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "execution",
+              "format" : "duration",
+              "type" : "string"
+            }, {
+              "$dynamic" : true,
+              "$group" : "execution",
+              "type" : "string"
+            } ]
+          }
+        },
+        "type" : {
+          "required" : true,
+          "schema" : {
+            "const" : "io.kestra.plugin.jdbc.postgresql.Batch"
+          }
+        },
+        "url" : {
+          "required" : true,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "username" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "version" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "workerSelector" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "execution",
+            "$ref" : "#/$defs/io.kestra.core.models.tasks.WorkerSelector"
+          }
+        }
+      }
+    },
+    "io.kestra.plugin.jdbc.postgresql.CopyIn" : {
+      "outputs" : [ "rowCount" ],
+      "properties" : {
+        "allowFailure" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "reliability",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "allowWarning" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "reliability",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "assets" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "$ref" : "#/$defs/io.kestra.core.models.assets.AssetsDeclaration"
+          }
+        },
+        "columns" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "processing",
+            "items" : {
+              "$dynamic" : true,
+              "$group" : "processing",
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "delimiter" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "processing",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "processing",
+              "type" : "string"
+            }, {
+              "$dynamic" : true,
+              "$group" : "processing",
+              "type" : "string"
+            } ]
+          }
+        },
+        "description" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "disabled" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "execution",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "encoding" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "processing",
+            "type" : "string"
+          }
+        },
+        "escape" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            } ]
+          }
+        },
+        "forceNotNull" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "items" : {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "forceNull" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "items" : {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "forceQuote" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "items" : {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "format" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "processing",
+            "default" : "TEXT",
+            "enum" : [ "TEXT", "CSV", "BINARY" ],
+            "type" : "string"
+          }
+        },
+        "freeze" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "boolean"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            } ]
+          }
+        },
+        "from" : {
+          "required" : true,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "main",
+            "$internalStorageURI" : true,
+            "type" : "string"
+          }
+        },
+        "header" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "processing",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "processing",
+              "type" : "boolean"
+            }, {
+              "$dynamic" : true,
+              "$group" : "processing",
+              "type" : "string"
+            } ]
+          }
+        },
+        "id" : {
+          "required" : true,
+          "schema" : {
+            "maxLength" : 256,
+            "minLength" : 1,
+            "pattern" : "^[a-zA-Z0-9][a-zA-Z0-9_-]*",
+            "type" : "string"
+          }
+        },
+        "logLevel" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "logging",
+            "enum" : [ "ERROR", "WARN", "INFO", "DEBUG", "TRACE" ],
+            "type" : "string"
+          }
+        },
+        "logToFile" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "logging",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "nullString" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "oids" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "boolean"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            } ]
+          }
+        },
+        "password" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "$secret" : true,
+            "type" : "string"
+          }
+        },
+        "policyRefs" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "items" : {
+              "$dynamic" : false,
+              "$group" : "advanced",
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "quote" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            } ]
+          }
+        },
+        "retry" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "reliability",
+            "anyOf" : [ {
+              "$dynamic" : false,
+              "$group" : "reliability",
+              "$ref" : "#/$defs/io.kestra.core.models.tasks.retrys.Constant"
+            }, {
+              "$dynamic" : false,
+              "$group" : "reliability",
+              "$ref" : "#/$defs/io.kestra.core.models.tasks.retrys.Exponential"
+            }, {
+              "$dynamic" : false,
+              "$group" : "reliability",
+              "$ref" : "#/$defs/io.kestra.core.models.tasks.retrys.Random"
+            } ]
+          }
+        },
+        "runIf" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "reliability",
+            "default" : "true",
+            "type" : "string"
+          }
+        },
+        "socketTimeout" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "connection",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "connection",
+              "type" : "integer"
+            }, {
+              "$dynamic" : true,
+              "$group" : "connection",
+              "type" : "string"
+            } ]
+          }
+        },
+        "ssl" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "connection",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "connection",
+              "default" : "false",
+              "type" : "boolean"
+            }, {
+              "$dynamic" : true,
+              "$group" : "connection",
+              "default" : "false",
+              "type" : "string"
+            } ],
+            "default" : "false"
+          }
+        },
+        "sslCert" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "sslKey" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "sslKeyPassword" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "$secret" : true,
+            "type" : "string"
+          }
+        },
+        "sslMode" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "enum" : [ "DISABLE", "ALLOW", "PREFER", "REQUIRE", "VERIFY_CA", "VERIFY_FULL" ],
+            "type" : "string"
+          }
+        },
+        "sslRootCert" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "table" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "taskCache" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "$ref" : "#/$defs/io.kestra.core.models.tasks.Cache"
+          }
+        },
+        "timeout" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "execution",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "execution",
+              "format" : "duration",
+              "type" : "string"
+            }, {
+              "$dynamic" : true,
+              "$group" : "execution",
+              "type" : "string"
+            } ]
+          }
+        },
+        "type" : {
+          "required" : true,
+          "schema" : {
+            "const" : "io.kestra.plugin.jdbc.postgresql.CopyIn"
+          }
+        },
+        "url" : {
+          "required" : true,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "username" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "version" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "workerSelector" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "execution",
+            "$ref" : "#/$defs/io.kestra.core.models.tasks.WorkerSelector"
+          }
+        }
+      }
+    },
+    "io.kestra.plugin.jdbc.postgresql.CopyOut" : {
+      "outputs" : [ "rowCount", "uri" ],
+      "properties" : {
+        "allowFailure" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "reliability",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "allowWarning" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "reliability",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "assets" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "$ref" : "#/$defs/io.kestra.core.models.assets.AssetsDeclaration"
+          }
+        },
+        "columns" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "processing",
+            "items" : {
+              "$dynamic" : true,
+              "$group" : "processing",
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "delimiter" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "processing",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "processing",
+              "type" : "string"
+            }, {
+              "$dynamic" : true,
+              "$group" : "processing",
+              "type" : "string"
+            } ]
+          }
+        },
+        "description" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "disabled" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "execution",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "encoding" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "processing",
+            "type" : "string"
+          }
+        },
+        "escape" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            } ]
+          }
+        },
+        "forceNotNull" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "items" : {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "forceNull" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "items" : {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "forceQuote" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "items" : {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "format" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "processing",
+            "default" : "TEXT",
+            "enum" : [ "TEXT", "CSV", "BINARY" ],
+            "type" : "string"
+          }
+        },
+        "freeze" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "boolean"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            } ]
+          }
+        },
+        "header" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "processing",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "processing",
+              "type" : "boolean"
+            }, {
+              "$dynamic" : true,
+              "$group" : "processing",
+              "type" : "string"
+            } ]
+          }
+        },
+        "id" : {
+          "required" : true,
+          "schema" : {
+            "maxLength" : 256,
+            "minLength" : 1,
+            "pattern" : "^[a-zA-Z0-9][a-zA-Z0-9_-]*",
+            "type" : "string"
+          }
+        },
+        "logLevel" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "logging",
+            "enum" : [ "ERROR", "WARN", "INFO", "DEBUG", "TRACE" ],
+            "type" : "string"
+          }
+        },
+        "logToFile" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "logging",
+            "default" : false,
+            "type" : "boolean"
+          }
+        },
+        "nullString" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "oids" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "boolean"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            } ]
+          }
+        },
+        "password" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "$secret" : true,
+            "type" : "string"
+          }
+        },
+        "policyRefs" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "items" : {
+              "$dynamic" : false,
+              "$group" : "advanced",
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "quote" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "advanced",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            }, {
+              "$dynamic" : true,
+              "$group" : "advanced",
+              "type" : "string"
+            } ]
+          }
+        },
+        "retry" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "reliability",
+            "anyOf" : [ {
+              "$dynamic" : false,
+              "$group" : "reliability",
+              "$ref" : "#/$defs/io.kestra.core.models.tasks.retrys.Constant"
+            }, {
+              "$dynamic" : false,
+              "$group" : "reliability",
+              "$ref" : "#/$defs/io.kestra.core.models.tasks.retrys.Exponential"
+            }, {
+              "$dynamic" : false,
+              "$group" : "reliability",
+              "$ref" : "#/$defs/io.kestra.core.models.tasks.retrys.Random"
+            } ]
+          }
+        },
+        "runIf" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "reliability",
+            "default" : "true",
+            "type" : "string"
+          }
+        },
+        "socketTimeout" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "connection",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "connection",
+              "type" : "integer"
+            }, {
+              "$dynamic" : true,
+              "$group" : "connection",
+              "type" : "string"
+            } ]
+          }
+        },
+        "sql" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "main",
+            "$language" : "sql",
+            "type" : "string"
+          }
+        },
+        "ssl" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "connection",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "connection",
+              "default" : "false",
+              "type" : "boolean"
+            }, {
+              "$dynamic" : true,
+              "$group" : "connection",
+              "default" : "false",
+              "type" : "string"
+            } ],
+            "default" : "false"
+          }
+        },
+        "sslCert" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "sslKey" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "sslKeyPassword" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "$secret" : true,
+            "type" : "string"
+          }
+        },
+        "sslMode" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "enum" : [ "DISABLE", "ALLOW", "PREFER", "REQUIRE", "VERIFY_CA", "VERIFY_FULL" ],
+            "type" : "string"
+          }
+        },
+        "sslRootCert" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "connection",
+            "type" : "string"
+          }
+        },
+        "table" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : true,
+            "$group" : "advanced",
+            "type" : "string"
+          }
+        },
+        "taskCache" : {
+          "required" : false,
+          "schema" : {
+            "$dynamic" : false,
+            "$group" : "advanced",
+            "$ref" : "#/$defs/io.kestra.core.models.tasks.Cache"
+          }
+        },
+        "timeout" : {
+          "required" : false,
+          "schema" : {
+            "$group" : "execution",
+            "anyOf" : [ {
+              "$dynamic" : true,
+              "$group" : "execution",
+              "format" : "duration",
+              "type" : "string"
+            }, {
+              "$dynamic" : true,
+              "$group" : "execution",
+              "type" : "string"
+            } ]
+          }
+        },
+        "type" : {
+          "required" : true,
+          "schema" : {
+            "const" : "io.kestra.plugin.jdbc.postgresql.CopyOut"
           }
         },
         "url" : {

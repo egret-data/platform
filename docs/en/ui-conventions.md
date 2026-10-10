@@ -1,5 +1,7 @@
 # egret UI conventions
 
+> **The rules now live in [`frontend-rules.md`](frontend-rules.md), which is normative.** This document is the rationale and the record of reversed decisions that the rulebook links to.
+
 How egret's frontend builds list pages, create flows, settings tables, and the tests that
 guard them.
 

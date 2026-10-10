@@ -480,7 +480,13 @@ fn error_class_entries_are_exactly_the_committed_allowlist() {
 /// function and the package that will implement it, asserted by
 /// `runners::functions::the_twelve_refusals_name_themselves_and_their_owner`,
 /// and their pairings moved from `unported:task-8` to that test in the same
-/// commit.
+/// commit. (W9a Task 4 renamed it `the_eight_refusals_…` and moved the four
+/// file functions' pairings to
+/// `without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution`;
+/// W9b Task 4 renamed it `kv_still_names_w9c_and_the_refused_list_shrinks_to_seven`
+/// and moved `fileURI`'s pairing to the four's test; W9c Task 4 renamed it
+/// `the_refused_list_is_six_and_kv_is_not_in_it` and moved `kv`'s pairing to
+/// `kv_without_a_scope_refuses_by_name`.)
 ///
 /// **Leave it empty.** The constant stays because it is what stops a new
 /// `unported:` being added to `oracle/error-class-pairs.txt` quietly: growing
@@ -499,7 +505,10 @@ fn declared_test_names() -> BTreeSet<String> {
     // existing. `every_runners_module_is_scanned_for_declared_tests` is what
     // keeps this list and the directory the same.
     const SOURCES: &[&str] = &[
+        include_str!("../src/runners/cmp_rewrite.rs"),
+        include_str!("../src/runners/compare.rs"),
         include_str!("../src/runners/env.rs"),
+        include_str!("../src/runners/files.rs"),
         include_str!("../src/runners/filters.rs"),
         include_str!("../src/runners/functions.rs"),
         include_str!("../src/runners/ionfmt.rs"),
@@ -582,8 +591,9 @@ fn every_runners_module_is_scanned_for_declared_tests() {
              `test:` pairing naming one of its tests would be rejected as nonexistent"
         );
     }
-    // 11 since W5b Task 4 added `secrets.rs`.
-    assert_eq!(on_disk.len(), 11, "a module was added or removed");
+    // 14 since W9c Task 4 fix round 1 added `cmp_rewrite.rs` and `compare.rs`
+    // (12 since W9a Task 4's `files.rs`, 11 since W5b Task 4's `secrets.rs`).
+    assert_eq!(on_disk.len(), 14, "a module was added or removed");
 }
 
 #[test]

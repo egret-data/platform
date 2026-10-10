@@ -374,7 +374,7 @@ export function AddStorageDialog({
                   <SelectValue placeholder="Select a provider" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="s3">S3 / MinIO</SelectItem>
+                  <SelectItem value="s3">S3 / RustFS</SelectItem>
                   <SelectItem value="gcs" disabled>
                     Google Cloud Storage — coming soon
                   </SelectItem>
@@ -391,7 +391,7 @@ export function AddStorageDialog({
                 id="cps-endpoint"
                 value={endpoint}
                 onChange={(e) => setEndpoint(e.target.value)}
-                placeholder="Leave blank for AWS (e.g. https://minio.corp.local)"
+                placeholder="Leave blank for AWS (e.g. https://s3.corp.local)"
               />
             </div>
 

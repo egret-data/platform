@@ -106,7 +106,7 @@ impl Handlers {
     /// A caller that wants it wires it in one line beside these four:
     ///
     /// ```ignore
-    /// let mut reg = Handlers::with_core_tasks();
+    /// let mut reg = Handlers::with_core_tasks(None);
     /// // `add_publishable`, not `add`: `egret.sql` HAS a `TASK_TYPES` row, and
     /// // this is the invariant documented above — a handler wired in by a
     /// // deployment is still a handler whose type publish has to accept.
@@ -120,7 +120,7 @@ impl Handlers {
     ///
     /// `oracle-exec/README.md`'s coverage statement says the same thing, so a
     /// green ratchet is not read as covering a handler it never ran.
-    pub fn with_core_tasks() -> Self {
+    pub fn with_core_tasks(files: Option<Arc<crate::storage::FileStore>>) -> Self {
         let mut r = Self::new();
         // `add_publishable`, not `add`: each of these must be a type publish
         // accepts, and each of publish's alias spellings must dispatch here.
@@ -129,6 +129,22 @@ impl Handlers {
         r.add_publishable(Arc::new(handlers::ret::Return));
         r.add_publishable(Arc::new(handlers::fail::Fail));
         r.add_publishable(Arc::new(handlers::sleep::Sleep::new()));
+        // W9a Task 11: the two core storage tasks that need no connection.
+        // `Write` takes the store its CALLER passes (spec §4.6: the store is a
+        // parameter, never read from a global here; fix round 1) -- `runtime`
+        // passes the one `egret-bin` installed, a test its own or `None`.
+        // `Delete` and `PurgeCurrentExecutionFiles` need the pool and are
+        // added by `handlers::storage::register`.
+        r.add_publishable(Arc::new(handlers::storage::Write::new(files.clone())));
+        r.add_publishable(Arc::new(handlers::storage::Size));
+        // W9a Task 12: the five whole-file storage tasks, over the same store.
+        r.add_publishable(Arc::new(handlers::storage::Concat::new(files.clone())));
+        r.add_publishable(Arc::new(handlers::storage::Split::new(files.clone())));
+        r.add_publishable(Arc::new(handlers::storage::Reverse::new(files.clone())));
+        r.add_publishable(Arc::new(handlers::storage::DeduplicateItems::new(
+            files.clone(),
+        )));
+        r.add_publishable(Arc::new(handlers::storage::FilterItems::new(files)));
         r
     }
 
@@ -283,16 +299,26 @@ mod tests {
     /// `io.kestra.plugin.core.log.Log`, not because this function mentions it.
     /// Delete that alias and this list loses an entry without anybody editing
     /// `with_core_tasks`.
+    ///
+    /// W9a Task 11 adds `core.storage.Write` and `Size`, the two storage tasks
+    /// that need no pool, and Task 12 the five whole-file storage tasks.
     #[test]
-    fn the_core_registry_holds_the_four_kestra_type_ids_and_the_one_alias() {
+    fn the_core_registry_holds_the_eleven_kestra_type_ids_and_the_one_alias() {
         assert_eq!(
-            Handlers::with_core_tasks().type_ids(),
+            Handlers::with_core_tasks(None).type_ids(),
             vec![
                 "core.log",
                 "io.kestra.plugin.core.debug.Return",
                 "io.kestra.plugin.core.execution.Fail",
                 "io.kestra.plugin.core.flow.Sleep",
                 "io.kestra.plugin.core.log.Log",
+                "io.kestra.plugin.core.storage.Concat",
+                "io.kestra.plugin.core.storage.DeduplicateItems",
+                "io.kestra.plugin.core.storage.FilterItems",
+                "io.kestra.plugin.core.storage.Reverse",
+                "io.kestra.plugin.core.storage.Size",
+                "io.kestra.plugin.core.storage.Split",
+                "io.kestra.plugin.core.storage.Write",
             ]
         );
     }
@@ -308,7 +334,7 @@ mod tests {
     /// everything else in this file.
     #[test]
     fn every_type_the_shipped_registry_serves_is_publishable() {
-        let reg = Handlers::with_core_tasks();
+        let reg = Handlers::with_core_tasks(None);
         let ids = reg.type_ids();
         assert!(!ids.is_empty(), "the registry must not be empty");
         for id in &ids {
@@ -332,7 +358,7 @@ mod tests {
     /// claims.
     #[tokio::test]
     async fn both_spellings_of_log_dispatch_to_the_log_handler() {
-        let reg = Handlers::with_core_tasks();
+        let reg = Handlers::with_core_tasks(None);
         for spelling in ["io.kestra.plugin.core.log.Log", "core.log"] {
             let out = reg
                 .run(&input(spelling, serde_json::json!({"message": "hi"})))
@@ -379,7 +405,7 @@ mod tests {
     /// only `Return` has, so this cannot pass by reaching a different one.
     #[tokio::test]
     async fn dispatch_reaches_the_handler_that_owns_the_type() {
-        let reg = Handlers::with_core_tasks();
+        let reg = Handlers::with_core_tasks(None);
         let out = reg
             .run(&input(
                 "io.kestra.plugin.core.debug.Return",
@@ -395,7 +421,7 @@ mod tests {
     /// the reader is not sent looking for a broken flow.
     #[tokio::test]
     async fn an_unknown_type_is_a_worker_error_naming_the_type() {
-        let err = Handlers::with_core_tasks()
+        let err = Handlers::with_core_tasks(None)
             .run(&input(
                 "io.kestra.plugin.core.output.OutputValues",
                 serde_json::json!({}),

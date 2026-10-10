@@ -96,7 +96,9 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
-use minijinja::value::{Enumerator, Object, ObjectRepr, Rest, Value as MjValue, ValueKind};
+use minijinja::value::{
+    DynObject, Enumerator, Object, ObjectRepr, Rest, Value as MjValue, ValueKind,
+};
 use minijinja::{Environment, Error as MjError, ErrorKind};
 use unicode_normalization::UnicodeNormalization;
 
@@ -1710,6 +1712,24 @@ fn join(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 /// anything**: `[null] | sort` is `[null]` and `[{"a":1}] | sort` is itself,
 /// both measured. That is why the class check below is skipped below two
 /// elements rather than run over every input.
+/// An integer as an exactly ordered key, over every `i128` and every `u128`
+/// (W9c final review C-M1): the variants order negatives first.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum WideInt {
+    Negative(i128),
+    NonNegative(u128),
+}
+
+/// `v` as a [`WideInt`], or `None` when it is not an integer either type
+/// holds.
+fn wide_integer(v: &MjValue) -> Option<WideInt> {
+    match i128::try_from(v.clone()) {
+        Ok(i) if i < 0 => Some(WideInt::Negative(i)),
+        Ok(i) => Some(WideInt::NonNegative(i.unsigned_abs())),
+        Err(_) => u128::try_from(v.clone()).ok().map(WideInt::NonNegative),
+    }
+}
+
 fn sort(value: MjValue) -> Result<MjValue, MjError> {
     strict_undefined("sort", &value)?;
     if is_java_null(&value) {
@@ -1756,6 +1776,7 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
                 | "java.lang.Long"
                 | "java.lang.Double"
                 | "java.math.BigInteger"
+                | "java.math.BigDecimal"
         ) {
             return Err(pebble_error(format!(
                 "class {first_class} cannot be cast to class java.lang.Comparable"
@@ -1784,13 +1805,24 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
         "java.lang.Integer" | "java.lang.Long" | "java.math.BigInteger"
     );
     items.sort_by(|a, b| {
+        // W9c Task 4 fix round 1: `BigDecimal.compareTo` and
+        // `BigInteger.compareTo` are exact. A `BigDecimal` list used to be
+        // refused as not `Comparable` (it is), and a `BigInteger` past `i128`
+        // fell to the TEXT order below, where `9` sorts after `10`. The class
+        // check above has already made the two elements one class.
+        if super::compare::exact_cmp(a, b).is_some() {
+            return super::compare::values_cmp(a, b);
+        }
         if integers {
-            // `i128` holds every `i64` and every `u64`, so no integer this
-            // crate can carry loses a bit on the way in.
-            return match (i128::try_from(a.clone()), i128::try_from(b.clone())) {
-                (Ok(x), Ok(y)) => x.cmp(&y),
-                // Past `i128` is `BigInteger` territory, and `java_class_name`
-                // has already made the two elements one class.
+            // `i128` holds every `i64` and every `u64`; a native `u128` past
+            // `i128::MAX` (a `kv()` integer, `integer_from_literal`) is
+            // compared as one too (W9c final review C-M1: it fell to the
+            // TEXT order, so `2^127` sorted before `2^64`).
+            return match (wide_integer(a), wide_integer(b)) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                // A `BigInteger` past `u128` is `exact_cmp`'s, above, and
+                // `java_class_name` has already made the two elements one
+                // class.
                 _ => kestra_to_string(a).cmp(&kestra_to_string(b)),
             };
         }
@@ -2243,8 +2275,13 @@ fn slugify(value: MjValue) -> Result<MjValue, MjError> {
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
-    let input = kestra_to_string(&value);
+    Ok(MjValue::from(slugify_str(&kestra_to_string(&value))))
+}
 
+/// [`slugify`]'s body over a string: `Slugify.of` without the filter's Java-null
+/// arm. Also the slug Kestra puts into a storage URI for a flow, task or
+/// trigger id (`StorageContext`), which is why `storage::uri` calls it (W9a).
+pub(crate) fn slugify_str(input: &str) -> String {
     let no_whitespace: String = input
         .chars()
         .map(|c| {
@@ -2272,7 +2309,7 @@ fn slugify(value: MjValue) -> Result<MjValue, MjError> {
         slug = rest.to_string();
     }
 
-    Ok(MjValue::from(slug.to_ascii_lowercase()))
+    slug.to_ascii_lowercase()
 }
 
 /// `UrlDecoderFilter` — `URLDecoder.decode(input, UTF_8)`.
@@ -2843,10 +2880,33 @@ impl Object for BigNumber {
     fn render(self: &Arc<Self>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.text)
     }
+
+    /// W9c Task 4 fix round 1: two `BigNumber`s compare by value, wherever
+    /// minijinja compares two of them itself (`1.5 == 1.50`, `-1.5 > -2.5`).
+    /// minijinja asks this ONLY for two objects of the same type; a
+    /// `BigNumber` against a number never reaches it, which is why the
+    /// comparison operators are compiled to `super::compare`'s functions.
+    fn custom_cmp(self: &Arc<Self>, other: &DynObject) -> Option<std::cmp::Ordering> {
+        let other = other.downcast_ref::<Self>()?;
+        super::compare::plain_text_cmp(&self.text, &other.text)
+    }
+}
+
+/// W9c Task 4 fix round 1: is this value a [`BigNumber`]?
+pub(super) fn is_big_number(value: &MjValue) -> bool {
+    value.downcast_object_ref::<BigNumber>().is_some()
+}
+
+/// W9c Task 4 fix round 1: a [`BigNumber`]'s `toPlainString()` text, the
+/// exact value `super::compare` compares, or `None` for anything else.
+pub(super) fn big_number_plain(value: &MjValue) -> Option<&str> {
+    value
+        .downcast_object_ref::<BigNumber>()
+        .map(|big| big.text.as_str())
 }
 
 /// The Java class of a [`BigNumber`], or `None` for anything else.
-fn big_number_class(value: &MjValue) -> Option<&'static str> {
+pub(super) fn big_number_class(value: &MjValue) -> Option<&'static str> {
     value
         .downcast_object_ref::<BigNumber>()
         .map(|big| big.class_name)
@@ -2866,6 +2926,38 @@ pub(super) fn big_number_text(value: &MjValue) -> Option<String> {
     value
         .downcast_object_ref::<BigNumber>()
         .map(|big| big.canonical.clone())
+}
+
+/// W9c Task 4: a `java.math.BigDecimal` [`BigNumber`] of `plain`, a KV
+/// value's decimal (`storage::kv::value::KvNumber::Decimal`, plain digits
+/// with their scale): a bare `{{ x }}` prints `plain`, a serialiser writes
+/// `BigDecimal.toString()`. `None` when `plain` is not a decimal literal.
+///
+/// Not arithmetic, as no [`BigNumber`] is: `{{ kv('d') + 1 }}` fails the
+/// render naming the operator, never computes on an `f64` (W9c spec §15).
+pub(crate) fn big_decimal(plain: &str) -> Option<MjValue> {
+    let (text, canonical) = big_decimal_strings(plain)?;
+    Some(MjValue::from_object(BigNumber {
+        text,
+        canonical,
+        class_name: "java.math.BigDecimal",
+    }))
+}
+
+/// W9c final review F1: `new BigDecimal(plain).toString()`, or `None` when
+/// `plain` is not a decimal literal.
+pub(crate) fn big_decimal_to_string(plain: &str) -> Option<String> {
+    big_decimal_strings(plain).map(|(_, canonical)| canonical)
+}
+
+/// W9c Task 4: a `java.math.BigInteger` [`BigNumber`] of `digits`
+/// (`-?[0-9]+`), a KV value's integer beyond every Rust integer primitive.
+pub(crate) fn big_integer(digits: &str) -> MjValue {
+    MjValue::from_object(BigNumber {
+        text: digits.to_string(),
+        canonical: digits.to_string(),
+        class_name: "java.math.BigInteger",
+    })
 }
 
 /// `NumberFilter` — `NumberUtils.create*`, selected by the `type` argument.
@@ -3731,7 +3823,7 @@ fn timestamp_input(value: &MjValue, rest: Rest<MjValue>) -> Result<Option<Zdt>, 
 /// `JacksonMapper.ofJson()` is the same mapper `JsonWriter` holds. **`toIon`
 /// and `yaml` are NOT the same mapper** — see the null-inclusion table in
 /// [`super::ionfmt`].
-fn to_json(value: MjValue) -> Result<MjValue, MjError> {
+pub(super) fn to_json(value: MjValue) -> Result<MjValue, MjError> {
     if is_java_null(&value) {
         return Ok(MjValue::from("null"));
     }
@@ -4981,6 +5073,18 @@ mod tests {
         // And the pre-port default was RIGHT about this, which is the part
         // worth remembering: minijinja compares integers exactly too.
         assert_eq!(ok("{{ l | sort }}", r#"{"l": [3, 1, 2]}"#), "[1,2,3]");
+        // W9c final review C-M1: a native `u128` past `i128::MAX` (2^127,
+        // as `kv()` hands one over) sorts by value against 2^64, an `i128`,
+        // against -2^64 and against another `u128` (all one class,
+        // `BigInteger`). Mutant: the text order puts 2^127 (`17…`) before
+        // 2^64 (`18…`).
+        assert_eq!(
+            ok(
+                "{{ l | sort }}",
+                r#"{"l": [170141183460469231731687303715884105729, 170141183460469231731687303715884105728, 18446744073709551616, -18446744073709551616]}"#
+            ),
+            "[-18446744073709551616,18446744073709551616,170141183460469231731687303715884105728,170141183460469231731687303715884105729]"
+        );
     }
 
     // -- W2 Task 8 fix round 1: Pebble's own core filters ----------------

@@ -30,18 +30,42 @@ import type {
   ErrorBody,
   ExecutionDto,
   ExecutionPageDto,
+  FileMetasDto,
+  FilePreviewDto,
   FlowDto,
   FlowListItemDto,
   FlowVersionDto,
+  KvDetailDto,
+  KvEntryDto,
+  KvInheritedDto,
+  KvKeysBody,
+  KvRevisionDto,
   LogPageDto,
+  NsFileRevisionDto,
+  NsFileStatsDto,
+  NsFileUploadForm,
   PublishFlowRequest,
+  StartExecutionMultipart,
   StartExecutionRequest,
   UpdateFlowRequest,
   ValidateFlowRequest,
   ValidationReportDto,
+  WorkflowCreateNamespaceDirectoryParams,
+  WorkflowDeleteNamespaceFileParams,
+  WorkflowDownloadExecutionFileParams,
+  WorkflowDownloadNamespaceFileParams,
+  WorkflowExecutionFileMetasParams,
   WorkflowGetExecutionLogsParams,
+  WorkflowGetKvValueParams,
   WorkflowListExecutionsParams,
-  WorkflowListFlowsParams
+  WorkflowListFlowsParams,
+  WorkflowListNamespaceDirectoryParams,
+  WorkflowMoveNamespaceFileParams,
+  WorkflowNamespaceFileRevisionsParams,
+  WorkflowNamespaceFileStatsParams,
+  WorkflowPreviewExecutionFileParams,
+  WorkflowSearchNamespaceFilesParams,
+  WorkflowUploadNamespaceFileParams
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -355,6 +379,469 @@ export function useWorkflowGetExecution<TData = Awaited<ReturnType<typeof workfl
 
 
 
+export type workflowDownloadExecutionFileResponse200 = {
+  data: Blob
+  status: 200
+}
+
+export type workflowDownloadExecutionFileResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowDownloadExecutionFileResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowDownloadExecutionFileResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowDownloadExecutionFileResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowDownloadExecutionFileResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowDownloadExecutionFileResponseSuccess = (workflowDownloadExecutionFileResponse200) & {
+  headers: Headers;
+};
+export type workflowDownloadExecutionFileResponseError = (workflowDownloadExecutionFileResponse401 | workflowDownloadExecutionFileResponse403 | workflowDownloadExecutionFileResponse404 | workflowDownloadExecutionFileResponse500 | workflowDownloadExecutionFileResponse503) & {
+  headers: Headers;
+};
+
+export type workflowDownloadExecutionFileResponse = (workflowDownloadExecutionFileResponseSuccess | workflowDownloadExecutionFileResponseError)
+
+export const getWorkflowDownloadExecutionFileUrl = (workspace: string,
+    id: string,
+    params: WorkflowDownloadExecutionFileParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file`
+}
+
+export const workflowDownloadExecutionFile = async (workspace: string,
+    id: string,
+    params: WorkflowDownloadExecutionFileParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowDownloadExecutionFileResponse> => {
+
+  return customInstance<workflowDownloadExecutionFileResponse>(getWorkflowDownloadExecutionFileUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowDownloadExecutionFileQueryKey = (workspace: string,
+    id: string,
+    params?: WorkflowDownloadExecutionFileParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowDownloadExecutionFileQueryOptions = <TData = Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError = ErrorBody>(workspace: string,
+    id: string,
+    params: WorkflowDownloadExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowDownloadExecutionFileQueryKey(workspace,id,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>> = ({ signal }) => workflowDownloadExecutionFile(workspace,id,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowDownloadExecutionFileQueryResult = NonNullable<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>>
+export type WorkflowDownloadExecutionFileQueryError = ErrorBody
+
+
+export function useWorkflowDownloadExecutionFile<TData = Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowDownloadExecutionFileParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowDownloadExecutionFile>>,
+          TError,
+          Awaited<ReturnType<typeof workflowDownloadExecutionFile>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowDownloadExecutionFile<TData = Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowDownloadExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowDownloadExecutionFile>>,
+          TError,
+          Awaited<ReturnType<typeof workflowDownloadExecutionFile>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowDownloadExecutionFile<TData = Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowDownloadExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowDownloadExecutionFile<TData = Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowDownloadExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowDownloadExecutionFileQueryOptions(workspace,id,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowExecutionFileMetasResponse200 = {
+  data: FileMetasDto
+  status: 200
+}
+
+export type workflowExecutionFileMetasResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowExecutionFileMetasResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowExecutionFileMetasResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowExecutionFileMetasResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowExecutionFileMetasResponseSuccess = (workflowExecutionFileMetasResponse200) & {
+  headers: Headers;
+};
+export type workflowExecutionFileMetasResponseError = (workflowExecutionFileMetasResponse401 | workflowExecutionFileMetasResponse403 | workflowExecutionFileMetasResponse404 | workflowExecutionFileMetasResponse500) & {
+  headers: Headers;
+};
+
+export type workflowExecutionFileMetasResponse = (workflowExecutionFileMetasResponseSuccess | workflowExecutionFileMetasResponseError)
+
+export const getWorkflowExecutionFileMetasUrl = (workspace: string,
+    id: string,
+    params: WorkflowExecutionFileMetasParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file/metas?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file/metas`
+}
+
+export const workflowExecutionFileMetas = async (workspace: string,
+    id: string,
+    params: WorkflowExecutionFileMetasParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowExecutionFileMetasResponse> => {
+
+  return customInstance<workflowExecutionFileMetasResponse>(getWorkflowExecutionFileMetasUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowExecutionFileMetasQueryKey = (workspace: string,
+    id: string,
+    params?: WorkflowExecutionFileMetasParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file/metas`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowExecutionFileMetasQueryOptions = <TData = Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError = ErrorBody>(workspace: string,
+    id: string,
+    params: WorkflowExecutionFileMetasParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowExecutionFileMetasQueryKey(workspace,id,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowExecutionFileMetas>>> = ({ signal }) => workflowExecutionFileMetas(workspace,id,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowExecutionFileMetasQueryResult = NonNullable<Awaited<ReturnType<typeof workflowExecutionFileMetas>>>
+export type WorkflowExecutionFileMetasQueryError = ErrorBody
+
+
+export function useWorkflowExecutionFileMetas<TData = Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowExecutionFileMetasParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowExecutionFileMetas>>,
+          TError,
+          Awaited<ReturnType<typeof workflowExecutionFileMetas>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowExecutionFileMetas<TData = Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowExecutionFileMetasParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowExecutionFileMetas>>,
+          TError,
+          Awaited<ReturnType<typeof workflowExecutionFileMetas>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowExecutionFileMetas<TData = Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowExecutionFileMetasParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowExecutionFileMetas<TData = Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowExecutionFileMetasParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionFileMetas>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowExecutionFileMetasQueryOptions(workspace,id,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowPreviewExecutionFileResponse200 = {
+  data: FilePreviewDto
+  status: 200
+}
+
+export type workflowPreviewExecutionFileResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowPreviewExecutionFileResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowPreviewExecutionFileResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowPreviewExecutionFileResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowPreviewExecutionFileResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowPreviewExecutionFileResponseSuccess = (workflowPreviewExecutionFileResponse200) & {
+  headers: Headers;
+};
+export type workflowPreviewExecutionFileResponseError = (workflowPreviewExecutionFileResponse401 | workflowPreviewExecutionFileResponse403 | workflowPreviewExecutionFileResponse404 | workflowPreviewExecutionFileResponse500 | workflowPreviewExecutionFileResponse503) & {
+  headers: Headers;
+};
+
+export type workflowPreviewExecutionFileResponse = (workflowPreviewExecutionFileResponseSuccess | workflowPreviewExecutionFileResponseError)
+
+export const getWorkflowPreviewExecutionFileUrl = (workspace: string,
+    id: string,
+    params: WorkflowPreviewExecutionFileParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file/preview?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file/preview`
+}
+
+export const workflowPreviewExecutionFile = async (workspace: string,
+    id: string,
+    params: WorkflowPreviewExecutionFileParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowPreviewExecutionFileResponse> => {
+
+  return customInstance<workflowPreviewExecutionFileResponse>(getWorkflowPreviewExecutionFileUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowPreviewExecutionFileQueryKey = (workspace: string,
+    id: string,
+    params?: WorkflowPreviewExecutionFileParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/file/preview`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowPreviewExecutionFileQueryOptions = <TData = Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError = ErrorBody>(workspace: string,
+    id: string,
+    params: WorkflowPreviewExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowPreviewExecutionFileQueryKey(workspace,id,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>> = ({ signal }) => workflowPreviewExecutionFile(workspace,id,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowPreviewExecutionFileQueryResult = NonNullable<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>>
+export type WorkflowPreviewExecutionFileQueryError = ErrorBody
+
+
+export function useWorkflowPreviewExecutionFile<TData = Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowPreviewExecutionFileParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowPreviewExecutionFile>>,
+          TError,
+          Awaited<ReturnType<typeof workflowPreviewExecutionFile>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowPreviewExecutionFile<TData = Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowPreviewExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowPreviewExecutionFile>>,
+          TError,
+          Awaited<ReturnType<typeof workflowPreviewExecutionFile>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowPreviewExecutionFile<TData = Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowPreviewExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowPreviewExecutionFile<TData = Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: WorkflowPreviewExecutionFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowPreviewExecutionFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowPreviewExecutionFileQueryOptions(workspace,id,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 export type workflowGetExecutionLogsResponse200 = {
   data: LogPageDto
   status: 200
@@ -608,7 +1095,7 @@ export const getWorkflowReplayExecutionUrl = (workspace: string,
  * trace."* Starting from the draft is what `POST .../flows/{id}/executions`
  * is for, and the two routes exist to be different.
  *
- * # Why the replacement names no parent, which is NOT a choice
+ * # The link is `replayed_from_execution_id`, not a parent
  *
  * `replay::spawn_due` links its replacement with `parent_execution_id` set and
  * `parent_run_ix` NULL. That slot is **one per execution and already spoken
@@ -619,19 +1106,25 @@ export const getWorkflowReplayExecutionUrl = (workspace: string,
  * replay that took the slot would make a later retry-replay of the same
  * execution fail a unique constraint, and a second manual replay fail one too.
  *
- * `start_execution` has no parent parameter and this task does not add one, so
- * the replacement is unlinked: **the relationship between a manual replay and
- * what it replays is in the audit trail and nowhere in the data.** Stated
- * rather than discovered. What it would take is a link that is not that index's
- * — a nullable `replayed_from` column of its own — which is a migration and a
- * schema decision, not a route.
+ * So the replacement has no parent, and the link has a column of its own:
+ * `replayed_from_execution_id` (migration 0166, W9a spec §4.4 item 3), written
+ * here through `start_execution_in` in one transaction with the row. It is
+ * what lets a replay read its source's files (a replay copies its source's
+ * inputs verbatim, and those may be `kestra://` URIs of the source). The audit
+ * record still carries both ids.
+ *
+ * # Not a loop iteration
+ *
+ * An iteration (`parent_execution_id` with a `loop_index`) is refused (400)
+ * naming its loop root: it is a part of the root's run, `replay::spawn_due`
+ * never replays one, and a replay of it would be a top-level run of the
+ * loop's body alone.
  *
  * # Terminal only
  *
- * A non-terminal execution is refused (409) rather than replayed. With no link
- * column there is nothing to tell an operator that two RUNNING executions of
- * one flow are a replay and its original, and the narrow door cannot
- * over-accept. `RunState::is_terminal` is the predicate — read through
+ * A non-terminal execution is refused (409) rather than replayed: two RUNNING
+ * executions of one flow, a replay and its original, would be in flight at
+ * once, and the narrow door cannot over-accept. `RunState::is_terminal` is the predicate — read through
  * `worker::from_wire`, which is derived from `RunState::ALL`, so a state added
  * to the enum is classified here without anyone remembering to come back.
  * @summary Run a finished execution again.
@@ -1450,15 +1943,30 @@ export type workflowStartFlowExecutionResponse409 = {
   status: 409
 }
 
+export type workflowStartFlowExecutionResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowStartFlowExecutionResponse415 = {
+  data: ErrorBody
+  status: 415
+}
+
 export type workflowStartFlowExecutionResponse500 = {
   data: ErrorBody
   status: 500
 }
 
+export type workflowStartFlowExecutionResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
 export type workflowStartFlowExecutionResponseSuccess = (workflowStartFlowExecutionResponse201) & {
   headers: Headers;
 };
-export type workflowStartFlowExecutionResponseError = (workflowStartFlowExecutionResponse400 | workflowStartFlowExecutionResponse401 | workflowStartFlowExecutionResponse403 | workflowStartFlowExecutionResponse404 | workflowStartFlowExecutionResponse409 | workflowStartFlowExecutionResponse500) & {
+export type workflowStartFlowExecutionResponseError = (workflowStartFlowExecutionResponse400 | workflowStartFlowExecutionResponse401 | workflowStartFlowExecutionResponse403 | workflowStartFlowExecutionResponse404 | workflowStartFlowExecutionResponse409 | workflowStartFlowExecutionResponse413 | workflowStartFlowExecutionResponse415 | workflowStartFlowExecutionResponse500 | workflowStartFlowExecutionResponse503) & {
   headers: Headers;
 };
 
@@ -1475,14 +1983,14 @@ export const getWorkflowStartFlowExecutionUrl = (workspace: string,
 
 export const workflowStartFlowExecution = async (workspace: string,
     id: string,
-    startExecutionRequest: StartExecutionRequest, options?: Parameters<typeof customInstance>[1]): Promise<workflowStartFlowExecutionResponse> => {
+    workflowStartFlowExecutionBody: StartExecutionRequest | StartExecutionMultipart, options?: Parameters<typeof customInstance>[1]): Promise<workflowStartFlowExecutionResponse> => {
 
   return customInstance<workflowStartFlowExecutionResponse>(getWorkflowStartFlowExecutionUrl(workspace,id),
   {
     ...options,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    body: JSON.stringify(startExecutionRequest)
+    method: 'POST'
+    ,
+    body: JSON.stringify(workflowStartFlowExecutionBody)
   }
 );}
 
@@ -1491,8 +1999,8 @@ export const workflowStartFlowExecution = async (workspace: string,
 
 
 export const getWorkflowStartFlowExecutionMutationOptions = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext> => {
 
 const mutationKey = ['workflowStartFlowExecution'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
@@ -1504,7 +2012,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowStartFlowExecution>>, {workspace: string;id: string;data: StartExecutionRequest}> = (props) => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowStartFlowExecution>>, {workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}> = (props) => {
           const {workspace,id,data} = props ?? {};
 
           return  workflowStartFlowExecution(workspace,id,data,requestOptions)
@@ -1518,15 +2026,15 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
   return  { mutationFn, ...mutationOptions }}
 
     export type WorkflowStartFlowExecutionMutationResult = NonNullable<Awaited<ReturnType<typeof workflowStartFlowExecution>>>
-    export type WorkflowStartFlowExecutionMutationBody = StartExecutionRequest
+    export type WorkflowStartFlowExecutionMutationBody = StartExecutionRequest | StartExecutionMultipart
     export type WorkflowStartFlowExecutionMutationError = ErrorBody
 
     export const useWorkflowStartFlowExecution = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof workflowStartFlowExecution>>,
         TError,
-        {workspace: string;id: string;data: StartExecutionRequest},
+        {workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart},
         TContext
       > => {
       return useMutation(getWorkflowStartFlowExecutionMutationOptions(options), queryClient);
@@ -2012,6 +2520,2357 @@ export function useWorkflowGetFlowVersion<TData = Awaited<ReturnType<typeof work
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getWorkflowGetFlowVersionQueryOptions(workspace,id,version,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowDownloadNamespaceFileResponse200 = {
+  data: Blob
+  status: 200
+}
+
+export type workflowDownloadNamespaceFileResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowDownloadNamespaceFileResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowDownloadNamespaceFileResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowDownloadNamespaceFileResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowDownloadNamespaceFileResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowDownloadNamespaceFileResponseSuccess = (workflowDownloadNamespaceFileResponse200) & {
+  headers: Headers;
+};
+export type workflowDownloadNamespaceFileResponseError = (workflowDownloadNamespaceFileResponse400 | workflowDownloadNamespaceFileResponse401 | workflowDownloadNamespaceFileResponse403 | workflowDownloadNamespaceFileResponse404 | workflowDownloadNamespaceFileResponse503) & {
+  headers: Headers;
+};
+
+export type workflowDownloadNamespaceFileResponse = (workflowDownloadNamespaceFileResponseSuccess | workflowDownloadNamespaceFileResponseError)
+
+export const getWorkflowDownloadNamespaceFileUrl = (workspace: string,
+    namespace: string,
+    params: WorkflowDownloadNamespaceFileParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files`
+}
+
+export const workflowDownloadNamespaceFile = async (workspace: string,
+    namespace: string,
+    params: WorkflowDownloadNamespaceFileParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowDownloadNamespaceFileResponse> => {
+
+  return customInstance<workflowDownloadNamespaceFileResponse>(getWorkflowDownloadNamespaceFileUrl(workspace,namespace,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowDownloadNamespaceFileQueryKey = (workspace: string,
+    namespace: string,
+    params?: WorkflowDownloadNamespaceFileParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowDownloadNamespaceFileQueryOptions = <TData = Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>, TError = ErrorBody>(workspace: string,
+    namespace: string,
+    params: WorkflowDownloadNamespaceFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowDownloadNamespaceFileQueryKey(workspace,namespace,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>> = ({ signal }) => workflowDownloadNamespaceFile(workspace,namespace,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && namespace !== null && namespace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowDownloadNamespaceFileQueryResult = NonNullable<Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>>
+export type WorkflowDownloadNamespaceFileQueryError = ErrorBody
+
+
+export function useWorkflowDownloadNamespaceFile<TData = Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params: WorkflowDownloadNamespaceFileParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>,
+          TError,
+          Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowDownloadNamespaceFile<TData = Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params: WorkflowDownloadNamespaceFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>,
+          TError,
+          Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowDownloadNamespaceFile<TData = Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params: WorkflowDownloadNamespaceFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowDownloadNamespaceFile<TData = Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params: WorkflowDownloadNamespaceFileParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadNamespaceFile>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowDownloadNamespaceFileQueryOptions(workspace,namespace,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowMoveNamespaceFileResponse200 = {
+  data: void
+  status: 200
+}
+
+export type workflowMoveNamespaceFileResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowMoveNamespaceFileResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowMoveNamespaceFileResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowMoveNamespaceFileResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowMoveNamespaceFileResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowMoveNamespaceFileResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowMoveNamespaceFileResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowMoveNamespaceFileResponseSuccess = (workflowMoveNamespaceFileResponse200) & {
+  headers: Headers;
+};
+export type workflowMoveNamespaceFileResponseError = (workflowMoveNamespaceFileResponse400 | workflowMoveNamespaceFileResponse401 | workflowMoveNamespaceFileResponse403 | workflowMoveNamespaceFileResponse404 | workflowMoveNamespaceFileResponse409 | workflowMoveNamespaceFileResponse413 | workflowMoveNamespaceFileResponse503) & {
+  headers: Headers;
+};
+
+export type workflowMoveNamespaceFileResponse = (workflowMoveNamespaceFileResponseSuccess | workflowMoveNamespaceFileResponseError)
+
+export const getWorkflowMoveNamespaceFileUrl = (workspace: string,
+    namespace: string,
+    params: WorkflowMoveNamespaceFileParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files`
+}
+
+export const workflowMoveNamespaceFile = async (workspace: string,
+    namespace: string,
+    params: WorkflowMoveNamespaceFileParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowMoveNamespaceFileResponse> => {
+
+  return customInstance<workflowMoveNamespaceFileResponse>(getWorkflowMoveNamespaceFileUrl(workspace,namespace,params),
+  {
+    ...options,
+    method: 'PUT'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowMoveNamespaceFileMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowMoveNamespaceFile>>, TError,{workspace: string;namespace: string;params: WorkflowMoveNamespaceFileParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowMoveNamespaceFile>>, TError,{workspace: string;namespace: string;params: WorkflowMoveNamespaceFileParams}, TContext> => {
+
+const mutationKey = ['workflowMoveNamespaceFile'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowMoveNamespaceFile>>, {workspace: string;namespace: string;params: WorkflowMoveNamespaceFileParams}> = (props) => {
+          const {workspace,namespace,params} = props ?? {};
+
+          return  workflowMoveNamespaceFile(workspace,namespace,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowMoveNamespaceFileMutationResult = NonNullable<Awaited<ReturnType<typeof workflowMoveNamespaceFile>>>
+
+    export type WorkflowMoveNamespaceFileMutationError = ErrorBody
+
+    export const useWorkflowMoveNamespaceFile = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowMoveNamespaceFile>>, TError,{workspace: string;namespace: string;params: WorkflowMoveNamespaceFileParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowMoveNamespaceFile>>,
+        TError,
+        {workspace: string;namespace: string;params: WorkflowMoveNamespaceFileParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowMoveNamespaceFileMutationOptions(options), queryClient);
+    }
+    export type workflowUploadNamespaceFileResponse200 = {
+  data: void
+  status: 200
+}
+
+export type workflowUploadNamespaceFileResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowUploadNamespaceFileResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowUploadNamespaceFileResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowUploadNamespaceFileResponse408 = {
+  data: ErrorBody
+  status: 408
+}
+
+export type workflowUploadNamespaceFileResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowUploadNamespaceFileResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowUploadNamespaceFileResponse415 = {
+  data: ErrorBody
+  status: 415
+}
+
+export type workflowUploadNamespaceFileResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowUploadNamespaceFileResponseSuccess = (workflowUploadNamespaceFileResponse200) & {
+  headers: Headers;
+};
+export type workflowUploadNamespaceFileResponseError = (workflowUploadNamespaceFileResponse400 | workflowUploadNamespaceFileResponse401 | workflowUploadNamespaceFileResponse403 | workflowUploadNamespaceFileResponse408 | workflowUploadNamespaceFileResponse409 | workflowUploadNamespaceFileResponse413 | workflowUploadNamespaceFileResponse415 | workflowUploadNamespaceFileResponse503) & {
+  headers: Headers;
+};
+
+export type workflowUploadNamespaceFileResponse = (workflowUploadNamespaceFileResponseSuccess | workflowUploadNamespaceFileResponseError)
+
+export const getWorkflowUploadNamespaceFileUrl = (workspace: string,
+    namespace: string,
+    params: WorkflowUploadNamespaceFileParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files`
+}
+
+export const workflowUploadNamespaceFile = async (workspace: string,
+    namespace: string,
+    nsFileUploadForm: NsFileUploadForm,
+    params: WorkflowUploadNamespaceFileParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowUploadNamespaceFileResponse> => {
+    const formData = new FormData();
+formData.append(`fileContent`, nsFileUploadForm.fileContent);
+
+  return customInstance<workflowUploadNamespaceFileResponse>(getWorkflowUploadNamespaceFileUrl(workspace,namespace,params),
+  {
+    ...options,
+    method: 'POST'
+    ,
+    body: formData
+  }
+);}
+
+
+
+
+
+export const getWorkflowUploadNamespaceFileMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowUploadNamespaceFile>>, TError,{workspace: string;namespace: string;data: NsFileUploadForm;params: WorkflowUploadNamespaceFileParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowUploadNamespaceFile>>, TError,{workspace: string;namespace: string;data: NsFileUploadForm;params: WorkflowUploadNamespaceFileParams}, TContext> => {
+
+const mutationKey = ['workflowUploadNamespaceFile'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowUploadNamespaceFile>>, {workspace: string;namespace: string;data: NsFileUploadForm;params: WorkflowUploadNamespaceFileParams}> = (props) => {
+          const {workspace,namespace,data,params} = props ?? {};
+
+          return  workflowUploadNamespaceFile(workspace,namespace,data,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowUploadNamespaceFileMutationResult = NonNullable<Awaited<ReturnType<typeof workflowUploadNamespaceFile>>>
+    export type WorkflowUploadNamespaceFileMutationBody = NsFileUploadForm
+    export type WorkflowUploadNamespaceFileMutationError = ErrorBody
+
+    export const useWorkflowUploadNamespaceFile = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowUploadNamespaceFile>>, TError,{workspace: string;namespace: string;data: NsFileUploadForm;params: WorkflowUploadNamespaceFileParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowUploadNamespaceFile>>,
+        TError,
+        {workspace: string;namespace: string;data: NsFileUploadForm;params: WorkflowUploadNamespaceFileParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowUploadNamespaceFileMutationOptions(options), queryClient);
+    }
+    export type workflowDeleteNamespaceFileResponse200 = {
+  data: void
+  status: 200
+}
+
+export type workflowDeleteNamespaceFileResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowDeleteNamespaceFileResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowDeleteNamespaceFileResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowDeleteNamespaceFileResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowDeleteNamespaceFileResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowDeleteNamespaceFileResponseSuccess = (workflowDeleteNamespaceFileResponse200) & {
+  headers: Headers;
+};
+export type workflowDeleteNamespaceFileResponseError = (workflowDeleteNamespaceFileResponse400 | workflowDeleteNamespaceFileResponse401 | workflowDeleteNamespaceFileResponse403 | workflowDeleteNamespaceFileResponse409 | workflowDeleteNamespaceFileResponse503) & {
+  headers: Headers;
+};
+
+export type workflowDeleteNamespaceFileResponse = (workflowDeleteNamespaceFileResponseSuccess | workflowDeleteNamespaceFileResponseError)
+
+export const getWorkflowDeleteNamespaceFileUrl = (workspace: string,
+    namespace: string,
+    params: WorkflowDeleteNamespaceFileParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files`
+}
+
+export const workflowDeleteNamespaceFile = async (workspace: string,
+    namespace: string,
+    params: WorkflowDeleteNamespaceFileParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowDeleteNamespaceFileResponse> => {
+
+  return customInstance<workflowDeleteNamespaceFileResponse>(getWorkflowDeleteNamespaceFileUrl(workspace,namespace,params),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowDeleteNamespaceFileMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteNamespaceFile>>, TError,{workspace: string;namespace: string;params: WorkflowDeleteNamespaceFileParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteNamespaceFile>>, TError,{workspace: string;namespace: string;params: WorkflowDeleteNamespaceFileParams}, TContext> => {
+
+const mutationKey = ['workflowDeleteNamespaceFile'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowDeleteNamespaceFile>>, {workspace: string;namespace: string;params: WorkflowDeleteNamespaceFileParams}> = (props) => {
+          const {workspace,namespace,params} = props ?? {};
+
+          return  workflowDeleteNamespaceFile(workspace,namespace,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowDeleteNamespaceFileMutationResult = NonNullable<Awaited<ReturnType<typeof workflowDeleteNamespaceFile>>>
+
+    export type WorkflowDeleteNamespaceFileMutationError = ErrorBody
+
+    export const useWorkflowDeleteNamespaceFile = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteNamespaceFile>>, TError,{workspace: string;namespace: string;params: WorkflowDeleteNamespaceFileParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowDeleteNamespaceFile>>,
+        TError,
+        {workspace: string;namespace: string;params: WorkflowDeleteNamespaceFileParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowDeleteNamespaceFileMutationOptions(options), queryClient);
+    }
+    export type workflowListNamespaceDirectoryResponse200 = {
+  data: NsFileStatsDto[]
+  status: 200
+}
+
+export type workflowListNamespaceDirectoryResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowListNamespaceDirectoryResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowListNamespaceDirectoryResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowListNamespaceDirectoryResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowListNamespaceDirectoryResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowListNamespaceDirectoryResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowListNamespaceDirectoryResponseSuccess = (workflowListNamespaceDirectoryResponse200) & {
+  headers: Headers;
+};
+export type workflowListNamespaceDirectoryResponseError = (workflowListNamespaceDirectoryResponse400 | workflowListNamespaceDirectoryResponse401 | workflowListNamespaceDirectoryResponse403 | workflowListNamespaceDirectoryResponse404 | workflowListNamespaceDirectoryResponse413 | workflowListNamespaceDirectoryResponse503) & {
+  headers: Headers;
+};
+
+export type workflowListNamespaceDirectoryResponse = (workflowListNamespaceDirectoryResponseSuccess | workflowListNamespaceDirectoryResponseError)
+
+export const getWorkflowListNamespaceDirectoryUrl = (workspace: string,
+    namespace: string,
+    params?: WorkflowListNamespaceDirectoryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/directory?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/directory`
+}
+
+export const workflowListNamespaceDirectory = async (workspace: string,
+    namespace: string,
+    params?: WorkflowListNamespaceDirectoryParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowListNamespaceDirectoryResponse> => {
+
+  return customInstance<workflowListNamespaceDirectoryResponse>(getWorkflowListNamespaceDirectoryUrl(workspace,namespace,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowListNamespaceDirectoryQueryKey = (workspace: string,
+    namespace: string,
+    params?: WorkflowListNamespaceDirectoryParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/directory`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowListNamespaceDirectoryQueryOptions = <TData = Awaited<ReturnType<typeof workflowListNamespaceDirectory>>, TError = ErrorBody>(workspace: string,
+    namespace: string,
+    params?: WorkflowListNamespaceDirectoryParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListNamespaceDirectory>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowListNamespaceDirectoryQueryKey(workspace,namespace,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowListNamespaceDirectory>>> = ({ signal }) => workflowListNamespaceDirectory(workspace,namespace,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && namespace !== null && namespace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowListNamespaceDirectory>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowListNamespaceDirectoryQueryResult = NonNullable<Awaited<ReturnType<typeof workflowListNamespaceDirectory>>>
+export type WorkflowListNamespaceDirectoryQueryError = ErrorBody
+
+
+export function useWorkflowListNamespaceDirectory<TData = Awaited<ReturnType<typeof workflowListNamespaceDirectory>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params: undefined |  WorkflowListNamespaceDirectoryParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListNamespaceDirectory>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListNamespaceDirectory>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListNamespaceDirectory>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListNamespaceDirectory<TData = Awaited<ReturnType<typeof workflowListNamespaceDirectory>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params?: WorkflowListNamespaceDirectoryParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListNamespaceDirectory>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListNamespaceDirectory>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListNamespaceDirectory>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListNamespaceDirectory<TData = Awaited<ReturnType<typeof workflowListNamespaceDirectory>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params?: WorkflowListNamespaceDirectoryParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListNamespaceDirectory>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowListNamespaceDirectory<TData = Awaited<ReturnType<typeof workflowListNamespaceDirectory>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params?: WorkflowListNamespaceDirectoryParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListNamespaceDirectory>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowListNamespaceDirectoryQueryOptions(workspace,namespace,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowCreateNamespaceDirectoryResponse200 = {
+  data: void
+  status: 200
+}
+
+export type workflowCreateNamespaceDirectoryResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowCreateNamespaceDirectoryResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowCreateNamespaceDirectoryResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowCreateNamespaceDirectoryResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowCreateNamespaceDirectoryResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowCreateNamespaceDirectoryResponseSuccess = (workflowCreateNamespaceDirectoryResponse200) & {
+  headers: Headers;
+};
+export type workflowCreateNamespaceDirectoryResponseError = (workflowCreateNamespaceDirectoryResponse400 | workflowCreateNamespaceDirectoryResponse401 | workflowCreateNamespaceDirectoryResponse403 | workflowCreateNamespaceDirectoryResponse409 | workflowCreateNamespaceDirectoryResponse503) & {
+  headers: Headers;
+};
+
+export type workflowCreateNamespaceDirectoryResponse = (workflowCreateNamespaceDirectoryResponseSuccess | workflowCreateNamespaceDirectoryResponseError)
+
+export const getWorkflowCreateNamespaceDirectoryUrl = (workspace: string,
+    namespace: string,
+    params: WorkflowCreateNamespaceDirectoryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/directory?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/directory`
+}
+
+export const workflowCreateNamespaceDirectory = async (workspace: string,
+    namespace: string,
+    params: WorkflowCreateNamespaceDirectoryParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowCreateNamespaceDirectoryResponse> => {
+
+  return customInstance<workflowCreateNamespaceDirectoryResponse>(getWorkflowCreateNamespaceDirectoryUrl(workspace,namespace,params),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowCreateNamespaceDirectoryMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowCreateNamespaceDirectory>>, TError,{workspace: string;namespace: string;params: WorkflowCreateNamespaceDirectoryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowCreateNamespaceDirectory>>, TError,{workspace: string;namespace: string;params: WorkflowCreateNamespaceDirectoryParams}, TContext> => {
+
+const mutationKey = ['workflowCreateNamespaceDirectory'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowCreateNamespaceDirectory>>, {workspace: string;namespace: string;params: WorkflowCreateNamespaceDirectoryParams}> = (props) => {
+          const {workspace,namespace,params} = props ?? {};
+
+          return  workflowCreateNamespaceDirectory(workspace,namespace,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowCreateNamespaceDirectoryMutationResult = NonNullable<Awaited<ReturnType<typeof workflowCreateNamespaceDirectory>>>
+
+    export type WorkflowCreateNamespaceDirectoryMutationError = ErrorBody
+
+    export const useWorkflowCreateNamespaceDirectory = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowCreateNamespaceDirectory>>, TError,{workspace: string;namespace: string;params: WorkflowCreateNamespaceDirectoryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowCreateNamespaceDirectory>>,
+        TError,
+        {workspace: string;namespace: string;params: WorkflowCreateNamespaceDirectoryParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowCreateNamespaceDirectoryMutationOptions(options), queryClient);
+    }
+    export type workflowExportNamespaceFilesResponse200 = {
+  data: Blob
+  status: 200
+}
+
+export type workflowExportNamespaceFilesResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowExportNamespaceFilesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowExportNamespaceFilesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowExportNamespaceFilesResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowExportNamespaceFilesResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowExportNamespaceFilesResponseSuccess = (workflowExportNamespaceFilesResponse200) & {
+  headers: Headers;
+};
+export type workflowExportNamespaceFilesResponseError = (workflowExportNamespaceFilesResponse400 | workflowExportNamespaceFilesResponse401 | workflowExportNamespaceFilesResponse403 | workflowExportNamespaceFilesResponse413 | workflowExportNamespaceFilesResponse503) & {
+  headers: Headers;
+};
+
+export type workflowExportNamespaceFilesResponse = (workflowExportNamespaceFilesResponseSuccess | workflowExportNamespaceFilesResponseError)
+
+export const getWorkflowExportNamespaceFilesUrl = (workspace: string,
+    namespace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/export`
+}
+
+export const workflowExportNamespaceFiles = async (workspace: string,
+    namespace: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowExportNamespaceFilesResponse> => {
+
+  return customInstance<workflowExportNamespaceFilesResponse>(getWorkflowExportNamespaceFilesUrl(workspace,namespace),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowExportNamespaceFilesQueryKey = (workspace: string,
+    namespace: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/export`
+    ] as const;
+    }
+
+
+export const getWorkflowExportNamespaceFilesQueryOptions = <TData = Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError = ErrorBody>(workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowExportNamespaceFilesQueryKey(workspace,namespace);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>> = ({ signal }) => workflowExportNamespaceFiles(workspace,namespace, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && namespace !== null && namespace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowExportNamespaceFilesQueryResult = NonNullable<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>>
+export type WorkflowExportNamespaceFilesQueryError = ErrorBody
+
+
+export function useWorkflowExportNamespaceFiles<TData = Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowExportNamespaceFiles>>,
+          TError,
+          Awaited<ReturnType<typeof workflowExportNamespaceFiles>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowExportNamespaceFiles<TData = Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowExportNamespaceFiles>>,
+          TError,
+          Awaited<ReturnType<typeof workflowExportNamespaceFiles>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowExportNamespaceFiles<TData = Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowExportNamespaceFiles<TData = Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportNamespaceFiles>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowExportNamespaceFilesQueryOptions(workspace,namespace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowNamespaceFileRevisionsResponse200 = {
+  data: NsFileRevisionDto[]
+  status: 200
+}
+
+export type workflowNamespaceFileRevisionsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowNamespaceFileRevisionsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowNamespaceFileRevisionsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowNamespaceFileRevisionsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowNamespaceFileRevisionsResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowNamespaceFileRevisionsResponseSuccess = (workflowNamespaceFileRevisionsResponse200) & {
+  headers: Headers;
+};
+export type workflowNamespaceFileRevisionsResponseError = (workflowNamespaceFileRevisionsResponse400 | workflowNamespaceFileRevisionsResponse401 | workflowNamespaceFileRevisionsResponse403 | workflowNamespaceFileRevisionsResponse404 | workflowNamespaceFileRevisionsResponse503) & {
+  headers: Headers;
+};
+
+export type workflowNamespaceFileRevisionsResponse = (workflowNamespaceFileRevisionsResponseSuccess | workflowNamespaceFileRevisionsResponseError)
+
+export const getWorkflowNamespaceFileRevisionsUrl = (workspace: string,
+    namespace: string,
+    params: WorkflowNamespaceFileRevisionsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/revisions?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/revisions`
+}
+
+export const workflowNamespaceFileRevisions = async (workspace: string,
+    namespace: string,
+    params: WorkflowNamespaceFileRevisionsParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowNamespaceFileRevisionsResponse> => {
+
+  return customInstance<workflowNamespaceFileRevisionsResponse>(getWorkflowNamespaceFileRevisionsUrl(workspace,namespace,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowNamespaceFileRevisionsQueryKey = (workspace: string,
+    namespace: string,
+    params?: WorkflowNamespaceFileRevisionsParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/revisions`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowNamespaceFileRevisionsQueryOptions = <TData = Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>, TError = ErrorBody>(workspace: string,
+    namespace: string,
+    params: WorkflowNamespaceFileRevisionsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowNamespaceFileRevisionsQueryKey(workspace,namespace,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>> = ({ signal }) => workflowNamespaceFileRevisions(workspace,namespace,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && namespace !== null && namespace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowNamespaceFileRevisionsQueryResult = NonNullable<Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>>
+export type WorkflowNamespaceFileRevisionsQueryError = ErrorBody
+
+
+export function useWorkflowNamespaceFileRevisions<TData = Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params: WorkflowNamespaceFileRevisionsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>,
+          TError,
+          Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowNamespaceFileRevisions<TData = Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params: WorkflowNamespaceFileRevisionsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>,
+          TError,
+          Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowNamespaceFileRevisions<TData = Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params: WorkflowNamespaceFileRevisionsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowNamespaceFileRevisions<TData = Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params: WorkflowNamespaceFileRevisionsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceFileRevisions>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowNamespaceFileRevisionsQueryOptions(workspace,namespace,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowSearchNamespaceFilesResponse200 = {
+  data: string[]
+  status: 200
+}
+
+export type workflowSearchNamespaceFilesResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowSearchNamespaceFilesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowSearchNamespaceFilesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowSearchNamespaceFilesResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowSearchNamespaceFilesResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowSearchNamespaceFilesResponseSuccess = (workflowSearchNamespaceFilesResponse200) & {
+  headers: Headers;
+};
+export type workflowSearchNamespaceFilesResponseError = (workflowSearchNamespaceFilesResponse400 | workflowSearchNamespaceFilesResponse401 | workflowSearchNamespaceFilesResponse403 | workflowSearchNamespaceFilesResponse413 | workflowSearchNamespaceFilesResponse503) & {
+  headers: Headers;
+};
+
+export type workflowSearchNamespaceFilesResponse = (workflowSearchNamespaceFilesResponseSuccess | workflowSearchNamespaceFilesResponseError)
+
+export const getWorkflowSearchNamespaceFilesUrl = (workspace: string,
+    namespace: string,
+    params: WorkflowSearchNamespaceFilesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/search?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/search`
+}
+
+export const workflowSearchNamespaceFiles = async (workspace: string,
+    namespace: string,
+    params: WorkflowSearchNamespaceFilesParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowSearchNamespaceFilesResponse> => {
+
+  return customInstance<workflowSearchNamespaceFilesResponse>(getWorkflowSearchNamespaceFilesUrl(workspace,namespace,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowSearchNamespaceFilesQueryKey = (workspace: string,
+    namespace: string,
+    params?: WorkflowSearchNamespaceFilesParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/search`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowSearchNamespaceFilesQueryOptions = <TData = Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>, TError = ErrorBody>(workspace: string,
+    namespace: string,
+    params: WorkflowSearchNamespaceFilesParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowSearchNamespaceFilesQueryKey(workspace,namespace,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>> = ({ signal }) => workflowSearchNamespaceFiles(workspace,namespace,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && namespace !== null && namespace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowSearchNamespaceFilesQueryResult = NonNullable<Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>>
+export type WorkflowSearchNamespaceFilesQueryError = ErrorBody
+
+
+export function useWorkflowSearchNamespaceFiles<TData = Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params: WorkflowSearchNamespaceFilesParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>,
+          TError,
+          Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowSearchNamespaceFiles<TData = Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params: WorkflowSearchNamespaceFilesParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>,
+          TError,
+          Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowSearchNamespaceFiles<TData = Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params: WorkflowSearchNamespaceFilesParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowSearchNamespaceFiles<TData = Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params: WorkflowSearchNamespaceFilesParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowSearchNamespaceFiles>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowSearchNamespaceFilesQueryOptions(workspace,namespace,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowNamespaceFileStatsResponse200 = {
+  data: NsFileStatsDto
+  status: 200
+}
+
+export type workflowNamespaceFileStatsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowNamespaceFileStatsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowNamespaceFileStatsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowNamespaceFileStatsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowNamespaceFileStatsResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowNamespaceFileStatsResponseSuccess = (workflowNamespaceFileStatsResponse200) & {
+  headers: Headers;
+};
+export type workflowNamespaceFileStatsResponseError = (workflowNamespaceFileStatsResponse400 | workflowNamespaceFileStatsResponse401 | workflowNamespaceFileStatsResponse403 | workflowNamespaceFileStatsResponse404 | workflowNamespaceFileStatsResponse503) & {
+  headers: Headers;
+};
+
+export type workflowNamespaceFileStatsResponse = (workflowNamespaceFileStatsResponseSuccess | workflowNamespaceFileStatsResponseError)
+
+export const getWorkflowNamespaceFileStatsUrl = (workspace: string,
+    namespace: string,
+    params?: WorkflowNamespaceFileStatsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/stats?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/stats`
+}
+
+export const workflowNamespaceFileStats = async (workspace: string,
+    namespace: string,
+    params?: WorkflowNamespaceFileStatsParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowNamespaceFileStatsResponse> => {
+
+  return customInstance<workflowNamespaceFileStatsResponse>(getWorkflowNamespaceFileStatsUrl(workspace,namespace,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowNamespaceFileStatsQueryKey = (workspace: string,
+    namespace: string,
+    params?: WorkflowNamespaceFileStatsParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/files/stats`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowNamespaceFileStatsQueryOptions = <TData = Awaited<ReturnType<typeof workflowNamespaceFileStats>>, TError = ErrorBody>(workspace: string,
+    namespace: string,
+    params?: WorkflowNamespaceFileStatsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceFileStats>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowNamespaceFileStatsQueryKey(workspace,namespace,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowNamespaceFileStats>>> = ({ signal }) => workflowNamespaceFileStats(workspace,namespace,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && namespace !== null && namespace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceFileStats>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowNamespaceFileStatsQueryResult = NonNullable<Awaited<ReturnType<typeof workflowNamespaceFileStats>>>
+export type WorkflowNamespaceFileStatsQueryError = ErrorBody
+
+
+export function useWorkflowNamespaceFileStats<TData = Awaited<ReturnType<typeof workflowNamespaceFileStats>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params: undefined |  WorkflowNamespaceFileStatsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceFileStats>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowNamespaceFileStats>>,
+          TError,
+          Awaited<ReturnType<typeof workflowNamespaceFileStats>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowNamespaceFileStats<TData = Awaited<ReturnType<typeof workflowNamespaceFileStats>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params?: WorkflowNamespaceFileStatsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceFileStats>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowNamespaceFileStats>>,
+          TError,
+          Awaited<ReturnType<typeof workflowNamespaceFileStats>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowNamespaceFileStats<TData = Awaited<ReturnType<typeof workflowNamespaceFileStats>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params?: WorkflowNamespaceFileStatsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceFileStats>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowNamespaceFileStats<TData = Awaited<ReturnType<typeof workflowNamespaceFileStats>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    params?: WorkflowNamespaceFileStatsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceFileStats>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowNamespaceFileStatsQueryOptions(workspace,namespace,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowListKvResponse200 = {
+  data: KvEntryDto[]
+  status: 200
+}
+
+export type workflowListKvResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowListKvResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowListKvResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowListKvResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowListKvResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowListKvResponseSuccess = (workflowListKvResponse200) & {
+  headers: Headers;
+};
+export type workflowListKvResponseError = (workflowListKvResponse400 | workflowListKvResponse401 | workflowListKvResponse403 | workflowListKvResponse413 | workflowListKvResponse503) & {
+  headers: Headers;
+};
+
+export type workflowListKvResponse = (workflowListKvResponseSuccess | workflowListKvResponseError)
+
+export const getWorkflowListKvUrl = (workspace: string,
+    namespace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/kv`
+}
+
+export const workflowListKv = async (workspace: string,
+    namespace: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowListKvResponse> => {
+
+  return customInstance<workflowListKvResponse>(getWorkflowListKvUrl(workspace,namespace),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowListKvQueryKey = (workspace: string,
+    namespace: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/kv`
+    ] as const;
+    }
+
+
+export const getWorkflowListKvQueryOptions = <TData = Awaited<ReturnType<typeof workflowListKv>>, TError = ErrorBody>(workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListKv>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowListKvQueryKey(workspace,namespace);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowListKv>>> = ({ signal }) => workflowListKv(workspace,namespace, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && namespace !== null && namespace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowListKv>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowListKvQueryResult = NonNullable<Awaited<ReturnType<typeof workflowListKv>>>
+export type WorkflowListKvQueryError = ErrorBody
+
+
+export function useWorkflowListKv<TData = Awaited<ReturnType<typeof workflowListKv>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListKv>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListKv>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListKv>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListKv<TData = Awaited<ReturnType<typeof workflowListKv>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListKv>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListKv>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListKv>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListKv<TData = Awaited<ReturnType<typeof workflowListKv>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListKv>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowListKv<TData = Awaited<ReturnType<typeof workflowListKv>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListKv>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowListKvQueryOptions(workspace,namespace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowDeleteKvValuesResponse200 = {
+  data: KvKeysBody
+  status: 200
+}
+
+export type workflowDeleteKvValuesResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowDeleteKvValuesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowDeleteKvValuesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowDeleteKvValuesResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowDeleteKvValuesResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowDeleteKvValuesResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowDeleteKvValuesResponseSuccess = (workflowDeleteKvValuesResponse200) & {
+  headers: Headers;
+};
+export type workflowDeleteKvValuesResponseError = (workflowDeleteKvValuesResponse400 | workflowDeleteKvValuesResponse401 | workflowDeleteKvValuesResponse403 | workflowDeleteKvValuesResponse409 | workflowDeleteKvValuesResponse413 | workflowDeleteKvValuesResponse503) & {
+  headers: Headers;
+};
+
+export type workflowDeleteKvValuesResponse = (workflowDeleteKvValuesResponseSuccess | workflowDeleteKvValuesResponseError)
+
+export const getWorkflowDeleteKvValuesUrl = (workspace: string,
+    namespace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/kv`
+}
+
+export const workflowDeleteKvValues = async (workspace: string,
+    namespace: string,
+    kvKeysBody: KvKeysBody, options?: Parameters<typeof customInstance>[1]): Promise<workflowDeleteKvValuesResponse> => {
+
+  return customInstance<workflowDeleteKvValuesResponse>(getWorkflowDeleteKvValuesUrl(workspace,namespace),
+  {
+    ...options,
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(kvKeysBody)
+  }
+);}
+
+
+
+
+
+export const getWorkflowDeleteKvValuesMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteKvValues>>, TError,{workspace: string;namespace: string;data: KvKeysBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteKvValues>>, TError,{workspace: string;namespace: string;data: KvKeysBody}, TContext> => {
+
+const mutationKey = ['workflowDeleteKvValues'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowDeleteKvValues>>, {workspace: string;namespace: string;data: KvKeysBody}> = (props) => {
+          const {workspace,namespace,data} = props ?? {};
+
+          return  workflowDeleteKvValues(workspace,namespace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowDeleteKvValuesMutationResult = NonNullable<Awaited<ReturnType<typeof workflowDeleteKvValues>>>
+    export type WorkflowDeleteKvValuesMutationBody = KvKeysBody
+    export type WorkflowDeleteKvValuesMutationError = ErrorBody
+
+    export const useWorkflowDeleteKvValues = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteKvValues>>, TError,{workspace: string;namespace: string;data: KvKeysBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowDeleteKvValues>>,
+        TError,
+        {workspace: string;namespace: string;data: KvKeysBody},
+        TContext
+      > => {
+      return useMutation(getWorkflowDeleteKvValuesMutationOptions(options), queryClient);
+    }
+    export type workflowListInheritedKvResponse200 = {
+  data: KvInheritedDto[]
+  status: 200
+}
+
+export type workflowListInheritedKvResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowListInheritedKvResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowListInheritedKvResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowListInheritedKvResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowListInheritedKvResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowListInheritedKvResponseSuccess = (workflowListInheritedKvResponse200) & {
+  headers: Headers;
+};
+export type workflowListInheritedKvResponseError = (workflowListInheritedKvResponse400 | workflowListInheritedKvResponse401 | workflowListInheritedKvResponse403 | workflowListInheritedKvResponse413 | workflowListInheritedKvResponse503) & {
+  headers: Headers;
+};
+
+export type workflowListInheritedKvResponse = (workflowListInheritedKvResponseSuccess | workflowListInheritedKvResponseError)
+
+export const getWorkflowListInheritedKvUrl = (workspace: string,
+    namespace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/kv/inheritance`
+}
+
+export const workflowListInheritedKv = async (workspace: string,
+    namespace: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowListInheritedKvResponse> => {
+
+  return customInstance<workflowListInheritedKvResponse>(getWorkflowListInheritedKvUrl(workspace,namespace),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowListInheritedKvQueryKey = (workspace: string,
+    namespace: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/kv/inheritance`
+    ] as const;
+    }
+
+
+export const getWorkflowListInheritedKvQueryOptions = <TData = Awaited<ReturnType<typeof workflowListInheritedKv>>, TError = ErrorBody>(workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListInheritedKv>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowListInheritedKvQueryKey(workspace,namespace);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowListInheritedKv>>> = ({ signal }) => workflowListInheritedKv(workspace,namespace, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && namespace !== null && namespace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowListInheritedKv>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowListInheritedKvQueryResult = NonNullable<Awaited<ReturnType<typeof workflowListInheritedKv>>>
+export type WorkflowListInheritedKvQueryError = ErrorBody
+
+
+export function useWorkflowListInheritedKv<TData = Awaited<ReturnType<typeof workflowListInheritedKv>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListInheritedKv>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListInheritedKv>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListInheritedKv>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListInheritedKv<TData = Awaited<ReturnType<typeof workflowListInheritedKv>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListInheritedKv>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListInheritedKv>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListInheritedKv>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListInheritedKv<TData = Awaited<ReturnType<typeof workflowListInheritedKv>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListInheritedKv>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowListInheritedKv<TData = Awaited<ReturnType<typeof workflowListInheritedKv>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListInheritedKv>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowListInheritedKvQueryOptions(workspace,namespace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowGetKvValueResponse200 = {
+  data: KvDetailDto
+  status: 200
+}
+
+export type workflowGetKvValueResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowGetKvValueResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowGetKvValueResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowGetKvValueResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowGetKvValueResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowGetKvValueResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowGetKvValueResponseSuccess = (workflowGetKvValueResponse200) & {
+  headers: Headers;
+};
+export type workflowGetKvValueResponseError = (workflowGetKvValueResponse400 | workflowGetKvValueResponse401 | workflowGetKvValueResponse403 | workflowGetKvValueResponse404 | workflowGetKvValueResponse413 | workflowGetKvValueResponse503) & {
+  headers: Headers;
+};
+
+export type workflowGetKvValueResponse = (workflowGetKvValueResponseSuccess | workflowGetKvValueResponseError)
+
+export const getWorkflowGetKvValueUrl = (workspace: string,
+    namespace: string,
+    key: string,
+    params?: WorkflowGetKvValueParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/kv/${encodeURIComponent(key)}?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/kv/${encodeURIComponent(key)}`
+}
+
+export const workflowGetKvValue = async (workspace: string,
+    namespace: string,
+    key: string,
+    params?: WorkflowGetKvValueParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowGetKvValueResponse> => {
+
+  return customInstance<workflowGetKvValueResponse>(getWorkflowGetKvValueUrl(workspace,namespace,key,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowGetKvValueQueryKey = (workspace: string,
+    namespace: string,
+    key: string,
+    params?: WorkflowGetKvValueParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/kv/${encodeURIComponent(key)}`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowGetKvValueQueryOptions = <TData = Awaited<ReturnType<typeof workflowGetKvValue>>, TError = ErrorBody>(workspace: string,
+    namespace: string,
+    key: string,
+    params?: WorkflowGetKvValueParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetKvValue>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowGetKvValueQueryKey(workspace,namespace,key,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowGetKvValue>>> = ({ signal }) => workflowGetKvValue(workspace,namespace,key,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && namespace !== null && namespace !== undefined && key !== null && key !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowGetKvValue>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowGetKvValueQueryResult = NonNullable<Awaited<ReturnType<typeof workflowGetKvValue>>>
+export type WorkflowGetKvValueQueryError = ErrorBody
+
+
+export function useWorkflowGetKvValue<TData = Awaited<ReturnType<typeof workflowGetKvValue>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    key: string,
+    params: undefined |  WorkflowGetKvValueParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetKvValue>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowGetKvValue>>,
+          TError,
+          Awaited<ReturnType<typeof workflowGetKvValue>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowGetKvValue<TData = Awaited<ReturnType<typeof workflowGetKvValue>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    key: string,
+    params?: WorkflowGetKvValueParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetKvValue>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowGetKvValue>>,
+          TError,
+          Awaited<ReturnType<typeof workflowGetKvValue>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowGetKvValue<TData = Awaited<ReturnType<typeof workflowGetKvValue>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    key: string,
+    params?: WorkflowGetKvValueParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetKvValue>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowGetKvValue<TData = Awaited<ReturnType<typeof workflowGetKvValue>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    key: string,
+    params?: WorkflowGetKvValueParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetKvValue>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowGetKvValueQueryOptions(workspace,namespace,key,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowPutKvValueResponse200 = {
+  data: void
+  status: 200
+}
+
+export type workflowPutKvValueResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowPutKvValueResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowPutKvValueResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowPutKvValueResponse408 = {
+  data: ErrorBody
+  status: 408
+}
+
+export type workflowPutKvValueResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowPutKvValueResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowPutKvValueResponse415 = {
+  data: ErrorBody
+  status: 415
+}
+
+export type workflowPutKvValueResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowPutKvValueResponseSuccess = (workflowPutKvValueResponse200) & {
+  headers: Headers;
+};
+export type workflowPutKvValueResponseError = (workflowPutKvValueResponse400 | workflowPutKvValueResponse401 | workflowPutKvValueResponse403 | workflowPutKvValueResponse408 | workflowPutKvValueResponse409 | workflowPutKvValueResponse413 | workflowPutKvValueResponse415 | workflowPutKvValueResponse503) & {
+  headers: Headers;
+};
+
+export type workflowPutKvValueResponse = (workflowPutKvValueResponseSuccess | workflowPutKvValueResponseError)
+
+export const getWorkflowPutKvValueUrl = (workspace: string,
+    namespace: string,
+    key: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/kv/${encodeURIComponent(key)}`
+}
+
+export const workflowPutKvValue = async (workspace: string,
+    namespace: string,
+    key: string,
+    workflowPutKvValueBody: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowPutKvValueResponse> => {
+
+  return customInstance<workflowPutKvValueResponse>(getWorkflowPutKvValueUrl(workspace,namespace,key),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'text/plain', ...options?.headers },
+    body: workflowPutKvValueBody
+  }
+);}
+
+
+
+
+
+export const getWorkflowPutKvValueMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowPutKvValue>>, TError,{workspace: string;namespace: string;key: string;data: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowPutKvValue>>, TError,{workspace: string;namespace: string;key: string;data: string}, TContext> => {
+
+const mutationKey = ['workflowPutKvValue'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowPutKvValue>>, {workspace: string;namespace: string;key: string;data: string}> = (props) => {
+          const {workspace,namespace,key,data} = props ?? {};
+
+          return  workflowPutKvValue(workspace,namespace,key,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowPutKvValueMutationResult = NonNullable<Awaited<ReturnType<typeof workflowPutKvValue>>>
+    export type WorkflowPutKvValueMutationBody = string
+    export type WorkflowPutKvValueMutationError = ErrorBody
+
+    export const useWorkflowPutKvValue = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowPutKvValue>>, TError,{workspace: string;namespace: string;key: string;data: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowPutKvValue>>,
+        TError,
+        {workspace: string;namespace: string;key: string;data: string},
+        TContext
+      > => {
+      return useMutation(getWorkflowPutKvValueMutationOptions(options), queryClient);
+    }
+    export type workflowDeleteKvValueResponse200 = {
+  data: boolean
+  status: 200
+}
+
+export type workflowDeleteKvValueResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowDeleteKvValueResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowDeleteKvValueResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowDeleteKvValueResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowDeleteKvValueResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowDeleteKvValueResponseSuccess = (workflowDeleteKvValueResponse200) & {
+  headers: Headers;
+};
+export type workflowDeleteKvValueResponseError = (workflowDeleteKvValueResponse400 | workflowDeleteKvValueResponse401 | workflowDeleteKvValueResponse403 | workflowDeleteKvValueResponse409 | workflowDeleteKvValueResponse503) & {
+  headers: Headers;
+};
+
+export type workflowDeleteKvValueResponse = (workflowDeleteKvValueResponseSuccess | workflowDeleteKvValueResponseError)
+
+export const getWorkflowDeleteKvValueUrl = (workspace: string,
+    namespace: string,
+    key: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/kv/${encodeURIComponent(key)}`
+}
+
+export const workflowDeleteKvValue = async (workspace: string,
+    namespace: string,
+    key: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowDeleteKvValueResponse> => {
+
+  return customInstance<workflowDeleteKvValueResponse>(getWorkflowDeleteKvValueUrl(workspace,namespace,key),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowDeleteKvValueMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteKvValue>>, TError,{workspace: string;namespace: string;key: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteKvValue>>, TError,{workspace: string;namespace: string;key: string}, TContext> => {
+
+const mutationKey = ['workflowDeleteKvValue'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowDeleteKvValue>>, {workspace: string;namespace: string;key: string}> = (props) => {
+          const {workspace,namespace,key} = props ?? {};
+
+          return  workflowDeleteKvValue(workspace,namespace,key,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowDeleteKvValueMutationResult = NonNullable<Awaited<ReturnType<typeof workflowDeleteKvValue>>>
+
+    export type WorkflowDeleteKvValueMutationError = ErrorBody
+
+    export const useWorkflowDeleteKvValue = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteKvValue>>, TError,{workspace: string;namespace: string;key: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowDeleteKvValue>>,
+        TError,
+        {workspace: string;namespace: string;key: string},
+        TContext
+      > => {
+      return useMutation(getWorkflowDeleteKvValueMutationOptions(options), queryClient);
+    }
+    export type workflowKvRevisionsResponse200 = {
+  data: KvRevisionDto[]
+  status: 200
+}
+
+export type workflowKvRevisionsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowKvRevisionsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowKvRevisionsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowKvRevisionsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowKvRevisionsResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type workflowKvRevisionsResponseSuccess = (workflowKvRevisionsResponse200) & {
+  headers: Headers;
+};
+export type workflowKvRevisionsResponseError = (workflowKvRevisionsResponse400 | workflowKvRevisionsResponse401 | workflowKvRevisionsResponse403 | workflowKvRevisionsResponse404 | workflowKvRevisionsResponse503) & {
+  headers: Headers;
+};
+
+export type workflowKvRevisionsResponse = (workflowKvRevisionsResponseSuccess | workflowKvRevisionsResponseError)
+
+export const getWorkflowKvRevisionsUrl = (workspace: string,
+    namespace: string,
+    key: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/kv/${encodeURIComponent(key)}/revisions`
+}
+
+export const workflowKvRevisions = async (workspace: string,
+    namespace: string,
+    key: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowKvRevisionsResponse> => {
+
+  return customInstance<workflowKvRevisionsResponse>(getWorkflowKvRevisionsUrl(workspace,namespace,key),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowKvRevisionsQueryKey = (workspace: string,
+    namespace: string,
+    key: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/kv/${encodeURIComponent(key)}/revisions`
+    ] as const;
+    }
+
+
+export const getWorkflowKvRevisionsQueryOptions = <TData = Awaited<ReturnType<typeof workflowKvRevisions>>, TError = ErrorBody>(workspace: string,
+    namespace: string,
+    key: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowKvRevisions>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowKvRevisionsQueryKey(workspace,namespace,key);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowKvRevisions>>> = ({ signal }) => workflowKvRevisions(workspace,namespace,key, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && namespace !== null && namespace !== undefined && key !== null && key !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowKvRevisions>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowKvRevisionsQueryResult = NonNullable<Awaited<ReturnType<typeof workflowKvRevisions>>>
+export type WorkflowKvRevisionsQueryError = ErrorBody
+
+
+export function useWorkflowKvRevisions<TData = Awaited<ReturnType<typeof workflowKvRevisions>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    key: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowKvRevisions>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowKvRevisions>>,
+          TError,
+          Awaited<ReturnType<typeof workflowKvRevisions>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowKvRevisions<TData = Awaited<ReturnType<typeof workflowKvRevisions>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    key: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowKvRevisions>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowKvRevisions>>,
+          TError,
+          Awaited<ReturnType<typeof workflowKvRevisions>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowKvRevisions<TData = Awaited<ReturnType<typeof workflowKvRevisions>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    key: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowKvRevisions>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowKvRevisions<TData = Awaited<ReturnType<typeof workflowKvRevisions>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    key: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowKvRevisions>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowKvRevisionsQueryOptions(workspace,namespace,key,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

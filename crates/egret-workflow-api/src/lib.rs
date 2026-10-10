@@ -23,7 +23,6 @@ pub use port::WorkflowRefPort;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RefKind {
     Database,
-    Notebook,
     Dataset,
     Chart,
     DataApiEndpoint,

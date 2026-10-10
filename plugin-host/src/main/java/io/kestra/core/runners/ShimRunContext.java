@@ -5,6 +5,7 @@ import java.net.URI;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -18,7 +19,12 @@ import io.kestra.core.models.Plugin;
 import io.kestra.core.models.executions.AbstractMetricEntry;
 import io.kestra.core.models.property.PropertyValueExtractor;
 import io.kestra.core.models.tasks.Task;
+import io.kestra.core.storages.InternalStorage;
+import io.kestra.core.storages.Namespace;
+import io.kestra.core.storages.NamespaceFactory;
 import io.kestra.core.storages.Storage;
+import io.kestra.core.storages.StorageContext;
+import io.kestra.core.storages.StorageInterface;
 import io.kestra.core.storages.kv.KVStore;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.ConstraintViolationException;
@@ -37,9 +43,13 @@ import jakarta.validation.Validator;
  *   <li>Every {@code render*} returns its input: egret rendered the properties before dispatch.</li>
  *   <li>{@link #logger()} writes {@code LEVEL message} lines to stdout (logback.xml).</li>
  *   <li>{@link #metric} logs one DEBUG line.</li>
- *   <li>{@link #workingDir()} is Kestra's own {@link LocalWorkingDir} under the given directory.</li>
- *   <li>Storage, KV, namespace files, secrets, encryption, ACLs and the application context throw
- *       {@link EgretUnsupported}.</li>
+ *   <li>{@link #workingDir()} is Kestra's own {@link LocalWorkingDir} under the JVM's temp directory
+ *       (W9a Task 9: on Docker, {@code $WORKING_DIR} is root-owned and the host runs as USER 65532).</li>
+ *   <li>{@link #storage()} is Kestra's own {@link InternalStorage} over {@link EgretStorage}: the files
+ *       egret staged and the ones this task writes (W9a spec §9.1); its {@code namespace(ns)} is an
+ *       {@link EgretNamespace}, read-only, over the namespace files egret staged (W9b spec §10,
+ *       2026-10-06).</li>
+ *   <li>KV, secrets, encryption, ACLs and the application context throw {@link EgretUnsupported}.</li>
  * </ul>
  */
 public class ShimRunContext extends DefaultRunContext {
@@ -58,17 +68,86 @@ public class ShimRunContext extends DefaultRunContext {
             .getValidator();
     }
 
+    /**
+     * What {@code task.json} says about storage (W9a spec §5): the staged files, this task run's prefix,
+     * its byte cap, and the five values Kestra's {@link StorageContext.Task} is built from.
+     *
+     * @param staged {@code kestra:// URI -> path relative to $WORKING_DIR}
+     * @param baseUri this task run's prefix, {@code null} when egret has no internal storage
+     * @param context {@code namespace, flowId, executionId, taskId, taskRunId}; {@code null} when absent
+     * @param namespaceFiles {@code task.json}'s {@code namespaceFiles} (W9b spec §10): every namespace file
+     *     egret staged because a property named it whole, of any namespace
+     */
+    record StorageSpec(Map<String, String> staged, URI baseUri, long maxTaskBytes, Map<String, String> context,
+                       List<EgretNamespace.Staged> namespaceFiles) {
+        static final StorageSpec NONE = new StorageSpec(Map.of(), null, 0, null);
+
+        /** W9a's shape: no namespace file staged. */
+        StorageSpec(Map<String, String> staged, URI baseUri, long maxTaskBytes, Map<String, String> context) {
+            this(staged, baseUri, maxTaskBytes, context, List.of());
+        }
+
+        /**
+         * What {@link EgretStorage} reads by URI: W9a's {@code storage} map, plus every staged namespace
+         * file, under
+         * <ul>
+         *   <li>its literal URI when that is a {@code kestra:///…/_files/…} one ({@code fileURI}'s) -- so a
+         *       plugin's {@code storage().getFile(uri)} reads it, as {@code CopyIn}'s {@code from} does;</li>
+         *   <li>(fix round 1, I1) its CANONICAL URI, {@code NamespaceFile.of(ns, path, revision).uri()},
+         *       for every entry, {@code nsfile://} ones included: Kestra's own read of an {@code nsfile://}
+         *       value ({@code URIFetcher.fetch}, {@code Data.from}) is
+         *       {@code storage().getFile(namespace(ns).get(path).uri())}, and {@link EgretNamespace#get}
+         *       answers that URI. It names exactly the staged revision, so R1 still holds.</li>
+         * </ul>
+         * {@code task.json}'s {@code storage} map itself is unchanged (the controller's ruling).
+         */
+        Map<String, String> readableByUri() {
+            Map<String, String> all = new LinkedHashMap<>(staged);
+            for (EgretNamespace.Staged s : namespaceFiles) {
+                if (s.uri().startsWith(EgretStorage.SCHEME + "://")) {
+                    all.putIfAbsent(s.uri(), s.staged());
+                }
+                all.putIfAbsent(EgretNamespace.canonicalUri(s), s.staged());
+            }
+            return all;
+        }
+    }
+
+    private final Path workingDirBase;
     private final WorkingDir workingDir;
+    private final StorageSpec storageSpec;
     private final List<AbstractMetricEntry<?>> metrics = new ArrayList<>();
+    private Storage storage;
 
     public ShimRunContext(Path workingDirBase) {
-        this.workingDir = new LocalWorkingDir(workingDirBase);
+        this(workingDirBase, StorageSpec.NONE);
+    }
+
+    ShimRunContext(Path workingDirBase, StorageSpec storageSpec) {
+        this(workingDirBase, workingDirBase, storageSpec);
+    }
+
+    /**
+     * @param scratchBase where Kestra's {@link LocalWorkingDir} makes its random directory (the
+     *     plugin's temp files)
+     * @param workingDirBase {@code $WORKING_DIR}: where egret staged {@code .egret/storage/} and
+     *     collects {@code .egret/out/}
+     */
+    ShimRunContext(Path scratchBase, Path workingDirBase, StorageSpec storageSpec) {
+        this.workingDirBase = workingDirBase;
+        this.workingDir = new LocalWorkingDir(scratchBase);
+        this.storageSpec = storageSpec;
         setVariables(Collections.emptyMap());
         setPluginConfiguration(Collections.emptyMap());
     }
 
     ShimRunContext(Path workingDirBase, Task task) {
-        this(workingDirBase);
+        this(workingDirBase, workingDirBase, StorageSpec.NONE);
+        setTask(task);
+    }
+
+    ShimRunContext(Path scratchBase, Path workingDirBase, Task task, StorageSpec storageSpec) {
+        this(scratchBase, workingDirBase, storageSpec);
         setTask(task);
     }
 
@@ -199,26 +278,81 @@ public class ShimRunContext extends DefaultRunContext {
         };
     }
 
+    /**
+     * Kestra's own {@link InternalStorage} over {@link EgretStorage} (W9a spec §9.1), built once, on
+     * {@code task.json}'s storage context.
+     *
+     * <p>The third argument, the {@link NamespaceFactory}, is read by {@code InternalStorage} only in
+     * {@code namespace()} (its constructor stores it; {@code getFile}/{@code putFile} never reach it --
+     * read in 2.0.0-rc13's bytecode). It is {@link #namespaceFactory}'s, over the staged namespace files.
+     */
+    @Override
+    public synchronized Storage storage() {
+        if (storage == null) {
+            Map<String, String> c = storageSpec.context();
+            if (c == null) {
+                // egret sends `context` with every task run of a flow's execution (fix round 1, I1); a
+                // task.json without one is not such a run, and has no storage to read or write.
+                throw new EgretUnsupported("storage() needs task.json's `context` (namespace, flow, "
+                    + "execution, task, task run), which egret sends for a task run of a flow's execution; "
+                    + "this task.json has none, so this run has no internal storage");
+            }
+            StorageContext context = StorageContext.forTask(null, c.get("namespace"), c.get("flowId"),
+                c.get("executionId"), c.get("taskId"), c.get("taskRunId"), null);
+            EgretStorage bridge = new EgretStorage(workingDirBase, storageSpec.readableByUri(), storageSpec.baseUri(),
+                storageSpec.maxTaskBytes());
+            storage = new InternalStorage(context, bridge, namespaceFactory(workingDirBase, storageSpec.namespaceFiles()));
+        }
+        return storage;
+    }
+
+    /**
+     * W9b spec §10 (2026-10-06, replacing W9a's {@code NO_NAMESPACE_FILES}, which threw for every
+     * namespace): {@code storage().namespace(ns)} is an {@link EgretNamespace} over the staged entries of
+     * {@code ns} -- an empty one for a namespace no property named, never an exit 4. Kestra's
+     * {@code InternalStorage.namespace(..)} calls {@code of(logger, tenant, ns, storage)} (read in
+     * 2.0.0-rc13's bytecode); the {@code StorageInterface} it passes is not used: egret staged the bytes.
+     */
+    static NamespaceFactory namespaceFactory(Path workingDir, List<EgretNamespace.Staged> staged) {
+        return new NamespaceFactory(null) {
+            @Override
+            public Namespace of(String tenantId, String namespace, StorageInterface storageInterface) {
+                List<EgretNamespace.Staged> own = staged.stream().filter(s -> s.namespace().equals(namespace)).toList();
+                return new EgretNamespace(tenantId, namespace, workingDir, own);
+            }
+
+            @Override
+            public Namespace of(Logger logger, String tenantId, String namespace, StorageInterface storageInterface) {
+                return of(tenantId, namespace, storageInterface);
+            }
+        };
+    }
+
     // --- what egret does not provide ----------------------------------------------------
 
     @Override
-    public Storage storage() {
-        throw new EgretUnsupported("storage() needs internal storage (W9)");
-    }
-
-    @Override
     public URI logFileURI() {
-        throw new EgretUnsupported("logFileURI() needs internal storage (W9)");
+        throw new EgretUnsupported("logFileURI(): egret keeps a task's log lines in its own log store, "
+            + "not as a file in internal storage");
     }
 
     @Override
     public KVStore namespaceKv(String namespace) {
-        throw new EgretUnsupported("namespaceKv() needs the KV store (W9)");
+        // 2026-10-07, W9c: the KV store is the core.kv tasks' and kv()'s; a plugin's namespaceKv() still
+        // throws, pointing at them. Nothing is staged for KV (task.json has no KV key).
+        throw new EgretUnsupported("namespaceKv(): egret gives flows the KV store through the "
+            + "`io.kestra.plugin.core.kv` tasks and the `kv()` function, not through a plugin's RunContext; "
+            + "use a `core.kv` task before or after this one.");
     }
 
+    /**
+     * Unsupported still: no class the catalog re-admits calls it (the bytecode of the three locked jars
+     * references {@code inputAndOutput} nowhere; W9a Task 9).
+     */
     @Override
     public InputAndOutput inputAndOutput() {
-        throw new EgretUnsupported("inputAndOutput() needs internal storage (W9)");
+        throw new EgretUnsupported("inputAndOutput() is not provided by egret's plugin host: no plugin "
+            + "egret's catalog holds calls it");
     }
 
     @Override

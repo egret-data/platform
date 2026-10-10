@@ -2,9 +2,9 @@
 //!
 //! An engine is materialized into each assigned workspace as a `query.databases`
 //! row (`engine_id` set). Deleting the engine — or unassigning it — deletes those
-//! rows, and several user-authored assets hang off them. Some cascade quietly
-//! (query history, notebook engine access), one is nulled (saved queries), and
-//! the rest either block the DELETE outright or would be destroyed with it:
+//! rows, and several user-authored assets hang off them. One cascades quietly
+//! (query history), one is nulled (saved queries), and the rest either block
+//! the DELETE outright or would be destroyed with it:
 //!
 //! * `dataapi.endpoints.database_id` is `ON DELETE RESTRICT` (0121), and soft
 //!   delete (0126) keeps trashed endpoints in the table, so they block too;
@@ -122,13 +122,6 @@ pub const QUERY_DATABASES_CHILD_FKS: &[DatabaseChildFk] = &[
         on_delete: "c",
         not_null: true,
         handling: ChildOnDelete::Blocks(EngineDependentKind::Dataset),
-    },
-    DatabaseChildFk {
-        table: "analytics.notebook_engine_access",
-        column: "database_id",
-        on_delete: "c",
-        not_null: true,
-        handling: ChildOnDelete::Cascades,
     },
     DatabaseChildFk {
         table: "analytics.saved_queries",

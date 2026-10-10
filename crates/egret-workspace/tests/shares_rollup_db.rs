@@ -87,6 +87,20 @@ async fn role_id(db: &Db, name: &str) -> Uuid {
         .unwrap()
 }
 
+/// A data app in the given workspace; returns (app_id, name).
+async fn seed_app(db: &Db, ws: WorkspaceId) -> (Uuid, String) {
+    let name = uniq("Sales app");
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO analytics.apps (workspace_id, name) VALUES ($1, $2) RETURNING id",
+    )
+    .bind(ws.0)
+    .bind(&name)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    (id, name)
+}
+
 /// Insert an object-scoped grant (allow/deny) on `object_id` for a principal.
 async fn grant_object(
     db: &Db,
@@ -311,4 +325,41 @@ async fn lists_object_grants_with_expires_at() {
         c.expires_at, None,
         "a grant seeded without expires_at must round-trip to None"
     );
+}
+
+/// A share on a data app (kind `app`) is listed like any other kind, with the
+/// app's name; a share on an app in another workspace is not.
+#[tokio::test]
+async fn lists_app_grants_scoped_to_workspace() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let repo = AccessViewsRepo::new(db.clone());
+    let wrepo = WorkspaceRepo::new(db.clone());
+    let owner = seed_user_email(
+        &db,
+        &format!("own-{}@t.local", uuid::Uuid::new_v4().simple()),
+    )
+    .await;
+    let w = wrepo.create(&uniq("ws"), "W", owner).await.unwrap();
+    let w2 = wrepo.create(&uniq("ws"), "W2", owner).await.unwrap();
+    let (app, app_name) = seed_app(&db, w.id).await;
+    let (other_app, _) = seed_app(&db, w2.id).await;
+    let viewer = role_id(&db, "ws_viewer").await;
+    let g = seed_group(&db, &uniq("App Team")).await;
+    grant_object(&db, "group", g, viewer, "app", app, "allow").await;
+    grant_object(&db, "group", g, viewer, "app", other_app, "allow").await;
+
+    let rows = repo.list_object_grants(w.id).await.unwrap();
+
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the share on this workspace's app: {rows:?}"
+    );
+    assert_eq!(rows[0].kind, "app");
+    assert_eq!(rows[0].object_id, app);
+    assert_eq!(rows[0].object_name.as_deref(), Some(app_name.as_str()));
+    assert_eq!(rows[0].role, "ws_viewer");
 }

@@ -20,12 +20,11 @@
 //! `catalog_registry:*` (migration 0153), so it no longer names a distinct key.
 //!
 //! Workspace-feature keys (`query:run`, `dataset:*`, `chart:*`, `dashboard:*`,
-//! `notebook:*`, `workspace:manage_members`) are enforced by
-//! `egret_workspace::rbac::Authorizer::require_workspace` in the feature-route
-//! crates (`egret-bi`, `egret-notebook`, `egret-query`, `egret-kernel`). Those
-//! routes usually pass a `const NAME: &str = "resource:action"` rather than an
-//! inline literal, so the scan resolves const identifiers referenced on a
-//! gate-call line back to their defining literal (see `enforced_in_file`).
+//! `workspace:manage_members`) are enforced by `egret_core::authz::require`/
+//! `require_object` in the feature-route crates (`egret-bi`, `egret-query`).
+//! Those routes usually pass a `const NAME: &str = "resource:action"` rather
+//! than an inline literal, so the scan resolves const identifiers referenced
+//! on a gate-call line back to their defining literal (see `enforced_in_file`).
 
 use std::collections::HashSet;
 
@@ -57,15 +56,13 @@ const EXTRA_FILES: &[&str] = &[
     // family (`warehouse:*`) was retired in SP3c-2; it now enforces
     // `catalog_registry:*`, the same keys `catalogs.rs` above already gates.
     "../egret-catalog-engine/src/warehouse_admin/mod.rs",
-    // Workspace-feature keys are gated via `require_workspace` in the
-    // feature-route crates (mostly via `const` args, resolved below).
+    // Workspace-feature keys are gated via `authz::require`/`require_object`
+    // in the feature-route crates (mostly via `const` args, resolved below).
     "../egret-bi/src/routes.rs",
     // `alert:manage` is gated via `authz::require` in the Alerts & Reports seam.
     "../egret-automation/src/routes.rs",
-    "../egret-notebook/src/routes.rs",
     "../egret-query/src/execution/routes.rs",
     "../egret-query/src/registry/routes.rs",
-    "../egret-kernel/src/routes.rs",
     // `service_account:*` (Data API P2) is gated via `authz::require` in the
     // Data API seam's management router, using the `SA_READ`/`SA_MANAGE` consts
     // the scan resolves below.
@@ -86,6 +83,14 @@ const EXTRA_FILES: &[&str] = &[
     // `WorkspaceContext`, so the gateway passes the core PEP its own
     // `AuthTarget` rather than calling `Pdp::authorize` by hand.
     "../egret-apps/src/gateway.rs",
+    // `app:read` / `app:write` (Data Apps P2) on the cookie-session app API:
+    // `authz::require` for list/create and `require_object` on every `{id}` route,
+    // with the same `APP_READ`/`APP_WRITE` consts.
+    "../egret-apps/src/routes.rs",
+    // `app:manage` (Data Apps P2) is gated by the object-share API through
+    // `require_object(manage_action(kind))`; `manage_action` is a literal table
+    // of every share kind's manage key, listed in `PERM_TABLE_FNS`.
+    "../egret-bi/src/shares.rs",
 ];
 
 /// Gate function names whose permission-key argument (an inline
@@ -118,7 +123,11 @@ const GATE_CALLS: &[&str] = &[
 /// Deliberately a NAMED list rather than "any tuple of permission literals":
 /// the point of the test is that a key nobody gates is caught, and a rule broad
 /// enough to match any table would let a genuinely dead key hide in one.
-const PERM_TABLE_FNS: &[&str] = &["fn kind_perms("];
+///
+/// `manage_action` in `egret-bi/src/shares.rs` is the second case: the share and
+/// tag handlers gate with `require_object(.., manage_action_for(&kind)?, obj)`, so
+/// `app:manage` never appears on a gate line.
+const PERM_TABLE_FNS: &[&str] = &["fn kind_perms(", "fn manage_action(", "fn read_action("];
 
 /// Functions whose whole body IS the gate, so the permission is named inside
 /// them rather than on the line that calls the gate.
@@ -344,6 +353,47 @@ fn every_catalog_permission_is_enforced_somewhere() {
     );
 }
 
+/// Keys that are enforced and CAN be held, without being in `PERMISSIONS`. Each
+/// needs its reason here; "it failed the test" is not one.
+///
+/// - `catalog:read`: the workspace-scope key from migration 0024, held by every
+///   workspace role and gated in egret-query's registry routes. It is kept out of
+///   the catalog on purpose -- `egret_core::rbac` pins `!is_known("catalog:read")`
+///   so it cannot be confused with the platform `catalog_registry:*` family.
+const HELD_OUTSIDE_THE_CATALOG: &[&str] = &["catalog:read"];
+
+/// The other direction: every key the code ENFORCES must be one somebody can hold.
+///
+/// A gate on a key no role can be granted cannot be satisfied, so the route
+/// behind it refuses everyone. `folder:manage` was exactly that for the whole life
+/// of folder sharing -- `shares.rs` asked for it, it was in no catalog and no
+/// migration, and workspace admins got 403. The scan above could not see it,
+/// because it only asks whether each catalog key has a gate.
+///
+/// "Can hold" is three sets: the catalog, the admin-graph actions (not grantable,
+/// but the PDP permits them to `platform_admin`), and the named exceptions above.
+/// Same scan, same files, read the other way.
+#[test]
+fn every_enforced_key_can_be_held_by_someone() {
+    let holdable: HashSet<&str> = egret_core::rbac::PERMISSIONS
+        .iter()
+        .map(|p| p.key)
+        .chain(egret_core::rbac::ADMIN_GRAPH_ACTIONS.iter().copied())
+        .chain(HELD_OUTSIDE_THE_CATALOG.iter().copied())
+        .collect();
+    let mut unknown: Vec<String> = enforced_keys()
+        .into_iter()
+        .filter(|k| !holdable.contains(k.as_str()))
+        .collect();
+    unknown.sort();
+    assert!(
+        unknown.is_empty(),
+        "gate(s) on a key nobody can hold -- not in egret_core::rbac::PERMISSIONS, not an \
+         admin-graph action -- so the route refuses everyone: {unknown:?}. Add the key to the \
+         catalog and grant it in a migration, or gate on a key that exists."
+    );
+}
+
 /// Sanity check on the scan itself: a handful of well-known keys must show up,
 /// so a change to `GATE_CALLS`/file list that silently stops matching
 /// anything doesn't slip through as a vacuously-true pass above.
@@ -356,12 +406,10 @@ fn scan_actually_finds_known_call_sites() {
         "policy:read",
         "workspace:read",
         "catalog_registry:read",
-        // Workspace-feature keys via `require_workspace`: `query:run` and
-        // `dashboard:read` come from a `const` arg; `notebook:read` from an
-        // inline literal (egret-kernel) — exercises both resolution paths.
+        // Workspace-feature keys resolved through a `const` arg (the other
+        // five above are inline literals, already exercising that path).
         "query:run",
         "dashboard:read",
-        "notebook:read",
     ] {
         assert!(
             enforced.contains(key),

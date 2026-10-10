@@ -1,0 +1,47 @@
+{{- /*
+NOTE on enforcement: this is the production posture (spec §6.3) regardless of CNI. Do not assume
+kindnet leaves it inert for local testing — P5e found it DOES drop traffic on an unlisted port on
+this project's kind setup (readiness probes still passed, because those are kubelet-sourced and
+not subject to this policy; the proxy's own pod-to-pod request silently timed out instead of
+getting a connection refused). Verify live on kind after touching the port list, not just by
+reading this comment.
+
+An app pod runs author code. It may be reached only by egret (the proxy lives in egret's pods), and
+it may reach only DNS and egret's own port 8080 (the pod API and the query gateway) — not the engines,
+not the object store, not the Kubernetes API, not the internet. Every query goes through the gateway
+as the viewer; a pod holds no credential to an engine.
+*/ -}}
+{{- if and (eq .Values.apps.pod.launcher "kubernetes") .Values.apps.pod.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: egret-app-pod-isolation, namespace: {{ .Values.apps.pod.namespace }} }
+spec:
+  podSelector:
+    matchLabels: { app: egret-apps }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .Release.Namespace }} }
+          podSelector:
+            matchLabels: { app: egret }
+      ports:
+        # edit (egret_marimo.launcher's PORTS["edit"]) and run (PORTS["run"]) each need their own
+        # port open — a run pod bound to only 2718 would never be reachable (found live, P5e).
+        - { protocol: TCP, port: 2718 }
+        - { protocol: TCP, port: 2719 }
+  egress:
+    # DNS
+    - to: []
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # egret: the pod API and the query gateway, on the API port only
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .Release.Namespace }} }
+          podSelector:
+            matchLabels: { app: egret }
+      ports:
+        - { protocol: TCP, port: 8080 }
+{{- end }}

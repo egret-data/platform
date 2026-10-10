@@ -150,8 +150,8 @@ pub struct DataApiEndpointDto {
 /// `#[serde(flatten)]` so the wire shape stays FLAT — `{...endpoint,
 /// "bookmarked": true}`, one object, exactly as if the field lived on the DTO —
 /// and so a field added to [`DataApiEndpointDto`] tomorrow appears in the list
-/// with nothing here to update. The same idiom `NotebookDetail` and
-/// `EngineDetailDto` use; utoipa renders it as an `allOf`.
+/// with nothing here to update. The same idiom `EngineDetailDto` uses; utoipa
+/// renders it as an `allOf`.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DataApiEndpointListItemDto {
     #[serde(flatten)]

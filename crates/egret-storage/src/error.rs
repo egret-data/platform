@@ -6,4 +6,6 @@ pub enum StorageError {
     S3(String),
     #[error("signing error: {0}")]
     Signing(String),
+    #[error("this object store does not implement {0}")]
+    Unsupported(&'static str),
 }

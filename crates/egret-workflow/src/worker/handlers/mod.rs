@@ -42,14 +42,46 @@
 pub mod container;
 pub mod fail;
 pub mod kestra;
+pub mod kv;
 pub mod log;
+pub mod namespace;
 pub mod python;
 pub mod ret;
 pub mod script;
 pub mod sleep;
 pub mod sql;
+pub mod storage;
 
 use crate::logs::{LogLevel, LogLine};
+
+/// The run's own `…/tasks/{task}/{taskRunId}/` prefix, under which a handler
+/// that writes a file in egret puts it: the render scope's (the worker's
+/// claim computed it), or else built from `flow.namespace` and `flow.id` the
+/// way `script.rs`'s `collect_to` does. `writes` names the writer in the
+/// message of a run that has none (W9a Tasks 10 and 11: `egret.sql`'s STORE,
+/// `core.storage.Write`). `Err` is the author's: a failed task.
+pub(crate) fn task_storage_prefix(task: &super::TaskInput, writes: &str) -> Result<String, String> {
+    if let Some(prefix) = task.render.files().and_then(|f| f.0.task_prefix()) {
+        return Ok(prefix.to_string());
+    }
+    let flow = (
+        crate::runners::render_str("{{ flow.namespace }}", &task.render),
+        crate::runners::render_str("{{ flow.id }}", &task.render),
+    );
+    let (Ok(namespace), Ok(flow_id)) = flow else {
+        return Err(format!(
+            "this run has no storage prefix for the file {writes} writes: it is not a task \
+             run of a flow's execution"
+        ));
+    };
+    crate::storage::uri::task_prefix(
+        &namespace,
+        &flow_id,
+        task.execution_id,
+        &task.task_id,
+        task.run_id,
+    )
+}
 
 /// Where a task's log lines go.
 ///
@@ -189,11 +221,11 @@ pub(crate) mod testing {
             // they cannot use must not be there to be quietly relied on.
             // `handlers::sql` builds its own input for that reason.
             principal: None,
-            // A fixed instant rather than `Utc::now()`: this helper's callers
-            // assert on values derived from the input, and a clock reading
-            // would make `commands::container_name`'s output differ between
-            // two runs of the same test. `handlers::container`'s tests build
-            // their own input when they need two DIFFERENT leases.
+            // A fixed instant rather than `Utc::now()`, so two runs of the
+            // same test build the same input. It bounds only `Delete`'s and
+            // `PurgeCurrentExecutionFiles`'s row `DELETE` (W9a final review
+            // I1), and no test of this helper reaches a database with one.
+            claimed_at: chrono::DateTime::UNIX_EPOCH,
             // `tracing`, under a nil identity. A test that reads the lines
             // uses `recorded` instead.
             log: RunLog::discard(),

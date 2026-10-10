@@ -1930,14 +1930,15 @@ async fn a_replay_runs_the_frozen_source_and_inputs_and_not_the_drafts() {
     // The mapping, not the key set -- see
     // [`a_start_runs_the_drafts_source_with_the_inputs_the_caller_sent`].
     assert_eq!(inputs, serde_json::json!({ "who": "world", "n": 3 }));
-    // **Unlinked, and asserted rather than assumed.** Migration 0138's
+    // **No parent, asserted rather than assumed.** Migration 0138's
     // `workflow_executions_loop_run_idx` is UNIQUE over
     // `(parent_execution_id, parent_run_ix, loop_index)` NULLS NOT DISTINCT, so
     // the one `(X, NULL, NULL)` slot belongs to `replay::spawn_due`'s
     // `CREATE_NEW_EXECUTION` replacement. A manual replay that took it would
-    // make a later retry-replay of the same execution fail a constraint. If
-    // someone gives the manual replay a link of its own, this assertion is what
-    // makes them come back to `replay_execution`'s doc.
+    // make a later retry-replay of the same execution fail a constraint. The
+    // manual replay's link is its own column, `replayed_from_execution_id`
+    // (W9a, migration 0166; `tests/storage_index.rs`
+    // `the_manual_replay_route_records_its_source`).
     assert_eq!(parent, None);
     assert_eq!(
         state_of(&db, done).await,
@@ -1945,13 +1946,9 @@ async fn a_replay_runs_the_frozen_source_and_inputs_and_not_the_drafts() {
         "the replayed execution itself is untouched"
     );
 
-    // **This assertion is what makes `replay_execution`'s doc falsifiable.**
-    // That doc says the relationship between a manual replay and what it
-    // replays *"is in the audit trail and nowhere in the data"* — and the
-    // `parent` assertion just above proves the "nowhere in the data" half. With
-    // nothing reading the trail, the other half was a sentence no test could
-    // contradict. Both ids, in the right roles: a payload that swapped them
-    // would name the replacement as the thing replayed.
+    // The audit trail carries the link too. Both ids, in the right roles: a
+    // payload that swapped them would name the replacement as the thing
+    // replayed.
     let audit = common::audit_mutations(&app);
     assert_eq!(audit.len(), 1, "one replay, one audit record");
     assert_eq!(audit[0].0, "workflow_execution:replay");
@@ -1968,10 +1965,9 @@ async fn a_replay_runs_the_frozen_source_and_inputs_and_not_the_drafts() {
 
 /// **A replay of an execution that has not finished is a 409.**
 ///
-/// Nothing in the schema records that two executions of one flow are a replay
-/// and its original (see [`a_replay_runs_the_frozen_source_and_inputs_and_not_the_drafts`]),
-/// so the narrow door is the one that cannot over-accept. The control is the
-/// same route on a terminal execution.
+/// Two copies of one flow in flight at once, a replay and its original, is
+/// what the narrow door refuses. The control is the same route on a terminal
+/// execution.
 #[tokio::test]
 async fn a_replay_of_an_unfinished_execution_is_a_conflict() {
     let Some(db) = common::db().await else { return };

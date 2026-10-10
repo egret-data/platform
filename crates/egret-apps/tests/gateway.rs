@@ -125,6 +125,9 @@ struct Fixture {
     db: Db,
     ws_a: Uuid,
     app: Uuid,
+    /// A published version of `app`: run sessions pin it (migration 0163's
+    /// `app_sessions_version_app_fk` refuses a version of no app / another app).
+    version: Uuid,
     viewer: User,
     editor: User,
     outsider: User,
@@ -274,6 +277,14 @@ impl Fixture {
         .fetch_one(&db.pool)
         .await
         .expect("insert app");
+        let version: Uuid = sqlx::query_scalar(
+            "INSERT INTO analytics.app_versions (app_id, version_no) \
+             VALUES ($1, 1) RETURNING id",
+        )
+        .bind(app)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert version");
 
         let trino_prod = insert_database(&db, ws_a, "trino_prod", "trino").await;
         insert_database(&db, ws_b, "b_only", "trino").await;
@@ -285,6 +296,7 @@ impl Fixture {
             db,
             ws_a,
             app,
+            version,
             viewer,
             editor,
             outsider,
@@ -320,11 +332,13 @@ impl Fixture {
                     workspace_id: WorkspaceId(self.ws_a),
                     app_id: self.app,
                     version_id: match mode {
-                        AppMode::Run => Some(Uuid::new_v4()),
+                        AppMode::Run => Some(self.version),
                         AppMode::Edit => None,
                     },
                     mode,
                     login_sid: user.login_sid,
+                    grant_id: None,
+                    impersonator: None,
                 },
                 IDLE,
                 ABS,
@@ -361,6 +375,14 @@ impl Fixture {
                 .unwrap(),
         )
         .await
+    }
+
+    async fn databases(&self, token: Option<&str>) -> (StatusCode, Value) {
+        let mut req = Request::get("/api/apps/databases");
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        self.send_raw(req.body(Body::empty()).unwrap()).await
     }
 
     async fn select1(&self, token: &str) -> (StatusCode, Value) {
@@ -895,6 +917,67 @@ async fn rate_limited_call_is_audited() {
     assert!(d["sql_sha256"].is_null(), "{d}");
 }
 
+/// P4a: a flood is one audit row, not one per rejected call. The limiter keeps a
+/// token locked for a window after the call that tripped it; every call inside that
+/// window is a 429 with no audit, so a runaway cell cannot fill the audit table.
+#[tokio::test]
+async fn a_flood_over_the_limit_is_audited_once() {
+    let mut f = Fixture::with_cfg(AppsConfig {
+        rate_max: 1,
+        rate_window_secs: 60,
+        ..AppsConfig::default()
+    })
+    .await;
+    let token = f.viewer_run().await;
+    assert_eq!(f.select1(&token).await.0, StatusCode::OK);
+    for _ in 0..50 {
+        assert_eq!(f.select1(&token).await.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+    let events = f.drain_audit();
+    let outcomes: Vec<&str> = events
+        .iter()
+        .map(|e| mutation(e)["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, ["ok", "rate_limited"], "{outcomes:?}");
+}
+
+/// P4a: a query made through an impersonated session names the real admin in the
+/// audit event; it is never recorded as the user's own act.
+#[tokio::test]
+async fn an_impersonated_session_audits_the_impersonator() {
+    let mut f = Fixture::new().await;
+    let admin = f.new_user().await;
+    let token = AppSessionRepo::new(f.db.clone())
+        .mint(
+            &NewAppSession {
+                user_id: UserId(f.viewer.id),
+                workspace_id: WorkspaceId(f.ws_a),
+                app_id: f.app,
+                version_id: Some(f.version),
+                mode: AppMode::Run,
+                login_sid: f.viewer.login_sid,
+                grant_id: None,
+                impersonator: Some(UserId(admin.id)),
+            },
+            IDLE,
+            ABS,
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.select1(&token).await.0, StatusCode::OK);
+    let events = f.drain_audit();
+    let AuditEvent::Mutation {
+        actor,
+        impersonator,
+        ..
+    } = &events[0]
+    else {
+        panic!("expected Mutation");
+    };
+    assert_eq!(*actor, Some(f.viewer.id));
+    assert_eq!(*impersonator, Some(admin.id));
+}
+
 /// Fix round 1: an unparseable body on a resolved session is 400, audited as
 /// `invalid`. (Before a session resolves, a 401 is not audited — case 1.)
 #[tokio::test]
@@ -1060,4 +1143,68 @@ async fn group_membership_authorizes_and_clears_a_group_gated_app() {
     // The fixture viewer holds app:read directly but is not in the group.
     let outside = f.viewer_run().await;
     assert_eq!(f.select1(&outside).await.0, StatusCode::FORBIDDEN);
+}
+
+// ---------------------------------------------------------------- P4d: databases
+
+/// An author's picker: the databases of the token's workspace, by name, and nobody else's.
+#[tokio::test]
+async fn an_authors_token_lists_the_databases_of_its_own_workspace_only() {
+    let f = Fixture::new().await;
+    let token = f.mint(&f.editor, AppMode::Edit).await;
+    let (status, body) = f.databases(Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let names: Vec<&str> = body["databases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"trino_prod"), "{names:?}");
+    assert!(
+        !names.contains(&"b_only"),
+        "another workspace's database leaked: {names:?}"
+    );
+    let trino = body["databases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "trino_prod")
+        .unwrap();
+    assert_eq!(trino["engine"], "trino");
+    assert!(
+        trino.get("host").is_none() && trino.get("port").is_none(),
+        "connection details never leave egret: {trino}"
+    );
+}
+
+/// Enumerating a workspace's databases is an admin act in egret's own API; a viewer of a published
+/// app must not get it through the back door of an app they merely open.
+#[tokio::test]
+async fn a_viewers_run_token_cannot_enumerate_databases() {
+    let f = Fixture::new().await;
+    let token = f.viewer_run().await;
+    let (status, body) = f.databases(Some(&token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+}
+
+#[tokio::test]
+async fn databases_needs_a_live_token_and_the_authors_permissions_right_now() {
+    let f = Fixture::new().await;
+    assert_eq!(f.databases(None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        f.databases(Some("ega_nope")).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let token = f.mint(&f.editor, AppMode::Edit).await;
+    assert_eq!(f.databases(Some(&token)).await.0, StatusCode::OK);
+    // revoke the author's role, rebuild the PDP snapshot: the SAME token now fails
+    sqlx::query("DELETE FROM access_grants WHERE principal_id = $1")
+        .bind(f.editor.id)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let mut f = f;
+    f.rebuild().await;
+    assert_eq!(f.databases(Some(&token)).await.0, StatusCode::FORBIDDEN);
 }

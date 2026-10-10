@@ -1,0 +1,65 @@
+# The full runtime closure of requirements.txt, exact pins (pip freeze of a clean
+# Python 3.12 venv; identical on python:3.12-slim/linux and macOS on 2026-10-02).
+# Install with `pip install -r requirements.txt -c constraints.txt` (image, dev venv, CI).
+# Regenerate after changing requirements.txt:
+#   python3.12 -m venv /tmp/lock && /tmp/lock/bin/pip install -r requirements.txt \
+#     && /tmp/lock/bin/pip freeze
+altair==6.3.0
+anyio==4.15.1
+anywidget==0.9.18
+asttokens==3.0.2
+attrs==26.1.0
+certifi==2026.7.22
+click==8.5.0
+comm==0.2.3
+docutils==0.23
+duckdb==1.5.6
+executing==2.2.1
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+ipython==9.17.1
+ipython_pygments_lexers==1.1.1
+ipywidgets==8.1.9
+itsdangerous==2.2.0
+jedi==0.20.0
+Jinja2==3.1.6
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+jupyterlab_widgets==3.0.17
+loro==1.16.2
+marimo==0.25.0
+Markdown==3.11
+MarkupSafe==3.0.3
+matplotlib-inline==0.2.2
+msgspec==0.22.0
+narwhals==2.26.0
+packaging==26.3
+parso==0.8.7
+pexpect==4.9.0
+plotly==7.1.0
+polars==1.30.0
+prompt_toolkit==3.0.53
+psutil==7.2.2
+psygnal==0.16.1
+ptyprocess==0.7.0
+pure_eval==0.2.4
+pyarrow==25.0.1
+Pygments==2.21.0
+pymdown-extensions==11.0.2
+python-multipart==0.0.32
+PyYAML==6.0.3
+pyzmq==27.2.0
+referencing==0.37.0
+rpds-py==2026.6.3
+sqlglot==30.21.0
+stack-data==0.6.3
+starlette==0.46.2
+tomlkit==0.15.1
+traitlets==5.16.1
+typing_extensions==4.16.0
+uvicorn==0.34.2
+wcwidth==0.9.1
+websockets==17.1
+widgetsnbextension==4.0.16

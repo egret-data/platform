@@ -157,7 +157,7 @@ const NOT_YET_ENFORCED: &[(&str, &str)] = &[
 /// `RunnableTask` that just runs and produces an output, like `Sleep` or
 /// `PurgeFlows`, which live in the same Java package but are *not* listed
 /// here) has a `TaskKind` variant in this crate.
-
+///
 /// Every canonical name this crate treats as Kestra control flow — the
 /// SPECIFICATION half of a two-table equality guard, and **not a production
 /// lookup any more**. W8 Task 3 fix round 1.
@@ -339,10 +339,15 @@ fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
 /// `timeout` and the other keys egret's `Task` model reads are walked like
 /// everything else, because the plugin render never sees them. A task
 /// object is recognised as a plugin task by its (`id`, `type`) pair.
+///
+/// W9c Task 4 (W9c spec §7): a `Set` or `Put` task's `value` is scanned on
+/// its own, and a call there is `secret_in_kv_value`, reported instead of
+/// `secret_outside_plugin_task` for that property.
 fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
     use crate::runners::secrets::{
         refused_argument_message, text_uses_secret, written_refused_arguments,
     };
+    use crate::worker::handlers::kv;
     use std::collections::HashSet;
 
     /// What `models::Task` reads itself; everything else on a leaf is its spec.
@@ -413,6 +418,25 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
             }
         }
 
+        /// W9c spec §7: every string of a `Set` or `Put` task's `value`, keys
+        /// too, that calls `secret()` is [`CODE_SECRET_IN_KV_VALUE`], INSTEAD
+        /// of the generic refusal, which this property never reports.
+        ///
+        /// [`CODE_SECRET_IN_KV_VALUE`]: crate::plugins::CODE_SECRET_IN_KV_VALUE
+        fn kv_value(&mut self, task: &str, v: &serde_json::Value, path: String) {
+            let mut found = Vec::new();
+            strings(v, path, &mut found);
+            for (p, text) in found {
+                if text_uses_secret(text) {
+                    self.report.errors.push(Finding {
+                        code: crate::plugins::CODE_SECRET_IN_KV_VALUE,
+                        message: crate::plugins::secret_in_kv_value_message(task, &p),
+                        path: p,
+                    });
+                }
+            }
+        }
+
         fn value(&mut self, v: &serde_json::Value, path: String) {
             match v {
                 serde_json::Value::String(s) => self.outside(path, s),
@@ -431,10 +455,17 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
                     let ty = map.get("type").and_then(serde_json::Value::as_str);
                     let is_plugin =
                         matches!((id, ty), (Some(i), Some(t)) if self.plugin.contains(&(i, t)));
+                    // W9c spec §7: a `Set` or `Put` task's `value`.
+                    let kv_value_of = match (id, ty) {
+                        (Some(i), Some(t)) if t == kv::SET || t == kv::PUT => Some(i),
+                        _ => None,
+                    };
                     for (k, v) in map {
                         let here = join(&path, k);
                         self.outside(path.clone(), k);
-                        if is_plugin && !TASK_KEYS.contains(&k.as_str()) {
+                        if let (Some(task), "value") = (kv_value_of, k.as_str()) {
+                            self.kv_value(task, v, here);
+                        } else if is_plugin && !TASK_KEYS.contains(&k.as_str()) {
                             let mut found = Vec::new();
                             strings(v, here, &mut found);
                             for (p, text) in found {
@@ -621,7 +652,10 @@ fn validate_plugin_tasks(flow: &Flow, report: &mut ValidationReport) {
 
 /// `namespace` against Kestra's own pattern (`AbstractFlow.java`):
 /// `^[a-z0-9][a-z0-9._-]*`, `@Size(min = 1, max = 150)`. A hand-written
-/// character check, not a `regex` dependency for one pattern.
+/// character check, not a `regex` dependency for one pattern. W9b: then no
+/// `_files` segment (`nsfiles::access::check_files_segment`), a second finding
+/// only when the pattern passes, so no message is doubled. W9c: then no `_kv`
+/// segment (`nsfiles::access::check_kv_segment`), only when both pass.
 fn validate_namespace(flow: &Flow, report: &mut ValidationReport) {
     if !is_valid_namespace(&flow.namespace) {
         report.errors.push(Finding {
@@ -630,6 +664,29 @@ fn validate_namespace(flow: &Flow, report: &mut ValidationReport) {
                 "namespace '{}' must match ^[a-z0-9][a-z0-9._-]* and be 1-150 characters long",
                 flow.namespace
             ),
+            path: "namespace".to_string(),
+        });
+    } else if let Err(message) =
+        crate::storage::nsfiles::access::check_files_segment(&flow.namespace)
+    {
+        // W9b: a `_files` segment would put this namespace's execution files
+        // under another namespace's files (W9b spec §3). The same function
+        // refuses it at run time (`nsfiles::access::check_namespace`, which
+        // `authorize` calls). Only this rule: an empty segment (`a..b`) still
+        // publishes, and is refused by namespace files alone (fix round 1 M3).
+        report.errors.push(Finding {
+            code: "namespace_files_segment",
+            message,
+            path: "namespace".to_string(),
+        });
+    } else if let Err(message) = crate::storage::nsfiles::access::check_kv_segment(&flow.namespace)
+    {
+        // W9c: a `_kv` segment would put this namespace's execution files and
+        // namespace files under another namespace's KV values (W9c spec §3).
+        // The same function refuses it at run time (`check_namespace`).
+        report.errors.push(Finding {
+            code: "namespace_kv_segment",
+            message,
             path: "namespace".to_string(),
         });
     }
@@ -862,6 +919,37 @@ fn validate_inputs(inputs: &[Input], report: &mut ValidationReport) {
                         .unwrap_or_else(|| format!("{item:?}")),
                 ),
                 path: format!("inputs.{}.itemType", input.id),
+            });
+        }
+    }
+
+    // W9a Task 7 fix round 1 (M5): `FileInput.allowedFileExtensions`, whose
+    // own doc requires "Each extension must start with a dot". An entry
+    // without one can never match (the file's extension is taken WITH its
+    // dot, `storage::inputs::extension_allowed`), so it would refuse every
+    // upload; refused here instead, naming the input. Gated on the input's
+    // own type for `itemType`'s reason above.
+    for input in inputs {
+        if input.r#type != InputType::File {
+            continue;
+        }
+        let bad: Vec<String> = input
+            .allowed_file_extensions
+            .iter()
+            .flatten()
+            .filter(|e| !e.starts_with('.'))
+            .map(|e| format!("{e:?}"))
+            .collect();
+        if !bad.is_empty() {
+            report.errors.push(Finding {
+                code: "input_file_extension_invalid",
+                message: format!(
+                    "input '{}': each `allowedFileExtensions` entry must start with a dot \
+                     (\".csv\"), and {} does not",
+                    input.id,
+                    bad.join(", ")
+                ),
+                path: format!("inputs.{}.allowedFileExtensions", input.id),
             });
         }
     }
@@ -1482,6 +1570,25 @@ fn walk_task(
                     path: format!("{path}.tasks"),
                 });
             }
+            // W9b Task 5 (spec §7, the user's ruling): the block is parsed by
+            // the script tasks' own parse and kept; egret does not run
+            // `WorkingDirectory`, so nothing about it changes at run.
+            if let Some(v) = &w.namespace_files {
+                if let Err((p, message)) =
+                    crate::storage::nsfiles::stage::NamespaceFilesSpec::parse(v)
+                {
+                    let at = if p.is_empty() {
+                        "namespaceFiles".to_string()
+                    } else {
+                        format!("namespaceFiles.{p}")
+                    };
+                    report.errors.push(Finding {
+                        code: "working_directory_namespace_files_invalid",
+                        message: format!("task '{}': '{at}' {message}", task.id),
+                        path: format!("{path}.{at}"),
+                    });
+                }
+            }
             // kestra: `WorkingDirectoryTaskValidator.isValid` --
             // `value.getTasks().stream().anyMatch(task -> !(task instanceof
             // RunnableTask<?>))` -> "Only runnable tasks are allowed as
@@ -2053,6 +2160,42 @@ mod tests {
         }
     }
 
+    /// W9a Task 7 fix round 1 (M5): each `allowedFileExtensions` entry of a
+    /// FILE input must start with `.` (`FileInput.java`'s own doc: "Each
+    /// extension must start with a dot"), refused naming the input; an entry
+    /// with its dot, and the property on no FILE input, are silent.
+    #[test]
+    fn an_allowed_file_extension_without_its_dot_is_an_error_naming_the_input() {
+        let src = |ty: &str, list: &str| {
+            parse(&format!(
+                "id: f\nnamespace: a.b\ninputs:\n  - id: up\n    type: {ty}\n    \
+                 allowedFileExtensions: {list}\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap()
+        };
+        let r = validate(&src("FILE", "[\".csv\", \"txt\"]"));
+        let e = r
+            .errors
+            .iter()
+            .find(|e| e.code == "input_file_extension_invalid")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert!(
+            e.message.contains("input 'up'") && e.message.contains("\"txt\""),
+            "{}",
+            e.message
+        );
+        assert_eq!(e.path, "inputs.up.allowedFileExtensions");
+        for (ty, list) in [("FILE", "[\".csv\", \".TXT\"]"), ("FILE", "[]")] {
+            let r = validate(&src(ty, list));
+            assert!(
+                !r.errors
+                    .iter()
+                    .any(|e| e.code == "input_file_extension_invalid"),
+                "{ty} {list}: {r:?}"
+            );
+        }
+    }
+
     /// Both silent arms. The second is the one this crate's flattening makes
     /// necessary: in Java the validator is attached to `ArrayInput` and
     /// `MultiselectInput` and can never see any other input type, so a gate on
@@ -2203,6 +2346,187 @@ mod tests {
             r.errors.iter().any(|e| e.code == "duplicate_task_id"),
             "{r:?}"
         );
+    }
+
+    /// W9b: the save-time refusal of a `_files` namespace segment; its
+    /// run-time twin is `nsfiles::access`'s
+    /// `a_files_segment_namespace_is_refused_for_every_access_and_actor`.
+    #[test]
+    fn publish_refuses_a_files_segment_namespace_by_name() {
+        for ns in ["a._files", "a._files.b", "_x._files"] {
+            let f = parse(&format!(
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            let found: Vec<_> = validate(&f)
+                .errors
+                .into_iter()
+                .filter(|e| e.path == "namespace")
+                .collect();
+            if ns.starts_with('_') {
+                // Refused by the pattern; named once.
+                assert_eq!(found.len(), 1, "{found:?}");
+                assert_eq!(found[0].code, "invalid_namespace");
+                continue;
+            }
+            assert_eq!(found.len(), 1, "{ns}: {found:?}");
+            assert_eq!(found[0].code, "namespace_files_segment");
+            assert!(
+                found[0].message.contains(ns) && found[0].message.contains("'_files'"),
+                "{found:?}"
+            );
+        }
+        // The controls: `_files` inside a segment is not the segment.
+        for ns in ["a.files", "a.x_files", "a._filesx"] {
+            let f = parse(&format!(
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            assert!(
+                !validate(&f).errors.iter().any(|e| e.path == "namespace"),
+                "{ns}"
+            );
+        }
+    }
+
+    /// W9b fix round 1 M3: the global namespace rule is unchanged -- an
+    /// empty segment publishes; only namespace files refuse it
+    /// (`nsfiles::access`'s `an_empty_namespace_segment_is_refused_by_namespace_files_only`).
+    #[test]
+    fn an_empty_namespace_segment_still_publishes() {
+        for ns in ["a..b", "a.", "a.b..c"] {
+            let f = parse(&format!(
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            assert!(
+                !validate(&f).errors.iter().any(|e| e.path == "namespace"),
+                "{ns}"
+            );
+        }
+    }
+
+    /// W9b fix round 1 I1: a flow id `_files` is refused at publish (by
+    /// Kestra's own id pattern: no leading `_`), so `{ns}/_files/executions/…`
+    /// is never a flow's execution URI. Its slug could not be `_files` either
+    /// (`storage::uri`'s `no_flow_slug_is_the_files_marker`).
+    #[test]
+    fn a_flow_id_of_files_is_refused() {
+        for id in ["_files", "_Files", "_files.x"] {
+            let f = parse(&format!(
+                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            let found: Vec<_> = validate(&f)
+                .errors
+                .into_iter()
+                .filter(|e| e.path == "id")
+                .collect();
+            assert_eq!(found.len(), 1, "{id}: {found:?}");
+            assert_eq!(found[0].code, "invalid_flow_id");
+            assert!(found[0].message.contains(&format!("'{id}'")), "{found:?}");
+        }
+        // The control: `files` and `x_files` are legal ids.
+        for id in ["files", "x_files"] {
+            let f = parse(&format!(
+                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            assert!(!validate(&f).errors.iter().any(|e| e.path == "id"), "{id}");
+        }
+    }
+
+    /// W9c: the save-time refusal of a `_kv` namespace segment; its run-time
+    /// twin is `nsfiles::access`'s
+    /// `a_kv_segment_namespace_is_refused_for_every_resource_access_and_actor`.
+    #[test]
+    fn publish_refuses_a_kv_segment_namespace_by_name() {
+        for ns in ["a._kv", "a._kv.b", "x.y._kv", "_kv.a"] {
+            let f = parse(&format!(
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            let found: Vec<_> = validate(&f)
+                .errors
+                .into_iter()
+                .filter(|e| e.path == "namespace")
+                .collect();
+            if ns.starts_with('_') {
+                // Refused by the pattern; named once.
+                assert_eq!(found.len(), 1, "{found:?}");
+                assert_eq!(found[0].code, "invalid_namespace");
+                continue;
+            }
+            assert_eq!(found.len(), 1, "{ns}: {found:?}");
+            assert_eq!(found[0].code, "namespace_kv_segment");
+            assert!(
+                found[0].message.contains(&format!("'{ns}'")) && found[0].message.contains("'_kv'"),
+                "{found:?}"
+            );
+        }
+        // Both markers: the `_files` finding alone, named once.
+        let f = parse("id: f\nnamespace: a._files._kv\ntasks:\n  - id: t\n    type: x\n").unwrap();
+        let found: Vec<_> = validate(&f)
+            .errors
+            .into_iter()
+            .filter(|e| e.path == "namespace")
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].code, "namespace_files_segment");
+        // The controls: `_kv` inside a segment is not the segment.
+        for ns in ["a.kv", "a.x_kv", "a._kvx", "a.b_kv.c", "kv"] {
+            let f = parse(&format!(
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            assert!(
+                !validate(&f).errors.iter().any(|e| e.path == "namespace"),
+                "{ns}"
+            );
+        }
+    }
+
+    /// W9c: a flow id `_kv` is refused at publish by Kestra's own id pattern
+    /// (no leading `_`), as `_files` is (`a_flow_id_of_files_is_refused`), so
+    /// `{ns}/_kv/…` is never a flow's execution prefix.
+    #[test]
+    fn a_flow_id_of_kv_is_refused() {
+        for id in ["_kv", "_KV", "_kv.x"] {
+            let f = parse(&format!(
+                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            let found: Vec<_> = validate(&f)
+                .errors
+                .into_iter()
+                .filter(|e| e.path == "id")
+                .collect();
+            assert_eq!(found.len(), 1, "{id}: {found:?}");
+            assert_eq!(found[0].code, "invalid_flow_id");
+            assert!(found[0].message.contains(&format!("'{id}'")), "{found:?}");
+        }
+        for id in ["kv", "x_kv"] {
+            let f = parse(&format!(
+                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            assert!(!validate(&f).errors.iter().any(|e| e.path == "id"), "{id}");
+        }
+    }
+
+    /// W9c: the corpus's KV flow (`oracle-exec/corpus/valids/kv.yaml`, an
+    /// over-refusal guard) still validates with no error finding: the `_kv`
+    /// rule is a namespace SEGMENT rule, not a word rule.
+    #[test]
+    fn valids_kv_still_publishes() {
+        let yaml = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/oracle-exec/corpus/valids/kv.yaml"
+        ))
+        .expect("the corpus flow");
+        let f = parse(&yaml).unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
     }
 
     #[test]
@@ -2626,7 +2950,7 @@ mod tests {
     /// via `dependsOn` must produce zero errors.
     #[test]
     fn a_legitimate_flow_with_nested_control_flow_produces_no_spurious_errors() {
-        let yaml = "id: nightly\nnamespace: company.analytics\ninputs:\n  - id: run_date\n    type: DATE\n  - id: dry_run\n    type: BOOL\n    dependsOn:\n      inputs: [run_date]\ntasks:\n  - id: pipeline\n    type: core.dag\n    tasks:\n      - task:\n          id: extract\n          type: egret.sql\n          database: d\n          sql: SELECT 1\n      - task:\n          id: load\n          type: egret.sql\n          database: d\n          sql: SELECT 2\n        dependsOn: [extract]\n  - id: fanout\n    type: core.parallel\n    tasks:\n      - id: enrich\n        type: egret.python\n        notebook: nb\nerrors:\n  - id: alert\n    type: core.slack\nfinally:\n  - id: cleanup\n    type: core.log\n";
+        let yaml = "id: nightly\nnamespace: company.analytics\ninputs:\n  - id: run_date\n    type: DATE\n  - id: dry_run\n    type: BOOL\n    dependsOn:\n      inputs: [run_date]\ntasks:\n  - id: pipeline\n    type: core.dag\n    tasks:\n      - task:\n          id: extract\n          type: egret.sql\n          database: d\n          sql: SELECT 1\n      - task:\n          id: load\n          type: egret.sql\n          database: d\n          sql: SELECT 2\n        dependsOn: [extract]\n  - id: fanout\n    type: core.parallel\n    tasks:\n      - id: enrich\n        type: egret.sql\n        database: d\n        sql: SELECT 3\nerrors:\n  - id: alert\n    type: core.slack\nfinally:\n  - id: cleanup\n    type: core.log\n";
         let f = parse(yaml).unwrap();
         let r = validate(&f);
         assert!(r.errors.is_empty(), "{r:?}");
@@ -3821,5 +4145,150 @@ mod tests {
             );
         }
         assert!(parse(&flow_trigger_flow(2, "    window:\n      every: PT1H\n")).is_ok());
+    }
+
+    // ─── W9c Task 4: `secret()` in a KV value (W9c spec §7) ──────────────────
+
+    /// A `Set` or `Put` task `s` whose `value` is `value_yaml` (YAML, already
+    /// indented under the key).
+    fn kv_task(ty: &str, value_yaml: &str) -> String {
+        format!(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: {ty}\n    key: k\n    value:{value_yaml}"
+        )
+    }
+
+    /// `tasks.<id>.value…` of every finding of `code`.
+    fn paths_of(src: &str, code: &str) -> Vec<String> {
+        validate(&parse(src).unwrap())
+            .errors
+            .into_iter()
+            .filter(|f| f.code == code)
+            .map(|f| f.path)
+            .collect()
+    }
+
+    #[test]
+    fn a_secret_in_a_set_or_put_value_is_refused_with_its_own_code_and_message() {
+        use crate::plugins::{
+            secret_in_kv_value_message, CODE_SECRET_IN_KV_VALUE, CODE_SECRET_OUTSIDE_PLUGIN_TASK,
+        };
+        use crate::worker::handlers::kv::{PUT, SET};
+        const SECRET: &str = "\"{{ secret('X') }}\"";
+        for ty in [SET, PUT] {
+            for (shape, value, path) in [
+                ("the whole value", format!(" {SECRET}\n"), "tasks.s.value"),
+                (
+                    "a nested map leaf",
+                    format!("\n      a:\n        b: {SECRET}\n"),
+                    "tasks.s.value.a.b",
+                ),
+                (
+                    "a list item",
+                    format!("\n      - plain\n      - {SECRET}\n"),
+                    "tasks.s.value[1]",
+                ),
+                (
+                    "a map key",
+                    format!("\n      {SECRET}: 1\n"),
+                    "tasks.s.value",
+                ),
+            ] {
+                let src = kv_task(ty, &value);
+                let f = parse(&src).unwrap();
+                let report = validate(&f);
+                let found: Vec<_> = report
+                    .errors
+                    .iter()
+                    .filter(|e| e.code == CODE_SECRET_IN_KV_VALUE)
+                    .collect();
+                assert_eq!(found.len(), 1, "{ty} {shape}: {:?}", report.errors);
+                assert_eq!(found[0].path, path, "{ty} {shape}");
+                assert_eq!(
+                    found[0].message,
+                    secret_in_kv_value_message("s", path),
+                    "{ty} {shape}"
+                );
+                assert!(
+                    found[0].message.contains("task 's'")
+                        && found[0].message.contains(path)
+                        && found[0].message.contains(
+                            "the secret's value would be stored in the KV store, where anyone \
+                             who can read this namespace's KV (`workflow:read`) could read it, \
+                             unmasked; pass the secret to the task that needs it instead."
+                        ),
+                    "{}",
+                    found[0].message
+                );
+                // Instead of the generic refusal, never beside it.
+                assert!(
+                    !report
+                        .errors
+                        .iter()
+                        .any(|e| e.code == CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+                    "{ty} {shape}: {:?}",
+                    report.errors
+                );
+            }
+            // The control: a value with no secret() is clean.
+            let src = kv_task(ty, " \"{{ 'plain' }}\"\n");
+            assert!(paths_of(&src, CODE_SECRET_IN_KV_VALUE).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_secret_elsewhere_on_a_set_task_keeps_the_generic_refusal() {
+        use crate::plugins::{CODE_SECRET_IN_KV_VALUE, CODE_SECRET_OUTSIDE_PLUGIN_TASK};
+        use crate::worker::handlers::kv::{PUT, SET};
+        for ty in [SET, PUT] {
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: {ty}\n    \
+                 key: \"{{{{ secret('X') }}}}\"\n    value: v\n"
+            );
+            assert_eq!(
+                paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+                vec!["tasks.s.key".to_string()],
+                "{ty}"
+            );
+            assert!(paths_of(&src, CODE_SECRET_IN_KV_VALUE).is_empty(), "{ty}");
+        }
+        // A `value` property on any other task is not a KV value.
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.debug.Return\n    \
+                   format: x\n    value: \"{{ secret('X') }}\"\n";
+        assert_eq!(
+            paths_of(src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+            vec!["tasks.s.value".to_string()]
+        );
+        assert!(paths_of(src, CODE_SECRET_IN_KV_VALUE).is_empty());
+    }
+
+    /// The corpus's two KV flows carry no `secret()`: the scan adds no
+    /// finding to either, and `valids/kv` validates clean for publish and
+    /// for the run.
+    #[test]
+    fn valids_kv_and_retry_with_flowable_errors_still_publish_and_plan() {
+        for (name, src) in [
+            (
+                "kv",
+                include_str!("../../oracle-exec/corpus/valids/kv.yaml"),
+            ),
+            (
+                "retry-with-flowable-errors",
+                include_str!("../../oracle-exec/corpus/valids/retry-with-flowable-errors.yaml"),
+            ),
+        ] {
+            let f = parse(src).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let errors = validate(&f).errors;
+            assert!(
+                !errors.iter().any(|e| e.code.starts_with("secret_")),
+                "{name}: {errors:?}"
+            );
+            if name == "kv" {
+                assert!(errors.is_empty(), "{name}: {errors:?}");
+                assert!(
+                    crate::spec::validate_for_run(&f).errors.is_empty(),
+                    "{name}"
+                );
+            }
+        }
     }
 }

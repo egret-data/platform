@@ -32,7 +32,7 @@ import { loginLocalAdmin, firstWorkspace, csrf, postJson } from "./helpers";
  *
  * Opt-in against the plain local dev stack (docker compose + `just serve` +
  * `npm run dev` — see README.md), NOT the in-cluster kind deploy, matching
- * `workspace-features.spec.ts` / `notebook.spec.ts`. It provisions its own
+ * `workspace-features.spec.ts` / `embedded-catalog.spec.ts`. It provisions its own
  * throwaway StarRocks connection and endpoint (no assigned engine is required in
  * the seeded workspace, unlike `runSqlInLab`'s SQL Lab path) and deletes both in a
  * `finally`, because the suite's `default` workspace is shared with other specs.

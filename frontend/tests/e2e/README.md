@@ -2,40 +2,29 @@
 
 These drive a **real browser against a running local stack**. They are separate
 from the Vitest unit suite (`npm test`) and are **not** run in standard CI —
-they need a live backend and a real Jupyter kernel, so they are a manual /
-opt-in smoke of the notebook execution money-path (Notebook epic E).
+most need a live backend (some also a real in-cluster kind deploy), so they
+are a manual / opt-in smoke of their respective money-paths.
 
 ## Prerequisites
+
+The plain-local-stack specs (not the `*-kind` ones, which deploy their own
+in-cluster stack via `just e2e-kind*`) need:
 
 1. **Docker services** up:
    ```bash
    docker compose -f ../../deploy/docker-compose.dev.yml up -d
    ```
-2. **A Python env with the kernel deps on PATH** (so notebook cells can spawn a
-   real kernel — the backend's `SubprocessLauncher` runs `jupyter kernelgateway`):
-   ```bash
-   python3.12 -m venv /tmp/kernelenv
-   /tmp/kernelenv/bin/pip install jupyter_kernel_gateway ipykernel   # + daft for %%egret_sql --target daft
-   ```
-3. **Backend** running on `:8080` with that venv on PATH + catalog enabled:
+2. **Backend** running on `:8080`:
    ```bash
    cd ../..   # egret repo root
-   PATH="/tmp/kernelenv/bin:$PATH" \
    EGRET_DATABASE__URL="postgres://egret:egret@localhost:5432/egret" \
    EGRET_CATALOG__ENABLED=true EGRET_CATALOG__AUTH_TOKEN=dev \
    cargo run -p egret-bin -- serve
    ```
-4. **Frontend dev server** on `:5173` (the Vite proxy forwards `/api` incl. the
-   kernel WebSocket — `ws: true` in `vite.config.ts`):
+3. **Frontend dev server** on `:5173` (the Vite proxy forwards `/api`):
    ```bash
    npm run dev
    ```
-5. **A provisioned Iceberg warehouse** for the target workspace. The notebook
-   kernel resolves the workspace's warehouse on connect; without one, Run shows
-   `KernelError: no warehouse configured for this workspace`. Provision it once
-   via the UI: **Storage → Add connection** (S3/MinIO: endpoint
-   `http://localhost:9000`, bucket `warehouse`, access key `egret`, secret
-   `egretsecret`) → **Catalog → Add warehouse** on that connection.
 
 ## SSO login (Keycloak)
 
@@ -95,41 +84,10 @@ Override the target / credentials via env: `EGRET_E2E_BASE_URL`, the SSO creds
 `EGRET_E2E_OIDC_USER` / `EGRET_E2E_OIDC_PASSWORD`, and the break-glass local
 admin `EGRET_E2E_EMAIL` / `EGRET_E2E_PASSWORD`.
 
-## What's covered
-
-- `notebook.spec.ts`:
-  - **run a Python cell end-to-end** — login → create notebook → set cell source
-    → Run → assert the printed output renders live → reload → assert the output
-    **restores** from the persisted `last_output` (E-P2 recorder + E-P3 restore).
-  - **toolbar controls** — Run all / Interrupt / Restart / Clear outputs + the
-    per-cell Run + Run options are present (E-P4).
-
-## Dataframe-first spec (`notebook-dataframe.spec.ts`)
-
-Opt-in, exactly like `notebook.spec.ts` (a live-stack money-path smoke, **not**
-in CI). It exercises the dataframe-first helpers auto-loaded in the kernel:
-`write_iceberg(df, table, mode=…)` writes a Daft DataFrame to the notebook's
-read-write Iceberg catalog (auto-creating the table), `iceberg(table)` reads it
-back, and `trino(sql)` / `starrocks(sql)` read the governed engines. The one
-test does an Iceberg **write→read roundtrip** and asserts the round-tripped
-marker renders.
-
-In addition to the prerequisites above, the target workspace needs:
-
-1. **A warehouse named `notebook`** — the notebook read-write Iceberg catalog
-   (catalog B), backed by a provisioned **Storage** connection, so
-   `write_iceberg` / `iceberg` have a read-write catalog to land in. Provision
-   it via **Storage → Add connection** (MinIO defaults as above) → **Catalog →
-   Add warehouse** with the warehouse name `notebook`.
-2. *(Optional, for a governed-engine read via `trino(…)` / `starrocks(…)`)* at
-   least one **registered + enabled engine** for the workspace.
-
-Without (1), Run reports no read-write catalog and the roundtrip fails.
-
 ## User impersonation e2e (`impersonation.spec.ts`)
 
 Opt-in (`EGRET_E2E_IMPERSONATION=1`) against the ordinary dev stack, same
-pattern as `notebook.spec.ts` / `workspace-features.spec.ts` (not `*-kind`).
+pattern as `embedded-catalog.spec.ts` / `workspace-features.spec.ts` (not `*-kind`).
 
 The break-glass local admin logs in once, seeds a plain local member with no
 control-plane permission (`POST /api/control-plane/users`, then added to the
@@ -158,11 +116,11 @@ EGRET_E2E_CATALOG=1 EGRET_E2E_BUCKET=e2e-auto npx playwright test embedded-catal
 
 Requirements:
 - The live stack up (`serve` + Vite; Vite proxies `/api`, `/catalog`, `/oauth`).
-- A **reserved, initially-empty** MinIO bucket (`EGRET_E2E_BUCKET`, default `e2e`)
+- A **reserved, initially-empty** RustFS bucket (`EGRET_E2E_BUCKET`, default `e2e`)
   with **no prefix-less warehouse** on it — each run uses a unique `key_prefix`,
   so repeated runs on that bucket don't overlap. Create it once:
-  `docker exec egret-dev-minio-1 mc mb --ignore-existing loc/e2e-auto`.
-- S3 overrides (defaults match dev MinIO): `EGRET_E2E_S3_ENDPOINT`,
+  `AWS_ACCESS_KEY_ID=egret AWS_SECRET_ACCESS_KEY=egretsecret aws --endpoint-url http://localhost:9000 s3 mb s3://e2e-auto`.
+- S3 overrides (defaults match dev RustFS): `EGRET_E2E_S3_ENDPOINT`,
   `EGRET_E2E_S3_KEY`, `EGRET_E2E_S3_SECRET`.
 
 Skipped unless `EGRET_E2E_CATALOG=1`. See `deploy/embedded-catalog/engine-wiring.md`
@@ -193,15 +151,15 @@ just ingress-install   # nginx-ingress (kind flavor)
 just coredns-rewrite   # egret.localtest.me resolves cluster-wide
 ```
 
-**Reserved MinIO bucket.** lakekeeper rejects a new warehouse whose storage profile
+**Reserved RustFS bucket.** lakekeeper rejects a new warehouse whose storage profile
 overlaps an existing one, and a **prefix-less** warehouse claims a whole bucket — so
 point the e2e at a bucket that has no root-level warehouse, via `EGRET_E2E_BUCKET`
 (default `warehouse`, the chart-seeded bucket). If that bucket already holds a
 prefix-less warehouse (e.g. a hand-provisioned `demo-catalog`), use a dedicated
-bucket and create it once in the in-cluster MinIO, e.g.:
+bucket and create it once in the in-cluster RustFS, e.g.:
 
 ```bash
-kubectl port-forward -n egret-system svc/minio 9000:9000 &
+kubectl port-forward -n egret-system svc/rustfs 9000:9000 &
 AWS_ACCESS_KEY_ID=egret AWS_SECRET_ACCESS_KEY=egretsecret \
   aws --endpoint-url http://localhost:9000 s3 mb s3://e2e
 # then: EGRET_E2E_BUCKET=e2e just e2e-kind   (each run uses a unique key_prefix)
@@ -257,8 +215,8 @@ MASKED `item` values and ONLY `country='US'` rows.
 Notes (baked into `just e2e-kind-governance`):
 - `EGRET_E2E_BUCKET=e2e` — a reserved bucket (the default `warehouse` bucket carries
   a prefix-less orphan warehouse; see the data-plane section's reserved-bucket note).
-- `EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000` — the FQDN,
-  because Trino (namespace `egret-engines`) can't resolve the bare `minio` (in
+- `EGRET_E2E_S3_ENDPOINT=http://rustfs.egret-system.svc.cluster.local:9000` — the FQDN,
+  because Trino (namespace `egret-engines`) can't resolve the bare `rustfs` (in
   `egret-system`) for the Iceberg write path.
 - The egret Trino provisioner sets the Ranger plugin poll interval to **30s**, so a
   new mask/row-filter takes up to ~30s to enforce — the spec re-queries until it does.

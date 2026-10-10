@@ -157,17 +157,18 @@ impl AccessViewsRepo {
     ) -> Result<Vec<ObjectGrantRollup>> {
         // Object tables — all in the `analytics` schema, each with `workspace_id`
         // and a `name` display column (confirmed against migrations 0012/0014/0015/
-        // 0021/0037 + 0010 saved_queries, moved to `analytics` in 0067):
+        // 0021 + 0010 saved_queries, moved to `analytics` in 0067):
         //   analytics.charts, analytics.dashboards, analytics.datasets,
-        //   analytics.folders, analytics.notebooks, analytics.saved_queries.
+        //   analytics.folders, analytics.saved_queries,
+        //   analytics.apps (0161; trashed apps included, as their shares still exist).
         let rows = sqlx::query_as::<_, ObjectGrantRow>(
             "WITH ws_objects (kind, id, name) AS ( \
                  SELECT 'chart',       id, name FROM analytics.charts        WHERE workspace_id = $1 \
                  UNION ALL SELECT 'dashboard',   id, name FROM analytics.dashboards    WHERE workspace_id = $1 \
                  UNION ALL SELECT 'dataset',     id, name FROM analytics.datasets      WHERE workspace_id = $1 \
                  UNION ALL SELECT 'folder',      id, name FROM analytics.folders       WHERE workspace_id = $1 \
-                 UNION ALL SELECT 'notebook',    id, name FROM analytics.notebooks     WHERE workspace_id = $1 \
                  UNION ALL SELECT 'saved_query', id, name FROM analytics.saved_queries WHERE workspace_id = $1 \
+                 UNION ALL SELECT 'app',         id, name FROM analytics.apps          WHERE workspace_id = $1 \
              ) \
              SELECT o.kind, o.id AS object_id, o.name AS object_name, \
                     ag.principal_type, ag.principal_id, \

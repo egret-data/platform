@@ -706,6 +706,7 @@ async fn a_worker_whose_lease_was_reaped_cannot_commit(pool: sqlx::PgPool) {
         state: egret_workflow::executor::RunState::Failed,
         outputs: Some(serde_json::json!({ "from": "the reaped worker" })),
         message: None,
+        files: Vec::new(),
     };
     let mut tx = pool.begin().await.unwrap();
     let late = apply_outcome(&mut tx, &a[0], &late_outcome).await;
@@ -887,7 +888,11 @@ async fn the_real_registry_runs_all_four_handlers_end_to_end(pool: sqlx::PgPool)
         .await
         .expect("start execution");
 
-    let finished = drain(&pool, &Handlers::with_core_tasks()).await;
+    let finished = drain(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(finished, 4, "one tick's work per task, four tasks");
 
     for id in ["l", "r", "f", "s"] {
@@ -917,7 +922,14 @@ async fn a_truthy_fail_fails_the_execution_through_the_real_handler(pool: sqlx::
         .await
         .expect("start execution");
 
-    assert_eq!(drain(&pool, &Handlers::with_core_tasks()).await, 1);
+    assert_eq!(
+        drain(
+            &pool,
+            &Handlers::with_core_tasks(egret_workflow::storage::current())
+        )
+        .await,
+        1
+    );
     assert_eq!(run_state(&pool, ex, "f").await.as_deref(), Some("FAILED"));
     assert_eq!(
         run_state(&pool, ex, "after").await,
@@ -966,7 +978,11 @@ async fn the_render_surface_reaches_inputs_and_outputs_and_still_refuses_labels(
         .await
         .expect("start execution");
 
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         (
             run_state(&pool, ex, "a").await,
@@ -1002,7 +1018,11 @@ async fn the_render_surface_reaches_inputs_and_outputs_and_still_refuses_labels(
     let r = start_execution(&pool, ws, None, refused, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         run_state(&pool, r, "l").await.as_deref(),
         Some("FAILED"),
@@ -1036,7 +1056,11 @@ async fn a_task_that_produced_no_output_renders_as_an_empty_map_not_an_absent_ke
     let e1 = start_execution(&pool, ws, None, ok, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         (
             run_state(&pool, e1, "b").await,
@@ -1056,7 +1080,11 @@ async fn a_task_that_produced_no_output_renders_as_an_empty_map_not_an_absent_ke
     let e2 = start_execution(&pool, ws, None, bad, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         run_state(&pool, e2, "b").await.as_deref(),
         Some("FAILED"),
@@ -1082,9 +1110,13 @@ async fn a_type_with_no_handler_aborts_the_tick(pool: sqlx::PgPool) {
         .await
         .expect("start execution");
 
-    let err = egret_workflow::worker::tick(&pool, 8, &Handlers::with_core_tasks())
-        .await
-        .expect_err("an unhandled type must not report a finished run");
+    let err = egret_workflow::worker::tick(
+        &pool,
+        8,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await
+    .expect_err("an unhandled type must not report a finished run");
     assert!(
         err.to_string()
             .contains("io.kestra.plugin.core.output.OutputValues"),
@@ -1242,7 +1274,11 @@ async fn a_sub_execution_inherits_the_posted_inputs_of_its_parent(pool: sqlx::Pg
     let parent = start_execution(&pool, ws, None, source, serde_json::json!({"failed": true}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let subs = sqlx::query_scalar::<_, serde_json::Value>(
         "SELECT inputs FROM workflow.executions WHERE parent_execution_id = $1",
@@ -1331,7 +1367,11 @@ async fn a_loop_over_two_values_spawns_two_sub_executions_ordered_by_index(pool:
     );
 
     // And each sub-execution really runs the loop's body, in its own right.
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     let done = sub_executions(&pool, ex, 0).await;
     assert_eq!(
         done.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(),
@@ -1371,7 +1411,11 @@ async fn the_default_concurrency_limit_runs_one_iteration_at_a_time(pool: sqlx::
          default of 0 (unlimited) would have spawned all three here"
     );
 
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         sub_executions(&pool, ex, 0).await,
         vec![
@@ -1437,7 +1481,11 @@ async fn a_failing_iteration_ends_a_transmit_failed_loop_at_once(pool: sqlx::PgP
         .await
         .expect("start execution");
 
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         sub_executions(&pool, ex, 0).await,
         vec![SubExecution {
@@ -1481,7 +1529,11 @@ async fn transmit_failed_false_runs_every_iteration_and_the_loop_succeeds(pool: 
         .await
         .expect("start execution");
 
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         sub_executions(&pool, ex, 0).await,
         vec![
@@ -1533,7 +1585,11 @@ async fn a_nested_loop_spawns_from_inside_a_sub_execution(pool: sqlx::PgPool) {
         .await
         .expect("start execution");
 
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let outer = sub_executions(&pool, ex, 0).await;
     assert_eq!(
@@ -1602,7 +1658,11 @@ async fn no_run_for_a_loop_body_task_is_ever_created_in_the_parent(pool: sqlx::P
     let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let parent_runs: Vec<String> = sqlx::query_scalar(
         "SELECT task_id FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix",
@@ -1671,7 +1731,11 @@ async fn a_transmit_failed_loop_with_several_iterations_in_flight_terminates_onc
         "unlimited: all three iterations are in flight before any of them fails"
     );
 
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     let history: serde_json::Value = sqlx::query_scalar(
         "SELECT history FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'loop'",
     )
@@ -3314,7 +3378,11 @@ tasks:
     let ex = start_execution(&pool, ws, None, parent, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let sub: Uuid = sqlx::query_scalar(
         "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 \
@@ -3367,7 +3435,11 @@ tasks:
         .await
         .expect("link the child as a replay: a parent, and no loop columns");
 
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         (
             run_state(&pool, child, "reads").await,
@@ -3533,7 +3605,11 @@ async fn a_subflow_child_is_linked_by_the_trigger_columns_and_never_by_parent_ex
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     // **The load-bearing assertion, and it is first on purpose.** It is asked
     // WITHOUT going through the trigger columns -- the child is found by the
@@ -3656,7 +3732,11 @@ async fn a_subflow_target_that_does_not_resolve_fails_the_run_and_creates_no_chi
     let parent = start_execution(&pool, ws, None, &source, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     assert_eq!(
         children_by_trigger(&pool, parent).await.len(),
@@ -3731,7 +3811,11 @@ async fn a_subflow_target_in_another_workspace_does_not_resolve(pool: sqlx::PgPo
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     assert_eq!(
         (
@@ -3787,7 +3871,11 @@ async fn a_subflow_target_disabled_by_its_own_yaml_does_not_run(pool: sqlx::PgPo
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     assert_eq!(
         (
@@ -3819,7 +3907,11 @@ async fn a_subflow_target_disabled_by_its_own_yaml_does_not_run(pool: sqlx::PgPo
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         (
             children_by_trigger(&pool, ok).await.len(),
@@ -3858,7 +3950,11 @@ async fn a_subflow_target_disabled_by_the_state_column_does_not_run(pool: sqlx::
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     assert_eq!(
         (
@@ -3903,7 +3999,11 @@ async fn a_trashed_subflow_target_does_not_run(pool: sqlx::PgPool) {
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     assert_eq!(
         (
@@ -3954,7 +4054,11 @@ async fn a_subflow_that_does_not_wait_records_the_childs_state_at_spawn_and_stil
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let kids = children_by_trigger(&pool, parent).await;
     assert_eq!(kids.len(), 1, "the child is still created and driven");
@@ -4013,7 +4117,11 @@ async fn a_subflow_that_does_not_wait_records_the_childs_state_at_spawn_and_stil
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let fast_kids = children_by_trigger(&pool, fast).await;
     assert_eq!(
@@ -4084,7 +4192,11 @@ async fn transmit_failed_decides_what_a_failing_child_does_to_its_parent(pool: s
     )
     .await
     .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     assert_eq!(
         (
@@ -4156,7 +4268,11 @@ async fn a_subflow_inside_an_errors_list_is_reached_and_spawned(pool: sqlx::PgPo
     let parent = start_execution(&pool, ws, None, source, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     assert_eq!(
         (
@@ -4206,7 +4322,11 @@ async fn a_cycle_of_subflows_stops_instead_of_crashing(pool: sqlx::PgPool) {
     let root = start_execution(&pool, ws, None, a, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     // **Ordered by the CHAIN, not by `created_at`.** The first draft of this
     // ordered by `(created_at, id)` and passed alone and failed in the full
@@ -4305,7 +4425,11 @@ async fn a_cycle_whose_every_hop_crosses_a_loop_boundary_stops_too(pool: sqlx::P
     let root = start_execution(&pool, ws, None, a, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     // **The chain by NAME and in order, not a bare count**, because the count
     // alone would not say the walk crossed the loop links at all. It is read
@@ -4376,6 +4500,51 @@ async fn a_cycle_whose_every_hop_crosses_a_loop_boundary_stops_too(pool: sqlx::P
     );
 }
 
+/// Run `body` on a thread whose stack is **2 MiB, tokio's worker default**
+/// (`tokio::runtime::Builder::thread_stack_size`), on its own current-thread
+/// runtime and its own pool to the same database.
+///
+/// The two subflow-chain tests below are the stack's tripwire (W9a final
+/// review): `settle` re-enters itself down a `Subflow` chain, and what they
+/// prove is that `MAX_SPAWN_CHAIN` levels fit in a production worker's stack.
+/// Run on the test harness's own thread they would prove it for whatever
+/// `RUST_MIN_STACK` the runner happened to export (the harness sizes its
+/// threads from it); pinned here, a future that grows past 2 MiB at the bound
+/// aborts this binary on every machine.
+async fn on_a_tokio_worker_stack<F, Fut>(pool: sqlx::PgPool, body: F)
+where
+    F: FnOnce(sqlx::PgPool) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    const TOKIO_WORKER_STACK: usize = 2 * 1024 * 1024;
+    let options = (*pool.connect_options()).clone();
+    let thread = std::thread::Builder::new()
+        .name("tokio-worker-stack".into())
+        .stack_size(TOKIO_WORKER_STACK)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime")
+                .block_on(async move {
+                    let pool = sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(4)
+                        .connect_with(options)
+                        .await
+                        .expect("connect to the test database");
+                    body(pool.clone()).await;
+                    pool.close().await;
+                })
+        })
+        .expect("spawn the 2 MiB thread");
+    let joined = tokio::task::spawn_blocking(move || thread.join())
+        .await
+        .expect("join");
+    if let Err(panic) = joined {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 /// **A chain deeper than `MAX_SPAWN_CHAIN` is refused rather than overflowing a
 /// stack.**
 ///
@@ -4407,6 +4576,17 @@ async fn a_cycle_whose_every_hop_crosses_a_loop_boundary_stops_too(pool: sqlx::P
 async fn a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowing(
     pool: sqlx::PgPool,
 ) {
+    on_a_tokio_worker_stack(
+        pool,
+        a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowing_body,
+    )
+    .await;
+}
+
+/// [`a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowing`]'s body, run by [`on_a_tokio_worker_stack`].
+async fn a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowing_body(
+    pool: sqlx::PgPool,
+) {
     egret_test_db::assert_database_url_is_exported();
     let db = Db { pool: pool.clone() };
     let (ws, user) = common::seed_workspace(&db).await;
@@ -4431,7 +4611,11 @@ async fn a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overfl
     let root = start_execution(&pool, ws, None, root_src, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let all: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
         .fetch_one(&pool)
@@ -4524,6 +4708,17 @@ async fn a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overfl
 /// the whole reason the numbers here are small.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter(pool: sqlx::PgPool) {
+    on_a_tokio_worker_stack(
+        pool,
+        a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter_body,
+    )
+    .await;
+}
+
+/// [`a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter`]'s body, run by [`on_a_tokio_worker_stack`].
+async fn a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter_body(
+    pool: sqlx::PgPool,
+) {
     egret_test_db::assert_database_url_is_exported();
     let db = Db { pool: pool.clone() };
     let (ws, user) = common::seed_workspace(&db).await;
@@ -4561,7 +4756,11 @@ async fn a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter(pool:
     let root = start_execution(&pool, ws, None, root_src, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     // By NAME and in order, not by count: a count alone cannot say the chain
     // stopped at the right link, and `asc-3` appearing here is exactly what the
@@ -4714,7 +4913,11 @@ async fn a_loop_ascent_and_a_wait_false_subflow_are_frames_too(pool: sqlx::PgPoo
     let root = start_execution(&pool, ws, None, root_src, serde_json::json!({}))
         .await
         .expect("start execution");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let refused: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT r.state, r.message FROM workflow.task_runs r WHERE r.message IS NOT NULL",
@@ -4762,6 +4965,195 @@ async fn a_loop_ascent_and_a_wait_false_subflow_are_frames_too(pool: sqlx::PgPoo
     assert_eq!(
         all, 6,
         "the root, three iterations, and two `wait: false` children"
+    );
+}
+
+/// The test-only effect log [`the_walk_runs_each_started_settle_where_the_inline_call_ran`]
+/// reads: one row per effect, numbered by a sequence, so the numbering is the
+/// order the walk wrote them in, across every execution of one transaction.
+///
+/// Triggers, because nothing egret writes is globally ordered except the
+/// Flow-trigger outbox's `id`: `executions.created_at` is transaction time
+/// (one instant for the whole walk), `seq` is per execution, and ids are
+/// random. `#[sqlx::test]` gives this test its own database, so the triggers
+/// are seen by nothing else.
+async fn record_effects(pool: &sqlx::PgPool) {
+    for ddl in [
+        "CREATE TABLE public.w9c_effects (n bigserial PRIMARY KEY, execution uuid NOT NULL, what text NOT NULL)",
+        "CREATE FUNCTION public.w9c_execution_effect() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF TG_OP = 'INSERT' THEN \
+             INSERT INTO public.w9c_effects (execution, what) VALUES (NEW.id, 'created'); \
+           ELSIF OLD.state IS DISTINCT FROM NEW.state THEN \
+             INSERT INTO public.w9c_effects (execution, what) VALUES (NEW.id, NEW.state); \
+           END IF; \
+           RETURN NEW; \
+         END $$",
+        "CREATE FUNCTION public.w9c_run_effect() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF TG_OP = 'INSERT' OR OLD.state IS DISTINCT FROM NEW.state THEN \
+             INSERT INTO public.w9c_effects (execution, what) \
+               VALUES (NEW.execution_id, NEW.task_id || ' ' || NEW.state); \
+           END IF; \
+           RETURN NEW; \
+         END $$",
+        "CREATE FUNCTION public.w9c_event_effect() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           INSERT INTO public.w9c_effects (execution, what) \
+             VALUES (NEW.source_execution_id, 'event ' || NEW.state); \
+           RETURN NEW; \
+         END $$",
+        "CREATE TRIGGER w9c_execution_effect AFTER INSERT OR UPDATE ON workflow.executions \
+         FOR EACH ROW EXECUTE FUNCTION public.w9c_execution_effect()",
+        "CREATE TRIGGER w9c_run_effect AFTER INSERT OR UPDATE ON workflow.task_runs \
+         FOR EACH ROW EXECUTE FUNCTION public.w9c_run_effect()",
+        "CREATE TRIGGER w9c_event_effect AFTER INSERT ON workflow.flow_trigger_events \
+         FOR EACH ROW EXECUTE FUNCTION public.w9c_event_effect()",
+    ] {
+        sqlx::query(ddl)
+            .execute(pool)
+            .await
+            .unwrap_or_else(|e| panic!("{ddl}: {e}"));
+    }
+}
+
+/// **The order of effects across one walk** (W9c Task 9 re-review 3, N1).
+///
+/// Fix round 3 turned every settle a head starts -- a `Loop` batch's first
+/// settles, a `Subflow` child's first settle, a refused `Subflow`'s
+/// completion -- into a `claim::Job` the walk runs, and argued the ORDER is
+/// the inline calls' order by construction: a frame runs its queued jobs,
+/// each to the end of its own tail, before its next phase. The golden cannot
+/// see this axis. This pins it on one `Parallel` holding a `Loop` (both
+/// iterations in one batch), a refused `Subflow` and a `Subflow` whose child
+/// ends in its first settle, all inside the start's one transaction:
+///
+/// - the loop's iterations settle -- and the loop ends -- BEFORE the
+///   `Subflow` phase starts;
+/// - the refused `Subflow`'s completion lands BEFORE its sibling's child is
+///   created;
+/// - the child's whole first settle and its completion land before the
+///   parent's own outbox.
+///
+/// **The Flow-trigger ids alone cannot see a reordering of the queue.** Every
+/// event is written by an `Outbox` phase, and a frame whose jobs were
+/// deferred to its `Outbox` phase (mutant O1) still runs them, in the same
+/// order, before that phase's outbox -- so the event sequence is identical
+/// under O1, measured. What moves is where a head's own writes (a child's
+/// row) fall relative to the jobs, so the whole effect log is asserted:
+/// creations, state changes and events.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_walk_runs_each_started_settle_where_the_inline_call_ran(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(
+        &db,
+        ws,
+        user,
+        &listener(
+            "ord-hears",
+            "    states: [RUNNING, SUCCESS, FAILED, WARNING]\n",
+        ),
+    )
+    .await;
+    // Ends inside its own first settle: an `If` that is false with no `else`.
+    let leaf = "id: ord-leaf\nnamespace: t\ntasks:\n  - id: gate\n    \
+                type: io.kestra.plugin.core.flow.If\n    condition: \"{{ false }}\"\n    \
+                then:\n      - id: never\n        type: io.kestra.plugin.core.log.Log\n        \
+                message: no\n";
+    file_flow(&db, ws, user, leaf).await;
+    record_effects(&pool).await;
+
+    let root_src = "id: ord\nnamespace: t\ntasks:\n  \
+                    - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      \
+                      - id: each\n        type: io.kestra.plugin.core.flow.Loop\n        \
+                        values: [\"1\", \"2\"]\n        concurrencyLimit: 0\n        tasks:\n          \
+                          - id: body\n            type: io.kestra.plugin.core.flow.If\n            \
+                            condition: \"{{ false }}\"\n            then:\n              \
+                              - id: never\n                type: io.kestra.plugin.core.log.Log\n                \
+                                message: no\n      \
+                      - id: refused\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+                        namespace: t\n        flowId: missing\n      \
+                      - id: call\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+                        namespace: t\n        flowId: ord-leaf\n";
+    let root = start_execution(&pool, ws, None, root_src, serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    // Name every execution: the root, the iterations by index, the child.
+    let names: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, CASE WHEN id = $1 THEN 'root' \
+                         WHEN loop_index IS NOT NULL THEN 'it' || loop_index \
+                         ELSE flow_key END \
+           FROM workflow.executions",
+    )
+    .bind(root)
+    .fetch_all(&pool)
+    .await
+    .expect("name the executions");
+    let name = |id: Uuid| {
+        names
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| id.to_string())
+    };
+    let log: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT execution, what FROM public.w9c_effects ORDER BY n")
+            .fetch_all(&pool)
+            .await
+            .expect("read the effect log");
+    let trace: Vec<String> = log
+        .into_iter()
+        .map(|(e, what)| format!("{}: {what}", name(e)))
+        .collect();
+    assert_eq!(
+        trace,
+        [
+            // The root's `Begin`: persist, the `Parallel` starts all three.
+            "root: created",
+            "root: par RUNNING",
+            "root: each RUNNING",
+            "root: refused RUNNING",
+            "root: call RUNNING",
+            "root: RUNNING",
+            // `Loops`: the batch's rows first (fix round 2), then each
+            // iteration's whole settle, and the loop ends in the second's tail.
+            "it0: created",
+            "it1: created",
+            "it0: body SUCCESS",
+            "it0: SUCCESS",
+            "it0: event RUNNING",
+            "it0: event SUCCESS",
+            "it1: body SUCCESS",
+            "it1: SUCCESS",
+            "it1: event RUNNING",
+            "it1: event SUCCESS",
+            "root: each SUCCESS",
+            // `Subflows`, request 1: the refusal's completion -- a nested
+            // settle of the root, which fails the `Parallel` and the root --
+            // lands BEFORE request 2 runs at all.
+            "root: par FAILED",
+            "root: refused FAILED",
+            "root: call FAILED",
+            "root: FAILED",
+            "root: event FAILED",
+            // Request 2: the child is still created (the top frame's request
+            // list is fixed at its `Begin`) and its whole first settle runs.
+            "ord-leaf: created",
+            "ord-leaf: gate SUCCESS",
+            "ord-leaf: SUCCESS",
+            "ord-leaf: event RUNNING",
+            "ord-leaf: event SUCCESS",
+            // The root's own `Outbox` last: it appends `RUNNING` relative to
+            // its own `before`, after the nested settle's `FAILED`.
+            "root: event RUNNING",
+        ],
+        "the walk must run every settle a head started where the inline call \
+         ran it: a frame's queued jobs before its next phase. Under mutant O1 \
+         (jobs deferred to the `Outbox` phase) `ord-leaf: created` moves up \
+         before `it0: body SUCCESS`; the events alone do not move"
     );
 }
 
@@ -5724,7 +6116,7 @@ tasks:
 ";
     file_flow(&db, ws, user, child_source).await;
 
-    let reg = Handlers::with_core_tasks();
+    let reg = Handlers::with_core_tasks(egret_workflow::storage::current());
     let parent = start_execution(
         &pool,
         ws,
@@ -6108,7 +6500,7 @@ async fn a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item(pool: 
     egret_test_db::assert_database_url_is_exported();
     let db = Db { pool: pool.clone() };
     let (ws, user) = common::seed_workspace(&db).await;
-    let reg = Handlers::with_core_tasks();
+    let reg = Handlers::with_core_tasks(egret_workflow::storage::current());
 
     // An `If`'s condition is the observation point: `advance()` stores the
     // render in `task_runs.rendered`, so no handler stands between the surface
@@ -7111,6 +7503,9 @@ async fn start_execution_in_commits_nothing_when_the_caller_rolls_back(pool: sql
             execution_depth: 0,
             flow_trigger_event_id: None,
             born_failed: false,
+            replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
         },
     )
     .await
@@ -7138,6 +7533,9 @@ async fn start_execution_in_commits_nothing_when_the_caller_rolls_back(pool: sql
             execution_depth: 0,
             flow_trigger_event_id: None,
             born_failed: false,
+            replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
         },
     )
     .await
@@ -7174,6 +7572,9 @@ async fn scheduled_date_is_refused_without_a_schedule_trigger(pool: sqlx::PgPool
             execution_depth: 0,
             flow_trigger_event_id: None,
             born_failed: false,
+            replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
         },
     )
     .await
@@ -7257,6 +7658,9 @@ async fn a_start_writes_trigger_execution_id_and_depth(pool: sqlx::PgPool) {
             execution_depth: 7,
             flow_trigger_event_id: Some(4242),
             born_failed: false,
+            replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
         },
     )
     .await
@@ -7379,6 +7783,9 @@ async fn one_event_fires_a_listener_once_and_a_second_event_in_the_same_state_fi
                     execution_depth: 1,
                     flow_trigger_event_id: Some(event),
                     born_failed: false,
+                    replayed_from_execution_id: None,
+                    id: None,
+                    input_files: Vec::new(),
                 },
             )
             .await;
@@ -7574,6 +7981,9 @@ async fn a_rolled_back_transition_leaves_no_event(pool: sqlx::PgPool) {
         execution_depth: 0,
         flow_trigger_event_id: None,
         born_failed: false,
+        replayed_from_execution_id: None,
+        id: None,
+        input_files: Vec::new(),
     };
 
     let mut tx = pool.begin().await.expect("begin");
@@ -7618,7 +8028,11 @@ async fn execution_render_context_renders_the_sources_inputs_and_outputs(pool: s
     let ex = start_execution(&pool, ws, None, source, serde_json::json!({"x": "posted"}))
         .await
         .expect("start the source");
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
     assert_eq!(
         execution_history(&pool, ex).await,
         serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
@@ -7809,7 +8223,11 @@ async fn a_subflow_child_is_one_deeper_and_refused_past_depth_100(pool: sqlx::Pg
         set_depth(&pool, root, depth).await;
         roots.push(root);
     }
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let depths: Vec<Vec<i32>> = {
         let mut out = Vec::new();
@@ -7873,7 +8291,11 @@ async fn a_loop_iteration_keeps_its_parents_depth(pool: sqlx::PgPool) {
         .await
         .expect("start");
     set_depth(&pool, root, 7).await;
-    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
 
     let iterations: Vec<i32> = sqlx::query_scalar(
         "SELECT execution_depth FROM workflow.executions \
@@ -8264,7 +8686,8 @@ async fn an_unconditional_fail_logs_one_line_and_a_conditional_fail_two(pool: sq
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
     let sink = std::sync::Arc::new(Lines::default());
-    let reg = Handlers::with_core_tasks().with_log_sink(sink.clone(), LogLimits::default());
+    let reg = Handlers::with_core_tasks(egret_workflow::storage::current())
+        .with_log_sink(sink.clone(), LogLimits::default());
 
     let cases = w11_expected("script_runner_diagnostics")["failed_attempt_line"]["fail_task"]
         .as_array()
@@ -8429,11 +8852,22 @@ async fn a_run_whose_worker_stopped_renewing_is_reaped(pool: sqlx::PgPool) {
 /// A [`Registry`] whose handler writes three lines, then lets a rival take its
 /// run exactly as production would (the reaper clears the lease, another
 /// worker claims it), then sleeps `sleep` and answers FAILED with a message.
+///
+/// **The rival runs on its own task** (W9a Task 6 fix round 2). The reap is
+/// what moves the fence, so the stale worker's next renewal (every 100 ms
+/// under `lease_of_ms(300)`) finds it moved and DROPS this handler -- which
+/// is the behaviour under test. Awaited inline, the reap and the rival's
+/// claim were part of the handler future and died with it whenever the reap
+/// committed less than one renewal before the claim returned; a reap that
+/// took ~90 ms (measured: 6-90 ms on the dev Postgres) left no rival at all
+/// and the test failed on its own harness ("the rival claimed"). A rival
+/// worker is never inside another worker's handler in production; spawned,
+/// it outlives the drop as a real one would.
 struct FenceMover {
     pool: sqlx::PgPool,
     sink: std::sync::Arc<Lines>,
     sleep: std::time::Duration,
-    rival: Mutex<Option<egret_workflow::worker::Claimed>>,
+    rival: std::sync::Arc<Mutex<Option<egret_workflow::worker::Claimed>>>,
     completed: std::sync::atomic::AtomicBool,
 }
 
@@ -8443,15 +8877,19 @@ impl Registry for FenceMover {
         for i in 1..=3 {
             task.log.info(&format!("line {i}")).await;
         }
-        assert_eq!(
-            reap(&self.pool, std::time::Duration::ZERO)
-                .await
-                .expect("reap"),
-            1
-        );
-        let rival = claim(&self.pool, 1).await.expect("rival claim");
-        assert_eq!(rival.len(), 1, "the reaped run is claimable again");
-        *self.rival.lock().unwrap() = rival.into_iter().next();
+        let (pool, slot) = (self.pool.clone(), self.rival.clone());
+        let rival = tokio::spawn(async move {
+            assert_eq!(
+                reap(&pool, std::time::Duration::ZERO).await.expect("reap"),
+                1
+            );
+            let rival = claim(&pool, 1).await.expect("rival claim");
+            assert_eq!(rival.len(), 1, "the reaped run is claimable again");
+            *slot.lock().unwrap() = rival.into_iter().next();
+        });
+        // Dropped here (or in the sleep) when the renewal finds the fence
+        // moved; the rival's task runs on regardless.
+        rival.await.expect("the rival's reap and claim");
         tokio::time::sleep(self.sleep).await;
         self.completed
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -8491,7 +8929,7 @@ async fn a_worker_that_loses_its_fence_records_no_outcome(pool: sqlx::PgPool) {
         pool: pool.clone(),
         sink: std::sync::Arc::new(Lines::default()),
         sleep: std::time::Duration::from_secs(3),
-        rival: Mutex::new(None),
+        rival: std::sync::Arc::new(Mutex::new(None)),
         completed: std::sync::atomic::AtomicBool::new(false),
     };
 
@@ -8510,12 +8948,21 @@ async fn a_worker_that_loses_its_fence_records_no_outcome(pool: sqlx::PgPool) {
         started.elapsed()
     );
 
-    let rival = reg
-        .rival
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("the rival claimed");
+    // The rival's task may still be finishing its claim when the tick
+    // returns: wait for it (bounded), never assume it.
+    let rival = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(r) = reg.rival.lock().unwrap().clone() {
+                break r;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the rival claimed within 10 s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
     assert_eq!(
         lease_of(&pool, ex, "a").await,
         Some(rival.claimed_at),
@@ -8685,4 +9132,274 @@ async fn a_script_task_without_timeout_gets_the_default(pool: sqlx::PgPool) {
         Some("Timeout after 00:00:01.000")
     );
     assert_eq!(reg.killed.lock().unwrap().clone(), vec!["slow".to_string()]);
+}
+
+// ---------------------------------------------------------------------------
+// W9a Task 6: a run's files are indexed with its outcome (spec §4.3)
+// ---------------------------------------------------------------------------
+
+/// The URI a task run's file `name` gets: its own execution and task run, as
+/// `uri::task_prefix` builds them for the claim.
+fn file_of(execution: Uuid, task_id: &str, run: Uuid, flow: &str, name: &str) -> String {
+    format!(
+        "{}{name}",
+        egret_workflow::storage::uri::task_prefix("t", flow, execution, task_id, run).unwrap()
+    )
+}
+
+/// The index rows of `execution`: `(uri, task_run_id, size)`.
+async fn indexed(pool: &sqlx::PgPool, execution: Uuid) -> Vec<(String, Option<Uuid>, i64)> {
+    sqlx::query_as(
+        "SELECT uri, task_run_id, size FROM workflow.execution_files \
+          WHERE execution_id = $1 ORDER BY uri",
+    )
+    .bind(execution)
+    .fetch_all(pool)
+    .await
+    .expect("read the index")
+}
+
+/// A handler that "wrote" one file per run, `out.txt`, of `attempt * 10`
+/// bytes -- and, while it runs (before any commit), saw no row for it.
+#[derive(Default)]
+struct WritesFiles {
+    pool: Mutex<Option<sqlx::PgPool>>,
+    flow: String,
+    /// `(run id, attempt, rows seen for its URI while the handler ran)`.
+    seen: Mutex<Vec<(Uuid, usize, i64)>>,
+    fail_first: bool,
+}
+
+#[async_trait::async_trait]
+impl Registry for WritesFiles {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        let uri = file_of(
+            task.execution_id,
+            &task.task_id,
+            task.run_id,
+            &self.flow,
+            "out.txt",
+        );
+        let pool = self.pool.lock().unwrap().clone().expect("a pool");
+        let before: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM workflow.execution_files WHERE uri = $1")
+                .bind(&uri)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        self.seen
+            .lock()
+            .unwrap()
+            .push((task.run_id, task.attempt, before));
+        let files = vec![egret_workflow::storage::StoredFile {
+            uri: uri.clone(),
+            size: task.attempt as u64 * 10,
+        }];
+        let outputs = Some(serde_json::json!({ "outputFiles": { "out.txt": uri } }));
+        if self.fail_first && task.attempt == 1 {
+            return Ok(Outcome {
+                state: egret_workflow::executor::RunState::Failed,
+                outputs,
+                message: Some("the first attempt fails, having written its file".into()),
+                files,
+            });
+        }
+        Ok(Outcome {
+            state: egret_workflow::executor::RunState::Success,
+            outputs,
+            message: None,
+            files,
+        })
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        panic!("nothing here is killed: {}", task.task_id);
+    }
+}
+
+/// **Files are indexed in the outcome's transaction, and not before** (spec
+/// §4.3): while the handler runs there is no row; while the outcome's
+/// transaction is open no other connection sees one; after the commit the
+/// row is there, carrying the task run.
+#[sqlx::test(migrations = "../../migrations")]
+async fn files_are_indexed_in_the_outcomes_transaction_and_not_before(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    // Through the worker: a registry whose handler returns a file.
+    let ex = start_execution(&pool, ws, None, &one_task("indexed"), serde_json::json!({}))
+        .await
+        .expect("start");
+    let reg = WritesFiles {
+        pool: Mutex::new(Some(pool.clone())),
+        flow: "indexed".into(),
+        ..WritesFiles::default()
+    };
+    assert_eq!(drain_with(&pool, &reg).await, 1);
+    let seen = reg.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    let (run, _, before) = seen[0];
+    assert_eq!(before, 0, "no row while the handler ran");
+    assert_eq!(
+        indexed(&pool, ex).await,
+        vec![(file_of(ex, "a", run, "indexed", "out.txt"), Some(run), 10)],
+        "after the commit: one row, the task run's"
+    );
+
+    // And the transaction itself: apply_outcome writes the row, nobody
+    // outside sees it until the commit.
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task("indexed2"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    let claimed = claim(&pool, 1).await.expect("claim");
+    assert_eq!(claimed.len(), 1);
+    let c = &claimed[0];
+    let uri = file_of(ex, &c.task_id, c.id, "indexed2", "a.csv");
+    let outcome = Outcome {
+        files: vec![egret_workflow::storage::StoredFile {
+            uri: uri.clone(),
+            size: 7,
+        }],
+        ..Outcome::success()
+    };
+    let mut tx = pool.begin().await.unwrap();
+    apply_outcome(&mut tx, c, &outcome)
+        .await
+        .expect("the live lease commits");
+    let inside: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workflow.execution_files WHERE uri = $1")
+            .bind(&uri)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(inside, 1, "the transaction holds the row");
+    assert!(
+        indexed(&pool, ex).await.is_empty(),
+        "no other connection sees it before the commit"
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(indexed(&pool, ex).await, vec![(uri, Some(c.id), 7)]);
+}
+
+/// **A fenced outcome indexes nothing**: a worker whose lease moved returns
+/// `LeaseLost` before any row is written, so its uploads stay orphans.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_fenced_outcome_indexes_nothing(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task("fenced-files"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    let claimed = claim(&pool, 1).await.expect("claim");
+    let c = &claimed[0];
+    // Another holder renewed the lease: the fencing token moved.
+    sqlx::query(
+        "UPDATE workflow.task_runs SET claimed_at = claimed_at + interval '1 second' \
+          WHERE id = $1",
+    )
+    .bind(c.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let outcome = Outcome {
+        files: vec![egret_workflow::storage::StoredFile {
+            uri: file_of(ex, &c.task_id, c.id, "fenced-files", "a.csv"),
+            size: 7,
+        }],
+        ..Outcome::success()
+    };
+    let mut tx = pool.begin().await.unwrap();
+    let late = apply_outcome(&mut tx, c, &outcome).await;
+    // Not even inside the stale worker's own transaction: the fence is checked
+    // BEFORE indexing (spec §4.3), so a lost lease writes no row that only
+    // the rollback would remove (and takes no lock on the live holder's URIs,
+    // which are the same deterministic names). Counted in `tx`, before the
+    // rollback below can hide an index-then-fence order.
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workflow.execution_files WHERE execution_id = $1"
+        )
+        .bind(ex)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap(),
+        0,
+        "the fenced outcome wrote no index row, even uncommitted"
+    );
+    // Committed if `apply_outcome` let it through, as `tick` would.
+    match &late {
+        Ok(()) => tx.commit().await.expect("commit"),
+        Err(_) => drop(tx),
+    }
+    let err = late.expect_err("the lease moved");
+    assert!(err.to_string().contains("lease"), "{err}");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workflow.execution_files WHERE execution_id = $1"
+        )
+        .bind(ex)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0,
+        "nothing indexed for the run"
+    );
+}
+
+/// **A retry attempt overwrites its own URIs** without a unique violation:
+/// the task run keeps its id across attempts, so its names are the same
+/// (spec §4.3), and the row ends holding the second attempt's size.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_retry_attempt_overwrites_its_own_uris_without_a_unique_violation(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_with_retry("retried-files", "PT1S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    let reg = WritesFiles {
+        pool: Mutex::new(Some(pool.clone())),
+        flow: "retried-files".into(),
+        fail_first: true,
+        ..WritesFiles::default()
+    };
+    assert_eq!(drain_with(&pool, &reg).await, 1, "the first attempt");
+    assert_eq!(run_state(&pool, ex, "a").await.as_deref(), Some("RETRYING"));
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    assert_eq!(wake(&pool, 8).await.expect("wake"), vec![ex]);
+    assert_eq!(drain_with(&pool, &reg).await, 1, "the second attempt");
+    assert_eq!(run_state(&pool, ex, "a").await.as_deref(), Some("SUCCESS"));
+    let seen = reg.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].0, seen[1].0, "one task run, two attempts");
+    assert_eq!((seen[0].1, seen[1].1), (1, 2));
+    assert_eq!(
+        seen[1].2, 1,
+        "the first attempt's row was there when the second ran"
+    );
+    assert_eq!(
+        indexed(&pool, ex).await,
+        vec![(
+            file_of(ex, "a", seen[0].0, "retried-files", "out.txt"),
+            Some(seen[0].0),
+            20
+        )],
+        "one row, overwritten by the second attempt"
+    );
 }

@@ -70,7 +70,7 @@ use uuid::Uuid;
 use super::claim::ExecutionCtx;
 use crate::executor::{ExecutionState, Plan, RunIx, RunState, TaskKind, Tick};
 use crate::models::{Flow, InputType};
-use crate::runners::RenderContext;
+use crate::runners::{FileScope, RenderContext};
 
 /// Everything a render needs that lives outside `ExecutionState`, read once
 /// per [`settle`](super::claim::settle).
@@ -128,6 +128,11 @@ pub(super) struct Surface {
     started: std::collections::BTreeMap<usize, String>,
     /// Each run's surrogate id, by `run_ix`, as `taskrun.id` reads it.
     ids: std::collections::BTreeMap<usize, Uuid>,
+    /// W9a Task 4: the files the four file functions read, attached by
+    /// `settle` after [`Surface::load`] ([`Surface::attach_files`]). `None`
+    /// everywhere else -- notably [`execution_render_context`], so a Flow
+    /// trigger's `conditions` and `inputs` refuse them (spec §7.2).
+    files: Option<FileScope>,
 }
 
 /// One row's links upward, as `Surface::load`'s walk reads them.
@@ -418,8 +423,14 @@ impl Surface {
                     // "value 1", "value 2", "value 3"), so the key is the nth of
                     // the same object and has to be read back from the loop
                     // run's own `rendered`.
+                    //
+                    // Only an OBJECT is parsed (W9a Task 11): nothing else
+                    // has a key. A `Loop` over a file keeps only its URI and
+                    // count here (fix round 1), its values being in
+                    // `workflow.loop_file_values`.
                     "key": rendered
                         .as_deref()
+                        .filter(|r| r.trim_start().starts_with('{'))
                         .and_then(|r| serde_json::from_str::<Value>(r).ok())
                         .and_then(|v| match v {
                             Value::Object(m) => m
@@ -528,7 +539,99 @@ impl Surface {
             own,
             started,
             ids,
+            files: None,
         })
+    }
+
+    /// Every JSON value of the render context a `kestra://` URI can arrive in
+    /// -- `inputs`, the outputs inherited from loop ancestors, this
+    /// execution's own outputs, `execution` and `item` -- for
+    /// `storage::scope::Snapshot::take`. The flow source is the caller's.
+    ///
+    /// `labels` too (fix round 1, M5), though today every label but
+    /// `system.correlationId` comes from the flow source the caller already
+    /// passes. `vars` and `flow` are the source's own text.
+    pub(super) fn snapshot_values(&self) -> Vec<&Value> {
+        let mut values = vec![&self.inputs, &self.execution, &self.labels];
+        values.extend(self.inherited.values());
+        values.extend(self.own.values());
+        values.extend(self.item.iter());
+        values
+    }
+
+    /// The outage a read of this surface's scope met, if any (spec §11):
+    /// `settle` turns it into an `Err` so its transaction rolls back.
+    pub(super) fn files_outage(&self) -> Option<String> {
+        self.files
+            .as_ref()
+            .and_then(|f| f.0.infrastructure_failure())
+    }
+
+    /// W9c Task 9 (final review I2): the per-call read limit a render of this
+    /// surface's scope met, if one did since the last call (taken). See
+    /// `RenderFiles::take_limit_failure`.
+    pub(super) fn take_limit_failure(&self) -> Option<String> {
+        self.files.as_ref().and_then(|f| f.0.take_limit_failure())
+    }
+
+    /// W9a Task 11 (spec §9.3): the values of a `Loop` whose `values:`
+    /// rendered to `uri`, one per record in file order (no `distinct()`, as
+    /// Kestra's URI path) -- or why not, which fails the loop run with that
+    /// message. The caller stores `executor::rendered_from_file`'s count and
+    /// hands the values to `settle`.
+    ///
+    /// The file is resolved through this surface's snapshot -- the one
+    /// readability decision; `outputs.<task>.uri` is in it because every
+    /// terminated task's outputs are -- and read whole, capped by
+    /// `workflow.storage.max_read_bytes` (there is no loop-width limit in the
+    /// code to reuse). It is read as BYTES, because a plugin's STORE file is
+    /// binary Ion and not UTF-8, and parsed by `storage::ion::loop_values`
+    /// (the one Ion reader, with Kestra's `ionValueToString` projection), one
+    /// top-level value per iteration value. A store OUTAGE is
+    /// recorded on the scope, so `settle` turns it into an `Err`.
+    ///
+    /// Kestra reads the file in batches of `concurrencyLimit` as iterations
+    /// end (`Loop.java:404`, `FlowableUtils.java:533-578`); egret reads it
+    /// once, before the loop starts, so a `null` record fails the loop before
+    /// its first iteration where Kestra fails it at the batch that reaches it
+    /// (`loop_over_ion.null_record`: one iteration ran).
+    pub(super) fn loop_values_from_file(
+        &self,
+        uri: &str,
+    ) -> std::result::Result<Vec<String>, String> {
+        // A `file://` or `nsfile://` URI is refused by the snapshot -- the one
+        // readability decision -- as a URI that does not parse, naming it;
+        // there is no second check here (mutation j of W9a Task 11 measured
+        // one as dead weight).
+        let Some(files) = self.files.clone() else {
+            return Err(format!(
+                "{uri} cannot be read: this render has no file scope"
+            ));
+        };
+        let bytes = crate::runners::env::on_a_render_thread(&files, || {
+            files.0.read_bytes(uri, LOOP_READS_WHOLE)
+        })??;
+        use crate::storage::ion::{loop_values, Stop};
+        // The reader's bounds (`ion::for_each_value`) under the same cap the
+        // file was read whole with.
+        let cap = files.0.max_read_bytes().unwrap_or(bytes.len() as u64);
+        let values = match loop_values(std::io::Cursor::new(bytes), usize::MAX, cap) {
+            (values, Stop::End | Stop::Full) => values,
+            (_, Stop::Failed(e) | Stop::TooDeep(e) | Stop::TooLarge(e) | Stop::Crashed(e)) => {
+                return Err(format!("{uri} is not an ION file a Loop can iterate: {e}"))
+            }
+        };
+        // The first record that cannot be a value -- a `null`
+        // (`ion::LOOP_NULL_RECORD`, Kestra's message), a `java.time` text that
+        // does not parse -- fails the loop, as Kestra's read of it throws.
+        values
+            .into_iter()
+            .collect::<std::result::Result<Vec<String>, String>>()
+    }
+
+    /// Attach the file scope every later [`Surface::context`] carries.
+    pub(super) fn attach_files(&mut self, files: FileScope) {
+        self.files = Some(files);
     }
 
     /// The flow this execution runs, as `load` parsed it.
@@ -705,7 +808,10 @@ impl Surface {
                 );
             }
         }
-        cx
+        match &self.files {
+            Some(files) => cx.with_files(files.clone()),
+            None => cx,
+        }
     }
 }
 
@@ -802,9 +908,9 @@ fn with_declared_defaults(posted: Value, flow: Option<&Flow>) -> Value {
 /// that is still running -- a `PAUSED` source can be resumed while its event
 /// waits. Spec §4.4 point 3 states what that costs.
 ///
-/// `Stack::Fresh`, because the processor is entered from the scheduler ticker
-/// with nothing of this crate's below it; nothing `settle`-shaped runs on the
-/// context this returns.
+/// `Stack::Reader`, because the processor is entered from the scheduler
+/// ticker with nothing of this crate's below it, and nothing `settle`-shaped
+/// runs on the context this returns (W9c Task 9: so it carries no gate).
 pub async fn execution_render_context(
     conn: &mut PgConnection,
     execution_id: Uuid,
@@ -813,7 +919,7 @@ pub async fn execution_render_context(
         conn,
         execution_id,
         super::claim::Lock::No,
-        super::claim::Stack::Fresh,
+        super::claim::Stack::Reader,
     )
     .await?;
     let surface = Surface::load(conn, &ctx).await?;
@@ -916,6 +1022,7 @@ mod tests {
             own: std::collections::BTreeMap::new(),
             started: std::collections::BTreeMap::new(),
             ids: std::collections::BTreeMap::new(),
+            files: None,
         };
         let cx = surface.context(&plan, &state, None);
         let read = |name: &str| {
@@ -978,7 +1085,16 @@ pub(super) enum Pass {
 /// `valids/task-runif`'s `willfailedtheflow` is `["CREATED","FAILED"]` with
 /// `attempts: []` in the golden, which is a different shape from a skip
 /// (`["CREATED","SKIPPED"]`, one attempt).
-pub(super) fn render_run_if(surface: &Surface, plan: &Plan, state: &mut ExecutionState) -> Pass {
+///
+/// W9c Task 9 (final review I2): a render that failed because a per-call
+/// read limit was spent ([`failed_on_a_limit`]) fails the run WITH that
+/// message; every other failure stays silent, as the golden has it.
+pub(super) fn render_run_if(
+    surface: &Surface,
+    plan: &Plan,
+    state: &mut ExecutionState,
+    side: &mut RenderSide,
+) -> Pass {
     let pending: Vec<RunIx> = (0..state.runs.len())
         .filter(|&ix| {
             plan.tasks
@@ -998,12 +1114,44 @@ pub(super) fn render_run_if(surface: &Surface, plan: &Plan, state: &mut Executio
             .clone()
             .expect("filtered on Some above");
         let cx = surface.context(plan, state, Some(ix));
-        match crate::render_str(&expression, &cx) {
+        let rendered = crate::render_str(&expression, &cx);
+        let limit = surface.take_limit_failure();
+        match rendered {
             Ok(value) => state.runs[ix].rendered_run_if = Some(value),
-            Err(_) => fail(state, ix),
+            Err(_) => failed_on_a_limit(state, ix, limit, side),
         }
     }
     Pass::Rendered
+}
+
+/// Fail run `ix` for a render that would not resolve: with the message of
+/// the per-call read limit it met (`storage::prefetch`, final review I2), if
+/// it met one -- egret's own bound, which the author cannot see any other
+/// way -- and silently otherwise, as before.
+fn failed_on_a_limit(
+    state: &mut ExecutionState,
+    ix: RunIx,
+    limit: Option<String>,
+    side: &mut RenderSide,
+) {
+    fail(state, ix);
+    if let Some(message) = limit {
+        side.failures.push((ix, message));
+    }
+}
+
+/// What a render pass produced beside the state, for `settle` to write in
+/// the same transaction after `persist` (W9a Task 11).
+#[derive(Debug, Default)]
+pub(super) struct RenderSide {
+    /// Each run a render failed WITH a message: a `Loop` whose values file
+    /// cannot be iterated, and (W9c Task 9) a render that met a per-call read
+    /// limit. Every other render failure fails its run without one.
+    pub(super) failures: Vec<(RunIx, String)>,
+    /// Each `Loop` run whose values were read from a file, with those values
+    /// in file order: written to `workflow.loop_file_values`, not to the
+    /// run's `rendered` (fix round 1; see `executor::rendered_from_file`).
+    pub(super) file_values: Vec<(RunIx, Vec<String>)>,
 }
 
 /// **Tier B — an `If`'s condition, a `Switch`'s value, a `Loop`'s `values:`, a
@@ -1033,6 +1181,7 @@ pub(super) fn render_expressions(
     plan: &Plan,
     state: &mut ExecutionState,
     now: Tick,
+    side: &mut RenderSide,
 ) -> Pass {
     let pending: Vec<RunIx> = (0..state.runs.len())
         .filter(|&ix| {
@@ -1066,13 +1215,46 @@ pub(super) fn render_expressions(
     for ix in pending {
         let expression = expression_of(plan, state.runs[ix].task).expect("filtered on Some above");
         let cx = surface.context(plan, state, Some(ix));
-        match crate::render_str(&expression, &cx) {
+        let rendered = crate::render_str(&expression, &cx);
+        let limit = surface.take_limit_failure();
+        match rendered {
+            // W9a Task 11 (spec §9.3): a `Loop` whose `values:` renders to a
+            // file URI iterates the FILE. Kestra's test is
+            // `URIFetcher.supports` -- the rendered text starts with one of
+            // its three schemes -- and its `Loop.initFromUri` reads the file
+            // before any iteration exists. Here the worker reads it: the run's
+            // `rendered` gets the URI and the count, `advance()` spawns from
+            // the count, and the values go to `settle` (`RenderSide`), which
+            // writes them where the spawner reads them by index.
+            Ok(value)
+                if matches!(plan.tasks[state.runs[ix].task].kind, TaskKind::Loop { .. })
+                    && crate::executor::values_name_a_file(&value) =>
+            {
+                let from_file = surface.loop_values_from_file(&value);
+                // Its message, a limit's included, is the failure's below.
+                let _ = surface.take_limit_failure();
+                match from_file {
+                    Ok(values) => {
+                        state.runs[ix].rendered =
+                            Some(crate::executor::rendered_from_file(&value, values.len()));
+                        side.file_values.push((ix, values));
+                    }
+                    Err(why) => {
+                        fail(state, ix);
+                        side.failures.push((ix, why));
+                    }
+                }
+            }
             Ok(value) => state.runs[ix].rendered = Some(value),
-            Err(_) => fail(state, ix),
+            Err(_) => failed_on_a_limit(state, ix, limit, side),
         }
     }
     Pass::Rendered
 }
+
+/// What a `Loop`'s reading of its values file says when it is not whole:
+/// the end of `Snapshot::read_bytes`'s over-cap message.
+const LOOP_READS_WHOLE: &str = "a Loop reads its values file whole before its first iteration";
 
 /// A render that will not resolve FAILS the run.
 ///

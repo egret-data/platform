@@ -127,9 +127,53 @@ pub const STEP_BOUND: usize = 4 * 765;
 const BATCH: usize = 1;
 
 /// The registry the ratchet judges: the four handlers W3b ships, with `Sleep`
-/// capped — see the module doc, item 3.
-pub fn registry() -> Handlers {
+/// capped — see the module doc, item 3 — and, since W9a Tasks 11 and 12, the
+/// nine core storage tasks (and, since W9b Tasks 6 and 7, the four
+/// `core.namespace` tasks)
+/// over the test `MemStore` (`storage::install_mem_for_tests`,
+/// installed here, so the render snapshot of every `settle` in this process
+/// reads the same store the handlers write). `pool` is the database `run`
+/// drives: `Delete` and `PurgeCurrentExecutionFiles` delete index rows in it.
+/// A caller that only reads the registry's types passes
+/// [`unconnected_pool`].
+pub fn registry(pool: &PgPool) -> Handlers {
+    let files = egret_workflow::storage::install_mem_for_tests();
     let mut r = Handlers::new();
+    r.add(std::sync::Arc::new(
+        egret_workflow::worker::handlers::storage::Write::new(Some(files.clone())),
+    ));
+    r.add(std::sync::Arc::new(
+        egret_workflow::worker::handlers::storage::Size,
+    ));
+    // W9a Task 12: the five whole-file storage tasks, over the same store.
+    {
+        use egret_workflow::worker::handlers::storage as st;
+        r.add(std::sync::Arc::new(st::Concat::new(Some(files.clone()))));
+        r.add(std::sync::Arc::new(st::Split::new(Some(files.clone()))));
+        r.add(std::sync::Arc::new(st::Reverse::new(Some(files.clone()))));
+        r.add(std::sync::Arc::new(st::DeduplicateItems::new(Some(
+            files.clone(),
+        ))));
+        r.add(std::sync::Arc::new(st::FilterItems::new(Some(
+            files.clone(),
+        ))));
+    }
+    egret_workflow::worker::handlers::storage::register(&mut r, pool.clone(), Some(files.clone()));
+    // W9b Task 6: the namespace tasks over the same store. Their render-time
+    // namespace lookups (and Task 4's functions) connect with the options of
+    // the pool the driver runs; an [`unconnected_pool`] installs nothing, so
+    // a caller that only reads the types cannot leave unreachable options
+    // behind for one that runs.
+    if !is_unconnected(pool) {
+        egret_workflow::storage::nsfiles::install_db_for_tests(pool);
+    }
+    egret_workflow::worker::handlers::namespace::register(
+        &mut r,
+        pool.clone(),
+        Some(files.clone()),
+    );
+    // W9c Task 5: the six KV tasks over the same store.
+    egret_workflow::worker::handlers::kv::register(&mut r, pool.clone(), Some(files));
     r.add(std::sync::Arc::new(
         egret_workflow::worker::handlers::log::Log::new(),
     ));
@@ -143,6 +187,29 @@ pub fn registry() -> Handlers {
         egret_workflow::worker::handlers::sleep::Sleep::capped(Duration::ZERO),
     ));
     r
+}
+
+/// Where [`unconnected_pool`] points: nothing listens on port 1. ONE
+/// definition, read by the pool and by [`is_unconnected`] (fix round 1, M1).
+const UNCONNECTED_URL: &str = "postgres://nobody@127.0.0.1:1/none";
+
+/// A pool that never connects, for a caller of [`registry`] that reads only
+/// its types.
+pub fn unconnected_pool() -> PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy(UNCONNECTED_URL)
+        .expect("a lazy pool parses")
+}
+
+/// Whether `pool` is [`unconnected_pool`]'s: the same host, port and
+/// database as [`UNCONNECTED_URL`], parsed the way the pool parsed it.
+pub fn is_unconnected(pool: &PgPool) -> bool {
+    let theirs: sqlx::postgres::PgConnectOptions =
+        UNCONNECTED_URL.parse().expect("UNCONNECTED_URL parses");
+    let ours = pool.connect_options();
+    ours.get_host() == theirs.get_host()
+        && ours.get_port() == theirs.get_port()
+        && ours.get_database() == theirs.get_database()
 }
 
 // ---------------------------------------------------------------------------
@@ -291,7 +358,6 @@ pub async fn publish_corpus(pool: &PgPool, ws: Uuid, by: UserId) -> BTreeMap<Str
         inner: WorkflowRefs {
             flows: FlowRepo::new(Db { pool: pool.clone() }),
             dataapi_endpoints: Arc::new(NoDataApi),
-            notebooks: Arc::new(NoNotebooks),
         },
         subflow_lookups: std::sync::atomic::AtomicUsize::new(0),
     };
@@ -707,7 +773,22 @@ const CREATE_REFUSED: usize = 4;
 /// refused the call at run before W5b and still does (the render's
 /// `SECRET_REFUSAL`), so publishing them only postponed the same refusal to
 /// run time. They moved to [`VALIDATE_REFUSED`].
-const LIVE: usize = 245;
+///
+/// # 245 → **247** at W9a Task 11
+///
+/// `valids/loop-values-from-uri` and `valids/loop-outputs-auto`, the corpus's
+/// two `io.kestra.plugin.core.storage.Write` flows: `TASK_TYPES` gained the
+/// four core storage FQCNs W9a Task 11 implements, and `Write` was the only
+/// type either flow lacked. An over-refusal closing, as at W10 Task 6: the
+/// pinned artifact published both. [`UNKNOWN_TYPE_REFUSED`] fell by the same 2.
+///
+/// # 247 → **248** at W9c Task 5
+///
+/// `valids/retry-with-flowable-errors`: `TASK_TYPES` gained the six
+/// `io.kestra.plugin.core.kv.*` FQCNs, and `kv.Set` was the only type it
+/// lacked. An over-refusal closing; [`UNKNOWN_TYPE_REFUSED`] fell by 1. Its
+/// golden entry stays baselined: `AllowFailure` is still planned opaque.
+const LIVE: usize = 248;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -724,7 +805,7 @@ const LIVE: usize = 245;
 /// sweeping for "16" is looking for. **The figure is gone entirely now** —
 /// there is no numeral in this sentence to go stale.)
 ///
-/// `registry::known_type` is an allow-list of fifteen rows — **five**
+/// `registry::known_type` is an allow-list of twenty-four rows — **five**
 /// `egret.*` types (this sentence said "eight" from W6 until W10 Task 6 fix
 /// round 2, and "seven" until W5a Task 2 turned `egret.container` and
 /// `egret.script.python` into aliases; counted, not quoted, at `TASK_TYPES`),
@@ -734,30 +815,41 @@ const LIVE: usize = 245;
 /// `…core.flow.Sleep`) plus the `core.log` alias, and — **since W5a Task 2**
 /// — the four `io.kestra.plugin.scripts.{shell,python}.{Commands,Script}`
 /// FQCNs with the two `egret.*` aliases. The corpus writes none of the script
-/// types, so the last addition moves no count in this file.
+/// types, so that addition moves no count in this file. **Since W9a Task 11**
+/// it also holds the four `io.kestra.plugin.core.storage.*` FQCNs that task
+/// implements, which DO move two (see [`LIVE`]), and **since W9a Task 12**
+/// the five whole-file ones (`Concat`, `Split`, `Reverse`,
+/// `DeduplicateItems`, `FilterItems`), which the corpus writes in no flow, so
+/// they move no count here. **Since W9c Task 5** it holds the six
+/// `io.kestra.plugin.core.kv.*` FQCNs, which move one (see [`LIVE`]).
 ///
-/// **That last clause is what makes [`LIVE`] 248.** This paragraph used to end
+/// **The FQCN rows are what make most of [`LIVE`].** (This sentence said
+/// "makes `LIVE` 248" and "false for 227 of the 248" after `LIVE` had moved
+/// to 247, 245 and 247 again; W9a Task 11 fix round 1 took the figures out,
+/// for the reason the parenthesis above gives.) This paragraph used to end
 /// *"the flows that DO reach a version are exactly the corpus flows whose every
 /// task is control flow, a `core.subflow` or a `core.pause` … so none meets the
 /// allow-list at all"*, which was true when only 21 flows published and is
-/// **false for 227 of the 248 now**: the overwhelming majority of live corpus
+/// **false for every live flow but those now**: the overwhelming majority of live corpus
 /// flows are live precisely *because* their leaves meet the allow-list. The old
 /// sentence survives here only as the description of the **21**, which is the
 /// population it was written for.
 ///
-/// **This is not a hole in the product** *for the 68 that remain*: egret's
+/// **This is not a hole in the product** *for the 66 that remain*: egret's
 /// publish refusing a genuinely unported Kestra plugin —
 /// `core.output.OutputValues`, `core.execution.Labels`, the `io.kestra.core.*`
 /// test-only classes — is exactly the behaviour W1 built the table for.
 ///
-/// **301 through W8 Task 2, 296 through W10 Task 6, 68 now.** The 228 that left
+/// **301 through W8 Task 2, 296 through W10 Task 6, 68 through W9a Task 10,
+/// 66 through W9c Task 4, 65 now** (W9a Task 11: the two `core.storage.Write`
+/// flows; W9c Task 5: the `core.kv.Set` flow; see [`LIVE`]). The 228 that left
 /// were NOT unported: `worker::handlers` has implemented all four of their types
 /// since W3b, and only `TASK_TYPES` did not say so. See [`LIVE`] for the
 /// mechanism and for why the figure was hiding behind a table rather than
 /// behind a missing handler; that is the difference between "egret has not
 /// ported this plugin" and "egret refuses a plugin it runs", and only the first
 /// is a statement about the oracle rather than a defect.
-const UNKNOWN_TYPE_REFUSED: usize = 68;
+const UNKNOWN_TYPE_REFUSED: usize = 65;
 
 /// How many corpus flows have a draft row that `publish` refused for a reason
 /// of **egret's own validate** — a real disagreement about the flow, not an
@@ -870,60 +962,23 @@ fn publish_class(message: &str) -> String {
     }
 }
 
-/// `RefKind::DataApiEndpoint` and `RefKind::Notebook` are structurally
-/// unreachable from this corpus, and these two doubles are how that is
-/// asserted rather than assumed.
+/// `RefKind::DataApiEndpoint` is structurally unreachable from this corpus,
+/// and this double is how that is asserted rather than assumed.
 ///
-/// Both kinds are declared by an `egret.*` task type
-/// (`spec::registry::TASK_TYPES`), `publish` only reads a `RefField` after
-/// `registry::known_type` has already matched, and
-/// `no_corpus_entry_can_exercise_the_egret_sql_handler` measures that no corpus
-/// flow names an `egret.*` type at all. A double that answered `Ok(None)`
-/// instead would turn a corpus that had grown one into a silent `NotFound`
-/// indistinguishable from the 300-odd refusals beside it. Same shape, and the
-/// same reason, as `refs.rs`'s own `UnreachableDataApi`/`UnreachableNotebooks`.
+/// It is declared by an `egret.*` task type (`spec::registry::TASK_TYPES`),
+/// `publish` only reads a `RefField` after `registry::known_type` has
+/// already matched, and `no_corpus_entry_can_exercise_the_egret_sql_handler`
+/// measures that no corpus flow names an `egret.*` type at all. A double
+/// that answered `Ok(None)` instead would turn a corpus that had grown one
+/// into a silent `NotFound` indistinguishable from the 300-odd refusals
+/// beside it. Same shape, and the same reason, as `refs.rs`'s own
+/// `UnreachableDataApi`.
 struct NoDataApi;
 
 #[async_trait::async_trait]
 impl egret_dataapi_api::DataApiEndpointPort for NoDataApi {
     async fn workspace_of(&self, _id: Uuid) -> Result<Option<Uuid>, egret_core::Error> {
         unreachable!("no corpus flow names an `egret.dataapi.call`")
-    }
-}
-
-/// See [`NoDataApi`].
-struct NoNotebooks;
-
-#[async_trait::async_trait]
-impl egret_analytics_api::NotebookDocsPort for NoNotebooks {
-    async fn get_summary(
-        &self,
-        _id: Uuid,
-    ) -> Result<Option<(egret_analytics_api::NotebookSummary, Uuid)>, egret_core::Error> {
-        unreachable!("no corpus flow names an `egret.python`")
-    }
-    async fn list_engine_options(
-        &self,
-        _ws: Uuid,
-    ) -> Result<Vec<egret_analytics_api::EngineOption>, egret_core::Error> {
-        unreachable!()
-    }
-    async fn record_output(
-        &self,
-        _nb: Uuid,
-        _cid: Uuid,
-        _outputs: &[egret_analytics_api::CellOutput],
-        _execution_count: Option<i32>,
-        _elapsed_ms: Option<i32>,
-    ) -> Result<(), egret_core::Error> {
-        unreachable!()
-    }
-    async fn build_runtime(
-        &self,
-        _ws: Uuid,
-        _user_id: UserId,
-    ) -> Result<egret_analytics_api::NotebookRuntime, egret_core::Error> {
-        unreachable!()
     }
 }
 

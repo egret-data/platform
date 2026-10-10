@@ -287,6 +287,7 @@ impl AccessResolver {
             "notebook" => Some("notebooks"),
             "saved_query" => Some("saved_queries"),
             "folder" => Some("folders"),
+            "app" => Some("apps"),
             _ => None,
         }
     }

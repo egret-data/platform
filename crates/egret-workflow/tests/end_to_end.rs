@@ -64,7 +64,7 @@
 //! shipped worker can execute.
 //!
 //! `spec::registry::TASK_TYPES` — publish's table — spelled egret's tasks
-//! `core.log`, `egret.sql`, `core.http`; `Handlers::with_core_tasks()`, which
+//! `core.log`, `egret.sql`, `core.http`; `Handlers::with_core_tasks(egret_workflow::storage::current())`, which
 //! is what `egret-bin` hands the runtime, registers Kestra's FQCNs, because
 //! that is what `executor::build_plan` copies verbatim out of `Task::type`.
 //! **The intersection was empty for every core task**, and worse: each of the
@@ -386,7 +386,7 @@ async fn a_published_flow_runs_to_success_with_nobody_driving_the_tick(pool: sql
     let cancel = CancellationToken::new();
     spawn(
         pool.clone(),
-        Arc::new(Handlers::with_core_tasks()),
+        Arc::new(Handlers::with_core_tasks(egret_workflow::storage::current())),
         cfg(true),
         cancel.clone(),
     );
@@ -440,7 +440,7 @@ async fn a_published_flow_runs_to_success_with_nobody_driving_the_tick(pool: sql
     assert_eq!(
         runs[1]["outputs"]["value"].as_str(),
         Some(RETURN_VALUE),
-        "`core.debug.Return` from `Handlers::with_core_tasks()` wrote this, or \
+        "`core.debug.Return` from `Handlers::with_core_tasks(egret_workflow::storage::current())` wrote this, or \
          nothing did: {dto}"
     );
     assert!(
@@ -488,7 +488,7 @@ async fn with_the_worker_disabled_the_execution_stays_where_the_api_left_it(pool
     let off = CancellationToken::new();
     spawn(
         pool.clone(),
-        Arc::new(Handlers::with_core_tasks()),
+        Arc::new(Handlers::with_core_tasks(egret_workflow::storage::current())),
         cfg(false),
         off.clone(),
     );
@@ -568,7 +568,7 @@ async fn with_the_worker_disabled_the_execution_stays_where_the_api_left_it(pool
     let on = CancellationToken::new();
     spawn(
         pool.clone(),
-        Arc::new(Handlers::with_core_tasks()),
+        Arc::new(Handlers::with_core_tasks(egret_workflow::storage::current())),
         cfg(true),
         on.clone(),
     );
@@ -692,7 +692,7 @@ async fn both_spellings_publish_and_both_dispatch(pool: sqlx::PgPool) {
     // Membership, kept as a secondary line rather than the claim: it says the
     // alias is registered at all, which is necessary and — as the swap proved —
     // nowhere near sufficient.
-    let shipped = Handlers::with_core_tasks();
+    let shipped = Handlers::with_core_tasks(egret_workflow::storage::current());
     let type_ids = shipped.type_ids();
     assert!(type_ids.contains(&FQCN), "{type_ids:?}");
     assert!(type_ids.contains(&ALIAS), "{type_ids:?}");
@@ -830,7 +830,7 @@ async fn run_one_task(
     let cancel = CancellationToken::new();
     spawn(
         pool.clone(),
-        Arc::new(Handlers::with_core_tasks()),
+        Arc::new(Handlers::with_core_tasks(egret_workflow::storage::current())),
         cfg(true),
         cancel.clone(),
     );

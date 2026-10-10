@@ -75,7 +75,7 @@ design system của sparklabx.
 | ADR-02 | Frontend | **1 SPA**, 2 route-group (Admin/Explorer) gate bằng role | Share component & theme tối đa; vận hành đơn giản |
 | ADR-03 | Ranger | **Tương thích Ranger Admin REST** | Plugin Ranger gốc của Trino/StarRocks fetch trực tiếp, không phải sửa plugin |
 | ADR-04 | Metadata store | **PostgreSQL** (sqlx, compile-time checked) | Nguồn sự thật; theo Lakekeeper/Superset/Metabase |
-| ADR-05 | Object storage | **S3-compatible (MinIO)**, abstraction pluggable | Lưu data Iceberg + result cache; kế thừa `lakekeeper/crates/io` |
+| ADR-05 | Object storage | **S3-compatible (RustFS)**, abstraction pluggable | Lưu data Iceberg + result cache; kế thừa `lakekeeper/crates/io` |
 | ADR-06 | Cache/queue | **Redis (tùy chọn)**, fallback Postgres | Session, async job, rate-limit |
 | ADR-07 | HTTP runtime | **axum + tokio + tower** | Chuẩn hệ sinh thái; Lakekeeper dùng axum |
 | ADR-08 | API contract | **OpenAPI qua utoipa** | Sinh client FE tự động |
@@ -111,7 +111,7 @@ graph TB
   end
   IDP[(OIDC / SSO Provider)]
   MAIL[(SMTP / MS Graph)]
-  OBJ[(Object Storage S3/MinIO)]
+  OBJ[(Object Storage S3/RustFS)]
   PG[(PostgreSQL)]
 
   A -->|Admin Portal| EG[Egret]
@@ -189,7 +189,7 @@ graph TB
 ## 4. Mô hình triển khai
 
 - **Đóng gói:** 1 Docker image (single binary `egret`) + 1 image frontend tĩnh (nginx) — hoặc binary phục vụ luôn static SPA.
-- **Phụ thuộc bắt buộc:** PostgreSQL, Object storage (S3/MinIO).
+- **Phụ thuộc bắt buộc:** PostgreSQL, Object storage (S3/RustFS).
 - **Phụ thuộc tùy chọn:** Redis (cache/queue), Kafka/NATS (event bus phân tán — mặc định in-proc).
 - **CLI binary:** `egret serve` (chạy server), `egret migrate` (DB migration), `egret init` (bootstrap admin/workspace).
 - **Helm chart** cho K8s; HorizontalPodAutoscaler ở phase scale (monolith stateless trừ DB/Redis/object store).
@@ -203,10 +203,10 @@ graph LR
   end
   PG[(Postgres HA)]
   RD[(Redis)]
-  MINIO[(MinIO/S3)]
+  RUSTFS[(RustFS/S3)]
   EGP --- PG
   EGP --- RD
-  EGP --- MINIO
+  EGP --- RUSTFS
   FE --- EGP
 ```
 
@@ -229,7 +229,7 @@ trong `egret-core`**, có thể test độc lập. Crate `*-server` tổng hợp
 | `egret-config` | Config typed (serde + figment), env + file, validate | core | `Config::load()` |
 | `egret-metastore` | Postgres: pool sqlx, migration runner, repository base, transaction helper | core, sqlx | `Db`, `Repo` traits |
 | `egret-secrets` | Envelope encryption credential at-rest, KMS-pluggable provider | core, metastore | `SecretStore` trait |
-| `egret-storage` | Object store IO abstraction (S3/MinIO/GCS/Azure) — kế thừa `lakekeeper/crates/io` | core | `ObjectStore` trait |
+| `egret-storage` | Object store IO abstraction (S3/RustFS/GCS/Azure) — kế thừa `lakekeeper/crates/io` | core | `ObjectStore` trait |
 | `egret-events` | Event bus nội bộ (in-proc broadcast + optional Kafka/NATS), topic `policy.changed`, `catalog.changed`, `query.finished`… | core | `EventBus`, `Event` |
 
 ### 5.2 Identity & Access
@@ -725,7 +725,7 @@ sequenceDiagram
 - **Observability:** `tracing` + OpenTelemetry export; Prometheus `/metrics`; structured JSON log; request-id + workspace-id trong span.
 - **Caching:** query result (engine), dataapi response, ranger policy version (304), dataset metadata. Redis hoặc in-proc.
 - **Migration:** sqlx migrations; `egret migrate` chạy lúc deploy; backward-compatible.
-- **Testing:** unit theo crate (mock trait), integration với testcontainers (Postgres/MinIO/Trino), contract test cho Ranger & Iceberg REST (so với spec), e2e Playwright cho SPA.
+- **Testing:** unit theo crate (mock trait), integration với testcontainers (Postgres/RustFS/Trino), contract test cho Ranger & Iceberg REST (so với spec), e2e Playwright cho SPA.
 - **Multi-instance:** monolith stateless (state ở PG/Redis/object store); scheduler workflow cần leader-election (advisory lock Postgres) để tránh chạy trùng.
 
 ---
@@ -810,13 +810,13 @@ egret/
 > **Tái định hình (v0.2):** mục tiêu xây **mỗi workspace thành một nền tảng dữ liệu độc lập hoàn chỉnh** theo **4 trụ cột** (ADR-17). Mỗi mục dưới đây là một chu kỳ brainstorm → spec → plan → subagent-build riêng.
 
 ### 16.1 Đã hoàn thành
-- **Foundation:** Cargo workspace + crates; Postgres metastore + sqlx migrations (0001–0028); typed config; dev docker-compose (Postgres + MinIO + Trino/StarRocks).
+- **Foundation:** Cargo workspace + crates; Postgres metastore + sqlx migrations (0001–0028); typed config; dev docker-compose (Postgres + RustFS + Trino/StarRocks).
 - **Admin / control plane:** local auth + session, workspaces + members + RBAC; đăng ký database/engine (Trino REST + StarRocks MySQL); Ranger REST-compatible policy surface.
 - **Analytics (BI):** Dataset / Chart / Dashboard với **Metabase parity** sâu (table & pivot, per-series chart options, axis range, series rename, table view-as + mini-bar, PNG export, Vietnam-map geo).
 - **Catalog (lakehouse core):** Iceberg catalog per-workspace qua **embedded lakekeeper** — CE-1 spike → CE-2 tenancy + cutover → CE-3 per-token read/write scope → CE-4 `EgretAuthorizer` tối giản + `namespace_scope` (đã merge toàn bộ; xem §10.3).
 
 ### 16.2 Tiếp theo — Trụ cột Catalog (CE chain)
-- **CE-5** — storage profiles / secrets bridge: cấu hình storage per-workspace, GCS/Azure ngoài S3/MinIO, kết nối secret store của lakekeeper với `egret-secrets`.
+- **CE-5** — storage profiles / secrets bridge: cấu hình storage per-workspace, GCS/Azure ngoài S3/RustFS, kết nối secret store của lakekeeper với `egret-secrets`.
 - **CE-6** — GC / task-queue workers: chạy snapshot-expiry + orphan-file cleanup của lakekeeper (registry nhúng hiện chỉ phục vụ REST, chưa spawn worker).
 - Sau: kết nối catalog ngoài (đăng ký REST/Glue/Nessie per workspace), hoàn thiện parity lakekeeper (soft-delete, statistics, generic tables), lineage.
 

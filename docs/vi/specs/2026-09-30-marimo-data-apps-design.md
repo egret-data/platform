@@ -35,8 +35,28 @@ edit là nơi tác giả viết, chế độ run là app đã publish.
 | D12 | **Origin apps là một subdomain anh em** (`apps.<host egret>`), same-site với egret (2026-10-01). | P4 phải có cookie `__Host-` (kiểm trên HTTPS), GET không có tác dụng phụ, CSRF dựa trên header, không cho phép CORS cho origin apps (§6.1). |
 | D13 | **SQL cell: cài DuckDB, engine egret là mặc định** (2026-10-01). | DuckDB để viết SQL trên DataFrame đã lấy về, chỉ trong pod; SQL cell mới nhắm vào gateway (§4.4). |
 | D14 | **Bước kiểm `has_marimo_installed` mỗi lần khởi chạy của marimo do shim của launcher trả lời** (2026-10-01). | Một mẹo dựa vào hành vi nội bộ của marimo: ghim phiên bản marimo, test hợp đồng trong CI của image sẽ fail khi lệnh đổi; hiện chưa theo hướng sửa upstream (§6.3). |
-| D15 | **Nghiệm thu thời gian khởi động của P5 tính tương đối so với chế độ thread** (≤ 0,5 giây trung vị, ≤ 1 giây cho 3 đồng thời, Linux, ≥ 5 lần chạy); "< 2 giây" là mục tiêu trải nghiệm riêng, không chặn (2026-10-01). | Mức sàn tải trang ≈ 1,75 giây nằm ngoài tầm của launcher kernel (S0b). |
+| D15 | **Nghiệm thu thời gian khởi động của P5 tính tương đối so với chế độ thread** (≤ 0,5 giây trung vị, ≤ 1 giây cho 3 đồng thời, Linux, ≥ 5 lần chạy); "< 2 giây" là mục tiêu trải nghiệm riêng, không chặn (2026-10-01). **Đã bị D24 thay thế (2026-10-03):** tiêu chí này so sánh một pool kernel khởi động sẵn với chế độ thread trong MỘT pod dùng chung; D24 bỏ pod dùng chung, nên không còn pool nào để so sánh. | Mức sàn tải trang ≈ 1,75 giây nằm ngoài tầm của launcher kernel (S0b). Xem `docs/en/plans/2026-10-03-data-apps-p5-startup-result.md` cho số đo thay thế (chi phí khởi động nguội của một run pod — chưa đáng tin, đo dưới tải nặng không liên quan). |
+
+### 1.2 D24 — run mode là một pod cho mỗi (viewer, version đã publish), không phải mỗi version (2026-10-03)
+
+| # | Quyết định | Hệ quả |
+|---|---|---|
+| D24 | Kênh IPC của marimo (`marimo/_ipc/connection.py`) bind socket ZeroMQ không xác thực lên `tcp://127.0.0.1:<cổng ngẫu nhiên>`. Thiết kế run mode ban đầu của spec này — nhiều kernel của nhiều viewer, cô lập bằng patch IPC của P3, dùng chung một pod cho mỗi **version** đã publish — sẽ cho phép code của app (chạy trong kernel của viewer B) chạm tới kênh điều khiển của viewer A trong cùng pod (đọc được `x-egret-app-token` của A, hoặc giả mạo output vào phiên của A): một lỗ rò giữa các viewer, nặng hơn D3 ("code tác giả không đáng tin với viewer của chính nó"). **Đã chốt với người dùng: mỗi run pod chỉ phục vụ một (version, viewer)** — đúng phương án dự phòng D7 đã nêu cho trường hợp patch IPC hỏng, nay dùng làm mặc định thay vì pod dùng chung. | §5.2, §6.3 và D7 bị thay thế ở chỗ mô tả một pod cho mỗi version; giờ một run pod chỉ phục vụ đúng một cặp `(version_id, user_id)`. Patch IPC ép buộc của P3 (`apps-image/egret_marimo/patches.py::install_run_mode_ipc_patch`) vẫn giữ nhưng **tắt mặc định** (`apps.pod.run_kernel_mode = "thread"`): vì mỗi pod chỉ có một viewer, các tab trình duyệt của chính người đó dùng chung kernel chế độ thread của marimo không còn là vấn đề cô lập giữa người khác nhau (đã đo trong `docs/en/plans/2026-10-03-data-apps-p5-startup-result.md` — hai tab, cùng một viewer, chế độ thread, token không bao giờ lẫn). Phải trả giá: mỗi viewer đang xem một pod riêng thay vì nhiều viewer dùng chung. Mục tiêu số của D15 không còn áp dụng (xem dòng đó). Plan: `docs/en/plans/2026-10-03-data-apps-p5-run-mode.md`. |
 | D16 | **Việc pool bị treo khi tắt được phủ bằng một test nghiệm thu trong P5**, không làm spike riêng (2026-10-01). | Áp dụng cho launcher mà P5 chọn; trên k8s thứ tự tắt này xảy ra thường xuyên. |
+
+### 1.1 Các quyết định đề xuất cho P4 (2026-10-02) — **chưa thống nhất với người dùng**
+
+Phát sinh khi viết plan P4 (`docs/en/plans/2026-10-02-data-apps-p4-origin-proxy-edit.md`) vì spec chưa nói. D19 và D23 là câu hỏi cho người dùng; phần còn lại là mặc định của plan, đảo lại nếu người dùng không đồng ý.
+
+| # | Đề xuất | Lý do |
+|---|---|---|
+| D17 | Apps host chạy bằng **listener riêng** (`apps.listen`), chỉ gắn route ticket và proxy. | Một router phân theo Host header khiến một lỗi lộ cả hai bề mặt; hai cổng thì tách bạch về cấu trúc. |
+| D18 | **Grant là một ticket đã redeem**: một dòng trong `analytics.app_grants`; cookie của apps origin giữ plaintext có hash là `cookie_hash`. `login_sid` cascade từ `sessions`. | Dùng một lần nguyên tử, logout huỷ grant theo cấu trúc, đúng với nhiều replica egret. |
+| D19 | **Token truy vấn cấp theo grant**, do proxy cấp lười; thiếu cache thì cấp mới. Token của grant bị thu hồi khi WebSocket cuối cùng trên replica đó đóng. **Câu hỏi mở:** số WebSocket đang mở đếm theo từng replica, nên với nhiều replica chỉ còn hết hạn idle (30 phút) làm lưới đỡ — chấp nhận, hay đếm chung trong DB? | Token theo cookie của S0 hỏng khi reload iframe (WebSocket cũ đóng đã thu hồi nó). |
+| D20 | Listener của egret từ chối mọi request có `Sec-Fetch-Site: same-site`. **Đã đo ở P4e** (xem `docs/en/plans/2026-10-03-data-apps-p4e-live-result.md`): Chromium gửi header này cho JavaScript ở apps origin và egret từ chối mọi request, kể cả `GET` thường mang cookie của người xem; nằm ngoài danh sách của spec. | S0 đo thấy cookie Lax của người xem đi kèm request từ apps origin; kiểm `GET` là cần nhưng chưa đủ. |
+| D21 | Cookie là `__Host-egret_session` / `__Host-egret_csrf` khi `session.secure` bật, giữ tên hiện tại nếu không; frontend đọc cả hai. | `__Host-` cần `Secure`; Chromium từ chối qua http (S0). |
+| D22 | Edit pod dùng **trait `AppPodLauncher` mới** trong `egret-apps`; không mở rộng `KernelLauncher` của `egret-kernel` (thay cho chữ "generalised" ở §6.3). | P6 xoá nửa Jupyter của `egret-kernel`. |
+| D23 | **Chặn grid layout ở chế độ edit** thay vì lưu cùng draft. **Câu hỏi mở:** mất grid layout ở v1 có chấp nhận được không? | Lưu nó cần đổi schema và một hook của marimo chưa tồn tại. |
 
 ## 2. Những gì code nói
 
@@ -278,6 +298,35 @@ bằng token theo pod chỉ đọc được đúng phiên bản đó, ghi ra đ�
 bản mới có pod mới; session mở trước khi publish tiếp tục chạy trên phiên bản cũ cho tới khi đóng, và pod
 cũ dừng khi rảnh.
 
+### 5.3 Hợp đồng API phía pod (định nghĩa ở P3, egret phục vụ ở P4)
+
+Đây là các endpoint egret duy nhất mà pod marimo gọi, ngoài query gateway (§4.2). Mỗi endpoint nhận một
+**token pod** (`Authorization: Bearer <token pod>`) do egret tạo khi khởi chạy pod. P4 tạo token và
+phục vụ các route này; P3 xây client và test nó với một egret giả.
+
+| Pod | Endpoint | Hành vi |
+|---|---|---|
+| edit (tác giả × workspace) | `GET /api/apps/pod/apps/{app_id}/draft` | `{source, revision}`. egret kiểm lại `app:write` của tác giả trong token ở mỗi lần gọi. |
+| edit | `PUT /api/apps/pod/apps/{app_id}/draft` kèm `If-Match: "<rev>"`, body `{source}` | 200 `{revision}` · 409 `{error, current_revision}` · 413 · 428, cùng hợp đồng với API cookie (§5) |
+| run (một phiên bản) | `GET /api/apps/pod/apps/{app_id}/versions/{version_id}` | `{source, version_no}`. Token gắn với đúng phiên bản đó. |
+
+Quy tắc phía pod, rút ra từ S0:
+- **Revision gốc theo từng session editor, không theo app.** marimo tạo một `AppFileManager` mới ở mỗi
+  lần `NotebookWorkspace.load`, và mỗi session editor giữ manager từ lần nạp của chính nó. Vì vậy mỗi lần
+  nạp đều tải draft mới nhất, và `EgretStorage` của nó giữ revision của nội dung mà session đó nhận được.
+  Session nào có draft đã thay đổi bên dưới sẽ nhận 409 ở lần lưu kế tiếp, và marimo hiện toast. Ở chế độ
+  edit marimo giữ một session cho mỗi file, và tải lại trình duyệt thường *tiếp tục* session mồ côi (TTL
+  120 giây). Vì vậy pod đánh dấu session là xung đột khi gặp 409 và từ chối tiếp tục nó, và lần tải lại
+  tạo một session mới ở revision mới nhất. Tab thứ hai dùng chung session (kiosk hoặc RTC) chứ không tách
+  ra. Cách này bắt được editor cũ và tác giả thứ hai. Quy tắc cũ (một revision gốc cho mỗi app suốt vòng đời pod) đã bị bỏ ở P3: revision dùng chung
+  không phân biệt được các session, nên một session cũ có thể lưu đè bản mới hơn sau khi một lần nạp khác
+  đã tải lại.
+- **Pod từ chối khởi động** nếu có `.marimo.toml` trong thư mục làm việc, bất kỳ thư mục cha nào của nó,
+  hoặc `$HOME`. marimo ưu tiên các file đó hơn cấu hình đã khoá trong `XDG_CONFIG_HOME`.
+- **marimo 0.25.0 không có API đặt engine mặc định.** SQL cell mới dùng kết nối được định nghĩa gần nhất
+  mà người dùng chưa chọn khác, nên chính cell `db = egret.connect(...)` của mẫu app mới (P2) là thứ
+  khiến engine egret trở thành mặc định (D13).
+
 ## 6. Runtime, proxy và ranh giới bảo mật
 
 ### 6.1 marimo không được chung origin với egret
@@ -517,12 +566,13 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
    revision/409, publish, khôi phục, CRUD app và share với `app:manage`; gateway kiểm phiên bản của token
    run vẫn tồn tại và đang publish; FK `apps.folder_id` (dùng cho tổ tiên PDP); `ALL_FEATURE_KEYS` ở
    frontend thêm `apps`.
+   Plan: `docs/en/plans/2026-10-01-data-apps-p2-storage-lifecycle.md`.
 3. **P3 — Image `egret-apps` và `egret_marimo`.** Entrypoint, `EgretStorage`, DB-API, `egret.sql`, cấu hình
    marimo đã khoá, patch IPC cho chế độ run và cách xử lý bước kiểm `has_marimo_installed` mỗi lần khởi
    chạy của marimo (D14: shim của launcher trả lời, với test hợp đồng sẽ fail khi marimo đổi lệnh); pytest
    với một egret giả, kể
    cả test hợp đồng `StorageInterface` (có ca tải-lại-không-gắn-lại, §5.1) và test hợp đồng IPC (§6.3).
-   Quyết định engine mặc định của SQL cell (§4.4).
+   Client API phía pod theo §5.3. Plan: `docs/en/plans/2026-10-01-data-apps-p3-image-and-client.md`.
 4. **P4 — Origin apps, proxy, chế độ edit.** Ticket → cookie, proxy (allow-list route hoặc block list của
    S0, kiểm và chuyển tiếp một đường dẫn thô, xoá hoặc ghim `X-Notebook-Id`), đổi tên cookie sang `__Host-`
    và kiểm qua HTTPS trên kind, kiểm toán phía egret rằng route `GET` không có tác dụng phụ và CSRF vẫn dựa
@@ -531,6 +581,16 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
    đăng nhập egret đã hết hạn nhưng chưa xoá có phải chặn token app không; cột `impersonator` trên
    `app_sessions` trước khi mint token khi đang impersonate; kiểm `session_idle_secs <=
    session_absolute_secs` lúc khởi động; chỉ audit lời gọi bắt đầu khoá rate limit, không audit mọi 429.
+   Từ review cuối của P3: các endpoint phía pod ở §5.3 và việc mint token pod; proxy còn chặn
+   `/api/ai/*`, `/terminal`, `/api/kernel/copy` và `/api/kernel/rename` (image cũng từ chối copy/rename vào
+   draft, nhưng proxy mới là ranh giới); token tới pod qua `secretKeyRef`; tini làm PID 1; deployment xử
+   lý mã thoát của launcher (64 = env sai, không khởi động lại; 65 = có file config bị từ chối, cấp
+   `emptyDir` mới; 69 = lấy phiên bản thất bại, thử lại); kernel chạy dưới uid khác với server (hoặc
+   `PR_SET_DUMPABLE=0` tạm thời) để cell không đọc được token của server; config mới chỉ khoá `ai` và
+   `rtc_v2` — các khoá PEP 723 / venv / runtime vẫn mở; tải lại khi WebSocket cũ còn kết nối cần tải lại
+   lần hai; endpoint `egret.databases()`; chạy lại test hợp đồng marimo, e2e và kiểm kê route mỗi lần
+   nâng marimo; layout dạng grid (`layouts/*.grid.json`) chỉ ghi xuống đĩa của pod, không bao giờ về egret —
+   lưu cùng draft hoặc chặn layout grid ở chế độ edit.
 5. **P5 — Chế độ run.** Launcher theo phiên bản, UI publish/versions/khôi phục, trang xem app; launcher
    kernel (warm pool hoặc fork server), mức trần session mỗi pod, giới hạn bộ nhớ và UX lúc mở session
    đặt theo số đo trên kind (§6.3). **Mục tiêu khởi động (D15):** tiêu chí nghiệm thu = người xem mới trên
@@ -568,13 +628,17 @@ fail khi code nó bảo vệ bị cố ý làm hỏng.
   tải lại trang hoặc mở tab thứ hai ở giữa (§5.1).
 - Proxy từ chối các dạng dot-segment, `//` và mã hoá phần trăm của một route bị chặn (40 biến thể raw
   socket của S0), trên HTTP và WebSocket.
-- N session run của một app chạy trong N tiến trình kernel.
+- **Hai người xem khác nhau của cùng một app đã publish rơi vào hai pod khác nhau, không bao giờ
+  chung một pod** (D24) — đã kiểm chứng sống trên kind: [kết quả P5e](plans/2026-10-04-data-apps-p5-live-result.md),
+  cũng tìm ra và sửa hai lỗi thật (cổng container của run pod, và danh sách cổng ingress của
+  NetworkPolicy apps) mà chỉ cluster sống mới lộ ra được.
 - Kiểm thử sống bằng trình duyệt trên kind cho P4 và P5.
 
 ## 11. Hoàn thành khi
 
 - Tác giả xây một app có SQL cell và widget UI trên Trino và trên StarRocks, rồi publish.
-- Hai người xem thấy kết quả theo quyền của chính họ.
+- Hai người xem thấy kết quả theo quyền của chính họ — bao gồm cả run mode, kể từ P5e (2026-10-04):
+  [kết quả sống](plans/2026-10-04-data-apps-p5-live-result.md).
 - Admin mở một app độc hại không ghi được dữ liệu, không đọc được cookie hay response của egret, và không
   hoàn tất được bất kỳ thay đổi trạng thái nào trên egret.
 - Notebook Jupyter đã được gỡ.

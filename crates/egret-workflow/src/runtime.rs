@@ -300,16 +300,23 @@ pub struct RuntimeHandle {
     claim_loop: Option<tokio::task::JoinHandle<()>>,
     log_writer: Option<tokio::task::JoinHandle<()>>,
     pruner: Option<tokio::task::JoinHandle<()>>,
+    /// W9a: the execution-file pruner ([`crate::storage::prune`]).
+    storage_pruner: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl RuntimeHandle {
     /// Wait for the claim loop, then the log writer (which the claim loop's
-    /// end releases, see [`spawn_with_logs`]), then the pruner. Unbounded if a
+    /// end releases, see [`spawn_with_logs`]), then the pruners. Unbounded if a
     /// tick is in flight; the caller bounds it.
     pub async fn join(self) {
-        for h in [self.claim_loop, self.log_writer, self.pruner]
-            .into_iter()
-            .flatten()
+        for h in [
+            self.claim_loop,
+            self.log_writer,
+            self.pruner,
+            self.storage_pruner,
+        ]
+        .into_iter()
+        .flatten()
         {
             let _ = h.await;
         }
@@ -328,6 +335,11 @@ impl RuntimeHandle {
 ///
 /// With `cfg.enabled` false this is [`spawn`]: no writer and no pruner,
 /// because the worker is the only producer of lines (spec §4.3).
+///
+/// W9a: with the worker on and a store installed ([`crate::storage::current`]),
+/// it also starts the execution-file pruner
+/// ([`crate::storage::prune::spawn_storage_pruner`]) with the store's
+/// `retention_days`; `0` starts none. It stops on `cancel`.
 ///
 /// # Shutdown order, and what enforces it
 ///
@@ -360,9 +372,19 @@ pub fn spawn_with_logs(
     );
     let reg: Arc<dyn Registry> = Arc::new(handlers.with_log_sink(Arc::new(sink), cfg.log_limits));
 
+    // W9a (spec §10): the execution-file pruner, on its own task beside the
+    // log pruner, when this process has a store. Its retention is the
+    // store's own (`FileStore::retention_days`, `workflow.storage_retention_days`)
+    // -- the number `Unreadable::Pruned` names -- so the two cannot differ.
+    let storage_pruner = crate::storage::current().and_then(|fs| {
+        let cfg = crate::storage::prune::StoragePruneConfig::new(fs.retention_days);
+        crate::storage::prune::spawn_storage_pruner(pool.clone(), fs, cfg, cancel.clone())
+    });
+
     let mut handle = spawn_inner(pool, reg, cfg, cancel, Some(writer_stop));
     handle.log_writer = Some(writer);
     handle.pruner = pruner;
+    handle.storage_pruner = storage_pruner;
     handle
 }
 
@@ -655,8 +677,10 @@ pub async fn reaper_pass(
 /// **The worker's registry for a deployment (W5a Task 5)**: `egret-bin`'s one
 /// call, so the decision is here where a test can reach it.
 ///
-/// * `container_runner = none`: [`Handlers::with_core_tasks`], **exactly** --
-///   no script handler, no orphan sweep -- and `None` for the publish gate's
+/// * `container_runner = none`: [`Handlers::with_core_tasks`] plus the core
+///   storage tasks that need the pool (`Delete`, `PurgeCurrentExecutionFiles`,
+///   [`crate::worker::handlers::storage::register`], W9a Task 11) -- no
+///   script handler, no orphan sweep -- and `None` for the publish gate's
 ///   default runner.
 /// * `docker` / `kubernetes`: the same, plus the four script types and their
 ///   two aliases over ONE runner built here ([`crate::worker::handlers::script::register`]),
@@ -693,34 +717,59 @@ pub async fn handlers_for(
     // W5b: the plugin host's image (required with a runner) and heap.
     cfg.validate_plugin_host()
         .map_err(egret_core::Error::InvalidInput)?;
-    let mut handlers = Handlers::with_core_tasks();
-    let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) =
-        match cfg.container_runner {
-            egret_config::ContainerRunner::None => return Ok((handlers, None)),
-            egret_config::ContainerRunner::Docker => {
-                let r = Arc::new(DockerRunner::new().with_logs(LogRepo::new(pool.clone())));
-                (RunnerKind::Docker, r.clone(), r)
+    let mut handlers = Handlers::with_core_tasks(crate::storage::current());
+    // W9a Task 11: `Delete` and `PurgeCurrentExecutionFiles` need the pool,
+    // so they are registered here, for every deployment, with or without a
+    // container runner.
+    crate::worker::handlers::storage::register(
+        &mut handlers,
+        pool.clone(),
+        crate::storage::current(),
+    );
+    // W9b Tasks 6 and 7: `UploadFiles`, `DownloadFiles`, `DeleteFiles` and
+    // `PurgeFiles`, which need the pool too.
+    crate::worker::handlers::namespace::register(
+        &mut handlers,
+        pool.clone(),
+        crate::storage::current(),
+    );
+    // W9c Task 5: `Set`, `Get`, `GetKeys`, `Delete`, `Put` and `PurgeKV`,
+    // which need the pool too.
+    crate::worker::handlers::kv::register(&mut handlers, pool.clone(), crate::storage::current());
+    let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) = match cfg
+        .container_runner
+    {
+        egret_config::ContainerRunner::None => return Ok((handlers, None)),
+        egret_config::ContainerRunner::Docker => {
+            let mut r = DockerRunner::new().with_logs(LogRepo::new(pool.clone()));
+            // W9a Task 5: stored inputs stream from the installed store.
+            if let Some(files) = crate::storage::current() {
+                r = r.with_files(files);
             }
-            egret_config::ContainerRunner::Kubernetes => {
-                let pod = pod_config(&cfg.kubernetes);
-                pod.validate()
-                    .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e}")))?;
-                let client = kube::Client::try_default().await.map_err(|e| {
-                    egret_core::Error::Internal(anyhow::anyhow!(
-                        "workflow.container_runner is kubernetes but no cluster client could be \
+            let r = Arc::new(r);
+            (RunnerKind::Docker, r.clone(), r)
+        }
+        egret_config::ContainerRunner::Kubernetes => {
+            let pod = pod_config(&cfg.kubernetes);
+            pod.validate()
+                .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e}")))?;
+            let client = kube::Client::try_default().await.map_err(|e| {
+                egret_core::Error::Internal(anyhow::anyhow!(
+                    "workflow.container_runner is kubernetes but no cluster client could be \
                          built: {e}"
-                    ))
-                })?;
-                let r = Arc::new(crate::worker::k8s::KubernetesRunner::new(
-                    client,
-                    pod,
-                    LogRepo::new(pool.clone()),
-                ));
-                (RunnerKind::Kubernetes, r.clone(), r)
+                ))
+            })?;
+            let mut r =
+                crate::worker::k8s::KubernetesRunner::new(client, pod, LogRepo::new(pool.clone()));
+            if let Some(files) = crate::storage::current() {
+                r = r.with_files(files);
             }
-        };
+            let r = Arc::new(r);
+            (RunnerKind::Kubernetes, r.clone(), r)
+        }
+    };
     let features: Arc<dyn crate::worker::handlers::script::FeatureState> =
-        Arc::new(PgFeatureState::new(pool));
+        Arc::new(PgFeatureState::new(pool.clone()));
     register(
         &mut handlers,
         Arc::new(ScriptRuntime {
@@ -728,6 +777,9 @@ pub async fn handlers_for(
             runner: runner.clone(),
             plugin_configurations: cfg.plugin_configurations.clone(),
             features: features.clone(),
+            files: crate::storage::current(),
+            // W9b Task 5: namespace files are staged on this pool.
+            pool: Some(pool.clone()),
         }),
     );
     crate::worker::handlers::kestra::register(
@@ -739,6 +791,11 @@ pub async fn handlers_for(
             plugin_configurations: cfg.plugin_configurations.clone(),
             host: cfg.plugin_host.clone(),
             secrets,
+            // W9a Task 9: the plugin storage bridge stages from, and collects
+            // into, the installed store.
+            files: crate::storage::current(),
+            // W9b Task 10: namespace-file values are resolved on this pool.
+            pool: Some(pool),
         }),
     );
     Ok((handlers.with_orphan_sweep(sweep), Some(kind)))

@@ -1,4 +1,4 @@
-import { test, expect, type Page, type BrowserContext, type APIRequestContext } from "@playwright/test";
+import { test, expect, type BrowserContext } from "@playwright/test";
 import {
   loginLocalAdmin,
   loginViaOidcAdminSso,
@@ -13,6 +13,7 @@ import {
   engineProfileName,
   createPolicy,
   addWorkspaceMember,
+  runQuery,
   runQueryByDb,
   deleteEngine,
 } from "./helpers";
@@ -20,12 +21,12 @@ import {
 /**
  * Egret machine-IdP / STS token-broker e2e (Task 7) against a RANGER-ON kind deploy.
  *
- * Egret now mints every user's engine JWT itself (a machine-IdP / STS token broker,
- * `POST /api/kernel/engine-token` for the kernel path) instead of exchanging a
- * Keycloak refresh token. The headline proof (test 1): a LOCAL break-glass user
- * (`admin@egret.local`) never authenticates through Keycloak and so holds NO OIDC
- * refresh token — yet can still run a notebook query against a governed StarRocks
- * engine, because the token comes solely from egret's own broker.
+ * Egret now mints every user's engine JWT itself (a machine-IdP / STS token broker)
+ * instead of exchanging a Keycloak refresh token. The headline proof (test 1): a
+ * LOCAL break-glass user (`admin@egret.local`) never authenticates through
+ * Keycloak and so holds NO OIDC refresh token — yet can still run a SQL Lab query
+ * against a governed StarRocks engine, because the token comes solely from
+ * egret's own broker.
  *
  * Opt-in (EGRET_E2E_KIND=1) against a RANGER-ON kind deploy; NOT in `npm test` /
  * GitHub CI. Run via `just e2e-kind-sts`.
@@ -33,63 +34,16 @@ import {
 const ENABLED = process.env.EGRET_E2E_KIND === "1";
 const RUN_ID = process.env.EGRET_E2E_RUN_ID ?? `${Date.now()}`;
 
-/** Set the Nth mounted Monaco editor's value (typing into Monaco is flaky). Mirrors
- *  notebook-write-isolation-kind.spec.ts / notebook-viz-kind.spec.ts. */
-async function setCellSource(page: Page, index: number, code: string) {
-  await page.waitForFunction(
-    (i) => (window as any).monaco?.editor?.getEditors?.().length > i,
-    index,
-    { timeout: 20_000 },
-  );
-  await page.evaluate(
-    ({ i, src }) => (window as any).monaco.editor.getEditors()[i].setValue(src),
-    { i: index, src: code },
-  );
-}
-
-async function newNotebook(page: Page, name: string) {
-  await page.getByRole("link", { name: "Notebooks" }).click();
-  await page.getByRole("button", { name: "+ Notebook" }).click();
-  await page.getByRole("textbox", { name: "Name" }).fill(name);
-  await page.getByRole("button", { name: "Create", exact: true }).click();
-  await page.waitForURL(/\/notebooks\/[0-9a-f-]{36}$/, { timeout: 20_000 });
-}
-
-/**
- * Enable a notebook DB-connection of the given `engineKind` ("trino" | "starrocks")
- * for the workspace — assigning an engine creates its notebook connection DISABLED
- * by default (mirrors the inline logic in notebook-engine-lakehouse.spec.ts /
- * per-user-enforcement-kind.spec.ts). Returns the connection NAME, which is the
- * `engine=` target notebook cells (`trino()`/`starrocks()`) resolve by.
- */
-async function enableNotebookEngine(
-  request: APIRequestContext,
-  h: Record<string, string>,
-  wsSlug: string,
-  engineKind: string,
-): Promise<string> {
-  const settings = await (await request.get(`/api/ws/${wsSlug}/notebook-settings`)).json();
-  const conns: Array<{ id: string; name: string; engine: string }> = settings.engines ?? [];
-  const conn = conns.find((c) => c.engine === engineKind);
-  expect(conn, `a ${engineKind} notebook connection exists after assignment`).toBeTruthy();
-  const put = await request.put(`/api/ws/${wsSlug}/notebook-settings`, {
-    headers: h,
-    data: { engine_ids: [conn!.id] },
-  });
-  expect(put.ok(), `enable notebook engine → ${put.status()} ${await put.text()}`).toBeTruthy();
-  return conn!.name;
-}
-
 test.describe("egret-minted engine tokens (STS broker) on kind", () => {
   test.skip(!ENABLED, "opt-in: set EGRET_E2E_KIND=1 against a ranger-on kind deploy");
-  // Full lifecycle: engine provisioning (minutes) + kernel cold-start + Ranger
-  // policy propagation. Keep the two tests serial — a single kind node runs hot.
+  // Full lifecycle: engine provisioning (minutes) + Ranger policy propagation.
+  // Keep the two tests serial — a single kind node runs hot.
   test.describe.configure({ mode: "serial" });
   test.setTimeout(900_000);
 
   test("local admin queries StarRocks via egret-minted token", async ({ page, context }) => {
     // Break-glass local admin: NO OIDC login, NO Keycloak refresh token in this
-    // session at all. If the notebook query below succeeds, the StarRocks JWT it
+    // session at all. If the SQL Lab query below succeeds, the StarRocks JWT it
     // used could only have come from egret's own token broker.
     await loginLocalAdmin(page);
     const request = page.request; // shares the logged-in session cookie
@@ -103,34 +57,23 @@ test.describe("egret-minted engine tokens (STS broker) on kind", () => {
       engineId = await provisionStarRocksEngineJwt(request, h, RUN_ID, warehouseId);
       await waitForEngineReady(request, engineId);
       await assignEngineToWorkspace(request, h, engineId, ws.id);
+      const eng = `e2e-sr-${RUN_ID}`;
 
-      const engineName = await enableNotebookEngine(request, h, ws.slug, "starrocks");
+      // The query authenticating at all, under a break-glass session with no
+      // refresh token, proves it ran purely off the egret-minted token.
+      // `runQuery`'s own `toPass` retry (300s budget) absorbs the engine's
+      // just-assigned SQL Lab database materializing asynchronously.
+      const table = `egret.sts_sr.probe_${RUN_ID.replace(/[^a-zA-Z0-9_]/g, "_")}`;
+      await runQuery(request, h, ws.slug, eng, "CREATE SCHEMA IF NOT EXISTS egret.sts_sr");
+      await runQuery(request, h, ws.slug, eng, `CREATE TABLE IF NOT EXISTS ${table} (id bigint, item varchar)`);
+      await runQuery(request, h, ws.slug, eng, `INSERT INTO ${table} VALUES (1,'apple'),(2,'banana')`);
 
-      // Create the notebook AFTER enabling the engine so the kernel's runtime
-      // manifest (loaded at kernel start) includes it → starrocks() resolves it.
-      await newNotebook(page, `sts-sr ${RUN_ID}`);
-      await setCellSource(
-        page,
-        0,
-        [
-          "import daft",
-          `df = starrocks("SELECT 1 AS one", engine="${engineName}")`,
-          "display(df)",
-          "d = df.to_pydict()",
-          "print('EGRET_STS_ROWS=' + str(len(d.get('one', []))))",
-          "print('EGRET_STS_VALUE=' + str(d.get('one', [None])[0]))",
-        ].join("\n"),
-      );
-      await page.getByRole("button", { name: "Run all" }).click();
-
-      // First run also cold-starts the per-user kernel pod → generous wait. The
-      // printed markers are the unambiguous proof the query ran; the "1 row"
-      // footer (DataFrameTable.tsx's row-count text) confirms display(df) also
-      // rendered — both happening under a break-glass session with no refresh
-      // token proves the query authenticated purely off the egret-minted token.
-      await expect(page.getByText("EGRET_STS_ROWS=1")).toBeVisible({ timeout: 150_000 });
-      await expect(page.getByText("EGRET_STS_VALUE=1")).toBeVisible();
-      await expect(page.getByText("1 row", { exact: false })).toBeVisible();
+      const out = await runQuery(request, h, ws.slug, eng, `SELECT id, item FROM ${table} ORDER BY id`);
+      const idIdx = out.columns.findIndex((c) => c.name === "id");
+      const itemIdx = out.columns.findIndex((c) => c.name === "item");
+      expect(out.rows.length, "admin query returns both seeded rows via the egret-minted token").toBe(2);
+      expect(out.rows.map((r) => String(r[idIdx]))).toEqual(["1", "2"]);
+      expect(out.rows.map((r) => r[itemIdx])).toEqual(["apple", "banana"]);
     } finally {
       // Delete with the live `request` (not afterAll, which runs after
       // page.request is torn down) to free node memory.
@@ -314,10 +257,9 @@ test.describe("OIDC-off deployment still queries via egret token", () => {
     //
     // Manually verified instead: `just deploy-kind` (OIDC left off) →
     // loginLocalAdmin → provision + assign a StarRocks engine → run test 1's
-    // `starrocks("SELECT 1 AS one", ...)` notebook cell against it. It succeeds
-    // with zero OIDC/Keycloak wiring anywhere in the cluster, because the
-    // kernel's engine JWT comes solely from egret's own `/api/kernel/engine-token`
-    // broker — never from a Keycloak grant of any kind.
+    // SQL Lab query against it. It succeeds with zero OIDC/Keycloak wiring
+    // anywhere in the cluster, because the engine JWT comes solely from egret's
+    // own machine-IdP token broker — never from a Keycloak grant of any kind.
     test.skip(true, "needs a separate OIDC-disabled kind deploy variant; see comment above");
   });
 });

@@ -15,7 +15,7 @@ egret runs on the host at `localhost:8080`; containers reach it via
 ## Provision (once)
 
 Control Plane → Warehouses:
-1. **Add warehouse** (`lakehouse`) over a storage connection (S3/MinIO). This
+1. **Add warehouse** (`lakehouse`) over a storage connection (S3/RustFS). This
    provisions the lakekeeper warehouse.
 2. Open it → **Roles & grants** → add a role (`engine`) → add a `write` grant
    (`write`/`manage` permit writes; any grant permits reads).
@@ -35,7 +35,7 @@ iceberg.rest-catalog.oauth2.server-uri=http://host.docker.internal:8080/oauth/to
 iceberg.rest-catalog.oauth2.scope=catalog
 # Direct S3 access (the embedded mount does not expose remote request-signing).
 fs.native-s3.enabled=true
-s3.endpoint=http://minio:9000
+s3.endpoint=http://rustfs:9000
 s3.region=us-east-1
 s3.path-style-access=true
 s3.aws-access-key=egret
@@ -62,7 +62,7 @@ cat = RestCatalog("egret",
 cat.create_namespace_if_not_exists("demo")
 t = cat.create_table_if_not_exists("demo.t", schema=pa.schema([("n", pa.int64())]))
 t.append(pa.table({"n": [1, 2, 3]}))
-print(t.scan().to_arrow().num_rows)   # 3 — data lands in s3://<bucket>/... on MinIO
+print(t.scan().to_arrow().num_rows)   # 3 — data lands in s3://<bucket>/... on RustFS
 ```
 
 ## Notes
@@ -71,7 +71,7 @@ print(t.scan().to_arrow().num_rows)   # 3 — data lands in s3://<bucket>/... on
   (remote-signing stays off — the embedded mount exposes no signer endpoint). A
   client that sends `X-Iceberg-Access-Delegation: vended-credentials` gets
   **short-lived S3 credentials downscoped to just the table it loaded** (lakekeeper
-  calls AssumeRole on the S3 endpoint; MinIO needs no role-arn). Enable it with
+  calls AssumeRole on the S3 endpoint; RustFS needs no role-arn). Enable it with
   `iceberg.rest-catalog.vended-credentials-enabled=true` (Trino),
   `"iceberg.catalog.vended-credentials-enabled" = "true"` (StarRocks 4.0+), or
   `"header.X-Iceberg-Access-Delegation": "vended-credentials"` (pyiceberg) — then the

@@ -1336,7 +1336,9 @@ async fn a_cron_runs_to_success_with_nothing_driving_it(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let flow = seed_cron_flow(&pool, "e2e").await;
     common::make_due(&Db { pool: pool.clone() }, flow, "s", 1).await;
-    let handlers = Arc::new(egret_workflow::worker::Handlers::with_core_tasks());
+    let handlers = Arc::new(egret_workflow::worker::Handlers::with_core_tasks(
+        egret_workflow::storage::current(),
+    ));
     let cfg = |scheduler_enabled| RuntimeConfig {
         scheduler_enabled,
         trigger_interval: Duration::from_millis(50),
@@ -1623,7 +1625,9 @@ async fn a_flow_trigger_runs_to_success_with_nothing_driving_it(pool: sqlx::PgPo
     let producer_src = w13_source("producer");
     let producer = common::seed_flow(&db, ws, user, &producer_src, "draft").await;
     let listener = common::seed_flow(&db, ws, user, &w13_listener("listener"), "draft").await;
-    let handlers = Arc::new(egret_workflow::worker::Handlers::with_core_tasks());
+    let handlers = Arc::new(egret_workflow::worker::Handlers::with_core_tasks(
+        egret_workflow::storage::current(),
+    ));
     let cfg = |scheduler_enabled| RuntimeConfig {
         scheduler_enabled,
         trigger_interval: Duration::from_millis(50),
@@ -2135,9 +2139,11 @@ fn unconnected_pool() -> sqlx::PgPool {
 }
 
 /// **With `container_runner = none` (the default) the production registry is
-/// byte-for-byte what it was before W5a** -- `Handlers::with_core_tasks()`,
-/// no orphan sweep, no default runner for publish -- and with `docker` it is
-/// that plus exactly the four script types and their two aliases.
+/// what it was before W5a** -- `Handlers::with_core_tasks(egret_workflow::storage::current())`, no orphan
+/// sweep, no default runner for publish -- plus, since W9a Task 11, the two
+/// core storage tasks that need the pool (`handlers::storage::register`), on
+/// every deployment; and with `docker` it is that plus exactly the four
+/// script types and their two aliases.
 #[tokio::test]
 async fn with_container_runner_none_the_registry_is_unchanged() {
     use egret_workflow::scripts::RunnerKind;
@@ -2153,7 +2159,29 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         egret_workflow::runtime::handlers_for(&cfg, unconnected_pool(), no_secrets())
             .await
             .expect("`none` needs nothing");
-    assert_eq!(reg.type_ids(), Handlers::with_core_tasks().type_ids());
+    let mut want: Vec<String> = Handlers::with_core_tasks(egret_workflow::storage::current())
+        .type_ids()
+        .into_iter()
+        .map(String::from)
+        .collect();
+    want.extend([
+        egret_workflow::worker::handlers::storage::DELETE.to_string(),
+        egret_workflow::worker::handlers::storage::PURGE_CURRENT_EXECUTION_FILES.to_string(),
+        // W9b Task 6: the namespace tasks, registered beside them.
+        egret_workflow::worker::handlers::namespace::UPLOAD_FILES.to_string(),
+        egret_workflow::worker::handlers::namespace::DOWNLOAD_FILES.to_string(),
+        // W9b Task 7.
+        egret_workflow::worker::handlers::namespace::DELETE_FILES.to_string(),
+        egret_workflow::worker::handlers::namespace::PURGE_FILES.to_string(),
+    ]);
+    // W9c Task 5: the six KV tasks, registered beside them.
+    want.extend(
+        egret_workflow::worker::handlers::kv::DECLARED
+            .iter()
+            .map(|c| c.0.to_string()),
+    );
+    want.sort_unstable();
+    assert_eq!(reg.type_ids(), want);
     assert_eq!(default_runner, None, "publish has no runner to default to");
     assert!(reg.orphan_sweep().is_none(), "nothing to sweep");
 
@@ -2173,11 +2201,17 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         egret_workflow::runtime::handlers_for(&cfg, unconnected_pool(), no_secrets())
             .await
             .expect("the Docker runner is built without a daemon");
-    let core = Handlers::with_core_tasks().type_ids().len();
+    let core = Handlers::with_core_tasks(egret_workflow::storage::current())
+        .type_ids()
+        .len();
     let added: Vec<&str> = reg
         .type_ids()
         .into_iter()
-        .filter(|id| Handlers::with_core_tasks().get(id).is_none())
+        .filter(|id| {
+            Handlers::with_core_tasks(egret_workflow::storage::current())
+                .get(id)
+                .is_none()
+        })
         .filter(|id| !id.starts_with(egret_workflow::plugins::PREFIX))
         .collect();
     // W5b: plus one `kestra.<FQCN>` per catalog class, over the same runner.
@@ -2190,19 +2224,33 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         plugins,
         egret_workflow::plugins::prefixed_types().collect::<Vec<_>>()
     );
-    assert_eq!(plugins.len(), 5);
+    // W9a Task 9: nine, with Batch ×2, CopyIn and CopyOut re-admitted.
+    assert_eq!(plugins.len(), 9);
     assert_eq!(
         added,
         vec![
             "egret.container",
             "egret.script.python",
+            // W9c Task 5.
+            "io.kestra.plugin.core.kv.Delete",
+            "io.kestra.plugin.core.kv.Get",
+            "io.kestra.plugin.core.kv.GetKeys",
+            "io.kestra.plugin.core.kv.PurgeKV",
+            "io.kestra.plugin.core.kv.Put",
+            "io.kestra.plugin.core.kv.Set",
+            "io.kestra.plugin.core.namespace.DeleteFiles",
+            "io.kestra.plugin.core.namespace.DownloadFiles",
+            "io.kestra.plugin.core.namespace.PurgeFiles",
+            "io.kestra.plugin.core.namespace.UploadFiles",
+            "io.kestra.plugin.core.storage.Delete",
+            "io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles",
             "io.kestra.plugin.scripts.python.Commands",
             "io.kestra.plugin.scripts.python.Script",
             "io.kestra.plugin.scripts.shell.Commands",
             "io.kestra.plugin.scripts.shell.Script",
         ]
     );
-    assert_eq!(reg.type_ids().len(), core + 6 + 5);
+    assert_eq!(reg.type_ids().len(), core + 2 + 4 + 6 + 6 + 9);
     assert_eq!(default_runner, Some(RunnerKind::Docker));
     assert!(
         reg.orphan_sweep().is_some(),
@@ -2269,7 +2317,8 @@ impl egret_workflow::worker::commands::OrphanSweep for CountingSweep {
 async fn the_reaper_tick_sweeps_the_configured_runners_orphans(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let sweep = Arc::new(CountingSweep::default());
-    let reg = egret_workflow::worker::Handlers::with_core_tasks().with_orphan_sweep(sweep.clone());
+    let reg = egret_workflow::worker::Handlers::with_core_tasks(egret_workflow::storage::current())
+        .with_orphan_sweep(sweep.clone());
     let cancel = CancellationToken::new();
     let cfg = RuntimeConfig {
         tick_interval: Duration::from_secs(3600),

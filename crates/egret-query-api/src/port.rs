@@ -3,7 +3,7 @@
 //!
 //! `egret-dataapi` holds an `Arc<dyn QueryExecPort>` and never depends on
 //! `egret-query`, so the Data API can move to its own binary by swapping the
-//! implementation. This mirrors `NotebookDocsPort` in `egret-analytics-api`.
+//! implementation. This mirrors `DataApiEndpointPort` in `egret-dataapi-api`.
 //!
 //! Deliberately minimal, and it grows only alongside its callers: P3 carried
 //! `describe_as` alone because validate-before-publish was the only consumer,

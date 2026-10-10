@@ -296,8 +296,25 @@ fn the_drain_deadline_outlasts_a_full_length_request() {
 /// beside the line the assertion is about — which means a comment could spell
 /// the very string being looked for, and a test a comment can satisfy is the
 /// shape this repo has shipped a green test over sixteen times.
+///
+/// Strips BOTH comment styles this chart uses: `#` line comments, and the
+/// `{{- /* ... */ -}}` (or `{{/* ... */}}`) Helm block comments several
+/// templates open with as a module doc — a single pass over `#` lines alone
+/// would leave that block's prose in place, able to satisfy a `.contains()`
+/// check the same way a `#` comment could.
 fn without_comments(yaml: &str) -> String {
-    yaml.lines()
+    let mut without_blocks = yaml.to_string();
+    while let Some(start) = without_blocks.find("/*") {
+        match without_blocks[start..].find("*/") {
+            Some(end_rel) => {
+                let end = start + end_rel + 2;
+                without_blocks.replace_range(start..end, "");
+            }
+            None => break,
+        }
+    }
+    without_blocks
+        .lines()
         .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n")
@@ -315,7 +332,7 @@ fn without_comments(yaml: &str) -> String {
 /// the Data API's rate-limit buckets and response cache split across them for
 /// the length of the rollout, and a published limit transiently doubles on a
 /// `helm upgrade` that touched nothing to do with limits. For postgres and
-/// minio it is older and blunter: the surged pod cannot mount a ReadWriteOnce
+/// rustfs it is older and blunter: the surged pod cannot mount a ReadWriteOnce
 /// PVC, so the upgrade wedges instead of rolling.
 ///
 /// Only the stateful three. The frontend and keycloak Deployments are
@@ -338,8 +355,8 @@ fn every_single_instance_store_is_recreated_rather_than_rolled() {
              directory",
         ),
         (
-            "deps-minio.yaml",
-            "a surged minio cannot mount the ReadWriteOnce minio-data PVC",
+            "deps-rustfs.yaml",
+            "a surged rustfs cannot mount the ReadWriteOnce rustfs-data PVC",
         ),
     ] {
         let yaml = without_comments(&read(&format!("deploy/helm/egret/templates/{file}")));
@@ -358,6 +375,174 @@ fn every_single_instance_store_is_recreated_rather_than_rolled() {
         assert!(
             after.starts_with("\n    type: Recreate"),
             "{file} must declare `strategy: {{ type: Recreate }}`: {what}"
+        );
+    }
+}
+
+// ── the apps host ───────────────────────────────────────────────────────────
+
+/// The apps host has its own Ingress object because the `egret` one pins a 60 s read timeout (see
+/// that file for why) which would cut every idle marimo WebSocket at a minute. This pins the
+/// relation: the timeouts here must out-last the apps proxy's idle token window's shortest sensible
+/// wait, buffering must be off for server-sent events, and the backend must be the APPS listener
+/// (8081), never the API port. The apps listener's port is in the backend Deployment and the
+/// Service; all three have to say 8081 or the host serves nothing.
+#[test]
+fn the_apps_ingress_keeps_websockets_alive_and_reaches_the_apps_listener() {
+    let ingress = read("deploy/helm/egret/templates/ingress-apps.yaml");
+    // an annotation value must be a quoted string, which `scalar_int` does not unquote
+    let read_timeout: u64 = ingress
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("nginx.ingress.kubernetes.io/proxy-read-timeout:")
+        })
+        .expect("no proxy-read-timeout annotation")
+        .trim()
+        .trim_matches('"')
+        .parse()
+        .expect("proxy-read-timeout is a number of seconds");
+    assert!(
+        read_timeout >= 3600,
+        "an idle marimo WebSocket would be cut at {read_timeout}s"
+    );
+    assert!(
+        ingress.contains("proxy-buffering: \"off\""),
+        "SSE needs buffering off"
+    );
+    assert!(
+        ingress.contains("port: { number: 8081 }"),
+        "the apps host must reach the apps listener, not the API port"
+    );
+    assert!(
+        !ingress.contains("number: 8080"),
+        "the API port must not be reachable through the apps host"
+    );
+    // the other two places that must agree on the port
+    assert!(
+        deployment().contains("containerPort: 8081"),
+        "the Deployment must expose 8081"
+    );
+    assert!(
+        read("deploy/helm/egret/templates/backend-service.yaml").contains("targetPort: 8081"),
+        "the Service must route 8081"
+    );
+    // and the default config of the listener is the same number
+    assert!(
+        egret_config::AppsConfig::default()
+            .listen
+            .ends_with(":8081"),
+        "the chart and the config default disagree on the apps port"
+    );
+}
+
+/// TLS ends at the ingress, so the backend sees plain http. If it were not told its cookies are
+/// `Secure`, the `__Host-` names would not be issued and the cookie-tossing defence would be off
+/// exactly where the apps origin exists.
+#[test]
+fn the_backend_is_told_its_cookies_are_secure_when_tls_is_on() {
+    let d = deployment();
+    let at = d
+        .find("EGRET_SESSION__SECURE")
+        .expect("the chart never sets EGRET_SESSION__SECURE");
+    let before = &d[..at];
+    let guard = before.rfind("{{- if").expect("an `if` guards it");
+    assert!(
+        before[guard..].contains(".Values.ingress.tls.enabled"),
+        "EGRET_SESSION__SECURE must be conditional on ingress.tls.enabled"
+    );
+}
+
+/// Run pods (D24) get their own idle/cap/kernel-mode env, next to the edit settings, only when
+/// `apps.pod.launcher` is kubernetes — the same guard the edit settings already live under.
+#[test]
+fn run_pod_settings_reach_the_backend_env_under_the_kubernetes_launcher_guard() {
+    let d = deployment();
+    for name in [
+        "EGRET_APPS__POD__RUN_IDLE_SECS",
+        "EGRET_APPS__POD__RUN_SESSION_CAP",
+        "EGRET_APPS__POD__RUN_KERNEL_MODE",
+    ] {
+        let at = d
+            .find(name)
+            .unwrap_or_else(|| panic!("the chart never sets {name}"));
+        let before = &d[..at];
+        let guard = before.rfind("{{- if").expect("an `if` guards it");
+        assert!(
+            before[guard..].contains(r#".Values.apps.pod.launcher "kubernetes""#),
+            "{name} must be conditional on apps.pod.launcher == kubernetes"
+        );
+    }
+}
+
+/// The test that would have caught a half-finished removal: Part P6d deleted
+/// `egret-kernel`'s dedicated Helm files (`namespace-kernels.yaml`,
+/// `rbac-kernels.yaml`, `networkpolicy-kernels.yaml`) and its conditional
+/// blocks inside `backend-deployment.yaml`/`ingress.yaml`. Scans every
+/// template so a reintroduced `kernel.launcher` or `EGRET_KERNEL__*` env var
+/// fails loudly here instead of reappearing unnoticed one file at a time.
+///
+/// Comments are stripped first (`without_comments`) because two deployments
+/// legitimately name the OS kernel's OOM killer in prose
+/// (`renderer-deployment.yaml`, `backend-deployment.yaml`) — real kernel
+/// debt would be functional template text (an env var, an image name, an
+/// `if`), never prose.
+///
+/// `kernelmode`/`kernel_mode` are also stripped before the check: Data Apps'
+/// OWN, unrelated pod execution-mode setting
+/// (`apps.pod.run.kernelMode` / `EGRET_APPS__POD__RUN_KERNEL_MODE`,
+/// `backend-deployment.yaml`) happens to contain "kernel" as a substring. A
+/// real reintroduced kernel reference is always `kernel` as its own path
+/// segment or word (`.kernel.`, `KERNEL__`, `-kernels.`), never glued
+/// directly to "mode" the way this one is — so stripping exactly that known
+/// collision, rather than loosening the check generally, keeps the test
+/// narrow instead of blind to a real one bounded the same way.
+#[test]
+fn no_template_mentions_the_deleted_notebook_kernel() {
+    let dir = format!(
+        "{}/../../deploy/helm/egret/templates",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut offenders = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("reading {dir}: {e}")) {
+        let path = entry
+            .unwrap_or_else(|e| panic!("reading entry in {dir}: {e}"))
+            .path();
+        let ext = path.extension().and_then(|e| e.to_str());
+        if !matches!(ext, Some("yaml") | Some("tpl")) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let scrubbed = without_comments(&text)
+            .to_lowercase()
+            .replace("kernelmode", "")
+            .replace("kernel_mode", "");
+        if scrubbed.contains("kernel") {
+            offenders.push(path.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these templates still mention the deleted notebook kernel outside a \
+         comment: {offenders:?}"
+    );
+}
+
+/// P5e found live: the apps NetworkPolicy's ingress rule allowed port 2718 (edit) only, so a run
+/// pod (port 2719) got a readiness probe PASS (kubelet-sourced, not policy-gated) but every real
+/// pod-to-pod request from the proxy timed out silently. Both ports must be in the one ingress
+/// rule that names the proxy as the allowed source.
+#[test]
+fn the_apps_network_policy_opens_both_the_edit_and_the_run_port() {
+    let np = read("deploy/helm/egret/templates/networkpolicy-apps.yaml");
+    let ingress_at = np.find("ingress:").expect("an ingress section");
+    let egress_at = np.find("egress:").expect("an egress section");
+    let ingress = &np[ingress_at..egress_at];
+    for port in ["2718", "2719"] {
+        assert!(
+            ingress.contains(&format!("port: {port}")),
+            "the ingress rule must open port {port}; got:\n{ingress}"
         );
     }
 }

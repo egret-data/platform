@@ -82,6 +82,17 @@ pub struct Input {
     /// distinction changes nothing this crate reads and is not modelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_type: Option<InputType>,
+    /// `FileInput.allowedFileExtensions` (`[".csv", ".txt"]`, each with its
+    /// dot) -- a `FILE` input's file must end in one of them, compared
+    /// lower-cased on both sides. Kept as written; the check is
+    /// [`crate::storage::inputs::extension_allowed`].
+    ///
+    /// **egret enforces it and the artifact does not** (W9a spec §2, §7.1;
+    /// `w9a-storage.json` `file_input.allowed_file_extensions`, basis
+    /// `chosen`): Kestra 2.x accepted `bad.csv` for `[".txt"]`. Flat on
+    /// `Input` for [`Self::item_type`]'s reason; `None` on every other type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_file_extensions: Option<Vec<String>>,
 }
 
 const fn default_true() -> bool {
@@ -181,5 +192,28 @@ prefill: world
         let json = serde_json::to_value(&i).unwrap();
         assert_eq!(json["defaults"], "hello");
         assert_eq!(json["prefill"], "world");
+    }
+
+    /// W9a Task 7: a FILE input's `allowedFileExtensions` parses in Kestra's
+    /// spelling and survives re-serialisation as written.
+    #[test]
+    fn allowed_file_extensions_round_trips_in_kestra_spelling() {
+        let yaml = "id: f\ntype: FILE\nallowedFileExtensions: [\".txt\", \".CSV\"]\n";
+        let i: Input = serde_norway::from_str(yaml).unwrap();
+        assert_eq!(
+            i.allowed_file_extensions.as_deref(),
+            Some(&[".txt".to_string(), ".CSV".to_string()][..])
+        );
+        let json = serde_json::to_value(&i).unwrap();
+        assert_eq!(
+            json["allowedFileExtensions"],
+            serde_json::json!([".txt", ".CSV"])
+        );
+        let none: Input = serde_norway::from_str("id: f\ntype: FILE\n").unwrap();
+        assert_eq!(none.allowed_file_extensions, None);
+        assert!(serde_json::to_value(&none)
+            .unwrap()
+            .get("allowedFileExtensions")
+            .is_none());
     }
 }

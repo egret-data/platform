@@ -1,0 +1,78 @@
+{{- if .Values.deps.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustfs
+  labels:
+    app: rustfs
+spec:
+  replicas: 1
+  # As for postgres: a rolling update surges a second pod that cannot mount the
+  # ReadWriteOnce `rustfs-data` PVC, so the upgrade wedges rather than rolls.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: rustfs
+  template:
+    metadata:
+      labels:
+        app: rustfs
+    spec:
+      # The image runs as uid 10001; without this the PVC is root-owned and unwritable.
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: rustfs
+          image: {{ .Values.deps.rustfs.image }}
+          env:
+            - name: RUSTFS_ACCESS_KEY
+              value: "{{ .Values.deps.rustfs.rootUser }}"
+            - name: RUSTFS_SECRET_KEY
+              value: "{{ .Values.deps.rustfs.rootPassword }}"
+          ports:
+            - containerPort: 9000
+            - containerPort: 9001
+          volumeMounts:
+            - name: rustfs-data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: rustfs-data
+          persistentVolumeClaim:
+            claimName: rustfs-data
+---
+# Not the old `minio-data` claim: RustFS cannot read MinIO's on-disk format.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rustfs-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs
+  labels:
+    app: rustfs
+spec:
+  selector:
+    app: rustfs
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
+{{- end }}

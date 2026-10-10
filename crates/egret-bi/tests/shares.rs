@@ -377,11 +377,12 @@ async fn object_share_grant_read_revoke() {
     );
 }
 
-/// B2-2 Task 1: notebook sharing is gated by `notebook:write` (Editor), not a
-/// non-existent `notebook:manage`. A `ws_editor` (holds notebook:write) can grant
-/// on a notebook; a `ws_viewer` (holds notebook:read but NOT notebook:write) cannot.
+/// Data Apps P2: an `app` is a share kind gated by `app:manage`, which only
+/// `ws_admin` holds (migration 0164). The admin grants an outside user
+/// `ws_viewer` on an app, lists it, and revokes it; a `ws_editor` (holds
+/// `app:write` but NOT `app:manage`) is refused.
 #[tokio::test]
-async fn notebook_share_requires_editor() {
+async fn app_share_requires_app_manage() {
     let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
@@ -390,10 +391,10 @@ async fn notebook_share_requires_editor() {
     db.migrate().await.expect("migrate");
 
     let owner = seed_user(&db).await;
-    let slug = format!("nbshare-{}", Uuid::new_v4().simple());
+    let slug = format!("appshare-{}", Uuid::new_v4().simple());
     let ws: Uuid = sqlx::query_scalar(
         "INSERT INTO workspaces (slug, name, created_by, status) \
-         VALUES ($1, 'NB Share', $2, 'active') RETURNING id",
+         VALUES ($1, 'App Share', $2, 'active') RETURNING id",
     )
     .bind(&slug)
     .bind(owner)
@@ -401,21 +402,21 @@ async fn notebook_share_requires_editor() {
     .await
     .expect("insert workspace");
 
+    let admin = seed_user(&db).await;
+    add_member(&db, ws, admin, "ws_admin").await; // holds app:manage
     let editor = seed_user(&db).await;
-    add_member(&db, ws, editor, "ws_editor").await; // holds notebook:write
-    let viewer = seed_user(&db).await;
-    add_member(&db, ws, viewer, "ws_viewer").await; // notebook:read only
+    add_member(&db, ws, editor, "ws_editor").await; // app:write, NOT app:manage
     let outsider = seed_user(&db).await;
 
-    // A notebook in the workspace.
-    let nb: Uuid = sqlx::query_scalar(
-        "INSERT INTO analytics.notebooks (workspace_id, owner_user_id, name) VALUES ($1, $2, 'NB') RETURNING id",
+    let app_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO analytics.apps (workspace_id, name, owner_user_id) \
+         VALUES ($1, 'Sales app', $2) RETURNING id",
     )
     .bind(ws)
     .bind(owner)
     .fetch_one(&db.pool)
     .await
-    .expect("insert notebook");
+    .expect("insert app");
 
     let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
         egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
@@ -424,53 +425,80 @@ async fn notebook_share_requires_editor() {
     );
     let st = build_state(db.clone(), pdp);
     let sessions = st.sessions.clone();
+    let admin_tok = session_for(&db, &sessions, admin).await;
     let editor_tok = session_for(&db, &sessions, editor).await;
-    let viewer_tok = session_for(&db, &sessions, viewer).await;
 
-    let app = shares_router().with_state(st);
+    let router = shares_router().with_state(st);
+    let grants = format!("/ws/{slug}/objects/app/{app_id}/grants");
+    let put = |tok: &str| {
+        Request::builder()
+            .method("PUT")
+            .uri(&grants)
+            .header("Cookie", format!("egret_session={tok}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"principal_type":"user","principal_id":"{outsider}","role":"ws_viewer"}}"#
+            )))
+            .unwrap()
+    };
 
-    // Editor (notebook:write) grants ws_viewer on the notebook → 2xx.
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/ws/{slug}/objects/notebook/{nb}/grants"))
-                .header("Cookie", format!("egret_session={editor_tok}"))
-                .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"principal_type":"user","principal_id":"{outsider}","role":"ws_viewer"}}"#
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let s = resp.status();
-    assert!(
-        s.is_success(),
-        "editor (notebook:write) must grant on a notebook; got {s}: {}",
-        body_string(resp).await
-    );
-
-    // Viewer (notebook:read, NOT notebook:write) cannot grant → 403.
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/ws/{slug}/objects/notebook/{nb}/grants"))
-                .header("Cookie", format!("egret_session={viewer_tok}"))
-                .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"principal_type":"user","principal_id":"{outsider}","role":"ws_viewer"}}"#
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    // A ws_editor (no app:manage) cannot share the app.
+    let resp = router.clone().oneshot(put(&editor_tok)).await.unwrap();
     assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
-        "a ws_viewer (no notebook:write) must NOT be able to share a notebook"
+        "a ws_editor holds app:write but not app:manage and must NOT share an app"
     );
+
+    // The ws_admin can.
+    let resp = router.clone().oneshot(put(&admin_tok)).await.unwrap();
+    let s = resp.status();
+    assert!(
+        s.is_success(),
+        "ws_admin (app:manage) must grant on an app; got {s}: {}",
+        body_string(resp).await
+    );
+
+    // ... and list it.
+    let resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&grants)
+                .header("Cookie", format!("egret_session={admin_tok}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let listed: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    let listed = listed.as_array().expect("grant list");
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0]["principal_id"], outsider.to_string());
+    assert_eq!(listed[0]["role"], "ws_viewer");
+    let grant_id = listed[0]["id"].as_str().unwrap().to_string();
+
+    // ... and revoke it.
+    let resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("{grants}/{grant_id}"))
+                .header("Cookie", format!("egret_session={admin_tok}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "ws_admin must revoke the grant");
+    let left: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access_grants WHERE scope_type = 'object' AND scope_id = $1",
+    )
+    .bind(app_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 0, "the revoke removed the app grant");
 }

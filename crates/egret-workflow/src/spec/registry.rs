@@ -68,10 +68,12 @@ pub struct TaskTypeSpec {
 /// [`add_publishable`](crate::worker::Handlers::add_publishable): the same
 /// mechanism facing this way would refuse to start any deployment that declines
 /// to wire `egret.sql`, `core.http` or the container tasks — which is every
-/// deployment, since `with_core_tasks` is four handlers and this table is
-/// fifteen rows (5 `egret.*`, 2 short `core.*`, 8 Kestra FQCNs -- W5a replaced
+/// deployment, since `with_core_tasks` is eleven handlers and this table is
+/// twenty-four rows (5 `egret.*`, 2 short `core.*`, 17 Kestra FQCNs -- W5a replaced
 /// the `egret.container`/`egret.script.python` rows with four script-task
-/// FQCNs that carry them as aliases). The
+/// FQCNs that carry them as aliases, W9a Task 11 added the four core
+/// storage tasks, two of them in `with_core_tasks`, and Task 12 the five
+/// whole-file ones, all in it). The
 /// asymmetry is deliberate, `main.rs` documents the shipping set, and what a
 /// flow using an unwired type gets is the loop above rather than a refusal.
 pub const TASK_TYPES: &[TaskTypeSpec] = &[
@@ -83,14 +85,6 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
             kind: RefKind::Database,
         }],
     },
-    TaskTypeSpec {
-        r#type: "egret.python",
-        aliases: &[],
-        references: &[RefField {
-            field: "notebook",
-            kind: RefKind::Notebook,
-        }],
-    },
     // ── W5a: Kestra's four script tasks (`crate::scripts`) ─────────────────
     //
     // FQCN canonical (rule 4). W4's `egret.container` and `egret.script.python`
@@ -100,10 +94,13 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
     // spellings. No `RefField`: a script and an image name are not egret
     // objects.
     //
-    // W4 Task 5 fix round 1's reason for `egret.script.python` still stands:
-    // `egret.python` one row above is the NOTEBOOK-kernel task, with a
-    // required `notebook` reference, so the container-backed `script:` task
-    // took a different name rather than bending that one.
+    // HISTORICAL (W4 Task 5 fix round 1): `egret.script.python` took a
+    // different name from the container-backed `script:` task rather than
+    // colliding with a row named `egret.python` one line above this comment
+    // used to be -- that row was the notebook-kernel task (a required
+    // `notebook` `RefField`), removed in Data Apps P6 along with the rest of
+    // the notebook. The name `egret.script.python` stays as it is; renaming
+    // it back would be churn for a collision that can no longer happen.
     TaskTypeSpec {
         r#type: crate::scripts::SHELL_COMMANDS,
         aliases: &[crate::scripts::ALIAS_CONTAINER],
@@ -158,7 +155,7 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         aliases: &[],
         references: &[],
     },
-    // ── The four tasks `worker::Handlers::with_core_tasks()` implements ────
+    // ── The four tasks `worker::Handlers::with_core_tasks` implements ────
     //
     // **FQCN canonical, short form as an alias, per programme spec section 8
     // rule 4.** Until W10 Task 6 fix round 1 this table held `core.log` and
@@ -193,6 +190,118 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
     },
     TaskTypeSpec {
         r#type: "io.kestra.plugin.core.flow.Sleep",
+        aliases: &[],
+        references: &[],
+    },
+    // ── W9a Task 11: the core storage tasks (`worker::handlers::storage`) ──
+    //
+    // FQCN only, no short alias, for the reason given above for the three
+    // that have none. `Write` and `Size` are in `with_core_tasks`; `Delete`
+    // and `PurgeCurrentExecutionFiles` need a pool and are registered by
+    // `handlers::storage::register`, which `runtime::handlers_for` calls.
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::WRITE,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::SIZE,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::DELETE,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::PURGE_CURRENT_EXECUTION_FILES,
+        aliases: &[],
+        references: &[],
+    },
+    // ── W9a Task 12: the whole-file core storage tasks, all five in
+    // `with_core_tasks` (they need the store and no pool). ──
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::CONCAT,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::SPLIT,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::REVERSE,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::DEDUPLICATE_ITEMS,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::storage::FILTER_ITEMS,
+        aliases: &[],
+        references: &[],
+    },
+    // ── W9b Task 6: the core namespace-file tasks (`worker::handlers::namespace`),
+    // FQCN only, as the storage rows above. They need the pool and are
+    // registered by `handlers::namespace::register`, which
+    // `runtime::handlers_for` calls. ──
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::namespace::UPLOAD_FILES,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::namespace::DOWNLOAD_FILES,
+        aliases: &[],
+        references: &[],
+    },
+    // ── W9b Task 7: `DeleteFiles` and `PurgeFiles`, registered by the same
+    // `handlers::namespace::register`. ──
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::namespace::DELETE_FILES,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::namespace::PURGE_FILES,
+        aliases: &[],
+        references: &[],
+    },
+    // ── W9c Task 5: the core KV tasks (`worker::handlers::kv`), FQCN only,
+    // as the namespace rows above. They need the pool and are registered by
+    // `handlers::kv::register`, which `runtime::handlers_for` calls. ──
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::kv::SET,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::kv::GET,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::kv::GET_KEYS,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::kv::DELETE,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::kv::PUT,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::kv::PURGE_KV,
         aliases: &[],
         references: &[],
     },

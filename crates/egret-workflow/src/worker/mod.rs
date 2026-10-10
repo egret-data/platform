@@ -89,11 +89,18 @@ mod replay;
 mod spawn;
 mod subflow;
 mod timeout;
+pub(crate) mod txn;
 
+pub(crate) use claim::start_execution_in_with;
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
+/// Test-only (`test-util`; W9c Task 9, final review m3): an outcome or a
+/// start in the CALLER's transaction, answering `Err` when a render needed a
+/// read. Production goes through `worker::txn`.
+#[cfg(any(test, feature = "test-util"))]
+pub use claim::{apply_outcome, start_execution_in};
 pub use claim::{
-    apply_outcome, claim, due_retries, resume, start_execution, start_execution_in,
-    start_execution_with_trigger, tick, tick_with, wake, Claimed, NewExecution, WorkerTiming,
+    claim, commit_outcome, due_retries, resume, start_execution, start_execution_with_trigger,
+    tick, tick_with, wake, Claimed, NewExecution, WorkerTiming,
 };
 pub use reaper::reap;
 pub use registry::Handlers;
@@ -235,6 +242,22 @@ pub struct TaskInput {
     /// scheduled run acts as, so it is left to own that column rather than
     /// guessed at here.
     pub principal: Option<egret_core::UserId>,
+    /// **The instant this claim of the run was taken** -- the value the
+    /// claim's own `UPDATE … SET claimed_at = now()` wrote
+    /// ([`Claimed::claimed_at`] as claimed, before any renewal moved it).
+    ///
+    /// **A bound, never a name and never a fence.** It is NOT the lease
+    /// token `apply_outcome` fences on (a renewal moves that, and the handler
+    /// never sees the moved value), and nothing may name a resource after it
+    /// ([`TaskHandler::cancel`]'s doc: a re-claim must compute the SAME name).
+    /// Its one use is W9a's final review I1: `core.storage.Delete` and
+    /// `PurgeCurrentExecutionFiles` delete index rows outside the fenced
+    /// commit, so they bound their `DELETE` to rows `created_at <=` this
+    /// instant. A worker frozen past its lease and woken after the run was
+    /// re-claimed and later tasks committed files therefore cannot delete
+    /// those later files: their rows were written (or re-written -- the
+    /// upsert bumps `created_at`) by transactions that started after it.
+    pub claimed_at: chrono::DateTime<chrono::Utc>,
     /// **This attempt's log** (W11): every line a handler or its runner
     /// writes goes through it with `task.log.line(level, msg).await`.
     ///
@@ -297,6 +320,15 @@ pub struct Outcome {
     /// state and not its message could not tell a budget that fired from a
     /// handler that failed for an unrelated reason.
     pub message: Option<String>,
+    /// Files this run wrote, indexed by apply_outcome in the fenced transaction (§4.3).
+    ///
+    /// W9a Task 6: the files are already in the store; their index rows --
+    /// what makes a file exist for a flow (spec §4.2) -- are inserted by
+    /// [`apply_outcome`] in the transaction that commits this outcome, after
+    /// the lease fence. A run that never commits leaves only unindexed
+    /// objects, which the pruner sweeps (§10). Empty for every handler that
+    /// writes no file.
+    pub files: Vec<crate::storage::StoredFile>,
 }
 
 impl Outcome {
@@ -306,6 +338,7 @@ impl Outcome {
             state: RunState::Success,
             outputs: None,
             message: None,
+            files: Vec::new(),
         }
     }
     /// `SUCCESS`, carrying an output map.
@@ -314,6 +347,7 @@ impl Outcome {
             state: RunState::Success,
             outputs: Some(outputs),
             message: None,
+            files: Vec::new(),
         }
     }
     /// `FAILED`, with no message. Kept because Task 2's tests use it.
@@ -322,6 +356,7 @@ impl Outcome {
             state: RunState::Failed,
             outputs: None,
             message: None,
+            files: Vec::new(),
         }
     }
     /// `FAILED`, carrying the message the task failed with.
@@ -330,6 +365,7 @@ impl Outcome {
             state: RunState::Failed,
             outputs: None,
             message: Some(message.into()),
+            files: Vec::new(),
         }
     }
 }
@@ -543,6 +579,19 @@ pub enum WorkerError {
     /// causes.
     #[error("advance() did not reach a fixed point in {MAX_ROUNDS} rounds on execution {0}")]
     NoFixedPoint(uuid::Uuid),
+
+    /// W9c Task 9: a render inside this transaction needed a read its cache
+    /// did not hold (`storage::prefetch`). Never committed and never the
+    /// author's: the transaction's owner (`worker::txn`) rolls back, fetches
+    /// the read with no transaction open, and runs the transaction again. Only
+    /// the test-only wrappers that run in their CALLER's transaction
+    /// (`apply_outcome`, `start_execution_in`) answer it, and their caller
+    /// must roll back.
+    #[error(
+        "a render in this transaction needs a value read before the transaction; the \
+         transaction is rolled back, the value fetched, and the transaction run again"
+    )]
+    PrefetchMiss,
 
     /// The stored `source` no longer builds a plan.
     #[error("execution {0} holds a source that no longer plans: {1}")]

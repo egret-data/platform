@@ -8,9 +8,8 @@ import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
  * something to adopt. It is NOT yet the one every page uses: `Alerts`,
  * `Charts`, `Dashboards` and `Datasets` were converted onto `ListToolbarButton`
  * directly (package U, 2026-08-22), not onto this wrapper, so the dedup this
- * component exists for has not happened for them. `Notebooks.tsx` still owns
- * an inline copy outright and was not touched by that conversion. `Endpoints.tsx`
- * remains this file's only consumer. Adopting this wrapper in the other five
+ * component exists for has not happened for them. `Endpoints.tsx`
+ * remains this file's only consumer. Adopting this wrapper in the other four
  * pages is still outstanding — a later package, not this one.
  *
  * It holds no state of its own — the page owns the filter, because the page is

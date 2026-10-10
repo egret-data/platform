@@ -6961,9 +6961,9 @@ mod tests {
     /// other field, and an engine created before the surface existed stores
     /// `null` for both — which the provisioner reads as "default StorageClass
     /// + default size". That says nothing about whether such an engine gets a
-    /// PVC: it does NOT, because it carries no `feMetaPersistent` marker (see
-    /// `build_starrocks_spec_marks_only_engines_it_creates`). These two fields
-    /// only choose the class and size of a volume the marker decides to render.
+    ///   PVC: it does NOT, because it carries no `feMetaPersistent` marker (see
+    ///   `build_starrocks_spec_marks_only_engines_it_creates`). These two fields
+    ///   only choose the class and size of a volume the marker decides to render.
     #[test]
     fn build_starrocks_spec_carries_fe_meta_storage_knobs() {
         let created = build_starrocks_spec(&StarRocksConfigBody::default(), None);
@@ -7517,7 +7517,7 @@ mod tests {
                 name: format!("sr-store-{}", Uuid::new_v4().simple()),
                 purpose: None,
                 provider: "s3".into(),
-                endpoint: Some("http://minio:9000".into()),
+                endpoint: Some("http://rustfs:9000".into()),
                 region: "us-east-1".into(),
                 bucket: "warehouse".into(),
                 key_prefix: None,
@@ -7813,7 +7813,7 @@ mod tests {
         assert_eq!(sr.cn_image, "starrocks/cn-ubuntu:custom");
         assert_eq!(sr.fe_replicas, 3);
         assert_eq!(sr.cn_replicas, 5);
-        assert_eq!(sr.storage_endpoint, "http://minio:9000");
+        assert_eq!(sr.storage_endpoint, "http://rustfs:9000");
         assert_eq!(sr.storage_access_key, "egret-ak");
         assert_eq!(sr.storage_secret_key, secret_plain);
         assert_eq!(

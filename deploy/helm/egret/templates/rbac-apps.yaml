@@ -1,0 +1,27 @@
+{{- /*
+What egret's service account may do in the app-pod namespace — and nothing beyond it. It creates and
+deletes the Pod and its Secret (the Secret holds the pod token and the marimo token), reads them
+back after a restart, and stamps the Pod with `egret.io/last-used`. No `list` on secrets, no
+`update`, no `pods/exec`, no `pods/log`.
+*/ -}}
+{{- if eq .Values.apps.pod.launcher "kubernetes" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: egret-app-pod-manager, namespace: {{ .Values.apps.pod.namespace }} }
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get","list","watch","create","delete","patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get","create","delete","patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: egret-app-pod-manager, namespace: {{ .Values.apps.pod.namespace }} }
+subjects:
+  - kind: ServiceAccount
+    name: egret
+    namespace: {{ .Release.Namespace }}
+roleRef: { kind: Role, name: egret-app-pod-manager, apiGroup: rbac.authorization.k8s.io }
+{{- end }}

@@ -393,7 +393,7 @@ describe("a menu item that opts out of the outline draws its own indicator", () 
    * where "selected" is the only pointer of any kind the list has.
    */
   test("the command palette's virtually-focused row carries the same indicator", () => {
-    const active = classStrings(src("components/notebook/CommandPalette.tsx")).find((c) =>
+    const active = classStrings(src("components/sqllab/CommandPalette.tsx")).find((c) =>
       /^bg-accent(?![\w/-])/.test(c),
     );
     expect(active, "the palette's active-row class string has moved or been renamed").toBeDefined();
@@ -453,7 +453,7 @@ describe("a menu item that opts out of the outline draws its own indicator", () 
       "DropdownMenuSubContent and DropdownMenuContent",
     ).toEqual([true, true]);
     expect(clippers("components/ui/select.tsx", "bg-popover", 1), "SelectContent").toEqual([true]);
-    expect(clippers("components/notebook/CommandPalette.tsx", "max-h-80", 1), "palette list").toEqual([true]);
+    expect(clippers("components/sqllab/CommandPalette.tsx", "max-h-80", 1), "palette list").toEqual([true]);
   });
 });
 

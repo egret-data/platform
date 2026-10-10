@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "egret-marimo"
+version = "0.1.0"
+description = "egret_marimo: gateway and pod-API clients for egret data apps"
+requires-python = ">=3.12"
+
+[project.scripts]
+egret-apps = "egret_marimo.launcher:main"
+
+[tool.setuptools]
+packages = ["egret_marimo"]
+
+[tool.pytest.ini_options]
+pythonpath = ["tests"]
+markers = ["e2e: end-to-end tests that drive Chromium against a real marimo (need `playwright install chromium`)"]
+addopts = "-m 'not e2e'"

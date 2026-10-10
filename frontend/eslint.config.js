@@ -3,6 +3,13 @@ import globals from 'globals';
 import reactHooks from 'eslint-plugin-react-hooks';
 import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
+import egret from './eslint-rules/index.js';
+import jsxA11yX from 'eslint-plugin-jsx-a11y-x';
+import { plugins, a11ySettings, a11yRules } from './eslint-rules/plugins.js';
+import { legacy } from './eslint-rules/legacy.js';
+
+const EGRET_FILES = ['src/**/*.{ts,tsx}'];
+const TESTS = ['**/__tests__/**', '**/*.test.{ts,tsx}'];
 
 export default tseslint.config(
   // `src/api/generated` is orval-emitted build output — not hand-maintained,
@@ -55,4 +62,27 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    files: EGRET_FILES,
+    ignores: [...TESTS, 'src/components/chart/echarts/**'],
+    plugins: { egret },
+    rules: { 'egret/no-raw-palette': 'error' },
+  },
+  {
+    files: EGRET_FILES,
+    ignores: TESTS,
+    plugins: { egret },
+    rules: { 'egret/no-arbitrary-text-size': 'error', 'egret/no-window-confirm': 'error' },
+  },
+  {
+    files: ['src/**/*.tsx'],
+    ignores: TESTS,
+    plugins: { 'jsx-a11y': plugins['jsx-a11y'] },
+    languageOptions: jsxA11yX.configs.recommended.languageOptions,
+    settings: a11ySettings,
+    rules: a11yRules,
+  },
+  // The legacy lists: each rule off for exactly the files that broke it when it
+  // was introduced (docs/en/frontend-rules.md, the debt register).
+  ...Object.entries(legacy).map(([rule, files]) => ({ files, rules: { [rule]: 'off' } })),
 );

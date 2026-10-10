@@ -241,14 +241,12 @@ impl UserRepo {
         usernames_via(&mut conn, ids).await
     }
 
-    /// Hard-delete `target` and dependents in one transaction. `target`'s notebooks
-    /// are reassigned to `reassign_notebooks_to` (the deleting admin) because
-    /// `notebooks.owner_user_id` is NOT NULL; attribution columns (created_by/
-    /// assigned_by/…) are auto-nulled by their `ON DELETE SET NULL` FKs (mig 0093);
-    /// cascade tables (sessions/user_groups/…) auto-clean. `access_grants` is swept
-    /// explicitly (polymorphic principal_id, no FK). The 23503 catch is now a rare
-    /// safety net: it fires only if a future table adds a NOT-NULL FK to users(id)
-    /// without an ON DELETE rule or reassignment here.
+    /// Hard-delete `target` and dependents in one transaction. Attribution columns
+    /// (created_by/assigned_by/owner_user_id/…) are auto-nulled by their
+    /// `ON DELETE SET NULL` FKs (mig 0093); cascade tables (sessions/user_groups/…)
+    /// auto-clean. `access_grants` is swept explicitly (polymorphic principal_id, no
+    /// FK). The 23503 catch is a safety net: it fires only if a future table adds a
+    /// NOT-NULL FK to users(id) without an ON DELETE rule.
     ///
     /// Returns `Some((name, email))` straight off the row `DELETE`'s own
     /// `RETURNING` — the row is gone once this returns, so a caller that needs
@@ -265,18 +263,8 @@ impl UserRepo {
     /// `fetch_one`, is what keeps that true; a caller that flipped this to
     /// `fetch_one` made a same-row-deleted-twice race in the control plane's
     /// user admin start failing loudly for a condition it used to shrug off.
-    pub async fn hard_delete(
-        &self,
-        target: UserId,
-        reassign_notebooks_to: UserId,
-    ) -> Result<Option<(String, String)>> {
+    pub async fn hard_delete(&self, target: UserId) -> Result<Option<(String, String)>> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
-        sqlx::query("UPDATE analytics.notebooks SET owner_user_id = $2 WHERE owner_user_id = $1")
-            .bind(target.0)
-            .bind(reassign_notebooks_to.0)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_err)?;
         sqlx::query("DELETE FROM sessions WHERE user_id = $1")
             .bind(target.0)
             .execute(&mut *tx)
@@ -563,10 +551,6 @@ mod tests {
             .insert_local("hard_delete_target@egret.local", "Target", "x")
             .await
             .unwrap();
-        let admin_id = repo
-            .insert_local("hard_delete_admin@egret.local", "Admin", "x")
-            .await
-            .unwrap();
 
         // Group membership.
         let group_id = groups.create_local("hard-delete-test-group").await.unwrap();
@@ -601,7 +585,7 @@ mod tests {
             .unwrap();
         assert!(sessions.validate(&issued.token).await.unwrap().is_some());
 
-        repo.hard_delete(uid, admin_id).await.unwrap();
+        repo.hard_delete(uid).await.unwrap();
 
         assert!(
             repo.find_by_id(uid).await.unwrap().is_none(),

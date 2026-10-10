@@ -9,12 +9,11 @@ import { EXPLORE_MODULES } from "@/lib/exploreModules";
  * `EXPLORE_MODULES`, so a non-module item can never become the default
  * explore path just by gaining a `feature` key here).
  *
- * The six `EXPLORE_MODULES` keys cover the Explore group; `data_api` is gated
- * the same way but on its own Sidebar group (`Data API`), not a module, so it
- * isn't part of `EXPLORE_MODULES` itself. `workflows` is a feature entitlement
- * key with no nav gate yet — the group that will read it lands in a later
- * package — but it still belongs here because this list has to name every key
- * the backend can return, not just the ones currently wired into the nav.
+ * The `EXPLORE_MODULES` keys cover the Explore group (Data Apps' `apps` among them); `data_api` is
+ * gated the same way but on its own Sidebar group (`Data API`), not a module, so it isn't part of
+ * `EXPLORE_MODULES` itself. `workflows` is a feature entitlement key with no nav gate yet — the
+ * group that will read it lands in a later package — but it still belongs here because this list
+ * has to name every key the backend can return, not just the ones currently wired into the nav.
  */
 export const ALL_FEATURE_KEYS: string[] = [...EXPLORE_MODULES.map((m) => m.key), "data_api", "workflows"];
 

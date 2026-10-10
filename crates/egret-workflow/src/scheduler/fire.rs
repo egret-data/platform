@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use egret_core::{Error, Result};
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::models::TriggerKind;
@@ -13,7 +13,8 @@ use crate::repo::{flow_cols, FlowRow};
 use crate::trigger::{
     tick, FixedClock, ScheduleTrigger, ScheduledExecution, TickOutcome, TriggerState,
 };
-use crate::worker::{start_execution_in, NewExecution};
+use crate::worker::txn::{transaction, Ended, Fetched, Finish, Isolation, Txn};
+use crate::worker::{start_execution_in_with, NewExecution};
 
 // The off switches' SQL, the feature key and the start classification are
 // shared with the Flow-trigger processor (W13a Task 4); see `start.rs`.
@@ -85,56 +86,106 @@ enum Fate {
 ///
 /// A trigger whose transaction fails returns `Err` and ends the pass; its
 /// rollback leaves the row as it was, so the next pass retries it.
+///
+/// # A miss is not a failed fire (W9c Task 9)
+///
+/// The fire's first settle renders through the transaction's cache
+/// (`storage::prefetch`). A render that needs a read rolls the WHOLE
+/// trigger transaction back -- the trigger row's lock with it -- in
+/// `worker::txn::transaction!`, which fetches the read with nothing held and
+/// claims again; the trigger is still the oldest due row, so it is claimed
+/// again (another replica may take it in between, and then this pass fires
+/// whatever it claims). The rolled-back attempt went on with a placeholder
+/// for every read it missed (the user's ruling of 2026-10-08, "gather"), so
+/// it may have classified a start that read a placeholder -- a fate, an
+/// error recorded on the row -- and all of it is discarded with the
+/// rollback: no `last_error`, no `errored`, and the trigger joins `seen`
+/// only once an attempt commits.
 pub async fn fire_due(pool: &PgPool) -> Result<PassReport> {
     let mut report = PassReport::default();
     let mut seen_flows: Vec<Uuid> = Vec::new();
     let mut seen_ids: Vec<String> = Vec::new();
     loop {
-        let mut tx = pool.begin().await.map_err(db_err)?;
-        let claimed: Option<Claimed> = sqlx::query_as(concat!(
-            "SELECT t.flow_id, t.trigger_id, t.spec_key, t.next_evaluation_date, t.evaluated_at, \
+        let ended = transaction!(
+            pool,
+            Isolation::Default,
+            |at| { claim_and_fire(at, &seen_flows, &seen_ids).await },
+            |pf| {
+                pf.fetch_pending().await?;
+                Ok(Fetched::Again)
+            }
+        )?;
+        let Ended::Done(fired) = ended else {
+            return Err(Error::Internal(anyhow::anyhow!(
+                "a schedule fire's plain fetch cannot give up"
+            )));
+        };
+        let Some((flow_id, trigger_id, fate)) = fired else {
+            return Ok(report);
+        };
+        seen_flows.push(flow_id);
+        seen_ids.push(trigger_id);
+        match fate {
+            Fate::Fired => report.fired += 1,
+            Fate::Skipped => report.skipped += 1,
+            Fate::Errored => report.errored += 1,
+            Fate::Frozen => report.frozen += 1,
+        }
+    }
+}
+
+/// One attempt of [`fire_due`]'s transaction: claim the oldest due trigger
+/// not yet seen, and fire it. `Rollback(None)` when nothing is due.
+async fn claim_and_fire(
+    at: &mut Txn,
+    seen_flows: &[Uuid],
+    seen_ids: &[String],
+) -> Result<Finish<Option<(Uuid, String, Fate)>>> {
+    let claimed: Option<Claimed> = sqlx::query_as(concat!(
+        "SELECT t.flow_id, t.trigger_id, t.spec_key, t.next_evaluation_date, t.evaluated_at, \
                     f.workspace_id, f.source, f.namespace, f.flow_id AS flow_key, \
                     now() AS db_now \
                FROM workflow.triggers t JOIN workflow.flows f ON f.id = t.flow_id \
               WHERE t.next_evaluation_date <= now() \
                 AND NOT t.disabled \
                 AND",
-            flow_is_on!("$3", "$4"),
-            "AND (t.flow_id, t.trigger_id) NOT IN \
+        flow_is_on!("$3", "$4"),
+        "AND (t.flow_id, t.trigger_id) NOT IN \
                     (SELECT * FROM unnest($1::uuid[], $2::text[])) \
               ORDER BY t.next_evaluation_date \
               LIMIT 1 \
               FOR UPDATE OF t SKIP LOCKED",
-        ))
-        .bind(&seen_flows)
-        .bind(&seen_ids)
-        .bind(WORKFLOWS_FEATURE)
-        .bind(workflows_feature_default())
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(db_err)?;
-        let Some(c) = claimed else {
-            return Ok(report);
-        };
-        seen_flows.push(c.flow_id);
-        seen_ids.push(c.trigger_id.clone());
-
-        match fire_one(&mut tx, &c).await? {
-            Fate::Fired => report.fired += 1,
-            Fate::Skipped => report.skipped += 1,
-            Fate::Errored => report.errored += 1,
-            Fate::Frozen => report.frozen += 1,
-        }
-        tx.commit().await.map_err(db_err)?;
-    }
+    ))
+    .bind(seen_flows)
+    .bind(seen_ids)
+    .bind(WORKFLOWS_FEATURE)
+    .bind(workflows_feature_default())
+    .fetch_optional(at.conn())
+    .await
+    .map_err(db_err)?;
+    let Some(c) = claimed else {
+        return Ok(Finish::Rollback(None));
+    };
+    // The cache is this trigger's: a retry that claims another one (this
+    // one was taken by another replica meanwhile) starts it over.
+    at.gate()
+        .prefetch()
+        .bind(&format!("{}/{}", c.flow_id, c.trigger_id));
+    let fate = fire_one(at, &c).await?;
+    Ok(Finish::Commit(Some((c.flow_id, c.trigger_id, fate))))
 }
 
 /// Everything that happens to one claimed trigger, inside its transaction.
-async fn fire_one(conn: &mut PgConnection, c: &Claimed) -> Result<Fate> {
+async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     let flow = match crate::spec::parse(&c.source) {
         Ok(f) => f,
         Err(e) => {
-            take_off_queue(conn, c, &format!("the flow does not parse: {}", e.message)).await?;
+            take_off_queue(
+                at.conn(),
+                c,
+                &format!("the flow does not parse: {}", e.message),
+            )
+            .await?;
             return Ok(Fate::Errored);
         }
     };
@@ -157,13 +208,13 @@ async fn fire_one(conn: &mut PgConnection, c: &Claimed) -> Result<Fate> {
             _ => None,
         });
     let Some((trigger, schedule)) = declared else {
-        resync(conn, c.flow_id).await?;
+        resync(at.conn(), c.flow_id).await?;
         return Ok(Fate::Frozen);
     };
     let resolved = match ScheduleTrigger::resolve(trigger) {
         Ok(r) => r,
         Err(e) => {
-            take_off_queue(conn, c, &e.to_string()).await?;
+            take_off_queue(at.conn(), c, &e.to_string()).await?;
             return Ok(Fate::Errored);
         }
     };
@@ -203,7 +254,7 @@ async fn fire_one(conn: &mut PgConnection, c: &Claimed) -> Result<Fate> {
         // Refused inputs consume the tick (spec §5): the dates advance
         // exactly as `tick` computed them, and no execution is created.
         TickOutcome::Fired(_) if refused.is_some() => (Fate::Skipped, refused),
-        TickOutcome::Fired(e) => match start(conn, c, &e).await? {
+        TickOutcome::Fired(e) => match start(at, c, &e).await? {
             Started::Yes => (Fate::Fired, None),
             // The unique index says this tick already has its execution: the
             // tick is consumed, not refired and not taken off the queue.
@@ -220,14 +271,14 @@ async fn fire_one(conn: &mut PgConnection, c: &Claimed) -> Result<Fate> {
             }
             // Deterministic in the source: only the author's next save helps.
             Started::Refused(why) => {
-                take_off_queue(conn, c, &why).await?;
+                take_off_queue(at.conn(), c, &why).await?;
                 return Ok(Fate::Errored);
             }
             // Anything else may be transient (a timeout, a deadlock, a
             // serialization failure). The dates stay, so the next pass fires
             // this same tick again (spec §4 point 1); only the reason is kept.
             Started::Failed(why) => {
-                record_error(conn, c, &why).await?;
+                record_error(at.conn(), c, &why).await?;
                 return Ok(Fate::Errored);
             }
         },
@@ -243,7 +294,7 @@ async fn fire_one(conn: &mut PgConnection, c: &Claimed) -> Result<Fate> {
     .bind(t.state.next_evaluation_date)
     .bind(t.state.evaluated_at)
     .bind(last_error)
-    .execute(&mut *conn)
+    .execute(at.conn())
     .await
     .map_err(db_err)?;
     Ok(fate)
@@ -253,9 +304,14 @@ async fn fire_one(conn: &mut PgConnection, c: &Claimed) -> Result<Fate> {
 /// -- including a statement Postgres aborted -- can be rolled back while the
 /// claim's transaction lives on to record what happened. The outer `Err` is a
 /// failure of the transaction itself.
-async fn start(conn: &mut PgConnection, c: &Claimed, e: &ScheduledExecution) -> Result<Started> {
-    let mut sp = conn.begin().await.map_err(db_err)?;
-    let started = start_execution_in(
+///
+/// W9c Task 9: the savepoint is the attempt's ([`Txn::savepoint`]), so
+/// the first settle renders under `fire_due`'s gate. A start whose render
+/// missed is classified like any other -- with a placeholder it usually
+/// starts -- and the gate rolls the whole attempt back, its fate with it.
+async fn start(at: &mut Txn, c: &Claimed, e: &ScheduledExecution) -> Result<Started> {
+    let mut sp = at.savepoint().await?;
+    let started = start_execution_in_with(
         &mut sp,
         NewExecution {
             workspace_id: c.workspace_id,
@@ -269,16 +325,19 @@ async fn start(conn: &mut PgConnection, c: &Claimed, e: &ScheduledExecution) -> 
             execution_depth: 0,
             flow_trigger_event_id: None,
             born_failed: false,
+            replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
         },
     )
     .await;
     match started {
         Ok(_) => {
-            sp.commit().await.map_err(db_err)?;
+            sp.release().await?;
             Ok(Started::Yes)
         }
         Err(err) => {
-            sp.rollback().await.map_err(db_err)?;
+            sp.rollback().await?;
             Ok(classify(&err))
         }
     }

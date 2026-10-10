@@ -56,7 +56,11 @@ export async function loginLocalAdmin(page: Page): Promise<void> {
 /** CSRF double-submit header from the session cookie, for control-plane mutations. */
 export async function csrf(context: BrowserContext): Promise<Record<string, string>> {
   const cookies = await context.cookies();
-  const token = cookies.find((c) => c.name === "egret_csrf")?.value ?? "";
+  // A deployment with Secure cookies issues `__Host-egret_csrf` (and ignores the plain name).
+  const token =
+    cookies.find((c) => c.name === "__Host-egret_csrf")?.value ??
+    cookies.find((c) => c.name === "egret_csrf")?.value ??
+    "";
   return { "X-Egret-CSRF": token, "Content-Type": "application/json" };
 }
 
@@ -72,7 +76,7 @@ export async function postJson(
   return res.json();
 }
 
-const S3_ENDPOINT = process.env.EGRET_E2E_S3_ENDPOINT ?? "http://minio:9000";
+const S3_ENDPOINT = process.env.EGRET_E2E_S3_ENDPOINT ?? "http://rustfs:9000";
 const S3_KEY = process.env.EGRET_E2E_S3_KEY ?? "egret";
 const S3_SECRET = process.env.EGRET_E2E_S3_SECRET ?? "egretsecret";
 const S3_BUCKET = process.env.EGRET_E2E_BUCKET ?? "warehouse";
@@ -88,7 +92,7 @@ export async function firstWorkspace(
   return { id: list[0].id, slug: list[0].slug ?? list[0].id };
 }
 
-/** Provision an in-cluster MinIO storage connection + an Iceberg warehouse on it. */
+/** Provision an in-cluster RustFS storage connection + an Iceberg warehouse on it. */
 export async function provisionStorageAndWarehouse(
   req: APIRequestContext,
   h: Record<string, string>,

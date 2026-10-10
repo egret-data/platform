@@ -14,6 +14,10 @@
 //!   io.kestra.core.runners.EgretPluginHost describe target/plugins \
 //!   > ../crates/egret-workflow/src/plugins/catalog.json
 //! ```
+//!
+//! The host's own tests need the same jars: on a fresh checkout, run
+//! `plugin-host/fetch-plugins.sh plugin-host/target/plugins` before
+//! `mvn -f plugin-host/pom.xml verify` (`just test-plugin-host` does both).
 
 //!
 //! # The task model (W5b spec §4)
@@ -37,8 +41,6 @@
 //!   does not read ([`REFUSED_BASE_PROPERTIES`], as on script tasks;
 //!   [`CODE_PROPERTY_NOT_IMPLEMENTED`]) -- the catalog lists the seven, so
 //!   they must be refused before the catalog is consulted;
-//! * a value that needs internal storage ([`REFUSED_VALUES`], Task 1's
-//!   measurement; [`CODE_PROPERTY_NEEDS_STORAGE`], naming W9);
 //! * a literal of the wrong type where the schema is plain
 //!   ([`CODE_PROPERTY_INVALID`]). A schema egret cannot read (`anyOf`,
 //!   `$ref`, `const`, ...) and a `{{ }}` value are accepted and checked by the
@@ -167,8 +169,6 @@ pub const CODE_PROPERTY_UNKNOWN: &str = "plugin_property_unknown";
 pub const CODE_PROPERTY_REQUIRED: &str = "plugin_property_required";
 /// Kestra accepts the property; egret does not implement it.
 pub const CODE_PROPERTY_NOT_IMPLEMENTED: &str = "plugin_property_not_implemented";
-/// The value needs Kestra's internal storage (W9).
-pub const CODE_PROPERTY_NEEDS_STORAGE: &str = "plugin_property_needs_storage";
 /// A literal that is not of the schema's plain type (or not in its enum).
 pub const CODE_PROPERTY_INVALID: &str = "plugin_property_invalid";
 /// `secret()` written anywhere but a `kestra.*` task's properties -- a
@@ -178,6 +178,24 @@ pub const CODE_SECRET_OUTSIDE_PLUGIN_TASK: &str = "secret_outside_plugin_task";
 /// A `secret()` call on a `kestra.*` task that passes `namespace` or `full`
 /// in the source (fix round 1, I2; spec §6).
 pub const CODE_SECRET_ARGUMENT_REFUSED: &str = "secret_argument_refused";
+/// W9c Task 4 (W9c spec §7): `secret()` written anywhere in the `value` of
+/// an `io.kestra.plugin.core.kv.Set` or `Put`. Reported INSTEAD of
+/// [`CODE_SECRET_OUTSIDE_PLUGIN_TASK`] for that property, so the author reads
+/// the reason that applies; it holds even if `secret()` is later allowed
+/// outside `kestra.*` tasks.
+pub const CODE_SECRET_IN_KV_VALUE: &str = "secret_in_kv_value";
+
+/// [`CODE_SECRET_IN_KV_VALUE`]'s message (W9c spec §7's sentence, verbatim),
+/// naming the task id and the property path (`tasks.<id>.value…`).
+pub fn secret_in_kv_value_message(task_id: &str, path: &str) -> String {
+    format!(
+        "secret() is refused in the value of task '{task_id}' ({path}): the secret's value \
+         would be stored in the KV store, where anyone who can read this namespace's KV \
+         (`workflow:read`) could read it, unmasked; pass the secret to the task that needs it \
+         instead."
+    )
+}
+
 /// A top-level `pluginDefaults:` (spec §4.1), on any flow.
 pub const CODE_REMOVED_PLUGIN_DEFAULTS: &str = "removed_plugin_defaults";
 /// The one message for [`CODE_REMOVED_PLUGIN_DEFAULTS`], verbatim from spec
@@ -212,157 +230,12 @@ pub const REFUSED_BASE_PROPERTIES: &[&str] = &[
     "workerSelector",
 ];
 
-/// A property value that needs internal storage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NeedsStorage {
-    /// Any value of the property (a storage URI to read from).
-    AnyValue,
-    /// These literal values.
-    Values(&'static [Literal]),
-}
-
-/// A literal JSON value in [`REFUSED_VALUES`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Literal {
-    Str(&'static str),
-    Bool(bool),
-}
-
-impl Literal {
-    fn to_json(self) -> Value {
-        match self {
-            Literal::Str(s) => Value::String(s.to_string()),
-            Literal::Bool(b) => Value::Bool(b),
-        }
-    }
-
-    /// `value` as Kestra would read it: an enum name case-insensitively
-    /// (fail-closed: refusing a spelling the host might also refuse costs
-    /// nothing), a boolean also from its string spelling (Jackson coerces
-    /// `"true"`).
-    fn matches(self, value: &Value) -> bool {
-        match (self, value) {
-            (Literal::Str(want), Value::String(got)) => want.eq_ignore_ascii_case(got),
-            (Literal::Bool(want), Value::Bool(got)) => want == *got,
-            (Literal::Bool(want), Value::String(got)) => {
-                got.eq_ignore_ascii_case(if want { "true" } else { "false" })
-            }
-            _ => false,
-        }
-    }
-}
-
-const STORE_VALUES: NeedsStorage = NeedsStorage::Values(&[Literal::Str("STORE")]);
-const STORE_TRUE: NeedsStorage = NeedsStorage::Values(&[Literal::Bool(true)]);
-
-/// **Task 1's measurement, `oracle-exec/w5b-plugins.json`'s
-/// `egret_expected.refused_values`**: per class, the property values that
-/// need Kestra's internal storage (W9), refused at publish.
-/// `tests/plugins_gate.rs` asserts this table equals the fixture (through
-/// [`refused_values_json`]), so it cannot drift from the measurement.
-///
-/// The `Batch` and `CopyIn` rows name classes Task 2 excluded from the
-/// catalog (they need storage at all); they are kept so the table is the
-/// measurement entire, and so a regenerated catalog that re-admitted them
-/// would still refuse their storage properties.
-pub const REFUSED_VALUES: &[(&str, &str, NeedsStorage)] = &[
-    (
-        "io.kestra.plugin.jdbc.postgresql.Query",
-        "fetchType",
-        STORE_VALUES,
-    ),
-    (
-        "io.kestra.plugin.jdbc.postgresql.Query",
-        "store",
-        STORE_TRUE,
-    ),
-    (
-        "io.kestra.plugin.jdbc.trino.Query",
-        "fetchType",
-        STORE_VALUES,
-    ),
-    ("io.kestra.plugin.jdbc.trino.Query", "store", STORE_TRUE),
-    (
-        "io.kestra.plugin.jdbc.mysql.Query",
-        "fetchType",
-        STORE_VALUES,
-    ),
-    ("io.kestra.plugin.jdbc.mysql.Query", "store", STORE_TRUE),
-    (
-        "io.kestra.plugin.jdbc.mysql.Query",
-        "inputFile",
-        NeedsStorage::AnyValue,
-    ),
-    (
-        "io.kestra.plugin.jdbc.postgresql.Queries",
-        "fetchType",
-        STORE_VALUES,
-    ),
-    (
-        "io.kestra.plugin.jdbc.postgresql.Queries",
-        "store",
-        STORE_TRUE,
-    ),
-    (
-        "io.kestra.plugin.jdbc.mysql.Queries",
-        "fetchType",
-        STORE_VALUES,
-    ),
-    ("io.kestra.plugin.jdbc.mysql.Queries", "store", STORE_TRUE),
-    (
-        "io.kestra.plugin.jdbc.mysql.Queries",
-        "inputFile",
-        NeedsStorage::AnyValue,
-    ),
-    (
-        "io.kestra.plugin.jdbc.postgresql.Batch",
-        "from",
-        NeedsStorage::AnyValue,
-    ),
-    (
-        "io.kestra.plugin.jdbc.mysql.Batch",
-        "from",
-        NeedsStorage::AnyValue,
-    ),
-    (
-        "io.kestra.plugin.jdbc.postgresql.CopyIn",
-        "from",
-        NeedsStorage::AnyValue,
-    ),
-];
-
-/// [`REFUSED_VALUES`] in the fixture's shape: `{FQCN: {property: "any" |
-/// [values]}}`.
-pub fn refused_values_json() -> Value {
-    let mut out = Map::new();
-    for (fqcn, property, needs) in REFUSED_VALUES {
-        let class = out
-            .entry(fqcn.to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-        let v = match needs {
-            NeedsStorage::AnyValue => Value::String("any".into()),
-            NeedsStorage::Values(vs) => Value::Array(vs.iter().map(|l| l.to_json()).collect()),
-        };
-        class
-            .as_object_mut()
-            .expect("inserted as an object")
-            .insert(property.to_string(), v);
-    }
-    Value::Object(out)
-}
-
-/// Whether `value` of `property` on `fqcn` needs internal storage. A `{{ }}`
-/// value of a [`NeedsStorage::Values`] property cannot be judged before
-/// rendering; the host traps any storage call at run (exit 4, naming W9).
-fn needs_storage(fqcn: &str, property: &str, value: &Value) -> bool {
-    REFUSED_VALUES
-        .iter()
-        .filter(|(f, p, _)| *f == fqcn && *p == property)
-        .any(|(_, _, needs)| match needs {
-            NeedsStorage::AnyValue => true,
-            NeedsStorage::Values(vs) => vs.iter().any(|l| l.matches(value)),
-        })
-}
+// W9a Task 9: no property value is refused for needing internal storage.
+// W5b's `REFUSED_VALUES` (Task 1's `w5b-plugins.json` `refused_values`) is
+// gone with `NeedsStorage`, `Literal`, `needs_storage`, `refused_values_json`
+// and `CODE_PROPERTY_NEEDS_STORAGE`: W9a Task 1 re-measured every row on the
+// artifact and `w9a-storage.json`'s `plugin_storage.still_refused_values` is
+// `{}` (`tests/plugins_gate.rs` asserts it stays empty).
 
 fn refusal(
     code: &'static str,
@@ -514,22 +387,6 @@ pub fn parse(type_id: &str, spec: &Value) -> Result<PluginTask, Vec<PluginRefusa
             ));
             continue;
         };
-        if needs_storage(fqcn, key, value) {
-            let shown = match value {
-                Value::String(s) => format!("'{key}: {s}'"),
-                Value::Bool(b) => format!("'{key}: {b}'"),
-                _ => format!("'{key}'"),
-            };
-            errs.push(refusal(
-                CODE_PROPERTY_NEEDS_STORAGE,
-                key,
-                format!(
-                    "{shown} on {fqcn} needs Kestra's internal storage, which egret does not \
-                     implement yet (W9); remove it"
-                ),
-            ));
-            continue;
-        }
         if !is_expression(value) {
             if let Some(problem) = type_problem(&prop.schema, value) {
                 errs.push(refusal(

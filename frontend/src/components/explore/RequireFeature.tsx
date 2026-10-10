@@ -4,7 +4,7 @@ import { Forbidden } from "@/routes/Forbidden";
 
 /**
  * Route guard for a single explore module (`sql_lab` / `datasets` / `charts` /
- * `dashboards` / `notebooks`): renders `Forbidden` when the current
+ * `dashboards` / `apps`): renders `Forbidden` when the current
  * workspace does not have `feature` switched on, otherwise renders `children`.
  *
  * Reads the same optimistic list the Sidebar filters on

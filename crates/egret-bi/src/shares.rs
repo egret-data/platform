@@ -26,27 +26,89 @@ fn object_table(kind: &str) -> Option<&'static str> {
         "chart" => Some("charts"),
         "dataset" => Some("datasets"),
         "folder" => Some("folders"),
-        "notebook" => Some("notebooks"),
         "saved_query" => Some("saved_queries"),
+        "app" => Some("apps"),
         _ => None,
     }
 }
 
-/// The action a caller must hold on the object to manage its shares. Notebooks
-/// have no `notebook:manage` action, so notebook sharing requires `notebook:write`
-/// (Editor); every BI kind uses `<kind>:manage`.
-fn manage_action(kind: &str) -> String {
-    if kind == "notebook" {
-        "notebook:write".to_string()
-    } else {
-        format!("{kind}:manage")
+/// The action a caller must hold on an object of this kind to manage its shares
+/// (and its tags), one literal arm per kind that HAS permissions of its own.
+/// Every such kind uses `<kind>:manage`.
+///
+/// `folder` is deliberately not here: there is no `folder:*` permission. A folder
+/// is gated on the kind of thing it holds -- see [`gate_kind`].
+///
+/// Literals rather than `format!("{kind}:manage")` so `catalog_drift` can see
+/// each key as enforced (this is one of its `PERM_TABLE_FNS`). `None` for a kind
+/// with no manage action.
+fn manage_action(kind: &str) -> Option<&'static str> {
+    match kind {
+        "dashboard" => Some("dashboard:manage"),
+        "chart" => Some("chart:manage"),
+        "dataset" => Some("dataset:manage"),
+        "saved_query" => Some("saved_query:manage"),
+        "app" => Some("app:manage"),
+        _ => None,
     }
 }
 
-/// The action a caller must hold on the object to read it (and its tags). Every
-/// kind uses `<kind>:read` (including `notebook:read`).
-fn read_action(kind: &str) -> String {
-    format!("{kind}:read")
+/// The action a caller must hold on an object of this kind to read it (and its
+/// tags). Literal, for the reason [`manage_action`] is.
+fn read_action(kind: &str) -> Option<&'static str> {
+    match kind {
+        "dashboard" => Some("dashboard:read"),
+        "chart" => Some("chart:read"),
+        "dataset" => Some("dataset:read"),
+        "saved_query" => Some("saved_query:read"),
+        "app" => Some("app:read"),
+        _ => None,
+    }
+}
+
+/// The kind whose permissions gate `(kind, id)`: the kind itself, or -- for a
+/// folder -- the kind of thing the folder holds (`analytics.folders.entity_type`).
+///
+/// A share on a folder is a share on everything in it, so it asks for what
+/// sharing one of those things asks for: a dashboards folder needs
+/// `dashboard:manage`, an apps folder `app:manage`. The route used to ask for
+/// `folder:manage`, a key no role holds and the catalog does not contain, and so
+/// refused everyone -- workspace admins included.
+///
+/// `InvalidInput` for a folder of a kind that cannot be shared at all (alerts,
+/// Data API endpoints): their folders only group, and an object grant on one
+/// would be read by nothing.
+async fn gate_kind(db: &Db, kind: &str, id: Uuid) -> Result<String, Error> {
+    if kind != "folder" {
+        return Ok(kind.to_string());
+    }
+    let held: String =
+        sqlx::query_scalar("SELECT entity_type FROM analytics.folders WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&db.pool)
+            .await
+            .map_err(|e| Error::Internal(e.into()))?
+            .ok_or_else(|| Error::NotFound("folder".to_string()))?;
+    if manage_action(&held).is_none() {
+        return Err(Error::InvalidInput(format!(
+            "a folder of {held}s cannot be shared"
+        )));
+    }
+    Ok(held)
+}
+
+/// [`manage_action`] for `(kind, id)`, through [`gate_kind`]. In practice an
+/// unknown kind never reaches here -- `resolve` (via `object_ref`) rejects it
+/// first as `InvalidInput` -- so the `NotFound` is only a backstop.
+async fn manage_action_for(st: &BiState, kind: &str, id: Uuid) -> Result<&'static str, BiApiError> {
+    let gate = gate_kind(&st.db, kind, id).await?;
+    manage_action(&gate).ok_or_else(|| Error::NotFound("object kind".to_string()).into())
+}
+
+/// [`read_action`] for `(kind, id)`, through [`gate_kind`].
+async fn read_action_for(st: &BiState, kind: &str, id: Uuid) -> Result<&'static str, BiApiError> {
+    let gate = gate_kind(&st.db, kind, id).await?;
+    read_action(&gate).ok_or_else(|| Error::NotFound("object kind".to_string()).into())
 }
 
 /// Resolve `(kind, id)` to the `ObjectRef` (folder + workspace ancestry) the PDP
@@ -234,7 +296,7 @@ pub(crate) async fn resolve(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
     ),
     request_body = ObjectGrantBody,
@@ -254,9 +316,14 @@ async fn grant_put(
     Json(b): Json<ObjectGrantBody>,
 ) -> Result<Json<ObjectGrantDto>, BiApiError> {
     let obj = resolve(&st, &ctx, &kind, id).await?;
-    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
-        .await
-        .map_err(BiApiError::from)?;
+    require_object(
+        &*st.pdp,
+        &ctx,
+        manage_action_for(&st, &kind, id).await?,
+        obj,
+    )
+    .await
+    .map_err(BiApiError::from)?;
     valid_principal_type(&b.principal_type)?;
     valid_role(&b.role)?;
     valid_effect(&b.effect)?;
@@ -342,7 +409,7 @@ async fn grant_put(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
         ("grant_id" = Uuid, Path, description = "Grant id to revoke"),
     ),
@@ -361,9 +428,14 @@ async fn grant_delete(
     Path((_w, kind, id, grant_id)): Path<(String, String, Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
     let obj = resolve(&st, &ctx, &kind, id).await?;
-    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
-        .await
-        .map_err(BiApiError::from)?;
+    require_object(
+        &*st.pdp,
+        &ctx,
+        manage_action_for(&st, &kind, id).await?,
+        obj,
+    )
+    .await
+    .map_err(BiApiError::from)?;
     // Scope the delete by the object so a manage holder can't revoke an unrelated grant.
     sqlx::query(
         "DELETE FROM access_grants \
@@ -391,7 +463,7 @@ async fn grant_delete(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
     ),
     responses(
@@ -412,9 +484,14 @@ async fn grant_list(
     // Listing the ACL exposes every grantee, so it is manage-only (matching
     // grant_put/grant_delete) — a merely read-shared recipient must not be able
     // to enumerate who else the object is shared with.
-    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
-        .await
-        .map_err(BiApiError::from)?;
+    require_object(
+        &*st.pdp,
+        &ctx,
+        manage_action_for(&st, &kind, id).await?,
+        obj,
+    )
+    .await
+    .map_err(BiApiError::from)?;
     // LEFT JOIN resolves the grantee's display name: a user's email or a group's
     // name (following egret-auth `assignees_named`). `email` is `citext`, so cast
     // to `text` for a uniform `Option<String>` column.
@@ -470,7 +547,7 @@ async fn grant_list(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
     ),
     responses(
@@ -488,7 +565,7 @@ async fn object_tags_list(
     Path((_w, kind, id)): Path<(String, String, Uuid)>,
 ) -> Result<Json<Vec<TagDto>>, BiApiError> {
     let obj = resolve(&st, &ctx, &kind, id).await?;
-    require_object(&*st.pdp, &ctx, &read_action(&kind), obj)
+    require_object(&*st.pdp, &ctx, read_action_for(&st, &kind, id).await?, obj)
         .await
         .map_err(BiApiError::from)?;
     let tags = crate::tags::TagRepo::new(st.db.clone())
@@ -504,7 +581,7 @@ async fn object_tags_list(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
         ("tag_id" = Uuid, Path, description = "Tag id to assign"),
     ),
@@ -523,9 +600,14 @@ async fn object_tag_assign(
     Path((_w, kind, id, tag_id)): Path<(String, String, Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
     let obj = resolve(&st, &ctx, &kind, id).await?;
-    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
-        .await
-        .map_err(BiApiError::from)?;
+    require_object(
+        &*st.pdp,
+        &ctx,
+        manage_action_for(&st, &kind, id).await?,
+        obj,
+    )
+    .await
+    .map_err(BiApiError::from)?;
     crate::tags::TagRepo::new(st.db.clone())
         .assign(tag_id, &kind, id, Some(ctx.principal.user_id.0))
         .await
@@ -547,7 +629,7 @@ async fn object_tag_assign(
     tag = "shares",
     params(
         WorkspacePath,
-        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query"),
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | saved_query | app"),
         ("id" = Uuid, Path, description = "Object id"),
         ("tag_id" = Uuid, Path, description = "Tag id to unassign"),
     ),
@@ -566,9 +648,14 @@ async fn object_tag_unassign(
     Path((_w, kind, id, tag_id)): Path<(String, String, Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
     let obj = resolve(&st, &ctx, &kind, id).await?;
-    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
-        .await
-        .map_err(BiApiError::from)?;
+    require_object(
+        &*st.pdp,
+        &ctx,
+        manage_action_for(&st, &kind, id).await?,
+        obj,
+    )
+    .await
+    .map_err(BiApiError::from)?;
     crate::tags::TagRepo::new(st.db.clone())
         .unassign(tag_id, &kind, id)
         .await
@@ -599,3 +686,47 @@ async fn object_tag_unassign(
     tags((name = "shares", description = "Per-object grants: share a dashboard / chart / dataset / folder with a user or group at a workspace role")),
 )]
 pub struct BiSharesApi;
+
+#[cfg(test)]
+mod tests {
+    use super::{manage_action, object_table, read_action};
+
+    /// Pins the action each kind requires, plus `app` from Data Apps P2. Every
+    /// kind `object_table` accepts except `folder` has a manage action of its own,
+    /// and nothing else does.
+    /// `notebook` is pinned among the rejected kinds: Data Apps P6 retired
+    /// notebook sharing, so it must resolve the same as any unknown kind.
+    #[test]
+    fn manage_action_per_kind_is_unchanged() {
+        let expected = [
+            ("dashboard", "dashboard:manage"),
+            ("chart", "chart:manage"),
+            ("dataset", "dataset:manage"),
+            ("saved_query", "saved_query:manage"),
+            ("app", "app:manage"),
+        ];
+        for (kind, action) in expected {
+            assert!(object_table(kind).is_some(), "{kind} must be a share kind");
+            assert_eq!(manage_action(kind), Some(action), "{kind}");
+        }
+        // A folder is a share kind with no permission of its own: it borrows the
+        // one of what it holds (`gate_kind`). `folder:manage` was never a real key.
+        assert!(object_table("folder").is_some());
+        assert_eq!(manage_action("folder"), None);
+        assert_eq!(read_action("folder"), None);
+        for kind in ["dashboard", "chart", "dataset", "saved_query", "app"] {
+            assert_eq!(read_action(kind), Some(format!("{kind}:read").as_str()));
+        }
+        for kind in [
+            "",
+            "alert",
+            "data_api_endpoint",
+            "apps",
+            "Dashboard",
+            "notebook",
+        ] {
+            assert_eq!(object_table(kind), None, "{kind}");
+            assert_eq!(manage_action(kind), None, "{kind}");
+        }
+    }
+}

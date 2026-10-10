@@ -2,12 +2,12 @@
 //! including a local user with no refresh token (the regression this fixes:
 //! the Keycloak-refresh broker cannot mint for local/password logins).
 
+use egret_analytics_api::engine_token::EngineTokenMinter;
 use egret_auth::groups::GroupRepo;
 use egret_auth::users::UserRepo;
 use egret_bin::engine_minter::MachineIdpEngineMinter;
 use egret_machine_idp::{PgSigningKeyStore, SigningKeyStore as _};
 use egret_metastore::Db;
-use egret_notebook::engine_token::EngineTokenMinter;
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn mints_egret_signed_token_for_local_user(pool: sqlx::PgPool) {

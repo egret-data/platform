@@ -46,9 +46,9 @@ import Alerts from "@/routes/explore/Alerts";
 import ScheduleDetail from "@/routes/explore/ScheduleDetail";
 import Notifications from "@/routes/explore/settings/Notifications";
 import DashboardView from "@/routes/explore/DashboardView";
-import Notebooks from "@/routes/explore/Notebooks";
-import NotebookPage from "@/routes/explore/NotebookPage";
-import NotebookSettings from "@/routes/explore/NotebookSettings";
+import Apps from "@/routes/explore/Apps";
+import AppEditPage from "@/routes/explore/AppEditPage";
+import AppViewPage from "@/routes/explore/AppViewPage";
 import DatabasesPage from "@/routes/explore/DatabasesPage";
 import WorkspaceSettings from "@/routes/explore/settings/WorkspaceSettings";
 import Members from "@/routes/explore/settings/Members";
@@ -146,9 +146,9 @@ function ExploreRoutes() {
           <Route path="charts/:id" element={<RequireFeature feature="charts"><ChartExplore /></RequireFeature>} />
           <Route path="dashboards" element={<RequireFeature feature="dashboards"><Dashboards /></RequireFeature>} />
           <Route path="dashboards/:id" element={<RequireFeature feature="dashboards"><DashboardView /></RequireFeature>} />
-          <Route path="notebooks" element={<RequireFeature feature="notebooks"><Notebooks /></RequireFeature>} />
-          <Route path="notebooks/:id" element={<RequireFeature feature="notebooks"><NotebookPage /></RequireFeature>} />
-          <Route path="notebook-settings" element={<RequireFeature feature="notebooks"><NotebookSettings /></RequireFeature>} />
+          <Route path="apps" element={<RequireFeature feature="apps"><Apps /></RequireFeature>} />
+          <Route path="apps/:id/edit" element={<RequireFeature feature="apps"><AppEditPage /></RequireFeature>} />
+          <Route path="apps/:id" element={<RequireFeature feature="apps"><AppViewPage /></RequireFeature>} />
           {/* Engine connections now live under Workspace settings; keep the old
               path working by redirecting into that tab. */}
           <Route path="engines" element={<Navigate to="../settings/engines" replace />} />

@@ -271,7 +271,7 @@ impl CatalogTagRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         warehouse_id: Uuid,
     ) -> Result<(), BiApiError> {
-        egret_catalog_registry::bump_bound_tag_versions(&mut **tx, warehouse_id)
+        egret_catalog_registry::bump_bound_tag_versions(tx, warehouse_id)
             .await
             .map_err(crate::error::BiError::from)?;
         Ok(())

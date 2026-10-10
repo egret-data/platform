@@ -34,6 +34,12 @@
 //!
 //! Task 8, four the built engine does not register at all -- refusals:
 //!   render renderOnce errorLogs subflow
+//!
+//! W9a Task 4 implemented four of the null-backed eight over the render's
+//! file scope: read fileSize fileExists isFileEmpty
+//!
+//! W9b Task 4 implemented fileURI over namespace files, and W9c Task 4 kv
+//! over the KV store, both through the same scope
 //! ```
 //!
 //! # Seven of Task 8's "service-backed" functions reach no service
@@ -57,12 +63,12 @@
 //!
 //! # A refusal is a feature
 //!
-//! The twelve that are refused say so in a sentence naming the function, what
-//! it needs and the package that will implement it. **The oracle cannot check
+//! The eight that are refused (twelve until W9a Task 4) say so in a sentence
+//! naming the function, what it needs and the package that will implement it. **The oracle cannot check
 //! any of that**: their corpus entries are `compare: "error-class"`, which any
 //! failure satisfies — including `unknown function: secret is unknown`, which
 //! is what egret said before this task. See [`not_implemented`] and
-//! `the_twelve_refusals_name_themselves_and_their_owner`.
+//! `the_eight_refusals_name_themselves_and_their_owner`.
 //!
 //! # `range` was already bound, and it did not error
 //!
@@ -130,6 +136,7 @@ use super::filters::{is_java_null, java_class_name, pebble_error, Args, DateArgs
 use super::ionfmt::read_ion;
 use super::javafmt::{parse_iso, Zdt, Zone};
 use super::jqsandbox::MAX_VALUE_DEPTH;
+use crate::storage::kv::value::{KvData, KvNumber};
 
 /// Registers the 19 pure functions onto `env`.
 ///
@@ -168,8 +175,28 @@ pub(super) fn register(env: &mut Environment<'static>) {
     env.add_function("printContext", fetch_context);
     env.add_function("tasksWithState", tasks_with_state);
 
-    // W2 Task 8's twelve refusals. See [`not_implemented`] for the message
-    // shape and why the oracle cannot check it.
+    // W9a Task 4: the four file functions, over the render's file scope.
+    env.add_function("read", |state: &State, rest: Rest<MjValue>| {
+        file_function(FileFunction::Read, state, rest)
+    });
+    env.add_function("fileSize", |state: &State, rest: Rest<MjValue>| {
+        file_function(FileFunction::Size, state, rest)
+    });
+    env.add_function("fileExists", |state: &State, rest: Rest<MjValue>| {
+        file_function(FileFunction::Exists, state, rest)
+    });
+    env.add_function("isFileEmpty", |state: &State, rest: Rest<MjValue>| {
+        file_function(FileFunction::IsEmpty, state, rest)
+    });
+    // W9b Task 4: `fileURI`, beside the four, over the same scope.
+    env.add_function("fileURI", |state: &State, rest: Rest<MjValue>| {
+        file_function(FileFunction::Uri, state, rest)
+    });
+    // W9c Task 4: `kv`, over the KV store, through the same scope.
+    env.add_function("kv", kv_function);
+
+    // W2 Task 8's refusals, six since W9c Task 4. See [`not_implemented`]
+    // for the message shape and why the oracle cannot check it.
     for (name, refusal) in REFUSED {
         env.add_function(
             *name,
@@ -210,7 +237,7 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
      fields of the pod spec, readable by anyone with `get pods` in the task namespace, and \
      no other render (inputs, runIf, Log, triggers) resolves secrets.";
 
-/// The twelve names egret registers only to refuse, with what each is waiting
+/// The six names egret registers only to refuse, with what each is waiting
 /// for and who owns it.
 ///
 /// **Two different kinds of absence, deliberately treated the same.** The
@@ -239,27 +266,22 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
 /// **Updated 2026-09-29 (W5b Task 4).** `secret` is no longer waiting for a
 /// package: it resolves on `kestra.*` plugin tasks and is
 /// [`Refusal::Confined`] everywhere else, with [`SECRET_REFUSAL`]'s reason.
+///
+/// **Updated 2026-10-01 (W9a Task 4): eight names now.** `read`, `fileSize`,
+/// `fileExists` and `isFileEmpty` are implemented ([`file_function`]) over
+/// the render's file scope; W9 split, so `fileURI` names W9b (namespace
+/// files) and `kv` W9c (the KV store). `http` is left naming W9: it is still
+/// in no package's contents (the programme spec's §9 note).
+///
+/// **Updated 2026-10-05 (W9b Task 4): seven names now.** `fileURI` is
+/// implemented ([`file_function`]) over namespace files, beside the four,
+/// which reach namespace files too; `kv` still names W9c.
+///
+/// **Updated 2026-10-07 (W9c Task 4): six names now.** `kv` is implemented
+/// ([`kv_function`]) over the KV store.
 const REFUSED: &[(&str, Refusal)] = &[
     // Registered with a null backing on the built engine.
     ("secret", Refusal::Confined(SECRET_REFUSAL)),
-    ("kv", not_yet("the namespace KV store", "W9")),
-    (
-        "read",
-        not_yet("internal storage and namespace files", "W9"),
-    ),
-    ("fileURI", not_yet("namespace files", "W9")),
-    (
-        "fileSize",
-        not_yet("internal storage and namespace files", "W9"),
-    ),
-    (
-        "fileExists",
-        not_yet("internal storage and namespace files", "W9"),
-    ),
-    (
-        "isFileEmpty",
-        not_yet("internal storage and namespace files", "W9"),
-    ),
     ("http", not_yet("an outbound HTTP client", "W9")),
     // Not registered at all on the built engine: `@Inject @Nullable`, guarded.
     (
@@ -276,6 +298,387 @@ const REFUSED: &[(&str, Refusal)] = &[
 
 const fn not_yet(needs: &'static str, package: &'static str) -> Refusal {
     Refusal::NotYet { needs, package }
+}
+
+// ---------------------------------------------------------------------------
+// W9a Task 4: the file functions
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum FileFunction {
+    Read,
+    Size,
+    Exists,
+    IsEmpty,
+    /// W9b Task 4: `fileURI`, namespace files only (an execution's
+    /// `kestra://` URI is returned as given, once readable).
+    Uri,
+}
+
+impl FileFunction {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Size => "fileSize",
+            Self::Exists => "fileExists",
+            Self::IsEmpty => "isFileEmpty",
+            Self::Uri => "fileURI",
+        }
+    }
+
+    /// `read` and `fileURI` declare `revision` (`ReadFileFunction.java`,
+    /// `FileURIFunction.java`: `path, namespace, revision`); the other three
+    /// declare `path, namespace` only.
+    fn takes_revision(self) -> bool {
+        matches!(self, Self::Read | Self::Uri)
+    }
+}
+
+/// `ReadFileFunction`, `FileSizeFunction`, `FileExistsFunction`,
+/// `IsFileEmptyFunction` and (W9b) `FileURIFunction`.
+///
+/// They answer from the render's [`FileScope`](super::files::FileScope),
+/// bound as the [`FILE_SCOPE`](super::files::FILE_SCOPE) global -- the pattern
+/// [`fetch_context`] uses for `CONTEXT_SCOPE_NAMES`. No scope means no running
+/// execution (a Flow trigger's `conditions`, a render outside a task run), and
+/// all five refuse by name.
+///
+/// [`classify`](super::files::classify) picks the route.
+///
+/// **An execution file** (`kestra:///…/executions/…`, W9a spec §7.2):
+///
+/// | the URI | `read` | `fileSize` | `fileExists` | `isFileEmpty` |
+/// |---|---|---|---|---|
+/// | readable, indexed | its text | its size | `true` | `size == 0` |
+/// | readable execution, no such file | error | error | **`false`** | error |
+/// | anything else | error | error | error | error |
+///
+/// `fileURI` returns it as given when it is readable. A `namespace` or
+/// `revision` argument is ignored there, as Kestra's `kestra` branch ignores
+/// both (`AbstractFileFunction.java:84-87`, `ReadFileFunction.java:50-55`, by
+/// the code; Task 1 did not measure it).
+///
+/// **A namespace file** (W9b spec §6): a bare path, `nsfile:///p`,
+/// `nsfile://other.ns/p` or `kestra:///…/_files/p[.vN]`, plus the `namespace`
+/// argument (with an authority, an error) and, on `read` and `fileURI`,
+/// `revision`. A missing path is `fileExists` `false` and an error naming it
+/// for the other four; a live directory answers `fileSize` 0, `fileExists`
+/// true, `isFileEmpty` true, and `read` and `fileURI` of it are errors naming
+/// the path (R3).
+fn file_function(
+    which: FileFunction,
+    state: &State,
+    rest: Rest<MjValue>,
+) -> Result<MjValue, MjError> {
+    use super::files::{classify, FileTarget, FileUnavailable, NsFileArgs};
+
+    let name = which.name();
+    let args = Args::new(rest);
+    let Some(path) = args.get("path", 0) else {
+        return Err(pebble_error(format!(
+            "The '{name}' function expects an argument 'path'."
+        )));
+    };
+    let Some(path) = path.as_str() else {
+        return Err(pebble_error(format!(
+            "The '{name}' function expects an argument 'path' with type string."
+        )));
+    };
+    let scope = state.lookup(super::files::FILE_SCOPE).and_then(|v| {
+        v.downcast_object_ref::<super::files::FileScopeObject>()
+            .map(|held| held.0.clone())
+    });
+    let Some(scope) = scope else {
+        return Err(pebble_error(format!(
+            "The '{name}' function needs a running execution: it reads the execution's files, \
+             and only a task run's render has them (a Flow trigger's conditions and inputs, \
+             for one, do not)."
+        )));
+    };
+    let failed = |message: &str| pebble_error(format!("The '{name}' function failed: {message}"));
+    // M1 (follow Kestra): `fileSize`, `fileExists` and `isFileEmpty` declare
+    // `path, namespace` only, and Pebble refuses an undeclared named argument
+    // with this sentence (`ArgumentsNode`) -- on either route.
+    if !which.takes_revision() && args.named_keys().any(|k| k == "revision") {
+        return Err(pebble_error(format!(
+            "The following named argument does not exist: revision (the '{name}' function \
+             takes path and namespace)"
+        )));
+    }
+
+    if classify(path) == FileTarget::Execution {
+        let meta = match scope.0.lookup(path) {
+            Ok(meta) => meta,
+            Err(FileUnavailable::Missing(_)) if matches!(which, FileFunction::Exists) => {
+                return Ok(MjValue::from(false));
+            }
+            Err(why) => return Err(failed(why.message())),
+        };
+        return Ok(match which {
+            FileFunction::Read => MjValue::from(scope.0.read_utf8(path).map_err(|m| failed(&m))?),
+            FileFunction::Size => MjValue::from(meta.size),
+            FileFunction::Exists => MjValue::from(true),
+            FileFunction::IsEmpty => MjValue::from(meta.size == 0),
+            FileFunction::Uri => MjValue::from(path),
+        });
+    }
+
+    // A namespace file. `none` is Kestra's absent argument.
+    let namespace = match args.get("namespace", 1).filter(|v| !is_java_null(v)) {
+        None => None,
+        Some(v) => match v.as_str() {
+            Some(s) => Some(s.to_string()),
+            None => {
+                return Err(pebble_error(format!(
+                    "The '{name}' function expects the 'namespace' argument to be a string."
+                )))
+            }
+        },
+    };
+    let revision = if which.takes_revision() {
+        args.get("revision", 2)
+            .filter(|v| !is_java_null(v))
+            .map(|v| v.to_string())
+    } else {
+        None
+    };
+    // `AbstractFileFunction.java:181-191`: Kestra's sentence, before anything
+    // is parsed. Storage takes the authority when there is one.
+    let authority = path
+        .strip_prefix(crate::runners::files::NSFILE_SCHEME)
+        .is_some_and(|rest| !rest.starts_with('/'));
+    if authority && namespace.is_some() {
+        return Err(failed(&format!(
+            "You cannot set a namespace both as the function argument and inside the URI \
+             ({path})"
+        )));
+    }
+    let ns_args = NsFileArgs {
+        path,
+        namespace: namespace.as_deref(),
+        revision,
+    };
+    if matches!(which, FileFunction::Read) {
+        return scope
+            .0
+            .read_namespace_file(&ns_args)
+            .map(MjValue::from)
+            .map_err(|m| failed(&m));
+    }
+    let meta = match scope.0.namespace_file(&ns_args) {
+        Ok(meta) => meta,
+        Err(FileUnavailable::Missing(_)) if matches!(which, FileFunction::Exists) => {
+            return Ok(MjValue::from(false));
+        }
+        Err(why) => return Err(failed(why.message())),
+    };
+    Ok(match which {
+        FileFunction::Size => MjValue::from(meta.size),
+        FileFunction::Exists => MjValue::from(true),
+        FileFunction::IsEmpty => MjValue::from(meta.size == 0),
+        // R3 (the user's ruling, 2026-10-05): a directory has no file URI.
+        FileFunction::Uri if meta.is_directory => {
+            return Err(failed(&format!(
+                "'{}' is a directory: it has no file URI",
+                meta.path
+            )))
+        }
+        // §6: a `kestra://` argument is returned as given, once it parsed
+        // and resolved.
+        FileFunction::Uri if path.starts_with("kestra://") => MjValue::from(path),
+        FileFunction::Uri => MjValue::from(meta.uri),
+        FileFunction::Read => unreachable!("answered above"),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// W9c Task 4: kv
+// ---------------------------------------------------------------------------
+
+/// `KvFunction` (W9c spec §6): `kv(key, namespace?, errorOnMissing?)`,
+/// positional or named (`KvFunction.java:34-36`).
+///
+/// - `key` is required: absent is Kestra's sentence; `null` is the empty key,
+///   which the key rule refuses with Kestra's sentence (w9c
+///   `kv_function.null_key`); any other non-string is refused naming it.
+/// - `namespace` absent or `null`: the running flow's namespace, walking up
+///   its parents on a dot boundary; given: that namespace only, no walk,
+///   even when it is the flow's own (`KvFunction.java:61-66`).
+/// - `errorOnMissing` defaults to **true** (`:53`); absent or `null` is the
+///   default; a non-boolean is refused naming the argument (w9c
+///   `kv_function.eom_*`, where Kestra throws a raw `ClassCastException`),
+///   before anything is looked up.
+///
+/// **The two `null` answers are read from Kestra's source, not chosen** (the
+/// artifact does not measure them; fix round 1, review concern 5), at
+/// `KvFunction.java` (`96893b589`):
+/// - `:51` `String namespace = (String) args.get(NAMESPACE_ARG);` and `:61`
+///   `if (namespace == null)` take the walk, so a `null` namespace walks
+///   exactly as an absent one;
+/// - `:53` `Optional.ofNullable((Boolean) args.get(ERROR_ON_MISSING_ARG))
+///   .orElse(true)`, so a `null` `errorOnMissing` is `true`.
+///
+/// It answers from the render's [`FileScope`](super::files::FileScope), as
+/// [`file_function`] does: no scope means no running execution (a Flow
+/// trigger's `conditions`, a corpus render), refused by name. A key that is
+/// missing (never written, soft-deleted, expired) is Kestra's sentence when
+/// `errorOnMissing`, else `null`. The value reaches the template exactly
+/// ([`kv_value`]).
+fn kv_function(state: &State, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    use super::files::{KvAnswer, KvArgs};
+
+    const DECLARED: [&str; 3] = ["key", "namespace", "errorOnMissing"];
+    let args = Args::new(rest);
+    // Pebble's own argument checks (`ArgumentsNode`), with Kestra's sentences
+    // (w9c `kv_function.too_many_args`, `unknown_named`).
+    if args.positional_only().len() > DECLARED.len() {
+        return Err(pebble_error(format!(
+            "The argument at position {} is not allowed. Only {} argument(s) are allowed.",
+            DECLARED.len() + 1,
+            DECLARED.len()
+        )));
+    }
+    if let Some(unknown) = args.named_keys().find(|k| !DECLARED.contains(k)) {
+        return Err(pebble_error(format!(
+            "The following named argument does not exist: {unknown}"
+        )));
+    }
+    let Some(key) = args.get("key", 0) else {
+        return Err(pebble_error("The 'kv' function expects an argument 'key'."));
+    };
+    let key = if is_java_null(&key) {
+        String::new()
+    } else {
+        match key.as_str() {
+            Some(k) => k.to_string(),
+            None => {
+                return Err(pebble_error(format!(
+                    "The 'kv' function expects the 'key' argument to be a string, and {} is not.",
+                    shown_argument(&key)
+                )))
+            }
+        }
+    };
+    let namespace = match args.get("namespace", 1).filter(|v| !is_java_null(v)) {
+        None => None,
+        Some(v) => match v.as_str() {
+            Some(ns) => Some(ns.to_string()),
+            None => {
+                return Err(pebble_error(format!(
+                    "The 'kv' function expects the 'namespace' argument to be a string, and {} \
+                     is not.",
+                    shown_argument(&v)
+                )))
+            }
+        },
+    };
+    let error_on_missing = match args.get("errorOnMissing", 2).filter(|v| !is_java_null(v)) {
+        None => true,
+        Some(v) if v.kind() == ValueKind::Bool => v.is_true(),
+        Some(v) => {
+            return Err(pebble_error(format!(
+                "The 'kv' function expects the 'errorOnMissing' argument to be a boolean (true \
+                 or false), and {} is not.",
+                shown_argument(&v)
+            )))
+        }
+    };
+    let scope = state.lookup(super::files::FILE_SCOPE).and_then(|v| {
+        v.downcast_object_ref::<super::files::FileScopeObject>()
+            .map(|held| held.0.clone())
+    });
+    let Some(scope) = scope else {
+        return Err(pebble_error(
+            "The 'kv' function needs a running execution: it reads the KV store as the running \
+             flow, and only a task run's render has one (a Flow trigger's conditions and \
+             inputs, for one, do not).",
+        ));
+    };
+    let answer = scope
+        .0
+        .kv(&KvArgs {
+            key: &key,
+            namespace: namespace.as_deref(),
+        })
+        .map_err(pebble_error)?;
+    match answer {
+        KvAnswer::Value(data) => kv_value(&data),
+        KvAnswer::Missing(message) if error_on_missing => Err(pebble_error(message)),
+        KvAnswer::Missing(_) => Ok(MjValue::from(())),
+    }
+}
+
+/// An argument as a refusal names it: a string quoted, anything else as it
+/// renders.
+fn shown_argument(v: &MjValue) -> String {
+    match v.as_str() {
+        Some(s) => format!("'{s}'"),
+        None => v.to_string(),
+    }
+}
+
+/// The value `kv()` hands the template: the KV store's [`KvData`] converted
+/// leaf by leaf, **never through `to_json()`** (which would make a decimal
+/// an `f64`; the user's ruling, 2026-10-07, decimals preserved exactly):
+///
+/// - a decimal is a `java.math.BigDecimal` [`filters::big_decimal`]: a bare
+///   `{{ x }}` prints its plain digits, a serialiser `BigDecimal.toString()`;
+/// - an int within `i64`/`u64`/`i128`/`u128` is that integer
+///   ([`env::integer_from_literal`]), beyond it a `java.math.BigInteger`
+///   [`filters::big_integer`];
+/// - a float is an `f64`; a string, a boolean and null are themselves; a list
+///   a list; a map an ordered map, its fields in their stored order.
+///
+/// Neither `BigNumber` is arithmetic, so `{{ kv('d') + 1 }}` fails the render
+/// naming the operator (W9c spec §15), where Kestra computes in `BigDecimal`.
+/// Both COMPARE exactly (fix round 1, the user's ruling of 2026-10-07):
+/// `kv('d') > 0.9`, `== 1.5`, `in [1.5]` go through `super::compare`.
+///
+/// A value nesting containers deeper than [`crate::storage::ion::MAX_DEPTH`]
+/// is refused before anything is built: the check walks with an explicit
+/// stack, so the conversion's recursion is bounded by it (Task 3 re-review
+/// 2, H1). The store never hands out a deeper one; this guards the seam.
+fn kv_value(data: &KvData) -> Result<MjValue, MjError> {
+    let limit = crate::storage::ion::MAX_DEPTH;
+    if data.nests_deeper_than(limit) {
+        return Err(pebble_error(format!(
+            "The 'kv' function failed: the value nests containers deeper than {limit} levels, \
+             which egret does not render"
+        )));
+    }
+    kv_value_bounded(data)
+}
+
+/// [`kv_value`] once the depth is checked.
+fn kv_value_bounded(data: &KvData) -> Result<MjValue, MjError> {
+    Ok(match data {
+        KvData::Null => MjValue::from(()),
+        KvData::Bool(b) => MjValue::from(*b),
+        KvData::Number(KvNumber::Int(digits)) => {
+            env::integer_from_literal(digits).unwrap_or_else(|| super::filters::big_integer(digits))
+        }
+        KvData::Number(KvNumber::Decimal(plain)) => {
+            super::filters::big_decimal(plain).ok_or_else(|| {
+                pebble_error(format!(
+                    "The 'kv' function failed: the stored decimal '{plain}' is not a decimal"
+                ))
+            })?
+        }
+        KvData::Number(KvNumber::Float(f)) => MjValue::from(*f),
+        KvData::String(s) => MjValue::from(s.clone()),
+        KvData::List(items) => MjValue::from(
+            items
+                .iter()
+                .map(kv_value_bounded)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        KvData::Struct(fields) => MjValue::from_object(env::OrderedMap::new(
+            fields
+                .iter()
+                .map(|(name, item)| Ok((name.clone(), kv_value_bounded(item)?)))
+                .collect::<Result<Vec<_>, MjError>>()?,
+        )),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1400,7 +1803,7 @@ fn random_port(_rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 /// `friendly-id`'s encoder passes `pad = 0` (no padding at all) and `ksuid`'s
 /// passes 27. That single argument is the whole difference between `id`'s
 /// variable length and `ksuid`'s constant one.
-fn base62(mut value: u128, pad: usize) -> String {
+pub(crate) fn base62(mut value: u128, pad: usize) -> String {
     let mut digits = Vec::new();
     while value > 0 {
         digits.push(BASE62[(value % 62) as usize]);
@@ -1456,8 +1859,8 @@ fn base62_bytes(bytes: &[u8], pad: usize) -> String {
 /// any failure satisfies — including `unknown function: secret is unknown`,
 /// which is what egret said before this task and which tells a flow author
 /// nothing. So the shape is pinned by a unit test per function instead
-/// (`runners::functions::the_twelve_refusals_name_themselves_and_their_owner`),
-/// and this one function is where the shape lives so twelve messages cannot
+/// (`runners::functions::the_eight_refusals_name_themselves_and_their_owner`),
+/// and this one function is where the shape lives so the messages cannot
 /// drift apart.
 ///
 /// Three things are in it on purpose: the function's own wire name, what it
@@ -2777,12 +3180,13 @@ mod tests {
                 "{source} through toIon"
             );
         }
-        // The `number(type='BIGDECIMAL')` path still returns the object and
-        // still has the hole. Recorded in `oracle/baseline.txt`; asserted here
-        // so it is a fact rather than a sentence, and so it fails loudly on
-        // the day `BigNumber` becomes a number.
+        // The `number(type='BIGDECIMAL')` path still returns the object, so
+        // arithmetic on it is still refused (recorded in
+        // `oracle/baseline.txt`). Its COMPARISONS are exact since W9c Task 4
+        // fix round 1 (2026-10-08): every comparison is compiled to a
+        // `super::compare` call, so `> 1` is no longer unconditionally true.
         assert!(render("{{ '1.5' | number(type='BIGDECIMAL') + 1 }}", "{}").is_err());
-        assert_eq!(ok("{{ '1' | number(type='BIGDECIMAL') > 1 }}"), "true");
+        assert_eq!(ok("{{ '1' | number(type='BIGDECIMAL') > 1 }}"), "false");
 
         // Three writer facts that path DOES get right, all fixed here: a
         // scale-0 `BigDecimal` needs Ion's `.` or it reads back as an integer;
@@ -3117,21 +3521,23 @@ mod tests {
     // evidence a refusal works, and it never will be. These are.
     // -----------------------------------------------------------------
 
-    /// The twelve names egret registers only to refuse, each asserted for its
+    /// The eight names egret registers only to refuse, each asserted for its
     /// **exact message**: the function's own name, what it needs, and the
     /// package that will implement it.
     ///
-    /// Pairs `function-secret`, `-kv`, `-read`, `-fileuri`, `-filesize`,
-    /// `-fileexists`, `-isfileempty`, `-http` (which were
-    /// `unported:task-8` until this task), and `function-render`,
-    /// `-renderonce`, `-errorlogs`, `-subflow`.
+    /// Pairs `function-secret`, `-kv`, `-fileuri`, `-http` (which were
+    /// `unported:task-8` until W2 Task 8), and `function-render`,
+    /// `-renderonce`, `-errorlogs`, `-subflow`. **W9a Task 4** took `read`,
+    /// `fileSize`, `fileExists` and `isFileEmpty` out (they answer from a
+    /// render's file scope, `file_functions` below) and gave `kv` and `fileURI`
+    /// their own packages, W9c and W9b.
     ///
     /// # These refuse unconditionally, and that is the honest answer
     ///
     /// The standing rule is that a paired test asserts a refused input **and**
     /// a neighbouring accepted one, because an entry pins *that* egret refuses
     /// and a test pins *what it says* — neither pins *which inputs*. There is
-    /// no boundary here: every one of the twelve refuses for every argument
+    /// no boundary here: every one of the eight refuses for every argument
     /// list, including none. So what this asserts instead is the two things
     /// that could actually go wrong:
     ///
@@ -3142,20 +3548,26 @@ mod tests {
     ///
     /// The second of those is belt and braces rather than the discriminating
     /// assertion, and saying so is the honest version: unregistering the
-    /// twelve dies on the `contains(&want)` assert first, because
+    /// eight dies on the `contains(&want)` assert first, because
     /// `unknown function: secret is unknown` does not contain the sentence.
     /// It earns its place only for a *different* mutation — a refusal that
     /// forwards to minijinja's unknown-name error while still being
     /// registered — and it costs one line.
+    ///
+    /// **W9c Task 4** took `kv` out: it reads the KV store over the render's
+    /// scope now. The test that held seven names is replaced by this one,
+    /// which pins six and proves a read through a fake scope.
     #[test]
-    fn the_twelve_refusals_name_themselves_and_their_owner() {
+    fn the_refused_list_is_six_and_kv_is_not_in_it() {
+        // W9b Task 4: `fileURI` left the list; W9c Task 4: `kv`.
+        for gone in ["fileURI", "kv"] {
+            assert!(
+                !REFUSED.iter().any(|(name, _)| *name == gone),
+                "{gone} is implemented, not refused"
+            );
+        }
+        assert_eq!(REFUSED.len(), 6);
         let expected = [
-            ("kv", "the namespace KV store", "W9"),
-            ("read", "internal storage and namespace files", "W9"),
-            ("fileURI", "namespace files", "W9"),
-            ("fileSize", "internal storage and namespace files", "W9"),
-            ("fileExists", "internal storage and namespace files", "W9"),
-            ("isFileEmpty", "internal storage and namespace files", "W9"),
             ("http", "an outbound HTTP client", "W9"),
             ("render", "an execution context to render against", "W3"),
             ("renderOnce", "an execution context to render against", "W3"),
@@ -3198,6 +3610,20 @@ mod tests {
                 );
             }
         }
+
+        // `kv` is a function now: with a scope it answers the stored value,
+        // and without one it is refused by its own sentence (the corpus's
+        // `function-kv` render has none), never "unknown".
+        let cx = kv_fn::FakeKv::default()
+            .with("k", crate::storage::kv::value::KvData::String("v".into()))
+            .cx();
+        assert_eq!(kv_fn::render("{{ kv('k') }}", &cx).unwrap(), "v");
+        let message = err("{{ kv(key='my-key') }}");
+        assert!(
+            message.contains("The 'kv' function needs a running execution"),
+            "{message}"
+        );
+        assert!(!message.contains("is unknown"), "{message}");
     }
 
     /// `env` — the two refusals, and the accepted neighbour of each.
@@ -3714,5 +4140,1029 @@ mod tests {
             "java.lang.Double"
         );
         assert_eq!(ok("{{ yaml(yaml=('1e5' | yaml)) }}"), "100000.0");
+    }
+
+    // -----------------------------------------------------------------
+    // W9a Task 4: the four file functions, over a fake scope.
+    // -----------------------------------------------------------------
+
+    mod file_functions {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        use crate::runners::env::{render_bound, render_str, RenderContext};
+        use std::sync::Mutex;
+
+        use crate::runners::files::{
+            FileMeta, FileScope, FileUnavailable, NsFileArgs, NsFileMeta, RenderFiles, FILE_SCOPE,
+        };
+
+        /// A `RenderFiles` over a map: what each URI resolves to, and its text.
+        /// W9b: namespace files by their `path` argument as given, and a spy
+        /// of which route each call took.
+        #[derive(Default)]
+        struct Fake {
+            meta: BTreeMap<String, Result<FileMeta, FileUnavailable>>,
+            text: BTreeMap<String, String>,
+            ns: BTreeMap<String, Result<NsFileMeta, FileUnavailable>>,
+            ns_text: BTreeMap<String, String>,
+            calls: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl Fake {
+            fn file(mut self, uri: &str, text: &str) -> Self {
+                self.meta.insert(
+                    uri.into(),
+                    Ok(FileMeta {
+                        size: text.len() as u64,
+                    }),
+                );
+                self.text.insert(uri.into(), text.into());
+                self
+            }
+            fn gone(mut self, uri: &str, why: FileUnavailable) -> Self {
+                self.meta.insert(uri.into(), Err(why));
+                self
+            }
+            fn cx(self) -> RenderContext {
+                RenderContext::new().with_files(FileScope(Arc::new(self)))
+            }
+            /// A namespace file at `path` (as the template passes it).
+            fn ns_file(mut self, path: &str, uri: &str, text: &str) -> Self {
+                self.ns.insert(
+                    path.into(),
+                    Ok(NsFileMeta {
+                        path: path.into(),
+                        size: text.len() as u64,
+                        is_directory: false,
+                        uri: uri.into(),
+                    }),
+                );
+                self.ns_text.insert(path.into(), text.into());
+                self
+            }
+            fn ns_dir(mut self, path: &str) -> Self {
+                self.ns.insert(
+                    path.into(),
+                    Ok(NsFileMeta {
+                        // The stored form storage answers: no trailing '/'.
+                        path: format!("/{}", path.trim_matches('/')),
+                        size: 0,
+                        is_directory: true,
+                        uri: String::new(),
+                    }),
+                );
+                self
+            }
+            fn ns_gone(mut self, path: &str, why: FileUnavailable) -> Self {
+                self.ns.insert(path.into(), Err(why));
+                self
+            }
+            fn spy(&self) -> Arc<Mutex<Vec<String>>> {
+                self.calls.clone()
+            }
+            fn record(&self, call: String) {
+                self.calls.lock().unwrap().push(call);
+            }
+        }
+
+        impl RenderFiles for Fake {
+            fn lookup(&self, uri: &str) -> Result<FileMeta, FileUnavailable> {
+                self.meta.get(uri).cloned().unwrap_or_else(|| {
+                    Err(FileUnavailable::Refused(format!("{uri} not in the fake")))
+                })
+            }
+            fn read_utf8(&self, uri: &str) -> Result<String, String> {
+                self.lookup(uri).map_err(|e| e.message().to_string())?;
+                Ok(self.text[uri].clone())
+            }
+            fn read_bytes(&self, uri: &str, _whole: &str) -> Result<Vec<u8>, String> {
+                self.read_utf8(uri).map(String::into_bytes)
+            }
+            fn task_prefix(&self) -> Option<&str> {
+                None
+            }
+            fn namespace_file(&self, args: &NsFileArgs<'_>) -> Result<NsFileMeta, FileUnavailable> {
+                self.record(format!(
+                    "namespace_file {} ns={:?} rev={:?}",
+                    args.path, args.namespace, args.revision
+                ));
+                self.ns.get(args.path).cloned().unwrap_or_else(|| {
+                    Err(FileUnavailable::Refused(format!(
+                        "{} not in the fake",
+                        args.path
+                    )))
+                })
+            }
+            fn read_namespace_file(&self, args: &NsFileArgs<'_>) -> Result<String, String> {
+                self.record(format!(
+                    "read_namespace_file {} ns={:?} rev={:?}",
+                    args.path, args.namespace, args.revision
+                ));
+                match self.ns.get(args.path) {
+                    Some(Ok(_)) => Ok(self.ns_text[args.path].clone()),
+                    Some(Err(why)) => Err(why.message().to_string()),
+                    None => Err(format!("{} not in the fake", args.path)),
+                }
+            }
+        }
+
+        /// A `RenderFiles` that records which route a call took and
+        /// answers every one: the spy of the routing test.
+        fn spied() -> (RenderContext, Arc<Mutex<Vec<String>>>) {
+            let fake = Fake::default()
+                .file(OWN, "own content")
+                .ns_file("data/x.csv", "kestra:///w9b/fn/_files/data/x.csv", "x")
+                .ns_file(
+                    "nsfile:///data/x.csv",
+                    "kestra:///w9b/fn/_files/data/x.csv",
+                    "x",
+                )
+                .ns_file(
+                    "kestra:///w9b/fn/_files/data/x.csv",
+                    "kestra:///w9b/fn/_files/data/x.csv",
+                    "x",
+                );
+            let spy = fake.spy();
+            (fake.cx(), spy)
+        }
+
+        const OWN: &str = "kestra:///w9a/storage/ff-main/executions/2G1i2hGvCOdQ5cwWChXwwu/tasks/w/6fG4Jp3jvbNakpAsBdWyGO/own.txt";
+        const EMPTY: &str = "kestra:///w9a/storage/ff-main/executions/2G1i2hGvCOdQ5cwWChXwwu/tasks/w/6fG4Jp3jvbNakpAsBdWyGO/empty.txt";
+        /// `file_functions.missing_in_own`'s URI, written LITERALLY (Kestra's
+        /// probe assembled it with `~ execution.id ~`, which egret's
+        /// snapshot ruling answers differently -- see `tests/storage_render.rs`).
+        const NOPE: &str = "kestra:///w9a/storage/ff-main/executions/2G1i2hGvCOdQ5cwWChXwwu/tasks/w/6fG4Jp3jvbNakpAsBdWyGO/nope.txt";
+
+        const FOUR: [&str; 4] = ["read", "fileSize", "fileExists", "isFileEmpty"];
+
+        fn call(name: &str, uri: &str, cx: &RenderContext) -> Result<String, String> {
+            render_str(&format!("{{{{ {name}('{uri}') }}}}"), cx).map_err(|e| e.to_string())
+        }
+
+        /// `w9a-storage.json` `file_functions.own` and `file_functions_extra.own_empty`,
+        /// each value the artifact's, and the argument passed both ways.
+        #[test]
+        fn the_four_functions_answer_from_the_scope() {
+            let cx = Fake::default()
+                .file(OWN, "own content")
+                .file(EMPTY, "")
+                .cx();
+            for (name, own, empty) in [
+                ("read", "own content", ""),
+                ("fileSize", "11", "0"),
+                ("fileExists", "true", "true"),
+                ("isFileEmpty", "false", "true"),
+            ] {
+                assert_eq!(call(name, OWN, &cx).as_deref(), Ok(own), "{name}");
+                assert_eq!(call(name, EMPTY, &cx).as_deref(), Ok(empty), "{name} empty");
+                assert_eq!(
+                    render_str(&format!("{{{{ {name}(path='{OWN}') }}}}"), &cx)
+                        .map_err(|e| e.to_string())
+                        .as_deref(),
+                    Ok(own),
+                    "{name}(path=…)"
+                );
+            }
+            // fileSize is a number, not text: it compares.
+            assert_eq!(
+                render_str(&format!("{{{{ fileSize('{OWN}') > 10 }}}}"), &cx).unwrap(),
+                "true"
+            );
+        }
+
+        /// `file_functions.missing_in_own`: `fileExists` is `false`, the other
+        /// three fail naming the URI.
+        #[test]
+        fn file_exists_on_a_missing_file_is_the_artifacts_answer() {
+            let cx = Fake::default()
+                .gone(
+                    NOPE,
+                    FileUnavailable::Missing(format!("{NOPE} does not exist")),
+                )
+                .cx();
+            assert_eq!(call("fileExists", NOPE, &cx).as_deref(), Ok("false"));
+            for name in ["read", "fileSize", "isFileEmpty"] {
+                let err = call(name, NOPE, &cx).unwrap_err();
+                assert!(
+                    err.contains(&format!("{NOPE} does not exist")),
+                    "{name}: {err}"
+                );
+                assert!(err.contains(&format!("'{name}'")), "{name}: {err}");
+            }
+        }
+
+        /// `file_functions.unrelated_same_namespace` (chosen: NotReadable) and
+        /// `file_functions.malformed`, `file_functions_extra.malformed_dotdot`
+        /// and `.malformed_scheme`: all four FAIL, `fileExists` included.
+        #[test]
+        fn every_other_unreadable_uri_is_an_error_naming_it() {
+            let unrelated = "kestra:///w9a/storage/ff-other/executions/3Hq/tasks/w/x/u.txt";
+            let malformed = "kestra:///not-an-execution-file.txt";
+            let dotdot = "kestra:///w9a/storage/ff-main/executions/2G1i2hGvCOdQ5cwWChXwwu/tasks/w/../../../../other/x.txt";
+            let cx = Fake::default()
+                .gone(
+                    unrelated,
+                    FileUnavailable::Refused(format!(
+                        "{unrelated} belongs to an execution this flow may not read"
+                    )),
+                )
+                .gone(
+                    malformed,
+                    FileUnavailable::Refused(format!(
+                        "{malformed} is not a storage URI egret can read: x"
+                    )),
+                )
+                .gone(
+                    dotdot,
+                    FileUnavailable::Refused(format!(
+                        "{dotdot} is not a storage URI egret can read: .."
+                    )),
+                )
+                .cx();
+            for uri in [unrelated, malformed, dotdot, "s3://bucket/key.txt"] {
+                for name in FOUR {
+                    let err = call(name, uri, &cx).unwrap_err();
+                    assert!(err.contains(uri), "{name}({uri}): {err}");
+                }
+            }
+        }
+
+        #[test]
+        fn without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution() {
+            for name in FOUR.into_iter().chain(["fileURI"]) {
+                let err = call(name, OWN, &RenderContext::new()).unwrap_err();
+                assert!(
+                    err.contains(&format!("The '{name}' function needs a running execution")),
+                    "{name}: {err}"
+                );
+                assert!(!err.contains("is unknown"), "{name}: {err}");
+            }
+        }
+
+        /// W9b `file_uri.present_rev3`: the URI of the revision storage resolved.
+        #[test]
+        fn file_uri_returns_the_resolved_revisions_uri() {
+            let cx = Fake::default()
+                .ns_file(
+                    "/fu/three.txt",
+                    "kestra:///w9b/fn/_files/fu/three.txt.v3",
+                    "r3",
+                )
+                .cx();
+            assert_eq!(
+                render_str("{{ fileURI('/fu/three.txt') }}", &cx).unwrap(),
+                "kestra:///w9b/fn/_files/fu/three.txt.v3"
+            );
+        }
+
+        /// §6: a `kestra://` argument comes back as given once it parses --
+        /// storage answers its metadata, and the function returns the
+        /// ARGUMENT, not the metadata's URI (the fake makes them differ).
+        /// An execution URI is returned too, once readable; one storage
+        /// refuses is an error naming it.
+        #[test]
+        fn file_uri_of_a_kestra_uri_returns_it_unchanged_after_it_parses() {
+            let ns_uri = "kestra:///w9b/fn/_files/fu/one.txt";
+            let bad = "kestra:///w9b/fn/_files/a/../b";
+            let cx = Fake::default()
+                .ns_file(ns_uri, "kestra:///somewhere/else", "one")
+                .ns_gone(
+                    bad,
+                    FileUnavailable::Refused(format!(
+                        "{bad} is not a storage URI egret can read: '..'"
+                    )),
+                )
+                .file(OWN, "own content")
+                .cx();
+            assert_eq!(
+                render_str(&format!("{{{{ fileURI('{ns_uri}') }}}}"), &cx).unwrap(),
+                ns_uri
+            );
+            assert_eq!(
+                render_str(&format!("{{{{ fileURI('{OWN}') }}}}"), &cx).unwrap(),
+                OWN
+            );
+            let err = render_str(&format!("{{{{ fileURI('{bad}') }}}}"), &cx)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(bad) && err.contains("'fileURI'"), "{err}");
+        }
+
+        /// `file_uri._extra.authority_and_namespace_arg`,
+        /// `read.nsfile_other_with_namespace_arg` (measured): Kestra's
+        /// sentence, for all five, and storage is never asked. The control:
+        /// the same namespace argument beside `nsfile:///` (no authority) is
+        /// passed on (`read._extra.nsfile_own_with_namespace_arg`).
+        #[test]
+        fn a_namespace_argument_together_with_an_authority_is_an_error() {
+            for name in ["read", "fileSize", "fileExists", "isFileEmpty", "fileURI"] {
+                let fake = Fake::default()
+                    .ns_file(
+                        "nsfile://w9b.other/o.txt",
+                        "kestra:///w9b/other/_files/o.txt",
+                        "o",
+                    )
+                    .ns_file("nsfile:///o.txt", "kestra:///w9b/other/_files/o.txt", "o");
+                let spy = fake.spy();
+                let cx = fake.cx();
+                let err = render_str(
+                    &format!("{{{{ {name}('nsfile://w9b.other/o.txt', namespace='w9b.other') }}}}"),
+                    &cx,
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(
+                    err.contains(
+                        "You cannot set a namespace both as the function argument and inside the URI"
+                    ) && err.contains("nsfile://w9b.other/o.txt"),
+                    "{name}: {err}"
+                );
+                assert!(spy.lock().unwrap().is_empty(), "{name}: storage was asked");
+                render_str(
+                    &format!("{{{{ {name}('nsfile:///o.txt', namespace='w9b.other') }}}}"),
+                    &cx,
+                )
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+                let calls = spy.lock().unwrap();
+                assert_eq!(calls.len(), 1, "{name}: {calls:?}");
+                assert!(
+                    calls[0].contains("ns=Some(\"w9b.other\")"),
+                    "{name}: {calls:?}"
+                );
+            }
+        }
+
+        /// The route: a bare path, `nsfile://` and a `kestra:///…/_files/…`
+        /// URI reach the namespace methods, with `namespace` and (for read
+        /// and fileURI) `revision` handed on; an execution URI reaches W9a's.
+        #[test]
+        fn a_bare_path_and_nsfile_reach_the_namespace_route_and_an_execution_uri_does_not() {
+            for (name, method) in [
+                ("read", "read_namespace_file"),
+                ("fileSize", "namespace_file"),
+                ("fileExists", "namespace_file"),
+                ("isFileEmpty", "namespace_file"),
+                ("fileURI", "namespace_file"),
+            ] {
+                for path in [
+                    "data/x.csv",
+                    "nsfile:///data/x.csv",
+                    "kestra:///w9b/fn/_files/data/x.csv",
+                ] {
+                    let (cx, spy) = spied();
+                    render_str(&format!("{{{{ {name}('{path}') }}}}"), &cx)
+                        .unwrap_or_else(|e| panic!("{name}({path}): {e}"));
+                    assert_eq!(
+                        *spy.lock().unwrap(),
+                        vec![format!("{method} {path} ns=None rev=None")],
+                        "{name}({path})"
+                    );
+                }
+                let (cx, spy) = spied();
+                render_str(&format!("{{{{ {name}('{OWN}') }}}}"), &cx)
+                    .unwrap_or_else(|e| panic!("{name}(OWN): {e}"));
+                assert!(spy.lock().unwrap().is_empty(), "{name}: an execution URI");
+            }
+            // `namespace` for all five, positional or named; `revision` on
+            // read and fileURI only (Kestra's declared names).
+            let (cx, spy) = spied();
+            render_str("{{ read('data/x.csv', 'w9b.fn', 2) }}", &cx).unwrap();
+            render_str("{{ fileURI('data/x.csv', revision='x') }}", &cx).unwrap();
+            render_str("{{ fileSize('data/x.csv', namespace='w9b.fn') }}", &cx).unwrap();
+            assert_eq!(
+                *spy.lock().unwrap(),
+                vec![
+                    "read_namespace_file data/x.csv ns=Some(\"w9b.fn\") rev=Some(\"2\")"
+                        .to_string(),
+                    "namespace_file data/x.csv ns=None rev=Some(\"x\")".to_string(),
+                    "namespace_file data/x.csv ns=Some(\"w9b.fn\") rev=None".to_string(),
+                ]
+            );
+        }
+
+        /// M1 (follow Kestra): `fileSize`, `fileExists` and `isFileEmpty`
+        /// declare `path, namespace` only, and Pebble refuses an undeclared
+        /// named argument (`The following named argument does not exist`),
+        /// on either route, before storage is asked. `read` and `fileURI`
+        /// take it (the control).
+        #[test]
+        fn the_three_metadata_functions_refuse_a_revision_argument() {
+            for name in ["fileSize", "fileExists", "isFileEmpty"] {
+                for path in ["data/x.csv", OWN] {
+                    let (cx, spy) = spied();
+                    let err = render_str(&format!("{{{{ {name}('{path}', revision=2) }}}}"), &cx)
+                        .unwrap_err()
+                        .to_string();
+                    assert!(
+                        err.contains("The following named argument does not exist: revision")
+                            && err.contains(&format!("'{name}'")),
+                        "{name}({path}): {err}"
+                    );
+                    assert!(spy.lock().unwrap().is_empty(), "{name}: storage was asked");
+                }
+            }
+            let (cx, _) = spied();
+            for name in ["read", "fileURI"] {
+                render_str(&format!("{{{{ {name}('data/x.csv', revision=2) }}}}"), &cx)
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+            }
+        }
+
+        /// `four_functions_ns.*.missing`: `fileExists` is `false`; the other
+        /// four fail naming the path.
+        #[test]
+        fn file_exists_of_a_missing_namespace_file_is_false() {
+            let cx = Fake::default()
+                .ns_gone(
+                    "/fu/nope.txt",
+                    FileUnavailable::Missing(
+                        "namespace file '/fu/nope.txt' does not exist in namespace 'w9b.fn'".into(),
+                    ),
+                )
+                .cx();
+            assert_eq!(
+                call("fileExists", "/fu/nope.txt", &cx).as_deref(),
+                Ok("false")
+            );
+            for name in ["read", "fileSize", "isFileEmpty", "fileURI"] {
+                let err = call(name, "/fu/nope.txt", &cx).unwrap_err();
+                assert!(
+                    err.contains("'/fu/nope.txt' does not exist")
+                        && err.contains(&format!("'{name}'")),
+                    "{name}: {err}"
+                );
+            }
+            // A refusal is not a missing file: fileExists fails too.
+            let cx = Fake::default()
+                .ns_gone(
+                    "nsfile://w9b._files/x",
+                    FileUnavailable::Refused(
+                        "namespace 'w9b._files' has a segment '_files'".into(),
+                    ),
+                )
+                .cx();
+            let err = call("fileExists", "nsfile://w9b._files/x", &cx).unwrap_err();
+            assert!(err.contains("w9b._files"), "{err}");
+        }
+
+        /// R3: `fileURI` of a directory is an error naming the path; the
+        /// other three answer from the directory's row
+        /// (`four_functions_ns.*.directory`, `file_uri._extra.directory`,
+        /// `uri.directory`).
+        #[test]
+        fn file_uri_of_a_directory_is_an_error_naming_the_path() {
+            let cx = Fake::default().ns_dir("fu").ns_dir("/d/").cx();
+            // M7: the message names the stored form storage answered, not the
+            // argument as written (`'/d'` for `'/d/'`, `'/fu'` for `'fu'`).
+            for (path, named) in [("fu", "/fu"), ("/d/", "/d")] {
+                let err = call("fileURI", path, &cx).unwrap_err();
+                assert!(
+                    err.contains(&format!("'{named}' is a directory"))
+                        && err.contains("no file URI"),
+                    "{path}: {err}"
+                );
+            }
+            for (name, want) in [
+                ("fileSize", "0"),
+                ("fileExists", "true"),
+                ("isFileEmpty", "true"),
+            ] {
+                assert_eq!(call(name, "fu", &cx).as_deref(), Ok(want), "{name}");
+            }
+        }
+
+        /// No argument, and a non-string one.
+        #[test]
+        fn the_path_argument_is_required_and_a_string() {
+            let cx = Fake::default().cx();
+            for name in FOUR {
+                let err = render_str(&format!("{{{{ {name}() }}}}"), &cx)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    err.contains(&format!("The '{name}' function expects an argument 'path'")),
+                    "{err}"
+                );
+                let err = render_str(&format!("{{{{ {name}(42) }}}}"), &cx)
+                    .unwrap_err()
+                    .to_string();
+                assert!(err.contains("with type string"), "{err}");
+            }
+        }
+
+        /// The probes `the_context_scope_global_is_unreachable_from_a_template`
+        /// uses, aimed at [`FILE_SCOPE`] -- and `fetchContext()` does not
+        /// list it either, with a scope attached.
+        #[test]
+        fn the_file_scope_global_is_unreachable_from_a_template() {
+            assert!(FILE_SCOPE.contains(' '));
+            let cx = Fake::default().file(OWN, "own content").cx();
+            let message =
+                render_str(&format!("{{{{ {FILE_SCOPE} }}}}"), &cx).expect_err("must not parse");
+            assert!(message.to_string().contains("syntax error"), "{message}");
+            assert!(render_str("{{ egret }}", &cx).is_err());
+            let all = render_str("{{ fetchContext() }}", &cx).unwrap();
+            assert!(!all.contains("egret"), "{all}");
+            // The control: the scope IS bound on this render.
+            assert_eq!(call("fileSize", OWN, &cx).as_deref(), Ok("11"));
+        }
+
+        /// `egret.sql` renders `sql:` on the OTHER render thread
+        /// (`render_bound`); the scope must reach it too.
+        #[test]
+        fn the_file_functions_render_inside_an_egret_sql_statement() {
+            let cx = Fake::default().file(OWN, "own content").cx();
+            let (sql, binds) =
+                render_bound(&format!("SELECT {{{{ fileSize('{OWN}') }}}}"), &cx).unwrap();
+            assert_eq!(sql, "SELECT ?");
+            assert_eq!(binds, vec![serde_json::json!(11)]);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // W9c Task 4: `kv()`, over a fake scope.
+    // -----------------------------------------------------------------
+
+    pub(super) mod kv_fn {
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        use crate::runners::env::{render_str, RenderContext};
+        use crate::runners::files::{
+            FileMeta, FileScope, FileUnavailable, KvAnswer, KvArgs, RenderFiles,
+        };
+        use crate::storage::kv::value::{decode, KvData, KvNumber, KvType};
+
+        /// A `RenderFiles` answering `kv()` from a map by key, and a spy of
+        /// what each call asked. A key not in the map is missing, with the
+        /// sentence a real scope writes for namespace `w9c.fn`.
+        #[derive(Default)]
+        pub(in super::super) struct FakeKv {
+            values: BTreeMap<String, Result<KvAnswer, String>>,
+            calls: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl FakeKv {
+            pub(in super::super) fn with(mut self, key: &str, data: KvData) -> Self {
+                self.values.insert(key.into(), Ok(KvAnswer::Value(data)));
+                self
+            }
+            fn refusing(mut self, key: &str, why: &str) -> Self {
+                self.values.insert(key.into(), Err(why.into()));
+                self
+            }
+            fn spy(&self) -> Arc<Mutex<Vec<String>>> {
+                self.calls.clone()
+            }
+            pub(in super::super) fn cx(self) -> RenderContext {
+                RenderContext::new().with_files(FileScope(Arc::new(self)))
+            }
+        }
+
+        impl RenderFiles for FakeKv {
+            fn lookup(&self, uri: &str) -> Result<FileMeta, FileUnavailable> {
+                Err(FileUnavailable::Refused(format!("{uri} not in the fake")))
+            }
+            fn read_utf8(&self, uri: &str) -> Result<String, String> {
+                Err(format!("{uri} not in the fake"))
+            }
+            fn read_bytes(&self, uri: &str, _whole: &str) -> Result<Vec<u8>, String> {
+                Err(format!("{uri} not in the fake"))
+            }
+            fn task_prefix(&self) -> Option<&str> {
+                None
+            }
+            fn kv(&self, args: &KvArgs<'_>) -> Result<KvAnswer, String> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("{} ns={:?}", args.key, args.namespace));
+                self.values.get(args.key).cloned().unwrap_or_else(|| {
+                    Ok(KvAnswer::Missing(format!(
+                        "The key '{}' does not exist in the namespace 'w9c.fn'.",
+                        args.key
+                    )))
+                })
+            }
+        }
+
+        pub(in super::super) fn render(
+            template: &str,
+            cx: &RenderContext,
+        ) -> Result<String, String> {
+            render_str(template, cx).map_err(|e| e.to_string())
+        }
+
+        fn fixture() -> serde_json::Value {
+            serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/oracle-exec/w9c-kv.json"
+            )))
+            .unwrap()
+        }
+
+        fn int(s: &str) -> KvData {
+            KvData::Number(KvNumber::Int(s.into()))
+        }
+
+        fn dec(s: &str) -> KvData {
+            KvData::Number(KvNumber::Decimal(s.into()))
+        }
+
+        /// `{a: 1}`, w9c `kv_function._setup`'s `k`.
+        fn a_one() -> KvData {
+            KvData::Struct(vec![("a".into(), int("1"))])
+        }
+
+        /// `KvFunction.java:34-36`: `key`, `namespace`, `errorOnMissing`, in
+        /// that order, positionally or by name, or mixed; `namespace`
+        /// absent or null asks for the walk (`None`).
+        #[test]
+        fn kv_takes_key_namespace_and_error_on_missing_positionally_or_by_name() {
+            let fake = FakeKv::default().with("k", KvData::String("v".into()));
+            let spy = fake.spy();
+            let cx = fake.cx();
+            for (call, asked) in [
+                ("{{ kv('k') }}", "k ns=None"),
+                ("{{ kv(key='k') }}", "k ns=None"),
+                ("{{ kv('k', null) }}", "k ns=None"),
+                ("{{ kv('k', 'w9c.other') }}", "k ns=Some(\"w9c.other\")"),
+                (
+                    "{{ kv(namespace='w9c.other', key='k') }}",
+                    "k ns=Some(\"w9c.other\")",
+                ),
+                (
+                    "{{ kv('k', namespace='w9c.other') }}",
+                    "k ns=Some(\"w9c.other\")",
+                ),
+                (
+                    "{{ kv('k', 'w9c.other', true) }}",
+                    "k ns=Some(\"w9c.other\")",
+                ),
+                ("{{ kv(key='k', errorOnMissing=false) }}", "k ns=None"),
+            ] {
+                spy.lock().unwrap().clear();
+                assert_eq!(render(call, &cx).unwrap(), "v", "{call}");
+                assert_eq!(*spy.lock().unwrap(), vec![asked.to_string()], "{call}");
+            }
+            // The third argument, either way, on a missing key.
+            for call in [
+                "{{ kv('missing', 'w9c.fn', false) }}",
+                "{{ kv('missing', errorOnMissing=false) }}",
+                "{{ kv(errorOnMissing=false, key='missing') }}",
+            ] {
+                assert_eq!(render(call, &cx).unwrap(), "", "{call}");
+            }
+            for call in [
+                "{{ kv('missing', 'w9c.fn', true) }}",
+                "{{ kv('missing', errorOnMissing=true) }}",
+            ] {
+                assert!(
+                    render(call, &cx)
+                        .unwrap_err()
+                        .contains("The key 'missing' does not exist in the namespace 'w9c.fn'."),
+                    "{call}"
+                );
+            }
+        }
+
+        /// w9c `kv_function.no_key`, `no_key_ns_only` (measured), and Pebble's
+        /// own argument checks (`too_many_args`, `unknown_named`, whose
+        /// sentences are the artifact's raw messages); `null_key` hands the
+        /// scope the empty key, which the key rule refuses with Kestra's
+        /// sentence.
+        #[test]
+        fn kv_without_a_key_is_kestras_sentence() {
+            let fake = FakeKv::default().with("k", KvData::String("v".into()));
+            let spy = fake.spy();
+            let cx = fake.cx();
+            for call in ["{{ kv() }}", "{{ kv(namespace='w9c.fn') }}"] {
+                let e = render(call, &cx).unwrap_err();
+                assert!(
+                    e.contains("The 'kv' function expects an argument 'key'."),
+                    "{call}: {e}"
+                );
+            }
+            let e = render("{{ kv('k', 'w9c.fn', false, 1) }}", &cx).unwrap_err();
+            assert!(
+                e.contains(
+                    "The argument at position 4 is not allowed. Only 3 argument(s) are allowed."
+                ),
+                "{e}"
+            );
+            let e = render("{{ kv(key='k', foo=1) }}", &cx).unwrap_err();
+            assert!(
+                e.contains("The following named argument does not exist: foo"),
+                "{e}"
+            );
+            assert!(spy.lock().unwrap().is_empty(), "nothing was looked up");
+            let _ = render("{{ kv(null) }}", &cx);
+            assert_eq!(*spy.lock().unwrap(), vec![" ns=None".to_string()]);
+            let e = render("{{ kv(1) }}", &cx).unwrap_err();
+            assert!(e.contains("'key'") && e.contains("string"), "{e}");
+            let e = render("{{ kv('k', 1) }}", &cx).unwrap_err();
+            assert!(e.contains("'namespace'") && e.contains("string"), "{e}");
+        }
+
+        /// `KvFunction.java:53`: `errorOnMissing` defaults to TRUE. Missing
+        /// is an error carrying the scope's sentence; `false` is `null`
+        /// (w9c `kv_function.missing_*`, `field_missing_safe`). The cell
+        /// `missing_eom_false_is_null` writes Pebble's `is null`, a test
+        /// egret's renderer does not bind (`env.rs`'s fence keeps it
+        /// unknown, as it does `is none`); `== null` asks the same of the
+        /// value.
+        #[test]
+        fn kv_error_on_missing_defaults_to_true() {
+            let cx = FakeKv::default().cx();
+            let e = render("{{ kv('missing') }}", &cx).unwrap_err();
+            assert!(
+                e.contains("The key 'missing' does not exist in the namespace 'w9c.fn'."),
+                "{e}"
+            );
+            let e = render("{{ kv('missing', errorOnMissing=null) }}", &cx).unwrap_err();
+            assert!(e.contains("does not exist"), "null is the default: {e}");
+            for (call, want) in [
+                ("{{ kv('missing', errorOnMissing=false) }}", ""),
+                ("{{ kv('missing', errorOnMissing=false) == null }}", "true"),
+                (
+                    "{{ kv('missing', errorOnMissing=false) ?? 'dflt' }}",
+                    "dflt",
+                ),
+                ("{{ kv('missing', errorOnMissing=false).a ?? 'n' }}", "n"),
+            ] {
+                assert_eq!(render(call, &cx).unwrap(), want, "{call}");
+            }
+            // A refusal is not missing: errorOnMissing=false does not hide it.
+            let cx = FakeKv::default().refusing("r", "refused, naming r").cx();
+            let e = render("{{ kv('r', errorOnMissing=false) }}", &cx).unwrap_err();
+            assert!(e.contains("refused, naming r"), "{e}");
+        }
+
+        /// w9c `types.<T>.kv_prints` (and `kv_tojson` where measured): the
+        /// artifact's own bytes, decoded as the store decodes them, then
+        /// rendered through `kv()`. 39 rows, every type.
+        #[test]
+        fn kv_returns_each_type_as_kestras_kv_printed_it() {
+            let f = fixture();
+            let types = f["egret_expected"]["types"].as_object().unwrap();
+            let (mut examined, mut tojson) = (0, 0);
+            for (name, cell) in types {
+                if name.starts_with('_') {
+                    continue;
+                }
+                let kind = KvType::parse(cell["api"]["type"].as_str().unwrap()).unwrap();
+                let bytes = cell["ion_bytes"].as_str().unwrap();
+                let data = decode(kind, bytes.as_bytes(), 1 << 20).unwrap();
+                let cx = FakeKv::default().with("x", data).cx();
+                assert_eq!(
+                    render("{{ kv('x') }}", &cx).unwrap(),
+                    cell["kv_prints"].as_str().unwrap(),
+                    "{name}"
+                );
+                if let Some(want) = cell.get("kv_tojson").and_then(|v| v.as_str()) {
+                    assert_eq!(
+                        render("{{ kv('x') | toJson }}", &cx).unwrap(),
+                        want,
+                        "{name} | toJson"
+                    );
+                    tojson += 1;
+                }
+                examined += 1;
+            }
+            assert_eq!(examined, 39, "every types row");
+            assert!(tojson > 20, "{tojson} toJson rows");
+        }
+
+        /// The user's ruling (2026-10-07): decimals reach the template
+        /// exactly. A decimal is a `java.math.BigDecimal` that prints every
+        /// digit; an int past `u128` a `java.math.BigInteger`; a float an
+        /// `f64`.
+        #[test]
+        fn kv_renders_a_decimal_and_a_big_int_exactly() {
+            let cx = FakeKv::default()
+                .with("d", dec("123456789012345678901234567890.5"))
+                .with("big", int("123456789012345678901234567890123456789012"))
+                .with("f", KvData::Number(KvNumber::Float(1.5)))
+                .with("tiny", dec("0.0000001"))
+                .with("scaled", dec("1.50"))
+                .cx();
+            for (call, want) in [
+                ("{{ kv('d') }}", "123456789012345678901234567890.5"),
+                ("{{ kv('d') | className }}", "java.math.BigDecimal"),
+                ("{{ [kv('d')] }}", "[123456789012345678901234567890.5]"),
+                ("{{ kv('d') | toJson }}", "123456789012345678901234567890.5"),
+                (
+                    "{{ kv('big') }}",
+                    "123456789012345678901234567890123456789012",
+                ),
+                ("{{ kv('big') | className }}", "java.math.BigInteger"),
+                ("{{ kv('f') }}", "1.5"),
+                ("{{ kv('tiny') }}", "0.0000001"),
+                // BigDecimal.toString() past the -6 adjusted exponent.
+                ("{{ kv('tiny') | toJson }}", "1E-7"),
+                ("{{ kv('scaled') }}", "1.50"),
+            ] {
+                assert_eq!(render(call, &cx).unwrap(), want, "{call}");
+            }
+        }
+
+        /// Fix round 3, re-review P4 (W9c spec §15): arithmetic on an exact
+        /// decimal, or on an int past `i128`, fails the render naming the
+        /// operator (minijinja's `InvalidOperation`), and nothing is
+        /// rounded; an int within `i128` and a float compute.
+        #[test]
+        fn arithmetic_on_an_exact_decimal_or_big_int_is_a_named_refusal() {
+            let cx = FakeKv::default()
+                .with("d", dec("1.5"))
+                .with("big", int(&"9".repeat(40)))
+                .with("i", int("41"))
+                .with("f", KvData::Number(KvNumber::Float(1.5)))
+                .cx();
+            for (call, op) in [
+                ("{{ kv('d') + 1 }}", "+"),
+                ("{{ kv('big') * 2 }}", "*"),
+                ("{{ 1 - kv('d') }}", "-"),
+            ] {
+                let e = render(call, &cx).expect_err(call);
+                assert!(
+                    e.contains(&format!("tried to use {op} operator"))
+                        && e.contains("unsupported types"),
+                    "{call}: {e}"
+                );
+            }
+            assert_eq!(render("{{ kv('i') + 1 }}", &cx).unwrap(), "42");
+            assert_eq!(render("{{ kv('f') + 1 }}", &cx).unwrap(), "2.5");
+        }
+
+        /// W9c Task 4 fix round 1, review I1 (the user's ruling, 2026-10-07:
+        /// comparisons on exact numbers compare exactly). Every row of the
+        /// review's table with its correct answer, then `>=`/`<=`/`!=`
+        /// between two exact numbers, an int on the other side, an int past
+        /// `u128`, and the float rule (a float is its exact binary value).
+        #[test]
+        fn comparisons_on_an_exact_decimal_or_big_int_are_exact() {
+            let u128_max = u128::MAX.to_string();
+            let past_u128 = format!("{}0", u128_max);
+            let cx = FakeKv::default()
+                .with("d", dec("1.5"))
+                .with("d150", dec("1.50"))
+                .with("d10", dec("10.5"))
+                .with("d9", dec("9.5"))
+                .with("m1", dec("-1.5"))
+                .with("m2", dec("-2.5"))
+                .with("t", dec("0.75"))
+                .with("d01", dec("0.1"))
+                .with("big", int(&past_u128))
+                .with("big2", int(&past_u128))
+                .with("bigneg", int(&format!("-{past_u128}")))
+                .cx();
+            let rows: Vec<(String, &str)> = vec![
+                // The review's table, row for row.
+                ("{{ kv('d') > 100 }}".into(), "false"),
+                ("{{ kv('d') < 100 }}".into(), "true"),
+                ("{{ kv('d') >= 2 }}".into(), "false"),
+                ("{{ kv('d') <= 2 }}".into(), "true"),
+                (
+                    "{% if kv('d') > 100 %}BIG{% else %}small{% endif %}".into(),
+                    "small",
+                ),
+                ("{{ kv('d') == 1.5 }}".into(), "true"),
+                ("{{ kv('d') != 1.5 }}".into(), "false"),
+                ("{{ kv('d') in [1.5] }}".into(), "true"),
+                ("{{ kv('d10') > kv('d9') }}".into(), "true"),
+                ("{{ kv('m1') > kv('m2') }}".into(), "true"),
+                ("{{ kv('d') == kv('d150') }}".into(), "true"),
+                // The review's failure scenario: a threshold.
+                ("{{ kv('t') > 0.9 }}".into(), "false"),
+                ("{{ kv('t') == 0.75 }}".into(), "true"),
+                // Between two exact numbers, every operator.
+                ("{{ kv('d') >= kv('d150') }}".into(), "true"),
+                ("{{ kv('d') <= kv('d150') }}".into(), "true"),
+                ("{{ kv('d') != kv('d150') }}".into(), "false"),
+                ("{{ kv('d9') >= kv('d10') }}".into(), "false"),
+                ("{{ kv('m2') <= kv('m1') }}".into(), "true"),
+                (
+                    "{{ kv('m2') < kv('m1') < kv('d') < kv('d10') }}".into(),
+                    "true",
+                ),
+                ("{{ kv('m1') > kv('m2') > kv('d') }}".into(), "false"),
+                // An int on the other side, either side.
+                ("{{ kv('d') > 1 }}".into(), "true"),
+                ("{{ 2 > kv('d') }}".into(), "true"),
+                ("{{ kv('m1') < -1 }}".into(), "true"),
+                ("{{ kv('m1') > -2 }}".into(), "true"),
+                ("{{ 1 in [kv('d'), 1] }}".into(), "true"),
+                ("{{ kv('d150') in [1, 1.5] }}".into(), "true"),
+                ("{{ kv('d') not in [1, 2] }}".into(), "true"),
+                // An int past `u128`, which no Rust integer holds.
+                (format!("{{{{ kv('big') > {u128_max} }}}}"), "true"),
+                ("{{ kv('big') > 1e30 }}".into(), "true"),
+                ("{{ kv('big') < 1e300 }}".into(), "true"),
+                ("{{ kv('big') == kv('big2') }}".into(), "true"),
+                ("{{ kv('bigneg') < -1 }}".into(), "true"),
+                ("{{ kv('bigneg') < kv('big') }}".into(), "true"),
+                ("{{ kv('big') in [kv('big2')] }}".into(), "true"),
+                // A float is its exact binary value (spec §15): the decimal
+                // 0.1 is below the double nearest 0.1.
+                ("{{ kv('d01') == 0.1 }}".into(), "false"),
+                ("{{ kv('d01') < 0.1 }}".into(), "true"),
+                ("{{ kv('d') == 1.5 }}".into(), "true"),
+                // `sort` orders them by value.
+                (
+                    "{{ [kv('d10'), kv('m1'), kv('d150'), kv('m2'), kv('d9')] | sort }}".into(),
+                    "[-2.5,-1.5,1.50,9.5,10.5]",
+                ),
+                // `isIn` is Kestra's `InExpression`, which compares
+                // `toString()`s: `1.5` matches, `1.50` does not.
+                ("{{ kv('d') isIn [1.5] }}".into(), "true"),
+                ("{{ kv('d150') isIn [1.5] }}".into(), "false"),
+            ];
+            for (template, want) in &rows {
+                assert_eq!(render(template, &cx).unwrap(), *want, "{template}");
+            }
+            // Arithmetic stays a named refusal.
+            let e = render("{{ kv('d') + 1 }}", &cx).unwrap_err();
+            assert!(e.contains("tried to use + operator"), "{e}");
+        }
+
+        /// w9c `kv_function.eom_*` (chosen: Kestra throws a raw
+        /// `ClassCastException`): a non-boolean `errorOnMissing` is refused
+        /// naming the argument and its type, present key or missing, before
+        /// anything is looked up.
+        #[test]
+        fn a_non_boolean_error_on_missing_is_refused_as_measured() {
+            let f = fixture();
+            let cells = f["egret_expected"]["kv_function"].as_object().unwrap();
+            let fake = FakeKv::default().with("k", a_one());
+            let spy = fake.spy();
+            let cx = fake.cx();
+            let mut examined = 0;
+            for (name, cell) in cells {
+                if !name.starts_with("eom_") {
+                    continue;
+                }
+                let e = render(cell["expr"].as_str().unwrap(), &cx).unwrap_err();
+                for fragment in cell["message_contains"].as_array().unwrap() {
+                    assert!(e.contains(fragment.as_str().unwrap()), "{name}: {e}");
+                }
+                examined += 1;
+            }
+            assert_eq!(examined, 4);
+            assert!(spy.lock().unwrap().is_empty(), "refused before the lookup");
+            // The control: a boolean passes.
+            assert_eq!(render("{{ kv('k', 'w9c.fn', true).a }}", &cx).unwrap(), "1");
+        }
+
+        /// w9c `kv_function.no_execution` (spec §6): a render with no scope
+        /// (a Flow trigger's conditions, the corpus) refuses `kv()` by name
+        /// -- the pairing of the expression oracle's `function-kv`.
+        #[test]
+        fn kv_without_a_scope_refuses_by_name() {
+            for call in ["{{ kv('k') }}", "{{ kv(key='my-key') }}"] {
+                let e = render(call, &RenderContext::new()).unwrap_err();
+                assert!(
+                    e.contains(
+                        "The 'kv' function needs a running execution: it reads the KV store as \
+                         the running flow"
+                    ),
+                    "{call}: {e}"
+                );
+                assert!(!e.contains("is unknown"), "{e}");
+            }
+        }
+
+        /// Task 3 re-review 2, H1, at the render: a value nested 10,000
+        /// deep (built by hand, with a loop, never `serde_json::json!`) is
+        /// refused naming the limit, with no stack overflow; one at
+        /// `MAX_DEPTH` renders.
+        #[test]
+        fn a_value_nested_10000_deep_is_refused_at_render_with_no_abort() {
+            let nest = |depth: usize| {
+                let mut v = KvData::Null;
+                for _ in 0..depth {
+                    v = KvData::List(vec![v]);
+                }
+                v
+            };
+            let limit = crate::storage::ion::MAX_DEPTH;
+            let cx = FakeKv::default()
+                .with("deep", nest(10_000))
+                .with("edge", nest(limit))
+                .with("over", nest(limit + 1))
+                .cx();
+            for key in ["deep", "over"] {
+                let e = render(&format!("{{{{ kv('{key}') }}}}"), &cx).unwrap_err();
+                assert!(
+                    e.contains(&format!("deeper than {limit} levels")),
+                    "{key}: {e}"
+                );
+            }
+            let edge = render("{{ kv('edge') }}", &cx).unwrap();
+            assert_eq!(
+                edge,
+                format!("{}null{}", "[".repeat(limit), "]".repeat(limit))
+            );
+        }
     }
 }

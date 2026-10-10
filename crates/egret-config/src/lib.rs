@@ -174,36 +174,6 @@ pub struct StorageSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KernelConfig {
-    /// Which `KernelLauncher` impl to use: `"subprocess"` (default, local dev)
-    /// or `"kubernetes"` (one pod per user×workspace; requires an in-cluster
-    /// or kubeconfig-reachable API server).
-    pub launcher: String,
-    /// Namespace the `KubernetesLauncher` creates kernel Pods in.
-    pub namespace: String,
-    /// Kernel container image.
-    pub image: String,
-    pub image_pull_policy: String,
-    pub cpu_request: String,
-    pub mem_request: String,
-    pub cpu_limit: String,
-    pub mem_limit: String,
-    /// Name of an existing `kubernetes.io/dockerconfigjson` Secret for pulling
-    /// `image`, if the registry requires auth. `None` omits imagePullSecrets.
-    pub pull_secret: Option<String>,
-    /// Externally/cluster-reachable base URL kernels use to call back into
-    /// egret (`EGRET_API_URL`). Overrides `catalog.public_url`-derived
-    /// `api_url` for the kernel-env path only — set this when the server's
-    /// own public URL isn't reachable from inside the cluster (e.g. behind an
-    /// ingress the kernel pods can't resolve), such as a Service DNS name.
-    pub callback_url: Option<String>,
-    /// Accept the engine's self-signed TLS cert in kernel `trino()`/`starrocks()`
-    /// — sets EGRET_ENGINE_TLS_INSECURE=1 on kernel pods. Dev/self-signed deploys
-    /// only.
-    pub engine_tls_insecure: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditConfig {
     /// When false, the PDP is not wrapped and no events are emitted.
     pub enabled: bool,
@@ -247,6 +217,104 @@ pub struct AppsConfig {
     /// Window length. A 429 holds that token for one full window (the limiter's
     /// lockout equals the window; see egret-bin `main.rs`).
     pub rate_window_secs: u64,
+    /// Where marimo is served, e.g. `https://apps.egret.example` — a sibling
+    /// subdomain of egret's own host, never another port on it (cookies are not
+    /// isolated by port). Empty means no iframe can be opened: the ticket endpoint
+    /// answers 503.
+    pub origin: String,
+    /// How long a one-time ticket may wait to be redeemed (spec §6.1: 30 s).
+    pub ticket_ttl_secs: u64,
+    /// egret's own browser-facing origin, e.g. `https://egret.example`. The proxy tells the
+    /// browser that only this origin may frame the apps origin (`frame-ancestors`). Required
+    /// whenever `origin` is set.
+    pub egret_origin: String,
+    /// How long the apps-origin cookie a ticket becomes stays valid (8 h, as an app token).
+    pub cookie_ttl_secs: u64,
+    /// Where the apps host listens. It is a SEPARATE listener from egret's API: it serves
+    /// only the ticket route and the proxy, so a bug in one cannot expose the other.
+    pub listen: String,
+    /// How marimo pods are started. `launcher = "none"` (the default) starts none: the proxy and
+    /// its checks are live and every pod is unavailable.
+    #[serde(default)]
+    pub pod: AppPodConfig,
+    /// Data Apps' draft/version source and grid-layout JSON.
+    #[serde(default)]
+    pub storage: AppsStorageConfig,
+}
+
+/// `[apps.pod]` — the edit-pod launcher (spec §6.3). Env: `EGRET_APPS__POD__<KEY>`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppPodConfig {
+    /// `"none"`, `"subprocess"` (local dev: one marimo process per author on this host) or
+    /// `"kubernetes"` (one hardened Pod per author per workspace).
+    pub launcher: String,
+    /// How long a request waits for a cold pod to answer.
+    pub ready_timeout_secs: u64,
+    /// An edit pod nobody has used for this long is stopped.
+    pub idle_secs: u64,
+    /// The base URL pods call back to (the pod API and the query gateway): egret's in-cluster
+    /// Service, e.g. `http://egret:8080`. Not the browser-facing origin.
+    pub callback_url: String,
+    // ── kubernetes ──
+    pub namespace: String,
+    pub image: String,
+    pub image_pull_policy: String,
+    pub cpu_request: String,
+    pub mem_request: String,
+    pub cpu_limit: String,
+    pub mem_limit: String,
+    /// An existing `kubernetes.io/dockerconfigjson` Secret for pulling `image`.
+    pub pull_secret: Option<String>,
+    // ── subprocess ──
+    /// The command that starts the launcher entrypoint, e.g. `["apps-image/.venv/bin/egret-apps"]`;
+    /// the mode (`edit`) is appended.
+    pub command: Vec<String>,
+    /// Parent directory of each pod's working directory and home.
+    pub work_dir: String,
+    /// The locked marimo configuration directory (`apps-image/config`), as the image's
+    /// `EGRET_APPS_CONFIG`. Honoured by the launcher only outside the image.
+    pub config_dir: String,
+    /// The venv shim directory (`apps-image/venv-shim`), as the image's `EGRET_VENV_SHIM`. Run
+    /// pods need it to start. Honoured by the launcher only outside the image.
+    pub venv_shim_dir: String,
+    // ── run pods (D24: one pod per (viewer, published version), never shared) ──
+    /// A run pod nobody has used for this long is stopped. Separate from `idle_secs` (the edit
+    /// default, 30 min) because an abandoned viewer tab is cheaper to let go of than an author's
+    /// unpublished work.
+    pub run_idle_secs: u64,
+    /// Sessions (browser tabs) of the ONE viewer a run pod serves, open at once, before a new one
+    /// gets 503 "app busy". Not a multi-tenant cap — D24 makes one pod one person — it bounds a
+    /// reconnect loop, not concurrent strangers.
+    pub run_session_cap: u32,
+    /// `"thread"` (default: safe because D24 makes one pod one viewer) or `"forced_ipc"` (the P3
+    /// patch, kept for a possible future shared-pod revival; not a supported production path).
+    pub run_kernel_mode: String,
+}
+
+impl Default for AppPodConfig {
+    fn default() -> Self {
+        Self {
+            launcher: "none".into(),
+            ready_timeout_secs: 60,
+            idle_secs: 1_800,
+            callback_url: String::new(),
+            namespace: "egret-apps".into(),
+            image: "egret-apps:dev".into(),
+            image_pull_policy: "IfNotPresent".into(),
+            cpu_request: "250m".into(),
+            mem_request: "512Mi".into(),
+            cpu_limit: "1000m".into(),
+            mem_limit: "2Gi".into(),
+            pull_secret: None,
+            command: Vec::new(),
+            work_dir: "/tmp/egret-apps".into(),
+            config_dir: String::new(),
+            venv_shim_dir: String::new(),
+            run_idle_secs: 300,
+            run_session_cap: 8,
+            run_kernel_mode: "thread".into(),
+        }
+    }
 }
 
 impl Default for AppsConfig {
@@ -258,6 +326,13 @@ impl Default for AppsConfig {
             session_absolute_secs: 28_800,
             rate_max: 20,
             rate_window_secs: 2,
+            origin: String::new(),
+            ticket_ttl_secs: 30,
+            egret_origin: String::new(),
+            cookie_ttl_secs: 28_800,
+            listen: "0.0.0.0:8081".into(),
+            pod: AppPodConfig::default(),
+            storage: AppsStorageConfig::default(),
         }
     }
 }
@@ -425,7 +500,6 @@ pub struct Config {
     pub secrets: SecretsConfig,
     pub engine: EngineConfig,
     pub audit: AuditConfig,
-    pub kernel: KernelConfig,
     pub automation: AutomationConfig,
     #[serde(default = "default_data_api")]
     pub data_api: DataApiConfig,
@@ -634,6 +708,19 @@ pub struct WorkflowConfig {
     #[serde(default = "default_log_retention_days")]
     pub log_retention_days: u32,
 
+    /// **How long an ended execution's files are kept, in days (W9a spec §10);
+    /// `0` keeps them for ever.** Counted from the loop ROOT's end, so an
+    /// iteration's files live as long as its root's.
+    /// `EGRET_WORKFLOW__STORAGE_RETENTION_DAYS=30`.
+    #[serde(default = "default_storage_retention_days")]
+    pub storage_retention_days: u32,
+
+    /// `[workflow.storage]` -- where execution files live in the `[storage]`
+    /// bucket and how large they may be (W9a spec §3, §4.5).
+    /// `EGRET_WORKFLOW__STORAGE__MAX_FILE_BYTES=1073741824`.
+    #[serde(default)]
+    pub storage: WorkflowStorageConfig,
+
     /// The most log lines one task-run **attempt** stores (W11 decision D4).
     ///
     /// Past it the attempt keeps running and its further lines are not
@@ -716,6 +803,178 @@ pub struct WorkflowConfig {
     /// author-settable. `EGRET_WORKFLOW__PLUGIN_HOST__IMAGE=egret-plugin-host:dev`.
     #[serde(default)]
     pub plugin_host: PluginHostConfig,
+}
+
+/// `[workflow.storage]`: execution files (W9a spec §3, §4.5, §7.2). The
+/// bucket and its credentials are `[storage]`'s; this is the key prefix inside
+/// it and the caps.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowStorageConfig {
+    /// The key prefix: an execution file's key is
+    /// `{prefix}{workspace_id}/{ns-as-path}/{flow}/executions/{exec}/{tail}`.
+    /// Default `workflow/`.
+    #[serde(default = "default_workflow_storage_prefix")]
+    pub prefix: String,
+    /// The largest one file may be; crossing it fails the task naming the cap.
+    /// Default 1 GiB.
+    #[serde(default = "default_max_file_bytes")]
+    pub max_file_bytes: u64,
+    /// The most bytes one task run may write in all. Default 5 GiB.
+    #[serde(default = "default_max_task_bytes")]
+    pub max_task_bytes: u64,
+    /// The most bytes `read()` returns into a render. Default 10 MiB.
+    #[serde(default = "default_max_read_bytes")]
+    pub max_read_bytes: u64,
+    /// W9b: the most namespace files one listing, search or namespace-file
+    /// operation may see; crossing it fails naming the cap (W9b spec §7).
+    /// Default 10 000. `EGRET_WORKFLOW__STORAGE__MAX_NAMESPACE_FILES`.
+    #[serde(default = "default_max_namespace_files")]
+    pub max_namespace_files: u64,
+}
+
+/// The longest `workflow.storage.prefix` may be, in bytes (W9b Task 3, the
+/// Task 2 review's R3, 2026-10-05). A namespace file's key is
+/// `{prefix}{workspace}/{ns-as-path}/_files{path}.v{N}`: 36 (workspace) + 1 +
+/// 150 (namespace) + 1 + 6 (`_files`) + 512 (path, W9b's `MAX_PATH_BYTES`) +
+/// 12 (`.v` and a `u32`) = 718 bytes after the prefix, so 200 keeps every key
+/// under S3's 1024-byte limit with room to spare.
+pub const MAX_WORKFLOW_STORAGE_PREFIX_BYTES: usize = 200;
+
+/// The smallest `workflow.storage.max_read_bytes` may be: 4 KiB (W9c Task 2
+/// review I2). The Ion reader that reads a KV value and the preview charges
+/// one value per 64 bytes of the cap, so a cap of a few bytes refuses even a
+/// small value; 4 KiB reads any value of up to 64 parts.
+pub const MIN_MAX_READ_BYTES: u64 = 4096;
+
+impl WorkflowStorageConfig {
+    /// The boot check (W9a fix round 1 M4), called from [`Config::validate`]:
+    /// `prefix` is a non-empty key prefix ending with `/` and not starting
+    /// with one (an object key has no leading `/`, and without the trailing
+    /// one `workflow` and `workflowX/` would share keys) and at most
+    /// [`MAX_WORKFLOW_STORAGE_PREFIX_BYTES`] bytes, every cap is at least
+    /// 1, and `max_read_bytes` is at least [`MIN_MAX_READ_BYTES`]. Each
+    /// refusal names its key.
+    pub fn validate(&self) -> Result<(), String> {
+        let p = &self.prefix;
+        if p.is_empty() || !p.ends_with('/') || p.starts_with('/') {
+            return Err(format!(
+                "workflow.storage.prefix {p:?} must be non-empty, end with '/' and not start \
+                 with '/' (e.g. \"workflow/\"; EGRET_WORKFLOW__STORAGE__PREFIX)"
+            ));
+        }
+        if p.len() > MAX_WORKFLOW_STORAGE_PREFIX_BYTES {
+            return Err(format!(
+                "workflow.storage.prefix is {} bytes long; it may be at most \
+                 {MAX_WORKFLOW_STORAGE_PREFIX_BYTES} bytes, so that a namespace file's object key \
+                 stays under S3's 1024-byte limit (EGRET_WORKFLOW__STORAGE__PREFIX)",
+                p.len()
+            ));
+        }
+        for (key, value) in [
+            ("max_file_bytes", self.max_file_bytes),
+            ("max_task_bytes", self.max_task_bytes),
+            ("max_read_bytes", self.max_read_bytes),
+            ("max_namespace_files", self.max_namespace_files),
+        ] {
+            if value == 0 {
+                return Err(format!("workflow.storage.{key} must be at least 1"));
+            }
+        }
+        if self.max_read_bytes < MIN_MAX_READ_BYTES {
+            return Err(format!(
+                "workflow.storage.max_read_bytes is {} bytes; it must be at least \
+                 {MIN_MAX_READ_BYTES} bytes (4 KiB), the least the Ion reader of a KV value \
+                 or a preview reads a small value under \
+                 (EGRET_WORKFLOW__STORAGE__MAX_READ_BYTES)",
+                self.max_read_bytes
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Default for WorkflowStorageConfig {
+    fn default() -> Self {
+        Self {
+            prefix: default_workflow_storage_prefix(),
+            max_file_bytes: default_max_file_bytes(),
+            max_task_bytes: default_max_task_bytes(),
+            max_read_bytes: default_max_read_bytes(),
+            max_namespace_files: default_max_namespace_files(),
+        }
+    }
+}
+
+fn default_workflow_storage_prefix() -> String {
+    "workflow/".to_string()
+}
+
+/// 1 GiB -- see [`WorkflowStorageConfig::max_file_bytes`].
+fn default_max_file_bytes() -> u64 {
+    1 << 30
+}
+
+/// 5 GiB -- see [`WorkflowStorageConfig::max_task_bytes`].
+fn default_max_task_bytes() -> u64 {
+    5 << 30
+}
+
+/// 10 MiB -- see [`WorkflowStorageConfig::max_read_bytes`].
+fn default_max_read_bytes() -> u64 {
+    10 << 20
+}
+
+/// `[apps.storage]`: Data Apps' draft/version source and grid-layout JSON. The
+/// bucket and its credentials are `[storage]`'s; this is the key prefix inside
+/// it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppsStorageConfig {
+    /// The key prefix: a draft revision's key is
+    /// `{prefix}{workspace_id}/{app_id}/draft/{revision}.py` (and
+    /// `draft/{revision}.layout.json`); a version's is
+    /// `{prefix}{workspace_id}/{app_id}/versions/{version_no}/source.py`.
+    /// Default `apps/`.
+    #[serde(default = "default_apps_storage_prefix")]
+    pub prefix: String,
+}
+
+fn default_apps_storage_prefix() -> String {
+    "apps/".to_string()
+}
+
+impl Default for AppsStorageConfig {
+    fn default() -> Self {
+        Self {
+            prefix: default_apps_storage_prefix(),
+        }
+    }
+}
+
+impl AppsStorageConfig {
+    /// Same two rules as `WorkflowStorageConfig::validate`: `prefix` is a
+    /// non-empty key prefix ending with `/` and not starting with one.
+    pub fn validate(&self) -> Result<(), String> {
+        let p = &self.prefix;
+        if p.is_empty() || !p.ends_with('/') || p.starts_with('/') {
+            return Err(format!(
+                "apps.storage.prefix {p:?} must be non-empty, end with '/' and not start \
+                 with '/' (e.g. \"apps/\"; EGRET_APPS__STORAGE__PREFIX)"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// 10 000 -- see [`WorkflowStorageConfig::max_namespace_files`].
+fn default_max_namespace_files() -> u64 {
+    10_000
+}
+
+/// `30` -- see [`WorkflowConfig::storage_retention_days`].
+fn default_storage_retention_days() -> u32 {
+    30
 }
 
 /// `[workflow.plugin_host]`: how egret runs the Kestra plugin host image (W5b
@@ -1178,6 +1437,8 @@ fn default_workflow() -> WorkflowConfig {
         scheduler_enabled: default_scheduler_enabled(),
         trigger_interval_secs: default_trigger_interval_secs(),
         log_retention_days: default_log_retention_days(),
+        storage_retention_days: default_storage_retention_days(),
+        storage: WorkflowStorageConfig::default(),
         log_run_max_lines: default_log_run_max_lines(),
         log_run_max_bytes: default_log_run_max_bytes(),
         plugin_configurations: PluginConfigurations::default(),
@@ -1377,19 +1638,6 @@ impl Default for Config {
                 batch_size: 256,
                 flush_interval_ms: 1000,
             },
-            kernel: KernelConfig {
-                launcher: "subprocess".into(),
-                namespace: "egret-notebooks".into(),
-                image: "egret-kernel:dev".into(),
-                image_pull_policy: "IfNotPresent".into(),
-                cpu_request: "250m".into(),
-                mem_request: "512Mi".into(),
-                cpu_limit: "1000m".into(),
-                mem_limit: "2Gi".into(),
-                pull_secret: None,
-                callback_url: None,
-                engine_tls_insecure: false,
-            },
             automation: AutomationConfig {
                 enabled: true,
                 tick_interval_secs: 30,
@@ -1456,12 +1704,124 @@ impl Config {
                 return Err("secrets.master_key must be base64 of >=32 bytes".into());
             }
         }
+        // W9a spec §15: a container runner moves files in and out of task pods
+        // through the `[storage]` bucket (the pod itself holds no credential),
+        // so it cannot start without one. NOTE: `Config::validate` runs for
+        // EVERY `egret` subcommand that loads config (`main.rs`, before the
+        // dispatch), so this also gates `egret migrate` and `egret init`, not
+        // only `serve`.
+        if self.workflow.container_runner != ContainerRunner::None
+            && (self.storage.bucket.is_empty()
+                || self.storage.access_key.is_empty()
+                || self.storage.secret_key.is_empty())
+        {
+            return Err(
+                "workflow.container_runner other than none requires [storage] bucket, \
+                        access_key and secret_key: execution files live there \
+                        (EGRET_STORAGE__BUCKET, EGRET_STORAGE__ACCESS_KEY, \
+                        EGRET_STORAGE__SECRET_KEY)"
+                    .into(),
+            );
+        }
+        self.workflow.storage.validate()?;
         if self.engine.max_rows == 0 || self.engine.query_timeout_secs == 0 {
             return Err("engine.max_rows and engine.query_timeout_secs must be >= 1".into());
         }
         if self.engine.preview_rows > self.engine.max_rows {
             return Err("engine.preview_rows must be <= engine.max_rows".into());
         }
+        if self.apps.session_idle_secs > self.apps.session_absolute_secs {
+            return Err("apps.session_idle_secs must be <= apps.session_absolute_secs".into());
+        }
+        if !self.apps.origin.is_empty() {
+            let is_origin = |o: &str| {
+                (o.starts_with("https://") || o.starts_with("http://"))
+                    && !o
+                        .trim_start_matches("https://")
+                        .trim_start_matches("http://")
+                        .contains('/')
+            };
+            if !is_origin(&self.apps.origin) || !is_origin(&self.apps.egret_origin) {
+                return Err(
+                    "apps.origin and apps.egret_origin must both be origins (scheme://host[:port], \
+                     no path or trailing slash) when apps.origin is set"
+                        .into(),
+                );
+            }
+            if self.apps.origin == self.apps.egret_origin {
+                return Err(
+                    "apps.origin must differ from apps.egret_origin: author JavaScript on the \
+                     apps origin would otherwise run as egret itself"
+                        .into(),
+                );
+            }
+            if self.apps.ticket_ttl_secs == 0 || self.apps.cookie_ttl_secs == 0 {
+                return Err("apps.ticket_ttl_secs and apps.cookie_ttl_secs must be >= 1".into());
+            }
+        }
+        let pod = &self.apps.pod;
+        match pod.launcher.as_str() {
+            "none" => {}
+            "subprocess" | "kubernetes" => {
+                if self.apps.origin.is_empty() {
+                    return Err(format!(
+                        "apps.pod.launcher = \"{}\" needs apps.origin: pods are reached through the apps host",
+                        pod.launcher
+                    ));
+                }
+                if pod.callback_url.is_empty() {
+                    return Err(
+                        "apps.pod.callback_url is required: pods call egret back there".into(),
+                    );
+                }
+                if pod.ready_timeout_secs == 0 || pod.idle_secs < 60 {
+                    return Err(
+                        "apps.pod.ready_timeout_secs must be >= 1 and idle_secs >= 60".into(),
+                    );
+                }
+                if pod.launcher == "kubernetes"
+                    && (pod.image.is_empty() || pod.namespace.is_empty())
+                {
+                    return Err(
+                        "apps.pod.launcher = \"kubernetes\" needs image and namespace".into(),
+                    );
+                }
+                if pod.launcher == "subprocess"
+                    && (pod.command.is_empty()
+                        || pod.config_dir.is_empty()
+                        || pod.venv_shim_dir.is_empty())
+                {
+                    return Err(
+                        "apps.pod.launcher = \"subprocess\" needs command, config_dir and \
+                         venv_shim_dir"
+                            .into(),
+                    );
+                }
+                if !matches!(pod.run_kernel_mode.as_str(), "thread" | "forced_ipc") {
+                    return Err(format!(
+                        "apps.pod.run_kernel_mode must be thread or forced_ipc, not \"{}\"",
+                        pod.run_kernel_mode
+                    ));
+                }
+                if pod.run_session_cap == 0 {
+                    return Err("apps.pod.run_session_cap must be >= 1".into());
+                }
+            }
+            other => {
+                return Err(format!(
+                    "apps.pod.launcher must be none, subprocess or kubernetes, not \"{other}\""
+                ))
+            }
+        }
+        if self.storage.bucket.is_empty()
+            || self.storage.access_key.is_empty()
+            || self.storage.secret_key.is_empty()
+        {
+            return Err(
+                "the apps API requires [storage] bucket, access_key, secret_key (it stores draft/version content there regardless of apps.pod.launcher)".into(),
+            );
+        }
+        self.apps.storage.validate()?;
         Ok(())
     }
 }
@@ -1484,6 +1844,13 @@ mod tests {
                     session_absolute_secs: 28_800,
                     rate_max: 20,
                     rate_window_secs: 2,
+                    origin: String::new(),
+                    ticket_ttl_secs: 30,
+                    egret_origin: String::new(),
+                    cookie_ttl_secs: 28_800,
+                    listen: "0.0.0.0:8081".into(),
+                    pod: AppPodConfig::default(),
+                    storage: AppsStorageConfig::default(),
                 }
             );
             Ok(())
@@ -1642,6 +2009,156 @@ values = { allowed-images = [] }
             }
             Ok(())
         });
+    }
+
+    /// W9a Task 3: `[workflow.storage]` and `storage_retention_days` have the
+    /// documented defaults on BOTH paths (the figment defaults layer and the
+    /// serde fallback), and every key is settable from the environment.
+    #[test]
+    fn workflow_storage_defaults_and_env() {
+        figment::Jail::expect_with(|_jail| {
+            let cfg: Config = Config::figment().extract()?;
+            let want = WorkflowStorageConfig {
+                prefix: "workflow/".into(),
+                max_file_bytes: 1_073_741_824,
+                max_task_bytes: 5_368_709_120,
+                max_read_bytes: 10_485_760,
+                max_namespace_files: 10_000,
+            };
+            assert_eq!(cfg.workflow.storage, want);
+            assert_eq!(cfg.workflow.storage_retention_days, 30);
+            assert_eq!(default_workflow().storage, want);
+            assert_eq!(default_workflow().storage_retention_days, 30);
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_WORKFLOW__STORAGE__PREFIX", "wf/");
+            jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_FILE_BYTES", "11");
+            jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_TASK_BYTES", "22");
+            jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_READ_BYTES", "33");
+            jail.set_env("EGRET_WORKFLOW__STORAGE__MAX_NAMESPACE_FILES", "44");
+            jail.set_env("EGRET_WORKFLOW__STORAGE_RETENTION_DAYS", "0");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.workflow.storage,
+                WorkflowStorageConfig {
+                    prefix: "wf/".into(),
+                    max_file_bytes: 11,
+                    max_task_bytes: 22,
+                    max_read_bytes: 33,
+                    max_namespace_files: 44,
+                }
+            );
+            assert_eq!(cfg.workflow.storage_retention_days, 0);
+            Ok(())
+        });
+    }
+
+    /// W9a fix round 1 M4: `[workflow.storage]` is checked at boot, each
+    /// refusal naming its key; the default passes (the control).
+    ///
+    /// Final review I4: `[storage]` (the bucket/access_key/secret_key, not
+    /// `[workflow.storage]`'s prefix/size limits) is now required
+    /// unconditionally, so the control config needs one set to isolate what
+    /// this test is actually about.
+    #[test]
+    fn workflow_storage_is_validated_at_boot() {
+        let check = |f: &dyn Fn(&mut WorkflowStorageConfig)| {
+            let mut cfg = Config::default();
+            cfg.storage.bucket = "b".into();
+            cfg.storage.access_key = "a".into();
+            cfg.storage.secret_key = "s".into();
+            f(&mut cfg.workflow.storage);
+            cfg.validate()
+        };
+        assert_eq!(check(&|_| {}), Ok(()));
+        assert_eq!(check(&|s| s.prefix = "wf/nested/".into()), Ok(()));
+        for bad in ["", "workflow", "/workflow/", "/"] {
+            let err = check(&|s| s.prefix = bad.into()).expect_err(bad);
+            assert!(err.contains("workflow.storage.prefix"), "{bad:?}: {err}");
+        }
+        // W9b Task 3 (R3 of Task 2's review): 200 bytes pass, 201 do not --
+        // counted in bytes ('é' is two), so a rule counting characters fails.
+        let at = format!("{}/", "é".repeat(99) + "a"); // 198 + 1 + 1 = 200 bytes
+        assert_eq!(at.len(), 200);
+        assert_eq!(check(&|s| s.prefix = at.clone()), Ok(()));
+        let over = format!("a{at}");
+        assert_eq!((over.len(), over.chars().count()), (201, 102));
+        let err = check(&|s| s.prefix = over.clone()).unwrap_err();
+        assert!(
+            err.contains("workflow.storage.prefix")
+                && err.contains("201 bytes")
+                && err.contains("at most 200"),
+            "{err}"
+        );
+        let err = check(&|s| s.max_file_bytes = 0).unwrap_err();
+        assert!(err.contains("workflow.storage.max_file_bytes"), "{err}");
+        let err = check(&|s| s.max_task_bytes = 0).unwrap_err();
+        assert!(err.contains("workflow.storage.max_task_bytes"), "{err}");
+        let err = check(&|s| s.max_read_bytes = 0).unwrap_err();
+        assert!(err.contains("workflow.storage.max_read_bytes"), "{err}");
+        // W9c Task 2 review I2: at least 4 KiB, and 4 KiB passes.
+        for small in [1, 4095] {
+            let err = check(&|s| s.max_read_bytes = small).unwrap_err();
+            assert_eq!(
+                err,
+                format!(
+                    "workflow.storage.max_read_bytes is {small} bytes; it must be at least \
+                     4096 bytes (4 KiB), the least the Ion reader of a KV value or a preview \
+                     reads a small value under (EGRET_WORKFLOW__STORAGE__MAX_READ_BYTES)"
+                )
+            );
+        }
+        assert_eq!(check(&|s| s.max_read_bytes = 4096), Ok(()));
+        let err = check(&|s| s.max_namespace_files = 0).unwrap_err();
+        assert!(
+            err.contains("workflow.storage.max_namespace_files"),
+            "{err}"
+        );
+        assert_eq!(check(&|s| s.max_namespace_files = 1), Ok(()));
+    }
+
+    /// W9a spec §15: a container runner needs `[storage]` at boot; `none`
+    /// adds no requirement of its own. Each missing key is refused on its
+    /// own, and the control (all three set) passes.
+    ///
+    /// Final review I4: `[storage]` is now ALSO required unconditionally for
+    /// the always-mounted apps API, independent of `container_runner`. So
+    /// `none` no longer validates with empty storage either -- but for that
+    /// separate reason, not because `container_runner` itself started
+    /// requiring it. The two Docker/Kubernetes refusal loops below still
+    /// isolate the container-runner-specific message.
+    #[test]
+    fn a_container_runner_requires_storage_at_boot() {
+        let with = |runner: ContainerRunner, bucket: &str, ak: &str, sk: &str| {
+            let mut cfg = Config::default();
+            cfg.workflow.container_runner = runner;
+            cfg.storage.bucket = bucket.into();
+            cfg.storage.access_key = ak.into();
+            cfg.storage.secret_key = sk.into();
+            cfg.validate()
+        };
+        for runner in [ContainerRunner::Docker, ContainerRunner::Kubernetes] {
+            assert_eq!(
+                with(runner, "b", "a", "s"),
+                Ok(()),
+                "{runner:?} with storage"
+            );
+            for (b, a, k) in [("", "a", "s"), ("b", "", "s"), ("b", "a", "")] {
+                let err = with(runner, b, a, k).expect_err("refused");
+                assert!(err.contains("[storage]"), "{err}");
+            }
+        }
+        assert_eq!(
+            with(ContainerRunner::None, "b", "a", "s"),
+            Ok(()),
+            "none adds no requirement of its own, given storage is set for the apps API"
+        );
+        let err = with(ContainerRunner::None, "", "", "").unwrap_err();
+        assert!(
+            err.contains("[storage]"),
+            "now refused by the apps API's unconditional check, not container_runner: {err}"
+        );
     }
 
     /// W5a Task 5: `container_runner` is `none` unless a deployment says
@@ -2152,8 +2669,129 @@ values = { allowed-images = [] }
     }
 
     #[test]
+    fn validate_rejects_an_app_idle_window_longer_than_the_absolute_one() {
+        // `app_sessions` has CHECK (idle_expires_at <= absolute_expires_at): the
+        // reverse would pass boot and then fail every mint with a 500.
+        let mut cfg = Config::default();
+        // [storage] is required unconditionally (final review I4); set it so
+        // the final assertion below reaches the session-window check's Ok arm
+        // rather than the storage one.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
+        cfg.apps.session_idle_secs = cfg.apps.session_absolute_secs + 1;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("apps.session_idle_secs"), "{err}");
+        cfg.apps.session_idle_secs = cfg.apps.session_absolute_secs;
+        assert!(cfg.validate().is_ok(), "equal windows are allowed");
+    }
+
+    #[test]
+    fn validate_requires_distinct_origins_without_paths_when_the_apps_origin_is_set() {
+        let mut cfg = Config::default();
+        // [storage] is required unconditionally (final review I4), independent
+        // of apps.origin, so set it up front to isolate the origin checks.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
+        assert!(
+            cfg.validate().is_ok(),
+            "unset origin: apps iframe is simply off"
+        );
+        cfg.apps.origin = "https://apps.egret.example".into();
+        assert!(cfg.validate().is_err(), "egret_origin missing");
+        cfg.apps.egret_origin = "https://egret.example".into();
+        assert!(cfg.validate().is_ok());
+        cfg.apps.egret_origin = "https://apps.egret.example".into();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("must differ"), "{err}");
+        cfg.apps.egret_origin = "https://egret.example/".into();
+        assert!(cfg.validate().is_err(), "trailing slash is a path");
+        cfg.apps.egret_origin = "egret.example".into();
+        assert!(cfg.validate().is_err(), "no scheme");
+        cfg.apps.egret_origin = "https://egret.example".into();
+        cfg.apps.cookie_ttl_secs = 0;
+        assert!(cfg.validate().is_err(), "a cookie that never lives");
+    }
+
+    #[test]
+    fn validate_checks_the_pod_launcher_choice_and_what_each_needs() {
+        let mut cfg = Config::default();
+        // The apps API requires [storage] unconditionally (it is mounted
+        // regardless of apps.pod.launcher), so it must be set before any of
+        // the launcher-specific assertions below.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
+        assert!(
+            cfg.validate().is_ok(),
+            "launcher none is valid, given storage is configured"
+        );
+        cfg.apps.pod.launcher = "docker".into();
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .contains("none, subprocess or kubernetes"));
+
+        cfg.apps.pod.launcher = "kubernetes".into();
+        assert!(cfg.validate().unwrap_err().contains("needs apps.origin"));
+        cfg.apps.origin = "https://apps.egret.example".into();
+        cfg.apps.egret_origin = "https://egret.example".into();
+        assert!(cfg.validate().unwrap_err().contains("callback_url"));
+        cfg.apps.pod.callback_url = "http://egret:8080".into();
+        assert!(cfg.validate().is_ok());
+        cfg.apps.pod.idle_secs = 10;
+        assert!(cfg.validate().unwrap_err().contains("idle_secs"));
+        cfg.apps.pod.idle_secs = 1_800;
+        cfg.apps.pod.image = String::new();
+        assert!(cfg.validate().unwrap_err().contains("image"));
+
+        cfg.apps.pod.launcher = "subprocess".into();
+        assert!(cfg.validate().unwrap_err().contains("command"));
+        cfg.apps.pod.command = vec!["egret-apps".into()];
+        cfg.apps.pod.config_dir = "apps-image/config".into();
+        assert!(cfg.validate().unwrap_err().contains("venv_shim_dir"));
+        cfg.apps.pod.venv_shim_dir = "apps-image/venv-shim".into();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_checks_run_pod_settings_d24() {
+        let mut cfg = Config::default();
+        cfg.apps.origin = "https://apps.egret.example".into();
+        cfg.apps.egret_origin = "https://egret.example".into();
+        cfg.apps.pod.launcher = "subprocess".into();
+        cfg.apps.pod.command = vec!["egret-apps".into()];
+        cfg.apps.pod.config_dir = "apps-image/config".into();
+        cfg.apps.pod.venv_shim_dir = "apps-image/venv-shim".into();
+        cfg.apps.pod.callback_url = "http://egret:8080".into();
+        // Set storage to allow validation to proceed
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
+        assert!(cfg.validate().is_ok(), "defaults (thread, cap 8) are valid");
+
+        cfg.apps.pod.run_kernel_mode = "pool".into();
+        assert!(cfg.validate().unwrap_err().contains("thread or forced_ipc"));
+        cfg.apps.pod.run_kernel_mode = "forced_ipc".into();
+        assert!(
+            cfg.validate().is_ok(),
+            "forced_ipc is the documented fallback, still accepted"
+        );
+        cfg.apps.pod.run_kernel_mode = "thread".into();
+
+        cfg.apps.pod.run_session_cap = 0;
+        assert!(cfg.validate().unwrap_err().contains("run_session_cap"));
+    }
+
+    #[test]
     fn validate_ok_when_oidc_disabled() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        // [storage] is required unconditionally (final review I4), independent
+        // of oidc.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
     }
 
@@ -2179,13 +2817,23 @@ values = { allowed-images = [] }
         cfg.security.secret_key =
             "Vi2XPRkbfyTLbSzhWv0VBYeOozGGoUnVSL3pIx2Oy1kbBphJyL0CXpomCNKdrYndzYnOX8MH0oaxhcY6Bt/x8g=="
                 .into();
+        // [storage] is required unconditionally (final review I4), independent
+        // of oidc.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn catalog_disabled_by_default_validates() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
         assert!(!cfg.catalog.enabled);
+        // [storage] is required unconditionally (final review I4), independent
+        // of catalog.enabled.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
     }
 
@@ -2197,13 +2845,22 @@ values = { allowed-images = [] }
         cfg.catalog.auth_token = "t".into();
         cfg.storage.access_key = "a".into();
         cfg.storage.secret_key = "s".into();
+        // Final review I4: [storage] is also required unconditionally, and
+        // that check also needs `bucket`, which catalog.enabled's own check
+        // does not look at.
+        cfg.storage.bucket = "b".into();
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn ranger_disabled_by_default_validates() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
         assert!(!cfg.ranger.enabled);
+        // [storage] is required unconditionally (final review I4), independent
+        // of ranger.enabled.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
     }
 
@@ -2211,6 +2868,11 @@ values = { allowed-images = [] }
     fn ranger_enabled_validates_with_or_without_token() {
         let mut cfg = Config::default();
         cfg.ranger.enabled = true;
+        // [storage] is required unconditionally (final review I4), independent
+        // of ranger.enabled.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         // Empty token = anonymous /service (for stock Ranger plugins). Valid.
         assert!(cfg.validate().is_ok());
         // A configured token is also valid (requires bearer).
@@ -2220,8 +2882,13 @@ values = { allowed-images = [] }
 
     #[test]
     fn secrets_master_key_defaults_empty_and_validates() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
         assert!(cfg.secrets.master_key.is_empty());
+        // [storage] is required unconditionally (final review I4), independent
+        // of secrets.master_key.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
     }
 
@@ -2232,15 +2899,25 @@ values = { allowed-images = [] }
         assert!(cfg.validate().is_err());
         use base64::Engine;
         cfg.secrets.master_key = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+        // [storage] is required unconditionally (final review I4), independent
+        // of secrets.master_key.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn engine_defaults_present_and_validate() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
         assert_eq!(cfg.engine.max_rows, 100_000);
         assert_eq!(cfg.engine.query_timeout_secs, 60);
         assert_eq!(cfg.engine.preview_rows, 100);
+        // [storage] is required unconditionally (final review I4), independent
+        // of engine settings.
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
         assert!(cfg.validate().is_ok());
     }
 
@@ -2262,30 +2939,6 @@ values = { allowed-images = [] }
         let mut cfg = Config::default();
         cfg.engine.preview_rows = 200_000; // > max_rows
         assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn kernel_defaults_to_subprocess_launcher() {
-        figment::Jail::expect_with(|_j| {
-            let cfg: Config = Config::figment().extract()?;
-            assert_eq!(cfg.kernel.launcher, "subprocess");
-            assert_eq!(cfg.kernel.namespace, "egret-notebooks");
-            assert!(cfg.kernel.pull_secret.is_none());
-            assert!(cfg.kernel.callback_url.is_none());
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn kernel_launcher_selectable_via_env() {
-        figment::Jail::expect_with(|jail| {
-            jail.set_env("EGRET_KERNEL__LAUNCHER", "kubernetes");
-            jail.set_env("EGRET_KERNEL__NAMESPACE", "custom-ns");
-            let cfg: Config = Config::figment().extract()?;
-            assert_eq!(cfg.kernel.launcher, "kubernetes");
-            assert_eq!(cfg.kernel.namespace, "custom-ns");
-            Ok(())
-        });
     }
 
     /// **The exposure lever, at the layer that parses it.** Fix round 3,
@@ -2617,5 +3270,42 @@ values = { allowed-images = [] }
             );
             Ok(())
         });
+    }
+
+    /// Final review I4: the Data Apps HTTP API (create/save/publish/draft/
+    /// version routes) is mounted unconditionally in `egret-bin`, regardless
+    /// of `apps.pod.launcher` -- that setting only gates whether interactive
+    /// notebook PODS can launch. So `[storage]` must be required at boot even
+    /// with the documented default `launcher = "none"`, instead of failing
+    /// every CRUD request with a 500 at request time.
+    #[test]
+    fn apps_api_always_requires_storage_regardless_of_launcher() {
+        let cfg = Config::default();
+        assert_eq!(cfg.apps.pod.launcher, "none");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("[storage]"), "{err}");
+    }
+
+    #[test]
+    fn apps_pod_launcher_other_than_none_requires_storage() {
+        let mut cfg = Config::default();
+        // Set up required fields so we reach the storage requirement check
+        cfg.apps.origin = "https://apps.egret.example".into();
+        cfg.apps.egret_origin = "https://egret.example".into();
+        cfg.apps.pod.launcher = "subprocess".into();
+        cfg.apps.pod.callback_url = "http://egret:8080".into();
+        cfg.apps.pod.command = vec!["egret-apps".into()];
+        cfg.apps.pod.config_dir = "apps-image/config".into();
+        cfg.apps.pod.venv_shim_dir = "apps-image/venv-shim".into();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("[storage]"), "{err}");
+    }
+
+    #[test]
+    fn apps_storage_prefix_must_end_with_a_slash() {
+        let cfg = AppsStorageConfig {
+            prefix: "apps".into(),
+        };
+        assert!(cfg.validate().is_err());
     }
 }

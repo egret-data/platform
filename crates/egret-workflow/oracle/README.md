@@ -213,7 +213,9 @@ literal removed the accidental reason egret used to fail for and left
 minijinja's own semantics showing, and where `is defined` -- the one of the five
 a crate can reach -- is closed by overriding a single test -- and **130 of 1336**
 after W2a, which added 48, BANKED **fourteen** (every pair W2 Task 8 had recorded
-as unfixable) and RECORDED four.
+as unfixable) and RECORDED four -- and **129 of 1336** after W9c Task 4's fix
+round 1 (2026-10-08), which BANKED one, `filter-number-bigdecimal-comparison`
+(see "The same hole" below), and changed no other answer.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -3575,6 +3577,23 @@ has two entries (`filter-number-bigdecimal-is-not-a-number-here`,
 `filter-number-bigdecimal-comparison`) where before this round nothing in the
 corpus could see it.
 
+**2026-10-08, W9c Task 4 fix round 1 (the user's ruling: comparisons on exact
+numbers compare exactly; option A).** The comparison half of that hole is
+closed, on this path and on `kv()`'s, which returns the same object. minijinja
+still cannot compare the object, so the operators no longer reach minijinja:
+`runners::cmp_rewrite` reads the rewriter's output with minijinja's own grammar
+and turns every `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in` and chain into
+a call to `runners::compare`, which compares a `BigDecimal`/`BigInteger`
+against a number exactly and answers every other pair with minijinja's own
+`PartialEq`/`Ord`. `filter-number-bigdecimal-comparison` is BANKED; the corpus
+moved by exactly that one entry, which is the evidence that no other answer
+changed. Arithmetic stays a named refusal, so
+`filter-number-bigdecimal-is-not-a-number-here` stays baselined. A float is
+compared by its exact binary value, where Pebble 4.1.2 compares any two
+numbers by `doubleValue()` -- W9c spec §15 records the difference.
+`fromIon` decimals are still `f64` (their scale is still what gave way); this
+round does not revisit that.
+
 ### C-B: an `e` exponent with a dot was classified as a decimal
 
 Ion's rule is that `e`/`E` makes a **float regardless of the dot**. Round 2
@@ -3687,6 +3706,27 @@ and which names neither the function nor anything a reader can act on. The eight
 that were `unported:task-8` in `error-class-pairs.txt` are now
 `test:the_twelve_refusals_name_themselves_and_their_owner`, and
 `UNPORTED_ERROR_CLASS` in `tests/oracle.rs` is empty.
+
+**W9a Task 4 (2026-10-01):** `read`, `fileSize`, `fileExists` and `isFileEmpty`
+are implemented over a render's file scope, and a corpus render has none (no
+running execution), so their four entries still fail -- by a sentence asserted in
+`without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution`,
+which is now their pairing. The test above is
+`the_eight_refusals_name_themselves_and_their_owner`; `fileURI` names W9b and
+`kv` W9c.
+
+**W9b Task 4 (2026-10-05):** `fileURI` is implemented over namespace files and
+left the refusals; a corpus render has no file scope, so `function-fileuri`
+still fails, by the sentence the four's test asserts for it too, and is paired
+with `without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution`.
+The refusals' test is now `kv_still_names_w9c_and_the_refused_list_shrinks_to_seven`
+(seven names; `kv` names W9c).
+
+**W9c Task 4 (2026-10-07):** `kv` is implemented over the KV store and left the
+refusals; a corpus render has no file scope, so `function-kv` still fails, by
+the sentence `kv_without_a_scope_refuses_by_name` asserts, which is now its
+pairing. The refusals' test is now `the_refused_list_is_six_and_kv_is_not_in_it`
+(six names).
 
 ### `fetchContext`'s key order is `HashMap`'s, and that is a recorded divergence
 

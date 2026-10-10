@@ -1,8 +1,8 @@
 //! `egret` binary entrypoint: parse the CLI, load config, dispatch the command.
 
+mod apps_pod_k8s;
 mod backfill;
 mod cli;
-mod kernel_launcher_k8s;
 
 use anyhow::Context;
 use chrono::Duration;
@@ -201,39 +201,6 @@ async fn workspace_cmd(config: Config, action: WorkspaceAction) -> anyhow::Resul
     }
 }
 
-/// Engine-connection resolver wired into `KernelState` (T4).
-///
-/// Resolves a `database_id` to the coordinates a kernel needs to open a direct
-/// Daft connection. Backed by the same `DatabaseRepo` registry the query runner
-/// uses; the engine label matches `EngineOption.engine` via `Engine::as_str`.
-struct EngineConnResolverImpl {
-    databases: egret_query::DatabaseRepo,
-}
-
-#[async_trait::async_trait]
-impl egret_kernel::engine_conn::EngineConnResolver for EngineConnResolverImpl {
-    async fn resolve(
-        &self,
-        database_id: uuid::Uuid,
-    ) -> Result<egret_kernel::engine_conn::EngineConn, egret_kernel::engine_conn::EngineConnError>
-    {
-        use egret_kernel::engine_conn::{EngineConn, EngineConnError};
-        let db = self
-            .databases
-            .get(database_id)
-            .await
-            .map_err(|e| EngineConnError::NotFound(e.to_string()))?;
-        Ok(EngineConn {
-            kind: db.engine.as_str().to_string(),
-            host: db.host,
-            port: db.port,
-            // Deliver the engine's self-signed cert so the kernel can PIN it
-            // (verify against this cert only) rather than disabling TLS verification.
-            tls_cert: db.options.tls_cert,
-        })
-    }
-}
-
 /// Reads the engine-provisioning seam for the Policy/Ranger admin console (E2d):
 /// which provisioned engines bind to which Ranger profile, and their catalog
 /// names. Backed by `EngineMgmtStore`; the composition root is the only place the
@@ -272,7 +239,7 @@ async fn recompile_catalog_assignment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     catalog_id: uuid::Uuid,
 ) -> Result<(), egret_perm::CompileError> {
-    let mut ids = egret_policy::services_for_catalog_via(&mut **tx, catalog_id)
+    let mut ids = egret_policy::services_for_catalog_via(tx, catalog_id)
         .await
         .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
     ids.sort_unstable();
@@ -1179,7 +1146,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // have drifted apart during development, cheaper to catch at `cargo run` time than as
     // a silent dead grant in prod. Only platform-scope grants are checked here:
     // `egret_core::rbac` is the platform vocabulary; workspace-scope roles (ws_*) use a
-    // separate permission vocabulary owned by egret-workspace (dataset/chart/notebook/…).
+    // separate permission vocabulary owned by egret-workspace (dataset/chart/app/…).
     if let Ok(rows) = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT rp.permission FROM role_permissions rp \
          JOIN roles r ON r.id = rp.role_id WHERE r.scope = 'platform'",
@@ -1388,14 +1355,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // and database connections reference named secrets.
     let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
 
-    // Externally-reachable catalog base URL, forwarded to the notebook-runtime
-    // manifest as the catalog URL (what pyiceberg/Daft hit).
-    let catalog_base_url = config
-        .catalog
-        .public_url
-        .clone()
-        .unwrap_or_else(|| "http://localhost:8080".into());
-
     let oidc = match (oidc_service.clone(), oidc_cookie_key.clone()) {
         (Some(service), Some(cookie_key)) => Some(egret_auth::oidc_routes::OidcRoutesState {
             oidc: service,
@@ -1472,6 +1431,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         cookie_key: oidc_cookie_key.clone(),
         session_secure: config.session.secure,
     };
+    // `Secure` cookies are named `__Host-egret_*` and ONLY those names are read, so a
+    // cookie tossed from a sibling host cannot stand in for them (spec §6.1).
+    egret_auth::cookie::set_secure_cookies(config.session.secure);
 
     // `secrets` (the SecretStore) is shared: the per-workspace storage layer and
     // the database block reuse the same instance for their secrets.
@@ -1550,12 +1512,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     };
 
     // Task 4 (STS cutover): the machine-IdP mints the short-lived per-user
-    // engine JWT carried in the notebook-runtime manifest — replacing the old
-    // Keycloak refresh-grant broker (deleted; couldn't mint for local users or
-    // when OIDC is disabled). Reused by EngineState (B3a SQL Lab delegation),
-    // BiState (B3a per-user delegation), NotebookState, and KernelState — one
-    // shared Arc.
-    let engine_minter: std::sync::Arc<dyn egret_notebook::engine_token::EngineTokenMinter> =
+    // engine JWT — replacing the old Keycloak refresh-grant broker (deleted;
+    // couldn't mint for local users or when OIDC is disabled). Reused by
+    // EngineState (B3a SQL Lab delegation) and BiState (B3a per-user
+    // delegation) — one shared Arc.
+    let engine_minter: std::sync::Arc<dyn egret_analytics_api::engine_token::EngineTokenMinter> =
         std::sync::Arc::new(egret_bin::engine_minter::MachineIdpEngineMinter::new(
             egret_machine_idp::PgSigningKeyStore::new(db.clone()),
             egret_auth::users::UserRepo::new(db.clone()),
@@ -1614,6 +1575,31 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         }
     };
     let engine = Some(engine_state.clone());
+
+    // W9a: the workflow engine's execution files live in the SAME object store
+    // (this `S3Store`, the `[storage]` bucket -- one client, not a second one),
+    // under `workflow.storage.prefix`. Installed process-wide BEFORE the
+    // workflow runtime and router below, because `read()` runs inside `settle`,
+    // which none of its eight entry points can hand a store to
+    // (`egret_workflow::storage`'s module doc). Index lookups never go through
+    // it: they run on the caller's connection.
+    if egret_workflow::storage::install(std::sync::Arc::new(egret_workflow::storage::FileStore {
+        store: engine_state.storage.clone(),
+        bucket: config.storage.bucket.clone(),
+        prefix: config.workflow.storage.prefix.clone(),
+        caps: egret_workflow::storage::Caps::from(&config.workflow.storage),
+        retention_days: config.workflow.storage_retention_days,
+    }))
+    .is_err()
+    {
+        anyhow::bail!("the workflow file store was installed twice");
+    }
+    // W9b: namespace-file lookups at render time (`fileURI`, `read` of a
+    // namespace file) run on their own connection, made from this pool's
+    // options, for the reason above: a render's entry points hold no pool.
+    if egret_workflow::storage::nsfiles::install_db((*db.pool.connect_options()).clone()).is_err() {
+        anyhow::bail!("the namespace file database options were installed twice");
+    }
 
     let bi = Some(egret_bi::BiState {
         db: db.clone(),
@@ -1733,77 +1719,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         runner: automation_runner.clone(),
     });
 
-    let notebook_state = egret_notebook::NotebookState {
-        store: egret_notebook::NotebookStore::new(db.clone()),
-        catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
-        sessions: sessions.clone(),
-        workspaces: WorkspaceRepo::new(db.clone()),
-        authz: Authorizer::new(db.clone()),
-        pdp: pdp.clone(),
-        users: UserRepo::new(db.clone()),
-        catalog_base_url: catalog_base_url.clone(),
-        engine_minter: engine_minter.clone(),
-        keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
-        // Same value the machine-IdP (`IdpState.issuer`) uses below, so a
-        // notebook-minted catalog JWT carries the same `iss` as OAuth-minted ones.
-        idp_issuer: identity.issuer().to_string(),
-    };
-    let notebook = Some(notebook_state.clone());
-
-    // ── Kernel lifecycle wiring (D1b T8) ────────────────────────────────────────
-    // Startup sweep: subprocess kernels from a prior run are gone — clear stale rows.
-    sqlx::query("DELETE FROM kernel.kernels")
-        .execute(&db.pool)
-        .await
-        .ok();
-
-    let kernel_registry = egret_kernel::KernelRegistry::new(db.clone());
-    let kernel_launcher: std::sync::Arc<dyn egret_kernel::KernelLauncher> =
-        if config.kernel.launcher == "kubernetes" {
-            let client = kube::Client::try_default()
-                .await
-                .expect("kernel.launcher=kubernetes but no in-cluster kube config");
-            let kcfg = crate::kernel_launcher_k8s::K8sKernelConfig {
-                namespace: config.kernel.namespace.clone(),
-                image: config.kernel.image.clone(),
-                image_pull_policy: config.kernel.image_pull_policy.clone(),
-                cpu_request: config.kernel.cpu_request.clone(),
-                mem_request: config.kernel.mem_request.clone(),
-                cpu_limit: config.kernel.cpu_limit.clone(),
-                mem_limit: config.kernel.mem_limit.clone(),
-                pull_secret: config.kernel.pull_secret.clone(),
-                engine_tls_insecure: config.kernel.engine_tls_insecure,
-            };
-            std::sync::Arc::new(crate::kernel_launcher_k8s::KubernetesLauncher::new(
-                client, kcfg,
-            ))
-        } else {
-            std::sync::Arc::new(egret_kernel::SubprocessLauncher::default())
-        };
-    let kernel_idle = std::time::Duration::from_secs(30 * 60); // 30 min idle timeout
-
-    let kernel_manager = std::sync::Arc::new(egret_kernel::KernelManager::new(
-        kernel_registry.clone(),
-        kernel_launcher.clone(),
-        kernel_idle,
-    ));
-
-    // Spawn the idle reaper (sweeps every 60 s). `reaper_cancel` is the
-    // background loops' shared token, cancelled on SIGTERM or SIGINT by the
-    // task spawned after the workflow runtime below.
+    // `reaper_cancel` is the background loops' shared cancellation token: the
+    // automation ticker and the workflow runtime below, cancelled together on
+    // SIGTERM or SIGINT by the task spawned after the workflow runtime.
     let reaper_cancel = tokio_util::sync::CancellationToken::new();
-    egret_kernel::spawn_reaper(
-        kernel_registry,
-        kernel_launcher,
-        kernel_idle,
-        std::time::Duration::from_secs(60),
-        reaper_cancel.clone(),
-    );
 
     // ── Alerts & Reports ticker (P2) ───────────────────────────────────────
     //
-    // One per replica, beside the kernel reaper and cancelled by the same
-    // token. No leader election: the claim uses FOR UPDATE SKIP LOCKED, so N
+    // One per replica, cancelled by the same token as the workflow runtime
+    // below. No leader election: the claim uses FOR UPDATE SKIP LOCKED, so N
     // replicas ticking together is the design rather than a hazard.
     //
     // `automation_runner` itself is always built (above, shared with
@@ -1853,9 +1777,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // **Which handlers run is `egret_workflow::runtime::handlers_for`'s
     // decision (W5a Task 5), made there so a test can reach it.** With
     // `workflow.container_runner = none` (the default) it is
-    // `Handlers::with_core_tasks()` exactly -- `core.log.Log`,
-    // `core.debug.Return`, `core.execution.Fail`, `core.flow.Sleep` -- as
-    // before W5a. With `docker` or `kubernetes` it adds Kestra's four script
+    // `Handlers::with_core_tasks()` -- eleven handlers: `core.log.Log`,
+    // `core.debug.Return`, `core.execution.Fail`, `core.flow.Sleep`, since W9a
+    // Task 11 `core.storage.Write`/`Size`, and since W9a Task 12
+    // `core.storage.Concat`/`Split`/`Reverse`/`DeduplicateItems`/`FilterItems`,
+    // the storage ones over the store installed above -- plus
+    // `core.storage.Delete`/`PurgeCurrentExecutionFiles`, which need the
+    // pool: thirteen of `spec::registry::TASK_TYPES`' twenty-three rows. With `docker` or `kubernetes` it adds Kestra's four script
     // task types and W4's two aliases over ONE runner built here, gated at run
     // time by the workspace feature `workflow_containers` (off by default) and
     // the `plugin_configurations` image allowlist, and the reaper's tick
@@ -1870,11 +1798,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // does not fail the run: it propagates out of `run_one`, the run keeps its
     // lease, `reap` clears only `claimed_at` a `working_timeout` later, `claim`
     // re-selects it, and the cycle repeats for ever with one `warn` per cycle.
-    // `oracle-exec/README.md` item 19 carries this. **Seven of fifteen
+    // `oracle-exec/README.md` item 19 carries this. **Six of twenty-three
     // publishable types hang in production, whatever the runner** (`egret.sql`,
-    // `egret.python`, `egret.dataapi.call`, `egret.dataset.refresh`,
-    // `egret.report.send`, `core.http`, `core.slack`); this comment said "nine
-    // of thirteen" before W5a folded `egret.container`/`egret.script.python`
+    // `egret.dataapi.call`, `egret.dataset.refresh`,
+    // `egret.report.send`, `core.http`, `core.slack`): 23 rows = these 6 + the
+    // 13 core handlers above + the 4 script types a runner serves. All nine
+    // core storage tasks are registered -- W9a Task 11's `Write` and `Size`
+    // and Task 12's five in `with_core_tasks`, `Delete` and
+    // `PurgeCurrentExecutionFiles` by `handlers::storage::register` inside
+    // `handlers_for`. This comment said "seven of twenty-four" until the W9a rebase onto Data
+    // Apps P6a (#629), which removed `egret.python`; "seven of nineteen" until W9a Task 12
+    // fix round 1, "seven of fifteen" until W9a Task 11, and "nine of
+    // thirteen" before W5a folded `egret.container`/`egret.script.python`
     // into aliases of four script types that a runner now serves. Publish
     // (`publish::check_script_tasks`) refuses EVERY script task when no
     // runner is configured -- with or without a `taskRunner:` -- and one whose
@@ -1928,10 +1863,31 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         },
         reaper_cancel.clone(),
     );
+    // W9b Task 8 fix round 1: the hourly sweep of namespace-file staging
+    // objects a crash left behind (older than 24 h). On every replica with a
+    // store, worker or not: the namespace file API uploads through staging
+    // wherever it is served, and two sweeps of one row are no-ops.
+    if let Some(fs) = egret_workflow::storage::current() {
+        egret_workflow::storage::nsfiles::staging::spawn_staging_sweeper(
+            db.pool.clone(),
+            fs.clone(),
+            egret_workflow::storage::nsfiles::staging::StagingSweepConfig::default(),
+            reaper_cancel.clone(),
+        );
+        // W9c spec §11: the hourly KV expiry sweep, its first pass an hour
+        // after start, over every workspace. On every replica with a store:
+        // each key is try-locked, so two replicas never sweep one key twice.
+        egret_workflow::storage::kv::sweep::spawn_kv_expiry_sweeper(
+            db.pool.clone(),
+            fs.clone(),
+            Default::default(),
+            reaper_cancel.clone(),
+        );
+    }
     // SIGTERM or SIGINT (`shutdown_signal` observes both) stops every
-    // background loop on `reaper_cancel` -- the kernel idle reaper, the
-    // automation ticker and the workflow runtime -- at the signal, while the
-    // HTTP server drains. (Before W11 only Ctrl-C cancelled it, from a task of
+    // background loop on `reaper_cancel` -- the automation ticker and the
+    // workflow runtime -- at the signal, while the HTTP server drains.
+    // (Before W11 only Ctrl-C cancelled it, from a task of
     // its own; on SIGTERM the loops ran on until `main` returned.) So the
     // workflow claim loop stops claiming and its log writer drains inside the
     // grace period, and other replicas pick up the runs.
@@ -1943,50 +1899,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             reaper_cancel.cancel();
         });
     }
-
-    // api_url: the server's own externally-reachable base URL (for EGRET_API_URL
-    // forwarded to kernel processes as a callback base). Defaults to
-    // http://127.0.0.1:{port} from the configured listen address when catalog
-    // public_url is not set.
-    let api_url = config
-        .catalog
-        .public_url
-        .clone()
-        .unwrap_or_else(|| format!("http://127.0.0.1:{}", config.server.port));
-    // kernel_api_url: the callback base handed to kernel processes/pods as
-    // EGRET_API_URL (via `manifest_to_env`). Distinct from `api_url` above
-    // because a `kubernetes` launcher's pods often can't reach the server's
-    // externally-facing `public_url` (e.g. an ingress host) and need a
-    // cluster-internal address (e.g. a Service DNS name) instead.
-    let kernel_api_url = config
-        .kernel
-        .callback_url
-        .clone()
-        .unwrap_or_else(|| api_url.clone());
-
-    let kernel = Some(egret_kernel::KernelState {
-        manager: kernel_manager,
-        // E5c-1: hand kernel the notebook-docs Port over the concrete
-        // NotebookState (which impls `egret_analytics_api::NotebookDocsPort`).
-        // Cloned, not moved (Task 7): `workflow`'s own `WorkflowRefs`, built
-        // further down this function, needs the same port over the same
-        // concrete state.
-        notebook_docs: std::sync::Arc::new(notebook_state.clone()),
-        sessions: sessions.clone(),
-        workspaces: WorkspaceRepo::new(db.clone()),
-        authz: Authorizer::new(db.clone()),
-        pdp: pdp.clone(),
-        api_url: kernel_api_url,
-        notebook_kernels: egret_kernel::NotebookKernelStore::new(db.clone()),
-        proxy: std::sync::Arc::new(egret_kernel::BackendWsProxy),
-        engine_conn: std::sync::Arc::new(EngineConnResolverImpl {
-            databases: databases.clone(),
-        }),
-        // Task 7: reuse the SAME broker Arc as NotebookState — one minter.
-        engine_minter: engine_minter.clone(),
-        active: egret_kernel::recorder::ActiveExecutions::default(),
-    });
-    // ── end kernel wiring ───────────────────────────────────────────────────────
 
     // Embedded catalog (EB-1/EB-3): mount lakekeeper in-process at /catalog/v1
     // (fronted by egret's CatalogGuard), and build the warehouse provisioner —
@@ -2261,6 +2173,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // other token this deployment signs; `consumer_base_url` is the address a
     // caller outside the cluster uses, so the `token_endpoint` handed back with
     // a new client points somewhere they can actually reach.
+    // Data Apps and Workflow Management share the SAME object store
+    // (this `S3Store`, the `[storage]` bucket -- one client, not a second one).
+    let apps_storage = engine_state.storage.clone();
     // ONE `Arc` around the query engine, cloned into every seam that reaches it
     // as a `QueryExecPort` (the Data API and the Data Apps gateway), so there is
     // exactly one `EngineState` behind both.
@@ -2332,7 +2247,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             flows: egret_workflow::FlowRepo::new(db.clone()),
             dataapi_endpoints: std::sync::Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
-            notebooks: std::sync::Arc::new(notebook_state.clone()),
         }),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
@@ -2347,6 +2261,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             plugin_configurations: config.workflow.plugin_configurations.clone(),
             default_runner: container_runner,
         },
+        upload_idle_timeout: egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        upload_total_timeout: egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        export_total_timeout: egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
     });
 
     // Data Apps query gateway (`POST /api/apps/query`). Same query engine `Arc`,
@@ -2372,6 +2289,146 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         cfg: config.apps.clone(),
     });
 
+    // Dead app tokens and grants (revoked or expired more than a day ago) are deleted hourly. A
+    // fresh row is kept a day: it is what explains a 401 someone is still debugging.
+    {
+        let sessions = egret_apps::session::AppSessionRepo::new(db.clone());
+        let grants = egret_apps::grant::GrantRepo::new(db.clone());
+        tokio::spawn(async move {
+            let older_than = std::time::Duration::from_secs(24 * 3600);
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                match sessions.sweep_expired(older_than).await {
+                    Ok(n) if n > 0 => tracing::info!(deleted = n, "app sessions swept"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "app session sweep failed"),
+                }
+                match grants.sweep(older_than).await {
+                    Ok(n) if n > 0 => tracing::info!(deleted = n, "app grants swept"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "app grant sweep failed"),
+                }
+            }
+        });
+    }
+
+    // Data Apps management API (`/api/ws/{workspace}/apps…`): the same session
+    // service, workspace repo, authorizer, PDP, audit sink and Db every other
+    // feature seam shares.
+    let apps_api = Some(egret_apps::AppsApiState {
+        store: egret_apps::store::AppStore::new(
+            db.clone(),
+            apps_storage.clone(),
+            config.storage.bucket.clone(),
+            config.apps.storage.prefix.clone(),
+        ),
+        db: db.clone(),
+        sessions: sessions.clone(),
+        workspaces: WorkspaceRepo::new(db.clone()),
+        authz: Authorizer::new(db.clone()),
+        pdp: pdp.clone(),
+        audit: audit_sink.clone(),
+        grants: egret_apps::grant::GrantRepo::new(db.clone()),
+        apps_origin: config.apps.origin.clone(),
+        ticket_ttl: std::time::Duration::from_secs(config.apps.ticket_ttl_secs),
+    });
+
+    // Data Apps pod API (`/api/apps/pod/…`): what an app pod calls with its pod token.
+    let apps_pod = Some(egret_apps::PodApiState {
+        db: db.clone(),
+        pdp: pdp.clone(),
+        pods: egret_apps::podtoken::PodTokenRepo::new(db.clone()),
+        store: egret_apps::store::AppStore::new(
+            db.clone(),
+            apps_storage.clone(),
+            config.storage.bucket.clone(),
+            config.apps.storage.prefix.clone(),
+        ),
+    });
+
+    // The apps host (spec §6.2, D17): the ticket route and the proxy, on a listener of their
+    // own. Off unless `apps.origin` is set. Which pods it can reach depends on
+    // `apps.pod.launcher`: with `none`, every pod is unavailable (the cookie, route and header
+    // checks are live all the same).
+    let apps_proxy = if config.apps.origin.is_empty() {
+        None
+    } else {
+        let pod = &config.apps.pod;
+        let pod_tokens = egret_apps::podtoken::PodTokenRepo::new(db.clone());
+        let launcher: Option<std::sync::Arc<dyn egret_apps::AppPodLauncher>> =
+            match pod.launcher.as_str() {
+                "subprocess" => Some(std::sync::Arc::new(
+                    egret_apps::subprocess_pod::SubprocessPodLauncher::new(
+                        pod_tokens,
+                        egret_apps::subprocess_pod::SubprocessConfig {
+                            command: pod.command.clone(),
+                            work_dir: pod.work_dir.clone().into(),
+                            config_dir: pod.config_dir.clone().into(),
+                            venv_shim_dir: pod.venv_shim_dir.clone().into(),
+                            callback_url: pod.callback_url.clone(),
+                            run_kernel_mode: pod.run_kernel_mode.clone(),
+                        },
+                    ),
+                )),
+                "kubernetes" => {
+                    let client = kube::Client::try_default()
+                        .await
+                        .expect("apps.pod.launcher=kubernetes but no in-cluster kube config");
+                    Some(std::sync::Arc::new(
+                        crate::apps_pod_k8s::KubernetesAppPodLauncher::new(
+                            client,
+                            crate::apps_pod_k8s::K8sAppPodConfig {
+                                namespace: pod.namespace.clone(),
+                                image: pod.image.clone(),
+                                image_pull_policy: pod.image_pull_policy.clone(),
+                                cpu_request: pod.cpu_request.clone(),
+                                mem_request: pod.mem_request.clone(),
+                                cpu_limit: pod.cpu_limit.clone(),
+                                mem_limit: pod.mem_limit.clone(),
+                                pull_secret: pod.pull_secret.clone(),
+                                callback_url: pod.callback_url.clone(),
+                                run_kernel_mode: pod.run_kernel_mode.clone(),
+                            },
+                            pod_tokens,
+                        ),
+                    ))
+                }
+                _ => None,
+            };
+        let resolver: std::sync::Arc<dyn egret_apps::PodResolver> = match launcher {
+            Some(launcher) => {
+                tracing::info!(mode = launcher.mode(), "app pod launcher");
+                egret_apps::spawn_pod_reaper(
+                    launcher.clone(),
+                    std::time::Duration::from_secs(pod.idle_secs),
+                    std::time::Duration::from_secs(pod.run_idle_secs),
+                    std::time::Duration::from_secs(60),
+                );
+                std::sync::Arc::new(egret_apps::LauncherPods {
+                    launcher,
+                    ready_timeout: std::time::Duration::from_secs(pod.ready_timeout_secs),
+                })
+            }
+            None => std::sync::Arc::new(egret_apps::UnavailablePods),
+        };
+        Some(egret_apps::proxy_router(egret_apps::ProxyState::new(
+            db.clone(),
+            pdp.clone(),
+            egret_apps::grant::GrantRepo::new(db.clone()),
+            egret_apps::session::AppSessionRepo::new(db.clone()),
+            resolver,
+            egret_apps::ProxyConfig {
+                egret_origin: config.apps.egret_origin.clone(),
+                secure: config.apps.origin.starts_with("https://"),
+                session_idle: std::time::Duration::from_secs(config.apps.session_idle_secs),
+                session_absolute: std::time::Duration::from_secs(config.apps.session_absolute_secs),
+                cookie_ttl: std::time::Duration::from_secs(config.apps.cookie_ttl_secs),
+                run_session_cap: pod.run_session_cap,
+            },
+        )))
+    };
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
@@ -2382,8 +2439,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         engine,
         bi,
         automation,
-        notebook,
-        kernel,
         control_plane,
         catalog_admin,
         policy_admin,
@@ -2411,12 +2466,33 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // this on and mistyped finds out at boot.
         workflow_webhooks_enabled: config.workflow.webhooks_enabled,
         apps,
+        apps_api,
+        apps_pod,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| format!("binding {addr}"))?;
     tracing::info!(%addr, "egret listening");
+    if let Some(router) = apps_proxy {
+        let apps_addr = config.apps.listen.clone();
+        let apps_listener = tokio::net::TcpListener::bind(&apps_addr)
+            .await
+            .with_context(|| format!("binding apps host {apps_addr}"))?;
+        tracing::info!(addr = %apps_addr, origin = %config.apps.origin, "apps host listening");
+        tokio::spawn(async move {
+            if let Err(e) = egret_server::serve_with_drain(
+                apps_listener,
+                router,
+                egret_server::shutdown_signal(),
+                egret_server::DRAIN_DEADLINE,
+            )
+            .await
+            {
+                tracing::error!(error = %e, "apps host stopped");
+            }
+        });
+    }
     // SIGTERM is observed and in-flight requests are drained, bounded by
     // `DRAIN_DEADLINE`. Before this, a rollout dropped every in-flight query on
     // the floor — and silently, because `dataapi.access_log` is written after

@@ -4,9 +4,7 @@
  * Thin adapter over `./generated/folders/folders` (list/create/rename/delete),
  * plus `useSetFolder`, which is generic across entity kinds and therefore
  * dispatches to each domain's generated `*SetFolder` fetch fn and invalidates
- * that domain's list key. Charts/dashboards/datasets are migrated to generated
- * keys; notebooks is still on its hand-written key (migrated in a later P4d
- * batch), so its branch keeps the legacy `["notebooks", ws]` invalidation.
+ * that domain's list key.
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
@@ -23,16 +21,16 @@ import {
 } from "./generated/folders/folders";
 import type { FolderDto } from "./generated/model";
 import { alertsSetFolder, getAlertsListQueryKey } from "./generated/alerts/alerts";
-import { notebooksSetFolder } from "./generated/notebooks/notebooks";
+import { appsSetFolder, getAppsListQueryKey } from "./generated/apps/apps";
 import { sqllabSqSetFolder } from "./generated/sqllab/sqllab";
 
 export type EntityKind =
   | "charts"
   | "dashboards"
   | "datasets"
-  | "notebooks"
   | "saved_queries"
-  | "alerts";
+  | "alerts"
+  | "apps";
 
 /**
  * Every `{kind}` the GENERIC folder router accepts — `egret-bi`'s `kind_perms`
@@ -51,16 +49,16 @@ export type EntityKind =
 export type FolderKind = EntityKind | "data_api_endpoints";
 export type Folder = FolderDto;
 
-/** Invalidation key for each entity's list; generated for migrated domains,
- *  legacy for notebooks (not yet on the generated client). */
+/** Invalidation key for each entity's list; generated for every migrated domain. */
 const listKeyOf: Record<EntityKind, (ws: string) => readonly unknown[]> = {
   charts: (ws) => getChartsChListQueryKey(ws),
   dashboards: (ws) => getDashboardsDbListQueryKey(ws),
   datasets: (ws) => getDatasetsDsListQueryKey(ws),
-  notebooks: (ws) => ["notebooks", ws],
   saved_queries: (ws) => ["sqllab", ws, "saved"],
   // Prefix key: both list tabs (`{type: alert|report}`) invalidate together.
   alerts: (ws) => getAlertsListQueryKey(ws),
+  // Prefix key: the live list and the trash (`{trashed: true}`) invalidate together.
+  apps: (ws) => getAppsListQueryKey(ws),
 };
 
 /** `PATCH /ws/{ws}/{kind}/{id}/folder` via each domain's generated fetch fn. */
@@ -68,9 +66,9 @@ const setFolderOf: Record<EntityKind, (ws: string, id: string, folderId: string 
   charts: (ws, id, folder_id) => chartsChSetFolder(ws, id, { folder_id }),
   dashboards: (ws, id, folder_id) => dashboardsDbSetFolder(ws, id, { folder_id }),
   datasets: (ws, id, folder_id) => datasetsDsSetFolder(ws, id, { folder_id }),
-  notebooks: (ws, id, folder_id) => notebooksSetFolder(ws, id, { folder_id }),
   saved_queries: (ws, id, folder_id) => sqllabSqSetFolder(ws, id, { folder_id }),
   alerts: (ws, id, folder_id) => alertsSetFolder(ws, id, { folder_id }),
+  apps: (ws, id, folder_id) => appsSetFolder(ws, id, { folder_id }),
 };
 
 export const folderKeys = { list: (ws: string, kind: FolderKind) => getFoldersFoldersListQueryKey(ws, kind) };

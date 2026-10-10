@@ -235,7 +235,7 @@ async fn member_session(
 }
 
 /// `data_api_endpoints` is a valid `{kind}` on the generic folder router
-/// (`kind_perms`), the same way `notebooks` and `alerts` share it despite
+/// (`kind_perms`), the same way `alerts` shares it despite
 /// living in other crates. Without the arm, `kind_perms` returns `None` and the
 /// route 404s — which would mean Data API endpoints can never appear in the
 /// Access Control console's folder tree alongside dashboards and datasets. A
@@ -293,6 +293,201 @@ async fn data_api_endpoint_folders_are_a_known_kind() {
         resp.status(),
         StatusCode::OK,
         "endpoints must appear in the Access Control console like dashboards and datasets"
+    );
+}
+
+/// `apps` is a valid `{kind}` on the generic folder router (`kind_perms`), the
+/// way `data_api_endpoints` is: data apps live in egret-apps and file into
+/// `analytics.folders` with `entity_type = 'app'`. A `ws_editor` (holds
+/// `app:write` from migration 0162), resolved by a real `CedarPdp`, can create
+/// one; without the arm the route 404s.
+#[tokio::test]
+async fn app_folders_are_a_known_kind() {
+    let Some(url) = egret_test_db::url().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let owner: Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(format!("owner_{}@egret.local", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .expect("insert owner");
+    let slug = format!("bi-app-folders-{}", Uuid::new_v4().simple());
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'App Folders Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let sessions = st.sessions.clone();
+    let editor = member_session(&db, &sessions, ws, "ws_editor").await;
+
+    let app = egret_bi::folder_router().with_state(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/ws/{slug}/folders/apps"))
+                .header("Cookie", format!("egret_session={editor}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name":"Sales apps"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a ws_editor creates an apps folder"
+    );
+
+    let entity_type: String = sqlx::query_scalar(
+        "SELECT entity_type FROM analytics.folders WHERE workspace_id = $1 AND name = 'Sales apps'",
+    )
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .expect("folder row");
+    assert_eq!(entity_type, "app");
+}
+
+/// Sharing a folder is gated on the manage action of the kind of thing the folder
+/// holds -- a share on a folder is a share on everything in it. It used to ask
+/// for `folder:manage`, a key that is in no role and not in the catalog, so the
+/// route answered 403 to everyone, workspace admins included.
+///
+/// Resolved by a real `CedarPdp`. A dashboards folder follows `dashboard:manage`
+/// (editors and admins); an apps folder follows `app:manage` (admins only), the
+/// same bar as sharing one app.
+#[tokio::test]
+async fn sharing_a_folder_follows_the_manage_action_of_what_it_holds() {
+    let Some(url) = egret_test_db::url().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let owner: Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(format!("owner_{}@egret.local", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .expect("insert owner");
+    let slug = format!("bi-folder-share-{}", Uuid::new_v4().simple());
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'Folder Share Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+    let mut folders = std::collections::HashMap::new();
+    for entity_type in ["dashboard", "app", "alert"] {
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO analytics.folders (workspace_id, entity_type, name) \
+             VALUES ($1, $2, 'Shared things') RETURNING id",
+        )
+        .bind(ws)
+        .bind(entity_type)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert folder");
+        folders.insert(entity_type, id);
+    }
+    // Someone to share with: resolved by email in the grant body.
+    let guest_email = format!("guest_{}@egret.local", Uuid::new_v4().simple());
+    sqlx::query("INSERT INTO users (provider, email) VALUES ('local', $1)")
+        .bind(&guest_email)
+        .execute(&db.pool)
+        .await
+        .expect("insert guest");
+
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let sessions = st.sessions.clone();
+    let admin = member_session(&db, &sessions, ws, "ws_admin").await;
+    let editor = member_session(&db, &sessions, ws, "ws_editor").await;
+    let viewer = member_session(&db, &sessions, ws, "ws_viewer").await;
+
+    let share = |token: String, folder: Uuid| {
+        let app = egret_bi::shares::shares_router().with_state(st.clone());
+        let uri = format!("/ws/{slug}/objects/folder/{folder}/grants");
+        let body = format!(
+            r#"{{"principal_type":"user","principal_id":"{guest_email}","role":"ws_viewer"}}"#
+        );
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header("Cookie", format!("egret_session={token}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+
+    let cases = [
+        ("ws_admin", &admin, "dashboard", StatusCode::OK),
+        ("ws_editor", &editor, "dashboard", StatusCode::OK),
+        ("ws_viewer", &viewer, "dashboard", StatusCode::FORBIDDEN),
+        ("ws_admin", &admin, "app", StatusCode::OK),
+        ("ws_editor", &editor, "app", StatusCode::FORBIDDEN),
+        ("ws_viewer", &viewer, "app", StatusCode::FORBIDDEN),
+    ];
+    for (who, token, kind, expected) in cases {
+        assert_eq!(
+            share(token.clone(), folders[kind]).await,
+            expected,
+            "{who} sharing a {kind}s folder"
+        );
+    }
+
+    // A folder of something that is not a share kind only groups: there is no
+    // object grant to hand out on it, for anyone. 400, not a 403 that reads as
+    // "you lack a permission somebody else has".
+    assert_eq!(
+        share(admin.clone(), folders["alert"]).await,
+        StatusCode::BAD_REQUEST,
+        "an alerts folder is not shareable"
+    );
+
+    // And the grant is real: it is stored against the folder.
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access_grants WHERE scope_type = 'object' AND scope_id = $1",
+    )
+    .bind(folders["dashboard"])
+    .fetch_one(&db.pool)
+    .await
+    .expect("count grants");
+    assert_eq!(
+        stored, 1,
+        "one guest, granted once (the second PUT is an upsert)"
     );
 }
 

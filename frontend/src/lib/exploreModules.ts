@@ -1,8 +1,8 @@
 import {
   BarChart3,
   Bell,
+  AppWindow,
   LayoutDashboard,
-  NotebookText,
   SquareTerminal,
   Table2,
   type LucideIcon,
@@ -33,7 +33,8 @@ export const EXPLORE_MODULES: ExploreModule[] = [
   { key: "datasets", label: "Datasets", icon: Table2, path: "datasets" },
   { key: "charts", label: "Charts", icon: BarChart3, path: "charts" },
   { key: "dashboards", label: "Dashboards", icon: LayoutDashboard, path: "dashboards" },
-  { key: "notebooks", label: "Notebooks", icon: NotebookText, path: "notebooks" },
+  // Data Apps replaced the Jupyter notebook in this menu (Data Apps P6).
+  { key: "apps", label: "Apps", icon: AppWindow, path: "apps" },
   // Last in nav order deliberately: Alerts & Reports acts ON the modules above
   // (it queries data and mails charts), so it reads as their consumer — and
   // being last means it can never displace SQL Lab as the default landing page.
