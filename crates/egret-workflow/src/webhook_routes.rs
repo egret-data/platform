@@ -215,8 +215,8 @@ use uuid::Uuid;
 
 use crate::routes::WorkflowState;
 use crate::trigger::webhook::{
-    build_output, find, render_inputs, ExecutionTrigger, InputContext, KeyContext, Unsupported,
-    WebhookRequest,
+    build_output, declared_unsupported, find, render_inputs, ExecutionTrigger, InputContext,
+    KeyContext, WebhookRequest,
 };
 
 /// The largest webhook body this surface accepts, in bytes.
@@ -588,22 +588,10 @@ async fn handle(
     // `responseCode` were parsed into `models::Webhook` and then silently
     // dropped, which is the `lateMaximumDelay` shape -- a field an author can
     // write, that validates, and that changes nothing. Only `wait` was refused.
-    if let Some(unsupported) = [
-        webhook.wait.then_some(Unsupported::Wait),
-        webhook.return_outputs.then_some(Unsupported::ReturnOutputs),
-        webhook
-            .response_content_type
-            .is_some()
-            .then_some(Unsupported::ResponseContentType),
-        webhook
-            .response_code
-            .is_some()
-            .then_some(Unsupported::ResponseCode),
-    ]
-    .into_iter()
-    .flatten()
-    .next()
-    {
+    // The list lives in `trigger::webhook::declared_unsupported`, which the
+    // flow schema's measurement (`spec::schema`) also calls, so a property
+    // refused here is never offered by the editor's completion.
+    if let Some(unsupported) = declared_unsupported(webhook) {
         return Err(Error::Conflict(unsupported.message(&trigger.id)));
     }
 

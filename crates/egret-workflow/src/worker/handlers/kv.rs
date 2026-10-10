@@ -969,7 +969,7 @@ pub(crate) struct PurgeSpec {
 /// expiredOnly}` or `{type: version, keepAmount | before}`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BehaviorSpec {
+pub(crate) struct BehaviorSpec {
     #[serde(rename = "type", default)]
     kind: Option<String>,
     #[serde(rename = "expiredOnly", default)]

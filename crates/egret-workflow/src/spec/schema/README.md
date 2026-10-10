@@ -22,7 +22,9 @@ where each comes from and how to reproduce it.
 
 The raw export is over 5 MB, so it is not committed; `trim.py` reproduces
 `kestra-flow-schema.json` from it byte for byte (the raw file's hash is
-recorded inside, under `x-kestra-export`).
+recorded inside, under `x-kestra-export`). The Kestra version, image ID and
+export date are recorded inside too, under `x-egret-source`; `mod.rs` serves
+the version from there (`x-egret-kestra-version`).
 
 ```bash
 # A throwaway container on a free port. Kestra 2.0 asks for a first user
@@ -42,7 +44,8 @@ for t in $(python3 -c 'import trim; print(" ".join(trim.KESTRA_TYPES))'); do
 done
 docker rm -f w7a-kestra-t1
 
-python3 trim.py raw-flow-schema.json plugin-docs kestra-flow-schema.json
+python3 trim.py raw-flow-schema.json plugin-docs kestra-flow-schema.json \
+  2.0.0-rc13 sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd 2026-10-10
 ```
 
 What `trim.py` does is in its docstring: task and trigger unions become
@@ -55,55 +58,93 @@ as `x-egret-outputs`. It removes no property; that is `mod.rs`'s job.
 `tests/flow_schema.rs` fails if egret starts accepting a Kestra class that is
 not there.
 
-## 2. The property-treatment measurement (W7a Task 1 Step 2)
+## 2. The property-treatment measurement (W7a Task 1 Step 2, fix round 1)
 
-For every type egret accepts that has a Kestra definition (50 classes), and
-for the flow document itself, each property Kestra documents is classified
-by egret's own code. `measure.rs` holds the instrument; it runs as the test
-`spec::schema::measure::the_committed_property_treatment_is_what_egret_does_today`,
-which fails when `property-treatment.json` no longer matches, and rewrites it
-with `EGRET_WRITE_PROPERTY_TREATMENT=1`.
+Every object the served schema can offer is a *row*: each Kestra class egret
+accepts (50), the flow document (`Flow`), and every nested Kestra definition
+those reach that egret parses -- the 20 input definitions, `DependsOn`, the
+three retry definitions, `Concurrency`, `Check`, `Quota`, both SLA
+definitions, `Output`, `Label`, the Flow trigger's `Flow-Dependency` and
+`Window`, `Dag-DagTask`, `LoopUntil-CheckFrequency`, `NamespaceFiles`, and the
+purge tasks' `behavior` (`kv.Key-2`, `kv.Version-2`, `namespace.Version-2`).
 
-**What egret reads (the read set).** The base properties `models::Task`'s
-deserializer takes; for a core leaf task, the fields of the struct its handler
-deserializes the leaf spec into, listed by serde itself (a deserializer that
-records the field list `deserialize_struct` receives); for a flowable or a
-trigger, the fields of its typed model struct the same way, plus the trigger
-base fields something outside `models/` reads; for a script task
-`ScriptKind::implemented_properties`; for a plugin class, its catalog
-properties minus the refused base ones; for the flow, `models::Flow`'s fields.
-None of those structs denies unknown fields, so for leaf tasks this is the
-complete answer to "honoured or ignored": a key outside the handler's struct
-is dropped by serde, without a word.
+`measure.rs` holds the instrument and its doc has the full rule table. It runs
+as the test `spec::schema::measure::the_committed_property_treatment_is_what_egret_does_today`,
+which fails when `property-treatment.json` differs from a fresh measurement by
+one byte; `EGRET_WRITE_PROPERTY_TREATMENT=1` rewrites the file.
 
-**What parse + validate say.** A minimal flow carrying the property (with a
-sample value) is parsed and validated, and compared with the same flow
-without it.
+For each property, a minimal flow holding the row's object is built with and
+without it and put through three stages:
 
-| parse + validate | in the read set | treatment | served |
-|---|---|---|---|
-| parse fails, or a new error | no | `refused` | no |
-| a new `not_yet_enforced` warning | either | `warned` | yes |
-| clean | yes | `honoured` | yes |
-| clean | no | `ignored` | no |
+1. **parse + validate** -- a parse failure or a new error;
+2. **the later stage that refuses by name**, where there is one:
+   `ScheduleTrigger::resolve` (what `scheduler::sync` runs), and for a
+   Webhook `trigger::webhook::declared_unsupported` and `build_output` (the
+   409 every firing answers). These are the refusal sites found by grepping
+   `trigger/`, `webhook_routes.rs` and the worker handlers for "not
+   supported" / "unsupported" / "not implemented" errors. The other hits refuse
+   *values* of a property egret honours (cron syntax, window durations,
+   `outputFiles` globs, the run-time `secret()` refusal), which a schema cannot
+   express, and are not counted;
+3. **what egret keeps**:
+   * a type row: `models::Task`'s base keys plus the handler's spec struct
+     (serde's own field list, `wire_fields_of`), the typed model struct
+     (flowables, triggers), `ScriptKind::implemented_properties` (scripts) or
+     the catalog (plugins). For a trigger, only the base fields its firing
+     path reads: `id`, `type`, `description` and `disabled` everywhere, plus
+     `when` and `labels` on Flow. A Schedule refuses `when` (stage 2) and a
+     Webhook reads neither, so `labels`/`when` are `ignored` there;
+   * a nested row egret models with a struct: whether the key survives
+     `parse` and re-serialising the parsed `Flow` -- serde drops every key
+     the struct lacks, which is exactly the silent drop to rule out;
+   * the purge `behavior` rows, which a handler deserializes
+     `deny_unknown_fields` at run time: their fields, anything else refused.
 
-Two adjustments, both named in `measure.rs`: the script tasks'
-`warningOnStdErr` is read and has no effect (Kestra's own "not used anymore"),
-so it is `ignored`; and the four trigger base fields `models::Trigger` parses
-that nothing reads (`stopAfter`, `logToFile`, `failOnTriggerError`,
-`allowConcurrent`) are outside the read set, so they come out `ignored`.
+| stage 1 | stage 2 | kept | treatment | served |
+|---|---|---|---|---|
+| any | new refusal | any | `refused` | no |
+| fails | -- | no | `refused` | no |
+| new `not_yet_enforced` warning | -- | any | `warned` | yes |
+| clean | clean | yes | `honoured` | yes |
+| clean | clean | no | `ignored` | no |
 
-`warned` is served because it is not silent: the editor shows the warning
-beside the property. `refused` is not served because completion would
-suggest a save error.
+**Enum values.** Each served property's `enum` values are tried one by one;
+a value that does not parse or that stage 2 refuses is removed from the served
+enum, and the property's description says so ("**Not accepted by egret:**").
+
+One adjustment: the script tasks' `warningOnStdErr` is read and has no effect
+(Kestra's own "not used anymore"), so it is `ignored`.
+
+`warned` is served because it is not silent: the editor shows the warning.
+
+### Passed through unfiltered
+
+* unions (`KvPurgeBehavior`, `FilesPurgeBehavior`, `ReusableInputsInput-2`)
+  -- each member is a row of its own;
+* `io.kestra.core.models.tasks.common.EncryptedString`, one shape of a
+  SECRET input's `defaults`, which egret keeps as an opaque value;
+* `java.lang.Void`, empty;
+* `ValueOption` and the other definitions reachable only from a property
+  that is no longer served (SELECT `values`, the *base 7*, Docker's runner
+  internals) are pruned from the document with it.
+
+### The type set and the deployment
+
+Which gated types are offered is decided by the two publish gates
+themselves, with the workspace's features **and the deployment's**
+`workflow.plugin_configurations` and default runner (`routes::WorkflowState::scripts`):
+a script type needs `scripts::gate::check_unrendered` to pass with the
+default runner (a runner, and an `allowed-images` entry for it); a plugin
+class needs `plugins::gate::check` (both features, a runner, its FQCN in
+`allowed-types`). The cache is keyed by that outcome.
 
 ### Result
 
-1223 properties over 51 rows (50 classes and the flow document): 799 honoured, 8 warned, 303 ignored, 113 refused.
+1495 properties over 90 rows: 1034 honoured, 8 warned, 334 ignored, 119 refused.
 
-The seven base properties egret's `Task` model does not read (`assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`, `workerSelector`) are `ignored` on every core task and flowable and `refused` on script and plugin tasks; the table lists them as *base 7*.
+*base 7* = `assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`, `workerSelector`: `ignored` on core tasks and flowables, `refused` on script and plugin tasks.
 
-| Type | honoured | warned | ignored | refused |
+| Row | honoured | warned | ignored | refused |
 |---|---|---|---|---|
 | `Flow` | 13 | `checks`, `concurrency`, `quotas`, `sla`, `triggers` | `deleted`, `draft`, `policyRefs`, `revision`, `updated`, `workerSelector` | — |
 | `io.kestra.plugin.core.debug.Return` | 10 | — | *base 7* | — |
@@ -141,8 +182,8 @@ The seven base properties egret's `Task` model does not read (`assets`, `logLeve
 | `io.kestra.plugin.core.storage.Split` | 15 | — | *base 7* | — |
 | `io.kestra.plugin.core.storage.Write` | 11 | — | *base 7* | — |
 | `io.kestra.plugin.core.trigger.Flow` | 12 | — | `allowConcurrent`, `assets`, `failOnTriggerError`, `logLevel`, `logToFile`, `policyRefs`, `stopAfter`, `version`, `workerSelector` | — |
-| `io.kestra.plugin.core.trigger.Schedule` | 11 | — | `allowConcurrent`, `assets`, `failOnTriggerError`, `logLevel`, `logToFile`, `policyRefs`, `recoverMissedSchedules`, `stopAfter`, `version`, `workerSelector` | — |
-| `io.kestra.plugin.core.trigger.Webhook` | 13 | — | `allowConcurrent`, `assets`, `failOnTriggerError`, `logLevel`, `logToFile`, `policyRefs`, `stopAfter`, `version`, `workerSelector` | — |
+| `io.kestra.plugin.core.trigger.Schedule` | 8 | — | `allowConcurrent`, `assets`, `failOnTriggerError`, `labels`, `logLevel`, `logToFile`, `policyRefs`, `recoverMissedSchedules`, `stopAfter`, `version`, `workerSelector` | `lateMaximumDelay`, `when` |
+| `io.kestra.plugin.core.trigger.Webhook` | 7 | — | `allowConcurrent`, `assets`, `failOnTriggerError`, `labels`, `logLevel`, `logToFile`, `policyRefs`, `stopAfter`, `version`, `when`, `workerSelector` | `responseCode`, `responseContentType`, `returnOutputs`, `wait` |
 | `io.kestra.plugin.scripts.python.Commands` | 20 | — | `warningOnStdErr` | *base 7*, `dependencies`, `dependencyCacheEnabled`, `packageManager`, `pythonVersion`, `runner`, `targetOS`, `uvAutoInstallEnabled`, `uvInstallerSha256`, `uvInstallerVersion` |
 | `io.kestra.plugin.scripts.python.Script` | 20 | — | `warningOnStdErr` | *base 7*, `dependencies`, `dependencyCacheEnabled`, `packageManager`, `pythonVersion`, `runner`, `targetOS`, `uvAutoInstallEnabled`, `uvInstallerSha256`, `uvInstallerVersion` |
 | `io.kestra.plugin.scripts.shell.Commands` | 20 | — | `warningOnStdErr` | *base 7*, `runner`, `targetOS` |
@@ -156,6 +197,60 @@ The seven base properties egret's `Task` model does not read (`assets`, `logLeve
 | `kestra.io.kestra.plugin.jdbc.postgresql.Queries` | 31 | — | — | *base 7* |
 | `kestra.io.kestra.plugin.jdbc.postgresql.Query` | 30 | — | — | *base 7* |
 | `kestra.io.kestra.plugin.jdbc.trino.Query` | 24 | — | — | *base 7* |
+| `io.kestra.core.models.Label` | 2 | — | — | — |
+| `io.kestra.core.models.flows.Concurrency` | 2 | — | — | — |
+| `io.kestra.core.models.flows.DependsOn` | 2 | — | — | — |
+| `io.kestra.core.models.flows.Output` | 6 | — | — | — |
+| `io.kestra.core.models.flows.check.Check` | 4 | — | — | — |
+| `io.kestra.core.models.flows.input.ArrayInput-2` | 9 | — | — | — |
+| `io.kestra.core.models.flows.input.BoolInput-2` | 8 | — | — | — |
+| `io.kestra.core.models.flows.input.DateInput-2` | 8 | — | `after`, `before` | — |
+| `io.kestra.core.models.flows.input.DateTimeInput-2` | 8 | — | `after`, `before` | — |
+| `io.kestra.core.models.flows.input.DurationInput-2` | 8 | — | `max`, `min` | — |
+| `io.kestra.core.models.flows.input.EmailInput-2` | 8 | — | — | — |
+| `io.kestra.core.models.flows.input.FileInput-2` | 9 | — | — | — |
+| `io.kestra.core.models.flows.input.FloatInput-2` | 8 | — | `max`, `min` | — |
+| `io.kestra.core.models.flows.input.FormInput-2` | 8 | — | `inputs` | — |
+| `io.kestra.core.models.flows.input.IntInput-2` | 8 | — | `max`, `min` | — |
+| `io.kestra.core.models.flows.input.IonInput-2` | 8 | — | — | — |
+| `io.kestra.core.models.flows.input.JsonInput-2` | 8 | — | `jsonSchema` | — |
+| `io.kestra.core.models.flows.input.MultiselectInput-2` | 9 | — | `allowCustomValue`, `autoSelectFirst`, `expression`, `values` | — |
+| `io.kestra.core.models.flows.input.ReusableInputsInput-1` | 8 | — | `namespace`, `ref`, `revision` | — |
+| `io.kestra.core.models.flows.input.SecretInput-2` | 8 | — | `validator` | — |
+| `io.kestra.core.models.flows.input.SelectInput-2` | 8 | — | `allowCustomValue`, `autoSelectFirst`, `expression`, `isRadio`, `values` | — |
+| `io.kestra.core.models.flows.input.StringInput-2` | 8 | — | `validator` | — |
+| `io.kestra.core.models.flows.input.TimeInput-2` | 8 | — | `after`, `before` | — |
+| `io.kestra.core.models.flows.input.URIInput-2` | 8 | — | — | — |
+| `io.kestra.core.models.flows.input.YamlInput-2` | 8 | — | — | — |
+| `io.kestra.core.models.flows.quota.Quota` | 3 | — | — | — |
+| `io.kestra.core.models.flows.sla.types.ExecutionAssertionSLA-2` | 5 | — | — | — |
+| `io.kestra.core.models.flows.sla.types.MaxDurationSLA-2` | 5 | — | — | — |
+| `io.kestra.core.models.tasks.NamespaceFiles` | 6 | — | — | — |
+| `io.kestra.core.models.tasks.retrys.Constant-2` | 6 | — | — | — |
+| `io.kestra.core.models.tasks.retrys.Exponential-2` | 8 | — | — | — |
+| `io.kestra.core.models.tasks.retrys.Random-2` | 7 | — | — | — |
+| `io.kestra.core.models.triggers.Window` | 7 | — | — | — |
+| `io.kestra.plugin.core.flow.Dag-DagTask` | 2 | — | — | — |
+| `io.kestra.plugin.core.flow.LoopUntil-CheckFrequency` | 3 | — | — | — |
+| `io.kestra.plugin.core.kv.Key-2` | 2 | — | — | — |
+| `io.kestra.plugin.core.kv.Version-2` | 3 | — | — | — |
+| `io.kestra.plugin.core.namespace.Version-2` | 3 | — | — | — |
+| `io.kestra.plugin.core.trigger.Flow-Dependency` | 5 | — | — | — |
+
+**Refused at a later stage** (`refused_downstream`; parse and validate accept these):
+
+| Row | Property or value | Site |
+|---|---|---|
+| `io.kestra.plugin.core.trigger.Schedule` | `lateMaximumDelay` | `trigger::schedule::ScheduleTrigger::resolve` |
+| `io.kestra.plugin.core.trigger.Schedule` | `when` | `trigger::schedule::ScheduleTrigger::resolve` |
+| `io.kestra.plugin.core.trigger.Schedule` | `timezone` = 38 of Kestra's Java short ids (`ACT`, `AET`, … `VST`) | `trigger::schedule::ScheduleTrigger::resolve` (`unknown timezone`) |
+| `io.kestra.plugin.core.trigger.Webhook` | `fetchType="STORE"` | `trigger::webhook::build_output` (409 at firing) |
+| `io.kestra.plugin.core.trigger.Webhook` | `responseCode` | `trigger::webhook::declared_unsupported` (409 at firing) |
+| `io.kestra.plugin.core.trigger.Webhook` | `responseContentType` | `trigger::webhook::declared_unsupported` (409 at firing) |
+| `io.kestra.plugin.core.trigger.Webhook` | `returnOutputs` | `trigger::webhook::declared_unsupported` (409 at firing) |
+| `io.kestra.plugin.core.trigger.Webhook` | `wait` | `trigger::webhook::declared_unsupported` (409 at firing) |
+
+**Refused enum values** (`refused_values`, removed from the served enum and named in its description): `Schedule.timezone`: 38 values; `Webhook.fetchType`: `STORE`.
 
 ## 3. `egret-task-schemas.json`
 

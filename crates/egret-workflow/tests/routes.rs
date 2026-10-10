@@ -925,7 +925,10 @@ async fn the_schema_etag_differs_between_workspaces_with_different_features() {
     common::grant(&db, plain, user_a, &["workflow:read"]).await;
     common::grant(&db, with_containers, user_b, &["workflow:read"]).await;
     common::enable_feature(&db, with_containers, "workflow_containers").await;
-    let app = common::app(&db).await;
+    // A deployment that can run a script task at all: a runner, and an
+    // `allowed-images` entry for it (publish refuses scripts without both).
+    let app =
+        common::app_with_scripts(&db, egret_workflow::spec::schema::permissive_deployment()).await;
 
     let a = common::get(&app, &format!("/api/ws/{plain}/workflows/schema"), user_a).await;
     let b = common::get(
@@ -1187,10 +1190,16 @@ async fn update_without_if_updated_at_behaves_as_before() {
     assert_eq!(row["namespace"], "a.absent2");
 }
 
-/// Two saves racing with the same `if_updated_at`: exactly one wins. Each
-/// request takes its own pooled connection, and the barrier releases them
-/// together; the loser waits on the winner's row lock, re-reads the row, and
-/// no longer matches.
+/// Two saves with the same `if_updated_at`: exactly one wins, every time.
+///
+/// Deterministic, after `tests/runtime.rs`'s
+/// `a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance`: a third
+/// connection holds the flow's row lock, both saves are started and observed
+/// **blocked on that lock** in `pg_stat_activity` (never inferred from
+/// timing), and only then is the lock released. Both saves have done every
+/// read they will do before the release, so an implementation that reads
+/// `updated_at` and then writes passes both; the comparison inside the
+/// `UPDATE` re-evaluates after the winner commits and refuses the loser.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_concurrent_saves_with_the_same_if_updated_at_one_wins() {
     let Some(db) = common::db().await else { return };
@@ -1199,13 +1208,28 @@ async fn two_concurrent_saves_with_the_same_if_updated_at_one_wins() {
     let app = std::sync::Arc::new(common::app(&db).await);
     let (id, at) = created_flow(&app, ws, user, "a.race").await;
     let path = format!("/api/ws/{ws}/workflows/flows/{id}");
-    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+
+    let mut holder = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM workflow.flows WHERE id = $1 FOR UPDATE")
+        .bind(Uuid::parse_str(&id).unwrap())
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let blocked_saves = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM pg_stat_activity \
+              WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                AND query LIKE 'UPDATE workflow.flows SET%'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+    };
 
     let mut handles = Vec::new();
-    for ns in ["a.race1", "a.race2"] {
-        let (app, barrier, path, at) = (app.clone(), barrier.clone(), path.clone(), at.clone());
+    for (n, ns) in ["a.race1", "a.race2"].into_iter().enumerate() {
+        let (app, path, at) = (app.clone(), path.clone(), at.clone());
         handles.push(tokio::spawn(async move {
-            barrier.wait().await;
             common::put(
                 &app,
                 &path,
@@ -1215,7 +1239,19 @@ async fn two_concurrent_saves_with_the_same_if_updated_at_one_wins() {
             .await
             .status()
         }));
+        // Wait for THIS save to be blocked before starting the next one.
+        let start = std::time::Instant::now();
+        while blocked_saves().await < (n as i64) + 1 {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "save {n} never blocked on the held row lock"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
+    assert!(handles.iter().all(|h| !h.is_finished()), "both saves wait");
+    holder.commit().await.unwrap();
+
     let mut statuses = Vec::new();
     for h in handles {
         statuses.push(h.await.unwrap());

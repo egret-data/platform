@@ -404,8 +404,8 @@ pub struct UpdateFlowRequest {
     /// The draft's `updated_at` as the editor last read it (RFC 3339, the
     /// exact string `FlowDto.updated_at` carried -- microseconds included).
     /// When present and no longer the row's, the save is refused with 409
-    /// and nothing is written; absent, the save is unconditional (W7a spec
-    /// §7.3). See [`update_flow`] for every writer of the column.
+    /// and nothing is written; absent, the save is unconditional. Publishing
+    /// also moves `updated_at`.
     #[serde(default)]
     pub if_updated_at: Option<DateTime<Utc>>,
 }
@@ -665,33 +665,34 @@ async fn get_flow(
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
-/// `PUT /flows/{id}`: replace the draft.
+/// Replace a flow's draft.
 ///
-/// # `if_updated_at` (W7a spec §7.3)
-///
-/// When the body carries it, the write happens only if the row's
-/// `updated_at` still equals it, compared inside the `UPDATE`'s own `WHERE`
-/// (`FlowRepo::update`), so two concurrent saves of the same draft cannot
-/// both pass: the second waits on the first's row lock, re-reads the row,
-/// no longer matches, and is refused with 409.
-///
-/// The precondition means "nobody saved or published this draft since you
-/// read it" only because these are **every** writer of
-/// `workflow.flows.updated_at` (`grep -rn updated_at` over `crates/` and
-/// `migrations/`, 2026-10-10):
-///
-/// * `FlowRepo::create` -- the `INSERT`, through the column's
-///   `DEFAULT now()` (migration 0132);
-/// * `FlowRepo::update` -- this route, `updated_at = now()`;
-/// * `FlowRepo::set_live` -- publish (`POST /flows/{id}/publish`),
-///   `updated_at = now()`. **A publish therefore moves it**: an editor that
-///   publishes must re-read the draft before its next conditional save.
-///
-/// Writes to the row that do **not** move it: `FlowRepo::soft_delete`
-/// (`deleted_at` only; a trashed draft is not updatable anyway), and the
-/// `ON DELETE SET NULL` foreign keys on `folder_id` and `live_version_id`
-/// (migration 0132), which clear a deleted folder or version without
-/// touching `updated_at`. No database trigger writes it.
+/// With `if_updated_at`, the save happens only if the draft is still the one the editor opened; otherwise it is refused with
+/// 409 and nothing is written. Saving and publishing both move `updated_at`,
+/// so after a publish the editor reads the draft again before saving.
+//
+// # `if_updated_at` (W7a spec §7.3) -- internal notes, not API text
+//
+// The comparison is inside the `UPDATE`'s own `WHERE` (`FlowRepo::update`),
+// so two concurrent saves of the same draft cannot both pass: the second
+// waits on the first's row lock, re-reads the row, no longer matches, and is
+// refused with 409.
+//
+// The precondition means "nobody saved or published this draft since you
+// read it" only because these are **every** writer of
+// `workflow.flows.updated_at` (`grep -rn updated_at` over `crates/` and
+// `migrations/`, 2026-10-10):
+//
+// * `FlowRepo::create` -- the `INSERT`, through the column's `DEFAULT now()`
+//   (migration 0132);
+// * `FlowRepo::update` -- this route, `updated_at = now()`;
+// * `FlowRepo::set_live` -- publish (`POST /flows/{id}/publish`),
+//   `updated_at = now()`.
+//
+// Writes to the row that do **not** move it: `FlowRepo::soft_delete`
+// (`deleted_at` only; a trashed draft is not updatable anyway), and the
+// `ON DELETE SET NULL` foreign keys on `folder_id` and `live_version_id`
+// (migration 0132). No database trigger writes it.
 async fn update_flow(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
@@ -870,7 +871,7 @@ async fn get_flow_schema(
         kestra_plugins: !disabled.contains(crate::plugins::FEATURE_KEY),
         containers: !disabled.contains(crate::scripts::FEATURE_KEY),
     };
-    let served = crate::spec::schema::served(&features);
+    let served = crate::spec::schema::served(&features, &st.scripts);
     let cache = [
         (header::ETAG, served.etag.clone()),
         (header::CACHE_CONTROL, "private, no-cache".to_string()),

@@ -1,120 +1,85 @@
-//! W7a Task 1 Step 2: how egret treats each property Kestra documents, for
-//! every type egret accepts that has a Kestra definition, and for the flow
-//! document itself. The result is `property-treatment.json`, which
-//! [`super::filter_properties`] serves from; the test below re-measures it on
-//! every run and fails when the committed table no longer matches, so a
-//! handler that starts (or stops) reading a property cannot leave the schema
-//! behind. `EGRET_WRITE_PROPERTY_TREATMENT=1` rewrites the file instead.
+//! W7a Task 1 Step 2 (and its fix round 1): how egret treats each property
+//! Kestra documents -- on every type egret accepts that has a Kestra
+//! definition, on the flow document, and on the nested definitions those
+//! reach that egret parses (inputs, retry, the trigger and flow sub-objects).
+//! The result is `property-treatment.json`, which `super::build` serves from;
+//! the test below re-measures it on every run and fails when the committed
+//! file no longer matches. `EGRET_WRITE_PROPERTY_TREATMENT=1` rewrites it.
 //!
 //! # The instrument, per property
 //!
-//! 1. **What egret reads** -- the *read set*:
-//!    * the base task properties `models::Task`'s own deserializer takes
-//!      ([`crate::plugins::HANDLED_BY_TASK_MODEL`]);
-//!    * for a core leaf task, the fields of the struct its handler
-//!      deserializes the leaf spec into, listed by serde itself
-//!      ([`fields_of`]). None of those structs denies unknown fields, so a
-//!      property outside the list is dropped by serde without a word;
-//!    * for a flowable or a trigger, the fields of its typed model struct
-//!      (same instrument), plus, for a trigger, the base fields with a
-//!      consumer outside `models` (see [`TRIGGER_BASE_READ`]);
-//!    * for a script task, `ScriptKind::implemented_properties`, and for a
-//!      plugin class, its catalog properties minus the refused base ones --
-//!      the plugin host runs Kestra's own code over them;
-//!    * for the flow document, the fields of `models::Flow`.
-//! 2. **What parse + validate say** -- a minimal flow carrying the property
-//!    (with a sample value) is parsed and validated, and compared with the
-//!    same flow without it. A parse failure or a new error refuses it; a new
-//!    `not_yet_enforced` warning means egret parses it, does not act on it,
-//!    and says so.
+//! Each row is an object at a [`Site`]: a minimal flow that holds it, built
+//! with and without the property, through three stages:
 //!
-//! | parse + validate | in the read set | treatment |
-//! |---|---|---|
-//! | parse fails, or a new error | no | `refused` |
-//! | new `not_yet_enforced` warning | either | `warned` |
-//! | clean | yes | `honoured` |
-//! | clean | no | `ignored` |
+//! 1. **parse + validate** -- a parse failure or a new validation error;
+//! 2. **the later stage**, where egret has one that refuses by name:
+//!    `ScheduleTrigger::resolve` for a Schedule trigger,
+//!    `trigger::webhook::declared_unsupported` and `build_output` for a
+//!    Webhook (the 409 every firing would answer);
+//! 3. **what egret keeps** -- the *read set*:
+//!    * a type row: the base keys `models::Task` reads, plus the fields of the
+//!      struct its handler deserializes the leaf spec into (serde's own list,
+//!      [`super::wire_fields_of`]), or of its typed model struct (flowables,
+//!      triggers), or `ScriptKind::implemented_properties`, or the catalog's
+//!      properties (plugins); for a trigger, the base fields its own firing
+//!      path reads ([`trigger_base_read`]);
+//!    * a nested row egret models with a struct: whether the key is still
+//!      there after `parse` and re-serialising the parsed `Flow`
+//!      ([`Read::Kept`]) -- serde drops every key the struct lacks;
+//!    * a nested row a handler deserializes `deny_unknown_fields`
+//!      ([`Read::Strict`]): its fields, and anything else is refused.
 //!
-//! A property in the read set whose sample fails to parse stays `honoured`
-//! and is printed, so a bad sample is visible rather than silently turning a
-//! read property into a refused one.
+//! | stage 1 | stage 2 | read | treatment |
+//! |---|---|---|---|
+//! | any | new refusal | any | `refused` |
+//! | fails | -- | no | `refused` |
+//! | new `not_yet_enforced` warning | -- | any | `warned` |
+//! | clean | clean | yes | `honoured` |
+//! | clean | clean | no | `ignored` |
+//!
+//! A read property whose sample fails stage 1 stays `honoured` and is
+//! printed, so a bad sample is visible rather than turning it into `refused`.
+//!
+//! **Enum values.** For each served property whose schema has an `enum`,
+//! each value is tried alone; a value that fails to parse, or that stage 2
+//! refuses, is listed in `refused_values` and removed from the served enum
+//! (Webhook `fetchType: STORE`). Validation errors are not counted for
+//! values: they are cross-field (`mode: AT_LEAST` without `minSatisfied`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::de::{self, DeserializeOwned, Visitor};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
-use super::{Treatment, TreatmentTable, FLOWABLE_TYPES, FLOW_ROW, TRIGGER_TYPES};
-use crate::models;
+use super::{
+    wire_fields_of as fields_of, Measured, Treatment, FLOWABLE_TYPES, FLOW_ROW, TRIGGER_TYPES,
+};
+use crate::models::{self, Flow, TriggerKind};
 use crate::spec::{parse, registry, validate};
 use crate::worker::handlers as h;
-
-// ---------- serde's own field list ----------
-
-#[derive(Debug)]
-struct Captured(Option<&'static [&'static str]>);
-
-impl std::fmt::Display for Captured {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.0)
-    }
-}
-impl std::error::Error for Captured {}
-impl de::Error for Captured {
-    fn custom<T: std::fmt::Display>(_: T) -> Self {
-        Captured(None)
-    }
-}
-
-/// A deserializer that answers nothing and records the field list a derived
-/// `Deserialize` hands to `deserialize_struct`.
-struct FieldProbe;
-
-impl<'de> de::Deserializer<'de> for FieldProbe {
-    type Error = Captured;
-    fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Captured> {
-        Err(Captured(None))
-    }
-    fn deserialize_struct<V: Visitor<'de>>(
-        self,
-        _: &'static str,
-        fields: &'static [&'static str],
-        _: V,
-    ) -> Result<V::Value, Captured> {
-        Err(Captured(Some(fields)))
-    }
-    serde::forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
-        bytes byte_buf option unit unit_struct newtype_struct seq tuple
-        tuple_struct map enum identifier ignored_any
-    }
-}
-
-/// The wire names of `T`'s fields, as its derived `Deserialize` knows them.
-fn fields_of<T: DeserializeOwned>() -> Vec<&'static str> {
-    match T::deserialize(FieldProbe) {
-        Err(Captured(Some(fields))) => fields.to_vec(),
-        _ => panic!(
-            "{} does not deserialize as a struct",
-            std::any::type_name::<T>()
-        ),
-    }
-}
-
-// ---------- the read sets ----------
-
-/// The base trigger fields `models::Trigger`'s deserializer takes AND
-/// something outside `models` reads. Measured by searching `src/` outside
-/// `models/` for each field (`grep -rn '\.<field>\b'`): `when`, `labels`,
-/// `disabled`, `id`, `type`, `description` have readers; `stop_after`,
-/// `log_to_file`, `fail_on_trigger_error` and `allow_concurrent` have none
-/// (the model's own doc says so of `stopAfter`), so those four are not here.
-const TRIGGER_BASE_READ: &[&str] = &["description", "disabled", "id", "labels", "type", "when"];
 
 /// Properties egret reads and that, by Kestra's own definition, do nothing:
 /// the script tasks' `warningOnStdErr` ("Not used anymore, will be removed
 /// soon"; W5a Task 1 measured no effect with `true`, `false` or unset).
 const NO_EFFECT: &[&str] = &["warningOnStdErr"];
+
+/// The base trigger fields each trigger's own firing path reads, measured by
+/// searching that path for each `models::Trigger` field (fix round 1):
+///
+/// * every trigger: `id`, `type`, `description` (documentation), `disabled`
+///   (`scheduler::sync`, `webhook_routes`, `trigger::flow`);
+/// * `Flow` alone also reads `when` and `labels` (`trigger::flow`
+///   `when_source`/`labels`). A Schedule refuses any `when` but `"true"`
+///   (stage 2); a Webhook's path reads neither.
+///
+/// `stopAfter`, `logToFile`, `failOnTriggerError` and `allowConcurrent` are
+/// parsed by `models::Trigger` and read by nothing.
+fn trigger_base_read(t: &str) -> Vec<&'static str> {
+    let mut v = vec!["description", "disabled", "id", "type"];
+    if t == "io.kestra.plugin.core.trigger.Flow" {
+        v.extend(["labels", "when"]);
+    }
+    v
+}
 
 fn task_model() -> BTreeSet<&'static str> {
     crate::plugins::HANDLED_BY_TASK_MODEL
@@ -182,13 +147,52 @@ fn trigger_fields(t: &str) -> Vec<&'static str> {
     }
 }
 
-// ---------- parse + validate ----------
+// ---------- stages ----------
 
 #[derive(Debug, PartialEq)]
 struct Outcome {
     parsed: bool,
     errors: BTreeSet<(String, String)>,
     not_yet_enforced: BTreeSet<String>,
+    /// Stage 2's refusal, if any.
+    downstream: Option<String>,
+    /// The re-serialised parsed flow, for [`Read::Kept`].
+    plan: Option<Value>,
+}
+
+/// Stage 2 for every trigger in `flow`: the first refusal, in its own words.
+fn downstream(flow: &Flow) -> Option<String> {
+    for t in &flow.triggers {
+        match &t.kind {
+            TriggerKind::Schedule(_) => {
+                if let Err(e) = crate::trigger::schedule::ScheduleTrigger::resolve(t) {
+                    return Some(format!("trigger::schedule::ScheduleTrigger::resolve: {e}"));
+                }
+            }
+            TriggerKind::Webhook(w) => {
+                if let Some(u) = crate::trigger::webhook::declared_unsupported(w) {
+                    return Some(format!(
+                        "trigger::webhook::declared_unsupported (409 at firing): {}",
+                        u.message(&t.id)
+                    ));
+                }
+                let req = crate::trigger::webhook::WebhookRequest {
+                    query: Vec::new(),
+                    headers: Vec::new(),
+                    content_type: Some("application/json".into()),
+                    body: b"{}".to_vec(),
+                };
+                if let Err(u) = crate::trigger::webhook::build_output(&req, w.fetch_type, None) {
+                    return Some(format!(
+                        "trigger::webhook::build_output (409 at firing): {}",
+                        u.message(&t.id)
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn run(flow: &Value) -> Outcome {
@@ -198,6 +202,8 @@ fn run(flow: &Value) -> Outcome {
             parsed: false,
             errors: BTreeSet::new(),
             not_yet_enforced: BTreeSet::new(),
+            downstream: None,
+            plan: None,
         },
         Ok(f) => {
             let r = validate(&f);
@@ -214,6 +220,8 @@ fn run(flow: &Value) -> Outcome {
                     .filter(|w| w.code == "not_yet_enforced")
                     .map(|w| w.path.clone())
                     .collect(),
+                downstream: downstream(&f),
+                plan: serde_json::to_value(&f).ok(),
             }
         }
     }
@@ -224,8 +232,8 @@ fn log_task(id: &str) -> Value {
 }
 
 /// A value for `prop` that egret's model can hold. Hand-picked where a
-/// property's warning only fires on a meaningful value; otherwise by the
-/// Kestra schema's type.
+/// generic one would not parse or would not show a warning; otherwise the
+/// schema's own default or first enum value, else by its type.
 fn sample(row: &str, prop: &str, schema: &Value) -> Value {
     match (row, prop) {
         (FLOW_ROW, "concurrency") => return json!({ "limit": 1 }),
@@ -242,21 +250,28 @@ fn sample(row: &str, prop: &str, schema: &Value) -> Value {
         (FLOW_ROW, "tasks" | "errors" | "finally" | "afterExecution") => {
             return json!([log_task("x")])
         }
+        (FLOW_ROW, "inputs") => return json!([{ "id": "i", "type": "STRING" }]),
+        (FLOW_ROW, "outputs") => return json!([{ "id": "o", "type": "STRING", "value": "x" }]),
         ("io.kestra.plugin.core.flow.Dag", "tasks") => return json!([{ "task": log_task("x") }]),
         (_, "namespaceFiles") => return json!({ "enabled": true }),
-        (_, "tasks" | "errors" | "finally" | "then" | "else" | "defaults") => {
+        (_, "tasks" | "errors" | "finally" | "then" | "else" | "defaults")
+            if row.contains(".flow.") =>
+        {
             return json!([log_task("x")])
         }
         ("io.kestra.plugin.core.flow.Pause", "onPause") => return log_task("x"),
+        ("io.kestra.plugin.core.flow.Pause", "behavior") => return json!("RESUME"),
         ("io.kestra.plugin.core.flow.Switch", "cases") => return json!({ "a": [log_task("x")] }),
         ("io.kestra.plugin.core.flow.LoopUntil", "checkFrequency") => {
             return json!({ "maxIterations": 1 })
         }
-        (FLOW_ROW, "inputs") => return json!([{ "id": "i", "type": "STRING" }]),
-        (FLOW_ROW, "outputs") => return json!([{ "id": "o", "type": "STRING", "value": "x" }]),
-        ("io.kestra.plugin.core.trigger.Webhook", "fetchType") => return json!("FETCH"),
+        // Realistic values: stage 2 resolves the whole trigger, so a bad
+        // sample here would read as a refusal of the property.
+        ("io.kestra.plugin.core.trigger.Schedule", "cron") => return json!("0 * * * *"),
+        ("io.kestra.plugin.core.trigger.Schedule", "timezone") => return json!("UTC"),
+        ("io.kestra.plugin.core.trigger.Schedule", "withSeconds") => return json!(false),
+        ("io.kestra.plugin.core.trigger.Schedule", "lateMaximumDelay") => return json!("PT1H"),
         ("io.kestra.plugin.core.trigger.Flow", "states") => return json!(["SUCCESS"]),
-        ("io.kestra.plugin.core.trigger.Flow", "mode") => return json!("ANY"),
         ("io.kestra.plugin.core.trigger.Flow", "dependsOn") => {
             return json!([{ "namespace": "a.b", "flowId": "f" }])
         }
@@ -264,8 +279,17 @@ fn sample(row: &str, prop: &str, schema: &Value) -> Value {
         (_, "stopAfter") => return json!(["SUCCESS"]),
         (_, "labels") => return json!({ "k": "v" }),
         (_, "retry") => return json!({ "type": "constant", "interval": "PT1S", "maxAttempts": 1 }),
-        ("io.kestra.plugin.core.flow.Pause", "behavior") => return json!("RESUME"),
+        (_, "dependsOn") if row.contains(".flows.input.") => return json!({ "inputs": ["a"] }),
+        (_, "dependsOn") if row.ends_with("Dag-DagTask") => return json!(["x"]),
+        (_, "task") => return log_task("x"),
         _ => {}
+    }
+    if let Some(e) = enum_values(schema).first() {
+        return if is_array(schema) {
+            json!([e])
+        } else {
+            e.clone()
+        };
     }
     let ty = schema
         .get("type")
@@ -281,63 +305,407 @@ fn sample(row: &str, prop: &str, schema: &Value) -> Value {
     }
 }
 
-/// A minimal flow for `row`, carrying `extra` when given.
-fn flow_for(row: &str, kind: Kind, extra: Option<(&str, &Value)>) -> Value {
-    let mut node = json!({ "id": "t", "type": row });
-    let mut flow = json!({ "id": "m", "namespace": "m.t", "tasks": [log_task("base")] });
-    let target = match kind {
-        Kind::Flow => &mut flow,
-        Kind::Task | Kind::Trigger => &mut node,
-    };
-    if let Some((p, v)) = extra {
-        target[p] = v.clone();
+/// A property schema's `enum`, wherever `remove_refused_values` looks for it.
+fn enum_values(schema: &Value) -> Vec<Value> {
+    fn walk(v: &Value, out: &mut Vec<Value>) {
+        let Value::Object(m) = v else { return };
+        if let Some(Value::Array(e)) = m.get("enum") {
+            out.extend(e.iter().cloned());
+        }
+        for key in ["allOf", "anyOf", "oneOf"] {
+            if let Some(Value::Array(parts)) = m.get(key) {
+                parts.iter().for_each(|p| walk(p, out));
+            }
+        }
+        if let Some(items) = m.get("items") {
+            walk(items, out);
+        }
     }
-    match kind {
-        Kind::Flow => {}
-        Kind::Task => flow["tasks"] = json!([node]),
-        Kind::Trigger => flow["triggers"] = json!([node]),
-    }
-    flow
+    let mut out = Vec::new();
+    walk(schema, &mut out);
+    out.dedup();
+    out
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Kind {
-    Task,
-    Trigger,
-    Flow,
+fn is_array(schema: &Value) -> bool {
+    schema.get("type").and_then(Value::as_str) == Some("array")
+        || schema.pointer("/allOf/0/type").and_then(Value::as_str) == Some("array")
 }
 
-fn classify(
+// ---------- sites ----------
+
+/// What egret keeps of a row.
+enum Read {
+    /// These keys.
+    Set(BTreeSet<&'static str>),
+    /// These keys, and the handler refuses any other (`deny_unknown_fields`
+    /// on a struct read at run time, which no earlier stage checks).
+    Strict(BTreeSet<&'static str>),
+    /// Whatever is still at this JSON pointer once the parsed `Flow` is
+    /// serialised again.
+    Kept(&'static str),
+}
+
+/// Where a row's object sits in a minimal flow.
+struct Site {
+    row: String,
+    props: BTreeMap<String, Value>,
+    /// The object without the property under test.
+    base: Map<String, Value>,
+    /// The whole flow holding `object`.
+    place: Box<dyn Fn(Value) -> Value>,
+    read: Read,
+}
+
+fn flow_with(extra: &[(&str, Value)]) -> Value {
+    let mut f = json!({ "id": "m", "namespace": "m.t", "tasks": [log_task("base")] });
+    for (k, v) in extra {
+        f[*k] = v.clone();
+    }
+    f
+}
+
+fn obj(v: Value) -> Map<String, Value> {
+    match v {
+        Value::Object(m) => m,
+        _ => unreachable!("a site's base is an object"),
+    }
+}
+
+fn props_of(def: &Value) -> BTreeMap<String, Value> {
+    def.get("properties")
+        .and_then(Value::as_object)
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default()
+}
+
+fn kestra_props(name: &str) -> BTreeMap<String, Value> {
+    super::kestra_definition(name)
+        .map(props_of)
+        .unwrap_or_default()
+}
+
+fn task_site(row: &str, props: BTreeMap<String, Value>, read: BTreeSet<&'static str>) -> Site {
+    Site {
+        row: row.to_string(),
+        props,
+        base: obj(json!({ "id": "t", "type": row })),
+        place: Box::new(|o| flow_with(&[("tasks", json!([o]))])),
+        read: Read::Set(read),
+    }
+}
+
+fn trigger_site(row: &str, read: BTreeSet<&'static str>) -> Site {
+    let mut base = json!({ "id": "t", "type": row });
+    match row {
+        "io.kestra.plugin.core.trigger.Schedule" => base["cron"] = json!("0 * * * *"),
+        "io.kestra.plugin.core.trigger.Webhook" => base["key"] = json!("k"),
+        _ => {}
+    }
+    Site {
+        row: row.to_string(),
+        props: kestra_props(row),
+        base: obj(base),
+        place: Box::new(|o| flow_with(&[("triggers", json!([o]))])),
+        read: Read::Set(read),
+    }
+}
+
+/// A nested definition egret models with a struct, at `pointer`.
+fn nested(
     row: &str,
-    kind: Kind,
-    props: &BTreeMap<String, Value>,
-    read: &BTreeSet<&str>,
-    notes: &mut Vec<String>,
-) -> BTreeMap<String, Treatment> {
-    let baseline = run(&flow_for(row, kind, None));
-    let mut out = BTreeMap::new();
-    for (prop, schema) in props {
-        // The identity keys: replacing them changes every finding's path.
-        if kind != Kind::Flow && (prop == "type" || prop == "id") {
-            out.insert(prop.clone(), Treatment::Honoured);
+    base: Value,
+    place: impl Fn(Value) -> Value + 'static,
+    pointer: &'static str,
+) -> Site {
+    Site {
+        row: row.to_string(),
+        props: kestra_props(row),
+        base: obj(base),
+        place: Box::new(place),
+        read: Read::Kept(pointer),
+    }
+}
+
+/// Every nested Kestra definition the served schema can reach once the
+/// type rows are filtered, except the ones the README lists as passed
+/// through (unions, `java.lang.Void`, `EncryptedString`, `ValueOption`).
+fn nested_sites() -> Vec<Site> {
+    const IN: &str = "io.kestra.core.models.flows.input.";
+    let mut sites = Vec::new();
+    // Inputs: one row per Kestra input definition, at `inputs[0]`.
+    let input_defs: Vec<(String, Value)> = super::INPUTS
+        .kestra_defs
+        .iter()
+        .filter(|(k, _)| k.starts_with(IN))
+        .filter_map(|(k, d)| {
+            let ty = d.pointer("/properties/type")?;
+            let t = ty
+                .get("const")
+                .cloned()
+                .or_else(|| ty.pointer("/enum/0").cloned())?;
+            Some((k.clone(), t))
+        })
+        .collect();
+    for (row, t) in input_defs {
+        sites.push(nested(
+            &row,
+            json!({ "id": "i", "type": t }),
+            |o| flow_with(&[("inputs", json!([o]))]),
+            "/inputs/0",
+        ));
+    }
+    sites.push(nested(
+        "io.kestra.core.models.flows.DependsOn",
+        json!({ "inputs": ["a"] }),
+        |o| {
+            flow_with(&[(
+                "inputs",
+                json!([{ "id": "a", "type": "STRING" }, { "id": "i", "type": "STRING", "dependsOn": o }]),
+            )])
+        },
+        "/inputs/1/dependsOn",
+    ));
+    // Retry, on a task.
+    for (row, base) in [
+        (
+            "io.kestra.core.models.tasks.retrys.Constant-2",
+            json!({ "type": "constant", "interval": "PT1S", "maxAttempts": 1 }),
+        ),
+        (
+            "io.kestra.core.models.tasks.retrys.Exponential-2",
+            json!({ "type": "exponential", "interval": "PT1S", "maxInterval": "PT1M", "maxAttempts": 1 }),
+        ),
+        (
+            "io.kestra.core.models.tasks.retrys.Random-2",
+            json!({ "type": "random", "minInterval": "PT1S", "maxInterval": "PT2S", "maxAttempts": 1 }),
+        ),
+    ] {
+        sites.push(nested(
+            row,
+            base,
+            |o| {
+                let mut t = log_task("t");
+                t["retry"] = o;
+                flow_with(&[("tasks", json!([t]))])
+            },
+            "/tasks/0/retry",
+        ));
+    }
+    // The flow's own sub-objects.
+    sites.push(nested(
+        "io.kestra.core.models.flows.Concurrency",
+        json!({ "limit": 1 }),
+        |o| flow_with(&[("concurrency", o)]),
+        "/concurrency",
+    ));
+    sites.push(nested(
+        "io.kestra.core.models.flows.check.Check",
+        json!({ "when": "{{ true }}", "message": "m" }),
+        |o| flow_with(&[("checks", json!([o]))]),
+        "/checks/0",
+    ));
+    sites.push(nested(
+        "io.kestra.core.models.flows.quota.Quota",
+        json!({ "duration": "PT1H", "limit": 1, "behavior": "FAIL" }),
+        |o| flow_with(&[("quotas", json!([o]))]),
+        "/quotas/0",
+    ));
+    sites.push(nested(
+        "io.kestra.core.models.flows.sla.types.MaxDurationSLA-2",
+        json!({ "id": "s", "type": "MAX_DURATION", "behavior": "FAIL", "duration": "PT1H" }),
+        |o| flow_with(&[("sla", json!([o]))]),
+        "/sla/0",
+    ));
+    sites.push(nested(
+        "io.kestra.core.models.flows.sla.types.ExecutionAssertionSLA-2",
+        json!({ "id": "s", "type": "EXECUTION_ASSERTION", "behavior": "FAIL", "assert": "{{ true }}" }),
+        |o| flow_with(&[("sla", json!([o]))]),
+        "/sla/0",
+    ));
+    sites.push(nested(
+        "io.kestra.core.models.flows.Output",
+        json!({ "id": "o", "type": "STRING", "value": "x" }),
+        |o| flow_with(&[("outputs", json!([o]))]),
+        "/outputs/0",
+    ));
+    sites.push(nested(
+        "io.kestra.core.models.Label",
+        json!({ "key": "k", "value": "v" }),
+        |o| flow_with(&[("labels", json!([o]))]),
+        "/labels/0",
+    ));
+    // The Flow trigger's sub-objects.
+    sites.push(nested(
+        "io.kestra.plugin.core.trigger.Flow-Dependency",
+        json!({ "namespace": "a.b", "flowId": "f" }),
+        |o| {
+            flow_with(&[(
+                "triggers",
+                json!([{ "id": "g", "type": "io.kestra.plugin.core.trigger.Flow", "dependsOn": [o] }]),
+            )])
+        },
+        "/triggers/0/dependsOn/0",
+    ));
+    sites.push(nested(
+        "io.kestra.core.models.triggers.Window",
+        json!({ "lookback": "PT1H" }),
+        |o| {
+            flow_with(&[(
+                "triggers",
+                json!([{
+                    "id": "g", "type": "io.kestra.plugin.core.trigger.Flow",
+                    "dependsOn": [{ "namespace": "a.b", "flowId": "f" }], "window": o,
+                }]),
+            )])
+        },
+        "/triggers/0/window",
+    ));
+    // The flowables' sub-objects.
+    sites.push(nested(
+        "io.kestra.plugin.core.flow.Dag-DagTask",
+        json!({ "task": log_task("x") }),
+        |o| {
+            flow_with(&[(
+                "tasks",
+                json!([{ "id": "d", "type": "io.kestra.plugin.core.flow.Dag", "tasks": [o] }]),
+            )])
+        },
+        "/tasks/0/tasks/0",
+    ));
+    sites.push(nested(
+        "io.kestra.plugin.core.flow.LoopUntil-CheckFrequency",
+        json!({ "maxIterations": 1 }),
+        |o| {
+            flow_with(&[(
+                "tasks",
+                json!([{
+                    "id": "l", "type": "io.kestra.plugin.core.flow.LoopUntil",
+                    "condition": "{{ true }}", "tasks": [log_task("x")], "checkFrequency": o,
+                }]),
+            )])
+        },
+        "/tasks/0/checkFrequency",
+    ));
+    // `namespaceFiles` on a script task: `NamespaceFilesSpec::parse`, which
+    // validate runs, refuses an unknown key by name.
+    sites.push(Site {
+        row: "io.kestra.core.models.tasks.NamespaceFiles".into(),
+        props: kestra_props("io.kestra.core.models.tasks.NamespaceFiles"),
+        base: obj(json!({ "enabled": true })),
+        place: Box::new(|o| {
+            flow_with(&[(
+                "tasks",
+                json!([{
+                    "id": "s", "type": crate::scripts::SHELL_COMMANDS,
+                    "commands": ["true"], "namespaceFiles": o,
+                }]),
+            )])
+        }),
+        read: Read::Set(
+            crate::storage::nsfiles::stage::PROPERTIES
+                .iter()
+                .copied()
+                .collect(),
+        ),
+    });
+    // The purge tasks' `behavior`: deserialized by the handler at run time,
+    // `deny_unknown_fields`.
+    for (row, fields) in [
+        (
+            "io.kestra.plugin.core.kv.Key-2",
+            fields_of::<h::kv::BehaviorSpec>(),
+        ),
+        (
+            "io.kestra.plugin.core.kv.Version-2",
+            fields_of::<h::kv::BehaviorSpec>(),
+        ),
+        (
+            "io.kestra.plugin.core.namespace.Version-2",
+            fields_of::<h::namespace::BehaviorSpec>(),
+        ),
+    ] {
+        sites.push(Site {
+            row: row.into(),
+            props: kestra_props(row),
+            base: Map::new(),
+            place: Box::new(|_| flow_with(&[])),
+            read: Read::Strict(fields.into_iter().collect()),
+        });
+    }
+    sites
+}
+
+fn with(base: &Map<String, Value>, prop: &str, v: Value) -> Value {
+    let mut m = base.clone();
+    m.insert(prop.to_string(), v);
+    Value::Object(m)
+}
+
+#[derive(Default)]
+struct RowResult {
+    props: BTreeMap<String, Treatment>,
+    values: BTreeMap<String, Vec<Value>>,
+    downstream: BTreeMap<String, String>,
+}
+
+fn classify(site: &Site, notes: &mut Vec<String>) -> RowResult {
+    let mut out = RowResult::default();
+    if let Read::Strict(read) = &site.read {
+        for p in site.props.keys() {
+            let t = if read.contains(p.as_str()) {
+                Treatment::Honoured
+            } else {
+                Treatment::Refused
+            };
+            out.props.insert(p.clone(), t);
+        }
+        return out;
+    }
+    let baseline = run(&(site.place)(Value::Object(site.base.clone())));
+    if !baseline.parsed {
+        notes.push(format!("{}: the base object does not parse", site.row));
+    }
+    for (prop, schema) in &site.props {
+        // The identity keys: replacing them changes every finding's path, and
+        // the discriminator selects the row itself.
+        if site.row != FLOW_ROW && (prop == "type" || prop == "id") {
+            out.props.insert(prop.clone(), Treatment::Honoured);
             continue;
         }
-        let value = sample(row, prop, schema);
-        let o = run(&flow_for(row, kind, Some((prop, &value))));
+        let value = sample(&site.row, prop, schema);
+        let o = run(&(site.place)(with(&site.base, prop, value.clone())));
         let new_errors: Vec<_> = o.errors.difference(&baseline.errors).collect();
         let warned = o
             .not_yet_enforced
             .difference(&baseline.not_yet_enforced)
             .next()
             .is_some();
-        let is_read = read.contains(prop.as_str());
-        let t = if !o.parsed || !new_errors.is_empty() {
-            if is_read {
+        let is_read = match &site.read {
+            Read::Set(set) | Read::Strict(set) => set.contains(prop.as_str()),
+            Read::Kept(ptr) => o
+                .plan
+                .as_ref()
+                .and_then(|p| p.pointer(ptr))
+                .and_then(Value::as_object)
+                .is_some_and(|m| m.contains_key(prop)),
+        };
+        let t = if o.downstream.is_some() && o.downstream != baseline.downstream {
+            out.downstream
+                .insert(prop.clone(), o.downstream.clone().unwrap_or_default());
+            Treatment::Refused
+        } else if !o.parsed || !new_errors.is_empty() {
+            if is_read || matches!(site.read, Read::Kept(_)) && o.parsed {
                 notes.push(format!(
-                    "{row}.{prop}: read, but the sample {value} did not pass ({}; {new_errors:?})",
+                    "{}.{prop}: read, but the sample {value} did not pass ({}; {new_errors:?})",
+                    site.row,
                     if o.parsed { "parsed" } else { "parse failed" }
                 ));
-                Treatment::Honoured
+                if is_read {
+                    Treatment::Honoured
+                } else {
+                    Treatment::Refused
+                }
             } else {
                 Treatment::Refused
             }
@@ -353,24 +721,40 @@ fn classify(
         } else {
             t
         };
-        out.insert(prop.clone(), t);
+        out.props.insert(prop.clone(), t);
+
+        // Enum values, on what is served.
+        if !matches!(t, Treatment::Honoured | Treatment::Warned) {
+            continue;
+        }
+        let mut refused = Vec::new();
+        for e in enum_values(schema) {
+            let v = if is_array(schema) {
+                json!([e])
+            } else {
+                e.clone()
+            };
+            let o = run(&(site.place)(with(&site.base, prop, v)));
+            let late = o.downstream.is_some() && o.downstream != baseline.downstream;
+            if !o.parsed || late {
+                if late {
+                    out.downstream
+                        .insert(format!("{prop}={e}"), o.downstream.unwrap_or_default());
+                }
+                refused.push(e);
+            }
+        }
+        if !refused.is_empty() {
+            out.values.insert(prop.clone(), refused);
+        }
     }
     out
 }
 
-fn kestra_props(fqcn: &str) -> BTreeMap<String, Value> {
-    super::kestra_definition(fqcn)
-        .and_then(|d| d.get("properties"))
-        .and_then(Value::as_object)
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .unwrap_or_default()
-}
-
-/// The whole measurement.
-pub(super) fn measure(notes: &mut Vec<String>) -> TreatmentTable {
-    let mut table = TreatmentTable::new();
+/// Every site: the types, the flow document, and the nested definitions.
+fn sites() -> Vec<Site> {
     let base = task_model();
-
+    let mut sites = Vec::new();
     for row in registry::TASK_TYPES {
         let props = kestra_props(row.r#type);
         if props.is_empty() {
@@ -384,12 +768,8 @@ pub(super) fn measure(notes: &mut Vec<String>) -> TreatmentTable {
                 .unwrap_or_else(|| panic!("{}: no handler field list", row.r#type));
             read.extend(fields);
         }
-        table.insert(
-            row.r#type.to_string(),
-            classify(row.r#type, Kind::Task, &props, &read, notes),
-        );
+        sites.push(task_site(row.r#type, props, read));
     }
-
     for (fqcn, class) in &crate::plugins::catalog().classes {
         let name = format!("{}{fqcn}", crate::plugins::PREFIX);
         let mut props = kestra_props(fqcn);
@@ -402,42 +782,43 @@ pub(super) fn measure(notes: &mut Vec<String>) -> TreatmentTable {
         read.extend(class.properties.keys().map(String::as_str).filter(|p| {
             !crate::plugins::REFUSED_BASE_PROPERTIES.contains(p) && *p != "taskRunner"
         }));
-        table.insert(
-            name.clone(),
-            classify(&name, Kind::Task, &props, &read, notes),
-        );
+        sites.push(task_site(&name, props, read));
     }
-
     for (fqcn, _) in FLOWABLE_TYPES {
         let mut read = base.clone();
         read.extend(flowable_fields(fqcn));
-        table.insert(
-            fqcn.to_string(),
-            classify(fqcn, Kind::Task, &kestra_props(fqcn), &read, notes),
-        );
+        sites.push(task_site(fqcn, kestra_props(fqcn), read));
     }
-
     for (fqcn, _) in TRIGGER_TYPES {
-        let mut read: BTreeSet<&str> = TRIGGER_BASE_READ.iter().copied().collect();
+        let mut read: BTreeSet<&str> = trigger_base_read(fqcn).into_iter().collect();
         read.extend(trigger_fields(fqcn));
-        table.insert(
-            fqcn.to_string(),
-            classify(fqcn, Kind::Trigger, &kestra_props(fqcn), &read, notes),
-        );
+        sites.push(trigger_site(fqcn, read));
     }
+    sites.push(Site {
+        row: FLOW_ROW.into(),
+        props: props_of(&super::INPUTS.kestra_flow),
+        base: obj(flow_with(&[])),
+        place: Box::new(|o| o),
+        read: Read::Set(fields_of::<Flow>().into_iter().collect()),
+    });
+    sites.extend(nested_sites());
+    sites
+}
 
-    let flow_props: BTreeMap<String, Value> = super::INPUTS
-        .kestra_flow
-        .get("properties")
-        .and_then(Value::as_object)
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .unwrap_or_default();
-    let read: BTreeSet<&str> = fields_of::<models::Flow>().into_iter().collect();
-    table.insert(
-        FLOW_ROW.to_string(),
-        classify(FLOW_ROW, Kind::Flow, &flow_props, &read, notes),
-    );
-    table
+/// The whole measurement.
+pub(super) fn measure(notes: &mut Vec<String>) -> Measured {
+    let mut m = Measured::default();
+    for site in sites() {
+        let r = classify(&site, notes);
+        m.properties.insert(site.row.clone(), r.props);
+        if !r.values.is_empty() {
+            m.refused_values.insert(site.row.clone(), r.values);
+        }
+        if !r.downstream.is_empty() {
+            m.refused_downstream.insert(site.row.clone(), r.downstream);
+        }
+    }
+    m
 }
 
 #[test]
@@ -451,34 +832,21 @@ fn the_committed_property_treatment_is_what_egret_does_today() {
         env!("CARGO_MANIFEST_DIR"),
         "/src/spec/schema/property-treatment.json"
     );
+    let text = format!("{}\n", serde_json::to_string_pretty(&measured).unwrap());
     if std::env::var_os("EGRET_WRITE_PROPERTY_TREATMENT").is_some() {
-        let mut text = serde_json::to_string_pretty(&measured).unwrap();
-        text.push('\n');
         std::fs::write(path, text).unwrap();
         return;
     }
-    let committed = super::property_treatment();
-    let mut diffs = Vec::new();
-    for (row, props) in &measured {
-        for (p, t) in props {
-            let c = committed.get(row).and_then(|r| r.get(p));
-            if c != Some(t) {
-                diffs.push(format!("{row}.{p}: measured {t:?}, committed {c:?}"));
-            }
-        }
-    }
-    for (row, props) in committed {
-        for p in props.keys() {
-            if measured.get(row).and_then(|r| r.get(p)).is_none() {
-                diffs.push(format!("{row}.{p}: committed, no longer measured"));
-            }
-        }
-    }
+    let committed = std::fs::read_to_string(path).unwrap();
     assert!(
-        diffs.is_empty(),
+        committed == text,
         "property-treatment.json is stale; re-run with EGRET_WRITE_PROPERTY_TREATMENT=1 and \
-         review the diff:\n{}",
-        diffs.join("\n")
+         review the diff"
+    );
+    assert_eq!(
+        serde_json::to_value(super::measured()).unwrap(),
+        serde_json::to_value(&measured).unwrap(),
+        "the compiled-in table is the committed file"
     );
 }
 
@@ -492,4 +860,52 @@ fn the_field_probe_reads_wire_names_and_unknown_keys_are_dropped() {
         serde_json::from_value(json!({ "errorMessage": "x", "logLevel": "INFO" }))
             .expect("an unknown key is dropped, not refused");
     assert!(format!("{spec:?}").contains("error_message"));
+}
+
+/// Stage 2 is wired: the five trigger properties egret parses and then
+/// refuses (fix round 1, I1) come out `refused`, each with its site.
+#[test]
+fn properties_refused_after_parse_are_measured_refused() {
+    let m = super::measured();
+    for (row, prop, site) in [
+        (
+            "io.kestra.plugin.core.trigger.Webhook",
+            "wait",
+            "declared_unsupported",
+        ),
+        (
+            "io.kestra.plugin.core.trigger.Webhook",
+            "returnOutputs",
+            "declared_unsupported",
+        ),
+        (
+            "io.kestra.plugin.core.trigger.Webhook",
+            "responseContentType",
+            "declared_unsupported",
+        ),
+        (
+            "io.kestra.plugin.core.trigger.Webhook",
+            "responseCode",
+            "declared_unsupported",
+        ),
+        (
+            "io.kestra.plugin.core.trigger.Schedule",
+            "lateMaximumDelay",
+            "ScheduleTrigger::resolve",
+        ),
+    ] {
+        assert_eq!(
+            m.properties[row].get(prop),
+            Some(&Treatment::Refused),
+            "{row}.{prop}"
+        );
+        assert!(
+            m.refused_downstream[row][prop].contains(site),
+            "{row}.{prop}"
+        );
+    }
+    assert_eq!(
+        m.refused_values["io.kestra.plugin.core.trigger.Webhook"]["fetchType"],
+        vec![json!("STORE")]
+    );
 }

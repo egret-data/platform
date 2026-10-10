@@ -1856,32 +1856,10 @@ export const getWorkflowUpdateFlowUrl = (workspace: string,
 }
 
 /**
- * # `if_updated_at` (W7a spec §7.3)
- *
- * When the body carries it, the write happens only if the row's
- * `updated_at` still equals it, compared inside the `UPDATE`'s own `WHERE`
- * (`FlowRepo::update`), so two concurrent saves of the same draft cannot
- * both pass: the second waits on the first's row lock, re-reads the row,
- * no longer matches, and is refused with 409.
- *
- * The precondition means "nobody saved or published this draft since you
- * read it" only because these are **every** writer of
- * `workflow.flows.updated_at` (`grep -rn updated_at` over `crates/` and
- * `migrations/`, 2026-10-10):
- *
- * * `FlowRepo::create` -- the `INSERT`, through the column's
- *   `DEFAULT now()` (migration 0132);
- * * `FlowRepo::update` -- this route, `updated_at = now()`;
- * * `FlowRepo::set_live` -- publish (`POST /flows/{id}/publish`),
- *   `updated_at = now()`. **A publish therefore moves it**: an editor that
- *   publishes must re-read the draft before its next conditional save.
- *
- * Writes to the row that do **not** move it: `FlowRepo::soft_delete`
- * (`deleted_at` only; a trashed draft is not updatable anyway), and the
- * `ON DELETE SET NULL` foreign keys on `folder_id` and `live_version_id`
- * (migration 0132), which clear a deleted folder or version without
- * touching `updated_at`. No database trigger writes it.
- * @summary `PUT /flows/{id}`: replace the draft.
+ * With `if_updated_at`, the save happens only if the draft is still the one the editor opened; otherwise it is refused with
+ * 409 and nothing is written. Saving and publishing both move `updated_at`,
+ * so after a publish the editor reads the draft again before saving.
+ * @summary Replace a flow's draft.
  */
 export const workflowUpdateFlow = async (workspace: string,
     id: string,
@@ -1932,7 +1910,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type WorkflowUpdateFlowMutationError = ErrorBody
 
     /**
- * @summary `PUT /flows/{id}`: replace the draft.
+ * @summary Replace a flow's draft.
  */
 export const useWorkflowUpdateFlow = <TError = ErrorBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowUpdateFlow>>, TError,{workspace: string;id: string;data: UpdateFlowRequest}, TContext>, request?: SecondParameter<typeof customInstance>}

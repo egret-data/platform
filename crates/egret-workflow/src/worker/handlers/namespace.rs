@@ -1267,7 +1267,7 @@ pub(crate) struct PurgeSpec {
 /// `before`, never both (`FilesVersionBehaviorValidator`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BehaviorSpec {
+pub(crate) struct BehaviorSpec {
     #[serde(rename = "type", default)]
     kind: Option<String>,
     #[serde(rename = "keepAmount", default)]

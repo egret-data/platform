@@ -19282,6 +19282,12 @@
   ],
   "type": "object"
  },
+ "x-egret-source": {
+  "export": "GET /api/v1/plugins/schemas/flow",
+  "exported_at": "2026-10-10",
+  "image_id": "sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd",
+  "kestra_version": "2.0.0-rc13"
+ },
  "x-kestra-export": {
   "collapsed_unions": {
    "egret.task": 38,

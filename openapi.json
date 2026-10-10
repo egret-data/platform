@@ -28291,8 +28291,8 @@
         "tags": [
           "workflow"
         ],
-        "summary": "`PUT /flows/{id}`: replace the draft.",
-        "description": "# `if_updated_at` (W7a spec §7.3)\n\nWhen the body carries it, the write happens only if the row's\n`updated_at` still equals it, compared inside the `UPDATE`'s own `WHERE`\n(`FlowRepo::update`), so two concurrent saves of the same draft cannot\nboth pass: the second waits on the first's row lock, re-reads the row,\nno longer matches, and is refused with 409.\n\nThe precondition means \"nobody saved or published this draft since you\nread it\" only because these are **every** writer of\n`workflow.flows.updated_at` (`grep -rn updated_at` over `crates/` and\n`migrations/`, 2026-10-10):\n\n* `FlowRepo::create` -- the `INSERT`, through the column's\n  `DEFAULT now()` (migration 0132);\n* `FlowRepo::update` -- this route, `updated_at = now()`;\n* `FlowRepo::set_live` -- publish (`POST /flows/{id}/publish`),\n  `updated_at = now()`. **A publish therefore moves it**: an editor that\n  publishes must re-read the draft before its next conditional save.\n\nWrites to the row that do **not** move it: `FlowRepo::soft_delete`\n(`deleted_at` only; a trashed draft is not updatable anyway), and the\n`ON DELETE SET NULL` foreign keys on `folder_id` and `live_version_id`\n(migration 0132), which clear a deleted folder or version without\ntouching `updated_at`. No database trigger writes it.",
+        "summary": "Replace a flow's draft.",
+        "description": "With `if_updated_at`, the save happens only if the draft is still the one the editor opened; otherwise it is refused with\n409 and nothing is written. Saving and publishing both move `updated_at`,\nso after a publish the editor reads the draft again before saving.",
         "operationId": "update_flow",
         "parameters": [
           {
@@ -43139,7 +43139,7 @@
               "null"
             ],
             "format": "date-time",
-            "description": "The draft's `updated_at` as the editor last read it (RFC 3339, the\nexact string `FlowDto.updated_at` carried -- microseconds included).\nWhen present and no longer the row's, the save is refused with 409\nand nothing is written; absent, the save is unconditional (W7a spec\n§7.3). See [`update_flow`] for every writer of the column."
+            "description": "The draft's `updated_at` as the editor last read it (RFC 3339, the\nexact string `FlowDto.updated_at` carried -- microseconds included).\nWhen present and no longer the row's, the save is refused with 409\nand nothing is written; absent, the save is unconditional. Publishing\nalso moves `updated_at`."
           }
         }
       },

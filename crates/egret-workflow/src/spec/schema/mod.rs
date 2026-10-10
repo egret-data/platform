@@ -29,11 +29,17 @@
 //!   egret silently drops), and neither is a refused one (it would suggest a
 //!   save error).
 //!
-//! Each combination of [`SchemaFeatures`] is built once and kept: the inputs
-//! are compiled in, so the answer cannot change while the process runs.
+//! * of each nested definition egret parses (inputs, retry, the trigger and
+//!   flow sub-objects), the same: what serde would drop or a later stage
+//!   would refuse is not offered, and neither are refused `enum` values.
+//!
+//! Which gated types are offered follows the publish gates for the
+//! workspace's features AND the deployment's `plugin_configurations` and
+//! default runner; each outcome is built once and kept.
 
+use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -57,16 +63,47 @@ pub struct SchemaFeatures {
     pub containers: bool,
 }
 
-impl SchemaFeatures {
-    fn index(self) -> usize {
-        usize::from(self.kestra_plugins) * 2 + usize::from(self.containers)
-    }
+/// Which gated types this workspace, on this deployment, may publish --
+/// decided by the two publish gates themselves, never by a copy of their
+/// rules.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Accepted {
+    features: SchemaFeatures,
+    /// The script types: `scripts::gate::check_unrendered` (the feature, an
+    /// `allowed-images` entry for the runner) with the configured default
+    /// runner, which `publish::check_script_tasks` requires.
+    scripts: bool,
+    /// The catalog classes `plugins::gate::check` lets through (both
+    /// features, a runner, `allowed-types`).
+    plugins: Vec<String>,
+}
 
-    /// The plugin types are served only when publish could accept them:
-    /// `plugins::gate::check` refuses a plugin task with
-    /// `workflow_containers` off, whatever `workflow_kestra_plugins` says.
-    fn plugins_served(self) -> bool {
-        self.kestra_plugins && self.containers
+impl Accepted {
+    fn of(features: SchemaFeatures, deployment: &crate::scripts::ScriptSettings) -> Self {
+        let cfg = &deployment.plugin_configurations;
+        let scripts = deployment.default_runner.is_some_and(|runner| {
+            crate::scripts::gate::check_unrendered(features.containers, runner, cfg).is_ok()
+        });
+        let plugins = crate::plugins::catalog()
+            .classes
+            .keys()
+            .filter(|fqcn| {
+                crate::plugins::gate::check(&crate::plugins::gate::GateInput {
+                    feature_enabled: features.kestra_plugins,
+                    containers_enabled: features.containers,
+                    plugin_configurations: cfg,
+                    runner: deployment.default_runner,
+                    fqcn,
+                })
+                .is_ok()
+            })
+            .cloned()
+            .collect();
+        Accepted {
+            features,
+            scripts,
+            plugins,
+        }
     }
 }
 
@@ -92,17 +129,38 @@ impl Treatment {
     }
 }
 
-/// `property-treatment.json`: type (or `Flow` for the flow document itself)
-/// -> property -> treatment.
+/// Row (a served type, a nested Kestra definition, or `Flow` for the flow
+/// document itself) -> property -> treatment.
 pub type TreatmentTable = BTreeMap<String, BTreeMap<String, Treatment>>;
 
+/// `property-treatment.json`, the committed measurement (`measure.rs`).
+#[derive(Debug, Default, Deserialize, serde::Serialize)]
+pub struct Measured {
+    /// How egret treats each property.
+    pub properties: TreatmentTable,
+    /// Row -> property -> the values of its `enum` that egret refuses (at
+    /// parse, or at a later stage). Removed from the served enum.
+    #[serde(default)]
+    pub refused_values: BTreeMap<String, BTreeMap<String, Vec<Value>>>,
+    /// Row -> property (or `property=value`) -> the refusal a later stage
+    /// answered (trigger resolution, webhook firing): the site, by its own
+    /// words, of every `refused` that parse and validate let through.
+    #[serde(default)]
+    pub refused_downstream: BTreeMap<String, BTreeMap<String, String>>,
+}
+
 /// The committed measurement.
-pub fn property_treatment() -> &'static TreatmentTable {
-    static TABLE: LazyLock<TreatmentTable> = LazyLock::new(|| {
+pub fn measured() -> &'static Measured {
+    static TABLE: LazyLock<Measured> = LazyLock::new(|| {
         serde_json::from_str(TREATMENT_JSON)
             .unwrap_or_else(|e| panic!("spec/schema/property-treatment.json: {e}"))
     });
     &TABLE
+}
+
+/// [`Measured::properties`].
+pub fn property_treatment() -> &'static TreatmentTable {
+    &measured().properties
 }
 
 /// The key of the flow document's own row in [`property_treatment`].
@@ -165,28 +223,40 @@ pub struct ServedSchema {
     pub etag: String,
 }
 
-/// The schema for `features`, built on first use and kept.
-pub fn served(features: &SchemaFeatures) -> &'static ServedSchema {
-    static CACHE: [OnceLock<ServedSchema>; 4] = [
-        OnceLock::new(),
-        OnceLock::new(),
-        OnceLock::new(),
-        OnceLock::new(),
-    ];
-    CACHE[features.index()].get_or_init(|| {
-        let value = build(*features);
-        let bytes = serde_json::to_vec(&value).expect("a serde_json::Value always serialises");
-        let etag = format!("\"sha256-{}\"", hex::encode(Sha256::digest(&bytes)));
-        ServedSchema { value, bytes, etag }
-    })
+/// The schema for a workspace with `features` on this `deployment` (its
+/// `workflow.plugin_configurations` and default runner), built on first use
+/// and kept. The key is what the two publish gates accept, so a deployment
+/// has at most four entries.
+pub fn served(
+    features: &SchemaFeatures,
+    deployment: &crate::scripts::ScriptSettings,
+) -> Arc<ServedSchema> {
+    static CACHE: LazyLock<Mutex<HashMap<Accepted, Arc<ServedSchema>>>> =
+        LazyLock::new(Default::default);
+    let accepted = Accepted::of(*features, deployment);
+    let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    cache
+        .entry(accepted.clone())
+        .or_insert_with(|| {
+            let value = build(&accepted);
+            let bytes = serde_json::to_vec(&value).expect("a serde_json::Value always serialises");
+            let etag = format!("\"sha256-{}\"", hex::encode(Sha256::digest(&bytes)));
+            Arc::new(ServedSchema { value, bytes, etag })
+        })
+        .clone()
 }
 
-/// The JSON schema of one flow document for a workspace with `features`.
-pub fn flow_schema(features: &SchemaFeatures) -> Value {
-    served(features).value.clone()
+/// The JSON schema of one flow document for a workspace with `features` on
+/// this `deployment`.
+pub fn flow_schema(
+    features: &SchemaFeatures,
+    deployment: &crate::scripts::ScriptSettings,
+) -> Value {
+    served(features, deployment).value.clone()
 }
 
 struct Inputs {
+    kestra_source: Value,
     kestra_defs: Map<String, Value>,
     kestra_flow: Value,
     egret_types: Map<String, Value>,
@@ -201,6 +271,10 @@ static INPUTS: LazyLock<Inputs> = LazyLock::new(|| {
         .unwrap_or_else(|e| panic!("spec/schema/egret-task-schemas.json: {e}"));
     let obj = |v: &Value, key: &str| v.get(key).and_then(Value::as_object).cloned();
     Inputs {
+        kestra_source: kestra
+            .get("x-egret-source")
+            .cloned()
+            .expect("kestra-flow-schema.json has x-egret-source"),
         kestra_defs: obj(&kestra, "$defs").expect("kestra-flow-schema.json has $defs"),
         kestra_flow: kestra
             .get("flow")
@@ -217,10 +291,16 @@ pub fn kestra_definition(fqcn: &str) -> Option<&'static Value> {
     INPUTS.kestra_defs.get(fqcn)
 }
 
-/// The Kestra version the committed export was taken from.
-pub const KESTRA_VERSION: &str = "2.0.0-rc13";
+/// The Kestra version the committed export was taken from, as recorded in
+/// the file (`x-egret-source.kestra_version`).
+pub fn kestra_version() -> &'static str {
+    INPUTS.kestra_source["kestra_version"]
+        .as_str()
+        .expect("x-egret-source.kestra_version is a string")
+}
 
-fn build(features: SchemaFeatures) -> Value {
+fn build(accepted: &Accepted) -> Value {
+    let features = accepted.features;
     let inputs = &*INPUTS;
     let mut defs = inputs.kestra_defs.clone();
     for (k, v) in &inputs.egret_defs {
@@ -229,7 +309,7 @@ fn build(features: SchemaFeatures) -> Value {
 
     let mut tasks: Vec<String> = Vec::new();
     for row in registry::TASK_TYPES {
-        if crate::scripts::kind_of(row.r#type).is_some() && !features.containers {
+        if crate::scripts::kind_of(row.r#type).is_some() && !accepted.scripts {
             continue;
         }
         let def = match inputs.kestra_defs.get(row.r#type) {
@@ -239,12 +319,11 @@ fn build(features: SchemaFeatures) -> Value {
         defs.insert(row.r#type.to_string(), def);
         tasks.push(row.r#type.to_string());
     }
-    if features.plugins_served() {
-        for (fqcn, class) in &crate::plugins::catalog().classes {
-            let name = format!("{}{fqcn}", crate::plugins::PREFIX);
-            defs.insert(name.clone(), plugin_type(&name, fqcn, class));
-            tasks.push(name);
-        }
+    for fqcn in &accepted.plugins {
+        let class = &crate::plugins::catalog().classes[fqcn];
+        let name = format!("{}{fqcn}", crate::plugins::PREFIX);
+        defs.insert(name.clone(), plugin_type(&name, fqcn, class));
+        tasks.push(name);
     }
     for (fqcn, aliases) in FLOWABLE_TYPES {
         let def = kestra_type(fqcn, aliases, &kestra_def(fqcn));
@@ -285,9 +364,18 @@ fn build(features: SchemaFeatures) -> Value {
             "workflow_containers": features.containers,
         }),
     );
-    root.insert("x-egret-kestra-version".into(), json!(KESTRA_VERSION));
+    root.insert("x-egret-kestra-version".into(), json!(kestra_version()));
     let mut flow = inputs.kestra_flow.clone();
     filter_properties(FLOW_ROW, &mut flow);
+    remove_refused_values(FLOW_ROW, &mut flow);
+    // Every measured row, served type or nested definition, through the same
+    // two filters. Idempotent on the types `kestra_type`/`plugin_type` built.
+    for (name, def) in defs.iter_mut() {
+        if property_treatment().contains_key(name) {
+            filter_properties(name, def);
+            remove_refused_values(name, def);
+        }
+    }
     if let Value::Object(f) = flow {
         for (k, v) in f {
             root.insert(k, v);
@@ -300,6 +388,54 @@ fn build(features: SchemaFeatures) -> Value {
         .collect();
     root.insert("$defs".into(), Value::Object(defs));
     Value::Object(root)
+}
+
+/// Remove from each property's `enum` (wherever it sits in that property's
+/// own schema: top level, `allOf`/`anyOf`/`oneOf` members, `items`) the
+/// values [`Measured::refused_values`] lists for `row`.
+fn remove_refused_values(row: &str, def: &mut Value) {
+    fn strip(schema: &mut Value, refused: &[Value]) {
+        let Value::Object(m) = schema else {
+            return;
+        };
+        if let Some(Value::Array(values)) = m.get_mut("enum") {
+            values.retain(|v| !refused.contains(v));
+        }
+        if let Some(d) = m.get("default") {
+            if refused.contains(d) {
+                m.remove("default");
+            }
+        }
+        for key in ["allOf", "anyOf", "oneOf"] {
+            if let Some(Value::Array(parts)) = m.get_mut(key) {
+                parts.iter_mut().for_each(|p| strip(p, refused));
+            }
+        }
+        if let Some(items) = m.get_mut("items") {
+            strip(items, refused);
+        }
+    }
+    let Some(table) = measured().refused_values.get(row) else {
+        return;
+    };
+    for (prop, refused) in table {
+        if let Some(schema) = def.pointer_mut(&format!("/properties/{prop}")) {
+            strip(schema, refused);
+            // Kestra's own text still describes the removed values; say so.
+            if let Value::Object(m) = schema {
+                let names: Vec<String> = refused
+                    .iter()
+                    .map(|v| format!("`{}`", v.as_str().unwrap_or_default()))
+                    .collect();
+                let note = format!("**Not accepted by egret:** {}.", names.join(", "));
+                let text = match m.get("markdownDescription").and_then(Value::as_str) {
+                    Some(t) => format!("{t}\n\n{note}"),
+                    None => note,
+                };
+                m.insert("markdownDescription".into(), Value::String(text));
+            }
+        }
+    }
 }
 
 fn kestra_def(fqcn: &str) -> Value {
@@ -521,26 +657,104 @@ fn reachable_defs(root: &Value, defs: &Map<String, Value>) -> BTreeSet<String> {
     seen
 }
 
+/// A deployment that lets every gated type through: a Docker runner whose
+/// `allowed-images` is `*`, and no `kestra` entry (every catalog class).
+pub fn permissive_deployment() -> crate::scripts::ScriptSettings {
+    use egret_config::{PluginConfiguration, PluginConfigurationValues, PluginConfigurations};
+    crate::scripts::ScriptSettings {
+        plugin_configurations: PluginConfigurations(vec![PluginConfiguration {
+            r#type: crate::scripts::DOCKER_RUNNER.to_string(),
+            values: PluginConfigurationValues {
+                allowed_images: Some(vec!["*".to_string()]),
+                ..Default::default()
+            },
+        }]),
+        default_runner: Some(crate::scripts::RunnerKind::Docker),
+    }
+}
+
+// ---------- serde's own field list ----------
+
+#[derive(Debug)]
+struct Captured(Option<&'static [&'static str]>);
+
+impl std::fmt::Display for Captured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
+impl std::error::Error for Captured {}
+impl serde::de::Error for Captured {
+    fn custom<T: std::fmt::Display>(_: T) -> Self {
+        Captured(None)
+    }
+}
+
+/// A deserializer that answers nothing and records the field list a derived
+/// `Deserialize` hands to `deserialize_struct`.
+struct FieldProbe;
+
+impl<'de> serde::de::Deserializer<'de> for FieldProbe {
+    type Error = Captured;
+    fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Captured> {
+        Err(Captured(None))
+    }
+    fn deserialize_struct<V: serde::de::Visitor<'de>>(
+        self,
+        _: &'static str,
+        fields: &'static [&'static str],
+        _: V,
+    ) -> Result<V::Value, Captured> {
+        Err(Captured(Some(fields)))
+    }
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map enum identifier ignored_any
+    }
+}
+
+/// The wire names of `T`'s fields, as its derived `Deserialize` knows them
+/// -- the keys serde keeps; any other key it drops (or, with
+/// `deny_unknown_fields`, refuses). Panics for a type that does not
+/// deserialize as a struct.
+pub fn wire_fields_of<T: serde::de::DeserializeOwned>() -> Vec<&'static str> {
+    match T::deserialize(FieldProbe) {
+        Err(Captured(Some(fields))) => fields.to_vec(),
+        _ => panic!(
+            "{} does not deserialize as a struct",
+            std::any::type_name::<T>()
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn all_features() -> Vec<SchemaFeatures> {
+        let mut v = Vec::new();
+        for kestra_plugins in [false, true] {
+            for containers in [false, true] {
+                v.push(SchemaFeatures {
+                    kestra_plugins,
+                    containers,
+                });
+            }
+        }
+        v
+    }
 
     /// Every `$ref` in a served schema resolves: a dangling one would make
     /// monaco-yaml give up on the whole subtree.
     #[test]
     fn every_reference_in_every_served_schema_resolves() {
-        for kestra_plugins in [false, true] {
-            for containers in [false, true] {
-                let f = SchemaFeatures {
-                    kestra_plugins,
-                    containers,
-                };
-                let s = flow_schema(&f);
-                let defs = s["$defs"].as_object().unwrap();
-                let names = reachable_defs(&s, defs);
-                let missing: Vec<_> = names.iter().filter(|n| !defs.contains_key(*n)).collect();
-                assert!(missing.is_empty(), "{f:?}: dangling {missing:?}");
-            }
+        for f in all_features() {
+            let s = flow_schema(&f, &permissive_deployment());
+            let defs = s["$defs"].as_object().unwrap();
+            let names = reachable_defs(&s, defs);
+            let missing: Vec<_> = names.iter().filter(|n| !defs.contains_key(*n)).collect();
+            assert!(missing.is_empty(), "{f:?}: dangling {missing:?}");
         }
     }
 
@@ -548,18 +762,13 @@ mod tests {
     /// combination is the same bytes every time.
     #[test]
     fn each_feature_combination_has_its_own_stable_etag() {
+        let d = permissive_deployment();
         let mut etags = BTreeSet::new();
-        for kestra_plugins in [false, true] {
-            for containers in [false, true] {
-                let f = SchemaFeatures {
-                    kestra_plugins,
-                    containers,
-                };
-                assert_eq!(served(&f).etag, served(&f).etag);
-                let rebuilt = serde_json::to_vec(&build(f)).unwrap();
-                assert_eq!(rebuilt, served(&f).bytes, "{f:?} is not deterministic");
-                etags.insert(served(&f).etag.clone());
-            }
+        for f in all_features() {
+            assert_eq!(served(&f, &d).etag, served(&f, &d).etag);
+            let rebuilt = serde_json::to_vec(&build(&Accepted::of(f, &d))).unwrap();
+            assert_eq!(rebuilt, served(&f, &d).bytes, "{f:?} is not deterministic");
+            etags.insert(served(&f, &d).etag.clone());
         }
         // `kestra_plugins` without `containers` serves no plugin types, so
         // it is the same TYPE set as neither -- but the features are named

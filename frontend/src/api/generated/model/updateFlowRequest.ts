@@ -20,8 +20,8 @@ export interface UpdateFlowRequest {
      * The draft's `updated_at` as the editor last read it (RFC 3339, the
      * exact string `FlowDto.updated_at` carried -- microseconds included).
      * When present and no longer the row's, the save is refused with 409
-     * and nothing is written; absent, the save is unconditional (W7a spec
-     * §7.3). See [`update_flow`] for every writer of the column.
+     * and nothing is written; absent, the save is unconditional. Publishing
+     * also moves `updated_at`.
      * @nullable
      */
   if_updated_at?: string | null;

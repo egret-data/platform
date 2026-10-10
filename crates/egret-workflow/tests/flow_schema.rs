@@ -10,8 +10,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use egret_workflow::models::{TaskKind, TriggerKind};
+use egret_workflow::scripts::ScriptSettings;
 use egret_workflow::spec::schema::{
-    flow_schema, kestra_definition, property_treatment, SchemaFeatures, Treatment,
+    flow_schema, kestra_definition, measured, permissive_deployment, property_treatment,
+    wire_fields_of, SchemaFeatures, Treatment,
 };
 use egret_workflow::spec::{parse, registry};
 use egret_workflow::{plugins, scripts};
@@ -117,45 +119,79 @@ fn short_spellings(names: &[String], package: &str) -> Vec<String> {
         .collect()
 }
 
-/// Would publish accept a task of type `t` in a workspace with `f`, as far
-/// as the TYPE decides? The flow is the smallest one carrying it; what the
-/// task's own properties would make of it is not the question.
-fn task_accepted(t: &str, f: SchemaFeatures) -> bool {
-    let source = json!({
-        "id": "a", "namespace": "a.b",
-        "tasks": [{ "id": "t", "type": t }],
-    })
-    .to_string();
+/// Would publish accept a task of type `t` in a workspace with `f` on
+/// deployment `d`, as far as the TYPE decides? Answered by publish's own
+/// functions: the parser's dispatch, `registry::known_type`,
+/// `publish::check_script_tasks` (on a script task whose image is an
+/// expression, so only the type-level rules apply) and `plugins::gate::check`
+/// (what `publish::check_plugin_tasks` calls once the properties parse).
+fn task_accepted(t: &str, f: SchemaFeatures, d: &ScriptSettings) -> bool {
+    let mut task = json!({ "id": "t", "type": t });
+    if let Some(kind) = scripts::kind_of(t) {
+        task[kind.body_property()] = match kind.body_property() {
+            "commands" => json!(["true"]),
+            _ => json!("true"),
+        };
+        task["containerImage"] = json!("{{ inputs.image }}");
+    }
+    let source = json!({ "id": "a", "namespace": "a.b", "tasks": [task] }).to_string();
     let flow = parse(&source).expect("a one-task flow parses");
     if !matches!(flow.tasks[0].kind, TaskKind::Leaf { .. }) {
         return true; // a typed flowable: no type refusal anywhere
     }
-    let cfg = egret_config::PluginConfigurations::default();
+    let gate = egret_workflow::ScriptGate {
+        feature_enabled: f.containers,
+        plugin_configurations: &d.plugin_configurations,
+        default_runner: d.default_runner,
+        kestra_plugins_enabled: f.kestra_plugins,
+    };
     if registry::known_type(t).is_some() {
-        // Publish step 3b: a script task's FIRST refusal is the feature.
-        if scripts::kind_of(t).is_some() {
-            let verdict = scripts::gate::check(&scripts::gate::GateInput {
-                feature_enabled: f.containers,
-                image: "x",
-                runner: scripts::RunnerKind::Docker,
-                plugin_configurations: &cfg,
-            });
-            return verdict != Err(scripts::gate::GateRefusal::FeatureDisabled);
-        }
-        return true;
+        return egret_workflow::publish::check_script_tasks(&flow, &gate).is_ok();
     }
     // Publish step 4 lets a catalog plugin type through; step 3c gates it.
     if let Some((fqcn, _)) = plugins::lookup(t) {
         return plugins::gate::check(&plugins::gate::GateInput {
             feature_enabled: f.kestra_plugins,
             containers_enabled: f.containers,
-            plugin_configurations: &cfg,
-            runner: Some(scripts::RunnerKind::Docker),
+            plugin_configurations: &d.plugin_configurations,
+            runner: d.default_runner,
             fqcn,
         })
         .is_ok();
     }
     false
+}
+
+/// The deployments the type-set test runs against: everything allowed; a
+/// `kestra` allow-list naming the PostgreSQL classes only; no container
+/// runner; and the default settings (no `plugin_configurations` at all).
+fn deployments() -> Vec<(&'static str, ScriptSettings)> {
+    use egret_config::{PluginConfiguration, PluginConfigurationValues, PluginConfigurations};
+    let mut restricted = permissive_deployment();
+    restricted
+        .plugin_configurations
+        .0
+        .push(PluginConfiguration {
+            r#type: egret_config::KESTRA_CONFIG_TYPE.to_string(),
+            values: PluginConfigurationValues {
+                allowed_types: Some(vec!["io.kestra.plugin.jdbc.postgresql.*".to_string()]),
+                ..Default::default()
+            },
+        });
+    let mut no_runner = permissive_deployment();
+    no_runner.default_runner = None;
+    vec![
+        ("permissive", permissive_deployment()),
+        ("allow-list", restricted),
+        ("no runner", no_runner),
+        (
+            "default",
+            ScriptSettings {
+                plugin_configurations: PluginConfigurations::default(),
+                default_runner: None,
+            },
+        ),
+    ]
 }
 
 /// A trigger egret parses into a typed `TriggerKind`; any other trigger type
@@ -177,46 +213,48 @@ fn trigger_accepted(t: &str) -> bool {
 fn the_served_type_set_is_the_accepted_type_set_for_every_feature_combination() {
     let kestra_tasks = kestra_type_names("tasks");
     let kestra_triggers = kestra_type_names("triggers");
-    for f in ALL {
-        let schema = flow_schema(&f);
-        let s = served(&schema);
+    for (name, d) in deployments() {
+        for f in ALL {
+            let schema = flow_schema(&f, &d);
+            let s = served(&schema);
 
-        let mut candidates: BTreeSet<String> = s.task_spellings.keys().cloned().collect();
-        candidates.extend(kestra_tasks.iter().cloned());
-        candidates.extend(short_spellings(
-            &kestra_tasks,
-            "io.kestra.plugin.core.flow.",
-        ));
-        for row in registry::TASK_TYPES {
-            candidates.insert(row.r#type.to_string());
-            candidates.extend(row.aliases.iter().map(|a| a.to_string()));
+            let mut candidates: BTreeSet<String> = s.task_spellings.keys().cloned().collect();
+            candidates.extend(kestra_tasks.iter().cloned());
+            candidates.extend(short_spellings(
+                &kestra_tasks,
+                "io.kestra.plugin.core.flow.",
+            ));
+            for row in registry::TASK_TYPES {
+                candidates.insert(row.r#type.to_string());
+                candidates.extend(row.aliases.iter().map(|a| a.to_string()));
+            }
+            candidates.extend(plugins::prefixed_types().map(str::to_string));
+            let accepted: BTreeSet<String> = candidates
+                .into_iter()
+                .filter(|t| task_accepted(t, f, &d))
+                .collect();
+            let offered: BTreeSet<String> = s.task_spellings.keys().cloned().collect();
+            assert_eq!(
+                offered,
+                accepted,
+                "{name} {f:?}: offered-but-refused {:?}, accepted-but-not-offered {:?}",
+                offered.difference(&accepted).collect::<Vec<_>>(),
+                accepted.difference(&offered).collect::<Vec<_>>()
+            );
+
+            let mut candidates: BTreeSet<String> = s.trigger_spellings.keys().cloned().collect();
+            candidates.extend(kestra_triggers.iter().cloned());
+            candidates.extend(short_spellings(
+                &kestra_triggers,
+                "io.kestra.plugin.core.trigger.",
+            ));
+            let accepted: BTreeSet<String> = candidates
+                .into_iter()
+                .filter(|t| trigger_accepted(t))
+                .collect();
+            let offered: BTreeSet<String> = s.trigger_spellings.keys().cloned().collect();
+            assert_eq!(offered, accepted, "{name} {f:?}: triggers");
         }
-        candidates.extend(plugins::prefixed_types().map(str::to_string));
-        let accepted: BTreeSet<String> = candidates
-            .into_iter()
-            .filter(|t| task_accepted(t, f))
-            .collect();
-        let offered: BTreeSet<String> = s.task_spellings.keys().cloned().collect();
-        assert_eq!(
-            offered,
-            accepted,
-            "{f:?}: offered-but-refused {:?}, accepted-but-not-offered {:?}",
-            offered.difference(&accepted).collect::<Vec<_>>(),
-            accepted.difference(&offered).collect::<Vec<_>>()
-        );
-
-        let mut candidates: BTreeSet<String> = s.trigger_spellings.keys().cloned().collect();
-        candidates.extend(kestra_triggers.iter().cloned());
-        candidates.extend(short_spellings(
-            &kestra_triggers,
-            "io.kestra.plugin.core.trigger.",
-        ));
-        let accepted: BTreeSet<String> = candidates
-            .into_iter()
-            .filter(|t| trigger_accepted(t))
-            .collect();
-        let offered: BTreeSet<String> = s.trigger_spellings.keys().cloned().collect();
-        assert_eq!(offered, accepted, "{f:?}: triggers");
     }
 }
 
@@ -224,7 +262,7 @@ fn the_served_type_set_is_the_accepted_type_set_for_every_feature_combination() 
 /// (so `trim.py`'s `KESTRA_TYPES` cannot fall behind the registry).
 #[test]
 fn every_accepted_kestra_class_is_backed_by_the_export() {
-    let all = flow_schema(&ALL[3]);
+    let all = flow_schema(&ALL[3], &permissive_deployment());
     let s = served(&all);
     for canonical in s.tasks.keys().chain(s.triggers.keys()) {
         let fqcn = canonical.strip_prefix(plugins::PREFIX).unwrap_or(canonical);
@@ -241,7 +279,7 @@ fn every_accepted_kestra_class_is_backed_by_the_export() {
 /// description names the canonical FQCN.
 #[test]
 fn aliases_are_listed_and_name_their_canonical_spelling() {
-    let all = flow_schema(&ALL[3]);
+    let all = flow_schema(&ALL[3], &permissive_deployment());
     let s = served(&all);
     let log = &all["$defs"]["io.kestra.plugin.core.log.Log"];
     let consts = type_consts(log);
@@ -275,7 +313,7 @@ fn all_type_spellings(schema: &Value) -> BTreeSet<String> {
 #[test]
 fn features_remove_the_plugin_and_script_types() {
     for f in ALL {
-        let schema = flow_schema(&f);
+        let schema = flow_schema(&f, &permissive_deployment());
         let types = all_type_spellings(&schema);
         let defs: Vec<&String> = schema["$defs"].as_object().unwrap().keys().collect();
         let has_plugins = types.iter().any(|t| t.contains("io.kestra.plugin.jdbc."))
@@ -295,14 +333,21 @@ fn features_remove_the_plugin_and_script_types() {
 #[test]
 fn no_served_property_is_one_egret_ignores_or_refuses() {
     let table = property_treatment();
-    let schema = flow_schema(&ALL[3]);
-    let s = served(&schema);
+    let schema = flow_schema(&ALL[3], &permissive_deployment());
     let mut checked = 0;
-    for name in s.tasks.values().chain(s.triggers.values()) {
+    let mut nested = 0;
+    // Every served definition with a measured row: the types AND the nested
+    // definitions (inputs, retry, the trigger and flow sub-objects).
+    for (name, def) in schema["$defs"].as_object().unwrap() {
         let Some(row) = table.get(name) else {
-            continue; // egret-only, hand-written
+            continue; // egret-only, hand-written, or passed through (README)
         };
-        let props = schema["$defs"][name]["properties"].as_object().unwrap();
+        if !name.contains(".plugin.") && !name.starts_with("kestra.") {
+            nested += 1;
+        }
+        let Some(props) = def["properties"].as_object() else {
+            continue;
+        };
         for p in props.keys() {
             let t = row.get(p);
             assert!(
@@ -338,13 +383,123 @@ fn no_served_property_is_one_egret_ignores_or_refuses() {
             Some(&Treatment::Ignored)
         );
     }
-    assert!(checked > 200, "only {checked} properties were checked");
+    assert!(checked > 300, "only {checked} properties were checked");
+    assert!(nested > 30, "only {nested} nested definitions were checked");
+}
+
+/// Fix round 1, I1: the five properties egret parses and then refuses at a
+/// later stage are not offered.
+#[test]
+fn properties_egret_refuses_after_parsing_are_not_served() {
+    let schema = flow_schema(&ALL[3], &permissive_deployment());
+    let defs = &schema["$defs"];
+    for (def, prop) in [
+        ("io.kestra.plugin.core.trigger.Webhook", "wait"),
+        ("io.kestra.plugin.core.trigger.Webhook", "returnOutputs"),
+        (
+            "io.kestra.plugin.core.trigger.Webhook",
+            "responseContentType",
+        ),
+        ("io.kestra.plugin.core.trigger.Webhook", "responseCode"),
+        ("io.kestra.plugin.core.trigger.Schedule", "lateMaximumDelay"),
+    ] {
+        assert!(defs[def]["properties"].is_object(), "{def} is served");
+        assert!(
+            defs[def]["properties"].get(prop).is_none(),
+            "{def} offers {prop}, which egret refuses"
+        );
+        assert!(
+            measured().refused_downstream[def].contains_key(prop),
+            "{def}.{prop} names its refusal site"
+        );
+    }
+}
+
+/// Fix round 1, I2: an enum value refused at firing is not offered.
+#[test]
+fn webhook_fetch_type_does_not_offer_store() {
+    let schema = flow_schema(&ALL[3], &permissive_deployment());
+    let fetch =
+        &schema["$defs"]["io.kestra.plugin.core.trigger.Webhook"]["properties"]["fetchType"];
+    let values: Vec<&str> = fetch["enum"]
+        .as_array()
+        .expect("fetchType keeps its enum")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(values, ["NONE", "FETCH"], "{fetch}");
+    assert!(
+        fetch["markdownDescription"]
+            .as_str()
+            .unwrap()
+            .ends_with("**Not accepted by egret:** `STORE`."),
+        "the hover says STORE is refused: {fetch}"
+    );
+}
+
+/// Fix round 1, I2: the flow's `inputs` offer exactly the keys
+/// `models::Input` keeps -- across all input definitions, and no definition
+/// offers a key outside them.
+#[test]
+fn the_inputs_offer_exactly_the_fields_models_input_accepts() {
+    let schema = flow_schema(&ALL[3], &permissive_deployment());
+    let fields: BTreeSet<String> = wire_fields_of::<egret_workflow::models::Input>()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let refs: Vec<String> = schema["properties"]["inputs"]["items"]["anyOf"]
+        .as_array()
+        .expect("inputs.items is an anyOf of the input definitions")
+        .iter()
+        .map(|r| {
+            r["$ref"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("#/$defs/")
+                .to_string()
+        })
+        .collect();
+    assert!(refs.len() > 15, "{refs:?}");
+    let mut union = BTreeSet::new();
+    for name in &refs {
+        let def = &schema["$defs"][name];
+        let target = def["allOf"][0]["$ref"]
+            .as_str()
+            .map(|r| r.trim_start_matches("#/$defs/").to_string());
+        let def = match &target {
+            Some(t) => &schema["$defs"][t],
+            None => def,
+        };
+        for p in def["properties"].as_object().unwrap().keys() {
+            assert!(
+                fields.contains(p),
+                "{name} offers {p}, which models::Input drops"
+            );
+            union.insert(p.clone());
+        }
+    }
+    assert_eq!(union, fields);
+    // The ones the review named, by name.
+    let select = &schema["$defs"]["io.kestra.core.models.flows.input.SelectInput-2"]["properties"];
+    for p in [
+        "values",
+        "allowCustomValue",
+        "expression",
+        "isRadio",
+        "autoSelectFirst",
+    ] {
+        assert!(select.get(p).is_none(), "SELECT offers {p}");
+    }
+    let string = &schema["$defs"]["io.kestra.core.models.flows.input.StringInput-2"]["properties"];
+    assert!(string.get("validator").is_none());
+    let int = &schema["$defs"]["io.kestra.core.models.flows.input.IntInput-2"]["properties"];
+    assert!(int.get("min").is_none() && int.get("max").is_none());
 }
 
 /// Test 5: every served type with a known outputs list carries it.
 #[test]
 fn every_type_with_known_outputs_carries_x_egret_outputs() {
-    let schema = flow_schema(&ALL[3]);
+    let schema = flow_schema(&ALL[3], &permissive_deployment());
     let s = served(&schema);
     for name in s.tasks.values().chain(s.triggers.values()) {
         let fqcn = name.strip_prefix(plugins::PREFIX).unwrap_or(name);
@@ -375,7 +530,7 @@ fn every_type_with_known_outputs_carries_x_egret_outputs() {
 /// fields publish resolves.
 #[test]
 fn egret_only_types_are_described_with_their_required_properties() {
-    let schema = flow_schema(&ALL[3]);
+    let schema = flow_schema(&ALL[3], &permissive_deployment());
     for t in [
         "egret.sql",
         "egret.dataapi.call",
@@ -411,7 +566,7 @@ fn egret_only_types_are_described_with_their_required_properties() {
 /// lists through the task union -- including a flowable's nested list.
 #[test]
 fn the_document_is_a_draft_2020_12_flow_schema_with_task_unions() {
-    let schema = flow_schema(&ALL[0]);
+    let schema = flow_schema(&ALL[0], &permissive_deployment());
     assert_eq!(
         schema["$schema"],
         "https://json-schema.org/draft/2020-12/schema"
