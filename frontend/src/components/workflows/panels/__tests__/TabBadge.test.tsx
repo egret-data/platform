@@ -16,9 +16,18 @@ registerTab<Ctx>({
   render: () => <p>problems</p>,
   badge: (ctx) => (ctx.errors > 0 ? <span>{`, ${ctx.errors} errors`}</span> : null),
 });
+registerTab<Ctx>({
+  id: "labelled",
+  title: "Labelled",
+  icon: TriangleAlert,
+  closable: true,
+  render: () => <p>labelled</p>,
+  badge: (ctx) => (ctx.errors > 0 ? <span className="sr-only">{ctx.errors}</span> : null),
+  badgeLabel: (ctx) => (ctx.errors > 0 ? `${ctx.errors} errors` : undefined),
+});
 
 const LAYOUT: Layout = {
-  panels: [{ id: "p1", size: 100, tabs: [CODE_TAB, "problems"], active: CODE_TAB }],
+  panels: [{ id: "p1", size: 100, tabs: [CODE_TAB, "problems", "labelled"], active: CODE_TAB }],
 };
 
 describe("a tab's badge", () => {
@@ -31,6 +40,12 @@ describe("a tab's badge", () => {
     rerender(<MultiPanel<Ctx> layout={LAYOUT} onChange={() => {}} context={{ errors: 0 }} />);
     expect(screen.getByRole("tab", { name: "Problems" })).toBeInTheDocument();
     // The actions menu names the tab by its title alone.
+    expect(screen.getByRole("tab", { name: "Labelled" })).not.toHaveAttribute("aria-label");
     expect(screen.getByRole("button", { name: "Tab actions: Code" })).toBeInTheDocument();
+  });
+
+  it("is named exactly '<title>, <label>' by an aria-label when the badge has words (Chromium spaced a hidden count)", () => {
+    render(<MultiPanel<Ctx> layout={LAYOUT} onChange={() => {}} context={{ errors: 3 }} />);
+    expect(screen.getByRole("tab", { name: "Labelled, 3 errors" })).toHaveAttribute("aria-label", "Labelled, 3 errors");
   });
 });

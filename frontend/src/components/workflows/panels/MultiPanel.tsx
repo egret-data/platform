@@ -51,7 +51,9 @@ function EdgeZone({ panelId, side }: { panelId: string; side: "left" | "right" }
       ref={setNodeRef}
       aria-hidden
       className={cn(
-        "pointer-events-none absolute inset-y-0 z-10 flex w-1/4 items-center justify-center",
+        // The label sits near the top: centred, it was under the dragged tab's overlay,
+        // which follows the pointer into the zone (W7a Task 8 fix round 1).
+        "pointer-events-none absolute inset-y-0 z-10 flex w-1/4 items-start justify-center pt-6",
         side === "left" ? "left-0" : "right-0",
         active && isOver && "border-2 border-dashed border-primary bg-primary/10",
       )}
@@ -94,6 +96,7 @@ export function MultiPanel<C>({ layout, onChange, context }: Props<C>) {
   useTabsVersion();
   const defs = new Map(getTabs<C>().map((d) => [d.id, d as unknown as TabDefinition<never>]));
   const badgeOf = (tab: TabId) => defs.get(tab)?.badge?.(context as never);
+  const badgeLabelOf = (tab: TabId) => defs.get(tab)?.badgeLabel?.(context as never);
   const baseId = useId();
   const tabDomId = (tab: TabId) => `${baseId}-tab-${tab}`;
   const [dragging, setDragging] = useState<TabId | null>(null);
@@ -223,6 +226,7 @@ export function MultiPanel<C>({ layout, onChange, context }: Props<C>) {
                     tabpanelId={tabpanelId}
                     onChange={change}
                     badgeOf={badgeOf}
+                    badgeLabelOf={badgeLabelOf}
                   />
                   <div
                     role="tabpanel"

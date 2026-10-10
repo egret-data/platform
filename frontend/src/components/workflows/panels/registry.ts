@@ -27,6 +27,12 @@ export type TabDefinition<C = unknown> = {
    * so give it words for a screen reader, not only a number.
    */
   badge?: (context: C) => ReactNode;
+  /**
+   * The badge in words ("3 errors"), when it has some. The tab is then named
+   * `"<title>, <label>"` by an `aria-label`: Chromium joins a visually hidden
+   * count to the title with a space ("Problems , 3 errors"; W7a Task 8).
+   */
+  badgeLabel?: (context: C) => string | undefined;
 };
 
 const tabs = new Map<TabId, TabDefinition<never>>();

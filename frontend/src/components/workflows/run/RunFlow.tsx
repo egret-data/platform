@@ -85,10 +85,9 @@ function RunForm({
 }: RunFlowProps & { inputs: RunInput[]; sourceError: string | null }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  // The route takes JSON or multipart, so orval writes no `Content-Type` for it, and a
-  // browser's `fetch` labels a string body `text/plain`, which the route refuses with 415
-  // (found in W7a Task 8's end-to-end run; the vitest fetch stub never looked at headers).
-  const start = useWorkflowStartFlowExecution({ request: { headers: { "Content-Type": "application/json" } } });
+  // Its JSON body goes out as `application/json` by `customInstance` (`api/mutator.ts`):
+  // the route takes two body types, so orval writes no `Content-Type` (W7a Task 8).
+  const start = useWorkflowStartFlowExecution();
   const idPrefix = useId();
   const [form, setForm] = useState(() => formFromInputs(inputs));
   const [clientErrors, setClientErrors] = useState<Record<string, string>>({});
@@ -221,6 +220,10 @@ function RunForm({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         data-container={container}
+        // The footer below is sticky; a field scrolled into view by focus must clear it
+        // (WCAG 2.4.11), so the body's scroll padding is taller than the footer: 45px on
+        // a wide screen, 85px where it stacks below `sm` (measured, W7a Task 8 fix round 1).
+        bodyClassName="scroll-pb-28 sm:scroll-pb-16"
         className={
           container === "drawer"
             ? // The right-hand drawer (spec §6.1). There is no sheet primitive in `components/ui`,

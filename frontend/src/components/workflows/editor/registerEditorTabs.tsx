@@ -2,7 +2,7 @@ import { Code, FileText, TriangleAlert } from "lucide-react";
 import { CodeTab } from "@/components/workflows/editor/CodeTab";
 import { DocsTab } from "@/components/workflows/editor/DocsTab";
 import type { EditorContext } from "@/components/workflows/editor/EditorContext";
-import { ProblemsBadge, ProblemsTab } from "@/components/workflows/editor/ProblemsTab";
+import { ProblemsBadge, ProblemsTab, problemsBadgeLabel } from "@/components/workflows/editor/ProblemsTab";
 import { CODE_TAB } from "@/components/workflows/panels/layout";
 import { registerTab } from "@/components/workflows/panels/registry";
 
@@ -34,6 +34,7 @@ export function registerEditorTabs(): void {
     closable: true,
     render: (ctx) => <ProblemsTab ctx={ctx} />,
     badge: (ctx) => <ProblemsBadge ctx={ctx} />,
+    badgeLabel: problemsBadgeLabel,
   });
 }
 

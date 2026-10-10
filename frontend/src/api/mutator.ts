@@ -44,7 +44,17 @@ export const customInstance = async <T>(
   // Segment-anchored so a hypothetical `/apiXxx` path is never mangled.
   const path = url.replace(/^\/api(?=\/|$)/, "");
 
-  const res = await apiFetch(path, { ...options, method });
+  // orval writes no `Content-Type` for a route that takes two body types (JSON or
+  // multipart), and a browser's `fetch` labels a string body `text/plain`, which
+  // such a route refuses with 415 (W7a Task 8: every Run of a flow failed so).
+  // Every generated body that is a string is `JSON.stringify`'d, so a string
+  // with no type is JSON; FormData, URLSearchParams and Blob carry their own.
+  const headers = new Headers(options?.headers);
+  if (typeof options?.body === "string" && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  const res = await apiFetch(path, { ...options, method, headers });
 
   let data: unknown = undefined;
   if (res.status !== 204 && res.headers.get("content-length") !== "0") {

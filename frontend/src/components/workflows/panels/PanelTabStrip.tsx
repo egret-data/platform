@@ -53,11 +53,12 @@ const isClosable = (defs: Map<TabId, TabDefinition<never>>, tab: TabId) =>
  * already selected by then — selection follows focus).
  */
 function TabButton({
-  tab, title, badge, icon: Icon, panelId, selected, closable, domId, controls, onSelect, onClose, onKeyDown,
+  tab, title, badge, badgeLabel, icon: Icon, panelId, selected, closable, domId, controls, onSelect, onClose, onKeyDown,
 }: {
   tab: TabId;
   title: string;
   badge?: ReactNode;
+  badgeLabel?: string;
   icon: LucideIcon | undefined;
   panelId: string;
   selected: boolean;
@@ -80,6 +81,7 @@ function TabButton({
       role="tab"
       id={domId}
       aria-selected={selected}
+      aria-label={badgeLabel ? `${title}, ${badgeLabel}` : undefined}
       aria-controls={selected ? controls : undefined}
       aria-describedby={drag.attributes["aria-describedby"]}
       aria-keyshortcuts={closable ? "Delete" : undefined}
@@ -138,7 +140,7 @@ function TabButton({
  * actions is two keystrokes (arrows, then Tab).
  */
 export function PanelTabStrip({
-  layout, panel, index, defs, tabDomId, tabpanelId, onChange, badgeOf,
+  layout, panel, index, defs, tabDomId, tabpanelId, onChange, badgeOf, badgeLabelOf,
 }: {
   layout: Layout;
   panel: PanelLayout;
@@ -150,6 +152,8 @@ export function PanelTabStrip({
   onChange: (next: Layout, focus?: TabId) => void;
   /** A tab's badge (`TabDefinition.badge`), already given the frame's context. */
   badgeOf?: (tab: TabId) => ReactNode;
+  /** A tab's badge in words (`TabDefinition.badgeLabel`), for its accessible name. */
+  badgeLabelOf?: (tab: TabId) => string | undefined;
 }) {
   const { setNodeRef: setStripRef, isOver: overStrip } = useDroppable({ id: `strip:${panel.id}`, data: { kind: "strip", panel: panel.id } satisfies DropData });
   const active = panel.active;
@@ -200,6 +204,7 @@ export function PanelTabStrip({
             tab={tab}
             title={tabTitle(defs, tab)}
             badge={badgeOf?.(tab)}
+            badgeLabel={badgeLabelOf?.(tab)}
             icon={defs.get(tab)?.icon}
             panelId={panel.id}
             selected={tab === active}
