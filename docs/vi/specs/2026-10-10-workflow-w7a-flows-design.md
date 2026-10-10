@@ -2,7 +2,7 @@
 
 > Bản tham khảo tiếng Việt. Bản chính là `docs/en/specs/2026-10-10-workflow-w7a-flows-design.md`; khi hai bản khác nhau, bản tiếng Anh thắng.
 
-**Trạng thái:** thiết kế, 2026-10-10; chưa cài.
+**Trạng thái:** đã cài, 2026-10-10 (W7a Task 1–8). Lần chạy end-to-end của Task 8 và phần đối chiếu với một Kestra đang chạy (2.0.0-rc13, image local đã ghim) được gộp vào §2, §5, §6 và §15.
 **Phụ thuộc:**
 - W1: flow, draft, version và validation;
 - W10: start execution;
@@ -55,16 +55,22 @@ Engine đã chạy flow trong production (từ W10), nhưng người dùng chỉ
 | Form run theo revision mới nhất | Form run theo **bản draft đã lưu**, và Run bị vô hiệu hoá khi còn chỉnh sửa chưa lưu | Execution chạy bản draft đã lưu (phán quyết của người dùng, 2026-10-10) |
 | Input JSON và YAML là editor code nội tuyến | Một ô văn bản font monospace; JSON được kiểm trước khi Run | Ô văn bản nhận `id` mà `Label` trỏ tới (FE-FORM-2) và để phím Tab di chuyển giữa các ô; `tabFocusMode` và `aria-labelledby` của Monaco làm được cả hai, nhưng form run không được lợi gì từ một editor (W7a Task 6, được chấp nhận khi review) |
 | MULTISELECT là một select nhiều lựa chọn có tìm kiếm và chọn tất cả | Một danh sách checkbox, mỗi giá trị một ô | Mỗi checkbox có `Label` gắn riêng (FE-FORM-2) và tập giá trị vẫn là một picker (FE-FORM-3); `ui/tag-combobox` không nhận `id`. Danh sách `values` dài làm drawer cao lên, và drawer cuộn được (W7a Task 6, được chấp nhận khi review) |
-| Form run mở trong một component drawer bên cạnh | Tối đa ba input scalar thì mở dialog; ngoài ra là chính primitive dialog ghim vào mép phải, cao hết màn hình | `components/ui` không có sheet hay drawer; phần thân của primitive dialog vốn đã cuộn được. Kích thước của nó được đo ở Task 8 (FE-TEST-2) |
+| Form run ("Execute the flow") là một modal giữa màn hình, rộng khoảng 750px, có ba tab (Inputs, Other properties, cURL command); phần thân cuộn được và nút Execute nằm yên ở footer | Tối đa ba input scalar thì mở dialog (576px, giữa màn hình); ngoài ra là chính primitive dialog ghim vào mép phải, cao hết màn hình (512px; trên điện thoại thì rộng hết). Cả hai chỉ có một khung input, và Run nằm trong footer dính đáy trong khi các ô cuộn | `components/ui` không có sheet hay drawer, và phần thân của primitive dialog vốn đã cuộn được. Label, thuộc tính execution và tab cURL không thuộc W7a. Footer dính đáy giống Kestra: theo phép đo ở Task 8, Run của drawer nằm dưới mép màn hình 175px ở 1440×900 cho tới khi được làm dính đáy |
 | Input BOOL không được chạm tới được gửi là `false` (`utils/inputs.ts:169-175`, được `updateDefaults` của `InputsForm.vue` áp cho mọi input chưa đặt) | Giống vậy: switch bắt đầu từ giá trị mặc định hoặc `false`, và luôn được gửi | Đúng hành vi của chính Kestra; switch không có trạng thái thứ ba |
-| Panel của editor: mỗi panel có một menu chấm (chuyển panel, đóng mọi tab, đóng mọi panel); thả tab lên mép trái hoặc phải ngoài cùng của khung thì tạo panel mới ở đó; `KeepAlive` giữ các tab ẩn của panel luôn mount, và panel được key theo chỉ số | Mỗi panel có một menu "Tab actions: <title>", tác động lên tab đang chọn (Move to panel…, Split left, Split right, Close); thả tab lên mép trái hoặc phải của **bất kỳ panel nào** thì tách cạnh panel đó; mỗi panel chỉ mount tab đang chọn, và khi tập panel đổi thì các panel được mount lại (§5.1) | Một `tablist` chỉ được chứa tab, nên đặt nút menu trong từng tab sẽ phá ngữ nghĩa đó; một menu mỗi panel giữ được ngữ nghĩa mà mọi tab vẫn tới được menu của mình trong hai phím. Tách cạnh bất kỳ panel nào là mô hình của spec. React không có `KeepAlive`: trạng thái của tab nằm ngoài tab, và Task 4 giữ model và view state của Monaco qua lần mount lại (`path`, `keepCurrentModel`, `saveViewState`). Nếu một tab khác cần luôn mount thì phương án dự phòng là portal đổi cha |
+| Panel của editor: mỗi panel có một menu chấm (ở 2.0.0-rc13: Move right, Move left, Close all panels, Keyboard shortcuts), một tay nắm để kéo và nút phóng to; tab kéo bằng HTML5 drag; thả tab lên một tab khác thì vào panel đó, đứng trước tab ấy, thả lên thân một panel thì vào dải tab của panel đó, và thả lên mép trái hoặc phải ngoài cùng của khung thì tạo panel mới ở đó; `KeepAlive` giữ các tab ẩn của panel luôn mount, và panel được key theo chỉ số | Mỗi panel có một menu "Tab actions: <title>", tác động lên tab đang chọn (Move to panel…, Split left, Split right, Close); thả tab lên mép trái hoặc phải của **bất kỳ panel nào** thì tách cạnh panel đó; mỗi panel chỉ mount tab đang chọn, và khi tập panel đổi thì các panel được mount lại (§5.1) | Một `tablist` chỉ được chứa tab, nên đặt nút menu trong từng tab sẽ phá ngữ nghĩa đó; một menu mỗi panel giữ được ngữ nghĩa mà mọi tab vẫn tới được menu của mình trong hai phím. Tách cạnh bất kỳ panel nào là mô hình của spec. React không có `KeepAlive`: trạng thái của tab nằm ngoài tab, và Task 4 giữ model và view state của Monaco qua lần mount lại (`path`, `keepCurrentModel`, `saveViewState`). Nếu một tab khác cần luôn mount thì phương án dự phòng là portal đổi cha |
+| Một thanh công cụ trên các panel bật/tắt từng loại tab (Flow Code, No-code, Topology, Docs, Files, Blueprints); mở một loại thì thêm một panel mới bên phải. Một dấu chấm trên tab Code báo có sửa đổi chưa lưu | Menu "+" của mỗi panel mở lại một tab đã đóng vào chính panel đó. Sửa đổi chưa lưu là một badge ở header ("Unsaved changes") | Menu "+" để người xem chọn panel, và người dùng bàn phím tới được nó bằng Tab (FE-A11Y-3). Badge ở header nằm cạnh Save và các chỉ báo khác, điều mà một dấu chấm trên tab không làm được khi Code ở panel khác |
+| Validate chạy khoảng 1 giây sau phím cuối (đo được: một `POST /flows/validate` 980 ms sau phím thứ ba trong ba phím cách nhau 150 ms). Thanh công cụ hiện "Valid" hoặc "N Error(s)" | 600 ms sau lần sửa cuối (§5.2). Số lỗi nằm trên tab Problems, và danh sách của nó đưa con trỏ tới từng lỗi | Problems là của egret (dòng ở trên); 600 ms là lựa chọn của spec, và request mới huỷ request cũ |
+| Id task lặp lại được đánh dấu ở lần xuất hiện thứ hai | Được đánh dấu ở lần đầu (`tasks.say` map vào phần tử đầu tiên khớp, §15) | Kết quả của server gọi task theo id chứ không theo vị trí; bộ validate của Kestra tự báo chỗ trùng. Một path mang vị trí là thay đổi ở backend, để sau |
+| Docs: ngoài task là một trình duyệt tài liệu tham khảo (tìm kiếm; Overview, Flow, Tasks, Inputs, Pebble, Examples). Trong một task là trang của plugin với breadcrumb và các tab (Overview, Properties, Examples). Nó đi theo con trỏ | Ngoài task là tài liệu cấp flow; trong task là một trang cuộn: mô tả, bảng thuộc tính và outputs. Nó cũng đi theo con trỏ (150 ms) | Cả hai đọc cùng một schema được phục vụ (§7.1); trang tài liệu plugin và ví dụ nằm ngoài W7 |
+| Revisions: hai ô chọn revision cạnh nhau, mỗi ô có Restore riêng, và một ô chọn side-by-side hoặc inline phía trên một diff rộng hết trang. Restore hỏi "Are you sure you want to restore the revision 1?" và tạo một revision mới | Một danh sách version (số, ghi chú, tác giả, thời gian) cạnh khung xem từ `xl`, phía trên nó khi hẹp hơn; "Compare with" chọn bên còn lại; diff hai cột từ 600px và inline khi hẹp hơn, kèm chú thích nói rõ là kiểu nào (§5.5). Restore lưu chữ của version vào draft, và hộp xác nhận nói thứ sẽ chạy tiếp và thứ bị mất | Version là snapshot còn draft là thứ chạy (phán quyết của người dùng), nên restore là một lần lưu draft chứ không phải version mới. Danh sách mang ghi chú và tác giả mà ô chọn của Kestra giấu đi |
+| INT là ô số có nút − và +. Một key YAML 1.1 như `on` được ghi nhãn là `true` | Một ô số. Id của input đúng như được viết (`on`) | Ô số của chính trình duyệt; YAML của egret là 1.2, nên `on` là chuỗi |
 | `monaco-yaml` 5.5.1 và `monaco-worker-manager` 2.0.1 được vá trong `node_modules` (`kestra/ui/patches/`): worker được khởi động bằng `createWebWorker({ worker })` của monaco 0.56, và bộ kiểm tra chọn thành viên `oneOf` theo `type` để gợi ý `type:` liệt kê mọi kiểu | Không vá `node_modules`. `monacoYaml.ts` đưa cho `monaco-yaml` một Monaco có `createWebWorker` khởi động worker theo cách monaco 0.56 làm; schema được phục vụ chỉ bắt buộc `id` và `type` trực tiếp, phần còn lại sau `if: type là chuỗi` (§7.1), nhờ đó mọi cách viết `type:` đều được gợi ý | Đo bằng schema của egret trong Chromium và bằng chính worker của `monaco-yaml` trong Node (W7a Task 4): nếu để nguyên, worker rơi về bản giả trong trang không có phương thức YAML nào, và gợi ý `type:` chỉ đưa 10 trên 54 cách viết của task |
 
 Mọi khác biệt khác tìm thấy khi đối chiếu với một Kestra đang chạy (§9) được thêm vào bảng này kèm lý do.
 
 ## 3. Route và điều hướng
 
-**Nav.** Sidebar Explore có thêm nhóm **Workflows**, gate theo feature `workflows` giống các module khác (`RequireFeature`, `EXPLORE_MODULES`). Nhóm có hai mục **Flows** và **Executions**. Executions là trang placeholder cho tới W7b.
+**Nav.** **Workflows là một nhóm Sidebar riêng**, giống Data API và vì cùng lý do: một module có nhiều phần. Nó **không** thuộc `EXPLORE_MODULES`, danh sách còn quyết định trang mở đầu của workspace. Mọi mục đều mang `feature: "workflows"`, nên cả nhóm ẩn đi khi workspace không có quyền dùng, và các route được canh bởi `RequireFeature feature="workflows"`. Nhóm có hai mục **Flows** và **Executions**. Executions là trang placeholder cho tới W7b.
 
 `components/layout/__tests__/Sidebar.test.tsx` hiện khẳng định không có link Workflows ("the real Workflows group lands in W7"). Khẳng định đó được thay bằng một khẳng định rằng nhóm có tồn tại và có gate.
 
@@ -129,6 +135,7 @@ Mọi khác biệt khác tìm thấy khi đối chiếu với một Kestra đang
   - Mọi lần đọc và ghi đều được bọc. Bố cục thiếu, không parse được hoặc không hợp lệ thì quay về mặc định. Một tab id lạ, ví dụ của một package sau đã bị rollback, bị bỏ qua.
   - Flow mới dùng bố cục mặc định.
 - **Mặc định:** hai panel `[Code] | [Docs, Problems]`, tỷ lệ 60/40.
+- **Gutter** rộng 8px với một vạch 4px, và vùng nhận con trỏ đúng bằng 8px đó (`resizeTargetMinimumSize`). Vùng nhận mặc định của thư viện (10px với chuột, 20px với cảm ứng) lấn 3px vào tab đầu của panel kế bên, và một lần kéo bắt đầu ở đó đã đổi kích thước panel (W7a Task 8).
 - **Mount.** Mỗi panel chỉ mount tab đang chọn, key theo tab id. Khi tập panel đổi (tách, hoặc đóng hay chuyển làm một panel trống) thì các panel được mount lại, để kích thước luôn khớp bố cục. Vì vậy tab giữ trạng thái bên ngoài chính nó: tab Code giữ model và view state của Monaco qua lần mount lại (`path`, `keepCurrentModel`, `saveViewState`; Task 4), và trang dispose model đó khi rời flow. §2 ghi khác biệt với `KeepAlive` của Kestra.
 
 **Registry tab.** Mỗi loại tab được đăng ký một lần bằng `registerTab({ id, title, icon, closable, render })`; `render(context)` nhận `context` mà trang đưa cho khung. W7c đăng ký Topology và W7d đăng ký Files mà không sửa khung. Tab đăng ký sau khi editor đã mount (một chunk lazy) vẫn được nhận: khung render lại, và bố cục đã lưu có nhắc tới tab đó thì giữ nó, trừ khi người xem đã đổi bố cục trước khi tab được đăng ký.
@@ -224,6 +231,8 @@ Hành vi:
 
 **Dòng báo mất: một cách đọc có chủ ý quy tắc của người dùng.** Quy tắc yêu cầu hộp xác nhận nêu thứ bị mất "khi draft có thay đổi so với version mới nhất". Hộp xác nhận chỉ cảnh báo draft đã lưu bị bỏ khi **không version nào giữ chữ của draft đã lưu**. Khi draft trùng một version cũ hơn thì không mất gì: version đó vẫn giữ nó, và phép kiểm hẹp hơn giữ cho hộp xác nhận không báo một mất mát không có thật. Hễ dòng này hiện thì draft cũng khác version mới nhất, nên câu chữ của nó ("changes since v{latest} that no version keeps") đúng. Các sửa đổi chưa lưu trong editor luôn được nêu khi có.
 
+**Bố cục.** Danh sách nằm cạnh khung xem từ `xl`, và phía trên nó khi hẹp hơn: với `lg`, màn hình 1024px chỉ còn cho diff 222px. Diff hiện hai cột khi khung của nó rộng ít nhất 600px, và inline khi hẹp hơn; khi đó chú thích ghi "v1 → Current draft" kèm nghĩa của − và +, thay vì gọi tên cột trái và cột phải. Để Monaco tự quyết thì nó chuyển inline dưới 900px, đúng bằng độ rộng khung trên màn hình 1440px (W7a Task 8).
+
 Khi một lần save của người khác đã được đọc về (draft đã lưu trên server không phải chữ editor này đang giữ), tab không so với thứ nó không bảo đảm được: nó báo flow đã đổi trên server, không đánh dấu "Matches draft", không diff với draft, và tắt Restore cho tới khi tải lại trang.
 
 ## 6. Run
@@ -232,7 +241,8 @@ Khi một lần save của người khác đã được đọc về (draft đã 
 
 Run đọc `inputs:` của **bản draft đã lưu** (`FlowDto.source`), cũng là thứ server khởi chạy (phán quyết của người dùng, 2026-10-10). Run không bao giờ được mở khi còn chỉnh sửa chưa lưu (§5.3), nên form và server luôn đọc cùng một nội dung.
 
-- **Khung chứa.** Flow không có input thì chạy ngay sau một bước xác nhận. Từ một đến ba input, tất cả đều là kiểu đơn, thì mở dialog. Còn lại mở một drawer bên phải.
+- **Khung chứa.** Flow không có input thì chạy ngay sau một bước xác nhận. Từ một đến ba input, tất cả đều là kiểu đơn, thì mở dialog. Còn lại mở một drawer bên phải. Ở cả hai, Cancel và Run nằm trong footer luôn hiện trong khi các ô cuộn.
+- **Request.** Một lần start bằng JSON tự ghi `Content-Type: application/json`. Route nhận JSON hoặc multipart, nên client sinh ra không ghi kiểu nào, và `fetch` của trình duyệt gắn nhãn `text/plain` cho body là chuỗi, thứ route từ chối bằng 415; cho tới lần chạy end-to-end của Task 8, mọi Run không có input FILE đều hỏng theo cách đó. Stub fetch của vitest chưa từng nhìn header.
 - **Control theo kiểu input** (`models/input.rs`):
 
 | Kiểu input | Control |
@@ -385,8 +395,8 @@ Trong lúc cài, một Kestra tạm chạy từ image `kestra/kestra` có sẵn 
   - control của từng kiểu input và giá trị nó gửi đi;
   - lỗi theo ô từ server, và giá trị đã nhập được giữ;
   - restore trong Revisions kèm bước xác nhận.
-- **Playwright,** trên một stack local, không bao giờ trên dev stack dùng chung (FE-TEST-2):
-  - tạo flow → gợi ý xuất hiện → một lỗi được đánh dấu và liệt kê → Save → Create version → Run → trang execution;
+- **Playwright,** trên một stack local, không bao giờ trên dev stack dùng chung (FE-TEST-2), trong `frontend/tests/e2e/workflows-flows.spec.ts` (bật bằng `EGRET_E2E_WORKFLOWS=1`; các lệnh dựng stack nằm ở đầu file):
+  - tạo flow → gợi ý xuất hiện → một lỗi được đánh dấu và liệt kê → Save → Run trên draft đã lưu → trang execution tới SUCCESS → Create version kèm ghi chú;
   - kéo một tab để tách panel, rồi tải lại trang và thấy bố cục được khôi phục;
   - cách làm tương đương bằng bàn phím;
   - diff trong Revisions.
@@ -437,3 +447,6 @@ Mỗi lần review task đều trả lời checklist cho reviewer của bộ rul
   - Path của server gọi phần tử danh sách theo id (`tasks.<id>.…`, `inputs.<id>`). Id lặp lại thì map vào phần tử đầu tiên khớp được phần còn lại của path; khi mọi phần tử đều khớp (`tasks.dup.type`) thì là phần tử đầu tiên. Task con có id trùng tên một thuộc tính của task cha, và id input có dấu chấm, được giải bằng cách thử từng cách đọc.
   - Lỗi parse mà server không định vị được thì hiện ở dòng 1, kèm thông điệp và không có path.
   - Path trỏ vào phần văn bản chưa từng parse được (chưa có bản nguồn nào trước đó parse được) thì map về dòng 1 cho tới khi tài liệu parse được.
+- **Một số lỗi chỉ là cảnh báo, hoặc không là gì, ở server** (kiểm ở W7a Task 8). Kiểu task lạ là cảnh báo `unknown_task_type`, nên Create version và Run vẫn bật; một `core.log.Log` thiếu `message` vẫn validate sạch ở server, chỉ schema đánh dấu nó. Vì vậy lỗi trong test e2e là một id task bị trùng.
+- **Chromium đặt tên tab Problems là "Problems , N errors"**, có dấu cách trước dấu phẩy: số lỗi là chữ ẩn về mặt hiển thị, và Chromium nối nó bằng một dấu cách. Trình đọc màn hình đọc như nhau; jsdom đặt tên là "Problems, N errors".
+- **Một thay đổi bố cục được ghi 300 ms sau thay đổi cuối,** và cả khi có `pagehide`; trình duyệt bị giết (chứ không đóng) trong 300 ms đó thì mất thay đổi ấy.

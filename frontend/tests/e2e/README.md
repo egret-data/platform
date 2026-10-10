@@ -267,3 +267,22 @@ cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://localhost:30080 \
 
 Chart fixtures are overridable: `EGRET_E2E_TABLE_CHART`, `EGRET_E2E_PIE_CHART`,
 `EGRET_E2E_WORKSPACE`.
+
+## Workflow flows (`workflows-flows.spec.ts`)
+
+Opt-in (`EGRET_E2E_WORKFLOWS=1`). W7a's money path in the browser: create a flow,
+see `type:` completion, an error marked and listed in Problems, Save, Run the saved
+draft with one STRING input until the execution page says SUCCESS, Create version
+with a note, then move the editor's tabs by pointer (a split that survives a reload)
+and by keyboard (the tab actions menu), and compare v1 with the draft in Revisions.
+
+It needs a backend with the workflow worker on (`EGRET_WORKFLOW__WORKER_ENABLED=true`)
+and the break-glass local admin; it uses only core tasks, because default settings
+allow no script image. It was run on a stack of its own (a dedicated database on the
+branch's Postgres, a private RustFS, `serve` and Vite on free ports), never on the
+shared dev stack: the exact commands are in the spec file's header.
+
+```bash
+cd frontend && EGRET_E2E_WORKFLOWS=1 EGRET_E2E_BASE_URL=http://localhost:5197 \
+  npx playwright test workflows-flows
+```
