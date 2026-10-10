@@ -24,7 +24,7 @@ A detail page with sections uses `ui/tabs`. The selected tab, and any filter or 
 - Create in a dialog when it has one to three fields.
 - Entry points are links, not imperative pushes.
 
-**Checked by:** review. **Why:** [ui-conventions §3](ui-conventions.md#3-create-flows-when-a-page-when-a-dialog).
+**Do this:** a page: `frontend/src/routes/explore/dataapi/EndpointCreate.tsx` (declared as `data-api/endpoints/new` in `frontend/src/App.tsx`); a dialog: `frontend/src/components/explore/FolderNameDialog.tsx`. **Checked by:** review. **Why:** [ui-conventions §3](ui-conventions.md#3-create-flows-when-a-page-when-a-dialog).
 
 #### FE-PAGE-4 — Tabular lists use the shared tables · MUST
 A tabular list uses `FilterableTable` or `ui/table`. A hand-written `<table>` is allowed only for a specialised grid (pivot, SQL results), and carries a comment saying why.
@@ -38,7 +38,7 @@ Settings use `ConfigTable`/`ConfigTableRow`/`ConfigSection`, in the `Setting | D
 
 #### FE-STATE-1 — Loading, empty and error, error first · MUST
 Every data view renders loading, empty and error, and checks `isError` before it checks for data. An error never renders as empty.
-**Checked by:** review. **Why:** [ui-conventions §2](ui-conventions.md#2-loading-empty-error--three-states-never-two).
+**Do this:** `ListStates` (`frontend/src/components/explore/ListStates.tsx`), which branches loading, error, empty, data in that order. **Checked by:** review. **Why:** [ui-conventions §2](ui-conventions.md#2-loading-empty-error--three-states-never-two).
 
 #### FE-STATE-2 — Loading content is a skeleton · MUST
 Loading page or list content renders a skeleton. A spinner (`Loader2`) is only for a button or an in-place action. The bare text "Loading…" is not a loading state.
@@ -50,7 +50,7 @@ Empty renders `EmptyState`. "Empty" means the unfiltered collection is empty. A 
 
 #### FE-STATE-4 — Status indicators compare content · MUST
 A status indicator ("edited", "differs from live", "out of date") compares the content it describes. A timestamp is used only when the content is unavailable, and then every writer of that timestamp is listed in a comment.
-**Checked by:** review.
+**Do this:** example: `frontend/src/routes/explore/dataapi/endpointState.tsx` (compares the draft with the served definition). **Checked by:** review.
 
 ## 3. Actions and feedback (FE-ACTION)
 
@@ -60,11 +60,11 @@ A destructive action is confirmed with `ConfirmDeleteDialog` or `ui/alert-dialog
 
 #### FE-ACTION-2 — Success invalidates; toast only when staying · MUST
 On success, a mutation invalidates the queries it changes. If it navigates to the result, there is no toast. If it stays on the page, a toast confirms it.
-**Checked by:** review. **Why:** [ui-conventions §3.6](ui-conventions.md#36-on-success-invalidate-and-no-toast--navigate-unless-the-response-is-the-point).
+**Do this:** example: `frontend/src/routes/explore/dataapi/EndpointCreate.tsx` (invalidates, navigates, no toast); `frontend/src/routes/explore/dataapi/detail/AccessSection.tsx` (invalidates, stays, toasts). **Checked by:** review. **Why:** [ui-conventions §3.6](ui-conventions.md#36-on-success-invalidate-and-no-toast--navigate-unless-the-response-is-the-point).
 
 #### FE-ACTION-3 — Failure shows the server's message and clears nothing · MUST
 On failure, a mutation shows the server's message, in a toast or inline, and clears nothing the user entered.
-**Checked by:** review. **Why:** [ui-conventions §3.7](ui-conventions.md#37-on-failure-clear-nothing).
+**Do this:** example: `frontend/src/routes/explore/dataapi/EndpointCreate.tsx` (the server's message inline, every field kept). **Checked by:** review. **Why:** [ui-conventions §3.7](ui-conventions.md#37-on-failure-clear-nothing).
 
 #### FE-ACTION-4 — A disabled control says why · MUST
 A disabled control says why it is disabled, in a tooltip or adjacent text.
@@ -78,23 +78,23 @@ A form with unsaved edits uses `useUnsavedChangesWarning`.
 
 #### FE-VISUAL-1 — Colours come from tokens · MUST
 Use the token classes defined in `frontend/src/index.css` (`bg-primary`, `text-muted-foreground`, `bg-highlight`, `text-success`, `text-destructive` and the others defined there). No raw Tailwind palette class (`bg-green-600`). No arbitrary colour (`bg-[#0af]`, `text-[oklch(...)]`).
-**Do this:** `className="bg-primary text-primary-foreground"`. **Checked by:** lint (`egret/no-raw-palette`; not applied under `frontend/src/components/chart/echarts/`, see FE-VISUAL-6).
+**Do this:** `className="bg-primary text-primary-foreground"`, with the tokens in `frontend/src/index.css`. **Checked by:** lint (`egret/no-raw-palette`; not applied under `frontend/src/components/chart/echarts/`, see FE-VISUAL-6).
 
 #### FE-VISUAL-2 — Inline styles use `var(--token)` · MUST
 In an inline style, a token is `var(--token)`, never `hsl(var(--token))`. A token cannot cross into an SVG data URL, so resolve it first with `getComputedStyle`.
-**Do this:** `style={{ color: "var(--primary)" }}`. **Checked by:** review.
+**Do this:** `style={{ color: "var(--primary)" }}`, as in `frontend/src/components/access/EffectBadge.tsx`; for an SVG data URL, `frontend/src/components/chart/dashboard/grid-background.ts`. **Checked by:** review.
 
 #### FE-VISUAL-3 — Font sizes come from the scale · MUST
 Use `text-xs`, `text-sm`, `text-base`, `text-lg`, `text-xl` and `text-2xl`. No arbitrary `text-[Npx]`.
-**Checked by:** lint (`egret/no-arbitrary-text-size`).
+**Do this:** `className="text-sm"`; lint's definition is `frontend/eslint-rules/rules/no-arbitrary-text-size.js`. **Checked by:** lint (`egret/no-arbitrary-text-size`).
 
 #### FE-VISUAL-4 — Tabular numbers; correct in light and dark · MUST
 A numeric column, count or measurement uses `tabular-nums`. Every screen is correct in light and dark; a colour change is checked on both and against every surface it lands on.
-**Checked by:** browser.
+**Do this:** example: `frontend/src/components/chart/pivot/PivotTable.tsx` (`tabular-nums` on numeric cells). **Checked by:** browser.
 
 #### FE-VISUAL-5 — Lucide icons; one highlight per page · SHOULD
 Icons come from `lucide-react`, and a page has at most one `--highlight` emphasis. `--accent` is the hover/focus surface and is not used as an emphasis colour.
-**Checked by:** review.
+**Do this:** icons as in `frontend/src/components/explore/RowActionsMenu.tsx`; `--highlight` and `--accent` are defined in `frontend/src/index.css`. **Checked by:** review.
 
 #### FE-VISUAL-6 — Charts keep the Metabase palette and its cues · MUST
 Charts keep the Metabase series palette and its colour-independent cues: line styles, markers and decals. Literal colours inside chart option builders are allowed; ECharts needs concrete values.
@@ -112,17 +112,17 @@ Every input has a `Label` tied by `htmlFor`/`id`.
 
 #### FE-FORM-3 — Known values get a picker · MUST
 When the set of valid values is known, the control is a picker or a combobox (pick or type) with help. It is never a bare text input.
-**Checked by:** review.
+**Do this:** `frontend/src/components/ui/select.tsx`, `frontend/src/components/ui/tag-combobox.tsx`; example: `frontend/src/routes/control-plane/config/PropertyPicker.tsx`. **Checked by:** review.
 
 #### FE-FORM-4 — Errors sit beside their field · MUST
 A validation error shows beside its field, in the server's words when the server produced it.
-**Checked by:** review.
+**Do this:** example: `frontend/src/routes/control-plane/config/QuantityInput.tsx` (the error directly under its input). **Checked by:** review.
 
 ## 6. Data and API (FE-DATA)
 
 #### FE-DATA-1 — Regenerate with `npm run gen:api` · MUST
 The API client is regenerated with `npm run gen:api`, never with bare `orval`, which drops path-parameter encoding.
-**Checked by:** review.
+**Do this:** `npm run gen:api` (`frontend/package.json`), which runs `orval` and then `frontend/scripts/encode-path-params.mjs`. **Checked by:** review.
 
 #### FE-DATA-2 — Orval hooks and a key factory per domain · MUST
 A new endpoint is consumed through its orval-generated hook. A hand-written query key comes from a per-domain key factory (`queryKeys.ts` in the domain's folder), prefixed with the domain's name.
@@ -130,7 +130,7 @@ A new endpoint is consumed through its orval-generated hook. A hand-written quer
 
 #### FE-DATA-3 — `localStorage` holds preferences only · MUST
 Server data is never cached in `localStorage`. `localStorage` holds per-viewer preferences only (theme, a collapsed panel), and every access is wrapped so the page works without it.
-**Checked by:** review.
+**Do this:** example: `frontend/src/components/explore/folders.ts` (a collapse state; every read in `try`). **Checked by:** review.
 
 ## 7. Routing (FE-ROUTE)
 
@@ -140,51 +140,51 @@ Routes are declared in `frontend/src/App.tsx`. A route is wrapped in the guard i
 
 #### FE-ROUTE-2 — New feature areas are lazy · MUST
 Every new feature area, starting with Workflow, is code-split with `React.lazy` and `Suspense`, with a skeleton fallback.
-**Checked by:** test: a bundle test like `test:bundle:monaco` (`frontend/scripts/assert-monaco-lazy.mjs`). The bundle test arrives with the first lazy area (W7).
+**Do this:** example: `frontend/src/components/monaco/MonacoEditor.tsx` (`lazy` with a fallback). **Checked by:** test: a bundle test like `npm run test:bundle:monaco` (`frontend/scripts/assert-monaco-lazy.mjs`). No such test covers routes yet: W7, the first lazy area, adds it, modelled on `assert-monaco-lazy.mjs`.
 
 #### FE-ROUTE-3 — Kebab-case, workspace-scoped URLs · MUST
 URLs are kebab-case and workspace-scoped under `/explore/:workspace/…`.
-**Checked by:** review.
+**Do this:** `frontend/src/App.tsx` (for example `/explore/:workspace/data-api/endpoints/new`). **Checked by:** review.
 
 ## 8. Accessibility (FE-A11Y)
 
 #### FE-A11Y-1 — Pass the jsx-a11y recommended rules · MUST
 The code passes the recommended rules of `eslint-plugin-jsx-a11y-x` (the maintained fork of `eslint-plugin-jsx-a11y`; rule ids read `jsx-a11y/…`). `jsx-a11y/no-autofocus` is off; see FE-A11Y-6.
-**Checked by:** lint (jsx-a11y; configured in `frontend/eslint-rules/plugins.js`).
+**Do this:** fix what lint reports; the configuration is `frontend/eslint-rules/plugins.js`. **Checked by:** lint (jsx-a11y).
 
 #### FE-A11Y-2 — The shared focus ring, at 3:1 · MUST
 Focus uses the shared ring (`focus-visible:ring-2 focus-visible:ring-ring`). A focus indicator meets 3:1 against every surface it lands on.
-**Checked by:** test (`frontend/src/__tests__/focusIndicatorContrast.test.ts`).
+**Do this:** the ring as in `frontend/src/components/ui/button.tsx`. **Checked by:** test (`frontend/src/__tests__/focusIndicatorContrast.test.ts`).
 
 #### FE-A11Y-3 — Everything clickable works from the keyboard · MUST
 Every clickable element works from the keyboard. A non-button element made clickable gets a role, `tabIndex` and Enter/Space handling. An icon-only button has an `aria-label`.
-**Checked by:** review.
+**Do this:** `frontend/src/components/ui/icon-button.tsx` for an icon-only button. **Checked by:** review.
 
 #### FE-A11Y-4 — Never colour alone · MUST
 Information is never carried by colour alone; charts keep their decals and markers (FE-VISUAL-6).
-**Checked by:** review.
+**Do this:** `frontend/src/components/chart/echarts/palette.ts` (marker shapes and line styles per series). **Checked by:** review.
 
 #### FE-A11Y-5 — Respect reduced motion · MUST
 Motion respects `prefers-reduced-motion`.
-**Checked by:** review.
+**Do this:** `frontend/src/index.css` (its `prefers-reduced-motion: reduce` block). **Checked by:** review.
 
 #### FE-A11Y-6 — `autoFocus` only after the user's own action · MUST
 `autoFocus` is only for a field that appears because of the user's own action (a dialog's first field, an inline edit), never on page load or route change.
-**Checked by:** review. **Why:** `jsx-a11y/no-autofocus` is off (the user's ruling, 2026-10-10), because it cannot tell the two apart.
+**Do this:** example: `frontend/src/components/ui/confirm-delete-dialog.tsx` (focus on the dialog the user opened). **Checked by:** review. **Why:** `jsx-a11y/no-autofocus` is off (the user's ruling, 2026-10-10), because it cannot tell the two apart.
 
 ## 9. Copy (FE-COPY)
 
 #### FE-COPY-1 — English, sentence case, verbs, one name per thing · MUST
 UI text is English. Titles, buttons and menu items are sentence case ("Add a chart"). A button starts with a verb. The same thing has the same name everywhere.
-**Checked by:** review.
+**Do this:** example: `frontend/src/routes/explore/dataapi/EndpointCreate.tsx` ("New endpoint", "Create endpoint"). **Checked by:** review.
 
 #### FE-COPY-2 — Errors say what happened and what to do · MUST
 An error message says what happened and what the user can do. A raw exception or a stack trace is never shown.
-**Checked by:** review.
+**Do this:** example: `frontend/src/components/monaco/MonacoEditor.tsx` ("The code editor could not be loaded. Reload the page to try again."). **Checked by:** review.
 
 #### FE-COPY-3 — Copy that names a control is tested · MUST
 Text that names a control ("click Publish") is a claim that the control exists under that name, and a test checks it.
-**Checked by:** test. **Why:** [ui-conventions §3.9](ui-conventions.md#39-copy-that-names-a-control-is-a-claim-about-the-tree-and-is-checked-like-one).
+**Do this:** example: `frontend/src/components/layout/__tests__/Sidebar.test.tsx`. **Checked by:** test. **Why:** [ui-conventions §3.9](ui-conventions.md#39-copy-that-names-a-control-is-a-claim-about-the-tree-and-is-checked-like-one).
 
 #### FE-COPY-4 — Pages write their own plurals · MUST
 Plurals are written out by the page (`SummaryStrip`'s `singular`), not built by appending "s" in shared code.
@@ -197,11 +197,11 @@ The visual system is egret's. Structure and interaction flow copy the area's sou
 - BI (charts, dashboards, tables, settings panels): Metabase, including the settings panel's tab split and row shape;
 - Workflow: Kestra.
 
-**Checked by:** review.
+**Do this:** example: `frontend/src/components/chart/settings/` (the Metabase-shaped settings panel). **Checked by:** review.
 
 #### FE-REF-2 — Compare against a running instance · MUST
 The comparison is made against a running instance of the source product, not from memory. Any deliberate difference is recorded in the package's spec with its reason.
-**Checked by:** review.
+**Do this:** `scripts/harness/` seeds the Metabase parity dashboards; record differences in the package's spec under `docs/en/specs/`. **Checked by:** review.
 
 ## 11. Verification (FE-TEST)
 
@@ -210,15 +210,15 @@ The comparison is made against a running instance of the source product, not fro
 - A test does not copy the expression it tests.
 - A fixture must be able to tell the right behaviour from a plausible wrong one; for example, it is not pre-sorted when order matters.
 
-**Checked by:** review. **Why:** [ui-conventions §8](ui-conventions.md#8-an-assertion-that-a-hardcoded-implementation-would-also-pass-pins-nothing).
+**Do this:** example: `frontend/src/components/explore/__tests__/ListStates.test.tsx`. **Checked by:** review. **Why:** [ui-conventions §8](ui-conventions.md#8-an-assertion-that-a-hardcoded-implementation-would-also-pass-pins-nothing).
 
 #### FE-TEST-2 — Painted results are verified in a browser · MUST
 A change to layout, width, height, colour or any other painted result is verified in a real browser: Playwright, or measuring the DOM with `getBoundingClientRect` and `getComputedStyle`. jsdom has no layout, and reading code does not settle layout.
-**Checked by:** browser. **Why:** [ui-conventions §10](ui-conventions.md#10-reading-the-code-does-not-settle-layout).
+**Do this:** Playwright specs in `frontend/tests/e2e/` (`npm run test:e2e`); example: `frontend/tests/e2e/data-api-detail-tab-widths.spec.ts`. **Checked by:** browser. **Why:** [ui-conventions §10](ui-conventions.md#10-reading-the-code-does-not-settle-layout).
 
 #### FE-TEST-3 — Shared components change additively · MUST
 A shared component changes additively. Its blast radius is measured by import path, not by symbol name.
-**Checked by:** review. **Why:** [ui-conventions §7](ui-conventions.md#7-changing-a-shared-component-additively-and-measure-by-import-path).
+**Do this:** no single file; follow `docs/en/ui-conventions.md` §7. **Checked by:** review. **Why:** [ui-conventions §7](ui-conventions.md#7-changing-a-shared-component-additively-and-measure-by-import-path).
 
 #### FE-TEST-4 — The gate · MUST
 Every frontend change passes, from `frontend/`:
@@ -226,16 +226,16 @@ Every frontend change passes, from `frontend/`:
 - `npx tsc -b`
 - `npm run test`
 - `npm run build`
-- the bundle tests the change touches (`npm run test:bundle:*`)
+- the bundle tests the change touches (`npm run test:bundle`, `test:bundle:xlsx`, `test:bundle:csp`, `test:bundle:monaco`)
 
-**Checked by:** the gate itself.
+**Do this:** the scripts in `frontend/package.json`. **Checked by:** review: the reviewer confirms the gate ran.
 
 ## Reviewer checklist
 
 Every frontend task review answers each applicable item: **pass**, **fail**, or **not applicable**. These are the rules lint cannot check.
 
 - [ ] FE-PAGE-1 — A list page uses `ListPageShell`, which owns the single `h1`; title, toolbar, `SummaryStrip`, table.
-- [ ] FE-PAGE-2 — Detail sections use `ui/tabs`; tab, filter and selection live in the URL.
+- [ ] FE-PAGE-2 — Detail sections use `ui/tabs`; the tab, and any filter or selection a user would want to share, live in the URL.
 - [ ] FE-PAGE-3 — Create on a page when several sections or a read-once result, in a dialog for one to three fields; entry points are links.
 - [ ] FE-PAGE-4 — Tabular lists use `FilterableTable` or `ui/table`; a hand-written `<table>` is a specialised grid with a comment.
 - [ ] FE-PAGE-5 — Settings use `ConfigTable`/`ConfigTableRow`/`ConfigSection` in `Setting | Details | Value` shape.
@@ -253,7 +253,7 @@ Every frontend task review answers each applicable item: **pass**, **fail**, or 
 - [ ] FE-VISUAL-6 — Charts keep the Metabase palette, line styles, markers and decals.
 - [ ] FE-FORM-1 — Form state in `useState` or a dedicated hook; no form library.
 - [ ] FE-FORM-3 — Known value sets get a picker or combobox with help.
-- [ ] FE-FORM-4 — Validation errors sit beside their field, in the server's words.
+- [ ] FE-FORM-4 — Validation errors sit beside their field, in the server's words when the server produced it.
 - [ ] FE-DATA-1 — The API client was regenerated with `npm run gen:api`.
 - [ ] FE-DATA-2 — New endpoints through orval hooks; hand-written keys from the domain's key factory.
 - [ ] FE-DATA-3 — No server data in `localStorage`; every access wrapped.
@@ -299,7 +299,7 @@ Each row is a legacy list in `frontend/eslint-rules/legacy.js`: the files that b
 
 ### Review-checked debt
 
-Counted on 2026-10-10. These are **grep counts, not an inventory**: each is a rough instrument that over- or under-counts, and its command is given so it can be rerun. Run the commands from `frontend/` under `bash` (zsh rejects the unquoted `--include=*.tsx`).
+Counted on 2026-10-10. These are **grep counts, not an inventory**: each is a rough instrument that over- or under-counts, and its command is given so it can be rerun. Run the commands from `frontend/`; they work in bash and zsh.
 
 | Rule | Debt | Grep count |
 |---|---|---|
@@ -309,17 +309,17 @@ Counted on 2026-10-10. These are **grep counts, not an inventory**: each is a ro
 | FE-STATE-3 | hand-written "No X" empty texts, and dashed empty blocks | (5) 20 lines of the form `"No <word> yet\|found`; (6) 12 `border-dashed` lines |
 | FE-DATA-2 | the `cp` and `control-plane` key prefixes for one domain | (7) 30 `["cp"` lines; (8) 52 `["control-plane"` lines |
 | FE-ROUTE-2 | no route in `App.tsx` is lazy | (9) 0 `lazy(` in `App.tsx` |
-| docs | `docs/vi/ui-conventions.md` has drifted from `docs/en/ui-conventions.md` | (10) 662 lines against 2,225 |
+| docs | `docs/vi/ui-conventions.md` has drifted from `docs/en/ui-conventions.md` | (10) 664 lines against 2,227 |
 
 ```bash
-grep -rln "<h1" src/routes --include=*.tsx | grep -v __tests__ | wc -l                                       # (1)
-grep -rLn "ListPageShell" $(grep -rln "<h1" src/routes --include=*.tsx | grep -v __tests__) | wc -l           # (2)
-grep -rn "<table" src --include=*.tsx | grep -v __tests__ | grep -v "components/ui/table" | wc -l             # (3)
-grep -rn "Loading…\|Loading\.\.\." src --include=*.tsx | grep -v __tests__ | wc -l                            # (4)
-grep -rn "\"No [a-z]\+ \(yet\|found\)" src --include=*.tsx | grep -v __tests__ | wc -l                        # (5)
-grep -rn "border-dashed" src --include=*.tsx | grep -v __tests__ | wc -l                                      # (6)
-grep -rn "\[\"cp\"\|\['cp'" src --include=*.ts* | grep -v __tests__ | wc -l                                  # (7)
-grep -rn "\[\"control-plane\"" src --include=*.ts* | grep -v __tests__ | wc -l                                # (8)
+grep -rln "<h1" src/routes --include='*.tsx' | grep -v __tests__ | wc -l                                       # (1)
+grep -rLn "ListPageShell" $(grep -rln "<h1" src/routes --include='*.tsx' | grep -v __tests__) | wc -l           # (2)
+grep -rn "<table" src --include='*.tsx' | grep -v __tests__ | grep -v "components/ui/table" | wc -l             # (3)
+grep -rn "Loading…\|Loading\.\.\." src --include='*.tsx' | grep -v __tests__ | wc -l                            # (4)
+grep -rn "\"No [a-z]\+ \(yet\|found\)" src --include='*.tsx' | grep -v __tests__ | wc -l                        # (5)
+grep -rn "border-dashed" src --include='*.tsx' | grep -v __tests__ | wc -l                                      # (6)
+grep -rn "\[\"cp\"\|\['cp'" src --include='*.ts*' | grep -v __tests__ | wc -l                                  # (7)
+grep -rn "\[\"control-plane\"" src --include='*.ts*' | grep -v __tests__ | wc -l                                # (8)
 grep -c "lazy(" src/App.tsx                                                                                    # (9)
 wc -l ../docs/vi/ui-conventions.md ../docs/en/ui-conventions.md                                               # (10)
 ```
