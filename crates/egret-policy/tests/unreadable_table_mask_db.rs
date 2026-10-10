@@ -294,9 +294,12 @@ async fn a_table_level_attachment_is_refused_when_a_tag_mask_rule_already_names_
 
 // ── The two orders, for the policy EDITOR's mask half ───────────────────────
 //
-// This half is not hypothetical and is not the lesser one: of the 44 databases
-// on this development host, the 4 live instances of the pair are ALL from the
-// editor and none from `perm.rules` (the module doc carries the measurement).
+// This half is not hypothetical and is not the lesser one: when SP4d-2b's live
+// gate swept this development host, every live instance of the pair it found
+// came from the editor and none from `perm.rules`. The COUNT is not restated —
+// the database holding them was dropped and a re-measurement on 2026-10-10
+// finds 0 pairs host-wide, so it is no longer re-derivable (the module doc
+// carries that). What the test rests on is the direction, not the number.
 
 /// **Attachment first, then a hand-authored tag masking policy.**
 #[tokio::test]

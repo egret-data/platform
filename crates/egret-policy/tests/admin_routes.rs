@@ -1354,11 +1354,16 @@ async fn scoped_permission_policies_read_and_create() {
 /// TABLE-level attachment of that tag makes the engine type-check the one mask
 /// against every column of the scanned table, so the table becomes unreadable
 /// rather than masked — measured live on Trino 470 during SP4d-2b's live gate.
-/// Of the 44 databases on this development host the 4 live instances of that
-/// pair are ALL editor policies and none is a `perm.rules` row
-/// (`egret_policy::unreadable_table_mask`'s module doc carries the
-/// measurement), which is why guarding only `POST /perm/rules` would have left
-/// the reachable half open.
+/// When that gate swept this development host, every live instance of the pair
+/// it found was an editor policy and none was a `perm.rules` row — which is why
+/// guarding only `POST /perm/rules` would have left the reachable half open.
+/// **The count is deliberately not restated here.** The sweep's database
+/// (`egret_sp4d2b`) has since been dropped, and a re-measurement on 2026-10-10
+/// finds 0 live pairs across the 9 databases that carry both schemas, so the
+/// figure cannot be re-derived; `egret_policy::unreadable_table_mask`'s module
+/// doc carries what remains checkable. The reach of this test does not depend
+/// on it either way: the editor surface is reachable from the browser, so it
+/// needs a guard whether or not anyone has used it yet.
 ///
 /// Four assertions, and the last two are what a DB-level test cannot make: the
 /// refusal is a 400, it carries all three remedies (Task 16 added the third),

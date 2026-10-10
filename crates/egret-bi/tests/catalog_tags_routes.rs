@@ -321,10 +321,14 @@ async fn resource_tag_assign_list_unassign_and_gating() {
 /// produced a defect four times. So this is the `PUT …/resource-tags` half, and
 /// it is run against BOTH surfaces that can author the mask: a `perm.rules` row
 /// and a hand-authored tag masking policy. The second is not the hypothetical
-/// one — of the 44 databases on this development host, all 4 live instances of
-/// the pair come from the policy editor and none from `perm.rules`
-/// (`egret_policy::unreadable_table_mask`'s module doc carries the
-/// measurement).
+/// one — when SP4d-2b's live gate swept this development host, every live
+/// instance of the pair it found came from the policy editor and none from
+/// `perm.rules`. The count is not restated: that sweep's database was dropped
+/// between sessions and a re-measurement on 2026-10-10 finds 0 pairs across the
+/// 9 databases carrying both schemas, so the figure cannot be reproduced
+/// (`egret_policy::unreadable_table_mask`'s module doc records both the old
+/// reading and the new one). The editor half earns its coverage from being
+/// reachable, not from a population count.
 ///
 /// Four assertions per surface, and the last two are the ones a DB-level test
 /// cannot make: the refusal is a 400, the body carries the remedies verbatim

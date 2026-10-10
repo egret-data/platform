@@ -206,11 +206,16 @@
 //!    guard would refuse both.
 //!
 //! Measured, so that the "it would wedge an installation" claim above is not
-//! rhetorical: of the **8** databases on this development host (`template0`
-//! and `template1` excluded), **7** carry both `policy.authz_policies` and
-//! `perm.rules` and one (`postgres`) carries neither; across those 7 there are
-//! **0** enabled mask or row-filter policies, **0** collision groups, **0**
-//! differing groups and **0** `perm.rules` rows of either kind. The sweep's own
+//! rhetorical. **As first swept, this host then had 8** databases (`template0`
+//! and `template1` excluded), **7** carrying both `policy.authz_policies` and
+//! `perm.rules` and one (`postgres`) carrying neither; across those 7 there
+//! were **0** enabled mask or row-filter policies, **0** collision groups,
+//! **0** differing groups and **0** `perm.rules` rows of either kind.
+//! **Re-measured 2026-10-10: 10 databases, 9 carrying both, `postgres`
+//! carrying neither, and the same four zeroes.** The population count drifts
+//! because the test harness creates and drops per-migration-set template
+//! databases between runs, so it is dated rather than stated in the present
+//! tense; what the argument needs is the ZEROES, and those reproduce. The sweep's own
 //! predicates were falsified against a fabricated six-row set holding one
 //! agreeing pair, one differing pair and two controls (a different resource, a
 //! different priority), where they reported `6 | 2 | 1` — so the zeros above
@@ -602,10 +607,30 @@ mod tests {
             msg.contains("Narrow one of the two"),
             "names the remedy: {msg}"
         );
-        assert!(
-            !msg.contains("random") && !msg.contains("undefined"),
-            "must not over-claim nondeterminism: {msg}"
-        );
+        // **The forbidden list must include the actual false alarm this branch
+        // corrected, not only its neighbours.** "random" and "undefined" were
+        // never the wording that shipped; "may change between queries" was, and
+        // it is the one claim here that is affirmatively FALSE.
+        // `PolicyEvalOrderComparator.compareNormal` is a TOTAL order — within a
+        // band it falls through to the policy NAME, a rule's uuid, which is
+        // stable for the life of the row — so the same two policies arbitrate
+        // the same way on every query against one downloaded artifact. Telling a
+        // steward their filter may vary between queries would be a false alarm
+        // shipped to a user, and worse than the over-claim the other two words
+        // guard: it describes a failure mode they cannot reproduce and would
+        // send them looking for a nondeterminism that is not there.
+        //
+        // What IS true, and what the message says instead: which of the two
+        // applies is decided by a tie-break the ARTIFACT does not express. It is
+        // determinate and it is not authored — unpredictable to the steward, not
+        // unstable at evaluation.
+        for forbidden in ["random", "undefined", "may change between queries"] {
+            assert!(
+                !msg.to_lowercase().contains(forbidden),
+                "must not over-claim nondeterminism — {forbidden:?} is a claim \
+                 `compareNormal`'s total order falsifies: {msg}"
+            );
+        }
     }
 
     /// F2's MASK half, which AGREES — and is admitted. ⚠ This assertion is an

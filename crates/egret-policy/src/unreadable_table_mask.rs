@@ -129,19 +129,31 @@
 //!    commit. That is the SAME residual window this Rust guard has (see
 //!    "Concurrency" below), so the trigger buys reach over non-route writers
 //!    and **no atomicity at all**. It is not the instrument 0177/0178/0179 are.
-//! 3. **A trigger on `policy.authz_policies` would wedge an installation that
-//!    already holds the pair, measured.** Of the 44 databases on this
-//!    development host, 35 carry both schemas (9 carry neither; 0 connection
-//!    errors). Across those 35: **1** tag-addressed mask RULE, **4**
-//!    hand-authored tag MASK policies, **4** table-level attachments — and
-//!    **4 live instances of the dangerous pair**, all four in `egret_sp4d2b`,
-//!    all four from the policy EDITOR (`tp-mask-pii`/`sp4d1.t4`,
-//!    `tp-mask-tblmask`/`sp4d1.t7`, `tp-mask-tblwide`/`sp4d1.t6`,
-//!    `ui-mask-pii`/`sp4d1.t4`), none from `perm.rules`. `policy.authz_policies`
-//!    is also written by the compiler's own `apply_diff_in_tx` on every
-//!    recompile, so a trigger there would make the recompile that REMOVES a
-//!    pair fail too — fail-closed with no product remedy, which is the opposite
-//!    of what 0177's operator note promises.
+//! 3. **A trigger on `policy.authz_policies` would wedge the recompile that
+//!    REMOVES a pair.** `apply_diff_in_tx` writes that table on every recompile,
+//!    so a trigger refusing the pair would refuse the write that CLEARS it:
+//!    fail-closed with no product remedy, the opposite of what `0177`'s
+//!    operator note promises. This leg is a property of the code and stays
+//!    checkable by reading `apply_diff_in_tx`; it does not rest on any sweep.
+//!
+//!    The second leg — "an installation already holds the pair" — was a SWEEP,
+//!    and a sweep is a statement about a moment. As measured during SP4d-2b's
+//!    live gate it found four live instances, all from the policy EDITOR and
+//!    none from `perm.rules`, all four in the `egret_sp4d2b` scratch database.
+//!    **That measurement no longer reproduces: `egret_sp4d2b` was dropped
+//!    between sessions.** Re-measured 2026-10-10 with this module's own
+//!    predicates: of the 10 databases on this development host (`template0` and
+//!    `template1` excluded), 9 carry both `policy.authz_policies` and
+//!    `perm.rules` and one (`postgres`) carries neither, 0 connection errors;
+//!    across those 9 there are **0** tag-addressed mask rules, **0**
+//!    hand-authored tag mask policies, **0** table-level attachments and **0**
+//!    live pairs. So the count is gone and only the direction survives: the
+//!    pair HAS occurred on a real host, and the surface that produced it was
+//!    the editor rather than `perm.rules` — which is why guarding only
+//!    `POST /perm/rules` would have left the reachable half open. Nothing here
+//!    needs the figure to be four; a trigger that can wedge an installation
+//!    that holds the pair is unacceptable whether such installations number
+//!    four or one.
 //! 4. **And the rule is wider than the defect** (see above), so it is the kind
 //!    of conservative refusal that belongs at an authoring boundary and not in
 //!    a static predicate that would make a working all-`varchar` configuration
@@ -332,7 +344,13 @@ pub enum TagWrite<'a> {
     /// the NEW name, because that is the state the write would land on and the
     /// string the steward just typed. A rename-specific prefix was considered
     /// and left out: one sentence from every path is what stops the three
-    /// directions describing the same state differently.
+    /// [`TagWrite`] WRITE PATHS describing the same state differently. (Not
+    /// "the three directions": in this module a *direction* is one of the two
+    /// MASK ORIGINS — `perm.rules` versus the editor, the sense used at
+    /// [`MaskOrigin`] and in the module doc's `CHECK` argument — and those
+    /// number two, not three. The surfaces number three here and four in the
+    /// module doc, which counts the two mask origins separately; both are true
+    /// of different things, so this says which one it means.)
     Rename {
         tag_id: Uuid,
         /// The name the tag is being renamed TO.
