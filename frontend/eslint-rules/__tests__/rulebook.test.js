@@ -42,7 +42,7 @@ const CHECKLIST_IDS = [
   ...["FORM-1", "FORM-2", "FORM-3", "FORM-4"],
   ...["DATA-1", "DATA-2", "DATA-3"],
   ...["ROUTE-1", "ROUTE-2", "ROUTE-3"],
-  ...["A11Y-3", "A11Y-4", "A11Y-5", "A11Y-6"],
+  ...["A11Y-2", "A11Y-3", "A11Y-4", "A11Y-5", "A11Y-6"],
   ...["COPY-1", "COPY-2", "COPY-3", "COPY-4"],
   ...["REF-1", "REF-2"],
   ...["TEST-1", "TEST-2", "TEST-3", "TEST-4"],

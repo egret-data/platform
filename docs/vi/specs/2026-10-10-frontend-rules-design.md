@@ -178,7 +178,7 @@ Bộ rule kết thúc bằng một checklist gồm mọi rule mà reviewer phả
 - FE-FORM-1 đến 4
 - FE-DATA-1 đến 3
 - FE-ROUTE-1 đến 3
-- FE-A11Y-3 đến 6
+- FE-A11Y-2 đến 6
 - FE-COPY-1 đến 4
 - FE-REF-1 và 2
 - FE-TEST-1 đến 4

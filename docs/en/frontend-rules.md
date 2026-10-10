@@ -261,6 +261,7 @@ Every rule a reviewer must confirm is here: either lint cannot check it, or its 
 - [ ] FE-ROUTE-1 — Routes in `App.tsx`, behind their area's guard; redirects are absolute.
 - [ ] FE-ROUTE-2 — A new feature area is lazy with a skeleton fallback, and a bundle test guards it (W7 adds the first).
 - [ ] FE-ROUTE-3 — URLs are kebab-case under `/explore/:workspace/…`.
+- [ ] FE-A11Y-2 — Focus uses the shared ring, at 3:1 against every surface it lands on; a new surface token is added to `focusIndicatorContrast.test.ts`.
 - [ ] FE-A11Y-3 — Everything clickable works from the keyboard; icon-only buttons have an `aria-label`.
 - [ ] FE-A11Y-4 — No information carried by colour alone.
 - [ ] FE-A11Y-5 — Motion respects `prefers-reduced-motion`.

@@ -263,6 +263,7 @@ Mọi rule mà reviewer phải xác nhận đều ở đây: hoặc lint không 
 - [ ] FE-ROUTE-1 — Route trong `App.tsx`, sau guard của khu vực; redirect dùng đường dẫn tuyệt đối.
 - [ ] FE-ROUTE-2 — Khu vực tính năng mới được lazy-load với fallback là skeleton, và có bundle test giữ điều đó (W7 thêm test đầu tiên).
 - [ ] FE-ROUTE-3 — URL kebab-case dưới `/explore/:workspace/…`.
+- [ ] FE-A11Y-2 — Focus dùng ring chung, đạt 3:1 trên mọi bề mặt nó xuất hiện; token bề mặt mới được thêm vào `focusIndicatorContrast.test.ts`.
 - [ ] FE-A11Y-3 — Mọi thứ bấm được đều dùng được bằng bàn phím; nút chỉ có icon có `aria-label`.
 - [ ] FE-A11Y-4 — Không thông tin nào chỉ truyền bằng màu.
 - [ ] FE-A11Y-5 — Chuyển động tôn trọng `prefers-reduced-motion`.

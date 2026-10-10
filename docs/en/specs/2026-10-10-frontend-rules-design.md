@@ -176,7 +176,7 @@ The rulebook ends with a checklist of every rule a reviewer must confirm: either
 - FE-FORM-1 to 4
 - FE-DATA-1 to 3
 - FE-ROUTE-1 to 3
-- FE-A11Y-3 to 6
+- FE-A11Y-2 to 6
 - FE-COPY-1 to 4
 - FE-REF-1 and 2
 - FE-TEST-1 to 4

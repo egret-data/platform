@@ -9,7 +9,9 @@ const RULE = "egret/no-raw-palette";
 const BREAKS = "eslint-rules/__tests__/fixtures/breaks.tsx";
 const CLEAN = "eslint-rules/__tests__/fixtures/clean.tsx";
 
-describe("staleEntries", () => {
+// Loading the whole ESLint config cold takes seconds on a busy machine; the
+// default 5 s timed out under load (final re-review).
+describe("staleEntries", { timeout: 30_000 }, () => {
   it("accepts a listed file that still breaks its rule", async () => {
     expect(await staleEntries({ [RULE]: [BREAKS] }, { cwd })).toEqual([]);
   });

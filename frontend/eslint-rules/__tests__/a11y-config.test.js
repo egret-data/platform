@@ -8,7 +8,9 @@ const cwd = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const eslint = new ESLint({ cwd });
 const severity = (entry) => (Array.isArray(entry) ? entry[0] : entry);
 
-describe("jsx-a11y configuration", () => {
+// Loading the whole ESLint config cold takes seconds on a busy machine; the
+// default 5 s timed out under load (final re-review).
+describe("jsx-a11y configuration", { timeout: 30_000 }, () => {
   it("turns the recommended rules on as errors for source components", async () => {
     const config = await eslint.calculateConfigForFile("src/components/explore/EmptyState.tsx");
     expect(severity(config.rules["jsx-a11y/alt-text"])).toBe(2);
