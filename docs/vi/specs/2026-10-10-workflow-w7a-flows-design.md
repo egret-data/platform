@@ -214,6 +214,18 @@ Hành vi:
 - Lần Save đầu gửi `POST …/flows`, rồi thay URL bằng `flows/{id}/edit`, giữ nguyên chữ trong editor và bố cục.
 - Lỗi 409, nghĩa là namespace và id đã tồn tại, hiện cạnh editor kèm thông báo của server, và chữ được giữ nguyên.
 
+### 5.5 Revisions
+
+*(Thêm ở vòng sửa 1 của W7a Task 7.)*
+
+`flows/:id/revisions` liệt kê các version của flow, mới nhất trước: số, ghi chú, tác giả (`created_by_name`, hoặc "—") và thời điểm. Nó đánh dấu version **Latest**, và **Matches draft** ở version nào có chữ trùng từng byte với draft đã lưu (FE-STATE-4). Chọn một version thì thấy YAML của nó. "Compare with" so nó với một version khác hoặc với draft hiện tại (đã lưu) trong diff editor của Monaco, chữ cũ hơn bên trái. Lựa chọn và phép so nằm trong URL (`?v=`, `?compare=`; FE-PAGE-2).
+
+**Restore to draft** là một lần Save chữ của version: `PUT` kèm `if_updated_at`, cùng hộp thoại save-cũ khi gặp 409, và không bao giờ publish. Editor chỉ nhận chữ sau khi đã lưu xong. Restore đổi thứ được chạy, nên luôn hỏi trước, và hộp xác nhận nói rõ điều đó.
+
+**Dòng báo mất: một cách đọc có chủ ý quy tắc của người dùng.** Quy tắc yêu cầu hộp xác nhận nêu thứ bị mất "khi draft có thay đổi so với version mới nhất". Hộp xác nhận chỉ cảnh báo draft đã lưu bị bỏ khi **không version nào giữ chữ của draft đã lưu**. Khi draft trùng một version cũ hơn thì không mất gì: version đó vẫn giữ nó, và phép kiểm hẹp hơn giữ cho hộp xác nhận không báo một mất mát không có thật. Hễ dòng này hiện thì draft cũng khác version mới nhất, nên câu chữ của nó ("changes since v{latest} that no version keeps") đúng. Các sửa đổi chưa lưu trong editor luôn được nêu khi có.
+
+Khi một lần save của người khác đã được đọc về (draft đã lưu trên server không phải chữ editor này đang giữ), tab không so với thứ nó không bảo đảm được: nó báo flow đã đổi trên server, không đánh dấu "Matches draft", không diff với draft, và tắt Restore cho tới khi tải lại trang.
+
 ## 6. Run
 
 ### 6.1 Form

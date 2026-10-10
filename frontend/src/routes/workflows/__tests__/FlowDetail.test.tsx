@@ -168,6 +168,8 @@ describe("FlowDetail: Save", () => {
 
     const dialog = await screen.findByRole("alertdialog", { name: "The draft changed since you opened it" });
     expect(box).toHaveValue(flowSource("mine"));
+    // A plain save overwrites with the editor's text, and the dialog says so.
+    expect(dialog).toHaveTextContent("Reload the saved draft, or overwrite it with your text.");
     await userEvent.click(within(dialog).getByRole("button", { name: "Overwrite" }));
 
     await waitFor(() => expect(puts()).toHaveLength(2));

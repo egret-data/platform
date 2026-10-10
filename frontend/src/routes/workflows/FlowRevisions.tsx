@@ -58,6 +58,8 @@ export function FlowRevisions({
   flowId,
   savedSource,
   dirty,
+  stale,
+  saving,
   manage,
   onRestore,
 }: {
@@ -67,6 +69,13 @@ export function FlowRevisions({
   savedSource: string;
   /** The editor holds edits that are not saved. */
   dirty: boolean;
+  /**
+   * Someone else's save was read back: the server's saved draft is not
+   * `savedSource`, so nothing here may be compared against `savedSource`.
+   */
+  stale: boolean;
+  /** A save of the page is in flight; a restore would be dropped. */
+  saving: boolean;
   manage: boolean;
   /** Save `source` as the draft and put it in the editor; resolves `true` when it was saved. */
   onRestore: (version: FlowVersionDto, source: string) => Promise<boolean>;
@@ -105,6 +114,8 @@ export function FlowRevisions({
       versions={versions}
       savedSource={savedSource}
       dirty={dirty}
+      stale={stale}
+      saving={saving}
       manage={manage}
       onRestore={onRestore}
     />
@@ -116,6 +127,8 @@ function RevisionsView({
   versions,
   savedSource,
   dirty,
+  stale,
+  saving,
   manage,
   onRestore,
 }: {
@@ -123,6 +136,8 @@ function RevisionsView({
   versions: FlowVersionDto[];
   savedSource: string;
   dirty: boolean;
+  stale: boolean;
+  saving: boolean;
   manage: boolean;
   onRestore: (version: FlowVersionDto, source: string) => Promise<boolean>;
 }) {
@@ -160,7 +175,8 @@ function RevisionsView({
   };
 
   // A version whose text equals the saved draft: content, never a timestamp (FE-STATE-4).
-  const matchesDraft = (v: FlowVersionDto) => versionSourceOf(v) === savedSource;
+  // While stale, `savedSource` is not the server's draft: nothing is said about the draft.
+  const matchesDraft = (v: FlowVersionDto) => !stale && versionSourceOf(v) === savedSource;
   const selectedSource = versionSourceOf(selected);
   const compareId = useId();
   const reasonsId = useId();
@@ -182,6 +198,8 @@ function RevisionsView({
   let restore: Enablement = { ok: true };
   if (restoring) restore = { ok: false, reason: "Restoring…" };
   else if (!manage) restore = { ok: false, reason: "Restoring needs the workflow:manage permission" };
+  else if (saving) restore = { ok: false, reason: "Wait for the save to finish" };
+  else if (stale) restore = { ok: false, reason: "The flow changed on the server; reload to restore" };
   else if (selectedSource === undefined) restore = { ok: false, reason: "This version's text is unavailable" };
   else if (selectedSource === savedSource) restore = { ok: false, reason: "The saved draft already has this text" };
 
@@ -190,6 +208,12 @@ function RevisionsView({
     viewer = (
       <Alert>
         <AlertDescription>v{selected.version}'s text is unavailable: its snapshot carries no source.</AlertDescription>
+      </Alert>
+    );
+  } else if (compareTarget === "draft" && stale) {
+    viewer = (
+      <Alert>
+        <AlertDescription>The current draft on the server is newer than this page's; reload the page to compare with it.</AlertDescription>
       </Alert>
     );
   } else if (compareTarget !== null) {
@@ -265,6 +289,14 @@ function RevisionsView({
       </section>
 
       <section aria-labelledby={`${reasonsId}-title`} className="flex min-h-[28rem] min-w-0 flex-1 flex-col gap-3">
+        {stale && (
+          <Alert data-testid="revisions-stale">
+            <AlertDescription>
+              The flow changed on the server; reload to compare with its draft or restore a version. Until then this tab marks no
+              version as matching the draft.
+            </AlertDescription>
+          </Alert>
+        )}
         {missingV && (
           <Alert>
             <AlertDescription>There is no version {missingV}; showing v{selected.version}, the latest.</AlertDescription>
@@ -335,7 +367,7 @@ function RevisionsView({
           version={selected.version}
           latestVersion={latest.version}
           // What restoring loses: the saved draft, when no version holds its text.
-          draftLost={!sorted.some(matchesDraft)}
+          draftLost={!stale && !sorted.some(matchesDraft)}
           dirty={dirty}
           onConfirm={() => void confirmRestore()}
         />

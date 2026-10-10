@@ -143,6 +143,8 @@ type SaveRequest = {
   /** Write `source` into the editor once it is saved (a restore). */
   replaceEditor?: boolean;
   successToast?: string;
+  /** What this save writes, as the stale-save dialog names it ("v1's text"); the editor's text when absent. */
+  label?: string;
 };
 
 const SAVED_TOAST = "Saved. New runs use this version of the flow.";
@@ -307,6 +309,7 @@ function FlowWorkspace({
       source,
       replaceEditor: true,
       successToast: `Restored v${version.version} to the draft. New runs use it.`,
+      label: `v${version.version}'s text`,
     });
     if (saved) void queryClient.invalidateQueries({ queryKey: workflowsKeys.versions(id) });
     return saved;
@@ -455,6 +458,8 @@ function FlowWorkspace({
             flowId={id}
             savedSource={baseline.source}
             dirty={dirty}
+            stale={stale}
+            saving={saving}
             manage={manage}
             onRestore={restoreVersion}
           />
@@ -466,6 +471,7 @@ function FlowWorkspace({
         onOpenChange={(o) => { if (!o) setStaleSave(null); }}
         onReload={reload}
         onOverwrite={async () => { await saveFlow(staleSave ?? {}, true); }}
+        overwriteWith={staleSave?.label}
       />
       <PublishDialog
         open={publishOpen}

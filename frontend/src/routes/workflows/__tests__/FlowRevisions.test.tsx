@@ -10,6 +10,7 @@ const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.
 vi.mock("sonner", () => ({ toast }));
 
 import FlowDetail from "@/routes/workflows/FlowDetail";
+import { workflowsKeys } from "@/routes/workflows/queryKeys";
 import { FakeWorkflowServer, FLOW_ID, flowSource, WS } from "./fakeWorkflowServer";
 import { resetMonacoStub, stub } from "./monacoStub";
 
@@ -25,6 +26,7 @@ const V2 = flowSource("second");
 const V3 = flowSource("third");
 
 let server: FakeWorkflowServer;
+let client: QueryClient;
 
 beforeEach(() => {
   resetMonacoStub();
@@ -53,7 +55,7 @@ function Where() {
 
 function renderAt(tab = "revisions", search = "") {
   server.install();
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[`/explore/${WS}/workflows/flows/${FLOW_ID}/${tab}${search}`]}>
@@ -277,6 +279,9 @@ describe("FlowRevisions: restore to draft", () => {
     await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Restore v1" }));
     const stale = await screen.findByRole("alertdialog", { name: "The draft changed since you opened it" });
     expect(server.flow!.source).toBe(flowSource("theirs"));
+    // Overwrite would save v1's text, not the editor's, and the dialog says so.
+    expect(stale).toHaveTextContent("Reload the saved draft, or overwrite it with v1's text.");
+    expect(stale).not.toHaveTextContent("your text");
     // Nothing was written; the editor still holds the user's text.
     await userEvent.click(within(stale).getByRole("button", { name: "Cancel" }));
     switchTab("Edit");
@@ -317,5 +322,71 @@ describe("FlowRevisions: restore to draft", () => {
     renderAt("revisions", "?v=1");
     expect(await restoreButton()).toBeDisabled();
     expect(screen.getByText("Restoring needs the workflow:manage permission")).toBeInTheDocument();
+  });
+
+  it("is off, with the reason shown, while a save is in flight, and on again once it answers", async () => {
+    flowWithVersions([V1, V2], V2);
+    renderAt("edit");
+    const box = await screen.findByRole("textbox", { name: "Flow source" });
+    fireEvent.change(box, { target: { value: flowSource("mine") } });
+    let answer!: () => void;
+    server.putGate = new Promise((r) => { answer = r; });
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(puts()).toHaveLength(1));
+    switchTab("Revisions");
+    await userEvent.click(await screen.findByRole("link", { name: "v1" }));
+    expect(await restoreButton()).toBeDisabled();
+    expect(screen.getByText("Wait for the save to finish")).toBeInTheDocument();
+    server.putGate = null;
+    answer();
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    await waitFor(async () => expect(await restoreButton()).toBeEnabled());
+    expect(screen.queryByText("Wait for the save to finish")).not.toBeInTheDocument();
+  });
+});
+
+describe("FlowRevisions: a draft changed on the server", () => {
+  it("says so, marks no version as the draft, does not diff against it, and disables Restore", async () => {
+    flowWithVersions([V1, V2], V2);
+    renderAt("revisions", "?v=1");
+    await screen.findByRole("textbox", { name: "v1 source" });
+    const v2Row = () => screen.getByRole("link", { name: "v2" }).closest("tr")!;
+    expect(within(v2Row()).getByText("Matches draft")).toBeInTheDocument();
+    expect(await restoreButton()).toBeEnabled();
+
+    // Someone saves v1's text; the page reads it back.
+    server.saveElsewhere(V1);
+    await client.invalidateQueries({ queryKey: workflowsKeys.flow(FLOW_ID) });
+    expect(await screen.findByTestId("revisions-stale")).toHaveTextContent("The flow changed on the server");
+    // The old baseline (v2's text) is not the draft any more, and the new one is not this editor's: no row is marked.
+    expect(screen.queryByText("Matches draft")).not.toBeInTheDocument();
+    expect(await restoreButton()).toBeDisabled();
+    expect(screen.getByText("The flow changed on the server; reload to restore")).toBeInTheDocument();
+    // Comparing with the draft would show the old text: it says why instead.
+    await userEvent.click(screen.getByRole("combobox", { name: "Compare with" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Current draft" }));
+    expect(await screen.findByText(/reload the page to compare with it/)).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Original" })).not.toBeInTheDocument();
+  });
+});
+
+describe("FlowRevisions: notices", () => {
+  it("says when ?compare= names no version, or the selected one, and shows the version alone", async () => {
+    flowWithVersions([V1, V2], V2);
+    const view = renderAt("revisions", "?v=1&compare=9");
+    expect(await screen.findByText("Cannot compare with version 9; showing v1 alone.")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "v1 source" })).toHaveValue(V1);
+    view.unmount();
+    renderAt("revisions", "?v=1&compare=1");
+    expect(await screen.findByText("Cannot compare with the same version; showing v1 alone.")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Original" })).not.toBeInTheDocument();
+  });
+
+  it("says when the version and the draft have the same text", async () => {
+    flowWithVersions([V1, V2], V1);
+    renderAt("revisions", "?v=1&compare=draft");
+    // By text: the harness's `<output>` elements are role="status" too.
+    expect(await screen.findByText("v1 and Current draft have the same text.")).toHaveAttribute("role", "status");
+    expect(screen.getByRole("textbox", { name: "Modified" })).toHaveValue(V1);
   });
 });

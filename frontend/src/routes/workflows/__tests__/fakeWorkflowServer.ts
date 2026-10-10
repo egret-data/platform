@@ -43,6 +43,8 @@ export class FakeWorkflowServer {
   versionsReply: Reply | null = null;
   /** While set, `GET …/flows/{id}/versions` waits for it before answering. */
   versionsGate: Promise<void> | null = null;
+  /** While set, `PUT …/flows/{id}` waits for it before answering. */
+  putGate: Promise<void> | null = null;
   /** While set, `POST …/flows` waits for it before answering. */
   createGate: Promise<void> | null = null;
 
@@ -101,6 +103,7 @@ export class FakeWorkflowServer {
       this.calls.push({ method, path, body });
       if (method === "POST" && path === `/api/ws/${WS}/workflows/flows` && this.createGate) await this.createGate;
       if (method === "GET" && path.endsWith("/versions") && this.versionsGate) await this.versionsGate;
+      if (method === "PUT" && this.putGate) await this.putGate;
       const { status, body: out, headers } = this.route(method, path, body);
       return new Response(out === undefined ? null : JSON.stringify(out), {
         status,

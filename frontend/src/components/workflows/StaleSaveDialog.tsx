@@ -26,7 +26,10 @@ export function StaleSaveDialog({
   onOpenChange,
   onReload,
   onOverwrite,
+  overwriteWith = "your text",
 }: {
+  /** What Overwrite saves, as the description names it: "your text", or "v1's text" for a restore. */
+  overwriteWith?: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onReload: () => Promise<void>;
@@ -84,7 +87,7 @@ export function StaleSaveDialog({
               <AlertDialogTitle>The draft changed since you opened it</AlertDialogTitle>
               <AlertDialogDescription>
                 Someone saved this flow or created a version of it after you opened it, so your save was refused and nothing was
-                written. Reload the saved draft, or overwrite it with your text.
+                written. Reload the saved draft, or overwrite it with {overwriteWith}.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>

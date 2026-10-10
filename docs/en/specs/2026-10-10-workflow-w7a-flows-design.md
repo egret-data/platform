@@ -212,6 +212,18 @@ Behaviour:
 - The first Save sends `POST …/flows`, then replaces the URL with `flows/{id}/edit`, keeping the editor's text and layout.
 - A 409, meaning the namespace and id already exist, is shown beside the editor with the server's message, and the text is kept.
 
+### 5.5 Revisions
+
+*(Added in W7a Task 7's fix round 1.)*
+
+`flows/:id/revisions` lists the flow's versions, newest first: number, note, author (`created_by_name`, or "—") and time. It marks the **Latest** version, and **Matches draft** on any version whose text equals the saved draft byte for byte (FE-STATE-4). Selecting a version shows its YAML. "Compare with" diffs it against another version or the current (saved) draft in Monaco's diff editor, older text on the left. The selection and the comparison are in the URL (`?v=`, `?compare=`; FE-PAGE-2).
+
+**Restore to draft** is a Save of the version's text: `PUT` with `if_updated_at`, the same stale-save dialog on 409, and never a publish. The editor takes the text only once it is saved. Restoring changes what runs, so it always asks first, and the confirm says so.
+
+**The loss line: a deliberate reading of the user's rule.** The rule asks the confirm to name what is lost "when the draft has changes since the latest version". The confirm warns that the saved draft is discarded only when **no version holds the saved draft's text**. When the draft equals an older version, nothing is lost: that version still holds it, and the narrower test keeps the confirm from claiming a loss that is not there. Whenever the line shows, the draft also differs from the latest version, so its wording ("changes since v{latest} that no version keeps") is true. Unsaved editor edits are always named when there are some.
+
+While someone else's save has been read back (the saved draft on the server is not the text this editor holds), the tab compares against nothing it cannot vouch for: it says the flow changed on the server, does not mark "Matches draft", does not diff against the draft, and disables Restore until the page is reloaded.
+
 ## 6. Run
 
 ### 6.1 The form
