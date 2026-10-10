@@ -140,6 +140,23 @@ describe("ProblemsTab", () => {
     expect(focusRange).toHaveBeenCalledWith({ startLine: 1, startCol: 1, endLine: 1, endCol: 10 });
   });
 
+  it("a parse error the server could not locate is shown on line 1 with its message only", async () => {
+    const focusRange = vi.fn();
+    render(<ProblemsTab ctx={makeEditorContext({
+      source: SOURCE,
+      focusRange,
+      validation: {
+        status: "ok", error: null, retry: vi.fn(),
+        findings: [{ severity: "error", code: "parse_error", message: "invalid input: EOF while parsing", path: "" }],
+      },
+    })} />);
+    expect(items()[0]).toHaveTextContent(/^Error invalid input: EOF while parsing Line 1$/);
+    expect(items()[0]).not.toHaveTextContent("null");
+    expect(items()[0]).not.toHaveTextContent("not found");
+    await userEvent.click(items()[0]);
+    expect(focusRange).toHaveBeenCalledWith({ startLine: 1, startCol: 1, endLine: 1, endCol: 10 });
+  });
+
   it("a parse error is listed at the line and column the server gave", async () => {
     const focusRange = vi.fn();
     render(<ProblemsTab ctx={makeEditorContext({
@@ -171,7 +188,7 @@ describe("ProblemsBadge", () => {
     });
     const { container, rerender } = render(<ProblemsBadge ctx={ctx} />);
     expect(container).toHaveTextContent("2, 2 errors");
-    rerender(<ProblemsBadge ctx={{ ...ctx, schemaMarkers: [] }} />);
+    rerender(<ProblemsBadge ctx={makeEditorContext({ source: SOURCE, validation: ctx.validation })} />);
     expect(container).toHaveTextContent("1, 1 error");
     rerender(<ProblemsBadge ctx={makeEditorContext({ source: SOURCE })} />);
     expect(container).toBeEmptyDOMElement();

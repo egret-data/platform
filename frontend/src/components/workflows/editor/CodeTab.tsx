@@ -5,7 +5,7 @@ import { Lock } from "lucide-react";
 import Editor from "@/components/monaco/MonacoEditor";
 import type { EditorContext, EditorHandle } from "@/components/workflows/editor/EditorContext";
 import { flowModelPath, rememberMonaco } from "@/components/workflows/editor/flowModel";
-import { collectProblems, type SchemaMarker } from "@/components/workflows/editor/problems";
+import type { SchemaMarker } from "@/components/workflows/editor/problems";
 import { SchemaUnavailable } from "@/components/workflows/editor/SchemaUnavailable";
 import type { YamlRange } from "@/components/workflows/editor/yamlPath";
 import { useIsDark } from "@/hooks/useIsDark";
@@ -104,10 +104,7 @@ export function CodeTab({ ctx }: { ctx: EditorContext }) {
   }, [mounted, bridge]);
 
   // The server's findings, placed against the current text.
-  const serverProblems = useMemo(
-    () => collectProblems(ctx.source, ctx.validation.findings, []),
-    [ctx.source, ctx.validation.findings],
-  );
+  const serverProblems = useMemo(() => ctx.problems.filter((p) => p.source === "server"), [ctx.problems]);
   useEffect(() => {
     if (!mounted) return;
     const { editor, monaco } = mounted;

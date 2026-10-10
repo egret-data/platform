@@ -169,7 +169,9 @@ describe("DocsTab", () => {
 
   it("names a type the schema does not know, then shows the flow's documentation", () => {
     renderDocs(at("type: com.example.Unknown") + 8);
-    expect(screen.getByText(/No documentation for/)).toHaveTextContent("No documentation for com.example.Unknown");
+    expect(screen.getByText(/No documentation for/)).toHaveTextContent(
+      "No documentation for com.example.Unknown. Showing the flow's documentation.",
+    );
     expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("Flow");
   });
 

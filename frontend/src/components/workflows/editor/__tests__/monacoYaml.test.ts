@@ -81,3 +81,34 @@ describe("the worker monaco-yaml starts", () => {
     expect(posted).toEqual(["ignore", createData]);
   });
 });
+
+describe("the versions the worker adapter and the Vite alias were written for", () => {
+  /**
+   * `forMonacoYaml` (monacoYaml.ts) answers monaco-worker-manager 2.0.1's
+   * `createWebWorker({ label, moduleId, createData })` with monaco 0.56's
+   * `{ worker }`, and `vite.config.ts` aliases a file path inside monaco 0.56.
+   * Both were verified in Chromium (W7a Task 4); jsdom cannot load Monaco, so no
+   * unit test can tell whether they still hold after an upgrade. This one fails
+   * on any upgrade instead, so that the browser check is redone.
+   */
+  it("are the installed ones", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const installed = (pkg: string) =>
+      (JSON.parse(readFileSync(resolve(__dirname, `../../../../../node_modules/${pkg}/package.json`), "utf8")) as { version: string }).version;
+    const expected = {
+      "monaco-editor": "0.56.0",
+      "@monaco-editor/react": "4.7.0",
+      "monaco-worker-manager": "2.0.1",
+      "monaco-yaml": "5.5.1",
+    };
+    const actual = Object.fromEntries(Object.keys(expected).map((p) => [p, installed(p)]));
+    expect(
+      actual,
+      "A Monaco package changed version. Re-check in a browser that the flow editor's YAML worker starts " +
+        "(completion after `type: `, no \"Missing requestHandler\" in the console): the createWebWorker " +
+        "adapter in components/workflows/editor/monacoYaml.ts and the editor.worker alias in vite.config.ts " +
+        "were written for these versions. Then update this list.",
+    ).toEqual(expected);
+  });
+});

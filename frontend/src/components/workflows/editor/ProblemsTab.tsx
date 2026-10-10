@@ -1,28 +1,19 @@
-import { useMemo } from "react";
 import { CircleCheck, CircleX, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/explore/EmptyState";
 import type { EditorContext } from "@/components/workflows/editor/EditorContext";
-import { collectProblems, type Problem } from "@/components/workflows/editor/problems";
+import type { Problem } from "@/components/workflows/editor/problems";
 import { cn } from "@/lib/utils";
 
 const LABEL = { error: "Error", warning: "Warning" } as const;
 
 function where(p: Problem): string {
   if (!p.mapped) return `${p.path} (not found in the source, shown on line 1)`;
-  const line = p.path === null && p.source === "server"
+  const line = p.located && p.source === "server"
     ? `Line ${p.range.startLine}, column ${p.range.startCol}`
     : `Line ${p.range.startLine}`;
   return p.path ? `${p.path} ${line}` : line;
-}
-
-function useProblems(ctx: EditorContext) {
-  const { source, validation, schemaMarkers } = ctx;
-  return useMemo(
-    () => collectProblems(source, validation.findings, schemaMarkers),
-    [source, validation.findings, schemaMarkers],
-  );
 }
 
 /**
@@ -34,7 +25,7 @@ function useProblems(ctx: EditorContext) {
  * `EmptyState` when the answer was empty.
  */
 export function ProblemsTab({ ctx }: { ctx: EditorContext }) {
-  const problems = useProblems(ctx);
+  const { problems } = ctx;
   const { status, error, retry } = ctx.validation;
 
   return (
@@ -98,7 +89,7 @@ export function ProblemsTab({ ctx }: { ctx: EditorContext }) {
 
 /** The error count drawn in the Problems tab (spec §5.2). */
 export function ProblemsBadge({ ctx }: { ctx: EditorContext }) {
-  const errors = useProblems(ctx).filter((p) => p.severity === "error").length;
+  const errors = ctx.problems.filter((p) => p.severity === "error").length;
   if (errors === 0) return null;
   return (
     <span className="rounded-full bg-destructive px-1.5 text-xs text-destructive-foreground tabular-nums">

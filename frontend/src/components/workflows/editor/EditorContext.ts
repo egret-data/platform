@@ -3,8 +3,8 @@ import type { FlowSchemaState } from "@/components/workflows/editor/useFlowSchem
 import { useFlowSchema } from "@/components/workflows/editor/useFlowSchema";
 import type { ServerValidation } from "@/components/workflows/editor/useServerValidation";
 import { useServerValidation } from "@/components/workflows/editor/useServerValidation";
-import type { SchemaMarker } from "@/components/workflows/editor/problems";
-import type { YamlRange } from "@/components/workflows/editor/yamlPath";
+import { collectProblems, type Problem, type SchemaMarker } from "@/components/workflows/editor/problems";
+import { createYamlView, parseYaml, type YamlDoc, type YamlRange, type YamlView } from "@/components/workflows/editor/yamlPath";
 
 /** What the Code tab exposes so another tab can move its cursor. */
 export type EditorHandle = { reveal: (range: YamlRange) => void };
@@ -61,6 +61,14 @@ export type EditorContext = {
   readOnly: boolean;
   validation: ServerValidation;
   schema: FlowSchemaState;
+  /** The one parse of `source`, with the lookups the tabs need (Docs' `typeAt`). */
+  yaml: YamlView;
+  /**
+   * The server's findings and the schema's markers, placed in `source` and
+   * sorted (`collectProblems`). Computed once per change, here; the Code
+   * tab's markers, the Problems tab and its badge all read this.
+   */
+  problems: Problem[];
   /** What `monaco-yaml` marked from the schema; the Code tab reports them. */
   schemaMarkers: SchemaMarker[];
   setSchemaMarkers: (markers: SchemaMarker[]) => void;
@@ -117,12 +125,31 @@ export function useFlowEditor({ workspace, flowId, initialSource, readOnly, save
     bridge.focus(range);
   }, [bridge]);
 
+  const yaml = useYamlView(source);
+  const problems = useMemo(
+    () => collectProblems(yaml, validation.findings, schemaMarkers),
+    [yaml, validation.findings, schemaMarkers],
+  );
+
   const modelKey = flowId ?? "new";
   return useMemo(
     () => ({
-      workspace, modelKey, source, setSource, readOnly, validation, schema,
+      workspace, modelKey, source, setSource, readOnly, validation, schema, yaml, problems,
       schemaMarkers, setSchemaMarkers, cursorOffset, setCursorOffset, focusRange, bridge, save,
     }),
-    [workspace, modelKey, source, readOnly, validation, schema, schemaMarkers, cursorOffset, setCursorOffset, focusRange, bridge, save],
+    [workspace, modelKey, source, readOnly, validation, schema, yaml, problems, schemaMarkers, cursorOffset, setCursorOffset, focusRange, bridge, save],
   );
+}
+
+/**
+ * One parse per source, and the last source that parsed, for the lookups made
+ * while the text is half-typed (`createYamlView`). The last good parse is kept
+ * as state updated during render, React's pattern for state derived from the
+ * previous render.
+ */
+export function useYamlView(source: string): YamlView {
+  const doc = useMemo(() => parseYaml(source), [source]);
+  const [lastGood, setLastGood] = useState<YamlDoc | null>(null);
+  if (doc.ok && lastGood !== doc) setLastGood(doc);
+  return useMemo(() => createYamlView(doc, doc.ok ? null : lastGood), [doc, lastGood]);
 }

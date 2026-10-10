@@ -5,7 +5,6 @@ import type { EditorContext } from "@/components/workflows/editor/EditorContext"
 import { flowDoc, typeDoc, type TypeDoc } from "@/components/workflows/editor/flowSchema";
 import { Markdown } from "@/components/workflows/editor/Markdown";
 import { SchemaUnavailable } from "@/components/workflows/editor/SchemaUnavailable";
-import { typeAt } from "@/components/workflows/editor/yamlPath";
 
 /**
  * The Docs tab (spec §5.2): the documentation of the task or trigger under the
@@ -14,10 +13,10 @@ import { typeAt } from "@/components/workflows/editor/yamlPath";
  * (`EditorContext.cursorOffset`).
  */
 export function DocsTab({ ctx }: { ctx: EditorContext }) {
-  const { schema, source, cursorOffset } = ctx;
+  const { schema, yaml, cursorOffset } = ctx;
   const spelled = useMemo(
-    () => (cursorOffset === null ? null : typeAt(source, cursorOffset)),
-    [source, cursorOffset],
+    () => (cursorOffset === null ? null : yaml.typeAt(cursorOffset)),
+    [yaml, cursorOffset],
   );
 
   if (schema.status === "error") return <SchemaUnavailable error={schema.error} retry={schema.retry} />;
@@ -37,7 +36,7 @@ export function DocsTab({ ctx }: { ctx: EditorContext }) {
     <div className="flex flex-col gap-4 p-3 text-sm">
       {spelled && !doc && (
         <p className="text-muted-foreground">
-          No documentation for <code className="rounded bg-muted px-1 font-mono">{spelled}</code>. This is the flow&apos;s.
+          No documentation for <code className="rounded bg-muted px-1 font-mono">{spelled}</code>. Showing the flow&apos;s documentation.
         </p>
       )}
       <TypeDocView doc={doc ?? flowDoc(schema.schema)} />

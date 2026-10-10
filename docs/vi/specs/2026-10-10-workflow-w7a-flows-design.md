@@ -135,7 +135,9 @@ Mọi khác biệt khác tìm thấy khi đối chiếu với một Kestra đang
   - Người chỉ có quyền đọc (không có `workflow:manage`) thấy editor chỉ đọc, kèm banner giải thích vì sao.
 
 **Docs.** Tab này đi theo con trỏ.
-- Nó tìm mapping trong cùng chứa con trỏ có key `type:`, rồi hiện tài liệu của task hoặc trigger đó từ cùng schema: mô tả, bảng thuộc tính (tên, kiểu, bắt buộc, mặc định, mô tả) và outputs.
+- Nó tìm task hoặc trigger trong cùng chứa con trỏ, rồi hiện tài liệu của task hoặc trigger đó từ cùng schema: mô tả, bảng thuộc tính (tên, kiểu, bắt buộc, mặc định, mô tả) và outputs.
+  - Task hoặc trigger là một mapping có `type:` dạng chuỗi và có `id:` hoặc là một phần tử của danh sách. Vì thế `type: constant` của chính một retry (mapping nằm dưới một key, không có `id`) bị bỏ qua, như `isTaskLike` của Kestra, và một task gõ `type:` trước `id:` vẫn được nhận ra.
+  - Khi văn bản chưa parse được (key thiếu `:`, dấu nháy chưa đóng), cây chịu lỗi được đọc tại chỗ đang sửa, còn ở mọi chỗ khác thì đọc bản nguồn gần nhất đã parse được.
 - Con trỏ nằm ngoài mọi mapping có `type:` thì hiện tài liệu cấp flow (`id`, `namespace`, `inputs`, `tasks`, `triggers`, `errors`, …).
 - Cập nhật khi con trỏ di chuyển, debounce 150 ms.
 
@@ -392,3 +394,6 @@ Mỗi lần review task đều trả lời checklist cho reviewer của bộ rul
 - Danh sách flow không phân trang (§4).
 - Input có `dependsOn` là tĩnh (§6.2).
 - Kết quả validate có `path` không map được thì hiện ở dòng 1 (§5.2).
+  - Path của server gọi phần tử danh sách theo id (`tasks.<id>.…`, `inputs.<id>`). Id lặp lại thì map vào phần tử đầu tiên khớp được phần còn lại của path; khi mọi phần tử đều khớp (`tasks.dup.type`) thì là phần tử đầu tiên. Task con có id trùng tên một thuộc tính của task cha, và id input có dấu chấm, được giải bằng cách thử từng cách đọc.
+  - Lỗi parse mà server không định vị được thì hiện ở dòng 1, kèm thông điệp và không có path.
+  - Path trỏ vào phần văn bản chưa từng parse được (chưa có bản nguồn nào trước đó parse được) thì map về dòng 1 cho tới khi tài liệu parse được.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rangeOfPath, typeAt } from "@/components/workflows/editor/yamlPath";
+import { createYamlView, parseYaml, rangeOfPath, typeAt } from "@/components/workflows/editor/yamlPath";
 
 /**
  * Block and flow style, comments, a flowable with nested tasks, a task whose
@@ -99,8 +99,106 @@ describe("rangeOfPath", () => {
     expect(rangeOfPath(FLOW, "")).toBeNull();
   });
 
-  it("returns null when the document does not parse", () => {
-    expect(rangeOfPath("id: [unclosed\n", "id")).toBeNull();
+});
+
+/** FLOW with `extra` inserted as a new line after line `after`. */
+const withLine = (after: number, extra: string) =>
+  [...LINES.slice(0, after), extra, ...LINES.slice(after)].join("\n");
+
+describe("while the source is half-typed", () => {
+  // `    m` is a key without its `:`, an error until the colon is typed; an open
+  // quote swallows the rest of the document into one string.
+  const DANGLING = withLine(15, "    m");
+  const OPEN_QUOTE = withLine(15, "    level: 'IN");
+
+  it("both states are parse errors, so the fixtures test what they claim", () => {
+    expect(parseYaml(DANGLING).ok).toBe(false);
+    expect(parseYaml(OPEN_QUOTE).ok).toBe(false);
+    expect(parseYaml(FLOW).ok).toBe(true);
+  });
+
+  it("a dangling key still maps, from the error-tolerant tree", () => {
+    // Line 20 of FLOW is now line 21.
+    expect(rangeOfPath(DANGLING, "tasks.third.retry.maxAttempt")).toEqual({ ...span(20, "maxAttempt", "3"), startLine: 21, endLine: 21 });
+    expect(rangeOfPath(DANGLING, "id")).toEqual(span(1, "id", "hello"));
+  });
+
+  it("on the dangling key itself, Docs still has the task's type", () => {
+    const offset = DANGLING.indexOf("    m\n") + 5;
+    expect(typeAt(DANGLING, offset)).toBe("io.kestra.plugin.core.log.Log");
+  });
+
+  it("past an open quote, the last source that parsed answers, moved to the current text", () => {
+    const own = createYamlView(parseYaml(OPEN_QUOTE), null);
+    // The quote swallowed `third`: on its own, the broken tree cannot find it…
+    expect(own.rangeOfPath("tasks.third.retry.maxAttempt")).toBeNull();
+    const view = createYamlView(parseYaml(OPEN_QUOTE), parseYaml(FLOW));
+    // …with the last good source it maps, one line down.
+    expect(view.rangeOfPath("tasks.third.retry.maxAttempt")).toEqual({ ...span(20, "maxAttempt", "3"), startLine: 21, endLine: 21 });
+    expect(view.rangeOfPath("id")).toEqual(span(1, "id", "hello"));
+    // And the cursor in `third` is in `third`, not in the string that swallowed it.
+    const inThird = OPEN_QUOTE.indexOf("errorMessage: c") + 3;
+    expect(own.typeAt(inThird)).toBe("io.kestra.plugin.core.log.Log");
+    expect(view.typeAt(inThird)).toBe("io.kestra.plugin.core.execution.Fail");
+    // Inside the edited line itself, the current tree answers.
+    expect(view.typeAt(OPEN_QUOTE.indexOf("'IN") + 2)).toBe("io.kestra.plugin.core.log.Log");
+  });
+});
+
+describe("id-keyed paths that are ambiguous", () => {
+  const EDGE = [
+    "id: edge", //                                             1
+    "namespace: n", //                                         2
+    "inputs:", //                                              3
+    "  - id: a.b", //                                          4
+    "    type: STRING", //                                     5
+    "  - id: a", //                                            6
+    "    type: INT", //                                        7
+    "tasks:", //                                               8
+    "  - id: dup", //                                          9
+    "    type: io.kestra.plugin.core.log.Log", //             10
+    "    message: one", //                                    11
+    "  - id: dup", //                                         12
+    "    type: io.kestra.plugin.core.debug.Return", //        13
+    "    format: two", //                                     14
+    "  - id: check", //                                       15
+    "    type: io.kestra.plugin.core.flow.If", //             16
+    '    condition: "{{ true }}"', //                         17
+    "    then:", //                                           18
+    "      - id: condition", //                               19
+    "        type: io.kestra.plugin.core.log.Log", //         20
+    "        message: shadowed", //                           21
+    "",
+  ].join("\n");
+  const E = EDGE.split("\n");
+  const espan = (line: number, from: string, to: string) => ({
+    startLine: line,
+    startCol: E[line - 1].indexOf(from) + 1,
+    endLine: line,
+    endCol: E[line - 1].indexOf(to) + to.length + 1,
+  });
+
+  it("a repeated id: the first item the rest of the path fits", () => {
+    expect(rangeOfPath(EDGE, "tasks.dup.message")).toEqual(espan(11, "message", "one"));
+    expect(rangeOfPath(EDGE, "tasks.dup.format")).toEqual(espan(14, "format", "two"));
+    // Both fit: the first one, which is what the validator's message names first.
+    expect(rangeOfPath(EDGE, "tasks.dup.type")).toEqual(espan(10, "type", "Log"));
+  });
+
+  it("a child whose id is also a property of its parent", () => {
+    expect(rangeOfPath(EDGE, "tasks.check.condition")).toEqual(espan(17, "condition", '"{{ true }}"'));
+    expect(rangeOfPath(EDGE, "tasks.check.condition.message")).toEqual(espan(21, "message", "shadowed"));
+  });
+
+  it("an input id with a dot", () => {
+    expect(rangeOfPath(EDGE, "inputs.a.b.type")).toEqual(espan(5, "type", "STRING"));
+    expect(rangeOfPath(EDGE, "inputs.a.type")).toEqual(espan(7, "type", "INT"));
+    expect(rangeOfPath(EDGE, "inputs.a.b")).toEqual(espan(4, "id", "a.b"));
+  });
+
+  it("a task whose type was typed before its id is still a task", () => {
+    const src = "id: f\nnamespace: n\ntasks:\n  - type: io.kestra.plugin.core.log.Log\n    message: x\n";
+    expect(typeAt(src, src.indexOf("message"))).toBe("io.kestra.plugin.core.log.Log");
   });
 });
 
@@ -134,7 +232,5 @@ describe("typeAt", () => {
     expect(typeAt(FLOW, offsetOf(22, "message"))).toBe("io.kestra.plugin.core.log.Log");
   });
 
-  it("returns null for a document that does not parse", () => {
-    expect(typeAt("tasks: [\n  - id: a\n", 5)).toBeNull();
-  });
+
 });

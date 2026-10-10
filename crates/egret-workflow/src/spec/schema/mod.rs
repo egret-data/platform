@@ -300,6 +300,12 @@ pub fn kestra_version() -> &'static str {
 }
 
 fn build(accepted: &Accepted) -> Value {
+    build_with(accepted, true)
+}
+
+/// [`build`], with [`defer_required_to_type`] optional so a test can compare
+/// the document before and after it.
+fn build_with(accepted: &Accepted, defer_required: bool) -> Value {
     let features = accepted.features;
     let inputs = &*INPUTS;
     let mut defs = inputs.kestra_defs.clone();
@@ -378,7 +384,7 @@ fn build(accepted: &Accepted) -> Value {
     }
     // After the filters, which may drop a required property egret ignores.
     for name in tasks.iter().chain(&triggers) {
-        if let Some(def) = defs.get_mut(name) {
+        if let Some(def) = defs.get_mut(name).filter(|_| defer_required) {
             defer_required_to_type(def);
         }
     }
@@ -869,6 +875,65 @@ mod tests {
                 full("io.kestra.plugin.core.log.Log"),
                 strs(&kestra_definition("io.kestra.plugin.core.log.Log").unwrap()["required"])
             );
+        }
+    }
+
+    /// For every served type, in every feature combination: the deferral moved
+    /// required properties and changed nothing else. `required` plus
+    /// `then.required` is exactly the type's `required` without the deferral,
+    /// every other key is untouched, and no type had an `if` or `then` of its
+    /// own for the guard to overwrite.
+    #[test]
+    fn deferring_required_keeps_every_types_requirement_and_nothing_else_changes() {
+        let set = |v: &Value| -> BTreeSet<String> {
+            v.as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let d = permissive_deployment();
+        for f in all_features() {
+            let accepted = Accepted::of(f, &d);
+            let before = build_with(&accepted, false);
+            let after = build_with(&accepted, true);
+            let mut members = 0;
+            for union in ["egret.task", "egret.trigger"] {
+                for member in after["$defs"][union]["oneOf"].as_array().unwrap() {
+                    let name = member["$ref"]
+                        .as_str()
+                        .unwrap()
+                        .trim_start_matches("#/$defs/");
+                    let (b, a) = (&before["$defs"][name], &after["$defs"][name]);
+                    assert!(
+                        b.get("if").is_none() && b.get("then").is_none(),
+                        "{f:?} {name} has its own if/then"
+                    );
+                    let mut full = set(&a["required"]);
+                    full.extend(set(&a["then"]["required"]));
+                    assert_eq!(full, set(&b["required"]), "{f:?} {name}");
+                    let strip = |v: &Value| {
+                        let mut m = v.as_object().unwrap().clone();
+                        for k in ["required", "if", "then"] {
+                            m.remove(k);
+                        }
+                        m
+                    };
+                    assert_eq!(strip(a), strip(b), "{f:?} {name}: other keys changed");
+                    members += 1;
+                }
+            }
+            assert!(members > 40, "{f:?}: only {members} types");
+            // Outside the type definitions, the documents are the same.
+            let others = |v: &Value| {
+                let mut m = v.as_object().unwrap().clone();
+                m.remove("$defs");
+                m
+            };
+            assert_eq!(others(&after), others(&before), "{f:?}");
         }
     }
 

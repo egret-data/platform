@@ -133,7 +133,9 @@ Any further difference found while comparing against a running Kestra (§9) is a
   - Read-only users (no `workflow:manage`) get a read-only editor with a banner explaining why.
 
 **Docs.** This tab follows the cursor.
-- It finds the innermost mapping enclosing the cursor that has a `type:` key, and shows that task's or trigger's documentation from the same schema: description, a properties table (name, type, required, default, description) and outputs.
+- It finds the innermost task or trigger enclosing the cursor, and shows that task's or trigger's documentation from the same schema: description, a properties table (name, type, required, default, description) and outputs.
+  - A task or trigger is a mapping with a string `type:` that has an `id:` or is a list item. A retry policy's own `type: constant` (a mapping under a key, without an `id`) is therefore skipped, as Kestra's `isTaskLike` does, and a task whose `type:` was typed before its `id:` is still found.
+  - While the text does not parse (a key without its `:`, an open quote), the error-tolerant tree is read at the edit, and the last source that parsed everywhere else.
 - Outside any typed mapping it shows the flow-level documentation (`id`, `namespace`, `inputs`, `tasks`, `triggers`, `errors`, …).
 - It updates on cursor moves, debounced by 150 ms.
 
@@ -390,3 +392,6 @@ Every task review answers the rulebook's reviewer checklist.
 - The flow list is unpaginated (§4).
 - `dependsOn` inputs are static (§6.2).
 - A finding whose `path` cannot be mapped is shown on line 1 (§5.2).
+  - Server paths name list items by id (`tasks.<id>.…`, `inputs.<id>`). A repeated id maps to the first item the rest of the path fits; when every one fits (`tasks.dup.type`), that is the first. A child task whose id is also a property of its parent, and an input id containing dots, are resolved by trying each reading.
+  - A parse error the server could not locate is shown on line 1, with its message and no path.
+  - A path into text whose surroundings have never parsed (no earlier source parsed either) maps to line 1 until the document parses.

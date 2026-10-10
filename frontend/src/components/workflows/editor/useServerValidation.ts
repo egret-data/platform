@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError } from "@/api/client";
 import { workflowValidateFlow, workflowValidateUnsavedFlow } from "@/api/generated/workflow/workflow";
 import type { ValidationReportDto } from "@/api/generated/model";
-import type { ServerFinding } from "@/components/workflows/editor/problems";
+import { PARSE_ERROR, type ServerFinding } from "@/components/workflows/editor/problems";
 
 /** Spec §5.2: the server validates 600 ms after the last edit. */
 export const VALIDATE_DEBOUNCE_MS = 600;
@@ -30,7 +30,7 @@ export function parseErrorFinding(message: string): ServerFinding {
   const m = /\(line (\d+), column (\d+)\)\s*$/.exec(message);
   return {
     severity: "error",
-    code: "parse_error",
+    code: PARSE_ERROR,
     message,
     path: "",
     ...(m ? { at: { line: Number(m[1]), col: Number(m[2]) } } : {}),

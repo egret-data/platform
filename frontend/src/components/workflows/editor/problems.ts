@@ -1,4 +1,4 @@
-import { rangeOfPath, type YamlRange } from "@/components/workflows/editor/yamlPath";
+import type { YamlRange, YamlView } from "@/components/workflows/editor/yamlPath";
 
 export type Severity = "error" | "warning";
 
@@ -24,6 +24,8 @@ export type Problem = {
   range: YamlRange;
   /** False when the path names nothing in the source; the range is then line 1. */
   mapped: boolean;
+  /** A parse error the server located: its column is worth showing. */
+  located: boolean;
   source: "server" | "schema";
 };
 
@@ -33,24 +35,35 @@ export function lineOne(source: string): YamlRange {
   return { startLine: 1, startCol: 1, endLine: 1, endCol: first.length + 1 };
 }
 
-function placeServer(source: string, f: ServerFinding): { range: YamlRange; mapped: boolean } {
+function placeServer(view: YamlView, f: ServerFinding): Pick<Problem, "range" | "mapped" | "path" | "located"> {
   if (f.at) {
     const { line, col } = f.at;
-    return { range: { startLine: line, startCol: col, endLine: line, endCol: col + 1 }, mapped: true };
+    return { range: { startLine: line, startCol: col, endLine: line, endCol: col + 1 }, mapped: true, path: null, located: true };
   }
-  const range = rangeOfPath(source, f.path);
-  return range ? { range, mapped: true } : { range: lineOne(source), mapped: false };
+  // A parse error the server could not locate (`routes.rs` sends the bare message): it is about
+  // the whole document, not about a path that went missing.
+  if (f.code === PARSE_ERROR || !f.path) {
+    return { range: lineOne(view.doc.source), mapped: true, path: null, located: false };
+  }
+  const range = view.rangeOfPath(f.path);
+  return range
+    ? { range, mapped: true, path: f.path, located: false }
+    : { range: lineOne(view.doc.source), mapped: false, path: f.path, located: false };
 }
+
+export const PARSE_ERROR = "parse_error";
 
 const RANK: Record<Severity, number> = { error: 0, warning: 1 };
 
 /**
- * Both sources of problems (spec §5.2), placed in `source` and sorted: errors
- * first, then by position. Server paths are mapped against the CURRENT source,
- * so a marker follows the text it names while the next validation is pending.
+ * Both sources of problems (spec §5.2), placed in the current source and
+ * sorted: errors first, then by position. Server paths are mapped against the
+ * CURRENT source, so a marker follows the text it names while the next
+ * validation is pending. `view` is the one parse of that source; the page
+ * computes this once per change (`useFlowEditor`) and every tab reads it.
  */
 export function collectProblems(
-  source: string,
+  view: YamlView,
   findings: readonly ServerFinding[],
   markers: readonly SchemaMarker[],
 ): Problem[] {
@@ -58,8 +71,7 @@ export function collectProblems(
     key: `s${i}`,
     severity: f.severity,
     message: f.message,
-    path: f.at ? null : f.path || null,
-    ...placeServer(source, f),
+    ...placeServer(view, f),
     source: "server",
   }));
   const schema = markers.map((m, i): Problem => ({
@@ -69,6 +81,7 @@ export function collectProblems(
     path: null,
     range: m.range,
     mapped: true,
+    located: true,
     source: "schema",
   }));
   return [...server, ...schema].sort(
