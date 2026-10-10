@@ -360,7 +360,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Produces: `plugins["jsx-a11y"]`, and legacy entries keyed `jsx-a11y/<rule>`.
 
 - [ ] **Step 1: Install, pinned exactly.**
-  - Run `npm i -D --save-exact eslint-plugin-jsx-a11y-x@0.2.0`. Expected: no ERESLOVE error; the package's peer range includes ESLint 10.
+  - Run `npm i -D --save-exact eslint-plugin-jsx-a11y-x@0.2.0`. Expected: no ERESOLVE error; the package's peer range includes ESLint 10.
   - Read the package's `README` and `package.json` `exports` in `node_modules/eslint-plugin-jsx-a11y-x`, and record the name of the flat recommended config (for example `flatConfigs.recommended` or `configs.recommended`) in the report. Do not guess it.
 
 - [ ] **Step 2: Write the config test (red).** In `a11y-config.test.js` (`// @vitest-environment node`):

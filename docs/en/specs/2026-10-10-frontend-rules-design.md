@@ -41,7 +41,7 @@ A survey of `frontend/src` on 2026-10-10 found a sound base but no single standa
 3. **`docs/{en,vi}/ui-conventions.md`:** one line at the top of each saying the rulebook is normative and this file is its rationale. Nothing else in the file changes. The Vietnamese twin's drift is recorded as debt.
 4. **Lint** (§7):
    - a local ESLint plugin with egret's own rules;
-   - `eslint-plugin-jsx-a11y`;
+   - `eslint-plugin-jsx-a11y-x` (the maintained fork of `eslint-plugin-jsx-a11y`);
    - a legacy list per rule;
    - a check that keeps every legacy list honest.
 5. **Removal of `frontend/src/theme/egret-theme.ts`.** It is a stale orange hex palette, and nothing imports it; the only matches for `egret-theme` are the theme provider's localStorage key.

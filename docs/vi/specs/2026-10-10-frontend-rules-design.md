@@ -43,7 +43,7 @@ Khảo sát `frontend/src` ngày 2026-10-10 cho thấy nền tốt nhưng chưa 
 3. **`docs/{en,vi}/ui-conventions.md`:** đầu mỗi file thêm một dòng nói bộ rule là chuẩn và file này là phần lý do. Không đổi gì khác trong file. Độ lệch của bản tiếng Việt được ghi thành nợ.
 4. **Lint** (§7):
    - một plugin ESLint cục bộ chứa các rule riêng của egret;
-   - `eslint-plugin-jsx-a11y`;
+   - `eslint-plugin-jsx-a11y-x` (bản fork còn bảo trì của `eslint-plugin-jsx-a11y`);
    - một danh sách legacy cho mỗi rule;
    - một bước kiểm để mọi danh sách legacy luôn đúng.
 5. **Xoá `frontend/src/theme/egret-theme.ts`.** Đó là một palette hex màu cam đã cũ, không ai import; các chỗ khớp `egret-theme` duy nhất là key localStorage của theme provider.
