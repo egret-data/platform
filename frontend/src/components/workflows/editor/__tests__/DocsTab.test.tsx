@@ -126,6 +126,14 @@ function propertyRows(name = "Properties") {
 }
 
 describe("DocsTab", () => {
+  it("gives both lists an explicit list role, which Safari drops from a ul styled list-none", () => {
+    // jsdom maps a <ul> to "list" by itself; VoiceOver on Safari does not once the CSS reset
+    // removes list styling, so the attribute itself is what is pinned.
+    renderDocs(at("database: dwh"));
+    expect(screen.getByRole("list", { name: "Properties" })).toHaveAttribute("role", "list");
+    expect(screen.getByRole("list", { name: "Outputs" })).toHaveAttribute("role", "list");
+  });
+
   it("documents the task under the cursor: description, properties and outputs", () => {
     renderDocs(at("database: dwh"));
     expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("egret.sql");

@@ -59,7 +59,7 @@ function TypeDocView({ doc }: { doc: TypeDoc }) {
 
       <section className="flex flex-col gap-1">
         <h3 className="font-semibold text-foreground">Properties</h3>
-        <ul aria-label="Properties" className="flex flex-col divide-y divide-border">
+        <ul role="list" aria-label="Properties" className="flex flex-col divide-y divide-border">
           {doc.properties.map((p) => (
             <DocItem
               key={p.name}
@@ -79,7 +79,7 @@ function TypeDocView({ doc }: { doc: TypeDoc }) {
           {doc.outputs.length === 0 ? (
             <p className="text-muted-foreground">This type has no documented outputs.</p>
           ) : (
-            <ul aria-label="Outputs" className="flex flex-col divide-y divide-border">
+            <ul role="list" aria-label="Outputs" className="flex flex-col divide-y divide-border">
               {doc.outputs.map((o) => (
                 <DocItem key={o.name} name={o.name} type={o.type} description={o.description} />
               ))}

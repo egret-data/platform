@@ -149,7 +149,7 @@ URLs are kebab-case and workspace-scoped under `/explore/:workspace/…`.
 ## 8. Accessibility (FE-A11Y)
 
 #### FE-A11Y-1 — Pass the jsx-a11y recommended rules · MUST
-The code passes the recommended rules of `eslint-plugin-jsx-a11y-x` (the maintained fork of `eslint-plugin-jsx-a11y`; rule ids read `jsx-a11y/…`). `jsx-a11y/no-autofocus` is off; see FE-A11Y-6.
+The code passes the recommended rules of `eslint-plugin-jsx-a11y-x` (the maintained fork of `eslint-plugin-jsx-a11y`; rule ids read `jsx-a11y/…`). `jsx-a11y/no-autofocus` is off; see FE-A11Y-6. `jsx-a11y/no-redundant-roles` allows `role="list"` on `<ul>` and `<ol>`: Safari with VoiceOver drops a list's role once CSS removes its list styling, as the Tailwind reset does.
 **Do this:** fix what lint reports; the configuration is `frontend/eslint-rules/plugins.js`. **Checked by:** lint (jsx-a11y).
 
 #### FE-A11Y-2 — The shared focus ring, at 3:1 · MUST

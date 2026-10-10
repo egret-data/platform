@@ -22,6 +22,16 @@ describe("jsx-a11y configuration", { timeout: 30_000 }, () => {
     expect(severity(config.rules["jsx-a11y/no-autofocus"])).toBe(0);
   });
 
+  it("allows role=list on a list, which Safari needs, and still refuses other redundant roles", async () => {
+    const lint = async (code) => {
+      const [result] = await eslint.lintText(code, { filePath: "src/components/explore/Probe.tsx" });
+      return result.messages.filter((m) => m.ruleId === "jsx-a11y/no-redundant-roles");
+    };
+    expect(await lint('export const A = () => <ul role="list"><li>a</li></ul>;')).toEqual([]);
+    expect(await lint('export const A = () => <ol role="list"><li>a</li></ol>;')).toEqual([]);
+    expect(await lint('export const A = () => <button role="button">a</button>;')).toHaveLength(1);
+  });
+
   it("lets the rules see through egret's primitives", async () => {
     const lint = async (code) => {
       const [result] = await eslint.lintText(code, { filePath: "src/components/explore/Probe.tsx" });
