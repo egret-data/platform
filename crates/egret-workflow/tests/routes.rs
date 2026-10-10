@@ -1166,6 +1166,54 @@ async fn update_with_if_updated_at_on_a_missing_flow_is_404() {
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
+/// A precondition on ANOTHER workspace's flow is a 404, never a 409: the
+/// 409/404 split would otherwise tell a caller that a flow with that id
+/// exists in a workspace they cannot see. Both a stale `if_updated_at` and
+/// the flow's exact current one are refused the same way, and neither
+/// writes. (W7a final review, M3.)
+#[tokio::test]
+async fn update_with_if_updated_at_on_another_workspaces_flow_is_404() {
+    let Some(db) = common::db().await else { return };
+    let (owner_ws, owner) = common::seed_workspace(&db).await;
+    common::grant(&db, owner_ws, owner, &["workflow:read", "workflow:manage"]).await;
+    let (other_ws, other_user) = common::seed_workspace(&db).await;
+    common::grant(
+        &db,
+        other_ws,
+        other_user,
+        &["workflow:read", "workflow:manage"],
+    )
+    .await;
+    let app = common::app(&db).await;
+    let (id, current) = created_flow(&app, owner_ws, owner, "a.theirs").await;
+    let owner_path = format!("/api/ws/{owner_ws}/workflows/flows/{id}");
+    let foreign_path = format!("/api/ws/{other_ws}/workflows/flows/{id}");
+
+    for if_updated_at in [current.as_str(), "2000-01-01T00:00:00Z"] {
+        let res = common::put(
+            &app,
+            &foreign_path,
+            other_user,
+            serde_json::json!({ "source": minimal_flow("a.mine"), "folder_id": null, "if_updated_at": if_updated_at }),
+        )
+        .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::NOT_FOUND,
+            "if_updated_at = {if_updated_at}"
+        );
+        let body = common::json(res).await;
+        assert_ne!(body["code"], "draft_changed", "{body}");
+    }
+
+    let row = common::json(common::get(&app, &owner_path, owner).await).await;
+    assert_eq!(
+        row["namespace"], "a.theirs",
+        "the refused saves wrote nothing"
+    );
+    assert_eq!(row["updated_at"].as_str(), Some(current.as_str()));
+}
+
 /// Without `if_updated_at` a save is unconditional, as before W7a: an old
 /// draft is overwritten.
 #[tokio::test]
