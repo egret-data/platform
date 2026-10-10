@@ -385,7 +385,7 @@ function RevisionsView({
  */
 function disposeUnshownModels(monaco: Monaco | null, paths: Iterable<string>): void {
   if (!monaco) return;
-  const shown = new Set(monaco.editor.getEditors().map((e) => e.getModel()));
+  const shown = new Set(monaco.editor.getEditors().map((e: { getModel(): unknown }) => e.getModel()));
   for (const path of paths) {
     const model = monaco.editor.getModel(monaco.Uri.parse(path));
     if (model && !shown.has(model)) model.dispose();
