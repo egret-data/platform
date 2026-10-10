@@ -1,5 +1,8 @@
 //! A CLOSED grammar: a Ranger access-policy body becomes either candidate
-//! [`Grant`]s or a list of named [`Blocker`]s. Pure — no DB, no clock, no
+//! [`Grant`]s or a list of named [`Blocker`]s ([`grants_from_access_policy`]);
+//! a masking, row-filter or tag-addressed body becomes candidate [`Rule`]s the
+//! same way ([`rules_from_mask_or_filter_policy`], whose doc carries the
+//! rule-side rulings). Pure — no DB, no clock, no
 //! network — so it can be differentially tested, which is the same property
 //! that makes `egret-ranger-eval` trustworthy.
 //!
@@ -89,13 +92,20 @@ use std::collections::BTreeSet;
 
 use egret_perm::{
     engine_accesses, Action, Effect, EngineType, Grant, GrantOrigin, Principal, PrincipalKind,
-    PrincipalSet, Scope,
+    PrincipalSet, Rule, RuleKind, Scope, Selector, PUBLIC_GROUP,
 };
-use egret_ranger_eval::model::{ItemBucket, PolicyItem, RangerPolicy, ResourceLevel, Unmodelled};
+use egret_ranger_eval::model::{
+    has_double_brackets, has_request_expression, ItemBucket, PolicyItem, RangerPolicy,
+    ResourceLevel, Unmodelled,
+};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::grants::{level_is_a_wildcard_run, resource_level_names, validate_user_ref};
+use crate::grants::{
+    level_is_a_wildcard_run, resource_level_names, validate_user_ref, PolicyTarget,
+    ROW_FILTER_LEVELS,
+};
+use crate::rules::{declared_mask_types, validate_rule_shape};
 
 /// Why one Ranger policy cannot become model objects. Each variant names the
 /// offending value where there is one, so Task 5 can render it as a sentence
@@ -178,6 +188,57 @@ pub enum Blocker {
     ForeignItems { bucket: &'static str },
     /// A key this grammar has not ruled on (path from the body root).
     UnrecognisedField { field: String },
+
+    // ── Added by Task 4 (masking, row-filter and tag-addressed policies) ──
+    /// `policyType` is neither 1 (masking) nor 2 (row filter), on a body that
+    /// is not tag-addressed.
+    NotAMaskOrRowFilter { policy_type: i32 },
+    /// A tag-addressed ACCESS policy (`policyType` 0 with a `tag` resource).
+    /// The only tag access policy the model has is a CLEARANCE, and its
+    /// cleared set is the MEMBERSHIP of `required_roles`, enumerated at
+    /// compile time (`crate::clearance`): a hand-written list of users cannot
+    /// be inverted into roles, and a tag ALLOW has no model at all.
+    ClearanceNotExpressible,
+    /// Mask item `index` has no `dataMaskInfo`, a `null` one, or one without
+    /// `dataMaskType` — the same object to Ranger (Jackson's setter
+    /// substitutes an empty info whose type is null). On the TAG repository
+    /// such an item NPEs the plugin's constructor and the engine serves
+    /// nothing.
+    MaskWithoutType { index: usize },
+    /// A mask type the engine's service-def does not declare (`dataMaskDef.
+    /// maskTypes`): the plugin ignores it and the column is served unmasked.
+    UnsupportedMaskType { mask_type: String },
+    /// A `valueExpr` on a mask type other than `CUSTOM` — the compiler emits
+    /// `valueExpr` for `CUSTOM` only, so it would be dropped.
+    ValueExprWithoutCustom { mask_type: String },
+    /// A mask value carrying a Ranger request-time expression (`${{…}}`).
+    MaskExpression { expr: String },
+    /// A row-filter expression Ranger rewrites or resolves per request
+    /// (`${{…}}`, a `{TOKEN}`, or `[[…]]`).
+    FilterExpression { expr: String },
+    /// Row-filter item `index` has no `filterExpr` (absent or `null`), which
+    /// Ranger reads as "this item decides nothing" — not the same as `""`.
+    MissingFilterExpr { index: usize },
+    /// More than the two items the compiler emits (an exemption, then
+    /// everyone).
+    TooManyRuleItems { count: usize },
+    /// Item `index` is in the "everyone" position but does not name exactly
+    /// the `public` group and nobody else. A Rule applies to everyone.
+    NotForEveryone { index: usize },
+    /// Item `index` sits ahead of the everyone item but does not LIFT the
+    /// control (`MASK_NONE` with no value, or `filterExpr: ""`) — a
+    /// per-principal mask or filter the model has no shape for.
+    NotAnExemption { index: usize },
+    /// The exemption item names the `public` group, which would exempt
+    /// everyone (`rules::exempt_principals` refuses it).
+    PublicExemption,
+    /// A tag-addressed policy for a StarRocks profile: StarRocks has no tag
+    /// service, so a tag rule compiles there to one resource policy per
+    /// tagged column — a different artifact from the body it came from.
+    TagSelectorOnStarRocks,
+    /// The candidate rule failed the compiler's own authoring check
+    /// (`validate_rule_shape`) — a backstop; the message is the compiler's.
+    CompilerRefuses { error: String },
 }
 
 /// The model objects one access policy becomes. Every grant's `id` is
@@ -187,6 +248,18 @@ pub enum Blocker {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateGrants {
     pub grants: Vec<Grant>,
+}
+
+/// The model objects one masking / row-filter / tag policy becomes. Every
+/// rule's `id` is [`Uuid::nil`] for the same reason [`CandidateGrants`]' are.
+///
+/// `clearances` (`tags.id`, one per gated tag) is part of the interface and is
+/// ALWAYS EMPTY today: see [`Blocker::ClearanceNotExpressible`] for why no
+/// Ranger body can be read back into a clearance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateRules {
+    pub rules: Vec<Rule>,
+    pub clearances: Vec<Uuid>,
 }
 
 /// Header keys that change no access decision. Every other header key is
@@ -239,6 +312,12 @@ const ITEM_BUCKETS: &[&str] = &[
     "allowExceptions",
     "denyExceptions",
 ];
+/// The two rule buckets, scanned only by the rule grammar (an access policy
+/// refuses them wholesale as [`Blocker::ForeignItems`]). Each item may carry
+/// its payload object, whose own keys are ruled on too.
+const RULE_ITEM_BUCKETS: &[&str] = &["dataMaskPolicyItems", "rowFilterPolicyItems"];
+const MASK_INFO_KEYS: &[&str] = &["dataMaskType", "valueExpr", "conditionExpr"];
+const ROW_FILTER_INFO_KEYS: &[&str] = &["filterExpr"];
 const ITEM_KEYS: &[&str] = &[
     "users",
     "groups",
@@ -259,7 +338,7 @@ pub fn grants_from_access_policy(
 ) -> Result<CandidateGrants, Vec<Blocker>> {
     let mut b = Vec::new();
 
-    unrecognised_fields(body, &mut b);
+    unrecognised_fields(body, false, &mut b);
 
     let policy: RangerPolicy = match serde_json::from_value(body.clone()) {
         Ok(p) => p,
@@ -276,7 +355,13 @@ pub fn grants_from_access_policy(
         b.push(from_unmodelled(u));
     }
 
-    let scopes = scopes(&policy.resources, engine, catalog_ids, &mut b);
+    let scopes = scopes(
+        &policy.resources,
+        engine,
+        PolicyTarget::Access,
+        catalog_ids,
+        &mut b,
+    );
 
     if policy.policy_items.is_empty() && policy.deny_policy_items.is_empty() {
         b.push(Blocker::NothingToMigrate);
@@ -327,8 +412,9 @@ fn dedup(all: Vec<Blocker>) -> Vec<Blocker> {
 }
 
 /// Keys the grammar has not ruled on, at every depth it reads. `null` is
-/// Ranger's "absent" and is never a blocker.
-fn unrecognised_fields(body: &Value, b: &mut Vec<Blocker>) {
+/// Ranger's "absent" and is never a blocker. `rules` also scans the mask and
+/// row-filter buckets and their payload objects.
+fn unrecognised_fields(body: &Value, rules: bool, b: &mut Vec<Blocker>) {
     let Some(obj) = body.as_object() else {
         return; // the typed read reports it
     };
@@ -363,15 +449,31 @@ fn unrecognised_fields(body: &Value, b: &mut Vec<Blocker>) {
         }
     }
 
-    for bucket in ITEM_BUCKETS {
+    let rule_buckets: &[&str] = if rules { RULE_ITEM_BUCKETS } else { &[] };
+    for bucket in ITEM_BUCKETS.iter().chain(rule_buckets) {
         let Some(items) = obj.get(*bucket).and_then(Value::as_array) else {
             continue;
+        };
+        let payload: Option<(&str, &[&str])> = match *bucket {
+            "dataMaskPolicyItems" => Some(("dataMaskInfo", MASK_INFO_KEYS)),
+            "rowFilterPolicyItems" => Some(("rowFilterInfo", ROW_FILTER_INFO_KEYS)),
+            _ => None,
         };
         for (i, it) in items.iter().enumerate() {
             let Some(it) = it.as_object() else { continue };
             for (k, v) in it {
-                if !v.is_null() && !ITEM_KEYS.contains(&k.as_str()) {
+                let is_payload = payload.is_some_and(|(key, _)| key == k);
+                if !v.is_null() && !ITEM_KEYS.contains(&k.as_str()) && !is_payload {
                     flag(format!("{bucket}[{i}].{k}"));
+                }
+            }
+            if let Some((key, allowed)) = payload {
+                if let Some(info) = it.get(key).and_then(Value::as_object) {
+                    for (k, v) in info {
+                        if !v.is_null() && !allowed.contains(&k.as_str()) {
+                            flag(format!("{bucket}[{i}].{key}.{k}"));
+                        }
+                    }
                 }
             }
             let Some(accesses) = it.get("accesses").and_then(Value::as_array) else {
@@ -397,6 +499,23 @@ fn header(p: &RangerPolicy, b: &mut Vec<Blocker>) {
             policy_type: p.policy_type,
         });
     }
+    common_header(p, b);
+    if !p.data_mask_policy_items.is_empty() {
+        b.push(Blocker::ForeignItems {
+            bucket: "dataMaskPolicyItems",
+        });
+    }
+    if !p.row_filter_policy_items.is_empty() {
+        b.push(Blocker::ForeignItems {
+            bucket: "rowFilterPolicyItems",
+        });
+    }
+}
+
+/// The header rulings every policy kind shares: the compiler emits
+/// `isEnabled: true`, priority 0, no deny-all-else and no additional
+/// resources for a grant and a rule alike.
+fn common_header(p: &RangerPolicy, b: &mut Vec<Blocker>) {
     if !p.is_enabled {
         b.push(Blocker::Disabled);
     }
@@ -410,16 +529,6 @@ fn header(p: &RangerPolicy, b: &mut Vec<Blocker>) {
     }
     if !p.additional_resources.is_empty() {
         b.push(Blocker::AdditionalResources);
-    }
-    if !p.data_mask_policy_items.is_empty() {
-        b.push(Blocker::ForeignItems {
-            bucket: "dataMaskPolicyItems",
-        });
-    }
-    if !p.row_filter_policy_items.is_empty() {
-        b.push(Blocker::ForeignItems {
-            bucket: "rowFilterPolicyItems",
-        });
     }
 }
 
@@ -474,14 +583,43 @@ fn from_unmodelled(u: &Unmodelled) -> Blocker {
     }
 }
 
-/// The resources map → one [`Scope`] per registered catalog value.
+/// Whether a match-any level may have a NAMED level beneath it. Refused on a
+/// grant only (0179): there it widens AUTHORITY, the measured escalation. On a
+/// rule it widens RESTRICTION and both plugins enforce it — product decision
+/// 2026-10-10, `migrations/0179`'s closing section, and the reason
+/// `rules::validate_rule_shape` does not call the grant-side guard either.
+fn refuses_wildcard_over_named(target: PolicyTarget) -> bool {
+    matches!(target, PolicyTarget::Access)
+}
+
+/// Whether a scope may stop above the deepest level by OMITTING the rest. Only
+/// a mask: `scope_to_resources`' `Mask` arm renders exactly the levels a scope
+/// names, so an absent trailing level is `None` and compiles back absent. A
+/// grant's and a row filter's renderers emit every level of their hierarchy,
+/// so for them an absent level is a body the compiler cannot produce.
+fn may_stop_short(target: PolicyTarget) -> bool {
+    matches!(target, PolicyTarget::Mask)
+}
+
+/// The resources map → one [`Scope`] per registered catalog value, read
+/// against the hierarchy `target` renders into (four levels; three for a row
+/// filter, which `rowFilterDef` stops at `table`).
+///
+/// Values are carried as the compiler renders them back: on a grant a wildcard
+/// run is "unnamed" (`None`, rendered `*`); on a rule every present value is
+/// kept VERBATIM (`Some("*")` renders `*`, and `None` renders absent on a mask).
 fn scopes(
     resources: &std::collections::BTreeMap<String, ResourceLevel>,
     engine: EngineType,
+    target: PolicyTarget,
     catalog_ids: &dyn Fn(&str) -> Option<Uuid>,
     b: &mut Vec<Blocker>,
 ) -> Vec<Scope> {
-    let names = resource_level_names(engine);
+    let all = resource_level_names(engine);
+    let names: &[&str] = match target {
+        PolicyTarget::RowFilter => &all[..ROW_FILTER_LEVELS],
+        PolicyTarget::Access | PolicyTarget::Mask => &all,
+    };
 
     for key in resources.keys() {
         if !names.contains(&key.as_str()) {
@@ -489,16 +627,15 @@ fn scopes(
         }
     }
 
-    // `None` = unusable (already blocked); `Some(None)` = a wildcard run;
-    // `Some(Some(v))` = a named value.
-    let mut below_catalog: [Option<Option<String>>; 3] = [None, None, None];
+    // `raw[i]` is the one usable value at `names[i + 1]` (`None` = absent or
+    // already blocked); `absent[i]` is whether `names[i]` is missing.
+    let mut raw: [Option<String>; 3] = [None, None, None];
+    let mut absent = [false; 4];
     let mut catalogs: Vec<Uuid> = Vec::new();
 
     for (i, name) in names.iter().enumerate() {
         let Some(level) = resources.get(*name) else {
-            b.push(Blocker::MissingLevel {
-                level: (*name).to_string(),
-            });
+            absent[i] = true;
             continue;
         };
         if level.is_excludes {
@@ -543,32 +680,45 @@ fn scopes(
             });
             continue;
         }
-        let value = &level.values[0];
-        below_catalog[i - 1] = Some(if level_is_a_wildcard_run(value) {
-            None
-        } else {
-            Some(value.clone())
-        });
+        raw[i - 1] = Some(level.values[0].clone());
     }
 
-    // 0179, grant side: a wildcard run may not have a NAMED level beneath it —
-    // that is the level skip `perm.grants`' own CHECK forbids, and the compiled
-    // artifact would enforce the grant in every schema of the catalog.
-    for i in 0..3 {
-        if below_catalog[i] != Some(None) {
-            continue;
-        }
-        if below_catalog[i + 1..]
-            .iter()
-            .any(|deeper| matches!(deeper, Some(Some(_))))
-        {
-            b.push(Blocker::WildcardOverNamedLevel {
-                level: names[i + 1].to_string(),
+    // An absent level is refused unless it is part of a trailing run a mask is
+    // allowed to omit. The catalog is never optional (`Scope.catalog_id`).
+    for (i, name) in names.iter().enumerate() {
+        let omissible =
+            may_stop_short(target) && i > 0 && absent[i..names.len()].iter().all(|a| *a);
+        if absent[i] && !omissible {
+            b.push(Blocker::MissingLevel {
+                level: (*name).to_string(),
             });
         }
     }
 
-    let [schema, table, column] = below_catalog.map(Option::flatten);
+    // 0179, grant side only: a wildcard run may not have a NAMED level beneath
+    // it — that is the level skip `perm.grants`' own CHECK forbids, and the
+    // compiled artifact would enforce the grant in every schema of the catalog.
+    let wild = |v: &Option<String>| v.as_deref().is_some_and(level_is_a_wildcard_run);
+    if refuses_wildcard_over_named(target) {
+        for i in 0..3 {
+            if !wild(&raw[i]) {
+                continue;
+            }
+            if raw[i + 1..]
+                .iter()
+                .any(|deeper| deeper.is_some() && !wild(deeper))
+            {
+                b.push(Blocker::WildcardOverNamedLevel {
+                    level: names[i + 1].to_string(),
+                });
+            }
+        }
+    }
+
+    let [schema, table, column] = raw.map(|v| match target {
+        PolicyTarget::Access => v.filter(|s| !level_is_a_wildcard_run(s)),
+        PolicyTarget::Mask | PolicyTarget::RowFilter => v,
+    });
     catalogs
         .into_iter()
         .map(|catalog_id| Scope {
@@ -706,4 +856,398 @@ fn actions(it: &PolicyItem, engine: EngineType, b: &mut Vec<Blocker>) -> Vec<Act
         }
     }
     out
+}
+
+// ── Rules: masking, row-filter and tag-addressed policies (Task 4) ──────────
+
+/// The one resource key a tag-addressed body carries (`tagify`).
+const TAG_LEVEL: &str = "tag";
+
+/// Turn one Ranger masking, row-filter or tag-addressed body into the
+/// [`Rule`]s it is equivalent to, or every reason it is not expressible.
+///
+/// The design oracle is [`crate::rules::compile_rule`], exactly as
+/// [`crate::grants::compile_grant`] is for [`grants_from_access_policy`]: an
+/// accepted body, compiled back, must decide identically. What that compiler
+/// emits, and therefore the only shape accepted here:
+///
+/// - **Items: `[exemption?, everyone]`.** The last item names exactly the
+///   `public` group and carries the rule's mask or filter; an optional first
+///   item names the exempt users/groups and LIFTS the control (`MASK_NONE`
+///   with no value, or `filterExpr: ""`). Ranger takes the first matching
+///   item, so the order is part of the meaning, and anything else — a mask for
+///   named principals only, two different masks, an exemption after the
+///   everyone item — is a per-principal control a [`Rule`] cannot hold.
+/// - **Accesses: exactly `select`** on every item.
+/// - **Resources: as `scope_to_resources` renders them.** A mask renders only
+///   the levels its scope names, so it may stop above the column; a row filter
+///   always renders catalog + schema|database + table, so all three are
+///   required and a `column` is [`Blocker::UnknownLevel`]. Values are kept
+///   verbatim, so a `*` above a named level is ACCEPTED here (product decision
+///   2026-10-10) — the asymmetry with the grant grammar is
+///   [`refuses_wildcard_over_named`].
+/// - **A tag body** (`resources: {tag: [v]}`) becomes `Selector::Tag { key:
+///   v }` when `tag_ids` resolves `v`. `tag_ids` resolves `tags.key`, NEVER
+///   `tags.name` (mutable and non-unique; SP4a D6).
+///
+/// Every candidate also passes [`validate_rule_shape`], the compiler's own
+/// authoring check, as a backstop ([`Blocker::CompilerRefuses`]).
+pub fn rules_from_mask_or_filter_policy(
+    body: &Value,
+    engine: EngineType,
+    catalog_ids: &dyn Fn(&str) -> Option<Uuid>,
+    tag_ids: &dyn Fn(&str) -> Option<Uuid>,
+) -> Result<CandidateRules, Vec<Blocker>> {
+    let mut b = Vec::new();
+
+    unrecognised_fields(body, true, &mut b);
+
+    let policy: RangerPolicy = match serde_json::from_value(body.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            b.push(Blocker::Unreadable {
+                error: e.to_string(),
+            });
+            return Err(dedup(b));
+        }
+    };
+
+    let tag_addressed = policy.resources.contains_key(TAG_LEVEL);
+    let target = match policy.policy_type {
+        1 => Some(PolicyTarget::Mask),
+        2 => Some(PolicyTarget::RowFilter),
+        0 if tag_addressed => {
+            b.push(Blocker::ClearanceNotExpressible);
+            None
+        }
+        other => {
+            b.push(Blocker::NotAMaskOrRowFilter { policy_type: other });
+            None
+        }
+    };
+    common_header(&policy, &mut b);
+
+    let own_bucket = match target {
+        Some(PolicyTarget::Mask) => "dataMaskPolicyItems",
+        Some(PolicyTarget::RowFilter) => "rowFilterPolicyItems",
+        _ => "",
+    };
+    for (bucket, items) in [
+        ("policyItems", &policy.policy_items),
+        ("denyPolicyItems", &policy.deny_policy_items),
+        ("allowExceptions", &policy.allow_exceptions),
+        ("denyExceptions", &policy.deny_exceptions),
+        ("dataMaskPolicyItems", &policy.data_mask_policy_items),
+        ("rowFilterPolicyItems", &policy.row_filter_policy_items),
+    ] {
+        if bucket != own_bucket && !items.is_empty() {
+            b.push(Blocker::ForeignItems { bucket });
+        }
+    }
+
+    for u in &policy.unmodelled {
+        if let Some(blocker) = rule_blocker_from_unmodelled(u) {
+            b.push(blocker);
+        }
+    }
+
+    let selectors: Vec<Selector> = if tag_addressed {
+        tag_selector(&policy.resources, engine, tag_ids, &mut b)
+            .into_iter()
+            .collect()
+    } else if let Some(target) = target {
+        scopes(&policy.resources, engine, target, catalog_ids, &mut b)
+            .into_iter()
+            .map(Selector::Path)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let payload = match target {
+        Some(PolicyTarget::Mask) => rule_items(
+            &policy.data_mask_policy_items,
+            PolicyTarget::Mask,
+            engine,
+            &mut b,
+        ),
+        Some(PolicyTarget::RowFilter) => rule_items(
+            &policy.row_filter_policy_items,
+            PolicyTarget::RowFilter,
+            engine,
+            &mut b,
+        ),
+        _ => None,
+    };
+
+    if !b.is_empty() {
+        return Err(dedup(b));
+    }
+    // Every path that leaves `payload` empty has pushed a blocker; an empty
+    // list here would be a bug, and it still refuses rather than accepts.
+    let Some((kind, exempt)) = payload else {
+        return Err(dedup(b));
+    };
+
+    // `perm.rules.name` is UNIQUE, so N rules from one policy (one per
+    // catalog) need N names; Task 7 owns collisions with existing rows.
+    let n = selectors.len();
+    let rules: Vec<Rule> = selectors
+        .into_iter()
+        .enumerate()
+        .map(|(i, selector)| Rule {
+            id: Uuid::nil(),
+            name: if n == 1 {
+                policy.name.clone()
+            } else {
+                format!("{} #{}", policy.name, i + 1)
+            },
+            kind: kind.clone(),
+            selector,
+            exempt: exempt.clone(),
+        })
+        .collect();
+
+    for rule in &rules {
+        if let Err(e) = validate_rule_shape(rule) {
+            b.push(Blocker::CompilerRefuses {
+                error: e.to_string(),
+            });
+        }
+    }
+    if !b.is_empty() {
+        return Err(dedup(b));
+    }
+
+    Ok(CandidateRules {
+        rules,
+        clearances: Vec::new(),
+    })
+}
+
+/// [`from_unmodelled`] with the three rule-payload constructs ruled on for
+/// rules (an access policy refuses them as foreign items). `None` = the
+/// construct is exactly representable and is not a blocker.
+fn rule_blocker_from_unmodelled(u: &Unmodelled) -> Option<Blocker> {
+    match u {
+        // The reader flags a bare `{TOKEN}` too, but Ranger's mask evaluator
+        // resolves only `${{…}}` (`has_request_expression`'s doc): a CUSTOM
+        // mask's `{col}` is reported verbatim, and the compiler emits it
+        // verbatim — it is exactly what `ensure_custom_mask_parses` requires.
+        Unmodelled::MaskExpressionMarker { expr, .. } => {
+            has_request_expression(expr).then(|| Blocker::MaskExpression { expr: expr.clone() })
+        }
+        // Refused whole: a filter is spliced into the engine's SQL, so being
+        // wrong about a token here fails open (rows unfiltered).
+        Unmodelled::RowFilterExpressionMarker { expr, .. } => {
+            Some(Blocker::FilterExpression { expr: expr.clone() })
+        }
+        Unmodelled::MaskConditionExpr { .. } => Some(Blocker::Conditions),
+        other => Some(from_unmodelled(other)),
+    }
+}
+
+/// A tag-addressed body's single `tag` resource → `Selector::Tag`.
+fn tag_selector(
+    resources: &std::collections::BTreeMap<String, ResourceLevel>,
+    engine: EngineType,
+    tag_ids: &dyn Fn(&str) -> Option<Uuid>,
+    b: &mut Vec<Blocker>,
+) -> Option<Selector> {
+    if engine == EngineType::StarRocks {
+        b.push(Blocker::TagSelectorOnStarRocks);
+    }
+    for key in resources.keys() {
+        if key != TAG_LEVEL {
+            b.push(Blocker::UnknownLevel { level: key.clone() });
+        }
+    }
+    let level = resources.get(TAG_LEVEL)?;
+    if level.is_excludes {
+        b.push(Blocker::ResourceFlag {
+            level: TAG_LEVEL.to_string(),
+            flag: "isExcludes",
+        });
+    }
+    if level.is_recursive {
+        b.push(Blocker::ResourceFlag {
+            level: TAG_LEVEL.to_string(),
+            flag: "isRecursive",
+        });
+    }
+    if level.values.is_empty() || level.values.iter().any(String::is_empty) {
+        b.push(Blocker::EmptyLevel {
+            level: TAG_LEVEL.to_string(),
+        });
+        return None;
+    }
+    // A policy on two tags matches a column carrying either; two tag rules
+    // would be two policies arbitrated against each other on a column
+    // carrying both — not the same artifact.
+    if level.values.len() > 1 {
+        b.push(Blocker::MultipleValues {
+            level: TAG_LEVEL.to_string(),
+            count: level.values.len(),
+        });
+        return None;
+    }
+    let key = &level.values[0];
+    if tag_ids(key).is_none() {
+        b.push(Blocker::UnknownTag { key: key.clone() });
+        return None;
+    }
+    Some(Selector::Tag { key: key.clone() })
+}
+
+/// The rule bucket's items → the rule's kind and its exempt set, when they
+/// are exactly `[exemption?, everyone]` (see
+/// [`rules_from_mask_or_filter_policy`]).
+fn rule_items(
+    items: &[PolicyItem],
+    target: PolicyTarget,
+    engine: EngineType,
+    b: &mut Vec<Blocker>,
+) -> Option<(RuleKind, PrincipalSet)> {
+    if items.is_empty() {
+        b.push(Blocker::NothingToMigrate);
+        return None;
+    }
+    let declared = if target == PolicyTarget::Mask {
+        declared_mask_types(engine).unwrap_or_else(|e| {
+            b.push(Blocker::CompilerRefuses {
+                error: e.to_string(),
+            });
+            Vec::new()
+        })
+    } else {
+        Vec::new()
+    };
+
+    let payloads: Vec<Option<RuleKind>> = items
+        .iter()
+        .enumerate()
+        .map(|(index, it)| {
+            select_only(it, b);
+            rule_payload(index, it, target, &declared, b)
+        })
+        .collect();
+
+    if items.len() > 2 {
+        b.push(Blocker::TooManyRuleItems { count: items.len() });
+        return None;
+    }
+
+    let last = items.len() - 1;
+    let everyone = &items[last];
+    if !(everyone.users.is_empty()
+        && everyone.roles.is_empty()
+        && everyone.groups.len() == 1
+        && everyone.groups[0] == PUBLIC_GROUP)
+    {
+        b.push(Blocker::NotForEveryone { index: last });
+    }
+    for role in &everyone.roles {
+        b.push(Blocker::RolePrincipal { role: role.clone() });
+    }
+
+    let mut include = Vec::new();
+    if last == 1 {
+        let exemption = &items[0];
+        if exemption.groups.iter().any(|g| g == PUBLIC_GROUP) {
+            b.push(Blocker::PublicExemption);
+        }
+        include = principals(exemption, b);
+        if let Some(kind) = &payloads[0] {
+            if !lifts_the_control(kind) {
+                b.push(Blocker::NotAnExemption { index: 0 });
+            }
+        }
+    }
+
+    let kind = payloads[last].clone()?;
+    Some((
+        kind,
+        PrincipalSet {
+            include,
+            exclude: Vec::new(),
+        },
+    ))
+}
+
+/// What `rules::mask_items` / `rowfilter_items` put in the exemption item.
+fn lifts_the_control(kind: &RuleKind) -> bool {
+    match kind {
+        RuleKind::Mask {
+            mask_type,
+            value_expr,
+        } => mask_type == "MASK_NONE" && value_expr.is_none(),
+        RuleKind::RowFilter { filter_expr } => filter_expr.is_empty(),
+    }
+}
+
+/// The compiler gives every mask and row-filter item `accesses: [select]`.
+fn select_only(it: &PolicyItem, b: &mut Vec<Blocker>) {
+    let set = access_set(it);
+    if set.is_empty() {
+        b.push(Blocker::EmptyAccesses);
+    }
+    for access_type in set {
+        if access_type != "select" {
+            b.push(Blocker::UnknownAccessType {
+                access_type: access_type.to_string(),
+            });
+        }
+    }
+}
+
+/// One item's mask or filter payload, or `None` with a blocker pushed.
+fn rule_payload(
+    index: usize,
+    it: &PolicyItem,
+    target: PolicyTarget,
+    declared: &[String],
+    b: &mut Vec<Blocker>,
+) -> Option<RuleKind> {
+    match target {
+        PolicyTarget::Mask => {
+            let info = it.data_mask_info.clone().unwrap_or_default();
+            let Some(mask_type) = info.mask_type else {
+                b.push(Blocker::MaskWithoutType { index });
+                return None;
+            };
+            if !declared.contains(&mask_type) {
+                b.push(Blocker::UnsupportedMaskType {
+                    mask_type: mask_type.clone(),
+                });
+            }
+            if mask_type != "CUSTOM" && info.value_expr.is_some() {
+                b.push(Blocker::ValueExprWithoutCustom {
+                    mask_type: mask_type.clone(),
+                });
+            }
+            Some(RuleKind::Mask {
+                mask_type,
+                value_expr: info.value_expr,
+            })
+        }
+        PolicyTarget::RowFilter => {
+            let Some(filter_expr) = it
+                .row_filter_info
+                .as_ref()
+                .and_then(|i| i.filter_expr.clone())
+            else {
+                b.push(Blocker::MissingFilterExpr { index });
+                return None;
+            };
+            // `replaceDoubleBrackets` rewrites `[[…]]` in the constructor; the
+            // reader does not flag it, so it is checked here.
+            if has_double_brackets(&filter_expr) {
+                b.push(Blocker::FilterExpression {
+                    expr: filter_expr.clone(),
+                });
+            }
+            Some(RuleKind::RowFilter { filter_expr })
+        }
+        PolicyTarget::Access => None,
+    }
 }
