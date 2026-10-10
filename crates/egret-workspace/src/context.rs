@@ -73,8 +73,11 @@ where
         //      `Scope::Platform` permission instead, which is a *platform*
         //      authorization question and says nothing about a workspace.
         //
-        //      Three places enforce `Impersonator::workspace_scope` today (`grep -rn
-        //      workspace_scope crates/ --include='*.rs'`): this guard,
+        //      Three places ENFORCE `Impersonator::workspace_scope` as of 2026-10-10.
+        //      Do not cite a bare `grep -rn workspace_scope crates/` as the evidence:
+        //      it answered 23 files when re-run on 2026-10-10, because most hits read
+        //      or carry the field rather than gate on it. The enforcing subset is
+        //      this guard,
         //      `list_my_workspaces` (which filters the switcher to the scope), and
         //      `egret_perm_compile::routes`' `confine_to_overlay_workspace` (which
         //      confines the `perm` surface to catalogs assigned to the scope, keyed

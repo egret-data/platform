@@ -94,8 +94,11 @@
 # ⚠ THIS SCRIPT PRUNES ONE TREE: the one it was invoked for ($CARGO_TARGET_DIR, or
 # ./target). Several worktrees share this host and other sessions build in them — on
 # 2026-10-01 there were three holding 161 G of `target` between them; on 2026-10-10 there
-# are two, `egret` at 73 G and `egret-sp4a` at 32 G, because a worktree was removed in
-# between. (Those numbers are statements about a moment: re-measure, do not cite them.)
+# are FOUR worktrees (`egret`, `egret-sp4a`, `egret-w7`, `egret-wt-marimo-s0`), of which
+# two held a `target` of that size — `egret` at 73 G and `egret-sp4a` at 32 G. The earlier
+# version of this line said "two", counting target directories and calling them worktrees;
+# the two populations are not the same and the enumeration below walks the worktrees.
+# (Those numbers are statements about a moment: re-measure, do not cite them.)
 # The tempting fix for a full disk is a sweep across all of them, and it is the wrong one:
 # this script runs from a post-commit hook in whichever worktree committed, with no
 # knowledge of what the others are mid-build on, and deleting another tree's `deps/` while

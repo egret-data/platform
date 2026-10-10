@@ -2026,8 +2026,19 @@ fn validate_explain_target(target: &Scope) -> Result<(), PermHttpError> {
 /// catalog↔workspace: `registry.catalog_workspaces`, the table
 /// `egret_perm::sync_assignment_grants_in_tx` derives its implicit grants from.
 /// A catalog the overlay's workspace is not assigned is `Forbidden`, which is also
-/// what a uuid naming no catalog gets — so a contained caller cannot use this
-/// route to probe which uuids are real.
+/// what a uuid naming no catalog gets — so a contained caller cannot use the
+/// CATALOG uuid in a request body to probe which catalogs are real.
+///
+/// ⚠ **That non-disclosure covers the body's catalog uuid and nothing else.** An
+/// earlier version of this paragraph stopped at "this route", which reads as a
+/// claim about every uuid the route accepts; the whole-branch review (2026-10-10,
+/// finding L-1) showed it is false for the GRANT and RULE uuids in the PATH,
+/// which answer `404` for a uuid naming no row and `403` for one naming a row in
+/// another workspace — so a contained caller can still learn that a grant id
+/// exists somewhere. That gap is recorded as accepted debt, not covered here:
+/// closing it means returning `404` for a row that does exist but is not the
+/// caller's to see, which is a decision about every `perm` read, not about this
+/// guard.
 ///
 /// **An unscoped overlay (`workspace_scope == None`, a platform_admin acting as
 /// someone) is unrestricted here, exactly as it is in `WsContext`.**
