@@ -2168,7 +2168,7 @@ async fn editing_a_tag_policy_runs_the_same_refusals_as_creating_one() {
     });
     let (status, body) = into_json(
         f.app_empty()
-            .oneshot(req("POST", "/policies", &token, Some(create.clone())))
+            .oneshot(req("POST", "/policies", &token, Some(create)))
             .await
             .unwrap(),
     )
@@ -2269,15 +2269,26 @@ async fn editing_a_tag_policy_runs_the_same_refusals_as_creating_one() {
     );
 
     // ── ACCEPT control, and the one that proves `replacing: Some(id)` is
-    // wired: re-PUT the first policy's own body. Without the exclusion this is
-    // a refusal no retry could escape.
+    // wired: edit the first policy IN PLACE — same tag, DIFFERENT items.
+    //
+    // ⚠ This was first written as a re-PUT of the policy's own unchanged body,
+    // and the `M5-replacing-arg` mutation (`Some(id)` → `None`) SURVIVED it:
+    // Task 6's rule refuses two policies selecting the same resource with
+    // DIFFERENT items, and a body byte-identical to the stored one disagrees
+    // with nothing, so it passed either way. An assertion that cannot fail is
+    // not an assertion. Changing the items is what makes the self-pair a
+    // disagreeing one, so the exclusion is the only thing that admits it.
     let (status, body) = into_json(
         f.app_empty()
             .oneshot(req(
                 "PUT",
                 &format!("/policies/{id}"),
                 &token,
-                Some(create.clone()),
+                Some(serde_json::json!({
+                    "kind": "tag-masking", "name": policy_name, "service": trino_name,
+                    "tag": format!("t16-unattached-{suffix}"), "isEnabled": true,
+                    "items": [{"groups": ["analysts"], "maskType": "MASK_NULL"}]
+                })),
             ))
             .await
             .unwrap(),
@@ -2286,10 +2297,149 @@ async fn editing_a_tag_policy_runs_the_same_refusals_as_creating_one() {
     assert_eq!(
         status,
         StatusCode::OK,
-        "re-saving a tag policy's own body must be accepted — the arbitration guard must \
-         not pair it against the row it replaces; body={body}"
+        "editing a tag policy in place must be accepted — the arbitration guard must not \
+         pair the new body against the row it replaces; body={body}"
+    );
+    let stored = f.store.get_policy(id).await.expect("get policy");
+    assert_eq!(
+        stored.policy_jsonb["dataMaskPolicyItems"][0]["dataMaskInfo"]["dataMaskType"], "MASK_NULL",
+        "and the accepted edit must have landed; body={}",
+        stored.policy_jsonb
     );
 
     f.store.delete_service(trino_svc.id).await.expect("cleanup");
     f.store.delete_service(tag_svc.id).await.expect("cleanup");
+}
+
+/// **A guard pointed at the wrong policy set is not running.** `PUT
+/// /policies/{id}` took the profile to validate against from the REQUEST BODY
+/// while `store.update_policy` wrote the row under its OWN `service_id`, which
+/// it never changes — so naming a different, empty profile had every guard in
+/// the handler (Task 6's arbitration guard above all) evaluate against that
+/// profile's policy set and pass, while the row stayed where it was and was
+/// served alongside the policy it ties with.
+///
+/// Found while routing Task 16's new tag branch through the create path's
+/// guards; pre-existing on the resource-addressed path since Task 6, and
+/// reachable on the tag path too (a different trino profile resolves a
+/// different tag service).
+///
+/// ⚠ The accept-control is in the same test and it is the one that keeps this
+/// from being "PUT is refused": re-sending the SAME profile is accepted, and
+/// the edit lands. The console only ever sends that one — the editor route
+/// carries the profile and the Tags tab links every row through it.
+#[tokio::test]
+async fn put_policies_refuses_a_service_that_is_not_the_policys_own() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t16mismatch", true).await;
+    egret_policy::seed_trino(&f.store)
+        .await
+        .expect("seed trino");
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let (home_name, home_id) = seed_service(&f).await;
+    let elsewhere_name = format!("t16else-{suffix}");
+    let elsewhere = f
+        .store
+        .create_service(&elsewhere_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create a second, empty profile");
+
+    // A row filter under `home`. It is a row filter because that is the class
+    // Task 6's guard reads, so this is the bypass that mattered.
+    let policy_name = format!("t16rf-{suffix}");
+    let body_for = |service: &str, expr: &str| {
+        serde_json::json!({
+            "kind": "rowfilter", "name": policy_name, "service": service,
+            "isEnabled": true,
+            "resources": {
+                "catalog": {"values": ["iceberg"]},
+                "schema": {"values": ["sales"]},
+                "table": {"values": ["orders"]}
+            },
+            "items": [{"groups": ["analysts"], "filterExpr": expr}]
+        })
+    };
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies",
+                &token,
+                Some(body_for(&home_name, "region = 'eu'")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create row filter; body={body}");
+    let id = body["id"].as_i64().expect("id");
+
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "PUT",
+                &format!("/policies/{id}"),
+                &token,
+                Some(body_for(&elsewhere_name, "region = 'us'")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a PUT naming a profile the policy does not belong to must be refused — every \
+         guard in the handler would otherwise be evaluated against that profile; body={body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains(&elsewhere_name) && msg.contains(&home_id.to_string()),
+        "the refusal must name both the profile sent and the profile the policy belongs \
+         to; got {msg}"
+    );
+    let stored = f.store.get_policy(id).await.expect("get policy");
+    assert_eq!(
+        stored.policy_jsonb["rowFilterPolicyItems"][0]["rowFilterInfo"]["filterExpr"],
+        "region = 'eu'",
+        "a refused PUT must have written nothing; body={}",
+        stored.policy_jsonb
+    );
+    assert_eq!(
+        stored.service_id, home_id,
+        "and must not have moved the row"
+    );
+
+    // ACCEPT control: the policy's OWN profile, same request otherwise.
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "PUT",
+                &format!("/policies/{id}"),
+                &token,
+                Some(body_for(&home_name, "region = 'us'")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the policy's own profile must still be accepted; body={body}"
+    );
+    let stored = f.store.get_policy(id).await.expect("get policy");
+    assert_eq!(
+        stored.policy_jsonb["rowFilterPolicyItems"][0]["rowFilterInfo"]["filterExpr"],
+        "region = 'us'",
+        "the accepted PUT must have landed; body={}",
+        stored.policy_jsonb
+    );
+
+    f.store.delete_service(elsewhere.id).await.expect("cleanup");
+    f.store.delete_service(home_id).await.expect("cleanup");
 }

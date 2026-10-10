@@ -1257,6 +1257,52 @@ async fn guard_tag_policy_authoring(
     refuse_ambiguous_arbitration(st, tag_service_id, replacing, pol).await
 }
 
+/// **A guard pointed at the wrong policy set is not running** — so a `PUT` must
+/// be refused when the service its body NAMES is not the service the row it is
+/// replacing actually LIVES under.
+///
+/// Found by measurement while routing Task 16's new tag branch through the
+/// create path's guards, and **pre-existing on the resource-addressed path
+/// since Task 6**. `store.update_policy` never writes `service_id`, so a
+/// mismatched `service` could not MOVE a policy; what it could do is have every
+/// guard in this handler evaluated against a different profile's policy set
+/// while the row stayed where it was. Task 6's arbitration guard is the one that
+/// matters: name an empty profile and the comparison set is empty, so the pair
+/// it exists to refuse is accepted, and the row — still under its original
+/// service — is then served alongside the policy it ties with. The mutation
+/// `M8-service-mismatch` is the measurement: with this check removed, the
+/// bypass succeeds and `put_policies_refuses_a_service_that_is_not_the_policys_own`
+/// is the test that dies.
+///
+/// It also closes an incoherence of its own: the stored body's `service` and
+/// `serviceType` fields would name a profile the row does not belong to, and
+/// `serviceType` is what `editor_to_ranger_json` stamps from the NAMED
+/// profile's type — so a policy stored under a trino profile could carry
+/// `serviceType: "starrocks"`.
+///
+/// Refuses only a hand-made request. The console always names the service the
+/// row belongs to: the editor route carries the profile, and a tag policy's row
+/// lives under exactly that profile's tag service
+/// (`frontend/src/routes/governance/ProfileDetailPage.tsx`'s `editPath` links
+/// every Tags-tab row through the main profile for this reason).
+fn refuse_service_mismatch(
+    row_service_id: i64,
+    named: &crate::store::ServiceRow,
+    id: i64,
+) -> Result<(), PolicyHttpError> {
+    if row_service_id == named.id {
+        return Ok(());
+    }
+    Err(PolicyHttpError::BadRequest(format!(
+        "policy {id} belongs to policy profile id {row_service_id}, but this body targets \
+         {:?} (id {}). A policy cannot be moved between profiles by editing it — delete it \
+         and create it under the other profile. Send the profile the policy already belongs \
+         to; for a tag policy that is the trino profile whose `tagService` names its tag \
+         profile.",
+        named.name, named.id
+    )))
+}
+
 /// Read the required `service` name from an editor policy body, or 400.
 fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
     v.get("service")
@@ -1378,7 +1424,7 @@ async fn create_policy(
     request_body = Object,
     responses(
         (status = 200, description = "Policy replaced", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input, missing policy name, a tag policy whose profile has no configured `tagService`, a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter body that would be served alongside another policy selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)", body = ErrorBody),
+        (status = 400, description = "Invalid editor input, missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter body that would be served alongside another policy selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
@@ -1393,6 +1439,11 @@ async fn update_policy(
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    // The row this `PUT` replaces, read before anything else, so both branches
+    // can check the body's `service` against the profile the policy actually
+    // lives under — see `refuse_service_mismatch`. 404s here for an unknown id,
+    // which is the status this route already answered for one.
+    let row = st.store.get_policy(id).await?;
 
     // SP4d debt Task 16 — mirrors `create_policy`'s branch. The form's
     // `service` is the trino PROFILE (that is what the editor route carries and
@@ -1407,6 +1458,7 @@ async fn update_policy(
     // write transaction.
     if is_tag_kind(&v) {
         let (svc, pol) = resolve_tag_service_and_body(&st, &v).await?;
+        refuse_service_mismatch(row.service_id, &svc, id)?;
         guard_tag_policy_authoring(&st, svc.id, Some(id), &pol).await?;
         st.store
             .update_policy(id, &pol.name, &pol.body, pol.is_enabled)
@@ -1418,6 +1470,7 @@ async fn update_policy(
     // Resolve the target service's Ranger type (and validate it exists) so the
     // serialized body carries the correct `serviceType` (trino|starrocks).
     let svc = st.store.get_service(service_name).await?;
+    refuse_service_mismatch(row.service_id, &svc, id)?;
     let pol = editor_to_ranger_json(&v, &svc.r#type).map_err(PolicyHttpError::BadRequest)?;
     if pol.name.trim().is_empty() {
         return Err(PolicyHttpError::BadRequest(
