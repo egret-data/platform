@@ -379,7 +379,7 @@ pub(crate) const ROW_FILTER_LEVELS: usize = 3;
 /// before changing this predicate.
 ///
 /// A `*` IS refused in one shape, and by a different function:
-/// [`ensure_a_wildcard_level_has_nothing_named_beneath_it`] (SP4d debt Task 14)
+/// [`ensure_a_grant_wildcard_level_has_nothing_named_beneath_it`] (SP4d debt Task 14)
 /// refuses a match-any level with a NAMED level under it, because that is the
 /// level skip `perm.grants`' own `grants_check` already forbids. It is a separate
 /// predicate on purpose — `''` is refused at every level unconditionally, a
@@ -497,12 +497,54 @@ fn level_is_a_wildcard_run(value: &str) -> bool {
 /// `('sales','orders','*')` — every shape where a wildcard has nothing named
 /// beneath it.
 ///
-/// Four call sites, the same four as [`ensure_scope_levels_are_named`] and for the
-/// same reasons — `validate_grant_shape` and `compile_grant` on the grant side,
-/// `crate::rules::validate_rule_shape` and `crate::rules::compile_rule` on the
-/// rule side; `catalog` is out of the loop for the same measured reason too
-/// (`0147`'s `name` allow-list cannot hold a `*`).
-pub(crate) fn ensure_a_wildcard_level_has_nothing_named_beneath_it(
+/// # ⚠ `perm.grants` ONLY — and the name of this function is how that is carried
+///
+/// **Two call sites, not four**: `validate_grant_shape` and `compile_grant`.
+/// [`ensure_scope_levels_are_named`] still has four, because `''` is refused on
+/// both tables; this one is not. Product decision 2026-10-10, recorded in
+/// `migrations/0179`'s closing section, which also dropped that migration's
+/// `perm.rules` constraint.
+///
+/// The ruling: *wider than the author wrote* points in OPPOSITE directions on
+/// the two tables. On `perm.grants` a match-any level above a named one widens
+/// **AUTHORITY** — the measured escalation, a grant written for one table
+/// enforced in every schema of the catalog — and fails OPEN. On `perm.rules` the
+/// same shape widens **RESTRICTION**: it withholds more, it fails CLOSED, both
+/// plugins enforce it (every `dataMaskDef` level is `"wildCard": true` on
+/// `ranger-plugins-common` 2.5.0 for Trino 470 and 2.8.0 for StarRocks
+/// fe-ubuntu 4.1), and `('sales','*','email')` — mask `email` in every table of
+/// `sales` — is a control a steward writes on purpose. It used to work. This is
+/// the same line `0178` draws: `''` is an absence and stays refused everywhere,
+/// a literal `*` the author typed is an authored value.
+///
+/// **How the grant/rule distinction is carried, and how it is NOT.** There is
+/// still exactly ONE predicate over a level value — [`level_is_a_wildcard_run`] —
+/// and ONE rule that walks the levels, this function. The distinction lives in
+/// this function's NAME and in which call sites reference it; `crate::rules` does
+/// not import it. It is deliberately **not** a `bool` or a table-kind enum
+/// threaded through the callers: a flag two call sites must agree about is the
+/// two-guards-must-agree shape that has produced a defect on this branch five
+/// times, once inside the fix for it. Adding a parameter here to re-enable the
+/// rule path would re-create exactly that.
+///
+/// **⚠ The trade-off the ruling accepts**, stated here because this is where a
+/// reader meets the asymmetry: a broad mask can win Ranger's evaluation order and
+/// apply a WEAKER mask than a narrow mask on the same table would — two mask
+/// policies on one column at the same `policyPriority` are arbitrated with `>=`
+/// and the tie-break is not expressed in the artifact. That is the already-open
+/// ambiguous-priority debt (`egret_policy::ambiguous_arbitration` refuses the
+/// differing pair at the authoring boundary), **not** a new hole opened by this
+/// decision, and it is deliberately not addressed here.
+///
+/// `catalog` is out of the loop for the same measured reason as
+/// [`ensure_scope_levels_are_named`] (`0147`'s `name` allow-list cannot hold a
+/// `*`).
+///
+/// Both cells are asserted on this branch — the grant-path refusal in
+/// `tests/compile_grants.rs`, the rule-path ACCEPT in `tests/compile_rules.rs`'s
+/// `a_wildcard_path_level_over_a_named_one_is_allowed_on_a_rule` — because a
+/// predicate that answers differently for two tables is unproven without both.
+pub(crate) fn ensure_a_grant_wildcard_level_has_nothing_named_beneath_it(
     scope: &Scope,
 ) -> Result<(), CompileError> {
     let levels = [
@@ -573,7 +615,7 @@ pub(crate) fn ensure_a_wildcard_level_has_nothing_named_beneath_it(
 /// the gate and fails the compile.
 pub fn validate_grant_shape(g: &Grant) -> Result<(), CompileError> {
     ensure_scope_levels_are_named(&g.scope)?;
-    ensure_a_wildcard_level_has_nothing_named_beneath_it(&g.scope)?;
+    ensure_a_grant_wildcard_level_has_nothing_named_beneath_it(&g.scope)?;
     principal_item(&g.principals.include, g.effect, &[], Expansion::NotYet)?;
     principal_item(&g.principals.exclude, g.effect, &[], Expansion::NotYet)?;
     Ok(())
@@ -604,7 +646,7 @@ pub fn compile_grant(
     e: EngineType,
 ) -> Result<AccessPolicyInput, CompileError> {
     ensure_scope_levels_are_named(&g.scope)?;
-    ensure_a_wildcard_level_has_nothing_named_beneath_it(&g.scope)?;
+    ensure_a_grant_wildcard_level_has_nothing_named_beneath_it(&g.scope)?;
 
     let mut accesses: Vec<String> = Vec::new();
     for action in &g.actions {
@@ -670,7 +712,7 @@ mod tests {
     /// **What masked it was call order, not coverage.** All four production call
     /// sites run [`ensure_scope_levels_are_named`] first, and it refuses `''` at
     /// every level, so no end-to-end test can reach the disagreement. This test
-    /// therefore calls [`ensure_a_wildcard_level_has_nothing_named_beneath_it`]
+    /// therefore calls [`ensure_a_grant_wildcard_level_has_nothing_named_beneath_it`]
     /// directly. A guardrail whose correctness rests on another function running
     /// first needs a test at its own boundary, because the next caller is one
     /// `pub(crate)` away from not running it.
@@ -693,7 +735,7 @@ mod tests {
             scope(Some("sales"), Some(""), Some("email")),
         ] {
             assert_eq!(
-                ensure_a_wildcard_level_has_nothing_named_beneath_it(&s),
+                ensure_a_grant_wildcard_level_has_nothing_named_beneath_it(&s),
                 Ok(()),
                 "{s:?}: an EMPTY level is a level that NAMES NOTHING — `0178`'s \
                  refusal, not this one. Firing here contradicts `0179`'s CHECK, \
@@ -706,7 +748,7 @@ mod tests {
         // beneath it, so the assertions above cannot be passing because the
         // function has gone inert.
         assert!(
-            ensure_a_wildcard_level_has_nothing_named_beneath_it(&scope(
+            ensure_a_grant_wildcard_level_has_nothing_named_beneath_it(&scope(
                 Some("*"),
                 Some("orders"),
                 None,

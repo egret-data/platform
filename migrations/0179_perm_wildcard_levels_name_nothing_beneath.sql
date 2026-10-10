@@ -1,8 +1,16 @@
 -- 0179_perm_wildcard_levels_name_nothing_beneath.sql
 --
 -- SP4d debt Task 14, and it is the half Task 12 (`0178`) deliberately left:
--- a `perm.grants` or `perm.rules` path level that Ranger reads as "every value
--- at this level" may not have a NAMED level beneath it.
+-- a `perm.grants` path level that Ranger reads as "every value at this level"
+-- may not have a NAMED level beneath it.
+--
+-- ⚠ **`perm.grants` ONLY.** This migration first shipped the same CHECK on
+-- `perm.rules` as well; a product decision on 2026-10-10 removed that half,
+-- because on a rule the shape widens RESTRICTION and fails CLOSED and both
+-- plugins enforce it. The section "`perm.rules` IS DELIBERATELY NOT CONSTRAINED
+-- HERE" at the end of this file carries the ruling and the trade-off it accepts;
+-- read it before adding a rule-side constraint back. Everything between here and
+-- there is about `perm.grants`, where the escalation was measured.
 --
 -- THIS IS NOT "`*` IS ILLEGITIMATE", and the predicate below refuses nothing a
 -- steward writes on purpose. A grant scoped to a whole catalog, a grant scoped
@@ -42,7 +50,7 @@
 --   | `schema_name = '',   table_name = 'orders'`             | rejected by `grants_scope_levels_are_named`|
 --   | `schema_name = 'sales', table_name = '*', col = 'email'`| **ACCEPTED**                              |
 --   | `schema_name = '*', table_name = '*', col = 'email'`    | **ACCEPTED**                              |
---   | `perm.rules`: `('*', 'orders', 'email')`                | **ACCEPTED**                              |
+--   | `perm.rules`: `('*', 'orders', 'email')`                | **ACCEPTED** — and STAYS accepted (see end)|
 --
 -- The two rejections are the control, and they are what make this a
 -- measurement rather than a probe that could not fail: the SAME level skip,
@@ -169,43 +177,68 @@ ALTER TABLE perm.grants
             OR column_name ~ '^[*]+$')
     );
 
--- `perm.rules` carries the same three columns, written by the same kind of
--- author through `routes::write_rule`, rendered by the same
--- `scope_to_resources`, and it has the SAME two level-skip CHECKs from `0154`
--- that this predicate is making consistent. It is not the same severity — a
--- match-any level on a mask or a row filter makes the control cover every
--- sibling at that level, so it withholds MORE than the author wrote rather than
--- granting more — and it is included for the same reason `0178` included it:
--- the predicate, the Rust refusal and the test are the same ones, probe row 6
--- above shows the write was accepted, and
--- `rules::ensure_row_filter_scope_is_a_table` — whose whole job is to refuse a
--- row-filter scope that is not exactly catalog+schema+table — counts
--- `schema_name = '*'` as a NAMED schema, exactly as `0178` found it counting
--- `''` as one.
+-- ── `perm.rules` IS DELIBERATELY NOT CONSTRAINED HERE ───────────────────────
 --
--- The Rust twin runs at BOTH rule-side positions — `rules::validate_rule_shape`
--- and `rules::compile_rule` — which is one more than `0178` shipped with. Task
--- 12 left `compile_rule` unguarded on a fail-closed severity argument; that
--- argument is sound about severity and does not answer what a `pub` entry point
--- should emit, so Task 14 added the call. `rules::compile_rule`'s doc carries the
--- reasoning, including why `ensure_row_filter_scope_is_a_table` staying at the
--- authoring boundary is a DIFFERENT case: the shapes it refuses are still
--- storable under `0154`, and `scope_to_resources`' `RowFilter` arm exists to keep
--- such a stored row compiling to something matchable.
+-- **PRODUCT DECISION, 2026-10-10.** This migration shipped a second, identical
+-- CHECK on `perm.rules`, and that constraint has been REMOVED. A path level that
+-- Ranger reads as match-any with a NAMED level beneath it — `('sales','*','email')`
+-- as a mask, `('*','orders')` as a row filter — is legal on `perm.rules` again.
+-- `perm.grants` keeps the constraint above, unchanged.
 --
--- Note which rule shapes this still allows, because they are not gaps: a mask
--- on `('sales','orders','*')` (every column of one table) and a row filter on
--- `('*','*')` (every table of every schema) both leave nothing named under a
--- match-any level, and both stay writable.
-ALTER TABLE perm.rules
-    ADD CONSTRAINT rules_wildcard_levels_name_nothing_beneath
-    CHECK (
-        (schema_name IS NULL
-            OR schema_name !~ '^[*]+$'
-            OR ((table_name IS NULL OR table_name ~ '^[*]+$')
-                AND (column_name IS NULL OR column_name ~ '^[*]+$')))
-        AND (table_name IS NULL
-            OR table_name !~ '^[*]+$'
-            OR column_name IS NULL
-            OR column_name ~ '^[*]+$')
-    );
+-- THE JUSTIFICATION ABOVE IS FALSE ON THE RULE PATH, AND THAT IS THE FINDING.
+-- The grant-side argument is "the artifact is wider than the author wrote". It
+-- does not transfer, because *wider* points in opposite directions on the two
+-- tables:
+--
+--   * On `perm.grants` a match-any level above a named one widens AUTHORITY. The
+--     measurement above is exactly that escalation: the compiled policy is
+--     enforced in every schema of the catalog, so a grant written for one table
+--     hands out access to its namesake in every other schema. It fails OPEN, and
+--     it stays refused.
+--   * On `perm.rules` the same shape widens RESTRICTION. A mask or a row filter
+--     covering every sibling at that level withholds MORE than a narrow one
+--     would — it fails CLOSED. `('sales','*','email')` is "mask `email` in every
+--     table of `sales`", which is a control a steward writes ON PURPOSE, and
+--     both plugins enforce it: every level of `dataMaskDef` is declared
+--     `"wildCard": true` on `ranger-plugins-common` 2.5.0 (Trino 470) and on
+--     2.8.0 (StarRocks fe-ubuntu 4.1). It used to work. Refusing it took a
+--     working, enforced control away from the author to make two tables look
+--     alike.
+--
+-- This is the same line `0178` draws, and drawing it the same way is the point.
+-- `0178` refuses `''` on BOTH tables and keeps `'*'` legal on both, because `''`
+-- is not something an author types for a reason while `'*'` is. A literal `*`
+-- the author typed is an authored value; `''` and NULL are absences. So:
+--
+--   * `0178`'s `<> ''` STAYS on both tables. `''` is not a run of `*`, and it
+--     remains refused everywhere.
+--   * `0154`'s level-skip CHECKs STAY on both tables. On `perm.rules` those are
+--     `rules_check3` (`schema_name IS NOT NULL OR table_name IS NULL`) and
+--     `rules_check4` (`table_name IS NOT NULL OR column_name IS NULL`), so
+--     `('sales', NULL, 'email')` is still rejected. Only a literal `*` the
+--     author typed becomes legal again — a NULL level is still refused.
+--
+-- ⚠ THE TRADE-OFF THIS ACCEPTS, stated here because this is where a reader
+-- meets the decision. A broad mask can win Ranger's evaluation order and apply a
+-- WEAKER mask than a narrow mask on the same table would: two mask policies
+-- selecting one column at the same `policyPriority` are arbitrated with `>=`, so
+-- the first evaluator in the band is final and which one that is falls through to
+-- a tie-break the artifact does not express. That is the ALREADY-OPEN
+-- ambiguous-priority debt — see `egret_policy::ambiguous_arbitration`, which
+-- detects and refuses the differing pair at the authoring boundary — and NOT a
+-- new hole opened by this decision. It is not addressed here, deliberately: the
+-- fix is priority arbitration, not a CHECK that forbids the broad mask.
+--
+-- WHAT THIS MEANS FOR THE RUST SIDE. `grants::ensure_a_grant_wildcard_level_has_nothing_named_beneath_it`
+-- is named for the table it binds to, and `rules::validate_rule_shape` /
+-- `rules::compile_rule` no longer call it. There is still ONE predicate over the
+-- level tuple — `grants::level_is_a_wildcard_run` — and the grant/rule
+-- distinction is carried by that single function's name and its call sites
+-- rather than by a flag a caller passes in, because a boolean two callers must
+-- agree about is the shape that has produced a defect on this branch five times.
+--
+-- Note which rule shapes were never in question, because they are not gaps
+-- either way: a mask on `('sales','orders','*')` (every column of one table) and
+-- a row filter on `('*','*')` (every table of every schema) both leave nothing
+-- named under a match-any level, and both were writable before this decision and
+-- remain so.

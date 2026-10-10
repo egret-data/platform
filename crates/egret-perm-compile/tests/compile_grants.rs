@@ -703,6 +703,23 @@ fn a_wildcard_level_over_a_named_one_is_refused_and_a_wildcard_tail_is_not() {
             "amount",
             scope(Some("sales"), Some("*"), Some("amount")),
         ),
+        // ⚠ **THE OTHER HALF OF THE 2026-10-10 RULING, and it belongs in a
+        // refuse set precisely because its twin is in an accept set.** This exact
+        // tuple — `('sales','*','email')` — is ACCEPTED on `perm.rules` by
+        // `compile_rules.rs`'s
+        // `a_wildcard_path_level_over_a_named_one_is_allowed_on_a_rule`, because
+        // a mask there widens RESTRICTION and fails closed. On a GRANT the same
+        // tuple widens AUTHORITY: it compiles to a policy enforced in every
+        // schema of the catalog, which is the measured escalation. One predicate
+        // now answers differently for two tables, so BOTH cells are asserted on
+        // this branch — otherwise nothing notices when one side drifts.
+        (
+            "table",
+            "*",
+            "column",
+            "email",
+            scope(Some("sales"), Some("*"), Some("email")),
+        ),
     ] {
         let expected = CompileError::NamedLevelUnderWildcard {
             wildcard,

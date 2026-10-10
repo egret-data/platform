@@ -97,8 +97,8 @@ use egret_policy::{starrocks_service_def, trino_service_def, COMPILER_RULE_PREFI
 use egret_perm::{CompileError, EngineType, PrincipalKind, PrincipalSet, Rule, RuleKind, Selector};
 
 use crate::grants::{
-    ensure_a_wildcard_level_has_nothing_named_beneath_it, ensure_scope_levels_are_named, level,
-    resource_level_names, scope_to_resources, validate_user_ref, PolicyTarget, ROW_FILTER_LEVELS,
+    ensure_scope_levels_are_named, level, resource_level_names, scope_to_resources,
+    validate_user_ref, PolicyTarget, ROW_FILTER_LEVELS,
 };
 
 /// One column carrying the tag a rule selects on, resolved by the CALLER —
@@ -138,12 +138,7 @@ pub struct ResolvedNames<'a> {
 /// severity: an empty level makes a mask or row filter cover every sibling at
 /// that level, which withholds more than the author wrote instead of granting
 /// more, and `ensure_row_filter_scope_is_a_table` below would otherwise accept
-/// `schema = ''` as a named schema), a path selector that names a level BENEATH
-/// a match-any one (`NamedLevelUnderWildcard` — SP4d debt Task 14; see
-/// [`crate::grants::ensure_a_wildcard_level_has_nothing_named_beneath_it`], and
-/// the same asymmetry and the same `ensure_row_filter_scope_is_a_table` hole
-/// apply: it counts `schema = '*'` as a named schema exactly as it counted `''`
-/// as one),
+/// `schema = ''` as a named schema),
 /// a `CUSTOM` mask expression that does not parse (`InvalidCustomMask`),
 /// and an exempt set a masking/row-filter item cannot express — a non-empty
 /// `exempt.exclude`, a `Role`, the literal `public` group
@@ -166,8 +161,16 @@ pub fn validate_rule_shape(r: &Rule) -> Result<(), CompileError> {
         }
     }
     if let Selector::Path(scope) = &r.selector {
+        // ⚠ `grants::ensure_a_grant_wildcard_level_has_nothing_named_beneath_it`
+        // is deliberately NOT called here — product decision 2026-10-10, recorded
+        // in `migrations/0179`'s closing section. A match-any level above a named
+        // one widens AUTHORITY on a grant (fails open: the measured escalation)
+        // and widens RESTRICTION on a rule (fails closed), and both plugins
+        // enforce the rule form, so `('sales','*','email')` as a mask is a
+        // control a steward writes on purpose. `''` is still refused on both
+        // tables by the call below, because `''` is an absence rather than an
+        // authored value — the same line `0178` draws.
         ensure_scope_levels_are_named(scope)?;
-        ensure_a_wildcard_level_has_nothing_named_beneath_it(scope)?;
     }
     ensure_row_filter_scope_is_a_table(r)?;
     exempt_principals(r)?;
@@ -198,16 +201,26 @@ pub fn validate_rule_shape(r: &Rule) -> Result<(), CompileError> {
 /// `table`), so there is no scope for an author to get wrong.
 ///
 /// ⚠ **`Some(_)` in the match below means "the level is PRESENT", not "the level
-/// NAMES something"**, and that is why two SP4d debt tasks had to run ahead of
-/// this function rather than widen it. `(Some(""), Some("orders"), None)` and
-/// `(Some("*"), Some("orders"), None)` both land on the `(Some(_), Some(_),
-/// None)` arm and are accepted here as "a table", while in enforcement terms
-/// both are a table with NO schema. [`validate_rule_shape`] runs
-/// [`crate::grants::ensure_scope_levels_are_named`] (Task 12) and
-/// [`crate::grants::ensure_a_wildcard_level_has_nothing_named_beneath_it`]
-/// (Task 14) BEFORE this call, so neither shape reaches it. Widening these arms
-/// instead would have put one rule in two places; the ORDER of the three calls
-/// in `validate_rule_shape` is what keeps it in one.
+/// NAMES something"**, and the two shapes that exploited that are now settled
+/// differently from each other.
+///
+/// `(Some(""), Some("orders"), None)` and `(Some("*"), Some("orders"), None)`
+/// both land on the `(Some(_), Some(_), None)` arm and are accepted here as "a
+/// table", while in enforcement terms both are a table with NO schema.
+///
+/// * `''` never reaches this function: [`validate_rule_shape`] runs
+///   [`crate::grants::ensure_scope_levels_are_named`] (Task 12) first, and
+///   `0178` refuses the value in the table as well.
+/// * `'*'` **does** reach it now, and is **accepted on purpose** — product
+///   decision 2026-10-10 (`migrations/0179`'s closing section). A row filter on
+///   `('*','orders')` is "filter `orders` in every schema", which withholds more
+///   rather than fewer: it fails CLOSED, both plugins enforce it, and the author
+///   typed the `*`. Task 14's rule-side refusal, which used to keep this shape
+///   away from here, has been removed.
+///
+/// So this function's job is unchanged — a row-filter scope must name catalog +
+/// schema + table — and it is no longer relying on an upstream guard to keep a
+/// match-any schema out of its `Some(_)` arm.
 fn ensure_row_filter_scope_is_a_table(r: &Rule) -> Result<(), CompileError> {
     let (RuleKind::RowFilter { .. }, Selector::Path(scope)) = (&r.kind, &r.selector) else {
         return Ok(());
@@ -257,26 +270,42 @@ fn ensure_row_filter_scope_is_a_table(r: &Rule) -> Result<(), CompileError> {
 /// tag policy, `tagify` overwrites it with `tag_service` regardless of what
 /// is passed here).
 ///
-/// # The two SCOPE-SHAPE refusals run here as well as at the authoring boundary
+/// # The SCOPE-SHAPE refusal that runs here as well as at the authoring boundary
 ///
 /// A `Path` selector's scope goes through
-/// [`crate::grants::ensure_scope_levels_are_named`] (SP4d debt Task 12) and
-/// [`crate::grants::ensure_a_wildcard_level_has_nothing_named_beneath_it`] (SP4d
-/// debt Task 14), exactly as `compile_grant` does.
+/// [`crate::grants::ensure_scope_levels_are_named`] (SP4d debt Task 12), exactly
+/// as `compile_grant` does: `''` is an absence, not an authored value, and a
+/// `pub` entry point should not emit an artifact its own validator refuses.
 ///
-/// ⚠ **They did NOT run here until Task 14, and the reason they did not is worth
-/// keeping because it was half right.** Task 12 left `compile_rule` unguarded on
-/// a severity argument: an unnamed level makes a mask or row filter cover every
-/// sibling at that level, so a wrong rule artifact withholds MORE than the author
-/// wrote (fails closed) while a wrong grant artifact ALLOWS more (fails open).
-/// That argument is sound **about severity** and not sound **about a `pub` entry
-/// point**: `compile_rule` is public and can be handed a `Rule` built in Rust
-/// that never went near the store, such a caller got no refusal at all, and an
-/// artifact that withholds more than the author wrote is still a wrong artifact —
-/// it is a control the author cannot read off what they wrote. It is the same
-/// argument that put the guard inside `compile_grant` rather than only at the
-/// boundary, and the severity difference does not change whether a `pub` function
-/// should emit an artifact its own validator refuses.
+/// ⚠ **It did NOT run here until Task 14, and the reason is worth keeping because
+/// it was half right.** Task 12 left `compile_rule` unguarded on a severity
+/// argument: an unnamed level makes a mask or row filter cover every sibling at
+/// that level, so a wrong rule artifact withholds MORE than the author wrote
+/// (fails closed) while a wrong grant artifact ALLOWS more (fails open). That
+/// argument is sound **about severity** and not sound **about a `pub` entry
+/// point**, so the `''` guard runs here.
+///
+/// ⚠ **The match-any guard is GONE from the rule path entirely** — product
+/// decision 2026-10-10, recorded in `migrations/0179`'s closing section. Task 14
+/// had added `ensure_a_wildcard_level_has_nothing_named_beneath_it` at both
+/// rule-side positions on the reasoning above; the ruling is that the severity
+/// argument it set aside is the whole point on THIS table. A match-any level
+/// above a named one widens AUTHORITY on a grant and RESTRICTION on a rule, both
+/// plugins enforce the rule form (every `dataMaskDef` level is
+/// `"wildCard": true` on `ranger-plugins-common` 2.5.0 and 2.8.0), and
+/// `('sales','*','email')` is a mask a steward writes on purpose. It is not a
+/// wrong artifact; it is the one the author asked for. The predicate is now
+/// named [`crate::grants::ensure_a_grant_wildcard_level_has_nothing_named_beneath_it`]
+/// for the table it binds to, and nothing on the rule path calls it.
+///
+/// ⚠ **The trade-off that ruling accepts**, because this is a place a reader
+/// meets it: a broad mask can win Ranger's evaluation order and apply a WEAKER
+/// mask than a narrow mask on the same table would — two mask policies on one
+/// column at the same `policyPriority` are arbitrated with `>=` and the
+/// tie-break is not expressed in the artifact. That is the already-open
+/// ambiguous-priority debt (`egret_policy::ambiguous_arbitration` refuses the
+/// differing pair at the authoring boundary), NOT a new hole, and it is
+/// deliberately not addressed here.
 ///
 /// **`ensure_row_filter_scope_is_a_table` deliberately stays at the authoring
 /// boundary only, and that is NOT the same omission.** Its argument is not about
@@ -287,8 +316,10 @@ fn ensure_row_filter_scope_is_a_table(r: &Rule) -> Result<(), CompileError> {
 /// such a row compile to something the plugin can still match instead of to a
 /// silent no-op (read that arm's comment). Moving the refusal into `compile_rule`
 /// would turn those stored rows uncompilable, which is a behaviour change rather
-/// than a consistency fix. The two guards above have no such population: since
-/// `0178` and `0179` nothing stored can carry either shape.
+/// than a consistency fix. The `''` guard above has no such population: since
+/// `0178` nothing stored can carry an empty level. (`0179` constrains
+/// `perm.grants` only, so a match-any level above a named one IS storable in
+/// `perm.rules` — by decision, and `scope_to_resources` renders it.)
 pub fn compile_rule(
     r: &Rule,
     e: EngineType,
@@ -302,15 +333,18 @@ pub fn compile_rule(
     // that cannot compile on ANY path is refused the same way regardless of
     // which one is taken.
     //
-    // SP4d debt Task 14, step 5 (carried from Task 12's concern 3): the two
-    // scope-shape refusals run HERE too, not only in `validate_rule_shape` — see
-    // this function's doc for why the fail-closed severity argument that left
-    // them out does not answer "a `pub` entry point emits an artifact its own
-    // validator refuses", and for why `ensure_row_filter_scope_is_a_table` is a
-    // different case rather than the same omission.
+    // SP4d debt Task 14, step 5 (carried from Task 12's concern 3): the `''`
+    // refusal runs HERE too, not only in `validate_rule_shape` — see this
+    // function's doc for why the fail-closed severity argument that left it out
+    // does not answer "a `pub` entry point emits an artifact its own validator
+    // refuses", and for why `ensure_row_filter_scope_is_a_table` is a different
+    // case rather than the same omission.
+    //
+    // ⚠ The match-any guard is NOT called here, and that is the ruling rather
+    // than an omission (product decision 2026-10-10, `migrations/0179`'s closing
+    // section): on a rule the shape fails CLOSED and both plugins enforce it.
     if let Selector::Path(scope) = &r.selector {
         ensure_scope_levels_are_named(scope)?;
-        ensure_a_wildcard_level_has_nothing_named_beneath_it(scope)?;
     }
     if let RuleKind::Mask {
         mask_type,

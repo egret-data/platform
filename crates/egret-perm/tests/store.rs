@@ -338,20 +338,37 @@ async fn a_wildcard_level_with_a_named_level_beneath_it_is_refused_by_the_databa
     );
 }
 
-/// The `perm.rules` half of 0179, the twin of
-/// `an_empty_rule_scope_level_is_refused_by_the_database`. Not the same severity —
-/// a match-any level makes a mask or row filter cover every sibling at that
-/// level, which withholds MORE than the author wrote — but the same three
-/// columns, the same two `0154` level-skip CHECKs being made consistent, and the
-/// same predicate. Measured accepted before 0179 (`scratchpad/t14_probe.sql`,
-/// row 6).
+/// ⚠ **THIS TEST ASSERTED A REFUSAL UNTIL 2026-10-10, and 0179 no longer
+/// constrains `perm.rules` at all.**
+///
+/// 0179 shipped `rules_wildcard_levels_name_nothing_beneath` as the twin of its
+/// `perm.grants` constraint. A product decision on 2026-10-10 dropped the
+/// rule-side half, so this test now pins the ACCEPT: a match-any level with a
+/// named level beneath it is storable in `perm.rules`.
+///
+/// **Why the two tables differ.** On `perm.grants` the shape widens AUTHORITY —
+/// the compiled policy is enforced in every schema of the catalog, the measured
+/// escalation — and fails OPEN, so
+/// `a_wildcard_level_with_a_named_level_beneath_it_is_refused_by_the_database`
+/// still pins that refusal. On `perm.rules` it widens RESTRICTION: it withholds
+/// more, fails CLOSED, and both plugins enforce it (every `dataMaskDef` level is
+/// `"wildCard": true` on `ranger-plugins-common` 2.5.0 and 2.8.0).
+/// `('sales','*','email')` is "mask `email` in every table of `sales`" — a
+/// control a steward writes on purpose, which used to work.
+///
+/// **The controls are the point of this test, not the accept.** An insert that
+/// succeeds proves nothing on its own: it would also succeed if someone dropped
+/// every CHECK on the table. So this asserts, on the same connection and the same
+/// columns, that the two refusals which did NOT move still fire — the `0154`
+/// level-skip CHECKs for a NULL level and `0178`'s for an empty one. Only a
+/// literal `*` the author typed became legal.
 #[tokio::test]
-async fn a_wildcard_rule_level_with_a_named_level_beneath_it_is_refused_by_the_database() {
+async fn a_wildcard_rule_level_with_a_named_level_beneath_it_is_accepted_by_the_database() {
     let Some(db) = test_db().await else { return };
     let catalog_id = seed_catalog(&db.pool).await;
 
     // CONTROL — a mask on every column of one table: a wildcard with nothing
-    // named beneath it, which stays legal.
+    // named beneath it, legal before the ruling and after it.
     sqlx::query(
         "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, schema_name, \
          table_name, column_name) VALUES ($1, 'mask', 'MASK', 'path', $2, 'sales', 'orders', '*')",
@@ -362,9 +379,44 @@ async fn a_wildcard_rule_level_with_a_named_level_beneath_it_is_refused_by_the_d
     .await
     .expect("a mask over every column of one table must stay legal");
 
+    // THE RULING'S ACCEPT CASE, and the exact tuple the grant-side test refuses.
+    for (schema, table, column) in [
+        ("sales", "*", "email"),
+        ("*", "orders", "email"),
+        ("*", "orders", ""),
+        ("**", "orders", "email"),
+    ] {
+        let column: Option<&str> = if column.is_empty() {
+            None
+        } else {
+            Some(column)
+        };
+        sqlx::query(
+            "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, \
+             schema_name, table_name, column_name) VALUES ($1, 'mask', 'MASK', 'path', $2, $3, \
+             $4, $5)",
+        )
+        .bind(unique("perm_rule"))
+        .bind(catalog_id)
+        .bind(schema)
+        .bind(table)
+        .bind(column)
+        .execute(&db.pool)
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "({schema:?}, {table:?}, {column:?}) must be STORABLE in perm.rules since \
+                 2026-10-10 — 0179 constrains perm.grants only: {e}"
+            )
+        });
+    }
+
+    // CONTROL 1 — a NULL level is still refused, by `0154`'s `rules_check4`
+    // (`table_name IS NOT NULL OR column_name IS NULL`). The ruling legalised a
+    // literal `*`, not an absent level.
     let err = sqlx::query(
         "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, schema_name, \
-         table_name, column_name) VALUES ($1, 'mask', 'MASK', 'path', $2, '*', 'orders', 'email')",
+         table_name, column_name) VALUES ($1, 'mask', 'MASK', 'path', $2, 'sales', NULL, 'email')",
     )
     .bind(unique("perm_rule"))
     .bind(catalog_id)
@@ -372,10 +424,26 @@ async fn a_wildcard_rule_level_with_a_named_level_beneath_it_is_refused_by_the_d
     .await
     .unwrap_err();
     assert!(
-        err.to_string()
-            .contains("rules_wildcard_levels_name_nothing_beneath"),
-        "a match-any schema over a named table must be refused by \
-         rules_wildcard_levels_name_nothing_beneath, got: {err}"
+        err.to_string().contains("rules_check"),
+        "a NULL table under a named column must still be refused by `0154`'s level-skip \
+         CHECK — got: {err}"
+    );
+
+    // CONTROL 2 — an EMPTY level is still refused, by `0178`. `''` is an absence
+    // rather than an authored value, and that line did not move.
+    let err = sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, schema_name, \
+         table_name, column_name) VALUES ($1, 'mask', 'MASK', 'path', $2, '', 'orders', 'email')",
+    )
+    .bind(unique("perm_rule"))
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("rules_scope_levels_are_named"),
+        "an EMPTY schema must still be refused by `rules_scope_levels_are_named` (0178) — \
+         only a literal `*` became legal: {err}"
     );
 }
 
