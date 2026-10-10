@@ -2009,8 +2009,16 @@ fn validate_explain_target(target: &Scope) -> Result<(), PermHttpError> {
 /// A holding the platform `data_steward` role — which migration 0059 seeds with
 /// the whole `policy:*` family — and both ask about and WRITE a grant on a catalog
 /// of workspace B. Task 13 made that validator refuse a target holding ANY
-/// platform-scoped role grant, so such an overlay can no longer satisfy the
-/// `policy:read` / `policy:update` gate at the top of these handlers at all.
+/// platform-scoped role grant — **but only when the overlay was CREATED, and
+/// that alone was escapable**: a reviewer showed the target could acquire the
+/// platform role afterwards and the live overlay picked it up, because
+/// `SessionService::validate` rebuilds the target's roles from live tables every
+/// request. `391c3c3a6` (2026-10-10) moved the rule into
+/// `egret_auth::impersonation::overlay_refused_by_platform_authority` and made
+/// `validate` re-evaluate it on every request, rendering such an overlay inert.
+/// Only with that second half does "such an overlay can no longer satisfy the
+/// `policy:read` / `policy:update` gate at the top of these handlers" hold — see
+/// the ⚠ paragraph on [`confine_to_overlay_workspace`] for the mechanism in full.
 ///
 /// This confines that overlay to catalogs assigned to the workspace it was
 /// started in, which is the same containment `WsContext` applies (`scope != ws →
@@ -2056,22 +2064,54 @@ fn validate_explain_target(target: &Scope) -> Result<(), PermHttpError> {
 /// `policy:read`/`policy:update` gate above this function at all.
 ///
 /// ⚠ **Consequence, recorded because it changes how the tests here should be
-/// read: this guard is UNREACHABLE in production, and so is every refusal it
-/// performs.** With no platform-scoped role grant a scoped overlay's principal
-/// cannot pass `require()` on this router, so nothing here can fire unless some
-/// future entry point writes a `workspace_scope = Some(_)` overlay row WITHOUT
-/// going through that validator. Nothing does today. **The measured protection on
-/// this surface is `validate_impersonation_target`; this function is defence in
-/// depth**, kept because it is the only half that would still hold in that future,
+/// read: no HTTP entry point reaches this guard, and so no refusal it performs
+/// is reachable either.** State the MECHANISM, because this claim has already
+/// been written once in the weaker form "nothing bypasses that validator today"
+/// and a reviewer falsified that form: the escapable version never bypassed the
+/// validator, it OUTLIVED the fact the validator had measured. Since
+/// `391c3c3a6` (2026-10-10) two independent facts hold, and the pair — not
+/// either one — is what closes this surface:
+///
+/// 1. `SessionService::validate` re-evaluates
+///    `egret_auth::impersonation::overlay_refused_by_platform_authority` on
+///    **every request** for the overlay's whole life and, when it refuses,
+///    renders the overlay **inert** — the request is decided as the admin, with
+///    `impersonator: None`, so [`overlay_workspace_scope`] here is `None`. A
+///    ws-scoped overlay whose target holds any platform-scoped role grant
+///    therefore never produces a principal on this router at all. **A
+///    creation-time measurement alone was NOT enough**: `validate` rebuilds the
+///    target's roles and permissions from live tables, so the target could gain
+///    a platform role after the overlay began (`sync_user_oidc_groups` on the
+///    next OIDC login, or a console grant — neither needing any permission from
+///    the admin) and the already-issued overlay picked it up. That is the bug
+///    `391c3c3a6` fixed, and it is why this paragraph names a re-evaluated
+///    predicate rather than a validator that ran once.
+/// 2. A ws-scoped overlay whose target holds NO platform-scoped role grant stays
+///    live, but then it carries no platform authority: every handler on this
+///    router gates on `Resource::Platform`, the PDP loads that with `ws = None`,
+///    and `egret_auth::grants::grants_for`'s `WHERE` admits a `workspace`-scoped
+///    row only for `scope_id = $ws` — NULL there matches nothing. So such a
+///    principal cannot pass `require()` above this function.
+///
+/// Those two cover the whole domain of `workspace_scope = Some(_)`, so **the
+/// measured protection on this surface is the inertness rule; this function is
+/// defence in depth** — kept because it is the only half that would still hold
+/// if a future entry point wrote an overlay row without going through either,
 /// and because it is keyed to a different relation
 /// (`registry.catalog_workspaces`) than the validator is.
 ///
-/// That is why `a_workspace_scoped_overlay_is_confined_to_that_workspaces_catalogs`
-/// reaches this code only through a helper that writes the overlay row directly,
-/// and why **its row 1 — the overlay's own workspace answered — is a statement
-/// about this function, not a production claim**: production never gets a scoped
-/// overlay here to answer for.
-async fn confine_to_overlay_workspace(
+/// That is why this function is `pub` and tested DIRECTLY, by
+/// `confine_to_overlay_workspace_allows_its_own_workspace_and_refuses_another`
+/// in `tests/routes.rs`, rather than through the router. Two route-level tests
+/// that drove it (`a_workspace_scoped_overlay_is_confined_to_that_workspaces_catalogs`
+/// and `…_cannot_create_a_grant_on_another_workspaces_catalog`) wrote the overlay
+/// row straight into the database to reach a state the product forbids; after
+/// `391c3c3a6` their ALLOW arm could not hold, which is exactly how an
+/// unreachable guard announces itself. What the router now pins is the
+/// **inertness** —
+/// `a_ws_scoped_overlay_over_a_platform_role_target_is_decided_as_the_admin` —
+/// at the layer the escalation actually lived on.
+pub async fn confine_to_overlay_workspace(
     conn: &mut sqlx::PgConnection,
     p: &egret_core::Principal,
     catalog_id: Uuid,
@@ -2109,7 +2149,12 @@ fn overlay_workspace_scope(p: &egret_core::Principal) -> Option<egret_core::Work
 /// only answer that is not a guess: silently narrowing the fan-out would author a
 /// rule that does not mean what the author wrote, and permitting it would be the
 /// widest cross-workspace write on this surface.
-async fn confine_rule_selector(
+///
+/// `pub` for the same reason [`confine_to_overlay_workspace`] is: no HTTP entry
+/// point can reach it since `391c3c3a6`, so
+/// `confine_rule_selector_refuses_a_foreign_path_and_every_tag` tests it
+/// directly. Read that function's ⚠ paragraph before relying on either.
+pub async fn confine_rule_selector(
     conn: &mut sqlx::PgConnection,
     p: &egret_core::Principal,
     selector: &Selector,

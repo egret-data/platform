@@ -82,14 +82,38 @@ where
         //      `egret-policy`, `egret-controlplane`, `egret-catalog-engine` or
         //      `egret-engine-mgmt` reads it at all.
         //
-        //      What makes the gap non-exploitable is therefore NOT this guard but
-        //      `egret_auth::impersonation::validate_impersonation_target`, which
-        //      refuses a target holding ANY platform-scoped role grant — so a
-        //      scoped overlay's principal cannot satisfy a `Scope::Platform`
-        //      permission on any of those routers in the first place. Read its ⚠
-        //      paragraph before relying on either half: the guard here and that
-        //      refusal cover different route sets, and only their union covers the
-        //      installation.
+        //      What makes the gap non-exploitable is therefore NOT this guard.
+        //      ⚠ **And it is not `validate_impersonation_target` alone either,
+        //      which is what this comment used to say** ("refuses a target
+        //      holding ANY platform-scoped role grant — so a scoped overlay's
+        //      principal cannot satisfy a `Scope::Platform` permission in the
+        //      first place"). That validator runs ONCE, when the overlay row is
+        //      written, and a reviewer falsified the claim built on it: nothing
+        //      bypassed the validator, the overlay simply OUTLIVED the fact the
+        //      validator had measured. `SessionService::validate` rebuilds the
+        //      TARGET's platform roles and permissions from live tables on every
+        //      request for the overlay's 30-minute life, so a target who gained a
+        //      platform role afterwards — `sync_user_oidc_groups` replaying an IdP
+        //      group change on the next login, or a console grant, neither needing
+        //      any permission from the admin — handed the same `ws_admin` token a
+        //      principal carrying platform permissions.
+        //
+        //      The mechanism that closes it, since `391c3c3a6` (2026-10-10): the
+        //      rule lives in
+        //      `egret_auth::impersonation::overlay_refused_by_platform_authority`
+        //      and `SessionService::validate` RE-EVALUATES it on every request,
+        //      falling through to the admin principal when it refuses — so a
+        //      ws-scoped overlay over a platform-role-holding target is inert, not
+        //      merely un-creatable, and `principal.impersonator` is `None` on
+        //      those routers rather than `Some(scope)` that nothing confines.
+        //      Read that function's ⚠ paragraph before relying on any of this: the
+        //      guard here covers `/api/ws/…`, the inertness rule covers every
+        //      route at once, and only their union covers the installation.
+        //
+        //      ⚠ So when you read a claim of this shape — "X cannot happen, since
+        //      nothing does it today" — check whether it names a fact measured
+        //      once or a predicate re-evaluated per request. This one was the
+        //      first kind twice, and was falsified twice.
         if let Some(imp) = &principal.impersonator {
             if let Some(scope) = imp.workspace_scope {
                 if scope != ws.id {

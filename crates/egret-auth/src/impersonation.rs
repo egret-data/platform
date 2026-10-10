@@ -158,6 +158,30 @@ pub async fn validate_impersonation_target(
     // without it: nothing else in the suite notices a guard that merely refuses
     // more.
     //
+    // ⚠ **What this check alone is NOT.** An earlier version of this paragraph
+    // claimed the escalation was closed because "no `/api/control-plane` route
+    // confines a scoped overlay, and this validator refuses such a target, so the
+    // overlay can never carry platform authority". A reviewer falsified it: the
+    // overlay never bypassed this validator — it OUTLIVED the fact this validator
+    // measured. `SessionService::validate` rebuilds the TARGET's platform roles and
+    // permissions from live tables on every request for the overlay's 30-minute
+    // life, so a target who gained a platform role AFTER creation (an IdP group
+    // change replayed by `sync_user_oidc_groups` on the next login, or a console
+    // grant — neither needing any permission from the admin) handed the same
+    // `ws_admin` token a principal carrying `policy:update` with
+    // `workspace_scope = Some(A)`.
+    //
+    // Since `391c3c3a6` (2026-10-10) the claim is true again, **for a different
+    // reason than the prose above gave**: the rule is
+    // [`overlay_refused_by_platform_authority`], and `SessionService::validate`
+    // RE-EVALUATES it on every request, rendering a refused overlay inert and
+    // falling through to the admin principal. This call site is the creation-time
+    // half — it keeps the caller from ever being handed a doomed overlay and
+    // returns a `403` they can read — but it is NOT the enforcement. **A
+    // creation-time measurement of a fact that can change later is not an
+    // invariant**; if you are about to rely on this function, rely on the
+    // per-request call in `validate` instead, and keep both.
+    //
     // **Why ANY platform role and not "any platform role carrying a
     // permission".** `platform_roles` is the same query that populates
     // `Principal::platform_roles` for the overlay (see `SessionService::validate`,
