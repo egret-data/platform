@@ -119,7 +119,7 @@ pub const DEDUPLICATE_ITEMS: &str = "io.kestra.plugin.core.storage.DeduplicateIt
 /// `io.kestra.plugin.core.storage.FilterItems`.
 pub const FILTER_ITEMS: &str = "io.kestra.plugin.core.storage.FilterItems";
 
-mod items;
+pub(crate) mod items;
 mod stream;
 
 pub use items::{
@@ -380,7 +380,7 @@ fn db_err(type_id: &str, e: sqlx::Error) -> Error {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct WriteSpec {
+pub(crate) struct WriteSpec {
     content: Property<String>,
     #[serde(default)]
     extension: Option<Property<String>>,
@@ -513,7 +513,7 @@ impl TaskHandler for Write {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct UriSpec {
+pub(crate) struct UriSpec {
     uri: Property<String>,
 }
 
@@ -560,7 +560,7 @@ impl TaskHandler for Size {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct DeleteSpec {
+pub(crate) struct DeleteSpec {
     uri: Property<String>,
     #[serde(rename = "errorOnMissing", default)]
     error_on_missing: Option<Property<bool>>,

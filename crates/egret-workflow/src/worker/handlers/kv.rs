@@ -431,7 +431,7 @@ async fn already(task: &TaskInput, key: &KvKey, namespace: &str, revision: u32) 
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct SetSpec {
+pub(crate) struct SetSpec {
     key: Property<String>,
     value: Value,
     #[serde(default)]
@@ -553,7 +553,7 @@ impl TaskHandler for SetKv {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct GetSpec {
+pub(crate) struct GetSpec {
     key: Property<String>,
     #[serde(default)]
     namespace: Option<Property<String>>,
@@ -665,7 +665,7 @@ impl TaskHandler for GetKv {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct GetKeysSpec {
+pub(crate) struct GetKeysSpec {
     #[serde(default)]
     prefix: Option<Property<String>>,
     #[serde(default)]
@@ -754,7 +754,7 @@ impl TaskHandler for GetKeys {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct DeleteSpec {
+pub(crate) struct DeleteSpec {
     key: Property<String>,
     #[serde(default)]
     namespace: Option<Property<String>>,
@@ -853,7 +853,7 @@ impl TaskHandler for DeleteKv {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct PutSpec {
+pub(crate) struct PutSpec {
     key: Property<String>,
     value: Value,
     #[serde(default)]
@@ -952,7 +952,7 @@ impl TaskHandler for PutKv {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct PurgeSpec {
+pub(crate) struct PurgeSpec {
     #[serde(rename = "keyPattern", default)]
     key_pattern: Option<Property<String>>,
     #[serde(default)]

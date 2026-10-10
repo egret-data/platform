@@ -194,7 +194,7 @@ fn rendered<T: serde::de::DeserializeOwned>(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct ConcatSpec {
+pub(crate) struct ConcatSpec {
     files: serde_json::Value,
     #[serde(default)]
     separator: Option<Property<String>>,
@@ -367,7 +367,7 @@ fn single(file: StoredFile) -> Outcome {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct ReverseSpec {
+pub(crate) struct ReverseSpec {
     from: Property<String>,
     #[serde(default)]
     separator: Option<Property<String>>,
@@ -500,7 +500,7 @@ impl TaskHandler for Reverse {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct SplitSpec {
+pub(crate) struct SplitSpec {
     from: Property<String>,
     #[serde(default)]
     bytes: Option<Property<String>>,
@@ -1033,7 +1033,7 @@ fn write_item(out: &mut Upload<'_>, item: &ion_rs::Element) -> Step<()> {
 }
 
 #[derive(Debug, Deserialize)]
-struct DeduplicateSpec {
+pub(crate) struct DeduplicateSpec {
     from: Property<String>,
     /// `@PluginProperty` with `dynamic = false`: the template itself, rendered
     /// per item, never as a property.
@@ -1183,7 +1183,7 @@ impl TaskHandler for DeduplicateItems {
 }
 
 #[derive(Debug, Deserialize)]
-struct FilterSpec {
+pub(crate) struct FilterSpec {
     from: Property<String>,
     /// `@PluginProperty` with `dynamic = false`, as `DeduplicateItems.expr`.
     #[serde(rename = "filterCondition")]

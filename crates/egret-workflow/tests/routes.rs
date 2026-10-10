@@ -842,3 +842,384 @@ async fn a_window_egret_does_not_implement_cannot_be_published() {
         "nothing went live: {after}"
     );
 }
+
+// ---------- W7a Task 1: the flow schema, id-less validation, if_updated_at ----------
+
+async fn body_bytes(res: axum::response::Response) -> Vec<u8> {
+    axum::body::to_bytes(res.into_body(), 64 * 1024 * 1024)
+        .await
+        .unwrap()
+        .to_vec()
+}
+
+fn header(res: &axum::response::Response, name: &str) -> String {
+    res.headers()
+        .get(name)
+        .unwrap_or_else(|| panic!("no {name} header"))
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+async fn flow_count(db: &egret_metastore::Db, ws: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM workflow.flows WHERE workspace_id = $1")
+        .bind(ws)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+/// A reader gets the schema with a strong `ETag` that is the same on a
+/// second call, `Cache-Control: private, no-cache`, and a 304 when it sends
+/// the tag back.
+#[tokio::test]
+async fn the_schema_route_serves_a_reader_with_a_stable_etag_and_answers_304() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let app = common::app(&db).await;
+    let path = format!("/api/ws/{ws}/workflows/schema");
+
+    let first = common::get(&app, &path, user).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let etag = header(&first, "etag");
+    assert!(
+        etag.starts_with("\"sha256-") && etag.ends_with('"'),
+        "{etag}"
+    );
+    assert_eq!(header(&first, "cache-control"), "private, no-cache");
+    let schema: serde_json::Value = serde_json::from_slice(&body_bytes(first).await).unwrap();
+    assert_eq!(
+        schema["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+
+    let second = common::get(&app, &path, user).await;
+    assert_eq!(
+        header(&second, "etag"),
+        etag,
+        "the same workspace, the same tag"
+    );
+
+    let res = common::send_with(
+        &app,
+        "GET",
+        &path,
+        user,
+        &[("If-None-Match", etag.as_bytes())],
+        axum::body::Body::empty(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(header(&res, "etag"), etag);
+    assert!(body_bytes(res).await.is_empty(), "a 304 has no body");
+}
+
+/// The schema follows the workspace's features, so two workspaces that
+/// differ in `workflow_containers` get different documents and tags.
+#[tokio::test]
+async fn the_schema_etag_differs_between_workspaces_with_different_features() {
+    let Some(db) = common::db().await else { return };
+    let (plain, user_a) = common::seed_workspace(&db).await;
+    let (with_containers, user_b) = common::seed_workspace(&db).await;
+    common::grant(&db, plain, user_a, &["workflow:read"]).await;
+    common::grant(&db, with_containers, user_b, &["workflow:read"]).await;
+    common::enable_feature(&db, with_containers, "workflow_containers").await;
+    let app = common::app(&db).await;
+
+    let a = common::get(&app, &format!("/api/ws/{plain}/workflows/schema"), user_a).await;
+    let b = common::get(
+        &app,
+        &format!("/api/ws/{with_containers}/workflows/schema"),
+        user_b,
+    )
+    .await;
+    assert_eq!((a.status(), b.status()), (StatusCode::OK, StatusCode::OK));
+    assert_ne!(header(&a, "etag"), header(&b, "etag"));
+    let a: serde_json::Value = serde_json::from_slice(&body_bytes(a).await).unwrap();
+    let b: serde_json::Value = serde_json::from_slice(&body_bytes(b).await).unwrap();
+    let shell = "io.kestra.plugin.scripts.shell.Commands";
+    assert!(
+        a["$defs"].get(shell).is_none(),
+        "containers off: no script type"
+    );
+    assert!(
+        b["$defs"].get(shell).is_some(),
+        "containers on: script types"
+    );
+}
+
+/// The schema needs `workflow:read`, and nothing else does it.
+#[tokio::test]
+async fn the_schema_route_requires_workflow_read() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let app = common::app(&db).await;
+    let res = common::get(&app, &format!("/api/ws/{ws}/workflows/schema"), user).await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+/// `POST /flows/validate` answers, for the same source, exactly what the
+/// by-id route answers, and writes nothing.
+#[tokio::test]
+async fn validate_without_an_id_answers_the_by_id_report_and_writes_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let created = common::json(
+        common::post(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows"),
+            user,
+            serde_json::json!({ "source": minimal_flow("a.idless") }),
+        )
+        .await,
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+    let before = flow_count(&db, ws).await;
+
+    // Errors AND warnings, so both halves of the report are compared.
+    let source = "id: f\nnamespace: BAD NAMESPACE\ntasks:\n  - id: t\n    type: egret.sqll\n";
+    let by_id = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}/validate"),
+        user,
+        serde_json::json!({ "source": source }),
+    )
+    .await;
+    let idless = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/validate"),
+        user,
+        serde_json::json!({ "source": source }),
+    )
+    .await;
+    assert_eq!(
+        (by_id.status(), idless.status()),
+        (StatusCode::OK, StatusCode::OK)
+    );
+    let (by_id, idless) = (common::json(by_id).await, common::json(idless).await);
+    assert_eq!(idless, by_id);
+    assert!(!idless["errors"].as_array().unwrap().is_empty(), "{idless}");
+    assert!(
+        !idless["warnings"].as_array().unwrap().is_empty(),
+        "{idless}"
+    );
+
+    assert_eq!(flow_count(&db, ws).await, before, "validate wrote a row");
+}
+
+/// A source that does not parse is a 400 whose message carries the line and
+/// column, as on the by-id route.
+#[tokio::test]
+async fn validate_without_an_id_refuses_unparsable_yaml_with_its_position() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/validate"),
+        user,
+        serde_json::json!({ "source": "id: f\nnamespace: a.b\ntasks: [\n" }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = common::json(res).await;
+    let msg = body["error"].as_str().unwrap();
+    assert!(msg.contains("line") && msg.contains("column"), "{msg}");
+}
+
+/// Validating is an authoring action: `workflow:read` alone is refused.
+#[tokio::test]
+async fn validate_without_an_id_requires_workflow_manage() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/validate"),
+        user,
+        serde_json::json!({ "source": minimal_flow("a.ro") }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+/// Create a flow and answer `(id, updated_at as the server sent it)`.
+async fn created_flow(
+    app: &common::App,
+    ws: Uuid,
+    user: egret_core::UserId,
+    ns: &str,
+) -> (String, String) {
+    let created = common::json(
+        common::post(
+            app,
+            &format!("/api/ws/{ws}/workflows/flows"),
+            user,
+            serde_json::json!({ "source": minimal_flow(ns) }),
+        )
+        .await,
+    )
+    .await;
+    (
+        created["id"].as_str().unwrap().to_string(),
+        created["updated_at"].as_str().unwrap().to_string(),
+    )
+}
+
+/// `if_updated_at` equal to the row's: the save goes through.
+#[tokio::test]
+async fn update_with_a_matching_if_updated_at_saves() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let (id, at) = created_flow(&app, ws, user, "a.match").await;
+
+    let res = common::put(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}"),
+        user,
+        serde_json::json!({ "source": minimal_flow("a.match2"), "folder_id": null, "if_updated_at": at }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = common::json(res).await;
+    assert_eq!(body["namespace"], "a.match2");
+    assert_ne!(
+        body["updated_at"].as_str().unwrap(),
+        at,
+        "the save moves it"
+    );
+}
+
+/// A stale `if_updated_at`: 409 with the spec's sentence, and the row is
+/// what the other save left.
+#[tokio::test]
+async fn update_with_a_stale_if_updated_at_is_refused_and_writes_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let (id, opened_at) = created_flow(&app, ws, user, "a.stale").await;
+    let path = format!("/api/ws/{ws}/workflows/flows/{id}");
+
+    // Someone else saves first, unconditionally.
+    let other = common::put(
+        &app,
+        &path,
+        user,
+        serde_json::json!({ "source": minimal_flow("a.other"), "folder_id": null }),
+    )
+    .await;
+    assert_eq!(other.status(), StatusCode::OK);
+    let other = common::json(other).await;
+
+    let res = common::put(
+        &app,
+        &path,
+        user,
+        serde_json::json!({ "source": minimal_flow("a.mine"), "folder_id": null, "if_updated_at": opened_at }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let msg = common::json(res).await["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        msg.contains("the draft was changed since you opened it"),
+        "{msg}"
+    );
+
+    let row = common::json(common::get(&app, &path, user).await).await;
+    assert_eq!(
+        row["namespace"], "a.other",
+        "the refused save wrote nothing"
+    );
+    assert_eq!(row["source"], other["source"]);
+    assert_eq!(row["updated_at"], other["updated_at"]);
+}
+
+/// A precondition on a flow that does not exist is still a 404, not a 409.
+#[tokio::test]
+async fn update_with_if_updated_at_on_a_missing_flow_is_404() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let res = common::put(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{}", Uuid::new_v4()),
+        user,
+        serde_json::json!({ "source": minimal_flow("a.none"), "folder_id": null, "if_updated_at": "2026-10-10T00:00:00Z" }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+/// Without `if_updated_at` a save is unconditional, as before W7a: an old
+/// draft is overwritten.
+#[tokio::test]
+async fn update_without_if_updated_at_behaves_as_before() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let (id, _) = created_flow(&app, ws, user, "a.absent").await;
+    let path = format!("/api/ws/{ws}/workflows/flows/{id}");
+    for ns in ["a.absent1", "a.absent2"] {
+        let res = common::put(
+            &app,
+            &path,
+            user,
+            serde_json::json!({ "source": minimal_flow(ns), "folder_id": null }),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+    let row = common::json(common::get(&app, &path, user).await).await;
+    assert_eq!(row["namespace"], "a.absent2");
+}
+
+/// Two saves racing with the same `if_updated_at`: exactly one wins. Each
+/// request takes its own pooled connection, and the barrier releases them
+/// together; the loser waits on the winner's row lock, re-reads the row, and
+/// no longer matches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_concurrent_saves_with_the_same_if_updated_at_one_wins() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = std::sync::Arc::new(common::app(&db).await);
+    let (id, at) = created_flow(&app, ws, user, "a.race").await;
+    let path = format!("/api/ws/{ws}/workflows/flows/{id}");
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+
+    let mut handles = Vec::new();
+    for ns in ["a.race1", "a.race2"] {
+        let (app, barrier, path, at) = (app.clone(), barrier.clone(), path.clone(), at.clone());
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            common::put(
+                &app,
+                &path,
+                user,
+                serde_json::json!({ "source": minimal_flow(ns), "folder_id": null, "if_updated_at": at }),
+            )
+            .await
+            .status()
+        }));
+    }
+    let mut statuses = Vec::new();
+    for h in handles {
+        statuses.push(h.await.unwrap());
+    }
+    statuses.sort();
+    assert_eq!(statuses, vec![StatusCode::OK, StatusCode::CONFLICT]);
+}

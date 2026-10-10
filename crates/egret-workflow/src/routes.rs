@@ -2,8 +2,10 @@
 //! versions (W1 Task 7, spec §10).
 //!
 //! ```text
+//! GET    /api/ws/{workspace}/workflows/schema
 //! GET    /api/ws/{workspace}/workflows/flows
 //! POST   /api/ws/{workspace}/workflows/flows
+//! POST   /api/ws/{workspace}/workflows/flows/validate
 //! GET    /api/ws/{workspace}/workflows/flows/{id}
 //! PUT    /api/ws/{workspace}/workflows/flows/{id}
 //! DELETE /api/ws/{workspace}/workflows/flows/{id}
@@ -399,6 +401,13 @@ pub struct CreateFlowRequest {
 pub struct UpdateFlowRequest {
     pub source: String,
     pub folder_id: Option<Uuid>,
+    /// The draft's `updated_at` as the editor last read it (RFC 3339, the
+    /// exact string `FlowDto.updated_at` carried -- microseconds included).
+    /// When present and no longer the row's, the save is refused with 409
+    /// and nothing is written; absent, the save is unconditional (W7a spec
+    /// §7.3). See [`update_flow`] for every writer of the column.
+    #[serde(default)]
+    pub if_updated_at: Option<DateTime<Utc>>,
 }
 
 /// `POST /flows/{id}/validate` body — the UNSAVED source being checked. See
@@ -652,10 +661,37 @@ async fn get_flow(
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace, or the flow calls secret() and the caller lacks workflow:use_secrets", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such flow in this workspace", body = egret_core::http::ErrorBody),
-        (status = 409, description = "Another flow already claims this namespace and id in the workspace", body = egret_core::http::ErrorBody),
+        (status = 409, description = "Another flow already claims this namespace and id in the workspace, or `if_updated_at` was sent and the draft was changed since (\"the draft was changed since you opened it\"); nothing was written", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
+/// `PUT /flows/{id}`: replace the draft.
+///
+/// # `if_updated_at` (W7a spec §7.3)
+///
+/// When the body carries it, the write happens only if the row's
+/// `updated_at` still equals it, compared inside the `UPDATE`'s own `WHERE`
+/// (`FlowRepo::update`), so two concurrent saves of the same draft cannot
+/// both pass: the second waits on the first's row lock, re-reads the row,
+/// no longer matches, and is refused with 409.
+///
+/// The precondition means "nobody saved or published this draft since you
+/// read it" only because these are **every** writer of
+/// `workflow.flows.updated_at` (`grep -rn updated_at` over `crates/` and
+/// `migrations/`, 2026-10-10):
+///
+/// * `FlowRepo::create` -- the `INSERT`, through the column's
+///   `DEFAULT now()` (migration 0132);
+/// * `FlowRepo::update` -- this route, `updated_at = now()`;
+/// * `FlowRepo::set_live` -- publish (`POST /flows/{id}/publish`),
+///   `updated_at = now()`. **A publish therefore moves it**: an editor that
+///   publishes must re-read the draft before its next conditional save.
+///
+/// Writes to the row that do **not** move it: `FlowRepo::soft_delete`
+/// (`deleted_at` only; a trashed draft is not updatable anyway), and the
+/// `ON DELETE SET NULL` foreign keys on `folder_id` and `live_version_id`
+/// (migration 0132), which clear a deleted folder or version without
+/// touching `updated_at`. No database trigger writes it.
 async fn update_flow(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
@@ -683,6 +719,7 @@ async fn update_flow(
                 source: Some(body.source),
                 plan: Some(plan),
                 folder_id: Some(body.folder_id),
+                if_updated_at: body.if_updated_at,
             },
         )
         .await?;
@@ -765,14 +802,101 @@ async fn validate_flow(
     // about IT is read below -- the source checked is the body's, per this
     // module's doc comment.
     let _ = st.repo.get(ctx.workspace_id.0, id).await?;
-    let flow = parse(&body.source).map_err(|e| {
+    Ok(Json(validate_flow_source(&body.source)?))
+}
+
+/// The report both validate routes answer for `source`: parse (a YAML that
+/// does not parse is a 400 whose message carries the line and column), then
+/// [`validate`]. Writes nothing.
+fn validate_flow_source(source: &str) -> EgretResult<ValidationReportDto> {
+    let flow = parse(source).map_err(|e| {
         Error::InvalidInput(match (e.line, e.column) {
             (Some(l), Some(c)) => format!("{} (line {l}, column {c})", e.message),
             _ => e.message,
         })
     })?;
     let report = validate(&flow);
-    Ok(Json(ValidationReportDto::from(&report)))
+    Ok(ValidationReportDto::from(&report))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/flows/validate",
+    tag = "workflow",
+    params(WorkspacePath),
+    request_body = ValidateFlowRequest,
+    responses(
+        (status = 200, description = "The validation report of a source that belongs to no saved flow yet (the create page). The same report `POST /flows/{id}/validate` gives for the same source; nothing is written", body = ValidationReportDto),
+        (status = 400, description = "The YAML does not parse; the message carries the line and column", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn validate_unsaved_flow(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<ValidateFlowRequest>,
+) -> EgretResult<Json<ValidationReportDto>> {
+    // `:manage`, as the by-id route: validating is an authoring action.
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    Ok(Json(validate_flow_source(&body.source)?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/schema",
+    tag = "workflow",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "The JSON Schema (draft 2020-12) of one flow document as this workspace may publish it: Kestra's definitions filtered to the types and properties egret honours, egret's own types, and the script and plugin types only when this workspace's features allow them. Carries a strong `ETag` and `Cache-Control: private, no-cache`", body = Object),
+        (status = 304, description = "`If-None-Match` names the current `ETag`"),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn get_flow_schema(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    headers: axum::http::HeaderMap,
+) -> EgretResult<axum::response::Response> {
+    use axum::http::header;
+    use axum::response::IntoResponse as _;
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    // The same effective feature set `publish_flow` gates with.
+    let disabled = st.workspaces.disabled_features(ctx.workspace_id).await?;
+    let features = crate::spec::schema::SchemaFeatures {
+        kestra_plugins: !disabled.contains(crate::plugins::FEATURE_KEY),
+        containers: !disabled.contains(crate::scripts::FEATURE_KEY),
+    };
+    let served = crate::spec::schema::served(&features);
+    let cache = [
+        (header::ETAG, served.etag.clone()),
+        (header::CACHE_CONTROL, "private, no-cache".to_string()),
+    ];
+    if if_none_match(&headers, &served.etag) {
+        return Ok((StatusCode::NOT_MODIFIED, cache).into_response());
+    }
+    Ok((
+        StatusCode::OK,
+        cache,
+        [(header::CONTENT_TYPE, "application/json".to_string())],
+        served.bytes.clone(),
+    )
+        .into_response())
+}
+
+/// Whether `If-None-Match` names `etag` (or is `*`). RFC 9110 §13.1.2 uses
+/// the weak comparison here, so a `W/` prefix on a listed tag is ignored.
+fn if_none_match(headers: &axum::http::HeaderMap, etag: &str) -> bool {
+    headers
+        .get_all(axum::http::header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .any(|t| t == "*" || t.strip_prefix("W/").unwrap_or(t) == etag)
 }
 
 #[utoipa::path(
@@ -2395,9 +2519,14 @@ async fn replay_execution(
 /// the feature-gate convention that depends on it.
 pub fn management_router() -> Router<WorkflowState> {
     Router::new()
+        .route("/ws/{workspace}/workflows/schema", get(get_flow_schema))
         .route(
             "/ws/{workspace}/workflows/flows",
             get(list_flows).post(create_flow),
+        )
+        .route(
+            "/ws/{workspace}/workflows/flows/validate",
+            post(validate_unsaved_flow),
         )
         .route(
             "/ws/{workspace}/workflows/flows/{id}",
@@ -2533,6 +2662,8 @@ pub fn management_router() -> Router<WorkflowState> {
         update_flow,
         delete_flow,
         validate_flow,
+        validate_unsaved_flow,
+        get_flow_schema,
         publish_flow,
         list_flow_versions,
         get_flow_version,

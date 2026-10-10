@@ -52,6 +52,10 @@ use egret_metastore::Db;
 use serde::Serialize;
 use uuid::Uuid;
 
+/// The 409 [`FlowRepo::update`] answers when its `if_updated_at` no longer
+/// matches the row (W7a spec §7.3, verbatim).
+pub const DRAFT_CHANGED: &str = "the draft was changed since you opened it";
+
 fn db_err(e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!("{e}"))
 }
@@ -179,6 +183,9 @@ pub struct UpdateFlowInput {
     pub source: Option<String>,
     pub plan: Option<serde_json::Value>,
     pub folder_id: Option<Option<Uuid>>,
+    /// Write only if the row's `updated_at` is still this (W7a spec §7.3).
+    /// `None`: unconditional, as before.
+    pub if_updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Filters for [`FlowRepo::list`]. `trashed = false` (the default) lists only
@@ -343,6 +350,7 @@ impl FlowRepo {
                folder_id = CASE WHEN $7 THEN $8 ELSE folder_id END, \
                updated_at = now() \
              WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL \
+               AND ($9::timestamptz IS NULL OR updated_at = $9) \
              RETURNING ",
             flow_cols!()
         ))
@@ -354,6 +362,7 @@ impl FlowRepo {
         .bind(&input.plan)
         .bind(input.folder_id.is_some())
         .bind(input.folder_id.flatten())
+        .bind(input.if_updated_at)
         .fetch_optional(&mut *tx)
         .await;
         // Whole-branch review, IMPORTANT finding 3: same `UNIQUE
@@ -376,7 +385,29 @@ impl FlowRepo {
             }
             Err(e) => return Err(db_err(e)),
         };
-        let row = row.ok_or_else(|| Error::NotFound("flow".into()))?;
+        let row = match row {
+            Some(row) => row,
+            // Zero rows with a precondition: the row is missing (404, as
+            // without one) or it no longer matches (409). The comparison
+            // already happened inside the `UPDATE` above, under its row
+            // lock, so this read only names the refusal; it decides nothing.
+            None if input.if_updated_at.is_some() => {
+                let exists: Option<(Uuid,)> = sqlx::query_as(
+                    "SELECT id FROM workflow.flows \
+                     WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL",
+                )
+                .bind(id)
+                .bind(ws)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db_err)?;
+                return Err(match exists {
+                    Some(_) => Error::Conflict(DRAFT_CHANGED.into()),
+                    None => Error::NotFound("flow".into()),
+                });
+            }
+            None => return Err(Error::NotFound("flow".into())),
+        };
         crate::scheduler::sync(&mut tx, &row, false).await?;
         tx.commit().await.map_err(db_err)?;
         Ok(row)
