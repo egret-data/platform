@@ -311,6 +311,12 @@ pub struct FlowDto {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub validation: ValidationReportDto,
+    /// Whether the caller may save, publish, run and delete this flow: they
+    /// hold `workflow:manage` in this workspace. An editor opens read-only
+    /// when this is false; every mutating route still checks for itself.
+    // W7a spec §5.2. The PDP's answer to the check the mutating routes make.
+    // `workflow:manage` is workspace-scoped, so `/auth/me` cannot say it.
+    pub can_manage: bool,
 }
 
 /// A flow draft as `GET /flows` lists it — no `source`/`plan`/`validation`:
@@ -444,7 +450,7 @@ pub struct PublishFlowRequest {
 /// [`update_flow`] — so it is mapped to `Error::Internal` rather than
 /// `InvalidInput`, which would misattribute a storage-layer inconsistency to
 /// the current request.
-fn draft_dto(row: FlowRow) -> EgretResult<FlowDto> {
+fn draft_dto(row: FlowRow, can_manage: bool) -> EgretResult<FlowDto> {
     let parsed = parse(&row.source).map_err(|e| {
         Error::Internal(anyhow::anyhow!(
             "stored draft {} no longer parses: {} (line {:?}, column {:?})",
@@ -469,6 +475,7 @@ fn draft_dto(row: FlowRow) -> EgretResult<FlowDto> {
         created_at: row.created_at,
         updated_at: row.updated_at,
         validation: ValidationReportDto::from(&report),
+        can_manage,
     })
 }
 
@@ -629,7 +636,8 @@ async fn create_flow(
             "flow_id": created.flow_id,
         }),
     ));
-    Ok((StatusCode::CREATED, Json(draft_dto(created)?)))
+    // The caller just passed `workflow:manage` to get here.
+    Ok((StatusCode::CREATED, Json(draft_dto(created, true)?)))
 }
 
 #[utoipa::path(
@@ -655,7 +663,15 @@ async fn get_flow(
 ) -> EgretResult<Json<FlowDto>> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
     let row = st.repo.get(ctx.workspace_id.0, id).await?;
-    Ok(Json(draft_dto(row)?))
+    // The check the mutating routes make, so the editor and the routes
+    // cannot disagree about who may write.
+    // A PDP that failed is an error, not a "no": only a refusal reads as false.
+    let can_manage = match egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await {
+        Ok(()) => true,
+        Err(Error::Forbidden) => false,
+        Err(e) => return Err(e),
+    };
+    Ok(Json(draft_dto(row, can_manage)?))
 }
 
 #[utoipa::path(
@@ -747,7 +763,8 @@ async fn update_flow(
             "flow_id": updated.flow_id,
         }),
     ));
-    Ok(Json(draft_dto(updated)?))
+    // The caller just passed `workflow:manage` to get here.
+    Ok(Json(draft_dto(updated, true)?))
 }
 
 #[utoipa::path(

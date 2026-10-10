@@ -286,6 +286,12 @@ Khi execution chưa kết thúc, trang poll `GET …/executions/{id}` mỗi 2 gi
 
 `openapi.json` và client được sinh lại bằng `npm run gen:api` (FE-DATA-1).
 
+### 7.5 `can_manage` trên `FlowDto`
+
+*(Thêm ở W7a Task 5.)* `GET …/flows/{id}` trả `can_manage: bool`: người gọi có `workflow:manage` trong workspace này hay không, do PDP quyết định bằng đúng phép kiểm tra các route ghi dùng. Khi nó là false, editor mở ở chế độ chỉ đọc, không có Save, Publish, Run hay Delete (§5.2). `workflow:manage` là quyền theo workspace, còn `/auth/me` chỉ liệt kê quyền platform, nên frontend không có cách nào khác để biết; cách này theo `can_manage` mà các đối tượng workspace khác đã mang (dashboard, schedule, app). Create và update trả `true`, vì người gọi vừa qua phép kiểm tra. PDP lỗi là lỗi, không phải `false`. Đây chỉ là gợi ý cho UI: mọi route ghi vẫn tự kiểm tra.
+
+Trang tạo flow chưa có flow để hỏi, nên nó giả định có quyền; người không có quyền bị server từ chối khi Save, kèm thông điệp của server.
+
 ## 8. Cấu trúc frontend
 
 - `frontend/src/routes/workflows/` chứa các trang và `queryKeys.ts`: factory key có tiền tố `["workflows", …]` (FE-DATA-2).

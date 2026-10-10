@@ -37294,7 +37294,8 @@
           "state",
           "created_at",
           "updated_at",
-          "validation"
+          "validation",
+          "can_manage"
         ],
         "properties": {
           "id": {
@@ -37354,6 +37355,10 @@
           },
           "validation": {
             "$ref": "#/components/schemas/ValidationReportDto"
+          },
+          "can_manage": {
+            "type": "boolean",
+            "description": "Whether the caller may save, publish, run and delete this flow: they\nhold `workflow:manage` in this workspace. An editor opens read-only\nwhen this is false; every mutating route still checks for itself."
           }
         }
       },

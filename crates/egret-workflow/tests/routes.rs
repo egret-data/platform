@@ -1469,3 +1469,25 @@ async fn a_deleted_creator_leaves_a_null_name() {
     assert_eq!(versions.as_array().unwrap().len(), 1, "{versions}");
     assert!(versions[0]["created_by_name"].is_null(), "{versions}");
 }
+
+/// `can_manage` on `GET /flows/{id}` is the PDP's `workflow:manage` answer
+/// (W7a Task 5): the editor opens read-only on `false`. A reader gets
+/// `false`, and the control below, identical but for the grant, gets `true`.
+#[tokio::test]
+async fn get_flow_says_whether_the_caller_may_manage_it() {
+    let Some(db) = common::db().await else { return };
+    for (perms, expected) in [
+        (&["workflow:read"][..], false),
+        (&["workflow:read", "workflow:manage"][..], true),
+    ] {
+        let (ws, user) = common::seed_workspace(&db).await;
+        common::grant(&db, ws, user, perms).await;
+        // Built after the grant, as every other test in this file builds it.
+        let app = common::app(&db).await;
+        let id = common::seed_flow(&db, ws, user, &minimal_flow("a.can"), "draft").await;
+        let res = common::get(&app, &format!("/api/ws/{ws}/workflows/flows/{id}"), user).await;
+        assert_eq!(res.status(), StatusCode::OK, "{perms:?}");
+        let body = common::json(res).await;
+        assert_eq!(body["can_manage"], expected, "{perms:?}: {body}");
+    }
+}

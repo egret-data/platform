@@ -1,0 +1,120 @@
+import { useEffect, useRef, useState } from "react";
+import type { EditorProps } from "@monaco-editor/react";
+
+/**
+ * A stand-in for `@/components/monaco/MonacoEditor`, for the flow pages'
+ * tests: real Monaco cannot load in jsdom. Mock the module with
+ * `vi.mock("@/components/monaco/MonacoEditor", () => import("./monacoStub"))`.
+ *
+ * It keeps what the Code tab relies on: one model per `path` that outlives the
+ * editor (`keepCurrentModel`), created from `defaultValue` only when the path
+ * has none; typing goes to the model and is reported through `onChange`; a
+ * replacement from outside goes through `pushEditOperations`. `Ctrl/Cmd+S`
+ * inside the editor is the command the tab binds, run by {@link pressSaveInEditor}.
+ */
+type Model = {
+  uri: { toString: () => string };
+  text: string;
+  disposed: boolean;
+  listeners: Set<() => void>;
+  getValue: () => string;
+  getFullModelRange: () => unknown;
+  pushStackElement: () => void;
+  pushEditOperations: (_s: unknown, ops: { text: string }[]) => null;
+  dispose: () => void;
+};
+
+export const stub = {
+  models: new Map<string, Model>(),
+  commands: new Map<number, () => void>(),
+};
+
+export function resetMonacoStub(): void {
+  stub.models.clear();
+  stub.commands.clear();
+}
+
+/** Run the editor's own `Ctrl/Cmd+S` binding, as Monaco would on that key. */
+export function pressSaveInEditor(): void {
+  stub.commands.get(KeyMod.CtrlCmd | KeyCode.KeyS)?.();
+}
+
+const KeyMod = { CtrlCmd: 1 << 11 };
+const KeyCode = { KeyS: 49 };
+
+function modelFor(path: string, initial: string): Model {
+  const existing = stub.models.get(path);
+  if (existing && !existing.disposed) return existing;
+  const model: Model = {
+    uri: { toString: () => path },
+    text: initial,
+    disposed: false,
+    listeners: new Set(),
+    getValue: () => model.text,
+    getFullModelRange: () => "all",
+    pushStackElement: () => {},
+    pushEditOperations: (_s, ops) => {
+      model.text = ops[0].text;
+      model.listeners.forEach((l) => l());
+      return null;
+    },
+    dispose: () => {
+      model.disposed = true;
+      stub.models.delete(path);
+    },
+  };
+  stub.models.set(path, model);
+  return model;
+}
+
+/** Typing, as Monaco reports it: the model changes, then its listeners run. */
+function typeInto(model: Model, text: string): void {
+  model.text = text;
+  model.listeners.forEach((l) => l());
+}
+
+const monaco = {
+  MarkerSeverity: { Hint: 1, Info: 2, Warning: 4, Error: 8 },
+  KeyMod,
+  KeyCode,
+  Uri: { parse: (s: string) => s },
+  editor: {
+    setModelMarkers: () => {},
+    getModelMarkers: () => [],
+    onDidChangeMarkers: () => ({ dispose: () => {} }),
+    getModel: (uri: string) => stub.models.get(uri) ?? null,
+  },
+};
+
+export default function MonacoStub(props: EditorProps) {
+  const model = modelFor(props.path ?? "default", props.defaultValue ?? "");
+  const [, repaint] = useState(0);
+  const latest = useRef(props);
+  useEffect(() => { latest.current = props; });
+  useEffect(() => {
+    const changed = () => {
+      repaint((n) => n + 1);
+      latest.current.onChange?.(model.text, undefined as never);
+    };
+    model.listeners.add(changed);
+    const editor = {
+      getModel: () => model,
+      addCommand: (k: number, cb: () => void) => { stub.commands.set(k, cb); },
+      onDidChangeCursorPosition: () => ({ dispose: () => {} }),
+      getPosition: () => null,
+      setSelection: () => {},
+      revealRangeInCenter: () => {},
+      focus: () => {},
+    };
+    latest.current.onMount?.(editor as never, monaco as never);
+    return () => { model.listeners.delete(changed); };
+  }, [model]);
+  return (
+    <textarea
+      aria-label="Flow source"
+      readOnly={!!props.options?.readOnly}
+      value={model.text}
+      onChange={(e) => typeInto(model, e.target.value)}
+    />
+  );
+}

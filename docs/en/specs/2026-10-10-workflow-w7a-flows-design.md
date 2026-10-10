@@ -284,6 +284,12 @@ While the execution is not terminal, it polls `GET …/executions/{id}` every 2 
 
 `openapi.json` and the generated client are regenerated with `npm run gen:api` (FE-DATA-1).
 
+### 7.5 `can_manage` on `FlowDto`
+
+*(Added in W7a Task 5.)* `GET …/flows/{id}` answers `can_manage: bool`: whether the caller holds `workflow:manage` in this workspace, decided by the PDP with the same check the mutating routes make. The editor opens read-only, with no Save, Publish, Run or Delete, when it is false (§5.2). `workflow:manage` is workspace-scoped, and `/auth/me` lists only platform permissions, so the frontend cannot tell otherwise; this follows the `can_manage` other workspace objects carry (dashboards, schedules, apps). Create and update answer `true`, since the caller just passed the check. A PDP failure is an error, not `false`. It is a hint for the UI only: every mutating route still checks.
+
+The create page has no flow to ask, so it assumes the permission; a caller without it is refused by the server on Save, with its message.
+
 ## 8. Frontend structure
 
 - `frontend/src/routes/workflows/` holds the pages and `queryKeys.ts`: the key factory, prefixed `["workflows", …]` (FE-DATA-2).

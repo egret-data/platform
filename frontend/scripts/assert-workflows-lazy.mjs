@@ -27,26 +27,52 @@
  * GUARDING THE GUARD. A marker that stops appearing anywhere would make this script pass forever
  * on any bundle, so it also asserts the marker IS present in some non-entry chunk. Renaming the key
  * fails this loudly instead of letting it go quiet.
+ *
+ * THE FLOW LIST'S OWN CHUNK (W7a Task 5). Inside the area, the flow pages (`FlowDetail.tsx`,
+ * `FlowNew.tsx`) are a second `lazy()` split: they bring the multi-panel frame, the editor tabs and
+ * the `yaml` library, which the flow list never uses. The markers flagged `editor` must therefore
+ * also stay out of the chunk that carries the flow list (found by its own marker). A static import
+ * of an editor module from the list, or of `registerEditorTabs` from `WorkflowsRoutes.tsx` (where it
+ * lived until Task 5), pulls them in and fails here. Each `editor` marker was proven by a scratch
+ * build that imported its module eagerly from `WorkflowsRoutes.tsx` (task-5-report.md).
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { entryChunkName } from "./dist-entry.mjs";
 
 const DIST = "dist";
+const LIST_MARKER = "egret.wf.ns-collapsed.";
 const ASSETS = join(DIST, "assets");
-/** `[module, marker]`: the module the marker proves stayed lazy. */
+/**
+ * `[module, marker, editor?]`: the module the marker proves stayed lazy. `editor` modules must also
+ * stay out of the flow list's chunk.
+ */
 const MARKERS = [
-  // The prefix of the flow list's collapse-state key (`nsCollapseKey`).
-  ["src/routes/workflows/FlowsList.tsx", "egret.wf.ns-collapsed."],
+  // The prefix of the flow list's collapse-state key (`nsCollapseKey`). Also finds the list's chunk.
+  ["src/routes/workflows/FlowsList.tsx", LIST_MARKER],
   // A Kestra state name; no egret module outside the area names Kestra's states.
   ["src/components/workflows/StateChip.tsx", "RESUBMITTED"],
   // `EMPTY_SEGMENT_LABEL`, this module's only string literal.
   ["src/components/workflows/namespaceTree.ts", "(empty segment)"],
   ["src/routes/workflows/ExecutionsPlaceholder.tsx", "The executions list is not here yet"],
-  // The flow editor's tabs (W7a Task 4), registered when the area loads.
-  ["src/components/workflows/editor/CodeTab.tsx", "egret-validate"],
-  ["src/components/workflows/editor/DocsTab.tsx", "This type has no documented outputs."],
-  ["src/components/workflows/editor/ProblemsTab.tsx", "(not found in the source, shown on line 1)"],
+  // The flow editor's tabs (W7a Task 4), registered by the flow pages' chunk (Task 5).
+  ["src/components/workflows/editor/CodeTab.tsx", "egret-validate", "editor"],
+  ["src/components/workflows/editor/DocsTab.tsx", "This type has no documented outputs.", "editor"],
+  ["src/components/workflows/editor/ProblemsTab.tsx", "(not found in the source, shown on line 1)", "editor"],
+  // The multi-panel frame (W7a Task 3), which nothing imported before the flow pages.
+  ["src/components/workflows/panels/MultiPanel.tsx", "Not over a drop target.", "editor"],
+  // `LAYOUT_KEY_PREFIX`.
+  ["src/components/workflows/panels/usePersistedLayout.ts", "egret.wf.layout.", "editor"],
+  // The `yaml` library, through `yamlPath.ts`: one of its own error codes. It is also in
+  // `monaco-yaml`'s worker file, which is a non-entry chunk and harmless.
+  ["node_modules/yaml (via src/components/workflows/editor/yamlPath.ts)", "BLOCK_AS_IMPLICIT_KEY", "editor"],
+  // The flow pages (W7a Task 5).
+  ["src/routes/workflows/FlowDetail.tsx", "Draft differs from live v", "editor"],
+  // The create page's template.
+  ["src/routes/workflows/FlowNew.tsx", "Hello from egret", "editor"],
+  ["src/components/workflows/PublishDialog.tsx", "What changed in this version", "editor"],
+  ["src/components/workflows/StaleSaveDialog.tsx", "Discard and reload", "editor"],
+  ["src/components/workflows/draftState.ts", "Publish the flow before running it", "editor"],
 ];
 
 const entry = entryChunkName(DIST);
@@ -55,7 +81,26 @@ const others = readdirSync(ASSETS).filter((f) => f.endsWith(".js") && f !== entr
 
 let failed = false;
 
-for (const [module, marker] of MARKERS) {
+const listChunks = others.filter((f) => readFileSync(join(ASSETS, f), "utf8").includes(LIST_MARKER));
+if (listChunks.length !== 1) {
+  console.error(
+    `✗ The flow list's chunk is not one chunk: ${LIST_MARKER} is in ${listChunks.length} non-entry chunks ` +
+      `(${listChunks.join(", ") || "none"}). The list-chunk checks below cannot run.`,
+  );
+  failed = true;
+}
+const listChunk = listChunks.length === 1 ? listChunks[0] : null;
+const listSource = listChunk ? readFileSync(join(ASSETS, listChunk), "utf8") : "";
+
+for (const [module, marker, editor] of MARKERS) {
+  if (editor && listChunk && listSource.includes(marker)) {
+    console.error(
+      `✗ ${marker} (${module}) is in the flow list's chunk (${listChunk}).\n` +
+        `  The flow editor now loads with the flow list. Look for a static import of it from\n` +
+        `  FlowsList.tsx or WorkflowsRoutes.tsx; the flow pages are reached through lazy().`,
+    );
+    failed = true;
+  }
   if (entrySource.includes(marker)) {
     console.error(
       `✗ ${marker} (${module}) is in the entry chunk (${entry}).\n` +
@@ -80,5 +125,7 @@ for (const [module, marker] of MARKERS) {
 
 if (failed) process.exit(1);
 console.log(
-  `✓ The Workflows area stays out of the entry chunk (${entry}); ${MARKERS.length} module markers found in lazy chunks.`,
+  `✓ The Workflows area stays out of the entry chunk (${entry}); ${MARKERS.length} module markers found in lazy chunks.\n` +
+    `✓ The flow editor stays out of the flow list's chunk (${listChunk}); ` +
+    `${MARKERS.filter((m) => m[2]).length} editor markers checked.`,
 );

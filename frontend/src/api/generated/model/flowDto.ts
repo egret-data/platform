@@ -35,4 +35,10 @@ export interface FlowDto {
   created_at: string;
   updated_at: string;
   validation: ValidationReportDto;
+  /**
+     * Whether the caller may save, publish, run and delete this flow: they
+     * hold `workflow:manage` in this workspace. An editor opens read-only
+     * when this is false; every mutating route still checks for itself.
+     */
+  can_manage: boolean;
 }

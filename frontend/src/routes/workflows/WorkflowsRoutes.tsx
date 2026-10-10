@@ -1,10 +1,33 @@
+import { lazy, Suspense, type ReactNode } from "react";
 import { Navigate, Route, Routes, useParams } from "react-router-dom";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Placeholder } from "@/routes/Placeholder";
 import FlowsList from "@/routes/workflows/FlowsList";
 import ExecutionsPlaceholder from "@/routes/workflows/ExecutionsPlaceholder";
-// Registers the flow editor's Code, Docs and Problems tabs with the panel frame
-// (spec §5.1). Here, so they register inside this lazy area and not before.
-import "@/components/workflows/editor/registerEditorTabs";
+
+/**
+ * The flow pages, a lazy chunk of their own inside this one: they bring the
+ * multi-panel frame, the editor tabs (which they register) and `yaml`, none
+ * of which the flow list needs. `scripts/assert-workflows-lazy.mjs` checks
+ * they stay out of the list's chunk as well as the entry.
+ */
+const FlowDetail = lazy(() => import("@/routes/workflows/FlowDetail"));
+const FlowNew = lazy(() => import("@/routes/workflows/FlowNew"));
+
+/** The flow pages' loading state (FE-STATE-2). A failed chunk reaches `LazyRouteArea`'s boundary. */
+function FlowPage({ children }: { children: ReactNode }) {
+  return (
+    <Suspense
+      fallback={
+        <div className="p-4" data-testid="flow-page-loading">
+          <ListSkeleton cols={2} />
+        </div>
+      }
+    >
+      {children}
+    </Suspense>
+  );
+}
 
 /**
  * The Workflows area, `/explore/:workspace/workflows/*` (spec §3).
@@ -26,9 +49,10 @@ export default function WorkflowsRoutes() {
       <Route index element={<Navigate to={`${base}/flows`} replace />} />
       <Route path="flows" element={<FlowsList />} />
       {/* `new` before `:id`, as the convention in `App.tsx` records. */}
-      <Route path="flows/new" element={<Placeholder title="New flow" />} />
+      <Route path="flows/new" element={<FlowPage><FlowNew /></FlowPage>} />
       <Route path="flows/:id" element={<FlowIndexRedirect base={base} />} />
-      <Route path="flows/:id/:tab" element={<FlowDetailPlaceholder base={base} />} />
+      {/* `FlowDetail` sends an unknown tab to `edit`. */}
+      <Route path="flows/:id/:tab" element={<FlowPage><FlowDetail /></FlowPage>} />
       <Route path="executions" element={<ExecutionsPlaceholder />} />
       <Route path="executions/:id" element={<Placeholder title="Execution" />} />
       <Route path="*" element={<Navigate to={`${base}/flows`} replace />} />
@@ -36,19 +60,7 @@ export default function WorkflowsRoutes() {
   );
 }
 
-/** The flow detail's tabs in W7a; W7b and W7e add theirs here. */
-const FLOW_TABS = new Set(["edit", "revisions"]);
-
 function FlowIndexRedirect({ base }: { base: string }) {
   const { id } = useParams();
   return <Navigate to={`${base}/flows/${encodeURIComponent(id ?? "")}/edit`} replace />;
-}
-
-/** Holds `flows/:id/:tab` until the flow editor lands; an unknown tab goes to `edit`. */
-function FlowDetailPlaceholder({ base }: { base: string }) {
-  const { id, tab } = useParams();
-  if (!tab || !FLOW_TABS.has(tab)) {
-    return <Navigate to={`${base}/flows/${encodeURIComponent(id ?? "")}/edit`} replace />;
-  }
-  return <Placeholder title="Flow" />;
 }
