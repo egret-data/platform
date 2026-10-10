@@ -108,7 +108,7 @@ Forms hold their state in `useState` or a dedicated hook. No form library is add
 
 #### FE-FORM-2 — Every input has a tied `Label` · MUST
 Every input has a `Label` tied by `htmlFor`/`id`.
-**Do this:** `<Label htmlFor="name">Name</Label><Input id="name" />` (`frontend/src/components/ui/label.tsx`). **Checked by:** lint (jsx-a11y, `jsx-a11y/label-has-associated-control`).
+**Do this:** `<Label htmlFor="name">Name</Label><Input id="name" />` (`frontend/src/components/ui/label.tsx`). **Checked by:** lint (the label side: `jsx-a11y/label-has-associated-control` requires a `Label` to have `htmlFor` or a nested control) and review (every input has a label whose `htmlFor` matches its `id`; lint misses an unlabelled input and a mismatched id).
 
 #### FE-FORM-3 — Known values get a picker · MUST
 When the set of valid values is known, the control is a picker or a combobox (pick or type) with help. It is never a bare text input.
@@ -232,7 +232,7 @@ Every frontend change passes, from `frontend/`:
 
 ## Reviewer checklist
 
-Every frontend task review answers each applicable item: **pass**, **fail**, or **not applicable**. These are the rules lint cannot check.
+Every rule a reviewer must confirm is here: either lint cannot check it, or its check is a test or the gate that the change must add or run. Every frontend task review answers each applicable item: **pass**, **fail**, or **not applicable**. For a rule checked by a test, the reviewer also asks: does the test this rule needs exist, and does it cover this change?
 
 - [ ] FE-PAGE-1 — A list page uses `ListPageShell`, which owns the single `h1`; title, toolbar, `SummaryStrip`, table.
 - [ ] FE-PAGE-2 — Detail sections use `ui/tabs`; the tab, and any filter or selection a user would want to share, live in the URL.
@@ -252,12 +252,14 @@ Every frontend task review answers each applicable item: **pass**, **fail**, or 
 - [ ] FE-VISUAL-5 — (SHOULD) Icons from `lucide-react`; at most one `--highlight` per page; `--accent` is not emphasis.
 - [ ] FE-VISUAL-6 — Charts keep the Metabase palette, line styles, marker shapes and the `aria` description; decals stay off.
 - [ ] FE-FORM-1 — Form state in `useState` or a dedicated hook; no form library.
+- [ ] FE-FORM-2 — Every input has a `Label` whose `htmlFor` matches its `id` (lint checks only the label side).
 - [ ] FE-FORM-3 — Known value sets get a picker or combobox with help.
 - [ ] FE-FORM-4 — Validation errors sit beside their field, in the server's words when the server produced it.
 - [ ] FE-DATA-1 — The API client was regenerated with `npm run gen:api`.
 - [ ] FE-DATA-2 — New endpoints through orval hooks; hand-written keys from the domain's key factory.
 - [ ] FE-DATA-3 — No server data in `localStorage`; every access wrapped.
 - [ ] FE-ROUTE-1 — Routes in `App.tsx`, behind their area's guard; redirects are absolute.
+- [ ] FE-ROUTE-2 — A new feature area is lazy with a skeleton fallback, and a bundle test guards it (W7 adds the first).
 - [ ] FE-ROUTE-3 — URLs are kebab-case under `/explore/:workspace/…`.
 - [ ] FE-A11Y-3 — Everything clickable works from the keyboard; icon-only buttons have an `aria-label`.
 - [ ] FE-A11Y-4 — No information carried by colour alone.
@@ -265,12 +267,14 @@ Every frontend task review answers each applicable item: **pass**, **fail**, or 
 - [ ] FE-A11Y-6 — `autoFocus` only on a field the user's own action revealed.
 - [ ] FE-COPY-1 — English, sentence case, buttons start with a verb, one name per thing.
 - [ ] FE-COPY-2 — Errors say what happened and what to do; no raw exception or stack trace.
+- [ ] FE-COPY-3 — Copy that names a control has a test that the control exists under that name.
 - [ ] FE-COPY-4 — Pages write their own plurals.
 - [ ] FE-REF-1 — egret's visual system; the source product's structure and flow (Metabase for BI, Kestra for Workflow).
 - [ ] FE-REF-2 — Compared against a running instance; deliberate differences recorded in the spec.
 - [ ] FE-TEST-1 — Tests render the real component, assert through the DOM, do not copy the expression, and use fixtures that can fail.
 - [ ] FE-TEST-2 — Painted results verified in a real browser.
 - [ ] FE-TEST-3 — Shared components changed additively; blast radius measured by import path.
+- [ ] FE-TEST-4 — The gate ran: `npm run lint`, `npx tsc -b`, `npm run test`, `npm run build`, and the bundle tests the change touches.
 
 ## Debt register
 

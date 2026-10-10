@@ -1,6 +1,6 @@
 # Frontend rules: one rulebook for egret's UI, enforced where a machine can check it
 
-**Status:** design, 2026-10-10; not yet implemented.
+**Status:** implemented on `docs/frontend-ui-rules`, 2026-10-10.
 **Applies to:** everything under `frontend/`, starting with W7 (the workflow UI). Existing code follows the rules as it is touched (§6).
 **Related:** `docs/{en,vi}/ui-conventions.md` (the reasons behind earlier decisions; it stays and becomes the rationale this rulebook links to).
 
@@ -113,7 +113,7 @@ A rule that names a component names the file it lives in. If a component moves, 
 
 ### 4.5 Forms (FE-FORM)
 1. Forms hold their state in `useState` or a dedicated hook (as `useEngineConfigForm`). No form library is added.
-2. Every input has a `Label` tied by `htmlFor`/`id`. Checked by lint (`jsx-a11y`).
+2. Every input has a `Label` tied by `htmlFor`/`id`. Checked by lint (the label side: a `Label` must have `htmlFor` or a nested control) and review (every input has a label whose `htmlFor` matches its `id`). *(Amended 2026-10-10, final review: `label-has-associated-control` misses an unlabelled input and a mismatched id.)*
 3. When the set of valid values is known, the control is a picker or a combobox (pick or type) with help. It is never a bare text input.
 4. A validation error shows beside its field, in the server's words when the server produced it.
 
@@ -168,20 +168,20 @@ A rule that names a component names the file it lives in. If a component moves, 
 
 ## 5. The reviewer checklist
 
-The rulebook ends with a checklist of the rules that lint cannot check:
+The rulebook ends with a checklist of every rule a reviewer must confirm: either lint cannot check it, or its check is a test or the gate that a change must add or run. *(Amended 2026-10-10, final review: FE-FORM-2, FE-ROUTE-2, FE-COPY-3 and FE-TEST-4 added.)*
 - FE-PAGE-1 to 5
 - FE-STATE-1 to 4
 - FE-ACTION-2 to 5
 - FE-VISUAL-2 and 4 to 6
-- FE-FORM-1, 3 and 4
+- FE-FORM-1 to 4
 - FE-DATA-1 to 3
-- FE-ROUTE-1 and 3
+- FE-ROUTE-1 to 3
 - FE-A11Y-3 to 6
-- FE-COPY-1, 2 and 4
+- FE-COPY-1 to 4
 - FE-REF-1 and 2
-- FE-TEST-1 to 3
+- FE-TEST-1 to 4
 
-Every frontend task review answers each applicable item: pass, fail, or not applicable.
+Every frontend task review answers each applicable item: pass, fail, or not applicable. For a rule checked by a test, the review also asks whether the test the rule needs exists and covers the change.
 
 ## 6. The debt register
 

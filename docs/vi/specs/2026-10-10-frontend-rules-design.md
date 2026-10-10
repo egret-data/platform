@@ -2,7 +2,7 @@
 
 > Bản tham khảo tiếng Việt. Bản chính là `docs/en/specs/2026-10-10-frontend-rules-design.md`; khi hai bản khác nhau, bản tiếng Anh thắng.
 
-**Trạng thái:** thiết kế, 2026-10-10; chưa cài.
+**Trạng thái:** đã cài trên `docs/frontend-ui-rules`, 2026-10-10.
 **Áp dụng cho:** mọi thứ dưới `frontend/`, bắt đầu từ W7 (UI workflow). Code cũ theo rule khi được chạm tới (§6).
 **Liên quan:** `docs/{en,vi}/ui-conventions.md` (lý do của các quyết định trước; file được giữ và trở thành phần giải thích lý do mà bộ rule trỏ tới).
 
@@ -115,7 +115,7 @@ Rule nhắc tên một component thì ghi file chứa nó. Nếu component chuy�
 
 ### 4.5 Form (FE-FORM)
 1. Form giữ state bằng `useState` hoặc một hook riêng (như `useEngineConfigForm`). Không thêm thư viện form.
-2. Mọi input có một `Label` gắn qua `htmlFor`/`id`. Kiểm bằng lint (`jsx-a11y`).
+2. Mọi input có một `Label` gắn qua `htmlFor`/`id`. Kiểm bằng lint (phía label: `Label` phải có `htmlFor` hoặc chứa control bên trong) và review (mọi input có label với `htmlFor` khớp `id` của nó). *(Sửa 2026-10-10, review cuối: `label-has-associated-control` bỏ sót input không có label và id không khớp.)*
 3. Khi tập giá trị hợp lệ đã biết, control là picker hoặc combobox (chọn hoặc gõ) có trợ giúp, không bao giờ là ô nhập chữ trơn.
 4. Lỗi validate hiện cạnh field của nó, bằng chính lời của server nếu lỗi do server trả về.
 
@@ -170,20 +170,20 @@ Rule nhắc tên một component thì ghi file chứa nó. Nếu component chuy�
 
 ## 5. Checklist cho reviewer
 
-Bộ rule kết thúc bằng một checklist gồm những rule mà lint không kiểm được:
+Bộ rule kết thúc bằng một checklist gồm mọi rule mà reviewer phải xác nhận: hoặc lint không kiểm được nó, hoặc cách kiểm nó là một test hay cổng kiểm mà thay đổi phải thêm hoặc chạy. *(Sửa 2026-10-10, review cuối: thêm FE-FORM-2, FE-ROUTE-2, FE-COPY-3 và FE-TEST-4.)*
 - FE-PAGE-1 đến 5
 - FE-STATE-1 đến 4
 - FE-ACTION-2 đến 5
 - FE-VISUAL-2 và 4 đến 6
-- FE-FORM-1, 3 và 4
+- FE-FORM-1 đến 4
 - FE-DATA-1 đến 3
-- FE-ROUTE-1 và 3
+- FE-ROUTE-1 đến 3
 - FE-A11Y-3 đến 6
-- FE-COPY-1, 2 và 4
+- FE-COPY-1 đến 4
 - FE-REF-1 và 2
-- FE-TEST-1 đến 3
+- FE-TEST-1 đến 4
 
-Mỗi lần review một task frontend trả lời từng mục áp dụng được: đạt, không đạt, hoặc không áp dụng.
+Mỗi lần review một task frontend trả lời từng mục áp dụng được: đạt, không đạt, hoặc không áp dụng. Với rule kiểm bằng test, review hỏi thêm test mà rule cần đã có chưa và có bao được thay đổi không.
 
 ## 6. Sổ nợ
 

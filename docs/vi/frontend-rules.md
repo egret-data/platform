@@ -110,7 +110,7 @@ Form giữ state bằng `useState` hoặc một hook riêng. Không thêm thư v
 
 #### FE-FORM-2 — Mọi input có `Label` gắn với nó · PHẢI
 Mọi input có một `Label` gắn qua `htmlFor`/`id`.
-**Làm thế này:** `<Label htmlFor="name">Name</Label><Input id="name" />` (`frontend/src/components/ui/label.tsx`). **Kiểm bằng:** lint (jsx-a11y, `jsx-a11y/label-has-associated-control`).
+**Làm thế này:** `<Label htmlFor="name">Name</Label><Input id="name" />` (`frontend/src/components/ui/label.tsx`). **Kiểm bằng:** lint (phía label: `jsx-a11y/label-has-associated-control` đòi `Label` có `htmlFor` hoặc chứa control bên trong) và review (mọi input có label với `htmlFor` khớp `id` của nó; lint bỏ sót input không có label và id không khớp).
 
 #### FE-FORM-3 — Giá trị đã biết thì dùng picker · PHẢI
 Khi tập giá trị hợp lệ đã biết, control là picker hoặc combobox (chọn hoặc gõ) có trợ giúp, không bao giờ là ô nhập chữ trơn.
@@ -234,7 +234,7 @@ Mọi thay đổi frontend qua được, chạy từ `frontend/`:
 
 ## Checklist cho reviewer
 
-Mỗi lần review một task frontend trả lời từng mục áp dụng được: **đạt**, **không đạt**, hoặc **không áp dụng**. Đây là những rule mà lint không kiểm được.
+Mọi rule mà reviewer phải xác nhận đều ở đây: hoặc lint không kiểm được nó, hoặc cách kiểm nó là một test hay cổng kiểm mà thay đổi phải thêm hoặc chạy. Mỗi lần review một task frontend trả lời từng mục áp dụng được: **đạt**, **không đạt**, hoặc **không áp dụng**. Với rule kiểm bằng test, reviewer hỏi thêm: test mà rule cần đã có chưa, và có bao được thay đổi này không?
 
 - [ ] FE-PAGE-1 — Trang danh sách dùng `ListPageShell`, shell giữ `h1` duy nhất; tiêu đề, toolbar, `SummaryStrip`, bảng.
 - [ ] FE-PAGE-2 — Phần chi tiết dùng `ui/tabs`; tab, cùng mọi filter hay lựa chọn mà người dùng muốn chia sẻ, nằm trong URL.
@@ -254,12 +254,14 @@ Mỗi lần review một task frontend trả lời từng mục áp dụng đư�
 - [ ] FE-VISUAL-5 — (NÊN) Icon từ `lucide-react`; tối đa một `--highlight` mỗi trang; `--accent` không dùng làm điểm nhấn.
 - [ ] FE-VISUAL-6 — Chart giữ palette Metabase, kiểu đường, hình marker và mô tả `aria`; decal vẫn tắt.
 - [ ] FE-FORM-1 — State của form bằng `useState` hoặc hook riêng; không thư viện form.
+- [ ] FE-FORM-2 — Mọi input có `Label` với `htmlFor` khớp `id` của nó (lint chỉ kiểm phía label).
 - [ ] FE-FORM-3 — Tập giá trị đã biết thì dùng picker hoặc combobox có trợ giúp.
 - [ ] FE-FORM-4 — Lỗi validate nằm cạnh field, bằng lời của server nếu lỗi do server trả về.
 - [ ] FE-DATA-1 — API client được sinh lại bằng `npm run gen:api`.
 - [ ] FE-DATA-2 — Endpoint mới qua hook của orval; key tự viết lấy từ factory key của domain.
 - [ ] FE-DATA-3 — Không có dữ liệu server trong `localStorage`; mọi lần truy cập đều được bọc.
 - [ ] FE-ROUTE-1 — Route trong `App.tsx`, sau guard của khu vực; redirect dùng đường dẫn tuyệt đối.
+- [ ] FE-ROUTE-2 — Khu vực tính năng mới được lazy-load với fallback là skeleton, và có bundle test giữ điều đó (W7 thêm test đầu tiên).
 - [ ] FE-ROUTE-3 — URL kebab-case dưới `/explore/:workspace/…`.
 - [ ] FE-A11Y-3 — Mọi thứ bấm được đều dùng được bằng bàn phím; nút chỉ có icon có `aria-label`.
 - [ ] FE-A11Y-4 — Không thông tin nào chỉ truyền bằng màu.
@@ -267,12 +269,14 @@ Mỗi lần review một task frontend trả lời từng mục áp dụng đư�
 - [ ] FE-A11Y-6 — `autoFocus` chỉ trên ô do chính thao tác của người dùng làm hiện ra.
 - [ ] FE-COPY-1 — Tiếng Anh, viết hoa kiểu câu, nút bắt đầu bằng động từ, một tên cho mỗi thứ.
 - [ ] FE-COPY-2 — Lỗi nói chuyện gì xảy ra và làm gì tiếp; không exception thô hay stack trace.
+- [ ] FE-COPY-3 — Chữ nhắc tên một control có test kiểm control đó tồn tại đúng tên ấy.
 - [ ] FE-COPY-4 — Trang tự viết số nhiều.
 - [ ] FE-REF-1 — Hệ visual của egret; cấu trúc và luồng của sản phẩm gốc (Metabase cho BI, Kestra cho Workflow).
 - [ ] FE-REF-2 — Đã so với một bản đang chạy; khác biệt có chủ ý được ghi vào spec.
 - [ ] FE-TEST-1 — Test render component thật, kiểm qua DOM, không chép biểu thức, fixture có thể làm test thất bại.
 - [ ] FE-TEST-2 — Kết quả hiển thị đã kiểm trên trình duyệt thật.
 - [ ] FE-TEST-3 — Component dùng chung chỉ sửa theo kiểu thêm vào; phạm vi ảnh hưởng đo theo đường import.
+- [ ] FE-TEST-4 — Cổng kiểm đã chạy: `npm run lint`, `npx tsc -b`, `npm run test`, `npm run build`, và các bundle test mà thay đổi chạm tới.
 
 ## Sổ nợ
 

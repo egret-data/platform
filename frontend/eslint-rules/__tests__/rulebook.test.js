@@ -32,19 +32,20 @@ const EXPECTED_IDS = Object.entries(GROUPS).flatMap(([group, n]) =>
   Array.from({ length: n }, (_, i) => `FE-${group}-${i + 1}`),
 );
 
-// Spec §5: the rules lint cannot check.
+// Spec §5: every rule a reviewer must confirm, because lint cannot check it or
+// because its check is a test or the gate that a change must add or run.
 const CHECKLIST_IDS = [
   ...["PAGE-1", "PAGE-2", "PAGE-3", "PAGE-4", "PAGE-5"],
   ...["STATE-1", "STATE-2", "STATE-3", "STATE-4"],
   ...["ACTION-2", "ACTION-3", "ACTION-4", "ACTION-5"],
   ...["VISUAL-2", "VISUAL-4", "VISUAL-5", "VISUAL-6"],
-  ...["FORM-1", "FORM-3", "FORM-4"],
+  ...["FORM-1", "FORM-2", "FORM-3", "FORM-4"],
   ...["DATA-1", "DATA-2", "DATA-3"],
-  ...["ROUTE-1", "ROUTE-3"],
+  ...["ROUTE-1", "ROUTE-2", "ROUTE-3"],
   ...["A11Y-3", "A11Y-4", "A11Y-5", "A11Y-6"],
-  ...["COPY-1", "COPY-2", "COPY-4"],
+  ...["COPY-1", "COPY-2", "COPY-3", "COPY-4"],
   ...["REF-1", "REF-2"],
-  ...["TEST-1", "TEST-2", "TEST-3"],
+  ...["TEST-1", "TEST-2", "TEST-3", "TEST-4"],
 ].map((id) => `FE-${id}`);
 
 const ID = /FE-[A-Z][A-Z0-9]*-\d+/g;
@@ -182,6 +183,17 @@ describe("the pointers to the rulebook", () => {
     expect(existsSync(resolve(repo, file))).toBe(true);
     expect(read(file)).toContain("../docs/en/frontend-rules.md");
     expect(existsSync(resolve(repo, "frontend", "../docs/en/frontend-rules.md"))).toBe(true);
+  });
+
+  // FE-TEST-4's gate, named the way the rulebook names it.
+  it.each(["frontend/CLAUDE.md", "frontend/AGENTS.md"])("%s lists FE-TEST-4's whole gate", (file) => {
+    const text = read(file);
+    for (const step of ["npm run lint", "npx tsc -b", "npm run test", "npm run build"]) {
+      expect(text).toContain(`\`${step}\``);
+    }
+    for (const bundle of ["npm run test:bundle", "test:bundle:xlsx", "test:bundle:csp", "test:bundle:monaco"]) {
+      expect(text).toContain(`\`${bundle}\``);
+    }
   });
 
   it.each(["docs/en/ui-conventions.md", "docs/vi/ui-conventions.md"])(
