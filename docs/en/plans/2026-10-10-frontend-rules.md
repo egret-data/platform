@@ -21,8 +21,8 @@
   - `docs/en/frontend-rules.md` is normative. `docs/en/ui-conventions.md` stays as the rationale and is not otherwise edited.
   - UI copy is English, with no i18n.
   - Visual system is egret's; structure and flow copy the area's source product (BI: Metabase, Workflow: Kestra), checked against a running instance.
-- **Rule ids** are `FE-<GROUP>-<n>`. The groups and numbering are exactly those of §4: PAGE 1–5, STATE 1–4, ACTION 1–5, VISUAL 1–6, FORM 1–4, DATA 1–3, ROUTE 1–3, A11Y 1–5, COPY 1–4, REF 1–2, TEST 1–4.
-- **Every egret lint rule and every jsx-a11y rule is `error`.** The React Compiler rules that `eslint.config.js` sets to `warn` are not touched.
+- **Rule ids** are `FE-<GROUP>-<n>`. The groups and numbering are exactly those of §4: PAGE 1–5, STATE 1–4, ACTION 1–5, VISUAL 1–6, FORM 1–4, DATA 1–3, ROUTE 1–3, A11Y 1–6, COPY 1–4, REF 1–2, TEST 1–4.
+- **Every egret lint rule and every jsx-a11y rule is `error`, except `jsx-a11y/no-autofocus`, which is `off`** (the user's ruling, 2026-10-10; FE-A11Y-6 covers it by review). The React Compiler rules that `eslint.config.js` sets to `warn` are not touched.
 - **Exemptions:**
   - The egret rules apply to `src/**/*.{ts,tsx}` except tests: `**/__tests__/**` and `**/*.test.{ts,tsx}`.
   - `egret/no-raw-palette` also skips `src/components/chart/echarts/**` (FE-VISUAL-6).
@@ -422,7 +422,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - the rule ids `egret/no-raw-palette`, `egret/no-arbitrary-text-size`, `egret/no-window-confirm`, and every `jsx-a11y/*` key in `legacy`.
 
 - [ ] **Step 1: Write the rulebook test (red).** In `rulebook.test.js` (`// @vitest-environment node`), read the files from disk and assert:
-  1. `docs/en/frontend-rules.md` contains every id of the Global Constraints numbering, each exactly once as a heading or rule line: PAGE 1–5, STATE 1–4, ACTION 1–5, VISUAL 1–6, FORM 1–4, DATA 1–3, ROUTE 1–3, A11Y 1–5, COPY 1–4, REF 1–2, TEST 1–4. It contains no other `FE-…-n`.
+  1. `docs/en/frontend-rules.md` contains every id of the Global Constraints numbering, each exactly once as a heading or rule line: PAGE 1–5, STATE 1–4, ACTION 1–5, VISUAL 1–6, FORM 1–4, DATA 1–3, ROUTE 1–3, A11Y 1–6, COPY 1–4, REF 1–2, TEST 1–4. It contains no other `FE-…-n`.
   2. `docs/vi/frontend-rules.md` contains the same set of ids.
   3. Every repo path in backticks in the English rulebook that starts with `src/`, `frontend/`, `docs/` or `scripts/` exists. A `src/` path resolves from `frontend/`.
   4. Every rule id in `legacy` appears in the rulebook's "Debt register" section, with the number of files in its list.

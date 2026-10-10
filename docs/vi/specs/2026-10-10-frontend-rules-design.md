@@ -18,6 +18,8 @@
   - hook của orval cộng một factory query key cho mỗi domain;
   - `React.lazy` cho mọi khu vực tính năng mới.
 
+- **(2026-10-10, phán quyết của người dùng ở Task 2) `jsx-a11y/no-autofocus` tắt trong lint và trở thành FE-A11Y-6, do review kiểm.** Rule này báo trên 41 file, gần như toàn bộ là `autoFocus` có chủ ý trên ô đầu tiên của dialog hoặc ô đổi tên tại chỗ, tức focus chuyển theo chính thao tác của người dùng; rule lint không phân biệt được điều đó với focus bị giật lúc tải trang.
+
 ## 1. Vì sao
 
 Khảo sát `frontend/src` ngày 2026-10-10 cho thấy nền tốt nhưng chưa có một chuẩn chung:
@@ -135,6 +137,7 @@ Rule nhắc tên một component thì ghi file chứa nó. Nếu component chuy�
 3. Mọi phần tử bấm được đều dùng được bằng bàn phím. Phần tử không phải nút mà được cho bấm thì có role, `tabIndex` và xử lý Enter/Space. Nút chỉ có icon thì có `aria-label`.
 4. Thông tin không bao giờ chỉ truyền bằng màu; chart giữ decal và marker của nó (FE-VISUAL-6).
 5. Chuyển động tôn trọng `prefers-reduced-motion`.
+6. `autoFocus` chỉ dành cho ô xuất hiện do chính thao tác của người dùng (ô đầu tiên của dialog, sửa tại chỗ), không bao giờ lúc tải trang hay đổi route. *(2026-10-10, phán quyết của người dùng: `jsx-a11y/no-autofocus` tắt, vì nó không phân biệt được hai trường hợp.)*
 
 ### 4.9 Chữ trên UI (FE-COPY)
 1. Chữ trên UI bằng tiếng Anh.
@@ -175,7 +178,7 @@ Bộ rule kết thúc bằng một checklist gồm những rule mà lint không 
 - FE-FORM-1, 3 và 4
 - FE-DATA-1 đến 3
 - FE-ROUTE-1 và 3
-- FE-A11Y-3 đến 5
+- FE-A11Y-3 đến 6
 - FE-COPY-1, 2 và 4
 - FE-REF-1 và 2
 - FE-TEST-1 đến 3

@@ -16,6 +16,8 @@
   - orval hooks plus a query-key factory per domain;
   - `React.lazy` for every new feature area.
 
+- **(2026-10-10, the user's ruling on Task 2) `jsx-a11y/no-autofocus` is off in lint and becomes FE-A11Y-6, checked by review.** It fired on 41 files, almost all a deliberate `autoFocus` on the first field of a dialog or an inline-rename input, which is focus moved by the user's own action; the lint rule cannot tell that from focus stolen on page load.
+
 ## 1. Why
 
 A survey of `frontend/src` on 2026-10-10 found a sound base but no single standard:
@@ -133,6 +135,7 @@ A rule that names a component names the file it lives in. If a component moves, 
 3. Every clickable element works from the keyboard. A non-button element made clickable gets a role, `tabIndex` and Enter/Space handling. An icon-only button has an `aria-label`.
 4. Information is never carried by colour alone; charts keep their decals and markers (FE-VISUAL-6).
 5. Motion respects `prefers-reduced-motion`.
+6. `autoFocus` is only for a field that appears because of the user's own action (a dialog's first field, an inline edit), never on page load or route change. *(2026-10-10, the user's ruling: `jsx-a11y/no-autofocus` is off, because it cannot tell the two apart.)*
 
 ### 4.9 Copy (FE-COPY)
 1. UI text is English.
@@ -173,7 +176,7 @@ The rulebook ends with a checklist of the rules that lint cannot check:
 - FE-FORM-1, 3 and 4
 - FE-DATA-1 to 3
 - FE-ROUTE-1 and 3
-- FE-A11Y-3 to 5
+- FE-A11Y-3 to 6
 - FE-COPY-1, 2 and 4
 - FE-REF-1 and 2
 - FE-TEST-1 to 3
