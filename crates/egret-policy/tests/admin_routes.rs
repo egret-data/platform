@@ -2514,3 +2514,100 @@ async fn put_policies_refuses_a_service_that_is_not_the_policys_own() {
     f.store.delete_service(elsewhere.id).await.expect("cleanup");
     f.store.delete_service(home_id).await.expect("cleanup");
 }
+
+// ---------------------------------------------------------------------------
+// SP4d-3 Task 2, fix round 1 — the infrastructure refusals win over the
+// route's authoring guards.
+// ---------------------------------------------------------------------------
+
+/// A human `POST`/`PUT` of an infrastructure name whose body ALSO trips the
+/// ambiguous-arbitration guard must answer 409 `InfrastructureOwned`, not the
+/// guard's 400: the store's own refusal sits inside `create_policy`/
+/// `update_policy`, after the guards, so the route needs the pre-flights.
+/// Controls: the same disagreeing body under an ordinary name IS the 400 (so
+/// the guard is genuinely armed and the 409 is not a vacuous pass).
+#[tokio::test]
+async fn an_infra_name_is_refused_with_409_before_the_authoring_guards_can_say_400() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "infra409", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let filter = |name: &str, expr: &str| {
+        serde_json::json!({
+            "kind": "rowfilter", "name": name, "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                          "table": {"values": ["orders"]}},
+            "items": [{"groups": ["public"], "filterExpr": expr}]
+        })
+    };
+    let send = |method: &'static str, uri: String, body: serde_json::Value| {
+        let app = f.app_empty();
+        let token = token.clone();
+        async move {
+            into_json(
+                app.oneshot(req(method, &uri, &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        }
+    };
+    let count = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM policy.authz_policies WHERE service_id = $1",
+        )
+        .bind(svc_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count")
+    };
+
+    let (status, body) = send(
+        "POST",
+        "/policies".into(),
+        filter("rf-us", "country = 'US'"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "seed filter; body={body}");
+    let (status, body) = send(
+        "POST",
+        "/policies".into(),
+        filter("rf-us-b", "country = 'US'"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "agreeing filter; body={body}");
+    let b_id = body["id"].as_i64().expect("id");
+    let rows = count().await;
+
+    // Control: an ordinary name with the disagreeing body is the guard's 400.
+    let (status, body) = send("POST", "/policies".into(), filter("rf-id", "id > 2")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "armed guard; body={body}");
+
+    // POST: infra names + a guard-tripping body -> 409, nothing created.
+    for name in ["egret-query-timeout", "all - catalog, schema, table"] {
+        let (status, body) = send("POST", "/policies".into(), filter(name, "id > 2")).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{name}; body={body}");
+        assert!(
+            body.to_string()
+                .contains("reserved for egret's own plumbing"),
+            "{name}: must carry the InfrastructureOwned message: {body}"
+        );
+    }
+    assert_eq!(count().await, rows, "no row created");
+
+    // PUT-rename: same, and the row keeps its name.
+    for name in ["egret-query-timeout", "all - catalog, schema, table"] {
+        let (status, body) = send("PUT", format!("/policies/{b_id}"), filter(name, "id > 2")).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{name}; body={body}");
+        assert!(
+            body.to_string()
+                .contains("reserved for egret's own plumbing"),
+            "{name}: must carry the InfrastructureOwned message: {body}"
+        );
+    }
+    assert_eq!(f.store.get_policy(b_id).await.expect("get").name, "rf-us-b");
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}

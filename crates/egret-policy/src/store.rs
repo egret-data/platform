@@ -659,8 +659,39 @@ impl PolicyStore {
         service_id: i64,
         name: &str,
     ) -> Result<(), PolicyStoreError> {
+        // First, exactly where `create_policy` puts it. Not inside
+        // `refuse_before_policy_insert`: the infra writers share that one.
+        refuse_infrastructure_name(name)?;
         let mut conn = self.db.pool.acquire().await?;
         refuse_before_policy_insert(&mut conn, service_id, name).await
+    }
+
+    /// The `PUT` route's counterpart of [`Self::preflight_policy_insert`]:
+    /// the SP4d-3 infrastructure refusals `update_policy` makes (an `'infra'`
+    /// row, and a rename INTO an infrastructure name), on a pooled connection,
+    /// so they win over the route's authoring guards (ambiguous-arbitration,
+    /// unreadable-table) that run before `update_policy` is called. The
+    /// in-transaction checks inside `update_policy` STAY and are the real
+    /// bound; this only decides which refusal the operator reads.
+    pub(crate) async fn preflight_policy_update(
+        &self,
+        id: i64,
+        name: &str,
+    ) -> Result<(), PolicyStoreError> {
+        let mut conn = self.db.pool.acquire().await?;
+        let current: Option<String> =
+            sqlx::query_scalar("SELECT name FROM policy.authz_policies WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        let Some(current_name) = current else {
+            return Err(PolicyStoreError::NotFound(format!("policy {id}")));
+        };
+        refuse_if_infrastructure_owned(&mut conn, id).await?;
+        if name != current_name {
+            refuse_infrastructure_name(name)?;
+        }
+        Ok(())
     }
 
     /// SP4d debt Task 5 — the POLICY EDITOR's entry into the one rule in

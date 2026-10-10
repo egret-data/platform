@@ -1489,6 +1489,9 @@ async fn update_policy(
     if is_tag_kind(&v) {
         let (svc, pol) = resolve_tag_service_and_body(&st, &v).await?;
         refuse_service_mismatch(row.service_id, &svc, id)?;
+        // SP4d-3 Task 2: the infrastructure refusals win over the authoring
+        // guards, as `preflight_policy_insert` does on the create path.
+        st.store.preflight_policy_update(id, &pol.name).await?;
         guard_tag_policy_authoring(&st, svc.id, Some(id), &pol).await?;
         st.store
             .update_policy(id, &pol.name, &pol.body, pol.is_enabled)
@@ -1507,6 +1510,7 @@ async fn update_policy(
             "policy name is required".into(),
         ));
     }
+    st.store.preflight_policy_update(id, &pol.name).await?;
     // SP4d debt Task 6, item 1 — the editor's half, with `replacing: Some(id)`
     // so the new body is not compared against the row it is replacing.
     refuse_ambiguous_arbitration(&st, svc.id, Some(id), &pol).await?;
