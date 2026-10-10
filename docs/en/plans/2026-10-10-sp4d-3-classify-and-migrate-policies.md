@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Put egret's own Ranger policies out of hand's reach, and give an operator a surface that says, per policy, what it is and whether it can become a Grant/Rule/Clearance — then migrate the ones that can, proving equivalence against a real Ranger engine before the write lands.
+**Goal:** Put egret's own Ranger policies out of hand's reach, and give an operator a surface that says, per policy, what it is and whether it can become a Grant or a Rule — then migrate the ones that can, proving equivalence against a real Ranger engine before the write lands.
 
 **Architecture:** A `managed_by` column on `policy.authz_policies` makes ownership a property of the row rather than of its name, so renaming cannot defeat the guard. A pure closed grammar turns a Ranger policy body into either candidate model objects or a list of named blockers. A pure equivalence gate decides the whole profile before and after, per plugin version, using SP4d-1's evaluator. The migration transaction writes the model objects, recompiles, switches the original off, records provenance, re-runs the gate against what it actually wrote, and rolls back on any disagreement.
 
@@ -785,8 +785,17 @@ pub fn grants_from_access_policy(
     body: &serde_json::Value,
     engine: EngineType,
     catalog_ids: &dyn Fn(&str) -> Option<uuid::Uuid>,
+    service: ServiceKind,              // added in Task 4's fix round 1
 ) -> Result<CandidateGrants, Vec<Blocker>>;
 ```
+
+> **Amended (Task 4, fix round 1, 2026-10-10).** Both grammars take the
+> `ServiceKind` (`Resource` | `Tag`) of the service the body is stored in. A
+> path-addressed body in a tag service, or a tag-addressed body in a resource
+> service, matches nothing where it is, and would start enforcing once compiled
+> back into the matching service — so it is refused (`PathBodyInTagService` /
+> `TagBodyInResourceService`). The test code below predates the parameter; the
+> real calls pass `ServiceKind::Resource` last.
 
 `catalog_ids` is a closure rather than a DB handle so the grammar stays **pure** — the same property that lets `egret-ranger-eval` be differentially tested. The caller (Task 5) supplies a lookup over `registry.catalogs`.
 
@@ -1072,18 +1081,26 @@ git commit -m "feat(perm-compile): a closed grammar from Ranger access policies 
 ```rust
 pub struct CandidateRules {
     pub rules: Vec<egret_perm::Rule>,
-    pub clearances: Vec<uuid::Uuid>,   // tags.id, one per gated tag
 }
 
 pub fn rules_from_mask_or_filter_policy(
     body: &serde_json::Value,
     engine: EngineType,
     catalog_ids: &dyn Fn(&str) -> Option<uuid::Uuid>,
-    tag_ids: &dyn Fn(&str) -> Option<uuid::Uuid>,
+    tag_names: &dyn Fn(&str) -> Option<String>,   // tags.key → that tag's tags.name
+    service: ServiceKind,
 ) -> Result<CandidateRules, Vec<Blocker>>;
 ```
 
-`tag_ids` resolves `tags.key` — **never** `tags.name`, which is mutable and non-unique (SP4a D6).
+`tag_names` resolves `tags.key` — **never** `tags.name`, which is mutable and non-unique (SP4a D6) — and answers the resolved tag's NAME. The grammar accepts a tag body only when that name equals the body's tag value exactly (`Blocker::TagNameDiffersFromKey` otherwise): the engine matches tag policies on names and the compiler stamps the resolved tag's name back, so a key ≠ name tag would compile to a policy on a different tag.
+
+> **Amended (Task 4, fix round 1, 2026-10-10 — user rulings).** (1) The
+> `clearances` field is REMOVED: clearance migration is out of scope (see the
+> spec's "Out of scope"). A clearance's cleared set is role membership expanded
+> at compile time, and a user list cannot be turned back into roles; a
+> tag-addressed access body is refused as `Blocker::ClearanceNotExpressible`.
+> (2) `tag_ids → Uuid` became `tag_names → String` with the name check above.
+> (3) The `service: ServiceKind` parameter (see Task 3's amendment).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1143,7 +1160,7 @@ pub struct ClassifiedPolicy {
 pub struct ProposedObjects {
     pub grants: usize,
     pub rules: usize,
-    pub clearances: usize,
+    // No `clearances`: clearance migration is out of scope (Task 4 fix round 1).
 }
 ```
 
@@ -1292,12 +1309,11 @@ CREATE TABLE perm.migrated_from (
     policy_name   text        NOT NULL,
     grant_ids     uuid[]      NOT NULL DEFAULT '{}',
     rule_ids      uuid[]      NOT NULL DEFAULT '{}',
-    clearance_ids uuid[]      NOT NULL DEFAULT '{}',
     probes_proved integer     NOT NULL,
     migrated_by   text        NOT NULL,
     migrated_at   timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT migrated_from_names_something CHECK (
-        cardinality(grant_ids) + cardinality(rule_ids) + cardinality(clearance_ids) > 0
+        cardinality(grant_ids) + cardinality(rule_ids) > 0
     ),
     CONSTRAINT migrated_from_policy_name_is_named CHECK (policy_name <> ''),
     CONSTRAINT migrated_from_is_once_per_policy UNIQUE (service_id, policy_name)
@@ -1527,4 +1543,4 @@ is a Critical**, not a note — the preview is the thing an operator will trust.
 
 **Placeholders.** None. Tasks 4, 5, 7 and 9 describe their tests as enumerated assertions rather than full source, which is deliberate — each item names the exact fixture, the exact field and the failure it must catch, and the surrounding tasks carry the full code for the patterns they reuse. Where an assertion depends on a signature the implementer must read (`update_policy`'s arity, the real blocker variant for a row-filter arity), the step says to read it and says explicitly not to weaken the assertion.
 
-**Type consistency.** `Blocker` is introduced in Task 3 and extended in Task 4 (`UnknownTag`), used by Task 5's `blockers: Vec<String>` rendering, and never re-spelled. `CandidateGrants` / `CandidateRules` are the grammar's only outputs. `Disagreement` is defined in Task 6 and consumed unchanged by Task 7's rollback response and Task 9's error rendering. `recompile_service_in_tx` and `set_policy_enabled` are existing signatures, quoted as they are. Migration numbers are deliberately *not* fixed in the plan: each step re-checks `origin/main` first, because that premise expiring is what produced the Critical on the previous branch.
+**Type consistency.** `Blocker` is introduced in Task 3 and extended in Task 4 (`UnknownTag`, and in its fix round 1 `TagNameDiffersFromKey`, `TagBodyInResourceService`, `PathBodyInTagService`, `Internal`), used by Task 5's `blockers: Vec<String>` rendering, and never re-spelled. `CandidateGrants` / `CandidateRules` are the grammar's only outputs. `Disagreement` is defined in Task 6 and consumed unchanged by Task 7's rollback response and Task 9's error rendering. `recompile_service_in_tx` and `set_policy_enabled` are existing signatures, quoted as they are. Migration numbers are deliberately *not* fixed in the plan: each step re-checks `origin/main` first, because that premise expiring is what produced the Critical on the previous branch.

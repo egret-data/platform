@@ -67,7 +67,7 @@ Read off the code, not inferred:
 | `Grant` | `effect ∈ {allow, deny}`, `actions ⊆ {read, write}`, `scope`, `principals{include, exclude}` | `crates/egret-perm/src/model.rs` |
 | `Scope` | `catalog_id: Uuid` + `schema?` + `table?` + `column?`, no level skipped | same |
 | `Rule` | `Selector::{Tag{key}, Path(Scope)}` × `RuleKind::{Mask{mask_type, value_expr?}, RowFilter{filter_expr}}` | same |
-| `Clearance` | one per gated tag, compiled as a tag DENY with `denyExceptions` | `egret-perm-compile/src/clearance.rs` |
+| `Clearance` | one per gated tag, compiled as a tag DENY with `denyExceptions` — **not a migration target** (see "Out of scope") | `egret-perm-compile/src/clearance.rs` |
 
 And the action expansion, which is the hinge of the whole grammar:
 
@@ -151,6 +151,8 @@ A policy is migratable only when every one of these holds:
 | no `validitySchedules`, no `conditions`, no non-default `policyPriority` | nothing in the model carries them |
 | no empty level, and no `*` above a named level in a grant scope | migrations 0178 and 0179, in SQL and in Rust |
 | a tag selector's tag exists in `tags.key` | the migrator never creates a tag |
+| that tag's `tags.name` equals the policy's tag value exactly | the engine matches tag policies on the NAME and the compiler stamps the resolved tag's name back; a key that is another tag's name (or a tag whose key and name differ) would compile to a policy on a different tag — fail-open in the crossing case (added 2026-10-10, Task 4 review) |
+| a tag-addressed body lives in a tag service, a path-addressed one in a resource service | the grammar is told the service kind; a misplaced body matches nothing today and would start enforcing once compiled into the matching service (added 2026-10-10) |
 
 **The subset trap.** `Action::Write` is atomic: it expands to `insert` + `delete` on Trino.
 A hand-written policy granting **only** `insert` is therefore **not expressible** — migrating
@@ -316,6 +318,13 @@ green tests; this step is not optional.
 
 - **A hand-written policy naming a tag absent from `tags.key`** is refused. The migrator never
   creates tags.
+- **Clearance migration** (user ruling, 2026-10-10). A hand-written tag ACCESS policy is refused
+  (`ClearanceNotExpressible`), never migrated into a `Clearance`. A clearance's cleared set is the
+  MEMBERSHIP of its `required_roles`, expanded into usernames at compile time
+  (`egret-perm-compile/src/clearance.rs`); a policy carries only the expanded user list, and a
+  user list cannot be turned back into roles without inventing them. A tag ALLOW has no model at
+  all. So a policy becomes a Grant or a Rule, never a Clearance, and provenance records only
+  grant and rule ids.
 - **A StarRocks engine bound to a `trino`-typed profile carrying a `tagService`** still produces
   a wrong artifact and is still only *reported*, through `UndecidableCause::EngineMismatch`. It
   is a cross-table invariant (`engines.authz_service_id` against `authz_services.type`) and needs

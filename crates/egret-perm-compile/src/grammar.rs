@@ -197,7 +197,8 @@ pub enum Blocker {
     /// The only tag access policy the model has is a CLEARANCE, and its
     /// cleared set is the MEMBERSHIP of `required_roles`, enumerated at
     /// compile time (`crate::clearance`): a hand-written list of users cannot
-    /// be inverted into roles, and a tag ALLOW has no model at all.
+    /// be inverted into roles, and a tag ALLOW has no model at all. Clearance
+    /// migration is therefore OUT OF SCOPE (user ruling, 2026-10-10).
     ClearanceNotExpressible,
     /// Mask item `index` has no `dataMaskInfo`, a `null` one, or one without
     /// `dataMaskType` — the same object to Ranger (Jackson's setter
@@ -239,6 +240,60 @@ pub enum Blocker {
     /// The candidate rule failed the compiler's own authoring check
     /// (`validate_rule_shape`) — a backstop; the message is the compiler's.
     CompilerRefuses { error: String },
+
+    // ── Added by Task 4, fix round 1 ─────────────────────────────────────
+    /// The body's tag value `key` resolves as a `tags.key`, but that tag's
+    /// NAME is `name`, a different string. The engine matches a tag policy on
+    /// the tag NAME and the compiler stamps the name back, so the migrated
+    /// rule would cover the tag named `name` while the original covers
+    /// whatever tag is named `key` — possibly another tag entirely, whose
+    /// columns would be left unmasked. Operator sentence: "the policy names
+    /// tag `{key}`; egret's tag with key `{key}` is named `{name}`, and Ranger
+    /// matches names — rename the tag so its key and name agree, or rewrite
+    /// the policy".
+    TagNameDiffersFromKey { key: String, name: String },
+    /// A tag-addressed body (`resources: {tag: …}`) stored in a RESOURCE
+    /// service, where it matches nothing; compiled back, it would be filed in
+    /// the tag service and start enforcing.
+    TagBodyInResourceService,
+    /// A path-addressed body (catalog/schema/…) stored in a TAG service, where
+    /// it matches nothing; compiled back, it would be filed in the resource
+    /// service and start enforcing.
+    PathBodyInTagService,
+    /// An internal invariant failed: the grammar found no blocker yet has
+    /// nothing to build. Never expected; present so that no refusal is ever
+    /// an empty list.
+    Internal { detail: &'static str },
+}
+
+/// Which kind of Ranger service the body is stored in — the caller knows it
+/// (the profile row), the body alone does not. A tag-addressed body only
+/// means something in a TAG service and a path-addressed one only in a
+/// RESOURCE service; the compiler files each in the matching service, so a
+/// body in the wrong one would start enforcing after migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceKind {
+    Resource,
+    Tag,
+}
+
+/// The one resource key a tag-addressed body carries (`tagify`).
+const TAG_LEVEL: &str = "tag";
+
+/// The service-placement ruling, shared by both grammars. Returns whether the
+/// body is tag-addressed.
+fn service_placement(
+    resources: &std::collections::BTreeMap<String, ResourceLevel>,
+    service: ServiceKind,
+    b: &mut Vec<Blocker>,
+) -> bool {
+    let tag_addressed = resources.contains_key(TAG_LEVEL);
+    match (service, tag_addressed) {
+        (ServiceKind::Resource, true) => b.push(Blocker::TagBodyInResourceService),
+        (ServiceKind::Tag, false) => b.push(Blocker::PathBodyInTagService),
+        _ => {}
+    }
+    tag_addressed
 }
 
 /// The model objects one access policy becomes. Every grant's `id` is
@@ -253,13 +308,11 @@ pub struct CandidateGrants {
 /// The model objects one masking / row-filter / tag policy becomes. Every
 /// rule's `id` is [`Uuid::nil`] for the same reason [`CandidateGrants`]' are.
 ///
-/// `clearances` (`tags.id`, one per gated tag) is part of the interface and is
-/// ALWAYS EMPTY today: see [`Blocker::ClearanceNotExpressible`] for why no
-/// Ranger body can be read back into a clearance.
+/// There is no `clearances` field: clearance migration is OUT OF SCOPE (user
+/// ruling, 2026-10-10). See [`Blocker::ClearanceNotExpressible`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateRules {
     pub rules: Vec<Rule>,
-    pub clearances: Vec<Uuid>,
 }
 
 /// Header keys that change no access decision. Every other header key is
@@ -335,6 +388,7 @@ pub fn grants_from_access_policy(
     body: &Value,
     engine: EngineType,
     catalog_ids: &dyn Fn(&str) -> Option<Uuid>,
+    service: ServiceKind,
 ) -> Result<CandidateGrants, Vec<Blocker>> {
     let mut b = Vec::new();
 
@@ -353,6 +407,11 @@ pub fn grants_from_access_policy(
     header(&policy, &mut b);
     for u in &policy.unmodelled {
         b.push(from_unmodelled(u));
+    }
+    // A tag-addressed ACCESS body is a clearance's shape, which is out of
+    // scope wherever it is stored.
+    if service_placement(&policy.resources, service, &mut b) {
+        b.push(Blocker::ClearanceNotExpressible);
     }
 
     let scopes = scopes(
@@ -860,9 +919,6 @@ fn actions(it: &PolicyItem, engine: EngineType, b: &mut Vec<Blocker>) -> Vec<Act
 
 // ── Rules: masking, row-filter and tag-addressed policies (Task 4) ──────────
 
-/// The one resource key a tag-addressed body carries (`tagify`).
-const TAG_LEVEL: &str = "tag";
-
 /// Turn one Ranger masking, row-filter or tag-addressed body into the
 /// [`Rule`]s it is equivalent to, or every reason it is not expressible.
 ///
@@ -887,8 +943,11 @@ const TAG_LEVEL: &str = "tag";
 ///   2026-10-10) — the asymmetry with the grant grammar is
 ///   [`refuses_wildcard_over_named`].
 /// - **A tag body** (`resources: {tag: [v]}`) becomes `Selector::Tag { key:
-///   v }` when `tag_ids` resolves `v`. `tag_ids` resolves `tags.key`, NEVER
-///   `tags.name` (mutable and non-unique; SP4a D6).
+///   v }` when `tag_names` resolves `v` as a `tags.key` (NEVER as a
+///   `tags.name`, which is mutable and non-unique; SP4a D6) AND that tag's
+///   name is exactly `v` ([`Blocker::TagNameDiffersFromKey`]).
+/// - **`service`** is where the body is stored; a tag body must be in a tag
+///   service and a path body in a resource service.
 ///
 /// Every candidate also passes [`validate_rule_shape`], the compiler's own
 /// authoring check, as a backstop ([`Blocker::CompilerRefuses`]).
@@ -896,7 +955,8 @@ pub fn rules_from_mask_or_filter_policy(
     body: &Value,
     engine: EngineType,
     catalog_ids: &dyn Fn(&str) -> Option<Uuid>,
-    tag_ids: &dyn Fn(&str) -> Option<Uuid>,
+    tag_names: &dyn Fn(&str) -> Option<String>,
+    service: ServiceKind,
 ) -> Result<CandidateRules, Vec<Blocker>> {
     let mut b = Vec::new();
 
@@ -912,7 +972,7 @@ pub fn rules_from_mask_or_filter_policy(
         }
     };
 
-    let tag_addressed = policy.resources.contains_key(TAG_LEVEL);
+    let tag_addressed = service_placement(&policy.resources, service, &mut b);
     let target = match policy.policy_type {
         1 => Some(PolicyTarget::Mask),
         2 => Some(PolicyTarget::RowFilter),
@@ -952,7 +1012,7 @@ pub fn rules_from_mask_or_filter_policy(
     }
 
     let selectors: Vec<Selector> = if tag_addressed {
-        tag_selector(&policy.resources, engine, tag_ids, &mut b)
+        tag_selector(&policy.resources, engine, tag_names, &mut b)
             .into_iter()
             .collect()
     } else if let Some(target) = target {
@@ -986,7 +1046,10 @@ pub fn rules_from_mask_or_filter_policy(
     // Every path that leaves `payload` empty has pushed a blocker; an empty
     // list here would be a bug, and it still refuses rather than accepts.
     let Some((kind, exempt)) = payload else {
-        return Err(dedup(b));
+        b.push(Blocker::Internal {
+            detail: "no blocker was recorded, yet the items yielded no mask or filter",
+        });
+        return Err(b);
     };
 
     // `perm.rules.name` is UNIQUE, so N rules from one policy (one per
@@ -1019,10 +1082,7 @@ pub fn rules_from_mask_or_filter_policy(
         return Err(dedup(b));
     }
 
-    Ok(CandidateRules {
-        rules,
-        clearances: Vec::new(),
-    })
+    Ok(CandidateRules { rules })
 }
 
 /// [`from_unmodelled`] with the three rule-payload constructs ruled on for
@@ -1051,7 +1111,7 @@ fn rule_blocker_from_unmodelled(u: &Unmodelled) -> Option<Blocker> {
 fn tag_selector(
     resources: &std::collections::BTreeMap<String, ResourceLevel>,
     engine: EngineType,
-    tag_ids: &dyn Fn(&str) -> Option<Uuid>,
+    tag_names: &dyn Fn(&str) -> Option<String>,
     b: &mut Vec<Blocker>,
 ) -> Option<Selector> {
     if engine == EngineType::StarRocks {
@@ -1091,9 +1151,21 @@ fn tag_selector(
         });
         return None;
     }
+    // Resolved by `tags.key` (D6) — and then the NAME must be the same
+    // string, because the engine matches the body's value against tag names
+    // and `compile_rule` stamps the resolved tag's name back. Names are not
+    // unique, but the original and the compiled body then match on the same
+    // name string, so they cover the same tags.
     let key = &level.values[0];
-    if tag_ids(key).is_none() {
+    let Some(name) = tag_names(key) else {
         b.push(Blocker::UnknownTag { key: key.clone() });
+        return None;
+    };
+    if name != *key {
+        b.push(Blocker::TagNameDiffersFromKey {
+            key: key.clone(),
+            name,
+        });
         return None;
     }
     Some(Selector::Tag { key: key.clone() })

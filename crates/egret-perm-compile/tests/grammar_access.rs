@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 
 use egret_perm::{Action, Effect, EngineType, PrincipalKind};
 use egret_perm_compile::compile_grant;
-use egret_perm_compile::grammar::{grants_from_access_policy, Blocker};
+use egret_perm_compile::grammar::{grants_from_access_policy, Blocker, ServiceKind};
 use egret_policy::admin::access_to_ranger_json;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -87,14 +87,20 @@ fn item(users: &[&str], accesses: &[&str]) -> Value {
 }
 
 fn refused(body: &Value, engine: EngineType) -> Vec<Blocker> {
-    grants_from_access_policy(body, engine, &lookup).expect_err("expected a refusal")
+    grants_from_access_policy(body, engine, &lookup, ServiceKind::Resource)
+        .expect_err("expected a refusal")
 }
 
 /// A full expansion is accepted and produces exactly the grant it should.
 #[test]
 fn a_full_action_expansion_becomes_one_grant() {
-    let got = grants_from_access_policy(&policy(&["select"]), EngineType::Trino, &lookup)
-        .expect("select is Action::Read on Trino");
+    let got = grants_from_access_policy(
+        &policy(&["select"]),
+        EngineType::Trino,
+        &lookup,
+        ServiceKind::Resource,
+    )
+    .expect("select is Action::Read on Trino");
     assert_eq!(got.grants.len(), 1);
     assert_eq!(got.grants[0].actions, vec![Action::Read]);
     assert_eq!(got.grants[0].scope.catalog_id, CAT);
@@ -103,8 +109,13 @@ fn a_full_action_expansion_becomes_one_grant() {
     // Added: the `*` column is the compiler's rendering of "no column".
     assert_eq!(got.grants[0].scope.column, None);
 
-    let got = grants_from_access_policy(&policy(&["insert", "delete"]), EngineType::Trino, &lookup)
-        .expect("insert+delete is exactly Action::Write on Trino");
+    let got = grants_from_access_policy(
+        &policy(&["insert", "delete"]),
+        EngineType::Trino,
+        &lookup,
+        ServiceKind::Resource,
+    )
+    .expect("insert+delete is exactly Action::Write on Trino");
     assert_eq!(got.grants[0].actions, vec![Action::Write]);
 }
 
@@ -114,8 +125,13 @@ fn a_full_action_expansion_becomes_one_grant() {
 /// types would accept this and widen access.
 #[test]
 fn a_strict_subset_of_an_action_expansion_is_refused_and_names_what_is_missing() {
-    let blockers = grants_from_access_policy(&policy(&["insert"]), EngineType::Trino, &lookup)
-        .expect_err("insert alone is a strict subset of Action::Write on Trino");
+    let blockers = grants_from_access_policy(
+        &policy(&["insert"]),
+        EngineType::Trino,
+        &lookup,
+        ServiceKind::Resource,
+    )
+    .expect_err("insert alone is a strict subset of Action::Write on Trino");
     assert!(
         blockers.iter().any(|b| matches!(
             b,
@@ -129,8 +145,13 @@ fn a_strict_subset_of_an_action_expansion_is_refused_and_names_what_is_missing()
     // insert+update+delete, so `insert` alone is still a subset, and the
     // missing list is longer. Asserting both engines keeps the expansion table
     // from being read as engine-independent.
-    let blockers = grants_from_access_policy(&policy(&["insert"]), EngineType::StarRocks, &lookup)
-        .expect_err("insert alone is a strict subset of Action::Write on StarRocks too");
+    let blockers = grants_from_access_policy(
+        &policy(&["insert"]),
+        EngineType::StarRocks,
+        &lookup,
+        ServiceKind::Resource,
+    )
+    .expect_err("insert alone is a strict subset of Action::Write on StarRocks too");
     assert!(blockers.iter().any(|b| matches!(
         b,
         Blocker::PartialActionExpansion { action: Action::Write, missing }
@@ -144,8 +165,13 @@ fn a_strict_subset_of_an_action_expansion_is_refused_and_names_what_is_missing()
 /// pass a test that only checked `is_err()`.
 #[test]
 fn each_inexpressible_shape_names_its_own_blocker() {
-    let unknown_access = grants_from_access_policy(&policy(&["alter"]), EngineType::Trino, &lookup)
-        .expect_err("alter has no Action");
+    let unknown_access = grants_from_access_policy(
+        &policy(&["alter"]),
+        EngineType::Trino,
+        &lookup,
+        ServiceKind::Resource,
+    )
+    .expect_err("alter has no Action");
     assert!(unknown_access.iter().any(|b| matches!(
         b,
         Blocker::UnknownAccessType { access_type } if access_type == "alter"
@@ -153,8 +179,13 @@ fn each_inexpressible_shape_names_its_own_blocker() {
 
     let mut unregistered = policy(&["select"]);
     unregistered["resources"]["catalog"]["values"] = json!(["not_in_registry"]);
-    let blockers = grants_from_access_policy(&unregistered, EngineType::Trino, &lookup)
-        .expect_err("an unregistered catalog has no Scope.catalog_id to point at");
+    let blockers = grants_from_access_policy(
+        &unregistered,
+        EngineType::Trino,
+        &lookup,
+        ServiceKind::Resource,
+    )
+    .expect_err("an unregistered catalog has no Scope.catalog_id to point at");
     assert!(blockers.iter().any(|b| matches!(
         b,
         Blocker::UnregisteredCatalog { catalog } if catalog == "not_in_registry"
@@ -162,8 +193,13 @@ fn each_inexpressible_shape_names_its_own_blocker() {
 
     let mut recursive = policy(&["select"]);
     recursive["resources"]["schema"]["isRecursive"] = json!(true);
-    let blockers = grants_from_access_policy(&recursive, EngineType::Trino, &lookup)
-        .expect_err("grants.rs::level hard-codes is_recursive: false");
+    let blockers = grants_from_access_policy(
+        &recursive,
+        EngineType::Trino,
+        &lookup,
+        ServiceKind::Resource,
+    )
+    .expect_err("grants.rs::level hard-codes is_recursive: false");
     assert!(blockers.iter().any(|b| matches!(
         b,
         Blocker::ResourceFlag { level, flag } if level == "schema" && *flag == "isRecursive"
@@ -171,8 +207,9 @@ fn each_inexpressible_shape_names_its_own_blocker() {
 
     let mut excludes = policy(&["select"]);
     excludes["resources"]["schema"]["isExcludes"] = json!(true);
-    let blockers = grants_from_access_policy(&excludes, EngineType::Trino, &lookup)
-        .expect_err("grants.rs::level hard-codes is_excludes: false");
+    let blockers =
+        grants_from_access_policy(&excludes, EngineType::Trino, &lookup, ServiceKind::Resource)
+            .expect_err("grants.rs::level hard-codes is_excludes: false");
     assert!(blockers.iter().any(|b| matches!(
         b,
         Blocker::ResourceFlag { level, flag } if level == "schema" && *flag == "isExcludes"
@@ -180,33 +217,42 @@ fn each_inexpressible_shape_names_its_own_blocker() {
 
     let mut scheduled = policy(&["select"]);
     scheduled["validitySchedules"] = json!([{"startTime": "2026/01/01 00:00:00"}]);
-    assert!(
-        grants_from_access_policy(&scheduled, EngineType::Trino, &lookup)
-            .expect_err("nothing in the model carries a schedule")
-            .iter()
-            .any(|b| matches!(b, Blocker::ValiditySchedules))
-    );
+    assert!(grants_from_access_policy(
+        &scheduled,
+        EngineType::Trino,
+        &lookup,
+        ServiceKind::Resource
+    )
+    .expect_err("nothing in the model carries a schedule")
+    .iter()
+    .any(|b| matches!(b, Blocker::ValiditySchedules)));
 
     let mut prioritised = policy(&["select"]);
     prioritised["policyPriority"] = json!(1);
-    assert!(
-        grants_from_access_policy(&prioritised, EngineType::Trino, &lookup)
-            .expect_err("a non-default priority changes arbitration and has no model field")
-            .iter()
-            .any(|b| matches!(b, Blocker::NonDefaultPriority { priority: 1 }))
-    );
+    assert!(grants_from_access_policy(
+        &prioritised,
+        EngineType::Trino,
+        &lookup,
+        ServiceKind::Resource
+    )
+    .expect_err("a non-default priority changes arbitration and has no model field")
+    .iter()
+    .any(|b| matches!(b, Blocker::NonDefaultPriority { priority: 1 })));
 
     let mut two_exceptions = policy(&["select"]);
     two_exceptions["allowExceptions"] = json!([
         {"users": ["bob"], "groups": [], "roles": [], "accesses": [{"type": "select", "isAllowed": true}]},
         {"users": ["carol"], "groups": [], "roles": [], "accesses": [{"type": "select", "isAllowed": true}]}
     ]);
-    assert!(
-        grants_from_access_policy(&two_exceptions, EngineType::Trino, &lookup)
-            .expect_err("principals.exclude emits exactly one exception item")
-            .iter()
-            .any(|b| matches!(b, Blocker::TooManyExceptions { count: 2 }))
-    );
+    assert!(grants_from_access_policy(
+        &two_exceptions,
+        EngineType::Trino,
+        &lookup,
+        ServiceKind::Resource
+    )
+    .expect_err("principals.exclude emits exactly one exception item")
+    .iter()
+    .any(|b| matches!(b, Blocker::TooManyExceptions { count: 2 })));
 }
 
 /// One exception with the SAME access set is expressible, and lands in
@@ -218,7 +264,7 @@ fn one_exception_with_the_same_accesses_becomes_principals_exclude() {
     one["allowExceptions"] = json!([
         {"users": ["bob"], "groups": [], "roles": [], "accesses": [{"type": "select", "isAllowed": true}]}
     ]);
-    let got = grants_from_access_policy(&one, EngineType::Trino, &lookup)
+    let got = grants_from_access_policy(&one, EngineType::Trino, &lookup, ServiceKind::Resource)
         .expect("one exception, same accesses, is expressible");
     assert_eq!(got.grants.len(), 1);
     assert_eq!(got.grants[0].principals.exclude.len(), 1);
@@ -233,7 +279,7 @@ fn allow_and_deny_items_become_two_grants() {
     both["denyPolicyItems"] = json!([
         {"users": ["dave"], "groups": [], "roles": [], "accesses": [{"type": "select", "isAllowed": true}]}
     ]);
-    let got = grants_from_access_policy(&both, EngineType::Trino, &lookup)
+    let got = grants_from_access_policy(&both, EngineType::Trino, &lookup, ServiceKind::Resource)
         .expect("both item kinds are expressible");
     assert_eq!(got.grants.len(), 2);
     assert_eq!(
@@ -257,6 +303,7 @@ fn a_union_of_full_expansions_becomes_both_actions_and_update_is_starrocks_only(
         &policy(&["select", "insert", "delete"]),
         EngineType::Trino,
         &lookup,
+        ServiceKind::Resource,
     )
     .expect("select+insert+delete is Read+Write on Trino");
     assert_eq!(got.grants[0].actions, vec![Action::Read, Action::Write]);
@@ -266,7 +313,7 @@ fn a_union_of_full_expansions_becomes_both_actions_and_update_is_starrocks_only(
         "catalog": level(&["wh"]), "database": level(&["sales"]),
         "table": level(&["orders"]), "column": level(&["*"])
     });
-    let got = grants_from_access_policy(&sr, EngineType::StarRocks, &lookup)
+    let got = grants_from_access_policy(&sr, EngineType::StarRocks, &lookup, ServiceKind::Resource)
         .expect("select+insert+update+delete is Read+Write on StarRocks");
     assert_eq!(got.grants[0].actions, vec![Action::Read, Action::Write]);
 
@@ -294,7 +341,13 @@ fn a_union_of_full_expansions_becomes_both_actions_and_update_is_starrocks_only(
 #[test]
 fn an_absent_level_is_refused_but_a_star_level_is_accepted() {
     // Accept cell: `column: *` (the fixture).
-    assert!(grants_from_access_policy(&policy(&["select"]), EngineType::Trino, &lookup).is_ok());
+    assert!(grants_from_access_policy(
+        &policy(&["select"]),
+        EngineType::Trino,
+        &lookup,
+        ServiceKind::Resource
+    )
+    .is_ok());
 
     let mut absent = policy(&["select"]);
     absent["resources"]
@@ -316,7 +369,13 @@ fn an_absent_level_is_refused_but_a_star_level_is_accepted() {
 /// (`procedure`) is unknown on Trino too.
 #[test]
 fn level_names_are_the_engines_own() {
-    assert!(grants_from_access_policy(&policy(&["select"]), EngineType::Trino, &lookup).is_ok());
+    assert!(grants_from_access_policy(
+        &policy(&["select"]),
+        EngineType::Trino,
+        &lookup,
+        ServiceKind::Resource
+    )
+    .is_ok());
 
     let blockers = refused(&policy(&["select"]), EngineType::StarRocks);
     assert!(blockers
@@ -360,8 +419,13 @@ fn a_wildcard_above_a_named_level_is_refused_on_a_grant() {
     // Accept cells.
     let mut schema_wide = policy(&["select"]);
     schema_wide["resources"]["table"] = level(&["*"]);
-    let got = grants_from_access_policy(&schema_wide, EngineType::Trino, &lookup)
-        .expect("a * with nothing named beneath it is a schema-wide grant");
+    let got = grants_from_access_policy(
+        &schema_wide,
+        EngineType::Trino,
+        &lookup,
+        ServiceKind::Resource,
+    )
+    .expect("a * with nothing named beneath it is a schema-wide grant");
     assert_eq!(got.grants[0].scope.schema.as_deref(), Some("sales"));
     assert_eq!(got.grants[0].scope.table, None);
     assert_eq!(got.grants[0].scope.column, None);
@@ -369,14 +433,20 @@ fn a_wildcard_above_a_named_level_is_refused_on_a_grant() {
     let mut catalog_wide = policy(&["select"]);
     catalog_wide["resources"]["schema"] = level(&["**"]);
     catalog_wide["resources"]["table"] = level(&["*"]);
-    let got = grants_from_access_policy(&catalog_wide, EngineType::Trino, &lookup)
-        .expect("a wildcard run at every level below the catalog is catalog-wide");
+    let got = grants_from_access_policy(
+        &catalog_wide,
+        EngineType::Trino,
+        &lookup,
+        ServiceKind::Resource,
+    )
+    .expect("a wildcard run at every level below the catalog is catalog-wide");
     assert_eq!(got.grants[0].scope.schema, None);
 
     // A glob is a NAMED set, not a wildcard run, and is carried verbatim.
     let mut glob = policy(&["select"]);
     glob["resources"]["table"] = level(&["ord*"]);
-    let got = grants_from_access_policy(&glob, EngineType::Trino, &lookup).expect("a glob");
+    let got = grants_from_access_policy(&glob, EngineType::Trino, &lookup, ServiceKind::Resource)
+        .expect("a glob");
     assert_eq!(got.grants[0].scope.table.as_deref(), Some("ord*"));
 }
 
@@ -404,8 +474,9 @@ fn an_empty_level_is_refused() {
 fn several_catalogs_become_n_grants_but_several_tables_are_refused() {
     let mut two = policy(&["select"]);
     two["resources"]["catalog"]["values"] = json!(["wh", "lake", "wh"]);
-    let got = grants_from_access_policy(&two, EngineType::Trino, &lookup_two)
-        .expect("two registered catalogs are two grants");
+    let got =
+        grants_from_access_policy(&two, EngineType::Trino, &lookup_two, ServiceKind::Resource)
+            .expect("two registered catalogs are two grants");
     let cats: BTreeSet<Uuid> = got.grants.iter().map(|g| g.scope.catalog_id).collect();
     assert_eq!(got.grants.len(), 2, "a repeated catalog value is one grant");
     assert_eq!(cats, BTreeSet::from([CAT, CAT2]));
@@ -413,8 +484,13 @@ fn several_catalogs_become_n_grants_but_several_tables_are_refused() {
     // All-or-nothing: one unregistered catalog among them refuses the policy.
     let mut partly = policy(&["select"]);
     partly["resources"]["catalog"]["values"] = json!(["wh", "nope"]);
-    let blockers = grants_from_access_policy(&partly, EngineType::Trino, &lookup_two)
-        .expect_err("one unregistered catalog refuses all of them");
+    let blockers = grants_from_access_policy(
+        &partly,
+        EngineType::Trino,
+        &lookup_two,
+        ServiceKind::Resource,
+    )
+    .expect_err("one unregistered catalog refuses all of them");
     assert_eq!(
         blockers,
         vec![Blocker::UnregisteredCatalog {
@@ -456,7 +532,7 @@ fn an_exception_with_a_different_access_set_is_refused() {
     assert!(refused(&deny, EngineType::Trino).contains(&Blocker::ExceptionAccessMismatch));
 
     deny["denyExceptions"] = json!([item(&["erin"], &["select"])]);
-    let got = grants_from_access_policy(&deny, EngineType::Trino, &lookup)
+    let got = grants_from_access_policy(&deny, EngineType::Trino, &lookup, ServiceKind::Resource)
         .expect("a deny with one same-access deny exception");
     assert_eq!(got.grants.len(), 1);
     assert_eq!(got.grants[0].effect, Effect::Deny);
@@ -601,7 +677,7 @@ fn decision_relevant_header_fields_are_refused_and_inert_ones_are_not() {
     ] {
         inert[field] = value;
     }
-    grants_from_access_policy(&inert, EngineType::Trino, &lookup)
+    grants_from_access_policy(&inert, EngineType::Trino, &lookup, ServiceKind::Resource)
         .expect("inert and default-valued header fields change no decision");
 }
 
@@ -663,7 +739,8 @@ fn a_body_that_does_not_read_as_a_ranger_policy_is_unreadable() {
 fn principals_that_do_not_round_trip_are_refused() {
     let mut ok = policy(&["select"]);
     ok["policyItems"][0]["groups"] = json!(["public", "analysts"]);
-    let got = grants_from_access_policy(&ok, EngineType::Trino, &lookup).expect("users + groups");
+    let got = grants_from_access_policy(&ok, EngineType::Trino, &lookup, ServiceKind::Resource)
+        .expect("users + groups");
     let include = &got.grants[0].principals.include;
     assert_eq!(include.len(), 3);
     assert_eq!(
@@ -739,10 +816,10 @@ fn access_entry_and_item_flags_are_refused() {
     defaults["policyItems"][0]["accesses"] = json!([{"type": "select"}]);
     defaults["policyItems"][0]["delegateAdmin"] = json!(false);
     defaults["policyItems"][0]["conditions"] = json!([]);
-    grants_from_access_policy(&defaults, EngineType::Trino, &lookup)
+    grants_from_access_policy(&defaults, EngineType::Trino, &lookup, ServiceKind::Resource)
         .expect("absent isAllowed is Ranger's TRUE; false delegateAdmin and [] conditions");
     defaults["policyItems"][0]["accesses"] = json!([{"type": "select", "isAllowed": null}]);
-    grants_from_access_policy(&defaults, EngineType::Trino, &lookup)
+    grants_from_access_policy(&defaults, EngineType::Trino, &lookup, ServiceKind::Resource)
         .expect("null isAllowed is Ranger's TRUE");
 }
 
@@ -843,7 +920,7 @@ fn every_accepted_body_compiles_back_to_what_it_came_from() {
     ];
 
     for (label, body, engine) in corpus {
-        let got = grants_from_access_policy(&body, engine, &lookup_two)
+        let got = grants_from_access_policy(&body, engine, &lookup_two, ServiceKind::Resource)
             .unwrap_or_else(|b| panic!("{label}: refused {b:?}"));
 
         let n_items = body["policyItems"].as_array().map_or(0, Vec::len)

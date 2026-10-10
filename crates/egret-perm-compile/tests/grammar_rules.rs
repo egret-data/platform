@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 use egret_perm::{EngineType, PrincipalKind, RuleKind, Selector};
 use egret_perm_compile::grammar::{
     grants_from_access_policy, rules_from_mask_or_filter_policy, Blocker, CandidateRules,
+    ServiceKind,
 };
 use egret_perm_compile::{compile_rule, ResolvedNames};
 use serde_json::{json, Value};
@@ -22,7 +23,6 @@ use uuid::Uuid;
 
 const CAT: Uuid = Uuid::from_u128(0x1111_1111_1111_1111_1111_1111_1111_1111);
 const CAT2: Uuid = Uuid::from_u128(0x2222_2222_2222_2222_2222_2222_2222_2222);
-const TAG: Uuid = Uuid::from_u128(0x7777_7777_7777_7777_7777_7777_7777_7777);
 
 fn catalogs(name: &str) -> Option<Uuid> {
     match name {
@@ -40,10 +40,35 @@ fn catalog_name(id: Uuid) -> &'static str {
     }
 }
 
-/// The registry knows ONE tag, by its KEY `pii`. Its (mutable, non-unique)
-/// display name is something else entirely, and must never be what resolves.
-fn tags(key: &str) -> Option<Uuid> {
-    (key == "pii").then_some(TAG)
+/// The tag registry, looked up by `tags.key` and answering that tag's
+/// `tags.name`. Key and name are independent columns, and this registry
+/// makes them differ on purpose:
+///
+/// | key            | name           |
+/// |----------------|----------------|
+/// | `pii`          | `Sensitive`    | ← key of A …
+/// | `b-key`        | `pii`          | ← … is the NAME of B (the crossing case)
+/// | `confidential` | `Confidential` | ← same word, different case
+/// | `phi`          | `phi`          | ← key == name: the one migratable shape
+fn tags(key: &str) -> Option<String> {
+    match key {
+        "pii" => Some("Sensitive".into()),
+        "b-key" => Some("pii".into()),
+        "confidential" => Some("Confidential".into()),
+        "phi" => Some("phi".into()),
+        _ => None,
+    }
+}
+
+/// The service a body belongs in, read off its own resources — so every
+/// helper call below is CORRECTLY placed, and the placement tests pass the
+/// wrong one explicitly.
+fn home(body: &Value) -> ServiceKind {
+    if body["resources"].get("tag").is_some() {
+        ServiceKind::Tag
+    } else {
+        ServiceKind::Resource
+    }
 }
 
 fn level(values: &[&str]) -> Value {
@@ -125,12 +150,12 @@ fn tag_mask_policy(tag: &str, items: Vec<Value>) -> Value {
 }
 
 fn accept(body: &Value, engine: EngineType) -> CandidateRules {
-    rules_from_mask_or_filter_policy(body, engine, &catalogs, &tags)
+    rules_from_mask_or_filter_policy(body, engine, &catalogs, &tags, home(body))
         .unwrap_or_else(|b| panic!("expected an accept, got {b:?}"))
 }
 
 fn refused(body: &Value, engine: EngineType) -> Vec<Blocker> {
-    rules_from_mask_or_filter_policy(body, engine, &catalogs, &tags)
+    rules_from_mask_or_filter_policy(body, engine, &catalogs, &tags, home(body))
         .expect_err("expected a refusal")
 }
 
@@ -165,7 +190,6 @@ fn a_column_mask_of_a_declared_type_becomes_one_mask_rule() {
         EngineType::Trino,
     );
     assert_eq!(got.rules.len(), 1);
-    assert!(got.clearances.is_empty());
     let r = &got.rules[0];
     assert_eq!(r.id, Uuid::nil());
     assert_eq!(r.name, "mask emails");
@@ -262,18 +286,21 @@ fn a_row_filter_is_exactly_three_levels_and_a_column_is_an_unknown_level() {
 
 // ── Brief item 3 ────────────────────────────────────────────────────────────
 
-/// A tag-addressed mask resolves its tag through `tags.key`. Absent from the
-/// registry → [`Blocker::UnknownTag`] (the migrator never creates a tag);
-/// present → `Selector::Tag` carrying that key. A tag's display NAME is not a
-/// key and does not resolve.
+/// A tag-addressed mask resolves its tag through `tags.key`, and is accepted
+/// only when that tag's NAME is the very string the body names: the engine
+/// matches tag policies on names, and `compile_rule` stamps the resolved tag's
+/// name back (`tagify`). Absent from the registry → [`Blocker::UnknownTag`]
+/// (the migrator never creates a tag).
 #[test]
 fn a_tag_mask_resolves_its_tag_by_key_or_names_the_unknown_tag() {
+    // key == name == V: accepted (and compiled back to the same name in the
+    // oracle test below).
     let got = accept(
-        &tag_mask_policy("pii", vec![everyone_mask("MASK_NULL")]),
+        &tag_mask_policy("phi", vec![everyone_mask("MASK_NULL")]),
         EngineType::Trino,
     );
     assert_eq!(got.rules.len(), 1);
-    assert_eq!(got.rules[0].selector, Selector::Tag { key: "pii".into() });
+    assert_eq!(got.rules[0].selector, Selector::Tag { key: "phi".into() });
     assert_eq!(
         got.rules[0].kind,
         RuleKind::Mask {
@@ -291,17 +318,66 @@ fn a_tag_mask_resolves_its_tag_by_key_or_names_the_unknown_tag() {
             key: "secret".into()
         }]
     );
-    // The registry's display name for `pii` might be "Personal Data"; the
-    // lookup is by key, so a body naming that is refused, never matched.
+    // A tag's NAME is not a key: `Sensitive` is A's name, and nothing has
+    // that key. Refused, never matched by name.
     assert_eq!(
         refused(
-            &tag_mask_policy("Personal Data", vec![everyone_mask("MASK_NULL")]),
+            &tag_mask_policy("Sensitive", vec![everyone_mask("MASK_NULL")]),
             EngineType::Trino
         ),
         vec![Blocker::UnknownTag {
-            key: "Personal Data".into()
+            key: "Sensitive".into()
         }]
     );
+}
+
+/// THE CROSSING CASE (review, Critical 1). The body says `pii`. To the
+/// engine that is tag B (NAMED `pii`); to a key lookup it is tag A (KEY
+/// `pii`, named `Sensitive`). Accepting it would compile back to a policy on
+/// `Sensitive` — A's columns masked, B's columns UNMASKED once the original
+/// is disabled. Fail-open, so refused, naming both strings.
+#[test]
+fn a_tag_whose_key_is_another_tags_name_is_refused() {
+    assert_eq!(
+        refused(
+            &tag_mask_policy("pii", vec![everyone_mask("MASK_NULL")]),
+            EngineType::Trino
+        ),
+        vec![Blocker::TagNameDiffersFromKey {
+            key: "pii".into(),
+            name: "Sensitive".into()
+        }]
+    );
+}
+
+/// The key exists but its name is a different string (here only by case —
+/// Ranger's tag match is exact). Without the crossing tag this fails closed
+/// rather than open, but the compiled-back body still names another tag.
+#[test]
+fn a_tag_whose_name_differs_from_its_key_is_refused() {
+    let mut filter = tag_mask_policy("confidential", vec![]);
+    filter
+        .as_object_mut()
+        .unwrap()
+        .remove("dataMaskPolicyItems");
+    set(&mut filter, "/policyType", json!(2));
+    set(
+        &mut filter,
+        "/rowFilterPolicyItems",
+        json!([filter_item(&[], &["public"], "x = 1")]),
+    );
+    for body in [
+        tag_mask_policy("confidential", vec![everyone_mask("MASK_NULL")]),
+        filter,
+    ] {
+        assert_eq!(
+            refused(&body, EngineType::Trino),
+            vec![Blocker::TagNameDiffersFromKey {
+                key: "confidential".into(),
+                name: "Confidential".into()
+            }]
+        );
+    }
 }
 
 // ── Brief item 4 ────────────────────────────────────────────────────────────
@@ -325,7 +401,7 @@ fn a_mask_item_without_data_mask_info_is_refused() {
                 obj.insert("dataMaskInfo".into(), v);
             }
         }
-        bodies.push(tag_mask_policy("pii", vec![it.clone()]));
+        bodies.push(tag_mask_policy("phi", vec![it.clone()]));
         bodies.push(mask_policy(vec![it]));
     }
     for body in &bodies {
@@ -338,7 +414,7 @@ fn a_mask_item_without_data_mask_info_is_refused() {
 
     // The accept cell: the same item WITH a type.
     accept(
-        &tag_mask_policy("pii", vec![everyone_mask("MASK_HASH")]),
+        &tag_mask_policy("phi", vec![everyone_mask("MASK_HASH")]),
         EngineType::Trino,
     );
 }
@@ -385,8 +461,9 @@ fn a_wildcard_above_a_named_level_is_accepted_on_a_rule_and_refused_on_a_grant()
         "resources": body["resources"].clone(),
         "policyItems": [{"users": ["alice"], "groups": [], "roles": [], "accesses": select()}]
     });
-    let blockers = grants_from_access_policy(&grant, EngineType::Trino, &catalogs)
-        .expect_err("the grant side refuses the same resources");
+    let blockers =
+        grants_from_access_policy(&grant, EngineType::Trino, &catalogs, ServiceKind::Resource)
+            .expect_err("the grant side refuses the same resources");
     assert!(
         blockers.contains(&Blocker::WildcardOverNamedLevel {
             level: "schema".into()
@@ -694,7 +771,7 @@ fn policy_kinds_the_rule_model_cannot_hold_are_refused() {
     // A tag ACCESS policy: a clearance's cleared set is role MEMBERSHIP
     // enumerated at compile time, so enumerated users cannot be inverted
     // into it.
-    let mut tag_deny = tag_mask_policy("pii", vec![]);
+    let mut tag_deny = tag_mask_policy("phi", vec![]);
     set(&mut tag_deny, "/policyType", json!(0));
     tag_deny
         .as_object_mut()
@@ -753,21 +830,21 @@ fn policy_kinds_the_rule_model_cannot_hold_are_refused() {
 fn a_tag_selector_is_refused_on_starrocks() {
     assert_eq!(
         refused(
-            &tag_mask_policy("pii", vec![everyone_mask("MASK_HASH")]),
+            &tag_mask_policy("phi", vec![everyone_mask("MASK_HASH")]),
             EngineType::StarRocks
         ),
         vec![Blocker::TagSelectorOnStarRocks]
     );
     accept(
-        &tag_mask_policy("pii", vec![everyone_mask("MASK_HASH")]),
+        &tag_mask_policy("phi", vec![everyone_mask("MASK_HASH")]),
         EngineType::Trino,
     );
 }
 
 #[test]
 fn a_tag_resource_names_one_tag_and_nothing_else() {
-    let mut two = tag_mask_policy("pii", vec![everyone_mask("MASK_HASH")]);
-    set(&mut two, "/resources/tag", level(&["pii", "pci"]));
+    let mut two = tag_mask_policy("phi", vec![everyone_mask("MASK_HASH")]);
+    set(&mut two, "/resources/tag", level(&["phi", "pci"]));
     assert!(has(
         &refused(&two, EngineType::Trino),
         &Blocker::MultipleValues {
@@ -775,7 +852,7 @@ fn a_tag_resource_names_one_tag_and_nothing_else() {
             count: 2
         }
     ));
-    let mut mixed = tag_mask_policy("pii", vec![everyone_mask("MASK_HASH")]);
+    let mut mixed = tag_mask_policy("phi", vec![everyone_mask("MASK_HASH")]);
     set(&mut mixed, "/resources/catalog", level(&["wh"]));
     assert!(has(
         &refused(&mixed, EngineType::Trino),
@@ -783,7 +860,7 @@ fn a_tag_resource_names_one_tag_and_nothing_else() {
             level: "catalog".into()
         }
     ));
-    let mut flagged = tag_mask_policy("pii", vec![everyone_mask("MASK_HASH")]);
+    let mut flagged = tag_mask_policy("phi", vec![everyone_mask("MASK_HASH")]);
     set(&mut flagged, "/resources/tag/isExcludes", json!(true));
     assert!(has(
         &refused(&flagged, EngineType::Trino),
@@ -792,7 +869,7 @@ fn a_tag_resource_names_one_tag_and_nothing_else() {
             flag: "isExcludes"
         }
     ));
-    let mut empty = tag_mask_policy("pii", vec![everyone_mask("MASK_HASH")]);
+    let mut empty = tag_mask_policy("phi", vec![everyone_mask("MASK_HASH")]);
     set(&mut empty, "/resources/tag", level(&[]));
     assert!(has(
         &refused(&empty, EngineType::Trino),
@@ -1075,7 +1152,7 @@ fn every_accepted_body_compiles_back_to_what_it_came_from() {
         ("two catalogs", two_catalogs, EngineType::Trino),
         (
             "tag mask",
-            tag_mask_policy("pii", vec![everyone_mask("MASK_NULL")]),
+            tag_mask_policy("phi", vec![everyone_mask("MASK_NULL")]),
             EngineType::Trino,
         ),
         (
@@ -1083,7 +1160,7 @@ fn every_accepted_body_compiles_back_to_what_it_came_from() {
             json!({
                 "name": "tag filter", "service": "tags", "serviceType": "tag",
                 "policyType": 2,
-                "resources": {"tag": level(&["pii"])},
+                "resources": {"tag": level(&["phi"])},
                 "rowFilterPolicyItems": [
                     filter_item(&["bob"], &[], ""),
                     filter_item(&[], &["public"], "x = 1")
@@ -1098,9 +1175,10 @@ fn every_accepted_body_compiles_back_to_what_it_came_from() {
         for rule in &got.rules {
             let (catalog, tag_name) = match &rule.selector {
                 Selector::Path(s) => (catalog_name(s.catalog_id), None),
-                // The test registry's name for `pii` is its key, so the
-                // compiled tag resource is comparable to the source.
-                Selector::Tag { key } => ("unused", Some(key.as_str())),
+                // The REAL resolution the compiler is given: key → name,
+                // from a registry where key ≠ name for most tags. Only an
+                // accepted key can get here, and its name must be the body's.
+                Selector::Tag { key } => ("unused", tags(key)),
             };
             let compiled = compile_rule(
                 rule,
@@ -1109,7 +1187,7 @@ fn every_accepted_body_compiles_back_to_what_it_came_from() {
                 Some("tags"),
                 &ResolvedNames {
                     catalog_name: catalog,
-                    tag_name,
+                    tag_name: tag_name.as_deref(),
                 },
                 &[],
                 100,
@@ -1169,4 +1247,71 @@ fn same_item(a: &Value, b: &Value) -> bool {
         && accesses(a) == accesses(b)
         && a["dataMaskInfo"] == b["dataMaskInfo"]
         && a["rowFilterInfo"] == b["rowFilterInfo"]
+}
+
+// ── Service placement (review, Important 2) ────────────────────────────────
+
+/// A body is only meaningful in the service kind its resources address: a
+/// tag body in a RESOURCE service matches nothing, and so does a path body in
+/// a TAG service. The compiler files each rule in the matching service, so
+/// migrating a misplaced body would start enforcing what enforced nothing.
+#[test]
+fn a_rule_body_in_the_wrong_kind_of_service_is_refused() {
+    let tag = tag_mask_policy("phi", vec![everyone_mask("MASK_NULL")]);
+    let path = mask_policy(vec![everyone_mask("MASK_HASH")]);
+    let run = |body: &Value, service| {
+        rules_from_mask_or_filter_policy(body, EngineType::Trino, &catalogs, &tags, service)
+    };
+
+    assert!(run(&tag, ServiceKind::Tag).is_ok());
+    assert_eq!(
+        run(&tag, ServiceKind::Resource).expect_err("tag body in a resource service"),
+        vec![Blocker::TagBodyInResourceService]
+    );
+    assert!(run(&path, ServiceKind::Resource).is_ok());
+    assert_eq!(
+        run(&path, ServiceKind::Tag).expect_err("path body in a tag service"),
+        vec![Blocker::PathBodyInTagService]
+    );
+}
+
+/// The same confusion on the grant side: a path ACCESS body in a tag service
+/// is refused; a tag-addressed access body is a clearance's shape — refused
+/// as such in a tag service, and as misplaced as well in a resource one.
+#[test]
+fn an_access_body_in_the_wrong_kind_of_service_is_refused() {
+    let path = json!({
+        "name": "read orders",
+        "resources": {
+            "catalog": level(&["wh"]), "schema": level(&["sales"]),
+            "table": level(&["orders"]), "column": level(&["*"])
+        },
+        "policyItems": [{"users": ["alice"], "accesses": select()}]
+    });
+    let run = |body: &Value, service| {
+        grants_from_access_policy(body, EngineType::Trino, &catalogs, service)
+    };
+    assert!(run(&path, ServiceKind::Resource).is_ok());
+    assert_eq!(
+        run(&path, ServiceKind::Tag).expect_err("path body in a tag service"),
+        vec![Blocker::PathBodyInTagService]
+    );
+
+    let tag_deny = json!({
+        "name": "gate phi",
+        "resources": {"tag": level(&["phi"])},
+        "denyPolicyItems": [{"groups": ["public"], "accesses": select()}]
+    });
+    let in_tag = run(&tag_deny, ServiceKind::Tag).expect_err("a clearance shape");
+    assert!(
+        in_tag.contains(&Blocker::ClearanceNotExpressible),
+        "{in_tag:?}"
+    );
+    assert!(!in_tag.contains(&Blocker::TagBodyInResourceService));
+    let in_resource = run(&tag_deny, ServiceKind::Resource).expect_err("misplaced too");
+    assert!(
+        in_resource.contains(&Blocker::TagBodyInResourceService)
+            && in_resource.contains(&Blocker::ClearanceNotExpressible),
+        "{in_resource:?}"
+    );
 }
