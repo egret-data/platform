@@ -327,7 +327,7 @@ zero is not evidence** — say how you looked.
 
 ### Task 12 (DO THIS NEXT — it is a privilege escalation in the permission model)
 
-**Files:** a migration (**0167**), the grant write path (`crates/egret-perm`/`egret-perm-compile`)
+**Files:** a migration (**0178**), the grant write path (`crates/egret-perm`/`egret-perm-compile`)
 
 **Found by Task 4, measured end to end.** `perm.grants` accepts `schema_name = ''` — stopped only by
 the FK, and the control proves the gap is real: a level **skip** *is* stopped by `grants_check`, so the
@@ -342,7 +342,7 @@ than of tags, and the blast radius is a grant rather than a tag, so it outranks 
 - [ ] **Step 1: Note the rule is not the tag rule.** `'*'` is a **legitimate** policy value; only `''`
 is wrong. Copying Task 3's predicate down would refuse something real — the same mistake as copying
 `0147`'s regex, and for the same reason.
-- [ ] **Step 2: Migration 0167 plus a write-path 400**, keyed to the same shape, mutation-tested for
+- [ ] **Step 2: Migration 0178 plus a write-path 400**, keyed to the same shape, mutation-tested for
 divergence. Measure existing rows first and say what you found, as Task 3 did.
 - [ ] **Step 3: Check every level**, not only `schema`. And check the *compile* side too: if a `''`
 survives anywhere into `compile_grant`, the guard is in the wrong place.
@@ -357,7 +357,7 @@ probe that simply could not fail. Reproduce the **pair**; a single accepted row 
 
 ### Task 14 (NEXT): `*` above a named level bypasses a constraint that already exists
 
-**Files:** a migration (**0168**), `grants::ensure_scope_levels_are_named`'s neighbourhood
+**Files:** a migration (**0179**), `grants::ensure_scope_levels_are_named`'s neighbourhood
 
 **Found by Task 12, measured, and it is sharper than my own ruling.** I ruled `'*'` legitimate and
 warned against refusing it. That ruling stands for what it covers — a catalog-wide or schema-wide grant
@@ -381,7 +381,7 @@ schema-wide grant, `('*','*')` — every shape where `*` has nothing named benea
 `grants_check`'s existing decision, not by a new opinion of ours. Say that where the error message is,
 so the refusal reads as consistency rather than as a restriction.
 - [ ] **Step 3: Both layers, keyed to one shape**, as Tasks 2, 3 and 12 did — and Task 12's standing
-third test arm plus the ⚠ paragraph in `0167` are where the measurement already lives.
+third test arm plus the ⚠ paragraph in `0178` are where the measurement already lives.
 - [ ] **Step 4: `perm.rules` too.** Task 12 established the two tables are a verbatim copy of each
 other; leaving one is leaving half a fix. Check whether `ensure_row_filter_scope_is_a_table` counts
 `'*'` as a **named** schema — it counted `''` as one, which is how that shape slipped past a guard whose
@@ -541,7 +541,7 @@ mistake — and after Tasks 9+16 it is at least **visible**: the write path refu
   config update route is the bigger change and Task 2's guards are written on the assumption that **no such
   statement exists**; adding one means re-reading those rulings, not just adding a handler.
 - [ ] **Step 2: Whichever it is, it goes through the same guards** the create path takes — Task 2's
-  non-Trino refusal and migration 0165's `CHECK` both exist precisely because this field decides whether
+  non-Trino refusal and migration 0176's `CHECK` both exist precisely because this field decides whether
   tag policy is enforced at all.
 - [ ] **Step 3: Say in the UI what a profile without a tag service cannot do**, rather than offering a tab
   that cannot complete.
@@ -550,8 +550,8 @@ mistake — and after Tasks 9+16 it is at least **visible**: the write path refu
 
 ## Pre-merge steps
 
-1. **Run migration 0166's own listing query** (`migrations/0166_…sql:124`) against any cluster that
-   may hold **hand-written** tag rows. 0166 is `VALID` with no clearing statement, deliberately, so
+1. **Run migration 0177's own listing query** (`migrations/0177_…sql:124`) against any cluster that
+   may hold **hand-written** tag rows. 0177 is `VALID` with no clearing statement, deliberately, so
    `migrate()` **aborts before the process serves** if such a row exists — which is the correct
    behaviour and a bad surprise during an upgrade. A survey **on 2026-10-01, of the 28 databases this
    host *then had*,** found zero violating rows, and the only deployment is the local kind cluster
@@ -559,13 +559,13 @@ mistake — and after Tasks 9+16 it is at least **visible**: the write path refu
    claim about **reach**, and reach claims have been wrong five times on this programme while the
    behaviour claim beside them was right.
 
-2. **Run migration 0167's listing query too**, for the same reason as 0166's and with a weaker evidence
+2. **Run migration 0178's listing query too**, for the same reason as 0177's and with a weaker evidence
    base. Task 12 measured, **on 2026-10-01, the 23 databases this host *then had* with a `perm.grants`
    table** (not every database on the host — the shipped migration says so at
    `migrations/0178_perm_scope_levels_are_named.sql:75`, "that **then** had"): 4 grant rows and 3 rule
    rows in total, all in scratch DBs, **zero violating**. But as it said itself, that is weaker than it looks — **no database on
    this host has ever held a `perm.grants` row outside three scratch DBs**, and the only live-cluster
-   measurement on record in this repo is about **tag assignments, not grants**. 0167 is `VALID`, so it
+   measurement on record in this repo is about **tag assignments, not grants**. 0178 is `VALID`, so it
    aborts `migrate()` before the process serves if a real cluster holds one.
 
    ⚠ **Every database count on this page is a MOMENT, not a standing fact, and is dated for that

@@ -177,7 +177,7 @@ describe("CatalogTagEditor", () => {
    * **SP4d debt Task 3, fix round, Minor 1 — the ruling's justification, made true
    * where a steward can see it.**
    *
-   * Migration 0166 makes some coordinates unstorable and `assign_catalog` refuses
+   * Migration 0177 makes some coordinates unstorable and `assign_catalog` refuses
    * them with a 400 that NAMES the offending level. The trade that justified
    * refusing instead of storing-and-declining was "a loud 400 at write time beats a
    * silent decline at read time" — and as first shipped this component had no
@@ -230,7 +230,7 @@ describe("CatalogTagEditor", () => {
    * status shows the backend's message verbatim, which is what a 500 or a future
    * refusal with real wording needs.
    *
-   * Note what this test does NOT assert: migration 0166's wildcard 400.
+   * Note what this test does NOT assert: migration 0177's wildcard 400.
    * `unassign_catalog` deliberately has no `unresolvable_coordinate` check, so no
    * coordinate can make THIS mutation fail — asserting that shape would pin a
    * fiction.

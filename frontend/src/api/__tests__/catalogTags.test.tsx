@@ -1,5 +1,5 @@
 /**
- * `useAssignResourceTag` must turn migration 0166's refusal into a react-query
+ * `useAssignResourceTag` must turn migration 0177's refusal into a react-query
  * FAILURE whose `error.message` is the backend's own sentence — SP4d debt Task 3,
  * fix round, Minor 1.
  *
@@ -59,7 +59,7 @@ describe("useAssignResourceTag", () => {
     );
     const { result } = renderHook(() => useAssignResourceTag("wh1"), { wrapper });
 
-    // The table-level sentinel, which 0166 deliberately still allows.
+    // The table-level sentinel, which 0177 deliberately still allows.
     result.current.mutate({ schema: "sales", table: "orders", column: "", tag_id: "t1" });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));

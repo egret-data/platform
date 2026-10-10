@@ -52,7 +52,7 @@ interface ResourceCoords {
  * "Add tag" select: catalog tags not already assigned to this resource.
  *
  * ⚠ **The failure message is RENDERED, and that is load-bearing rather than
- * polish** (SP4d debt Task 3, fix round, Minor 1). Migration 0166 made some
+ * polish** (SP4d debt Task 3, fix round, Minor 1). Migration 0177 made some
  * coordinates unstorable and `assign_catalog` refuses them with a 400 naming the
  * offending level — but the trade that justified the refusal was "a loud 400 at
  * write time beats a silent decline at read time", and as first shipped this
@@ -129,7 +129,7 @@ function AddCatalogTagSelect({
  * test may assert.** `unassign_catalog` deliberately carries NO
  * `unresolvable_coordinate` check (`crates/egret-bi/src/catalog_tags.rs`, the
  * "`unassign_catalog` deliberately has no such check" paragraph): a `DELETE` is not
- * constrained by migration 0166's `CHECK`, and a deployment holding a bad row must
+ * constrained by migration 0177's `CHECK`, and a deployment holding a bad row must
  * be able to remove it through the API. So no wildcard coordinate can make this
  * mutation fail. What CAN, by code path:
  *

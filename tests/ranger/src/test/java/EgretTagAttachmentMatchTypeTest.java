@@ -42,7 +42,7 @@ import org.junit.Test;
  *   <li><b>wildcards are UNSTORABLE</b> — {@code FilenameUtils.wildcardMatch} is a backtracking
  *       token matcher and SQL {@code LIKE} is not that algorithm. Until SP4d debt Task 3 the Rust
  *       gate refused the resolution while any stored value carried {@code *} or {@code ?}; migration
- *       0166's {@code catalog_tag_assignments_levels_are_present_and_literal} now forbids storing
+ *       0177's {@code catalog_tag_assignments_levels_are_present_and_literal} now forbids storing
  *       such a value at all, together with an empty schema or table. The rows below stay, because
  *       they are the MEASUREMENT of what the matcher would do and therefore the reason the
  *       constraint exists;
@@ -70,7 +70,7 @@ public class EgretTagAttachmentMatchTypeTest {
      *
      * <p>The second column is the whole point: every {@code ADMITTED|not-returned} row is a
      * fail-open unless something stops it, and the Rust side asserts which mechanism does — the fold
-     * for case, migration 0166's {@code CHECK} for the empty-level and wildcard rows, and
+     * for case, migration 0177's {@code CHECK} for the empty-level and wildcard rows, and
      * {@code stored_coordinate_is_fold_divergent} for a fold-divergent value.
      */
     private static Map<String, String> expected() {
@@ -82,13 +82,13 @@ public class EgretTagAttachmentMatchTypeTest {
         t.put("SALES|ORDERS|EMAIL", "SELF");
         t.put("SALES|ORDERS|", "ANCESTOR");
         t.put("Sales|Orders|Email", "SELF");
-        // Wildcards: the matcher matches, the query cannot, migration 0166 refuses the write.
+        // Wildcards: the matcher matches, the query cannot, migration 0177 refuses the write.
         t.put("sales|*|", "ANCESTOR");
         t.put("sales|ord*|", "ANCESTOR");
         t.put("*|*|", "ANCESTOR");
         t.put("sales|order?|", "ANCESTOR");
         t.put("sales|orders|ema*", "SELF");
-        // The empty-level class, the only one the first gate covered — now also 0166's.
+        // The empty-level class, the only one the first gate covered — now also 0177's.
         t.put("sales||", "ANCESTOR");
         t.put("||", "ANCESTOR");
         // The control: a row that genuinely does not apply must be NONE, or every row above
@@ -154,7 +154,7 @@ public class EgretTagAttachmentMatchTypeTest {
 
         assertEquals(
                 "the MatchType per stored row must be exactly this table — it is what "
-                        + "`resolved_tags_for_resource_via`'s fold, migration 0166's CHECK and "
+                        + "`resolved_tags_for_resource_via`'s fold, migration 0177's CHECK and "
                         + "`stored_coordinate_is_fold_divergent` are each measured against",
                 expected(),
                 measured);

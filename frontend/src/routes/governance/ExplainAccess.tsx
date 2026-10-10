@@ -205,7 +205,7 @@ function serviceDefIssuePhrase(i: WireServiceDefIssue): string {
  *
  * | cause | reaches | and the thing to act on |
  * |---|---|---|
- * | `tags_unresolved` | every target in THIS CATALOG for `stored_fold_divergent`, and THIS REQUEST ALONE for `target_fold_divergent` — which is why `tagDeclineScope` is two notes and not one | whichever of the two `tag_resolution_declined` names, each with its own remedy (⚠ this row said "one stored tag assignment names no schema or no table" while FOUR states produced the cause — the fix-round-3 defect, surviving in a doc comment. There are two states now: migration 0166 made `stored_level_empty` and `stored_wildcard` unstorable) |
+ * | `tags_unresolved` | every target in THIS CATALOG for `stored_fold_divergent`, and THIS REQUEST ALONE for `target_fold_divergent` — which is why `tagDeclineScope` is two notes and not one | whichever of the two `tag_resolution_declined` names, each with its own remedy (⚠ this row said "one stored tag assignment names no schema or no table" while FOUR states produced the cause — the fix-round-3 defect, surviving in a doc comment. There are two states now: migration 0177 made `stored_level_empty` and `stored_wildcard` unstorable) |
  * | `envelope_construct` / `policy_construct` with `tag_policies` | every target on THIS PROFILE | the tag download itself, which did not read |
  * | `tag_attachment_not_reproducible`, `tag_resource_not_reproducible`, `tag_policy_not_normalisable`, both arbitration causes | the tag or the policy the sentence already NAMES | nothing to add: the subject is in the sentence |
  */
@@ -282,7 +282,7 @@ function tagNormalisationProblemPhrase(p: WireTagNormalisationProblem): string {
  *  or `sales / orders / (the table itself)` for a table-level attachment.
  *
  *  ⚠ The `(none)` rendering for an empty SCHEMA or TABLE is gone with the states that
- *  produced it: migration 0166 makes an empty schema or table unstorable, so the only
+ *  produced it: migration 0177 makes an empty schema or table unstorable, so the only
  *  empty level that can reach here is `column`, which is 0081's table-level sentinel
  *  and has always had its own wording. */
 function storedCoordinate(d: { schema: string; table: string; column: string }): string {
@@ -310,7 +310,7 @@ const TARGET_LEVEL_LABEL: Record<ExplainTargetLevel, string> = {
  * handler stopped discarding the variant.
  *
  * ⚠ **Two of the four arms are gone, and not because they were wrong.** Migration
- * 0166 adds a `CHECK` to `catalog_tag_assignments` that makes an empty schema or
+ * 0177 adds a `CHECK` to `catalog_tag_assignments` that makes an empty schema or
  * table, and a `*` or `?` in any level, unstorable — so `stored_level_empty` and
  * `stored_wildcard` are states the backend can no longer report and the wire enum no
  * longer carries. A `case` for a `kind` that cannot arrive is the same defect as the
@@ -412,7 +412,7 @@ function causeSentence(c: WireUndecidableCause, declined?: ExplainTagDecline): s
       // unconditional, because `explain` never resolved tags); fix round 3 moved
       // the REASON out of this sentence and into `tag_resolution_declined`,
       // because by then four states produced this cause and this sentence named
-      // only the first of them (two states since migration 0166). The distinction
+      // only the first of them (two states since migration 0177). The distinction
       // the cause has always carried — "declined to resolve" is not "there are
       // none", since an empty set would have been an ANSWER — stays here, where it
       // is true of every one of them.

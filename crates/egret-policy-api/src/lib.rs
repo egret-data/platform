@@ -34,7 +34,7 @@ pub use port::{PolicyError, PolicyPort};
 /// | `services_and_tag_services_via` | `egret-policy/src/store.rs` |
 /// | `bump_bound_tag_versions`' id resolution (two clauses, one query) | `egret-catalog-registry/src/tag_version.rs` |
 ///
-/// Plus migration `0165_tag_service_requires_schema_level.sql`, whose `CHECK` and
+/// Plus migration `0176_tag_service_requires_schema_level.sql`, whose `CHECK` and
 /// clearing `UPDATE` both name it. So: **every Rust occurrence of the key in `src/`
 /// goes through this const; the SQL occurrences are the four above plus the
 /// migration, and they are enumerated here rather than left to be discovered.**

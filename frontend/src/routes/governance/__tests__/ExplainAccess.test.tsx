@@ -796,7 +796,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * wording, so the suite required it.
    *
    * ⚠ **This covered FOUR states until SP4d debt Task 3.** `stored_level_empty` and
-   * `stored_wildcard` are gone from the wire enum: migration 0166 adds a `CHECK` to
+   * `stored_wildcard` are gone from the wire enum: migration 0177 adds a `CHECK` to
    * `catalog_tag_assignments` that makes an empty schema or table, and a `*` or `?`
    * in any level, unstorable, so no backend can report them. The two that remain are
    * the two whose reaches differ, which is what this test is really for.
@@ -866,7 +866,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
       }
       // ⚠ Round 1's single sentence, which the suite used to require: it must not
       // appear on ANY state now. It belonged to `stored_level_empty`, which migration
-      // 0166 made unstorable, so nothing here may still render it.
+      // 0177 made unstorable, so nothing here may still render it.
       expect(sentence).not.toHaveTextContent(/stored with no schema or no table/i);
       expect(sentence).not.toHaveTextContent(/re-store that assignment on a table or a column/i);
       // The REACH, which differs, and whose round-1 wording was measured false for

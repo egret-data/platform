@@ -274,7 +274,7 @@ pub fn trie_reproduces_matcher(policy_value: &str, wild_card: bool) -> bool {
         // one: `perm.grants` accepted `schema_name = ''` and
         // `scope_to_resources` copied it through, which made the level
         // `isMatchAny` and enforced the grant across the whole catalog. SP4d
-        // debt Task 12 closed that — `migrations/0167_perm_scope_levels_are_named.sql`
+        // debt Task 12 closed that — `migrations/0178_perm_scope_levels_are_named.sql`
         // plus `egret_perm_compile::grants::ensure_scope_levels_are_named`, which
         // runs at the authoring boundary AND inside `compile_grant`. Stated by
         // code path now, not by authorship; see
@@ -283,7 +283,7 @@ pub fn trie_reproduces_matcher(policy_value: &str, wild_card: bool) -> bool {
         // The OTHER match-any spelling the compiler could emit is a run of `*`,
         // and it does NOT reach this early return: `classify` sends it to the
         // `None` arm below, which the trie reproduces. SP4d debt Task 14
-        // (`migrations/0168`, `ensure_a_wildcard_level_has_nothing_named_beneath_it`)
+        // (`migrations/0179`, `ensure_a_grant_wildcard_level_has_nothing_named_beneath_it`)
         // refuses it only with a NAMED level beneath it — a level skip, not a trie
         // question — so a bare `*` at the deepest named level is still ordinary
         // compiler output and still handled there.
