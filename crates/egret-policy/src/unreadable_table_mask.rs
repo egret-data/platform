@@ -128,7 +128,7 @@
 //!    transactions each writing one half would both pass and the pair would
 //!    commit. That is the SAME residual window this Rust guard has (see
 //!    "Concurrency" below), so the trigger buys reach over non-route writers
-//!    and **no atomicity at all**. It is not the instrument 0166/0167/0168 are.
+//!    and **no atomicity at all**. It is not the instrument 0177/0178/0179 are.
 //! 3. **A trigger on `policy.authz_policies` would wedge an installation that
 //!    already holds the pair, measured.** Of the 44 databases on this
 //!    development host, 35 carry both schemas (9 carry neither; 0 connection
@@ -141,7 +141,7 @@
 //!    is also written by the compiler's own `apply_diff_in_tx` on every
 //!    recompile, so a trigger there would make the recompile that REMOVES a
 //!    pair fail too — fail-closed with no product remedy, which is the opposite
-//!    of what 0166's operator note promises.
+//!    of what 0177's operator note promises.
 //! 4. **And the rule is wider than the defect** (see above), so it is the kind
 //!    of conservative refusal that belongs at an authoring boundary and not in
 //!    a static predicate that would make a working all-`varchar` configuration
@@ -286,7 +286,7 @@ pub enum TagWrite<'a> {
     /// decided "this one is table-level" and whose query decided it again is
     /// two guards that must agree, written to different shapes — the defect
     /// this programme has produced four times. **The sentinel itself is legal
-    /// and stays legal** (0166 keeps it so on purpose); what is refused is the
+    /// and stays legal** (0177 keeps it so on purpose); what is refused is the
     /// PAIR.
     Attachment {
         tag_id: Uuid,
@@ -314,7 +314,7 @@ pub enum TagWrite<'a> {
     /// concern 5, which judged that direction correctly). It is a product remedy
     /// for a pair that already exists — one a `psql` writer or a pre-guard
     /// installation left behind — so refusing it would trap the steward instead
-    /// of protecting them. The same reasoning 0166 records for `DELETE
+    /// of protecting them. The same reasoning 0177 records for `DELETE
     /// …/resource-tags`: removing half the pair is the remedy, never the hazard.
     ///
     /// Task 5 called it the **only** product remedy, and **that is no longer
@@ -371,7 +371,7 @@ impl<'a> From<TagRef<'a>> for TagBy<'a> {
 /// **THE ATTACHMENT HALF, spelled once.** Is this tag attached to a whole
 /// TABLE, and if so which one?
 ///
-/// `column_name = ''` is migration 0081's table-level sentinel (which 0166
+/// `column_name = ''` is migration 0081's table-level sentinel (which 0177
 /// deliberately keeps storable — the sentinel is legal, the PAIR is not), and
 /// **this is the one place that spelling appears**: the Mask arm asks the
 /// question by key or by name, the Rename arm asks it by id, and the three

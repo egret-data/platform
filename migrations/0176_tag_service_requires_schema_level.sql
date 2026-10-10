@@ -1,4 +1,4 @@
--- 0165_tag_service_requires_schema_level.sql
+-- 0176_tag_service_requires_schema_level.sql
 -- SP4d debt Task 2. A policy profile may carry a `tagService` only when its
 -- service-def declares a `schema` resource — which, of the three seeded defs, is
 -- `trino` alone.

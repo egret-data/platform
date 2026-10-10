@@ -1,4 +1,4 @@
--- 0166_catalog_tag_levels_are_present_and_literal.sql
+-- 0177_catalog_tag_levels_are_present_and_literal.sql
 --
 -- SP4d debt Task 3. A `catalog_tag_assignments` coordinate must name a schema and
 -- a table, and all three of its levels must be LITERAL — no `*`, no `?`.
@@ -106,8 +106,8 @@
 -- a bad `PUT …/resource-tags` is a 400 naming the level rather than this
 -- constraint surfacing as a 500.
 --
--- VALID, AND NO CLEARING STATEMENT — THE OPPOSITE OF 0165, FOR A MEASURED REASON.
--- 0165 deleted the rows its CHECK would reject because that key was PROVABLY
+-- VALID, AND NO CLEARING STATEMENT — THE OPPOSITE OF 0176, FOR A MEASURED REASON.
+-- 0176 deleted the rows its CHECK would reject because that key was PROVABLY
 -- INERT: Ranger's enricher drops the whole attachment, so nothing was enforcing
 -- it. A row this CHECK rejects is the opposite — it is ENFORCED, measured on the
 -- real jar. Deleting `('sales','ord*','email')` UNMASKS a column; deleting
@@ -142,7 +142,7 @@
 -- refusal, so removing an already-stored bad row is always possible.
 --
 -- WHEN A WILDCARD MATCHER LANDS, this constraint is what that work replaces — the
--- same "block now, map later" ruling 0165 records.
+-- same "block now, map later" ruling 0176 records.
 ALTER TABLE catalog_tag_assignments
     ADD CONSTRAINT catalog_tag_assignments_levels_are_present_and_literal
     CHECK (

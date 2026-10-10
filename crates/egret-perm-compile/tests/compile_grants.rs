@@ -469,8 +469,8 @@ fn a_starrocks_grant_scopes_by_database_not_schema() {
 /// **The third arm WAS a standing residual and SP4d debt Task 14 closed it.**
 /// `'*'` at a level is a legitimate policy value — a steward scopes a grant to a
 /// whole catalog or schema routinely, and `scope_to_resources` emits `*` itself
-/// for every level the scope does not name — so neither `0167` nor `0168` refuses
-/// it as such. What `0168` refuses is `*` with a NAMED level BENEATH it, because
+/// for every level the scope does not name — so neither `0178` nor `0179` refuses
+/// it as such. What `0179` refuses is `*` with a NAMED level BENEATH it, because
 /// `grants_check` has forbidden naming a table without a schema since `0154` and
 /// `(schema = '*', table = 'orders')` expresses exactly that. The arm stays here
 /// unchanged as the MEASUREMENT (`''` and `'*'` earn the identical `Self_`), and
@@ -606,7 +606,7 @@ fn every_scope_level_is_refused_empty_and_nothing_else_is() {
 
     // The shapes that must stay legal. `*` is a legitimate policy value (see
     // `an_empty_scope_level_would_be_enforced_in_every_schema`'s third arm and
-    // migration 0167); whitespace is a literal resource name, because `init()`
+    // migration 0178); whitespace is a literal resource name, because `init()`
     // drops `""` and nothing else; and an ABSENT level is the ordinary
     // catalog-or-schema-wide scope that `scope_to_resources` renders as `*`.
     //
@@ -615,7 +615,7 @@ fn every_scope_level_is_refused_empty_and_nothing_else_is() {
     // wildcard_tail_is_not` (SP4d debt Task 14) — not because `*` stopped being
     // legitimate, but because a NAMED level under a match-any one is the level
     // skip `grants_check` already forbids. `('*', None)` keeps this test's
-    // original point: `0167`'s predicate must not refuse `*`.
+    // original point: `0178`'s predicate must not refuse `*`.
     for s in [
         scope(None, None, None),
         scope(Some("sales"), None, None),

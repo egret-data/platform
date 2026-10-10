@@ -1,6 +1,6 @@
--- 0168_perm_wildcard_levels_name_nothing_beneath.sql
+-- 0179_perm_wildcard_levels_name_nothing_beneath.sql
 --
--- SP4d debt Task 14, and it is the half Task 12 (`0167`) deliberately left:
+-- SP4d debt Task 14, and it is the half Task 12 (`0178`) deliberately left:
 -- a `perm.grants` or `perm.rules` path level that Ranger reads as "every value
 -- at this level" may not have a NAMED level beneath it.
 --
@@ -30,7 +30,7 @@
 -- render ever carries a named level under an unnamed one. This CHECK is that
 -- latch stated over the AUTHORED values.
 --
--- THE MEASUREMENT, AS A PAIR, on `egret_test` with `0167`'s two constraints
+-- THE MEASUREMENT, AS A PAIR, on `egret_test` with `0178`'s two constraints
 -- applied inside the same (rolled-back) transaction so the probe sees exactly
 -- the branch tip. `scratchpad/t14_probe.sql`; `egret_test` is untouched
 -- afterwards (0 rows, constraint absent) so it re-runs as recorded:
@@ -49,7 +49,7 @@
 -- spelled NULL and spelled `''`, is refused on the same connection in the same
 -- transaction by two live constraints on these very columns — while spelled
 -- `'*'` it was accepted. Row 1 is not a missing guard; it is a third hole in
--- the one guard that exists, and `0167` closed only the second.
+-- the one guard that exists, and `0178` closed only the second.
 --
 -- WHAT THE MATCH-ANY LEVEL DOES, measured on the compiler's own artifact rather
 -- than asserted. `crates/egret-perm-compile/tests/compile_grants.rs`'s
@@ -63,7 +63,7 @@
 --   | policy `schema` value | MatchType   |
 --   |-----------------------|-------------|
 --   | `"sales"` (unedited)  | `None`      | <- control
---   | `""`                  | `Self_`     | <- `0167`
+--   | `""`                  | `Self_`     | <- `0178`
 --   | `"*"`                 | `Self_`     | <- THIS migration
 --
 -- Identical reach. A grant written for one schema was enforced across every
@@ -104,7 +104,7 @@
 -- levels), so "a run of stars is match-any" is engine-independent — which is
 -- what lets this rule live at an authoring boundary at all.
 --
--- `catalog` IS NOT IN THE PREDICATE, same as in `0167`, and for the same
+-- `catalog` IS NOT IN THE PREDICATE, same as in `0178`, and for the same
 -- measured reason: the value emitted at that level is `registry.catalogs.name`,
 -- and `0147_catalog_registry.sql` gives that column
 -- `CHECK (name ~ '^[a-z][a-z0-9_]{0,62}$')` — an allow-list under which `*` is
@@ -123,13 +123,13 @@
 -- `egret_perm::assignment`, which names no level at all), and create, patch and
 -- the rolled-back `/perm/preview` all funnel through `routes::write_grant`.
 --
--- VALID, AND NO CLEARING STATEMENT — `0166`/`0167`'s case, not `0165`'s, and
+-- VALID, AND NO CLEARING STATEMENT — `0177`/`0178`'s case, not `0176`'s, and
 -- measured rather than copied. Across the 29 databases on this host that have
 -- `perm.grants` and `perm.rules` (10 more have no `perm` schema at all), the
 -- two tables hold **4 grant rows and 3 rule rows in total**, all of them in the
 -- three `egret_sp4*` scratch databases, and **not one row anywhere carries `*`
 -- at ANY level** — so the violating population is empty by a wider margin than
--- `0167`'s was. A row this CHECK rejects is ENFORCED (that is the finding), so
+-- `0178`'s was. A row this CHECK rejects is ENFORCED (that is the finding), so
 -- a clearing statement would change what an engine enforces: deleting an
 -- `allow` fails closed, but deleting a `deny` written `('*','orders')` WIDENS
 -- access, and no one statement is right for both. Nor is a repair one
@@ -175,16 +175,16 @@ ALTER TABLE perm.grants
 -- that this predicate is making consistent. It is not the same severity — a
 -- match-any level on a mask or a row filter makes the control cover every
 -- sibling at that level, so it withholds MORE than the author wrote rather than
--- granting more — and it is included for the same reason `0167` included it:
+-- granting more — and it is included for the same reason `0178` included it:
 -- the predicate, the Rust refusal and the test are the same ones, probe row 6
 -- above shows the write was accepted, and
 -- `rules::ensure_row_filter_scope_is_a_table` — whose whole job is to refuse a
 -- row-filter scope that is not exactly catalog+schema+table — counts
--- `schema_name = '*'` as a NAMED schema, exactly as `0167` found it counting
+-- `schema_name = '*'` as a NAMED schema, exactly as `0178` found it counting
 -- `''` as one.
 --
 -- The Rust twin runs at BOTH rule-side positions — `rules::validate_rule_shape`
--- and `rules::compile_rule` — which is one more than `0167` shipped with. Task
+-- and `rules::compile_rule` — which is one more than `0178` shipped with. Task
 -- 12 left `compile_rule` unguarded on a fail-closed severity argument; that
 -- argument is sound about severity and does not answer what a `pub` entry point
 -- should emit, so Task 14 added the call. `rules::compile_rule`'s doc carries the

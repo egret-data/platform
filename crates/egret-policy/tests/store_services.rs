@@ -114,7 +114,7 @@ async fn tag_def_seeds_and_tag_service_provisions() {
 /// because a guard on create alone leaves the hole open from the other side, and
 /// **there is no Rust writer to hang a second refusal on**: no `UPDATE` of
 /// `type` or of `config_jsonb` exists in any `src/` in this workspace. So the
-/// other direction is held by migration 0165's CHECK, and the only way to
+/// other direction is held by migration 0176's CHECK, and the only way to
 /// exercise it is to issue the raw `UPDATE`s here — a test that only drove the
 /// route would be a green from a population that cannot reach this behaviour.
 ///
@@ -212,11 +212,11 @@ fn assert_constraint_violation(e: &sqlx::Error, what: &str) {
     };
     assert!(
         named,
-        "{what}: expected migration 0165's CHECK {NAME:?} to refuse, got: {e}"
+        "{what}: expected migration 0176's CHECK {NAME:?} to refuse, got: {e}"
     );
 }
 
-/// SP4d debt Task 2 fix round — **the clearing `UPDATE` in migration 0165, which
+/// SP4d debt Task 2 fix round — **the clearing `UPDATE` in migration 0176, which
 /// the Rust suite could not otherwise reach.**
 ///
 /// The migration deletes a `tagService` from every non-Trino profile and then adds
@@ -237,16 +237,16 @@ fn assert_constraint_violation(e: &sqlx::Error, what: &str) {
 /// One connection throughout: a `TEMP` table lives in the session, so running the
 /// statements on a different pooled connection would not see it.
 #[tokio::test]
-async fn migration_0165_clears_the_inert_key_then_validates_the_check() {
+async fn migration_0176_clears_the_inert_key_then_validates_the_check() {
     let Some((_s, db)) = store_and_db().await else {
         eprintln!("skip");
         return;
     };
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../migrations/0165_tag_service_requires_schema_level.sql"
+        "/../../migrations/0176_tag_service_requires_schema_level.sql"
     );
-    let sql = std::fs::read_to_string(path).expect("read migration 0165");
+    let sql = std::fs::read_to_string(path).expect("read migration 0176");
     // Comments only; the two statements are what runs.
     let body: String = sql
         .lines()
@@ -255,18 +255,18 @@ async fn migration_0165_clears_the_inert_key_then_validates_the_check() {
         .join("\n");
     assert!(
         body.contains("config_jsonb - 'tagService'") && body.contains("ADD CONSTRAINT"),
-        "migration 0165 no longer carries both the clearing UPDATE and the CHECK; body={body}"
+        "migration 0176 no longer carries both the clearing UPDATE and the CHECK; body={body}"
     );
     assert!(
         !body.to_uppercase().contains("NOT VALID"),
-        "migration 0165's CHECK must be VALIDATED — a NOT VALID one leaves a row that \
+        "migration 0176's CHECK must be VALIDATED — a NOT VALID one leaves a row that \
          makes `bump_bound_tag_versions`' bulk UPDATE fail for a whole warehouse; body={body}"
     );
-    let fixture = body.replace("policy.authz_services", "t0165");
+    let fixture = body.replace("policy.authz_services", "t0176");
 
     let mut conn = db.pool.acquire().await.expect("acquire");
     sqlx::query(
-        "CREATE TEMP TABLE t0165 (
+        "CREATE TEMP TABLE t0176 (
              id bigserial PRIMARY KEY,
              name text NOT NULL,
              type text NOT NULL,
@@ -278,7 +278,7 @@ async fn migration_0165_clears_the_inert_key_then_validates_the_check() {
     .expect("create fixture");
     // Every config shape the two predicates have to agree about.
     sqlx::query(
-        "INSERT INTO t0165 (name, type, config_jsonb) VALUES
+        "INSERT INTO t0176 (name, type, config_jsonb) VALUES
            ('sr_dead',  'starrocks', '{\"tagService\":\"dead\",\"jdbc.url\":\"keep\"}'),
            ('tr_live',  'trino',     '{\"tagService\":\"live\"}'),
            ('sr_plain', 'starrocks', '{}'),
@@ -300,11 +300,11 @@ async fn migration_0165_clears_the_inert_key_then_validates_the_check() {
         sqlx::query(sqlx::AssertSqlSafe(stmt.to_owned()))
             .execute(&mut *conn)
             .await
-            .unwrap_or_else(|e| panic!("migration 0165 statement failed: {e}\n{stmt}"));
+            .unwrap_or_else(|e| panic!("migration 0176 statement failed: {e}\n{stmt}"));
     }
 
     let rows: Vec<(String, Value)> =
-        sqlx::query_as("SELECT name, config_jsonb FROM t0165 ORDER BY id")
+        sqlx::query_as("SELECT name, config_jsonb FROM t0176 ORDER BY id")
             .fetch_all(&mut *conn)
             .await
             .expect("read back");
@@ -340,11 +340,11 @@ async fn migration_0165_clears_the_inert_key_then_validates_the_check() {
     // And the constraint is now in force on the fixture, in both directions.
     for (sql, what) in [
         (
-            "UPDATE t0165 SET type = 'starrocks' WHERE name = 'tr_live'",
+            "UPDATE t0176 SET type = 'starrocks' WHERE name = 'tr_live'",
             "type flip",
         ),
         (
-            "UPDATE t0165 SET config_jsonb = '{\"tagService\":\"late\"}' WHERE name = 'sr_plain'",
+            "UPDATE t0176 SET config_jsonb = '{\"tagService\":\"late\"}' WHERE name = 'sr_plain'",
             "late tagService",
         ),
     ] {
@@ -363,7 +363,7 @@ trait UnwrapErrOrPanic<E> {
 impl<T, E> UnwrapErrOrPanic<E> for Result<T, E> {
     fn unwrap_err_or_panic(self, what: &str) -> E {
         match self {
-            Ok(_) => panic!("{what}: migration 0165's CHECK must have refused this"),
+            Ok(_) => panic!("{what}: migration 0176's CHECK must have refused this"),
             Err(e) => e,
         }
     }

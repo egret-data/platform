@@ -141,7 +141,7 @@ async fn a_column_scope_without_a_table_is_refused_by_the_database() {
 /// would pass an empties-only test, so arm 1 writes the legal row the escalation
 /// imitates and asserts it is still ACCEPTED. And the NULL skip is asserted to
 /// still fail under its OWN constraint name, which is what proves `''` and NULL
-/// are two different shapes rather than one guard answering twice: before 0167
+/// are two different shapes rather than one guard answering twice: before 0178
 /// the NULL insert was rejected by `grants_check` while the `''` insert was
 /// accepted, on the same connection. Keeping both arms here is what makes this a
 /// measurement rather than a probe that could not fail.
@@ -151,7 +151,7 @@ async fn an_empty_scope_level_is_refused_by_the_database_and_so_is_the_null_skip
     let catalog_id = seed_catalog(&db.pool).await;
 
     // CONTROL 1 — the legal row the escalation imitates. If this ever fails,
-    // 0167 is over-refusing and every arm below is meaningless.
+    // 0178 is over-refusing and every arm below is meaningless.
     sqlx::query(
         "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name, table_name, \
          column_name) VALUES ('allow', ARRAY['read'], $1, 'sales', 'orders', 'email')",
@@ -162,15 +162,15 @@ async fn an_empty_scope_level_is_refused_by_the_database_and_so_is_the_null_skip
     .expect("a fully named path is the ordinary grant and must stay legal");
 
     // CONTROL 2 — `*` at a level is a LEGITIMATE policy value and stays legal
-    // (migration 0167's own `'' AND NOT '*'` paragraph, and the plan's ruling).
+    // (migration 0178's own `'' AND NOT '*'` paragraph, and the plan's ruling).
     // A predicate that refused it would break a scope a steward writes on
-    // purpose, so this arm is what stops 0167 over-refusing.
+    // purpose, so this arm is what stops 0178 over-refusing.
     //
-    // ⚠ It was `('*', 'orders')` when Task 12 wrote it, and migration 0168
+    // ⚠ It was `('*', 'orders')` when Task 12 wrote it, and migration 0179
     // (Task 14) now refuses THAT shape — not because `*` is illegitimate but
     // because a NAMED level under a match-any one is the level skip
     // `grants_check` already forbids. The control is kept at the same level with
-    // nothing named beneath it, which is the half 0167 is responsible for;
+    // nothing named beneath it, which is the half 0178 is responsible for;
     // `a_wildcard_level_with_a_named_level_beneath_it_is_refused_by_the_database`
     // below owns the other half and keeps `('*','orders')` measured.
     sqlx::query(
@@ -207,7 +207,7 @@ async fn an_empty_scope_level_is_refused_by_the_database_and_so_is_the_null_skip
         );
     }
 
-    // CONTROL 3 — the NULL skip, which was ALREADY refused before 0167 existed.
+    // CONTROL 3 — the NULL skip, which was ALREADY refused before 0178 existed.
     // Its constraint name must still be the OLD one: if this row started failing
     // under `grants_scope_levels_are_named` instead, the two shapes would have
     // collapsed into one guard and the pair would no longer measure anything.
@@ -226,9 +226,9 @@ async fn an_empty_scope_level_is_refused_by_the_database_and_so_is_the_null_skip
     );
 }
 
-/// SP4d debt Task 14 — **the half 0167 left, and the more reachable one.**
+/// SP4d debt Task 14 — **the half 0178 left, and the more reachable one.**
 ///
-/// `0167` closed `schema_name = ''`. `schema_name = '*'` earns the IDENTICAL
+/// `0178` closed `schema_name = ''`. `schema_name = '*'` earns the IDENTICAL
 /// `MatchType::Self_` on `finance.orders.amount` (measured on the compiler's own
 /// artifact in
 /// `egret-perm-compile/tests/compile_grants.rs::an_empty_scope_level_would_be_enforced_in_every_schema`),
@@ -253,8 +253,8 @@ async fn an_empty_scope_level_is_refused_by_the_database_and_so_is_the_null_skip
 /// this on the literal `'*'` would close one spelling and leave the next one
 /// reaching identical enforcement from the identical field.
 ///
-/// **CONTROL 3 is the NULL skip under its OWN constraint name.** Both `0167` and
-/// `0168` are consistency fixes to `grants_check`; if a NULL schema under a named
+/// **CONTROL 3 is the NULL skip under its OWN constraint name.** Both `0178` and
+/// `0179` are consistency fixes to `grants_check`; if a NULL schema under a named
 /// table ever started failing under one of THEM, the three shapes would have
 /// collapsed into one guard and none of these arms would measure anything.
 #[tokio::test]
@@ -321,7 +321,7 @@ async fn a_wildcard_level_with_a_named_level_beneath_it_is_refused_by_the_databa
         });
     }
 
-    // CONTROL 3 — the NULL skip, refused before either 0167 or 0168 existed, and
+    // CONTROL 3 — the NULL skip, refused before either 0178 or 0179 existed, and
     // still refused under its OWN name.
     let err = sqlx::query(
         "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name, table_name) \
@@ -338,12 +338,12 @@ async fn a_wildcard_level_with_a_named_level_beneath_it_is_refused_by_the_databa
     );
 }
 
-/// The `perm.rules` half of 0168, the twin of
+/// The `perm.rules` half of 0179, the twin of
 /// `an_empty_rule_scope_level_is_refused_by_the_database`. Not the same severity —
 /// a match-any level makes a mask or row filter cover every sibling at that
 /// level, which withholds MORE than the author wrote — but the same three
 /// columns, the same two `0154` level-skip CHECKs being made consistent, and the
-/// same predicate. Measured accepted before 0168 (`scratchpad/t14_probe.sql`,
+/// same predicate. Measured accepted before 0179 (`scratchpad/t14_probe.sql`,
 /// row 6).
 #[tokio::test]
 async fn a_wildcard_rule_level_with_a_named_level_beneath_it_is_refused_by_the_database() {
@@ -379,11 +379,11 @@ async fn a_wildcard_rule_level_with_a_named_level_beneath_it_is_refused_by_the_d
     );
 }
 
-/// The `perm.rules` half of 0167. Not the same severity — an empty level makes a
+/// The `perm.rules` half of 0178. Not the same severity — an empty level makes a
 /// mask or row filter cover every sibling at that level, which withholds MORE
 /// than the author wrote — but the same three columns, the same verbatim copy
 /// into `scope_to_resources`, and the same predicate. Measured accepted before
-/// 0167.
+/// 0178.
 #[tokio::test]
 async fn an_empty_rule_scope_level_is_refused_by_the_database() {
     let Some(db) = test_db().await else { return };

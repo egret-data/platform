@@ -406,7 +406,7 @@ pub(crate) const ROW_FILTER_LEVELS: usize = 3;
 /// `catalog` is absent from the loop and needs nothing: the value emitted at
 /// that level is `registry.catalogs.name`, and `0147_catalog_registry.sql` gives
 /// that column `CHECK (name ~ '^[a-z][a-z0-9_]{0,62}$')` — an allow-list under
-/// which the empty string is impossible. (`0166`'s comment records the same
+/// which the empty string is impossible. (`0177`'s comment records the same
 /// division of labour for the tag coordinate, including that weakening 0147's
 /// regex re-opens it.)
 pub(crate) fn ensure_scope_levels_are_named(scope: &Scope) -> Result<(), CompileError> {
@@ -455,13 +455,13 @@ pub(crate) fn ensure_scope_levels_are_named(scope: &Scope) -> Result<(), Compile
 /// `egret_ranger_eval::resource::requests_all_values`, which folds `null`, `""`
 /// and `"*"` together because it is the REQUEST-side rule.
 ///
-/// Keyed one-for-one with `migrations/0168`'s `~ '^[*]+$'`.
+/// Keyed one-for-one with `migrations/0179`'s `~ '^[*]+$'`.
 fn level_is_a_wildcard_run(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|b| b == b'*')
 }
 
 /// Refuse a [`Scope`] that names a level BENEATH a match-any one — SP4d debt
-/// Task 14, and the half `0167` deliberately left.
+/// Task 14, and the half `0178` deliberately left.
 ///
 /// **A level may be a wildcard run only if every level below it is a wildcard
 /// run or absent.** [`CompileError::NamedLevelUnderWildcard`] carries the whole

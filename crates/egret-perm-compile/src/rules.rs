@@ -288,7 +288,7 @@ fn ensure_row_filter_scope_is_a_table(r: &Rule) -> Result<(), CompileError> {
 /// silent no-op (read that arm's comment). Moving the refusal into `compile_rule`
 /// would turn those stored rows uncompilable, which is a behaviour change rather
 /// than a consistency fix. The two guards above have no such population: since
-/// `0167` and `0168` nothing stored can carry either shape.
+/// `0178` and `0179` nothing stored can carry either shape.
 pub fn compile_rule(
     r: &Rule,
     e: EngineType,

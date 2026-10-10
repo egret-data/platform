@@ -68,7 +68,7 @@ impl CatalogTagRepo {
     /// visible in a state this transaction hasn't fully applied yet.
     ///
     /// **Refuses an unresolvable coordinate up front** —
-    /// [`unresolvable_coordinate`], SP4d debt Task 3. Migration 0166 is what makes
+    /// [`unresolvable_coordinate`], SP4d debt Task 3. Migration 0177 is what makes
     /// the state impossible; this is what makes it a 400 naming the level instead
     /// of that constraint surfacing as an opaque 500 (`BiError::Db` maps to
     /// "internal error"). The two predicates are written to the same shape on
@@ -110,7 +110,7 @@ impl CatalogTagRepo {
         //
         // ⚠ `column` is passed VERBATIM and this call site makes no judgement
         // about it. Only a TABLE-level attachment (`column_name = ''`,
-        // migration 0081's sentinel, which 0166 keeps legal on purpose) is half
+        // migration 0081's sentinel, which 0177 keeps legal on purpose) is half
         // of the pair, and that decision lives beside the SQL that spells the
         // same thing `= ''` — a gate here plus a predicate there would be two
         // guards that must agree, written to different shapes. A column-level
@@ -344,7 +344,7 @@ impl CatalogTagRepo {
 
 /// Why this `(schema, table, column)` cannot be stored, or `None`.
 ///
-/// **SP4d debt Task 3, and it is the write-side half of migration 0166's
+/// **SP4d debt Task 3, and it is the write-side half of migration 0177's
 /// `catalog_tag_assignments_levels_are_present_and_literal`.** The constraint is
 /// what makes the state impossible; this exists so a caller is told WHICH level is
 /// wrong, with a 400, rather than meeting a constraint violation that
@@ -511,7 +511,7 @@ async fn list_resource_tags(
     request_body = ResourceTagBody,
     responses(
         (status = 200, description = "Tag assigned to the catalog resource (idempotent)", body = egret_core::Ack),
-        (status = 400, description = "The coordinate cannot be stored (an empty schema or table, or `*`/`?` in any level — see migration 0166), or the tag is being attached to a whole TABLE while a tag-addressed mask names it, which would make that table unreadable rather than masked", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The coordinate cannot be stored (an empty schema or table, or `*`/`?` in any level — see migration 0177), or the tag is being attached to a whole TABLE while a tag-addressed mask names it, which would make that table unreadable rather than masked", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
@@ -600,7 +600,7 @@ pub struct CatalogTagsApi;
 mod tests {
     use super::unresolvable_coordinate;
 
-    /// **The write-side half of migration 0166, asserted by LEVEL.** This is the
+    /// **The write-side half of migration 0177, asserted by LEVEL.** This is the
     /// guard that keeps a bad `PUT …/resource-tags` a 400 instead of the CHECK
     /// surfacing as a 500, so what matters is that it refuses exactly the set the
     /// constraint refuses — no more, no less. A mutation that drops any arm shows up

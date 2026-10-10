@@ -99,7 +99,7 @@
 //!   the same reading `CompileError::EmptyScopeLevel` rests on. Treating the
 //!   two as equal is the fail-CLOSED direction (it finds more collisions);
 //!   nothing this compiler emits can reach it anyway, since
-//!   `ranger_json::resources_object` drops empty levels and migration `0167`
+//!   `ranger_json::resources_object` drops empty levels and migration `0178`
 //!   forbids an empty scope level upstream of it.
 //!
 //! # Why this is NARROWER than the evaluator's refusal, deliberately

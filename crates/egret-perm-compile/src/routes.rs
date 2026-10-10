@@ -618,7 +618,7 @@ pub struct ExplainResponse {
     /// rendered round 1's single sentence for every one of them — naming a stored
     /// row that does not exist, and claiming a per-catalog reach for the state that
     /// is per-REQUEST. (There were four states when that was measured; migration
-    /// 0166 made two of them unrepresentable and left two.)
+    /// 0177 made two of them unrepresentable and left two.)
     ///
     /// **Carried here rather than as a payload on `TagsUnresolved`**, which was
     /// the other option: `egret-ranger-eval` is a pure crate that knows nothing of
@@ -670,7 +670,7 @@ fn explain_tag_inputs(
 /// holds for nothing else.
 ///
 /// ⚠ **This carried FOUR variants until SP4d debt Task 3.** `StoredLevelEmpty` and
-/// `StoredWildcard` were the other two, and migration 0166's
+/// `StoredWildcard` were the other two, and migration 0177's
 /// `catalog_tag_assignments_levels_are_present_and_literal` makes both states
 /// unrepresentable: no running egret can read such a row, so no response can
 /// report one. They are removed rather than left unreachable — an API variant a
@@ -2362,7 +2362,7 @@ impl ClearanceLookups for sqlx::PgConnection {
 /// three conditions, and is now ONE read plus one `CHECK`:
 ///
 /// * an empty `schema_name` or `table_name`, and a `*` or `?` in any level, are
-///   **unrepresentable** — migration 0166's
+///   **unrepresentable** — migration 0177's
 ///   `catalog_tag_assignments_levels_are_present_and_literal`, VALIDATED, so no
 ///   running egret can read such a row and nothing here rules on one. The write
 ///   that used to produce them is refused by `egret_bi::catalog_tags` with a 400
@@ -2403,12 +2403,12 @@ impl ClearanceLookups for sqlx::PgConnection {
 /// | input | read | ruling |
 /// |---|---|---|
 /// | `target.catalog_id` | **yes** | scopes both reads, and scopes them identically (`a.warehouse_id = c.warehouse_id` for `c.id = $1`), so a row the gate counts is a row the resolver could return |
-/// | `target.schema` / `target.table` — PRESENCE | **yes** | `None` on either ⇒ `Some(empty)`, argued above. `Some("")` is NOT special-cased, and since migration 0166 that needs no gate to be sound: no stored coordinate CAN have an empty `schema_name` or `table_name`, so an empty request value matches nothing and the empty set is the right answer. ⚠ Before 0166 this row rested on the gate having refused a `('', '')` row; it now rests on the `CHECK`, which is a stronger claim about a smaller surface |
+/// | `target.schema` / `target.table` — PRESENCE | **yes** | `None` on either ⇒ `Some(empty)`, argued above. `Some("")` is NOT special-cased, and since migration 0177 that needs no gate to be sound: no stored coordinate CAN have an empty `schema_name` or `table_name`, so an empty request value matches nothing and the empty set is the right answer. ⚠ Before 0177 this row rested on the gate having refused a `('', '')` row; it now rests on the `CHECK`, which is a stronger claim about a smaller surface |
 /// | `target.schema` / `target.table` / `target.column` — the VALUES' CASE | **yes, and ruled on since fix round 1** | the resolver folds both sides, so `SALES` against a row stored `sales` resolves. ⚠ This row did not exist, and its absence was the review's Critical: the values reach `request_resource` verbatim from `ScopePicker`'s free-text inputs, so differing case is what ORDINARY use produces — more reachable than the empty-string class that was gated |
-/// | `target.*` — the VALUES' SYNTAX | **no, and that is a ruling** | a `*` or `?` the OPERATOR types is a request value, and Ranger matches a request value literally: the wildcard lives on the POLICY side of `getMatchType`, never the request side. So a typed `*` names a resource called `*` and resolves nothing, which is correct — and migration 0166 does NOT constrain the request, only what can be stored, so a steward can still type one. The syntax that matters is the STORED side's, and since 0166 the schema refuses it rather than this function detecting it |
+/// | `target.*` — the VALUES' SYNTAX | **no, and that is a ruling** | a `*` or `?` the OPERATOR types is a request value, and Ranger matches a request value literally: the wildcard lives on the POLICY side of `getMatchType`, never the request side. So a typed `*` names a resource called `*` and resolves nothing, which is correct — and migration 0177 does NOT constrain the request, only what can be stored, so a steward can still type one. The syntax that matters is the STORED side's, and since 0177 the schema refuses it rather than this function detecting it |
 /// | `target.*` — a [`FOLD_DIVERGENT`] character | **yes, since fix round 2** | ⚠ the divergence is a property of the PAIR, not of the stored side: `("ſ", "s")` is measured disagreeing, so an ASCII stored value and an odd REQUEST value are the same fail-open. Checked with the same `fold_divergent` the stored side uses |
 /// | `target.column` | **yes** | `None` ⇒ `""`, which is migration 0081's "the table itself" convention in the REQUEST position, and is the value `resolved_tags_for_resource_via` is documented against |
-/// | `assignment_coordinates` + [`stored_coordinate_is_fold_divergent`] | **yes, first** | a divergent coordinate ⇒ `None`. Per CATALOG and not per request: the coordinate that breaks the equivalence is one the resolver cannot return, so there is nothing per-request to test it against. ⚠ The read is NOT retired by 0166 — the `CHECK` takes the empty-level and wildcard classes, and the fold class is the one a `CHECK` must not take |
+/// | `assignment_coordinates` + [`stored_coordinate_is_fold_divergent`] | **yes, first** | a divergent coordinate ⇒ `None`. Per CATALOG and not per request: the coordinate that breaks the equivalence is one the resolver cannot return, so there is nothing per-request to test it against. ⚠ The read is NOT retired by 0177 — the `CHECK` takes the empty-level and wildcard classes, and the fold class is the one a `CHECK` must not take |
 /// | `egret_policy::ResolvedTag::name` | **yes** | `tags.name`, which is what `from_assignments` puts in the wire tag's `type` and therefore what the engine matches. Never `tags.key` — live they differ for one of three tags |
 /// | `egret_policy::ResolvedTag::match_type` | **yes** | both the evaluator's admission test AND, here, the only surviving record of WHICH level the attachment was at — see [`attachment_for`] |
 /// | the engine (Trino / StarRocks) | **no** | and that is the ruling, not an omission: `ServiceTags::from_assignments` writes the keys `catalog`/`schema`/`table`/`column` for every service type. See [`attachment_for`] |
@@ -2444,7 +2444,7 @@ async fn resolved_tags_for_target<L: TagLookups + Send>(
     // states apart, and the page then rendered round 1's single sentence for every
     // one of them — naming a stored row that did not exist and claiming a
     // per-catalog reach for this per-REQUEST one. (Four states then; two since
-    // migration 0166.)
+    // migration 0177.)
     for (level, value) in [
         (ExplainTargetLevel::Schema, target.schema.as_deref()),
         (ExplainTargetLevel::Table, target.table.as_deref()),
@@ -2461,7 +2461,7 @@ async fn resolved_tags_for_target<L: TagLookups + Send>(
     // enough — the resolver's predicate is the same predicate for every target in
     // it — and the one that offends is the one the page has to name.
     //
-    // ⚠ **WHAT THIS STILL ASKS, after migration 0166.** The gate used to rule on
+    // ⚠ **WHAT THIS STILL ASKS, after migration 0177.** The gate used to rule on
     // three classes; the CHECK that migration adds makes two of them
     // unrepresentable (an empty `schema_name`/`table_name`, and `*`/`?` in any
     // level), so the only class left for this read is the fold divergence — which
@@ -2601,14 +2601,14 @@ fn fold_divergent(value: &str) -> bool {
 
 /// The ruling on ONE stored coordinate: `true` when
 /// `resolved_tags_for_resource_via`'s predicate cannot be shown to reproduce the
-/// enricher for it, which after migration 0166 means exactly one thing — one of
+/// enricher for it, which after migration 0177 means exactly one thing — one of
 /// its levels carries a character the two case folds can disagree on.
 ///
-/// # ⚠ This ruled on THREE classes until migration 0166 took two of them
+/// # ⚠ This ruled on THREE classes until migration 0177 took two of them
 ///
 /// It was `stored_value_problem`, returning `Option<StoredValueProblem>` over
 /// `EmptyLevel`, `WildcardMetacharacter` and `FoldDivergentCharacter`. Migration
-/// 0166 adds `catalog_tag_assignments_levels_are_present_and_literal` — a
+/// 0177 adds `catalog_tag_assignments_levels_are_present_and_literal` — a
 /// VALIDATED `CHECK` forbidding an empty `schema_name`/`table_name` and `*`/`?` in
 /// any of the three levels — so the first two are no longer states a running
 /// egret can read: unrepresentable beats unforgettable. The fold divergence is the
@@ -2630,10 +2630,10 @@ fn fold_divergent(value: &str) -> bool {
 ///
 /// | property of the stored value | the matcher's rule | here |
 /// |---|---|---|
-/// | the `catalog` LEVEL — its emptiness and its syntax | `from_assignments` writes `catalog` **unconditionally** (`egret-policy-api/src/dto.rs`, no `is_empty()` guard), and `trino.json` declares `{"wildCard": true}` on it like the other three — so a catalog named `ord*` would be the same fail-open one level UP, and 0166 does not constrain it | **closed, by a DIFFERENT mechanism, and that is why this row exists** — the value is `registry.catalogs.name` (both readers join `registry.catalogs c` and select `c.name`), and `migrations/0147_catalog_registry.sql` gives that column `CHECK (name ~ '^[a-z][a-z0-9_]{0,62}$')`: an allow-list, so empty, `*` and `?` are all already impossible. ⚠ 0166 could NOT use that predicate for the other three levels — they hold FOREIGN-catalog identifiers where mixed case and non-ASCII are ordinary — so the catalog level is the one protected by an allow-list and the other three by a deny-list. Weakening 0147's regex re-opens this |
-/// | emptiness of `schema` / `table` | `from_assignments` omits the level, and the shorter resource is an ANCESTOR the enricher admits — `('sales','','')` ships as `{catalog, schema}`, measured ANCESTOR of `hive.sales.orders.email` on the real jar, and an equality predicate on `table_name` can never return it | **UNREPRESENTABLE since 0166** — `catalog_tag_assignments_levels_are_present_and_literal`. Not ruled on here, and not reachable |
-/// | emptiness of `column` | the same omission, but it is migration 0081's documented table-level sentinel and the resolver's second arm IS that ANCESTOR case | **ruled fine, and deliberately still writable** — the one emptiness that is reproduced, and the one 0166's predicate had to keep: a constraint forbidding every empty string would break the table-level attachment |
-/// | `*` / `?` | `{"wildCard": true}` on all four `trino.json` resources ⇒ `FilenameUtils.wildcardMatch`, a token-based backtracking matcher that SQL `LIKE` is not (`%`/`_`, no `?`, different escaping) | **UNREPRESENTABLE since 0166**, same constraint. Standing up a second matcher implementation is the trade this package has declined three times — the tag trie, the candidate rule, T4 — so the state is refused at the WRITE instead of reproduced |
+/// | the `catalog` LEVEL — its emptiness and its syntax | `from_assignments` writes `catalog` **unconditionally** (`egret-policy-api/src/dto.rs`, no `is_empty()` guard), and `trino.json` declares `{"wildCard": true}` on it like the other three — so a catalog named `ord*` would be the same fail-open one level UP, and 0177 does not constrain it | **closed, by a DIFFERENT mechanism, and that is why this row exists** — the value is `registry.catalogs.name` (both readers join `registry.catalogs c` and select `c.name`), and `migrations/0147_catalog_registry.sql` gives that column `CHECK (name ~ '^[a-z][a-z0-9_]{0,62}$')`: an allow-list, so empty, `*` and `?` are all already impossible. ⚠ 0177 could NOT use that predicate for the other three levels — they hold FOREIGN-catalog identifiers where mixed case and non-ASCII are ordinary — so the catalog level is the one protected by an allow-list and the other three by a deny-list. Weakening 0147's regex re-opens this |
+/// | emptiness of `schema` / `table` | `from_assignments` omits the level, and the shorter resource is an ANCESTOR the enricher admits — `('sales','','')` ships as `{catalog, schema}`, measured ANCESTOR of `hive.sales.orders.email` on the real jar, and an equality predicate on `table_name` can never return it | **UNREPRESENTABLE since 0177** — `catalog_tag_assignments_levels_are_present_and_literal`. Not ruled on here, and not reachable |
+/// | emptiness of `column` | the same omission, but it is migration 0081's documented table-level sentinel and the resolver's second arm IS that ANCESTOR case | **ruled fine, and deliberately still writable** — the one emptiness that is reproduced, and the one 0177's predicate had to keep: a constraint forbidding every empty string would break the table-level attachment |
+/// | `*` / `?` | `{"wildCard": true}` on all four `trino.json` resources ⇒ `FilenameUtils.wildcardMatch`, a token-based backtracking matcher that SQL `LIKE` is not (`%`/`_`, no `?`, different escaping) | **UNREPRESENTABLE since 0177**, same constraint. Standing up a second matcher implementation is the trade this package has declined three times — the tag trie, the candidate rule, T4 — so the state is refused at the WRITE instead of reproduced |
 /// | letter case | `{"ignoreCase": true}` ⇒ `equalsIgnoreCase` | **reproduced, not refused** — the resolver folds both sides, measured on the Ranger side by `EgretTagAttachmentMatchTypeTest` |
 /// | a character from [`FOLD_DIVERGENT`] | `equalsIgnoreCase`'s PER-CHARACTER fold versus `lower()`'s FULL-STRING one — the 25 code points on which the two can disagree, derived by a sweep over all of Unicode | **this function**, and the only class left in it |
 /// | any other non-ASCII character | the two folds AGREE on it — measured over every defined code point by the Java sweep against a `lower()` STAND-IN, and over the derived pairs against a real PostgreSQL 16.15 `en_US.utf8`; the caveats for U+0130 and U+03A3 are on [`FOLD_DIVERGENT`] | **ruled fine** — ⚠ fix round 2 narrowed this from "all non-ASCII declines", which was an over-refusal on an un-measured premise in a Vietnamese-language deployment |
@@ -2695,7 +2695,7 @@ fn fold_divergent(value: &str) -> bool {
 /// The REQUEST side is not this function's: see the `target.*` rows on
 /// [`resolved_tags_for_target`]. A `*` an operator types is a literal there,
 /// because `getMatchType` takes the wildcard from the POLICY position only — and
-/// 0166 does not constrain the request, only what can be stored.
+/// 0177 does not constrain the request, only what can be stored.
 fn stored_coordinate_is_fold_divergent(schema: &str, table: &str, column: &str) -> bool {
     [schema, table, column].into_iter().any(fold_divergent)
 }
@@ -2746,14 +2746,14 @@ fn stored_coordinate_is_fold_divergent(schema: &str, table: &str, column: &str) 
 ///
 /// **SP4d debt Task 2 made that configuration unrepresentable.**
 /// `PolicyStore::create_service` refuses a non-Trino profile carrying a
-/// `tagService`, and migration 0165's VALIDATED `CHECK (config_jsonb ->>
+/// `tagService`, and migration 0176's VALIDATED `CHECK (config_jsonb ->>
 /// 'tagService' IS NULL OR type = 'trino')` refuses it for every `INSERT` and every
 /// `UPDATE`, from Rust or from `psql`, having first cleared the key from any row
 /// that already carried it. This mapping still has to be right rather than merely
 /// unused: the levels it synthesises reach `enriched_tags`'
 /// `service_resource_validates` for EVERY StarRocks profile with a tagged column —
 /// `resolved_tags` comes from `catalog_tag_assignments`, not from the `tagService`
-/// — so the drop fires regardless of what any config says. What 0165 removed is the
+/// — so the drop fires regardless of what any config says. What 0176 removed is the
 /// state in which that drop could silently discard a tag policy somebody wrote.
 ///
 /// # ⚠ Enumerated: the four fields with no column to come from
@@ -2880,7 +2880,7 @@ trait TagLookups {
     /// `(schema_name, table_name, column_name)` this catalog's tag assignments
     /// carry. The RULING on them is [`stored_coordinate_is_fold_divergent`]'s, in
     /// Rust, so that it is testable and mutable; this is the fact. ⚠ It used to be a
-    /// three-class ruling; migration 0166 took two of the three into a `CHECK`, and
+    /// three-class ruling; migration 0177 took two of the three into a `CHECK`, and
     /// the read survives for the one a `CHECK` must not take.
     fn assignment_coordinates(
         &mut self,
@@ -3496,7 +3496,7 @@ mod tag_resolution_tests {
     /// ⚠ **This had EIGHT rows until SP4d debt Task 3, covering three classes.**
     /// Seven of them — `('sales','','')`, `('','','')`, `('sales','*','')`,
     /// `('sales','ord*','')`, `('*','*','')`, `('sales','order?','')` and
-    /// `('sales','orders','ema*')` — are coordinates migration 0166's
+    /// `('sales','orders','ema*')` — are coordinates migration 0177's
     /// `catalog_tag_assignments_levels_are_present_and_literal` now refuses to
     /// store. A test that feeds them to the fake lookup asserts a branch no
     /// production read can produce, which is the shape that lets a stale
@@ -3734,7 +3734,7 @@ mod tag_resolution_tests {
     /// one of the two.
     ///
     /// ⚠ **The pair used to be one wildcard row and one fold-divergent row**, which
-    /// also disproved a per-CLASS precedence. Migration 0166 makes the wildcard row
+    /// also disproved a per-CLASS precedence. Migration 0177 makes the wildcard row
     /// unstorable, so there is one class left and no precedence left to disprove;
     /// the two offenders are now two fold-divergent rows carrying the divergent
     /// character at DIFFERENT levels, which is what the rule still has to order.
@@ -3787,7 +3787,7 @@ mod tag_resolution_tests {
     /// only through a decline.
     ///
     /// ⚠ **This was `stored_value_problem_rules_on_each_class_by_name` and asserted
-    /// three classes.** Migration 0166 took two of them into the schema, so the
+    /// three classes.** Migration 0177 took two of them into the schema, so the
     /// rows that used to live here — `("", "orders", "")`, `("sales", "", "")`,
     /// `("sal*s", "orders", "")`, `("sales", "orders", "ema?l")` — are now measured
     /// against the real `CHECK` in `crates/egret-policy/tests/tag_resolution.rs`,
@@ -3801,7 +3801,7 @@ mod tag_resolution_tests {
         ));
         // `column_name = ''` is migration 0081's table-level sentinel and the
         // resolver's own second arm — the one emptiness that is REPRODUCED, and the
-        // one 0166's CHECK deliberately still allows.
+        // one 0177's CHECK deliberately still allows.
         assert!(!stored_coordinate_is_fold_divergent("sales", "orders", ""));
         // ⚠ Fix round 2: an ordinary non-ASCII value is NOT a problem. The two
         // folds AGREE on every Vietnamese letter — measured over the precomposed
@@ -4015,7 +4015,7 @@ mod tag_resolution_tests {
     /// kept it out of the mapping was neither the query nor the schema but the
     /// gate's `EmptyLevel` class.
     ///
-    /// It is now the SCHEMA: migration 0166's
+    /// It is now the SCHEMA: migration 0177's
     /// `catalog_tag_assignments_levels_are_present_and_literal` means no such row
     /// can exist to be returned, and `egret_bi::catalog_tags` refuses that `PUT`
     /// with a 400. Nothing constrains `explain`'s own `schema`/`table` strings —

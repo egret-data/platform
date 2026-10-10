@@ -167,7 +167,7 @@ async fn column_attachment_against_a_column_request_is_self() {
 /// verbatim, so a steward typing `SALES` reached it with nothing wrong anywhere.
 /// That is why case is REPRODUCED here rather than refused. The other classes the
 /// fold cannot reproduce are elsewhere now: a wildcard metacharacter and an empty
-/// level are UNSTORABLE (migration 0166), and a fold-divergent value declines in
+/// level are UNSTORABLE (migration 0177), and a fold-divergent value declines in
 /// `egret_perm_compile::routes::stored_coordinate_is_fold_divergent`.
 ///
 /// The two entries also prove the fold did not collapse the LEVELS: one tag at two
@@ -373,7 +373,7 @@ async fn the_returned_identifier_is_the_name_not_the_key() {
 }
 
 /// Test 6 — **the population bound, now enforced by the database.** SP4d debt
-/// Task 3, migration 0166.
+/// Task 3, migration 0177.
 ///
 /// Every test above is a claim about what
 /// [`resolved_tags_for_resource_via`](egret_policy::resolved_tags_for_resource_via)
@@ -414,8 +414,8 @@ async fn the_database_refuses_a_coordinate_the_resolver_cannot_reproduce() {
     let (wh_id, _catalog_id) = seed_catalog(&pool).await;
     let tag = seed_tag_row(
         &pool,
-        &format!("t0166-{}", Uuid::new_v4().simple()),
-        "Migration 0166",
+        &format!("t0177-{}", Uuid::new_v4().simple()),
+        "Migration 0177",
     )
     .await;
 

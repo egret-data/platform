@@ -1,4 +1,4 @@
--- 0167_perm_scope_levels_are_named.sql
+-- 0178_perm_scope_levels_are_named.sql
 --
 -- SP4d debt Task 12. A `perm.grants` or `perm.rules` path level that is PRESENT
 -- must be a resource NAME: `schema_name`, `table_name` and `column_name` may be
@@ -46,7 +46,7 @@
 -- `policy:update` caller.
 --
 -- `''` AND NOT `'*'` — the one thing this predicate had to get right.
--- `0166_catalog_tag_levels_are_present_and_literal.sql` bans `*` and `?` in a
+-- `0177_catalog_tag_levels_are_present_and_literal.sql` bans `*` and `?` in a
 -- stored tag coordinate, where nothing real is named `*`. That is a DIFFERENT
 -- population and copying its predicate down here would refuse something real: a
 -- grant scoped to a whole catalog or schema is an ordinary thing a steward
@@ -66,8 +66,8 @@
 --    third row to "enforced: yes" — this one does NOT, because that row is about
 --    `*` and `?`, which stay legal).
 --
--- `column_name` IS INCLUDED HERE, UNLIKE IN 0166, AND THAT IS NOT AN OVERSIGHT.
--- `0166` had to exclude it because `migrations/0081`'s `catalog_tag_assignments`
+-- `column_name` IS INCLUDED HERE, UNLIKE IN 0177, AND THAT IS NOT AN OVERSIGHT.
+-- `0177` had to exclude it because `migrations/0081`'s `catalog_tag_assignments`
 -- defines `column_name = ''` as the documented TABLE-LEVEL SENTINEL, and
 -- forbidding it would have broken the table-level attachment feature. `perm`
 -- has no such sentinel: `egret_perm::model::Scope` maps all three levels to
@@ -82,7 +82,7 @@
 -- regex, because `egret_perm_compile::grants::ensure_scope_levels_are_named` is
 -- keyed to `value.is_empty()` and the two must be the same shape — "two guards
 -- that must agree, written to different shapes" has produced a defect in this
--- programme four times (0165 and 0166 both record it). `NULL <> ''` is NULL, not
+-- programme four times (0176 and 0177 both record it). `NULL <> ''` is NULL, not
 -- false, so a CHECK written this way admits NULL exactly as the Rust side skips
 -- a `None`. WHITESPACE IS DELIBERATELY NOT REFUSED, and that follows from the
 -- mechanism rather than from taste: `init()` drops `''` and nothing else, so
@@ -106,8 +106,8 @@
 -- `routes::write_grant` — so the Rust side's reach is stated by code path, not
 -- by authorship.
 --
--- VALID, AND NO CLEARING STATEMENT — 0166's case, not 0165's, and measured
--- rather than copied. 0165 deleted the rows its CHECK would reject because that
+-- VALID, AND NO CLEARING STATEMENT — 0177's case, not 0176's, and measured
+-- rather than copied. 0176 deleted the rows its CHECK would reject because that
 -- key was provably INERT (Ranger's enricher dropped the whole attachment, so
 -- nothing was enforcing it) and because leaving it dormant turned an unrelated
 -- bulk UPDATE into an outage. A row THIS check rejects is the opposite: it is

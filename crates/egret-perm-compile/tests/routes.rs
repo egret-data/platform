@@ -1399,7 +1399,7 @@ async fn patching_a_grant_into_an_uncompilable_shape_is_refused_and_changes_noth
 ///
 /// **Why an ORPHAN catalog, and why the assertion is `400` and not "not 2xx".**
 /// Three guards can refuse this input and the test has to be pointed at one.
-/// `0167`'s CHECK would refuse the INSERT whatever happens in Rust, and on a
+/// `0178`'s CHECK would refuse the INSERT whatever happens in Rust, and on a
 /// catalog an engine reaches `compile_grant`'s own copy of the guard would refuse
 /// the recompile. An orphan catalog affects no profile, so
 /// `recompile_services_in_tx(&[])` validates nothing, and the only thing between
@@ -1424,7 +1424,7 @@ async fn an_empty_scope_level_is_a_400_and_a_star_is_created() {
     // the `*` CONTROL's own shape matter: `('*', 'orders')` is now a 400 of its
     // own (a named level under a match-any one is the level skip `grants_check`
     // already forbids), so this test's control moved to `('*', '*')` — a wildcard
-    // with nothing named beneath it, which is what `0167` must not refuse.
+    // with nothing named beneath it, which is what `0178` must not refuse.
     // `a_wildcard_level_over_a_named_one_is_a_400_and_a_wildcard_tail_is_created`
     // owns the moved shape.
     let body_with = |schema: Value, table: Value| {
@@ -1522,7 +1522,7 @@ async fn an_empty_scope_level_is_a_400_and_a_star_is_created() {
 /// **SP4d debt Task 14 over HTTP — the status code is the assertion.**
 ///
 /// **Why an ORPHAN catalog, and why `400` and not "not 2xx".** Three guards can
-/// refuse this input and the test has to be pointed at one. `0168`'s CHECK would
+/// refuse this input and the test has to be pointed at one. `0179`'s CHECK would
 /// refuse the INSERT whatever happens in Rust, and on a catalog an engine reaches
 /// `compile_grant`'s own copy of the guard would refuse the recompile. An orphan
 /// catalog affects no profile, so `recompile_services_in_tx(&[])` validates
@@ -2935,7 +2935,7 @@ async fn a_group_only_grant_is_refused_by_the_artifact_the_engine_downloads() {
 ///    row is `SELF` for this target and the table row is `ANCESTOR`, so a flag
 ///    written once — either way — pairs one tag with the wrong answer.
 /// 3. **H1: non-empty for the profile that resolves it, empty for the one that does
-///    not.** Migration 0165's `CHECK` makes a StarRocks profile carrying a
+///    not.** Migration 0176's `CHECK` makes a StarRocks profile carrying a
 ///    `tagService` unrepresentable, so "one profile resolves these tags and one
 ///    cannot" is the ONLY shape this pair can take — and it is exactly the state
 ///    whose single response-level list made the page claim, under both profiles,
@@ -5399,7 +5399,7 @@ async fn a_tag_policy_block_with_no_tags_recorded_answers_through_the_narrowing(
 ///    request, while `resolved_tags_for_resource_via`'s exact `table_name = $3`
 ///    can never return it. So egret's set was MISSING a tag the engine enforces,
 ///    and an empty set is the licence to skip the tag phase entirely. SP4d-2b
-///    detected that at read time; migration 0166's
+///    detected that at read time; migration 0177's
 ///    `catalog_tag_assignments_levels_are_present_and_literal` makes it
 ///    unstorable, which is why this test now asserts the INSERT is refused and
 ///    names the constraint that refused it. The remark this test used to carry —
@@ -5424,7 +5424,7 @@ async fn the_schema_refuses_the_empty_level_and_the_fold_gate_still_declines() {
     //    `PUT …/resource-tags` route, and `psql`.
     let e = try_assign_tag(&f, catalog_id, "sales", "", "")
         .await
-        .expect_err("migration 0166 must refuse a row with an empty table_name");
+        .expect_err("migration 0177 must refuse a row with an empty table_name");
     let named = match &e {
         sqlx::Error::Database(d) => {
             d.constraint() == Some("catalog_tag_assignments_levels_are_present_and_literal")
@@ -5433,7 +5433,7 @@ async fn the_schema_refuses_the_empty_level_and_the_fold_gate_still_declines() {
     };
     assert!(
         named,
-        "the refusal must be migration 0166's CHECK, not a typo or a dropped \
+        "the refusal must be migration 0177's CHECK, not a typo or a dropped \
          connection: {e}"
     );
 
@@ -6061,7 +6061,7 @@ async fn the_resource_addressed_remedy_is_accepted_while_the_tag_is_on_a_whole_t
 }
 
 /// Attach the fixture's tag to the WHOLE table `sales.{table}` in the fixture's
-/// own warehouse — migration 0081's `column_name = ''` sentinel, which 0166
+/// own warehouse — migration 0081's `column_name = ''` sentinel, which 0177
 /// deliberately keeps legal.
 ///
 /// Raw SQL on purpose: this is the half `egret_bi::CatalogTagRepo::assign_catalog`

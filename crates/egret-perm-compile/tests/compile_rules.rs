@@ -1090,7 +1090,7 @@ fn an_empty_path_level_is_refused_on_a_rule_and_a_star_is_not() {
     // ⚠ This arm was `('*', 'orders', 'email')` when Task 12 wrote it, and SP4d
     // debt Task 14 refuses THAT shape — a named level under a match-any one is the
     // level skip `0154`'s CHECKs already forbid. `*` at the tail keeps the arm's
-    // original point, which is that 0167's predicate must not refuse `*`; the Task
+    // original point, which is that 0178's predicate must not refuse `*`; the Task
     // 14 shapes live in `a_wildcard_path_level_over_a_named_one_is_refused`.
     validate_rule_shape(&mask_rule_on_path(
         scope_of(Some("sales"), Some("orders"), Some("*")),

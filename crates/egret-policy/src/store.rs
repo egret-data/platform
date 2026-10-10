@@ -157,7 +157,7 @@ fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
 ///
 /// Deliberately the SAME predicate as Postgres' `config_jsonb ->> 'tagService'
 /// IS NOT NULL`: the key is present AND its value is not JSON `null`. Migration
-/// 0165's `CHECK` is written with that expression and this function is written
+/// 0176's `CHECK` is written with that expression and this function is written
 /// to match it, because the one failure this guard keeps reproducing in this
 /// programme is **two guards that must agree, written to different shapes** —
 /// here that would be a refusal keyed on `as_str()` (what `download_policies`
@@ -168,7 +168,7 @@ fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
 /// `->>` on a non-object `config_jsonb` (a bare `5`, `"x"`, `[]`) yields NULL
 /// rather than erroring — measured on the live PostgreSQL 16.15 — and
 /// `Value::get` on a non-object likewise yields `None`, so the two agree there
-/// too. Migration 0165's own clearing `UPDATE` is keyed on the SAME `->>`
+/// too. Migration 0176's own clearing `UPDATE` is keyed on the SAME `->>`
 /// expression, so it cannot leave behind a row its own `CHECK` then rejects, and
 /// the `-` operator it applies is never reached for a scalar or array config
 /// (measured: the `WHERE` excludes those rows, so `jsonb - text` never raises
@@ -208,7 +208,7 @@ fn carries_tag_service(config: &Value) -> bool {
 /// mapping (teaching everything that emits Ranger resource keys to take the
 /// engine, or its service-def, as an input) is separate, deliberately
 /// out-of-scope work: **block now, map later.** When it lands, this refusal and
-/// migration 0165's `CHECK` are what it replaces.
+/// migration 0176's `CHECK` are what it replaces.
 ///
 /// # ⚠ Enumerated: every write path that can produce the state
 ///
@@ -228,7 +228,7 @@ fn carries_tag_service(config: &Value) -> bool {
 /// | 3 | the five `SET policy_version = policy_version + 1` bumps in this file, and `egret-perm-compile`'s `trigger.rs` | no | no | cannot |
 /// | 4 | `egret_catalog_registry::tag_version`'s `SET tag_version = …` | no | no | cannot |
 /// | 5 | `egret-perm-compile`'s `trigger.rs` `SET origin = 'generated'` | no | no | cannot |
-/// | 6 | **an `UPDATE` of `type` or of `config_jsonb`** | — | — | **no such statement exists in any `src/` in this workspace.** So "change a profile's type to `starrocks` while it already carries a `tagService`" has no code path to refuse at today. Prose is not a bound, so the direction is closed in the SCHEMA instead: migration 0165's VALIDATED `CHECK` holds for every `INSERT` and every `UPDATE`, from Rust, from a future route, from `psql`, from a test's raw `sqlx::query` |
+/// | 6 | **an `UPDATE` of `type` or of `config_jsonb`** | — | — | **no such statement exists in any `src/` in this workspace.** So "change a profile's type to `starrocks` while it already carries a `tagService`" has no code path to refuse at today. Prose is not a bound, so the direction is closed in the SCHEMA instead: migration 0176's VALIDATED `CHECK` holds for every `INSERT` and every `UPDATE`, from Rust, from a future route, from `psql`, from a test's raw `sqlx::query` |
 ///
 /// Row 6 is why this function is not the whole fix, and why a test that only
 /// drives #1a would be a green from a population that cannot exercise the other
@@ -246,7 +246,7 @@ fn carries_tag_service(config: &Value) -> bool {
 /// violating row in that set would make a catalog-tag write fail outright AND
 /// leave a healthy Trino profile in the same warehouse un-bumped — all-or-nothing.
 /// A dormant dead key turning into an outage on an unrelated healthy profile's
-/// write is worse than deleting the key, so migration 0165 deletes it (the value
+/// write is worse than deleting the key, so migration 0176 deletes it (the value
 /// is provably inert — a non-Trino profile's own enricher discards the
 /// attachments) and validates the constraint. **There is therefore no "legacy row"
 /// population left**; do not reintroduce one by adding a `NOT VALID` variant.
@@ -285,7 +285,7 @@ fn refuse_tag_service_on_non_trino_profile(
 ///
 /// # Why this is a second guard and not a change to [`carries_tag_service`]
 ///
-/// Task 2 keyed that predicate to migration 0165's `->>` shape **on purpose**,
+/// Task 2 keyed that predicate to migration 0176's `->>` shape **on purpose**,
 /// and mutation-tested the divergence: presence is the right question for the
 /// TYPE rule (`{"tagService": 7}` on a StarRocks profile must be refused by the
 /// route rather than surfacing the `CHECK` as a 500). Presence is the wrong
@@ -337,13 +337,13 @@ fn refuse_tag_service_on_non_trino_profile(
 ///
 /// JSON `null` is **deliberately permitted** and treated exactly as an absent
 /// key, because that is what [`carries_tag_service`] (and `->>`, and migration
-/// 0165's `CHECK`, and `Value::get`) already say it is. Refusing it here would
+/// 0176's `CHECK`, and `Value::get`) already say it is. Refusing it here would
 /// be a third reading of "present", which is the drift this programme keeps
 /// re-finding.
 ///
 /// # ⚠ Why there is NO migration for this rule, unlike Task 2's
 ///
-/// 0165's `CHECK` exists because its state is **silently inert and has no Rust
+/// 0176's `CHECK` exists because its state is **silently inert and has no Rust
 /// writer in the `UPDATE` direction**: no `UPDATE` of `type` or `config_jsonb`
 /// exists in any `src/` in this workspace (re-measured 2026-10-10 by grepping
 /// every statement naming `policy.authz_services` across `crates/` and
@@ -358,7 +358,7 @@ fn refuse_tag_service_on_non_trino_profile(
 /// tag policies. A `CHECK` would also have to be written to a THIRD shape
 /// (`jsonb_typeof(…) = 'string' AND btrim(…) <> ''`, since `->>` cannot
 /// express "is a string"), which is exactly the two-guards-two-shapes defect
-/// 0165's own doc comment warns about.
+/// 0176's own doc comment warns about.
 ///
 /// **Falsified by** a reader of this key that neither refuses nor logs an
 /// unusable value, or by an `UPDATE` of `config_jsonb` appearing in `src/` —
@@ -383,7 +383,7 @@ fn refuse_unnameable_tag_service(config: &Value) -> Result<(), PolicyStoreError>
          through `as_str()`, so a number, a bool, or an empty/whitespace-only string reads as \
          \"no tag service\" to the policy download (which then omits the `tagPolicies` block \
          entirely, leaving every tag mask and row filter inert), while the SQL join behind \
-         `usable_tag_service` and migration 0165's `->>` read it as text. Omit the key \
+         `usable_tag_service` and migration 0176's `->>` read it as text. Omit the key \
          entirely for a profile with no tag service, or set it to an existing tag profile's \
          name."
     )))
@@ -702,7 +702,7 @@ impl PolicyStore {
     ) -> Result<ServiceRow, PolicyStoreError> {
         // SP4d debt Task 2: pure, no DB needed, and it runs BEFORE the insert so
         // the route answers 400 with the reason rather than letting migration
-        // 0165's `CHECK` surface as an opaque 500. The `CHECK` is not redundant
+        // 0176's `CHECK` surface as an opaque 500. The `CHECK` is not redundant
         // with this — it is the only thing holding the `UPDATE` direction, which
         // has no Rust writer to guard.
         refuse_tag_service_on_non_trino_profile(typ, config)?;
@@ -1588,7 +1588,7 @@ pub async fn resolved_tags_for_resource_via(
 /// detect it. It has to be detected on the stored data, which is what this reads.
 ///
 /// **Such rows are no longer writable, and that retired two thirds of the ruling
-/// but NOT this read** — SP4d debt Task 3, migration 0166
+/// but NOT this read** — SP4d debt Task 3, migration 0177
 /// (`catalog_tag_assignments_levels_are_present_and_literal`, VALIDATED). It
 /// forbids an empty `schema_name`/`table_name` and `*`/`?` in any level, which is
 /// open item B of the SP4d-2b plan: unrepresentable beats unforgettable, and
@@ -1602,7 +1602,7 @@ pub async fn resolved_tags_for_resource_via(
 /// steward must be able to tag), and which of them diverge depends on the
 /// deployment's collation, so the state has to be detected at read time and
 /// declined rather than refused at the write. `stored_coordinate_is_fold_divergent`
-/// is the whole surviving ruling and migration 0166's text records the argument.
+/// is the whole surviving ruling and migration 0177's text records the argument.
 ///
 /// # ⚠ Why the coordinates and not a `count(*)` with the predicate in SQL
 ///
@@ -1615,7 +1615,7 @@ pub async fn resolved_tags_for_resource_via(
 /// either. The rule is now one pure Rust function with the enumeration beside it
 /// and a test per class; this query returns facts.
 ///
-/// ⚠ **Migration 0166 does put two of those classes into SQL, and that is not a
+/// ⚠ **Migration 0177 does put two of those classes into SQL, and that is not a
 /// reversal of this paragraph.** The objection was to a rule in THIS query's
 /// `WHERE` clause: unreachable from any test, because the shared test template is
 /// ahead of the branch's migrations. A `CHECK` is the opposite — it is in force for
@@ -2172,7 +2172,7 @@ mod tests {
         );
     }
 
-    /// Four SQL statements and migration 0165 name this key as a literal and
+    /// Four SQL statements and migration 0176 name this key as a literal and
     /// cannot reference the const (interpolating it would mean building the
     /// statement with `format!`, the dynamic-SQL shape this repository avoids), so
     /// changing the const's VALUE would silently split the Rust readers from the
@@ -2189,7 +2189,7 @@ mod tests {
             TAG_SERVICE_CONFIG_KEY, "tagService",
             "the const no longer matches the literal in `usable_tag_service`, \
              `tag_assignments_for_service`, `services_and_tag_services_via`, \
-             `bump_bound_tag_versions` and migration 0165's CHECK/UPDATE — none of \
+             `bump_bound_tag_versions` and migration 0176's CHECK/UPDATE — none of \
              which can reference it"
         );
     }
@@ -2346,7 +2346,7 @@ mod tests {
         }
     }
 
-    /// The shape agreement with migration 0165's `CHECK (… config_jsonb ->>
+    /// The shape agreement with migration 0176's `CHECK (… config_jsonb ->>
     /// 'tagService' IS NULL)`. `->>` answers non-NULL for a number, a bool, an
     /// object and an array — none of which `download_policies`' `as_str()`
     /// reads — so the Rust predicate must refuse them too, or a config of
@@ -2419,7 +2419,7 @@ mod tests {
     }
 
     /// JSON `null` and an absent key are the SAME thing to every other reader of
-    /// this field — [`carries_tag_service`], Postgres' `->>`, migration 0165's
+    /// this field — [`carries_tag_service`], Postgres' `->>`, migration 0176's
     /// `CHECK`, and `Value::get` all say so — so the value rule reuses that
     /// presence predicate instead of spelling a third reading of "present".
     /// Refusing `null` here would make `{"tagService": null}` a 400 while the

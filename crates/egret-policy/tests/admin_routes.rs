@@ -1635,7 +1635,7 @@ async fn a_second_row_filter_on_one_table_is_refused_only_when_it_disagrees() {
 // ---------------------------------------------------------------------------
 //
 // Task 2's guards test key PRESENCE, deliberately, to agree with migration
-// 0165's `->>`. So `{"tagService": ""}` was accepted, and a Trino profile with
+// 0176's `->>`. So `{"tagService": ""}` was accepted, and a Trino profile with
 // no `tagService` at all was accepted too — and then the readers of that field
 // disagreed: the tag editor's write target fell back to `{profile}_tag` and
 // filed policies there, while `download_policies` read the field with no
@@ -1789,7 +1789,7 @@ async fn create_profile_refuses_a_tag_service_that_names_nothing() {
 ///    still LIST what is stranded there;
 /// 3. a STARROCKS profile with a stranded `{name}_tag` is refused too. A
 ///    non-Trino profile can never carry a `tagService` (Task 2 + migration
-///    0165), so the removed fallback was also Task 2's hole on this surface.
+///    0176), so the removed fallback was also Task 2's hole on this surface.
 #[tokio::test]
 async fn a_tag_policy_is_refused_when_the_profile_configures_no_tag_service() {
     let Some(f) = setup().await else {

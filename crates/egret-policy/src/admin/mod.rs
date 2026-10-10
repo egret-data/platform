@@ -1080,7 +1080,7 @@ pub struct SeedResult {
 ///
 /// * **It was also Task 2's hole on the editor-write side.** Nothing here checks
 ///   that `profile` is a `trino` profile. A StarRocks profile can never carry a
-///   `tagService` (`refuse_tag_service_on_non_trino_profile` + migration 0165),
+///   `tagService` (`refuse_tag_service_on_non_trino_profile` + migration 0176),
 ///   so the fallback ALWAYS fired for one, and a stranded `{sr}_tag` row —
 ///   `engines.rs`'s "left by a deleted same-name engine: reuse, never delete" —
 ///   made the write succeed. Requiring the configured link closes that without a
@@ -1241,7 +1241,7 @@ async fn refuse_ambiguous_arbitration(
 ///
 /// **Task 2's `tagService`-on-non-Trino refusal is reached by construction, not
 /// by a call from here.** That guard lives on the profile write
-/// (`create_service`, plus migration 0165's `CHECK`), and
+/// (`create_service`, plus migration 0176's `CHECK`), and
 /// [`resolve_tag_service_and_body`] now requires a CONFIGURED `tagService` — a
 /// thing a non-Trino profile cannot have — so both authoring surfaces refuse a
 /// tag policy aimed at one before this function runs. Before Task 9 removed the

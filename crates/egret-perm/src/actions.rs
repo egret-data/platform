@@ -252,7 +252,7 @@ pub enum CompileError {
     /// not the deliberate one.
     ///
     /// The keyed shape is `value.is_empty()`, one-for-one with
-    /// `migrations/0167_perm_scope_levels_are_named.sql`'s `<> ''`, because two
+    /// `migrations/0178_perm_scope_levels_are_named.sql`'s `<> ''`, because two
     /// guards that must agree written to different shapes has produced a defect in
     /// this programme four times. In particular this is NOT
     /// `egret_ranger_eval::resource::requests_all_values`: that predicate is the
