@@ -1217,6 +1217,8 @@ pub struct Disagreement {
     pub user: String,
     pub groups: Vec<String>,       // the synthetic probe member's group/role, if any
     pub roles: Vec<String>,
+    pub tags: Vec<String>,         // tag names the probe's resource carried
+    pub tagging: Tagging,          // Actual (from the assignments) | Hypothetical
     pub access_type: String,
     pub resource: String,          // rendered coordinate, e.g. "wh.sales.orders"
     pub before: String,            // rendered Decision / MaskResult / RowFilterResult
@@ -1231,17 +1233,24 @@ pub struct ProfileCase<'a> {
     pub service_def: &'a ServiceDef,    // parsed, not a raw Value
     pub engine: EngineConfig,           // super-users; plugin_version set per version
     pub versions: Vec<PluginVersion>,   // of the engines bound to THIS profile
-    pub probes: Vec<AccessRequest>,     // with resolved_tags filled
+    pub probes: Vec<Probe>,             // from derive_probes
 }
+
+pub enum Tagging { Actual, Hypothetical }
+pub struct Probe { pub request: AccessRequest, pub tagging: Tagging }
+/// One catalog_tag_assignments row, as names (tags.name; column "" = table-level).
+pub struct TagAssignment { pub catalog: String, pub schema: String, pub table: String,
+                           pub column: String, pub tag: String }
 
 pub enum GateRefusal { NoProfiles, NoPluginVersions { service_id: i64 }, NoProbes { service_id: i64 } }
 
-/// Probes derived from BOTH policy sets, plus probes neither mentions.
-/// `tagged`: coordinates the caller knows carry a tag. `resolved_tags` is left None.
+/// Probes derived from BOTH policy sets, plus probes neither mentions. The
+/// assignments are the ONE tag input (fix round 1, review I1): they decide both
+/// which coordinates are probed as tagged and every probe's resolved tags; and
+/// every table/column coordinate is probed again per tag name the tag
+/// policies address (Tagging::Hypothetical).
 pub fn derive_probes(before: &ServicePolicySet, after: &ServicePolicySet,
-                     service_def: &ServiceDef, tagged: &[RequestResource]) -> Vec<AccessRequest>;
-pub fn with_resolved_tags(probes: Vec<AccessRequest>,
-                          resolve: impl FnMut(&RequestResource) -> Option<UnenrichedTags>) -> Vec<AccessRequest>;
+                     service_def: &ServiceDef, assignments: &[TagAssignment]) -> Vec<Probe>;
 
 /// Ok(empty) = equivalent on every probe, on every version of this profile.
 pub fn compare(case: &ProfileCase) -> Result<Vec<Disagreement>, GateRefusal>;
@@ -1258,6 +1267,8 @@ Three cases, and the third is the one that justifies the whole gate:
 3. **Equivalent on 2.5.0, different on 2.8.0** — build the known divergence (a tag DENY plus a higher-priority resource ALLOW with no deny items, Allowed on 2.8.0 and Denied on 2.5.0) and assert `compare` reports a disagreement **for 2.8.0 only**. A gate that evaluated one version would pass this and ship a wrong artifact to StarRocks.
 
    ⚠ **Corrected by Task 6: "for 2.8.0 only" is unreachable with the real evaluator.** `egret-ranger-eval` reproduces 2.8.0's answer for this shape and REFUSES on 2.5.0 (`UndecidableCause::TagDenyReopenedDiffersByPluginVersion`; 2.5.0's arm is unmodelled), and that refusal is the evaluator's only version-dependent branch — so wherever the two versions' decided answers differ, 2.5.0's is `Undecidable`, which the gate counts as a disagreement. The test therefore asserts a decided Denied → Allowed flip on 2.8.0 and a "cannot be decided" refusal on 2.5.0, on the same probe and nowhere else.
+
+3b. **The mirror — the case that justifies the per-version loop** (fix round 1, review M1). Before: a tag DENY plus a strictly higher-priority no-deny ALLOW (2.8.0 already reopens it); after: the same ALLOW without the tag deny. 2.8.0 sees no change; 2.5.0 goes from `Undecidable` (Trino's true answer: Denied) to Allowed. Assert the disagreement is on 2.5.0 only, and that a 2.8.0-only gate returns empty — that gate would ship this change to Trino.
 
 5. **Every affected profile** (user ruling, 2026-10-11) — two profiles serving the same catalog; the migration is equivalent on P but adds access on Q → `compare_profiles` returns exactly Q's disagreements, each naming Q.
 
@@ -1303,7 +1314,7 @@ The transaction, in this order — and the order is the design, not an implement
 2. `recompile_service_in_tx(tx, service_id)`.
 3. Set `enabled = false` on the original policy row.
 4. Insert provenance.
-5. **Re-derive probes and re-run the gate (`compare_profiles`) against the state now in the transaction, over EVERY affected profile** — the union of `affected_services_for_grant` / `_rule` over the objects inserted in step 1, which always includes the source profile. For each: its download as served before the transaction began and as served now, its parsed service-def, the measured super-user config, the `PluginVersion` of every engine bound to it, and probes from `derive_probes` with `resolved_tags` filled by the same resolution `explain` uses (`resolved_tags_for_target`), with every tag-assignment coordinate of the catalogs it serves passed as `tagged`. Any disagreement on any profile, or any `GateRefusal` → return it to the caller (each disagreement names its profile, so the preview lists every other profile that changes) and `ROLLBACK`.
+5. **Re-derive probes and re-run the gate (`compare_profiles`) against the state now in the transaction, over EVERY affected profile** — the union of `affected_services_for_grant` / `_rule` over the objects inserted in step 1, which always includes the source profile. For each: its download as served before the transaction began and as served now, its parsed service-def, the measured super-user config, the `PluginVersion` of every engine bound to it, and probes from `derive_probes` given every `catalog_tag_assignments` row of the catalogs it serves, as `TagAssignment`s (`tags.name`, catalog registry name) — after running `explain`'s fold-divergence gate over those rows and the policies' resource values and refusing on a decline. Any disagreement on any profile, or any `GateRefusal` → return it to the caller (each disagreement names its profile, so the preview lists every other profile that changes) and `ROLLBACK`.
 
 Step 5 is why the order is what it is: the gate proves its claim about **the artifact the engine will actually download after the write**, not about a predicted one. `dry_run` runs the identical code and differs in exactly one place — it always rolls back.
 

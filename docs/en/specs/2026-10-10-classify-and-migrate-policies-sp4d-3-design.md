@@ -191,6 +191,29 @@ So the gate sees this case as a decided Denied → Allowed flip on 2.8.0 **and**
 2.5.0 — never as agreement on 2.5.0. An `Undecidable` on either side is always a disagreement:
 "cannot be decided" proves nothing about equivalence.
 
+**The mirror is what makes the per-version loop necessary.** Before: a tag DENY plus a strictly
+higher-priority no-deny ALLOW, which 2.8.0 already reopens; after: the same ALLOW with the tag
+deny removed. 2.8.0 answers Allowed both times; 2.5.0 goes from refused (Trino's true answer:
+Denied) to Allowed. A gate that evaluated only 2.8.0 would pass it and ship the change to Trino.
+
+**Tags enter once.** The probe set is derived from the profile's tag-assignment rows, which
+decide both which coordinates are probed as tagged and what each probe carries; every
+table/column coordinate is also probed carrying each tag name the tag policies address,
+whether or not a column carries it today, so a tag-rule change cannot wait dormant for the
+first assignment.
+
+**Two named limits of the probe set:**
+
+- *One group per synthetic member.* Each probe user carries at most one group, so a
+  user-exception on a group item is never exercised. That is sound only because no egret
+  engine receives groups at all (D7: no `group-provider.properties`, no usersync — see
+  `crates/egret-perm-compile/src/members.rs`' module doc). **The day a group provider ships,
+  this becomes a false-equivalence path** and the probe set must carry real memberships.
+- *`_any` is not probed.* The evaluator answers it `Undecidable` (`PseudoAccessType`), which
+  would block every migration. Ranger's `_any` semantics are not a pure function of the
+  concrete per-access answers, so a migration could in principle change a Trino `show`/filter
+  outcome the gate does not see. Not guaranteed.
+
 Probes come from the coordinates and principals both sides mention, **plus probes neither side
 mentions**: a sibling at each level, a principal in no policy, and an excluded access type.
 Without that second half the probe set inherits the blind spots of the two policies it was

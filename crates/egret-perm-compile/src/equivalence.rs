@@ -66,18 +66,29 @@
 //! enters as [`AccessRequest::resolved_tags`] on each PROBE, never on a policy
 //! set, so the before and the after evaluation of one probe read the same tag
 //! input by construction — there is no second tag argument that could differ.
-//! [`derive_probes`] leaves it `None`, which the evaluator refuses wherever a
-//! tag policy could decide (fail-closed); the caller fills it with
-//! [`with_resolved_tags`] from the same resolution `explain` uses.
+//!
+//! ⚠ **ONE tag input, and it cannot be vacuous** (Task 6 fix round 1, review
+//! I1). The first version took the tagged coordinates and the tag resolver as
+//! two separate inputs, and the natural call shape (no coordinates, a real
+//! resolver) put every probe at an untagged coordinate — so a changed tag mask,
+//! a dropped exemption or a dropped tag DENY compared EQUIVALENT. Now
+//! [`derive_probes`] takes the profile's [`TagAssignment`] rows once and derives
+//! BOTH which coordinates are probed as tagged AND every probe's resolved tags
+//! from them ([`Tagging::Actual`]). On top of that, for every tag NAME either
+//! set's tag policies address, every table/column coordinate is probed again
+//! carrying only that tag ([`Tagging::Hypothetical`]) — so a tag-rule change is
+//! caught even when no column carries the tag today, which is also the state in
+//! which it would otherwise lie dormant until somebody tags a column.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use egret_ranger_eval::eval::{
     evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, DenyReason,
-    EngineConfig, MaskDecision, MaskResult, PluginVersion, RowFilterDecision, UnenrichedTags,
+    EngineConfig, MaskDecision, MaskResult, PluginVersion, ResolvedTag, RowFilterDecision,
+    TagServiceResource, UnenrichedTags,
 };
 use egret_ranger_eval::model::{PolicyItem, RangerPolicy, ResourceLevel, ServicePolicySet};
-use egret_ranger_eval::resource::RequestResource;
+use egret_ranger_eval::resource::{MatchType, RequestResource};
 use egret_ranger_eval::servicedef::{PolicyType, ServiceDef};
 
 /// The user name of the probe principal no policy names.
@@ -116,6 +127,11 @@ pub struct Disagreement {
     /// members [`derive_probes`] adds for each group/role a policy names.
     pub groups: Vec<String>,
     pub roles: Vec<String>,
+    /// The tag names the probe's resource carried, and whether that tagging
+    /// is today's ([`Tagging::Actual`]) or one a column COULD have
+    /// ([`Tagging::Hypothetical`]). Both kinds block.
+    pub tags: Vec<String>,
+    pub tagging: Tagging,
     pub access_type: String,
     /// The coordinate, e.g. `wh.sales.orders.email` — dotted in the
     /// service-def's level order when it is a catalog path, `level=value, …`
@@ -145,8 +161,8 @@ pub struct ProfileCase<'a> {
     pub engine: EngineConfig,
     /// The `PluginVersion` of every engine bound to this profile.
     pub versions: Vec<PluginVersion>,
-    /// Usually `with_resolved_tags(derive_probes(..), ..)`.
-    pub probes: Vec<AccessRequest>,
+    /// Usually `derive_probes(before, after, service_def, assignments)`.
+    pub probes: Vec<Probe>,
 }
 
 /// Why the gate refused to answer at all. Each is a state in which an empty
@@ -163,6 +179,48 @@ pub enum GateRefusal {
 
 // ── probes ───────────────────────────────────────────────────────────────
 
+/// Whether a probe's tags are the profile's real tagging or a hypothetical one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tagging {
+    /// Resolved from the [`TagAssignment`] rows the caller passed.
+    Actual,
+    /// The resource carries exactly one tag a policy in either set addresses,
+    /// whether or not any column carries it today.
+    Hypothetical,
+}
+
+/// One probe: the request evaluated against both sets, and where its tags
+/// came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Probe {
+    pub request: AccessRequest,
+    pub tagging: Tagging,
+}
+
+/// One `catalog_tag_assignments` row, as names: the tag's `tags.name` (never
+/// `tags.key`) on `catalog.schema.table[.column]`. An empty `column` is a
+/// TABLE-level assignment. `catalog` is the registry name the compiler emits.
+///
+/// ⚠ The resolution [`derive_probes`] performs from these rows is
+/// `egret_policy::store::resolved_tags_for_resource_via` + `routes.rs`'s
+/// `attachment_for`, restated: a schema/table match folded with
+/// `to_lowercase`, `SELF` for the same column (or the table on a table
+/// request), `ANCESTOR` for a table-level row under a column request, and a
+/// column row excluded from a table request (`DESCENDANT`). The fold is only
+/// that resolver's fold OUTSIDE the 25 code points `routes.rs`'
+/// `fold_divergent` names, so the caller must run that gate first — over the
+/// stored rows and over the policies' resource values, which are where every
+/// probe coordinate's values come from (the synthetic names are ASCII) — and
+/// refuse the migration on a decline, as `explain` declines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagAssignment {
+    pub catalog: String,
+    pub schema: String,
+    pub table: String,
+    pub column: String,
+    pub tag: String,
+}
+
 /// Probes derived from BOTH policy sets, plus probes neither mentions.
 ///
 /// The probe set is the cross product of three axes:
@@ -171,29 +229,33 @@ pub enum GateRefusal {
 ///   tag, every bucket) in either set; one synthetic member per named group and
 ///   one synthetic holder per named role; and [`PROBE_UNNAMED_USER`], whom no
 ///   policy names. Ranger macros (`{USER}`, `{OWNER}`) are not principals and
-///   are skipped. Probe users carry no groups beyond the one being probed —
-///   egret runs no usersync, so that is what the engine sees.
+///   are skipped. Each synthetic member carries exactly ONE group — sound only
+///   because no egret engine receives groups at all today (D7, see
+///   `members.rs`' module doc); a group provider would make a user-exception
+///   on a group item un-probed.
 /// * **Access types** — every access type the service-def declares (so one
 ///   that neither set mentions is always probed, which is what catches an
 ///   `Action` expansion that ADDED an access) plus any either set mentions.
+///   `_any` is not probed: the evaluator answers it `PseudoAccessType`.
 /// * **Coordinates** — for each resource map of each policy in either set, and
-///   for each of `tagged` (coordinates the caller knows carry a tag): along the
-///   longest service-def hierarchy that holds its levels, every combination of
-///   its values with `*`/absent levels filled by a [`PROBE_ANY_PREFIX`] name;
-///   every prefix of that path (the engines ask at every depth); and at each
-///   level a [`PROBE_SIBLING_PREFIX`] sibling under the same parents, both cut
-///   at that level and continued to full depth with the original values below.
+///   for each of `assignments`: along the longest service-def hierarchy that
+///   holds its levels, every combination of its values with `*`/absent levels
+///   filled by a [`PROBE_ANY_PREFIX`] name; every prefix of that path (the
+///   engines ask at every depth); and at each level a [`PROBE_SIBLING_PREFIX`]
+///   sibling under the same parents, both cut at that level and continued to
+///   full depth with the original values below.
 ///
-/// Every returned request has `resolved_tags: None` and `owner: None`. Fill the
-/// tags with [`with_resolved_tags`]; a `None` left in place makes any tag
-/// policy that could decide `Undecidable`, which the gate counts as a
-/// disagreement.
+/// Every probe carries the tags `assignments` resolve to on its resource
+/// ([`Tagging::Actual`], `Some(empty)` where none). Then every coordinate that
+/// names a table is probed once more per tag name either set's tag policies
+/// address, carrying only that tag at `SELF` ([`Tagging::Hypothetical`]).
+/// `owner` is always `None`.
 pub fn derive_probes(
     before: &ServicePolicySet,
     after: &ServicePolicySet,
     service_def: &ServiceDef,
-    tagged: &[RequestResource],
-) -> Vec<AccessRequest> {
+    assignments: &[TagAssignment],
+) -> Vec<Probe> {
     let policies: Vec<&RangerPolicy> = [before, after]
         .iter()
         .flat_map(|s| s.policies.iter().chain(s.tag_policies.iter()))
@@ -201,39 +263,139 @@ pub fn derive_probes(
 
     let principals = principals(&policies);
     let access_types = access_types(&policies, service_def);
-    let coordinates = coordinates(&policies, service_def, tagged);
+    let schema_level = if service_def.resource(PolicyType::Access, "schema").is_some() {
+        "schema"
+    } else {
+        "database"
+    };
+    let assigned: Vec<RequestResource> = assignments
+        .iter()
+        .map(|a| {
+            let mut r = RequestResource::new()
+                .with("catalog", a.catalog.clone())
+                .with(schema_level, a.schema.clone())
+                .with("table", a.table.clone());
+            if !a.column.is_empty() {
+                r.insert("column", a.column.clone());
+            }
+            r
+        })
+        .collect();
+    let coordinates = coordinates(&policies, service_def, &assigned);
+    let tag_names = tag_names(before, after);
 
-    let mut out = Vec::with_capacity(principals.len() * access_types.len() * coordinates.len());
+    let mut out = Vec::new();
     for coordinate in &coordinates {
         let resource: RequestResource = coordinate.iter().cloned().collect();
-        for (user, groups, roles) in &principals {
-            for access_type in &access_types {
-                out.push(AccessRequest {
-                    user: user.clone(),
-                    groups: groups.clone(),
-                    roles: roles.clone(),
-                    access_type: access_type.clone(),
-                    resource: resource.clone(),
-                    owner: None,
-                    resolved_tags: None,
-                });
+        let mut taggings = vec![(Tagging::Actual, resolve_tags(&resource, assignments))];
+        if table_of(&resource).is_some() {
+            for name in &tag_names {
+                taggings.push((
+                    Tagging::Hypothetical,
+                    vec![attachment(name, MatchType::Self_, &resource)],
+                ));
+            }
+        }
+        for (tagging, tags) in taggings {
+            let tags = UnenrichedTags::new(tags);
+            for (user, groups, roles) in &principals {
+                for access_type in &access_types {
+                    out.push(Probe {
+                        request: AccessRequest {
+                            user: user.clone(),
+                            groups: groups.clone(),
+                            roles: roles.clone(),
+                            access_type: access_type.clone(),
+                            resource: resource.clone(),
+                            owner: None,
+                            resolved_tags: Some(tags.clone()),
+                        },
+                        tagging,
+                    });
+                }
             }
         }
     }
     out
 }
 
-/// Put the caller's tag resolution on every probe. One resolution per
-/// coordinate, carried by the probe, so the before and the after evaluation
-/// cannot read different tag inputs.
-pub fn with_resolved_tags(
-    mut probes: Vec<AccessRequest>,
-    mut resolve: impl FnMut(&RequestResource) -> Option<UnenrichedTags>,
-) -> Vec<AccessRequest> {
-    for p in &mut probes {
-        p.resolved_tags = resolve(&p.resource);
+/// `(catalog, schema, table, column)` of a request, `column` `""` when the
+/// request stops at the table; `None` when it names no table.
+fn table_of(r: &RequestResource) -> Option<(&str, &str, &str, &str)> {
+    let catalog = r.get("catalog")?;
+    let schema = r.get("schema").or_else(|| r.get("database"))?;
+    let table = r.get("table")?;
+    Some((catalog, schema, table, r.get("column").unwrap_or("")))
+}
+
+/// The tags `assignments` put on `r` — see [`TagAssignment`] for whose rule
+/// this restates.
+fn resolve_tags(r: &RequestResource, assignments: &[TagAssignment]) -> Vec<ResolvedTag> {
+    let Some((catalog, schema, table, column)) = table_of(r) else {
+        return Vec::new();
+    };
+    let fold = |s: &str| s.to_lowercase();
+    let mut seen: BTreeSet<(bool, String)> = BTreeSet::new();
+    for a in assignments {
+        if a.catalog == catalog
+            && fold(&a.schema) == fold(schema)
+            && fold(&a.table) == fold(table)
+            && (fold(&a.column) == fold(column) || a.column.is_empty())
+        {
+            seen.insert((fold(&a.column) != fold(column), a.tag.clone()));
+        }
     }
-    probes
+    // `is_self DESC, name` — the resolver's ORDER BY.
+    seen.into_iter()
+        .map(|(ancestor, name)| {
+            let mt = if ancestor {
+                MatchType::Ancestor
+            } else {
+                MatchType::Self_
+            };
+            attachment(&name, mt, r)
+        })
+        .collect()
+}
+
+/// One attachment as `attachment_for` shapes it: `catalog`, `schema`, `table`,
+/// and `column` only for a `SELF` attachment on a column request.
+fn attachment(name: &str, match_type: MatchType, r: &RequestResource) -> ResolvedTag {
+    let column = r.get("column").is_some_and(|c| !c.is_empty());
+    let levels: BTreeSet<String> = ["catalog", "schema", "table"]
+        .into_iter()
+        .chain((column && match_type == MatchType::Self_).then_some("column"))
+        .map(str::to_owned)
+        .collect();
+    ResolvedTag {
+        name: name.to_string(),
+        match_type,
+        attributes: BTreeMap::new(),
+        options: BTreeSet::new(),
+        validity_periods: 0,
+        attached_through: TagServiceResource {
+            levels,
+            is_enabled: true,
+        },
+    }
+}
+
+/// Every tag name either set's tag policies address; a pure wildcard value
+/// becomes a name nobody wrote (it matches any tag).
+fn tag_names(before: &ServicePolicySet, after: &ServicePolicySet) -> BTreeSet<String> {
+    [before, after]
+        .iter()
+        .flat_map(|s| s.tag_policies.iter())
+        .filter_map(|p| p.resources.get("tag"))
+        .flat_map(|l| l.values.iter())
+        .map(|v| {
+            if v.is_empty() || v.bytes().all(|b| b == b'*') {
+                format!("{PROBE_ANY_PREFIX}tag")
+            } else {
+                v.clone()
+            }
+        })
+        .collect()
 }
 
 type Principal = (String, BTreeSet<String>, BTreeSet<String>);
@@ -443,7 +605,11 @@ pub fn compare(case: &ProfileCase<'_>) -> Result<Vec<Disagreement>, GateRefusal>
             plugin_version: Some(version),
             ..case.engine.clone()
         };
-        for probe in &case.probes {
+        for Probe {
+            request: probe,
+            tagging,
+        } in &case.probes
+        {
             let mut push = |check: Check, before: String, after: String| {
                 out.push(Disagreement {
                     service_id: case.service_id,
@@ -453,6 +619,12 @@ pub fn compare(case: &ProfileCase<'_>) -> Result<Vec<Disagreement>, GateRefusal>
                     user: probe.user.clone(),
                     groups: probe.groups.iter().cloned().collect(),
                     roles: probe.roles.iter().cloned().collect(),
+                    tags: probe
+                        .resolved_tags
+                        .as_ref()
+                        .map(|t| t.as_slice().iter().map(|t| t.name.clone()).collect())
+                        .unwrap_or_default(),
+                    tagging: *tagging,
                     access_type: probe.access_type.clone(),
                     resource: render_resource(&probe.resource, case.service_def),
                     before,

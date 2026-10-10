@@ -7,23 +7,21 @@
 //!
 //! Pure (no DB).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use egret_perm::{EngineType, Grant, PrincipalKind};
 use egret_perm_compile::equivalence::{
-    compare, compare_profiles, derive_probes, with_resolved_tags, Check, Disagreement, GateRefusal,
-    ProfileCase, PROBE_SIBLING_PREFIX, PROBE_UNNAMED_USER,
+    compare, compare_profiles, derive_probes, Check, Disagreement, GateRefusal, Probe, ProfileCase,
+    TagAssignment, Tagging, PROBE_SIBLING_PREFIX, PROBE_UNNAMED_USER,
 };
 use egret_perm_compile::grammar::{
     grants_from_access_policy, rules_from_mask_or_filter_policy, ServiceKind,
 };
 use egret_perm_compile::{compile_grant, compile_rule, ResolvedNames};
 use egret_policy::admin::access_to_ranger_json;
-use egret_ranger_eval::eval::{
-    AccessRequest, EngineConfig, PluginVersion, ResolvedTag, TagServiceResource, UnenrichedTags,
-};
+use egret_ranger_eval::eval::{AccessRequest, EngineConfig, PluginVersion};
 use egret_ranger_eval::model::ServicePolicySet;
-use egret_ranger_eval::resource::{MatchType, RequestResource};
+use egret_ranger_eval::resource::RequestResource;
 use egret_ranger_eval::servicedef::ServiceDef;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -149,7 +147,7 @@ fn case<'a>(
     after: &'a ServicePolicySet,
     def: &'a ServiceDef,
     versions: &[PluginVersion],
-    probes: Vec<AccessRequest>,
+    probes: Vec<Probe>,
 ) -> ProfileCase<'a> {
     ProfileCase {
         service_id,
@@ -178,33 +176,14 @@ fn column(catalog: &str, schema: &str, table: &str, column: &str) -> RequestReso
         .with("column", column)
 }
 
-/// The tag resolution `explain` performs (`resolved_tags_for_resource_via` +
-/// `attachment_for`), for COLUMN-level assignments only: a request naming the
-/// tagged column gets the tag at `SELF`; any other request — including the
-/// table, for which a column attachment is `DESCENDANT` — gets the empty set.
-fn resolver<'a>(
-    assignments: &'a [(RequestResource, &'a str)],
-) -> impl FnMut(&RequestResource) -> Option<UnenrichedTags> + 'a {
-    move |r: &RequestResource| {
-        let tags = assignments
-            .iter()
-            .filter(|(at, _)| at == r)
-            .map(|(_, name)| ResolvedTag {
-                name: name.to_string(),
-                match_type: MatchType::Self_,
-                attributes: BTreeMap::new(),
-                options: BTreeSet::new(),
-                validity_periods: 0,
-                attached_through: TagServiceResource {
-                    levels: ["catalog", "schema", "table", "column"]
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect(),
-                    is_enabled: true,
-                },
-            })
-            .collect();
-        Some(UnenrichedTags::new(tags))
+/// One `catalog_tag_assignments` row on a column.
+fn assign(catalog: &str, schema: &str, table: &str, column: &str, tag: &str) -> TagAssignment {
+    TagAssignment {
+        catalog: catalog.into(),
+        schema: schema.into(),
+        table: table.into(),
+        column: column.into(),
+        tag: tag.into(),
     }
 }
 
@@ -213,10 +192,12 @@ fn summary(ds: &[Disagreement]) -> String {
         .take(12)
         .map(|d| {
             format!(
-                "\n  [{} {:?} {:?}] {} {} {}: {} -> {}",
+                "\n  [{} {:?} {:?} {:?}{:?}] {} {} {}: {} -> {}",
                 d.service_id,
                 d.plugin_version,
                 d.check,
+                d.tagging,
+                d.tags,
                 d.user,
                 d.access_type,
                 d.resource,
@@ -456,19 +437,19 @@ fn a_tag_deny_reopened_on_2_8_0_is_a_decided_flip_on_2_8_0_and_a_refusal_on_2_5_
     let before = envelope(vec![allow_alice_at(0)], vec![tag_deny_pii()]);
     let after = envelope(vec![allow_alice_at(1)], vec![tag_deny_pii()]);
     let def = trino_def();
-    let email = column("wh", "sales", "orders", "email");
-    let assignments = [(email.clone(), "pii")];
-    let probes = with_resolved_tags(
-        derive_probes(&before, &after, &def, std::slice::from_ref(&email)),
-        resolver(&assignments),
-    );
+    let assignments = [assign("wh", "sales", "orders", "email", "pii")];
+    let probes = derive_probes(&before, &after, &def, &assignments);
 
     let ds = compare(&case(1, &before, &after, &def, &BOTH, probes)).expect("answers");
 
+    // Only alice, only where `pii` is (actually or hypothetically) carried.
+    // Which tagging is not asserted here: that is the tag tests' job, so that
+    // a mutation of the tag input kills those and not this one.
     assert!(
-        ds.iter()
-            .all(|d| d.user == "alice" && d.resource == "wh.sales.orders.email"),
-        "only alice on the tagged column changes:{}",
+        ds.iter().all(|d| d.user == "alice"
+            && d.resource.starts_with("wh.sales.orders")
+            && d.tags == ["pii"]),
+        "only alice on a pii-tagged resource changes:{}",
         summary(&ds)
     );
     let on_2_8: Vec<_> = ds
@@ -496,6 +477,59 @@ fn a_tag_deny_reopened_on_2_8_0_is_a_decided_flip_on_2_8_0_and_a_refusal_on_2_5_
     );
 }
 
+/// **Case 3b, the MIRROR — the one that justifies the per-version loop**
+/// (Task 6 review M1). Before: the tag DENY plus a strictly higher-priority
+/// no-deny ALLOW, which 2.8.0 already reopens (Allowed) and 2.5.0 does not
+/// (Trino's true answer is Denied; the evaluator refuses). After: the same
+/// ALLOW with the tag deny gone — Allowed on both.
+///
+/// So 2.8.0 sees NO change and 2.5.0 does: Trino would start allowing alice on
+/// the tagged column. A gate that evaluated only 2.8.0 would pass this and
+/// ship it.
+#[test]
+fn removing_a_tag_deny_that_only_2_8_0_already_reopens_is_caught_on_2_5_0_alone() {
+    // The allow covers every coordinate, so wherever the tag deny reaches,
+    // 2.8.0 reopens it — removing the deny then changes no 2.8.0 answer.
+    let mut everywhere = allow_alice_at(1);
+    for name in ["catalog", "schema", "table", "column"] {
+        everywhere["resources"][name] = level(&["*"]);
+    }
+    let before = envelope(vec![everywhere.clone()], vec![tag_deny_pii()]);
+    let after = envelope(vec![everywhere], vec![]);
+    let def = trino_def();
+    let assignments = [assign("wh", "sales", "orders", "email", "pii")];
+    let probes = derive_probes(&before, &after, &def, &assignments);
+
+    let ds = compare(&case(1, &before, &after, &def, &BOTH, probes.clone())).expect("answers");
+    assert!(
+        ds.iter()
+            .all(|d| d.plugin_version == PluginVersion::Ranger2_5_0),
+        "2.8.0 sees no change:{}",
+        summary(&ds)
+    );
+    assert!(
+        ds.iter().any(|d| d.user == "alice"
+            && d.access_type == "select"
+            && d.resource.starts_with("wh.sales.orders")
+            && d.before == "cannot be decided: TagDenyReopenedDiffersByPluginVersion"
+            && d.after == "allowed (policy \"alice reads orders\")"),
+        "2.5.0 must report the change:{}",
+        summary(&ds)
+    );
+
+    // What a 2.8.0-only gate would have said.
+    let only_2_8 = compare(&case(
+        1,
+        &before,
+        &after,
+        &def,
+        &[PluginVersion::Ranger2_8_0],
+        probes,
+    ))
+    .expect("answers");
+    assert_eq!(only_2_8, vec![], "a 2.8.0-only gate passes this");
+}
+
 // ── 4. probes reach past both sets' vocabulary ───────────────────────────
 
 /// A pair that only ever mentions `wh.sales.orders` and `alice` still yields
@@ -510,7 +544,10 @@ fn the_probe_set_reaches_past_both_policies_vocabulary() {
     );
     let before = envelope(vec![body.clone()], vec![]);
     let after = envelope(compiled(&grants_of(&body)), vec![]);
-    let probes = derive_probes(&before, &after, &trino_def(), &[]);
+    let probes: Vec<AccessRequest> = derive_probes(&before, &after, &trino_def(), &[])
+        .into_iter()
+        .map(|p| p.request)
+        .collect();
 
     let is_sibling = |v: Option<&str>| v.is_some_and(|v| v.starts_with(PROBE_SIBLING_PREFIX));
     let at = |p: &AccessRequest, k: &str| p.resource.get(k).map(str::to_string);
@@ -608,58 +645,77 @@ fn compiled_rules(body: &Value, service: ServiceKind) -> Vec<Value> {
 }
 
 /// A tag-addressed mask (alice exempt, everyone else nulled) and its compiled
-/// rule: equivalent, with service tags that put `phi` on `ssn` and on no
-/// other column. A wrong mask TYPE and a dropped exemption are each caught on
-/// the tagged column only, with the whole mask rendered; and forgetting to
-/// resolve tags fails closed.
+/// rule, probed the way Task 7 calls the gate: the profile's tag-assignment
+/// rows (`phi` on `ssn`) and nothing else — no resource policy names `ssn`.
+///
+/// **Review I1.** The first version took the tagged coordinates and the tag
+/// resolver as two inputs; with no coordinates and a real resolver every probe
+/// sat on an untagged column and a changed mask compared EQUIVALENT. The rows
+/// are now the one input, so the tagged column is probed WITH its tag.
+///
+/// Equivalent as migrated. A wrong mask TYPE and a dropped exemption are each
+/// caught on `ssn` under its ACTUAL tagging, with the whole mask rendered, and
+/// an untagged sibling column changes under no actual tagging.
 #[test]
-fn a_tag_mask_is_compared_as_data_on_the_tagged_column_only() {
+fn a_tag_mask_change_is_caught_on_the_actually_tagged_column_from_the_assignments_alone() {
     let reader = hand_policy(
         "everyone reads orders",
         &["wh"],
         vec![item(&[], &["public"], &["select"])],
     );
     let before = envelope(vec![reader.clone()], vec![tag_mask("MASK_NULL")]);
-    let migrated = compiled_rules(&tag_mask("MASK_NULL"), ServiceKind::Tag);
-    let after = envelope(vec![reader.clone()], migrated.clone());
+    let after = envelope(
+        vec![reader.clone()],
+        compiled_rules(&tag_mask("MASK_NULL"), ServiceKind::Tag),
+    );
 
     let def = trino_def();
     let ssn = column("wh", "sales", "orders", "ssn");
-    let assignments = [(ssn.clone(), "phi")];
-    let probes = || {
-        with_resolved_tags(
-            derive_probes(&before, &after, &def, std::slice::from_ref(&ssn)),
-            resolver(&assignments),
-        )
-    };
+    let assignments = [assign("wh", "sales", "orders", "ssn", "phi")];
+    let probes = || derive_probes(&before, &after, &def, &assignments);
 
-    // The probe set holds the tagged column AND a column of the same table
-    // carrying no tag.
+    // Under ACTUAL tagging the probe set holds the tagged column carrying
+    // `phi`, and a column of the same table carrying nothing.
     let ps = probes();
-    let tags_on = |p: &AccessRequest| {
-        p.resolved_tags
-            .as_ref()
-            .map(|t| t.as_slice().len())
-            .unwrap_or(usize::MAX)
+    let actual_tags_on = |p: &Probe| {
+        p.request.resolved_tags.as_ref().map(|t| {
+            t.as_slice()
+                .iter()
+                .map(|t| t.name.clone())
+                .collect::<Vec<_>>()
+        })
     };
-    assert!(ps.iter().any(|p| p.resource == ssn && tags_on(p) == 1));
-    assert!(ps.iter().any(|p| p.resource.get("table") == Some("orders")
-        && p.resource.get("column").is_some_and(|c| c != "ssn")
-        && tags_on(p) == 0));
+    assert!(ps.iter().any(|p| p.tagging == Tagging::Actual
+        && p.request.resource == ssn
+        && actual_tags_on(p) == Some(vec!["phi".to_string()])));
+    assert!(ps.iter().any(|p| p.tagging == Tagging::Actual
+        && p.request.resource.get("table") == Some("orders")
+        && p.request.resource.get("column").is_some_and(|c| c != "ssn")
+        && actual_tags_on(p) == Some(vec![])));
 
     let ds = compare(&case(1, &before, &after, &def, &BOTH, probes())).expect("answers");
     assert!(ds.is_empty(), "expected equivalent:{}", summary(&ds));
+
+    let actual = |ds: Vec<Disagreement>| -> Vec<Disagreement> {
+        ds.into_iter()
+            .filter(|d| d.tagging == Tagging::Actual)
+            .collect()
+    };
 
     // Wrong mask type.
     let hashed = envelope(
         vec![reader.clone()],
         compiled_rules(&tag_mask("MASK_HASH"), ServiceKind::Tag),
     );
-    let ds = compare(&case(1, &before, &hashed, &def, &BOTH, probes())).expect("answers");
-    assert!(!ds.is_empty(), "a changed mask type must be caught");
+    let ds = actual(compare(&case(1, &before, &hashed, &def, &BOTH, probes())).expect("answers"));
+    assert!(
+        !ds.is_empty(),
+        "a changed mask type must be caught under actual tagging"
+    );
     assert!(
         ds.iter().all(|d| d.check == Check::DataMask
             && d.resource == "wh.sales.orders.ssn"
+            && d.tags == ["phi"]
             && d.user != "alice"),
         "only non-exempt users' masks on ssn change:{}",
         summary(&ds)
@@ -675,7 +731,7 @@ fn a_tag_mask_is_compared_as_data_on_the_tagged_column_only() {
         vec![reader.clone()],
         compiled_rules(&no_exempt, ServiceKind::Tag),
     );
-    let ds = compare(&case(1, &before, &unexempt, &def, &BOTH, probes())).expect("answers");
+    let ds = actual(compare(&case(1, &before, &unexempt, &def, &BOTH, probes())).expect("answers"));
     assert!(
         !ds.is_empty()
             && ds
@@ -684,14 +740,57 @@ fn a_tag_mask_is_compared_as_data_on_the_tagged_column_only() {
         "only alice on ssn changes:{}",
         summary(&ds)
     );
+}
 
-    // Tags NOT resolved: the evaluator cannot run the tag phase, and the gate
-    // must refuse rather than call it equivalent.
-    let unresolved = derive_probes(&before, &after, &def, std::slice::from_ref(&ssn));
-    let ds = compare(&case(1, &before, &after, &def, &BOTH, unresolved)).expect("answers");
+/// A tag rule that NO column carries today is still proven: every
+/// table/column coordinate is probed again carrying each tag name the policies
+/// address. Without that, a migrated tag rule with a wrong mask would pass
+/// the gate and wait, enforcing nothing wrong, until somebody tags a column.
+#[test]
+fn a_tag_rule_change_is_caught_even_when_no_column_carries_the_tag() {
+    let reader = hand_policy(
+        "everyone reads orders",
+        &["wh"],
+        vec![item(&[], &["public"], &["select"])],
+    );
+    let before = envelope(vec![reader.clone()], vec![tag_mask("MASK_NULL")]);
+    let same = envelope(
+        vec![reader.clone()],
+        compiled_rules(&tag_mask("MASK_NULL"), ServiceKind::Tag),
+    );
+    let hashed = envelope(
+        vec![reader.clone()],
+        compiled_rules(&tag_mask("MASK_HASH"), ServiceKind::Tag),
+    );
+    let def = trino_def();
+
+    let ds = compare(&case(
+        1,
+        &before,
+        &same,
+        &def,
+        &BOTH,
+        derive_probes(&before, &same, &def, &[]),
+    ))
+    .expect("answers");
+    assert!(ds.is_empty(), "expected equivalent:{}", summary(&ds));
+
+    let ds = compare(&case(
+        1,
+        &before,
+        &hashed,
+        &def,
+        &BOTH,
+        derive_probes(&before, &hashed, &def, &[]),
+    ))
+    .expect("answers");
+    assert!(!ds.is_empty(), "no assignments must not mean vacuous");
     assert!(
-        ds.iter().any(|d| d.before.starts_with("cannot be decided")),
-        "an unresolved tag set must fail closed:{}",
+        ds.iter().all(|d| d.tagging == Tagging::Hypothetical
+            && d.tags == ["phi"]
+            && d.check == Check::DataMask
+            && d.user != "alice"),
+        "{}",
         summary(&ds)
     );
 }
