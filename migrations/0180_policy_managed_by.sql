@@ -35,8 +35,12 @@
 -- check: that one is run against a real cluster (plan Task 10 Step 6).
 --
 -- `DEFAULT 'operator'` is the right default for the human entry point: a policy
--- somebody creates through the editor is theirs. The compiler and the seeder
--- both stamp their own value explicitly (Task 1 Step 10).
+-- somebody creates through the editor is theirs. The three non-human writers
+-- stamp their own value explicitly: the compiler (`egret-perm-compile`'s
+-- `trigger.rs`) writes 'compiler'; the two seeders in `default_policies.rs` and
+-- the delegator seeding (`engines.rs::seed_delegator_policies`) write 'infra'
+-- through `PolicyStore::upsert_infra_policy` / `create_infra_policy`, which
+-- refuse any name `is_egret_infrastructure_policy_name` does not recognise.
 
 ALTER TABLE policy.authz_policies
     ADD COLUMN managed_by text NOT NULL DEFAULT 'operator';

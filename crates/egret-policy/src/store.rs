@@ -1,5 +1,6 @@
 use crate::PolicyStoreError;
 use egret_metastore::Db;
+use egret_policy_api::infra_names::is_egret_infrastructure_policy_name;
 use egret_policy_api::TAG_SERVICE_CONFIG_KEY;
 use egret_ranger_eval::resource::MatchType;
 use serde_json::Value;
@@ -141,6 +142,19 @@ pub fn is_compiler_owned_policy_name(name: &str) -> bool {
 /// Deliberately does not require `origin = 'generated'`: a `manual` profile
 /// is exactly the case the round-2 report showed getting silently
 /// steamrolled, so gating this on `origin` would reopen the same hole.
+/// The infra writers' own guard: they stamp `managed_by = 'infra'`, so they may
+/// only be given a name `egret_policy_api::infra_names` recognises. A hard
+/// error, not a `debug_assert`, so the writer cannot drift from the predicate.
+fn refuse_non_infrastructure_name(name: &str) -> Result<(), PolicyStoreError> {
+    if !is_egret_infrastructure_policy_name(name) {
+        return Err(PolicyStoreError::BadRequest(format!(
+            "policy name {name:?} is not an egret infrastructure policy name; \
+             refusing to stamp it managed_by = 'infra'"
+        )));
+    }
+    Ok(())
+}
+
 fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
     if is_compiler_owned_policy_name(name) {
         return Err(PolicyStoreError::CompilerOwned(format!(
@@ -1861,6 +1875,33 @@ impl PolicyStore {
         name: &str,
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
+        self.insert_policy_owned_by(service_id, name, policy, "operator")
+            .await
+    }
+
+    /// [`create_policy`](Self::create_policy) for egret's OWN infrastructure
+    /// policies (the delegator's two): same guards and errors, but the row is
+    /// stamped `managed_by = 'infra'`. Refuses a name that
+    /// [`is_egret_infrastructure_policy_name`] does not recognise, so this
+    /// writer cannot drift from the predicate that defines the owner.
+    pub async fn create_infra_policy(
+        &self,
+        service_id: i64,
+        name: &str,
+        policy: &Value,
+    ) -> Result<i64, PolicyStoreError> {
+        refuse_non_infrastructure_name(name)?;
+        self.insert_policy_owned_by(service_id, name, policy, "infra")
+            .await
+    }
+
+    async fn insert_policy_owned_by(
+        &self,
+        service_id: i64,
+        name: &str,
+        policy: &Value,
+        managed_by: &str,
+    ) -> Result<i64, PolicyStoreError> {
         // Fix round 3's reserved-namespace check and Task 8's origin check, in
         // the one order they are allowed to fire in — spelled once, in
         // `refuse_before_policy_insert`, and shared with
@@ -1872,12 +1913,13 @@ impl PolicyStore {
             return Err(e);
         }
         let id: i64 = sqlx::query_scalar::<_, i64>(
-            r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb)
-               VALUES ($1,$2,$3) RETURNING id"#,
+            r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by)
+               VALUES ($1,$2,$3,$4) RETURNING id"#,
         )
         .bind(service_id)
         .bind(name)
         .bind(policy)
+        .bind(managed_by)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| match &e {
@@ -1907,6 +1949,7 @@ impl PolicyStore {
         name: &str,
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
+        refuse_non_infrastructure_name(name)?;
         refuse_reserved_name(name)?;
         let mut tx = self.db.pool.begin().await?;
         let id: i64 = sqlx::query_scalar::<_, i64>(

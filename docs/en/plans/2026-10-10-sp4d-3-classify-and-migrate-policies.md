@@ -323,8 +323,11 @@ If that shows anything at or above `0180`, use the next free number and say so i
 -- the column and the predicates agree across the WHOLE table, not on a sample.
 --
 -- `DEFAULT 'operator'` is the right default for the human entry point: a policy
--- somebody creates through the editor is theirs. The compiler and the seeder
--- both stamp their own value explicitly (Task 1 Step 10).
+-- somebody creates through the editor is theirs. The three non-human writers
+-- stamp their own value explicitly: the compiler writes 'compiler'; the two
+-- seeders and the delegator seeding write 'infra' through
+-- `upsert_infra_policy` / `create_infra_policy`, which refuse any name
+-- `is_egret_infrastructure_policy_name` does not recognise (Task 1 Step 10).
 
 ALTER TABLE policy.authz_policies
     ADD COLUMN managed_by text NOT NULL DEFAULT 'operator';
@@ -473,12 +476,14 @@ DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
 Expected: PASS, 1 test. If it fails on `authz_services` column names, read the real schema with
 `psql "$DATABASE_URL" -c '\d policy.authz_services'` and fix the fixture — do not change the assertion.
 
-- [ ] **Step 10: Make the two writers stamp their own owner**
+- [ ] **Step 10: Make the three writers stamp their own owner**
 
-In `crates/egret-policy/src/store.rs`, the compiler's own writes go through `egret-perm-compile`'s `trigger.rs` raw queries, and the seeder goes through `create_policy`/`upsert_policy`. Add an explicit `managed_by` to those two inserts so a fresh row never relies on the default:
+In `crates/egret-policy/src/store.rs`, the compiler's own writes go through `egret-perm-compile`'s `trigger.rs` raw queries, and the seeder goes through `create_policy`/`upsert_policy`. The delegator's two fixed policies (`engines.rs::seed_delegator_policies`) are a THIRD writer: they go through `PolicyPort::create_policy`. Add an explicit `managed_by` to all three so a fresh row never relies on the default:
 
 - `trigger.rs`'s `INSERT INTO policy.authz_policies (service_id, name, policy_jsonb)` becomes `(service_id, name, policy_jsonb, managed_by)` with `'compiler'` bound.
 - `default_policies.rs`'s two seeding paths call a new `PolicyStore::upsert_infra_policy(service_id, name, body)` that writes `managed_by = 'infra'`, rather than `create_policy`/`upsert_policy` which leave the `'operator'` default.
+- `seed_delegator_policies` calls a new `PolicyPort::create_infra_policy` (create semantics: `AlreadyExists` on a clash, behind its existing `policy_exists` skip) that writes `managed_by = 'infra'`. Both infra writers (`create_infra_policy`, `upsert_infra_policy`) REFUSE, with an error and not a `debug_assert`, any name for which `is_egret_infrastructure_policy_name` is false. `create_policy` is NOT changed to stamp by name.
+- Each writer is covered by a DB test asserting the stamped value (`crates/egret-policy/tests/infra_writers.rs`, `crates/egret-perm-compile/tests/compiler_stamps_managed_by.rs`).
 
 - [ ] **Step 11: Mutation-check the backfill's separator**
 
@@ -530,7 +535,7 @@ git commit -m "feat(policy): make policy ownership a column, not a name prefix"
 
 The three paths that must refuse, all in `store.rs`: `update_policy`, `delete_policy`, and `set_policy_enabled`. Each already calls `refuse_if_compiler_owned(&mut tx, service_id, &current_name)`; the new refusal belongs **beside** it and keyed on the column, not folded into it — `refuse_if_compiler_owned` answers a question about a NAME, and this one answers a question about a ROW.
 
-`create_policy` needs no change: a new row cannot already be infrastructure, and `refuse_reserved_name` plus `refuse_if_generated` already cover it.
+`create_policy` needs no change for the DELEGATOR: Task 1 (fix round 1) moved the delegator's two policies onto `PolicyPort::create_infra_policy`, so they are stamped `'infra'` at insert and never pass through `create_policy`. What Task 2 must still do on the human path is RESERVE infra names: a human `create_policy` (and rename in `update_policy`) of a name `is_egret_infrastructure_policy_name` recognises must be refused, otherwise an operator can mint an `'operator'` row under an infra name that the seeders later re-stamp. That reservation is Task 2's, not Task 1's.
 
 - [ ] **Step 1: Write the failing test**
 

@@ -2210,7 +2210,7 @@ async fn seed_delegator_policies(st: &CpState, service_name: &str) -> Result<(),
             continue;
         }
         st.authz
-            .create_policy(svc.id, name, &body)
+            .create_infra_policy(svc.id, name, &body)
             .await
             .map_err(|e| CpError::BadRequest(format!("seed policy: {e}")))?;
     }
