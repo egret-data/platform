@@ -371,11 +371,37 @@ describe("FlowDetail: Run", () => {
     expect(button("Run")).toHaveAccessibleDescription("Publish the flow before running it");
   });
 
-  it("is enabled once a version is live", async () => {
+  it("is enabled once a version is live and its source has loaded", async () => {
     liveFlow(flowSource("live"));
     renderAt();
     await editorBox();
-    expect(button("Run")).toBeEnabled();
+    await waitFor(() => expect(button("Run")).toBeEnabled());
+  });
+
+  it("opens the run form on the LIVE version's inputs, saying the draft is not what runs", async () => {
+    // Live v1 has one input; the saved draft has a different one, which the form must not offer.
+    const live = `id: hello\nnamespace: company.team\ninputs:\n  - id: live_only\n    type: STRING\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n`;
+    const draft = live.replace("live_only", "draft_only");
+    liveFlow(live, draft);
+    renderAt();
+    await editorBox();
+    await waitFor(() => expect(button("Run")).toBeEnabled());
+    await userEvent.click(button("Run"));
+    const dialog = await screen.findByRole("dialog", { name: "Run company.team.hello" });
+    expect(within(dialog).getByLabelText(/^live_only/)).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText(/^draft_only/)).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("note")).toHaveTextContent("Runs live v1; your draft is not published");
+  });
+
+  it("says nothing about the draft when the editor holds the live text", async () => {
+    liveFlow(flowSource("live"));
+    renderAt();
+    await editorBox();
+    await waitFor(() => expect(button("Run")).toBeEnabled());
+    await userEvent.click(button("Run"));
+    // No inputs: the confirm.
+    const confirm = await screen.findByRole("alertdialog", { name: "Run company.team.hello?" });
+    expect(within(confirm).queryByText(/your draft is not published/)).not.toBeInTheDocument();
   });
 });
 

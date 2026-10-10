@@ -1,9 +1,9 @@
 import { lazy, Suspense, type ReactNode } from "react";
 import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { Placeholder } from "@/routes/Placeholder";
 import FlowsList from "@/routes/workflows/FlowsList";
 import ExecutionsPlaceholder from "@/routes/workflows/ExecutionsPlaceholder";
+import ExecutionMinimal from "@/routes/workflows/ExecutionMinimal";
 
 /**
  * The flow pages, a lazy chunk of their own inside this one: they bring the
@@ -54,7 +54,8 @@ export default function WorkflowsRoutes() {
       {/* `FlowDetail` sends an unknown tab to `edit`. */}
       <Route path="flows/:id/:tab" element={<FlowPage><FlowDetail /></FlowPage>} />
       <Route path="executions" element={<ExecutionsPlaceholder />} />
-      <Route path="executions/:id" element={<Placeholder title="Execution" />} />
+      {/* The minimal execution page (spec §6.3) until W7b replaces it. */}
+      <Route path="executions/:id" element={<ExecutionMinimal />} />
       <Route path="*" element={<Navigate to={`${base}/flows`} replace />} />
     </Routes>
   );

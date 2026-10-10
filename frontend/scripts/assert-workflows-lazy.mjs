@@ -73,6 +73,12 @@ const MARKERS = [
   ["src/components/workflows/PublishDialog.tsx", "What changed in this version", "editor"],
   ["src/components/workflows/StaleSaveDialog.tsx", "Discard and reload", "editor"],
   ["src/components/workflows/draftState.ts", "Publish the flow before running it", "editor"],
+  // The run form (W7a Task 6), opened from the flow page.
+  ["src/components/workflows/run/RunFlow.tsx", "your draft is not published", "editor"],
+  ["src/components/workflows/run/inputControls.tsx", "This input depends on other inputs", "editor"],
+  ["src/components/workflows/run/inputModel.ts", "Add at least one item.", "editor"],
+  // The minimal execution page (W7a Task 6), in the area's own chunk with the list.
+  ["src/routes/workflows/ExecutionMinimal.tsx", "The execution ended before any task ran."],
 ];
 
 const entry = entryChunkName(DIST);

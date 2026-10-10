@@ -1,0 +1,272 @@
+import { useId, useMemo, useState, type FormEvent } from "react";
+import { useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
+import { Loader2, Play } from "lucide-react";
+import {
+  getWorkflowStartFlowExecutionUrl,
+  useWorkflowStartFlowExecution,
+  type workflowStartFlowExecutionResponse,
+} from "@/api/generated/workflow/workflow";
+import { customInstance } from "@/api/mutator";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import type { Enablement } from "@/components/workflows/draftState";
+import { InputField } from "@/components/workflows/run/inputControls";
+import {
+  containerFor,
+  formFromInputs,
+  inputsFromSource,
+  requestFromForm,
+  serverErrorInput,
+  unsupportedInputs,
+  validateForm,
+  type FieldValue,
+  type RunInput,
+} from "@/components/workflows/run/inputModel";
+import { DisabledReasons } from "@/routes/workflows/FlowEditPage";
+import { workflowsKeys } from "@/routes/workflows/queryKeys";
+
+export interface RunFlowProps {
+  ws: string;
+  /** The flow's UUID. */
+  flowId: string;
+  /** `namespace.flow_id`, for the title. */
+  flowName: string;
+  /** The live version's number, and its frozen YAML (`snapshot.source`): the inputs come from here. */
+  liveVersion: number;
+  liveSource: string;
+  /** The editor's text differs from the live version's. */
+  draftDiffers: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+/**
+ * Run (W7a spec §6): the live version's inputs as a form, in a confirm, a
+ * dialog or a right-hand drawer by how many inputs there are and what kind.
+ * Kestra's `FlowRun.vue`/`InputsForm.vue` give the structure: one labelled
+ * control per input, its description under it, Run at the foot.
+ *
+ * The parent keys this by the live version, so a new version starts a new
+ * form; while the version stays, closing and reopening keeps what was typed.
+ */
+export function RunFlow(props: RunFlowProps) {
+  const parsed = useMemo(() => inputsFromSource(props.liveSource), [props.liveSource]);
+  const inputs = "inputs" in parsed ? parsed.inputs : [];
+  return <RunForm {...props} inputs={inputs} sourceError={"error" in parsed ? parsed.error : null} />;
+}
+
+function RunForm({
+  ws,
+  flowId,
+  flowName,
+  liveVersion,
+  draftDiffers,
+  open,
+  onOpenChange,
+  inputs,
+  sourceError,
+}: RunFlowProps & { inputs: RunInput[]; sourceError: string | null }) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const start = useWorkflowStartFlowExecution();
+  const idPrefix = useId();
+  const [form, setForm] = useState(() => formFromInputs(inputs));
+  const [clientErrors, setClientErrors] = useState<Record<string, string>>({});
+  const [serverErrors, setServerErrors] = useState<Record<string, string>>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const unsupported = unsupportedInputs(inputs);
+  const container = sourceError ? "dialog" : containerFor(inputs);
+  const runState: Enablement = sourceError
+    ? { ok: false, reason: "The live version's inputs could not be read" }
+    : unsupported.length > 0
+      ? { ok: false, reason: `${unsupported.map((u) => `${u.id} (${u.type})`).join(", ")} cannot be entered in this form` }
+      : submitting
+        ? { ok: false, reason: "Starting the run…" }
+        : { ok: true };
+
+  const setValue = (id: string, value: FieldValue) => {
+    setForm((f) => ({ ...f, values: { ...f.values, [id]: value } }));
+    // An edit answers that field's error; the others stay until the next Run.
+    setClientErrors((errors) => without(errors, id));
+    setServerErrors((errors) => without(errors, id));
+  };
+
+  const submit = async (e?: FormEvent) => {
+    e?.preventDefault();
+    if (!runState.ok) return;
+    const errors = validateForm(form);
+    setClientErrors(errors);
+    setServerErrors({});
+    setFormError(null);
+    if (Object.keys(errors).length > 0) return;
+    setSubmitting(true);
+    try {
+      const req = requestFromForm(form);
+      // The generated function always `JSON.stringify`s its body, so a multipart
+      // start goes through the same mutator with the `FormData` as the body, and
+      // the browser writes the `multipart/form-data; boundary=…` header.
+      const res =
+        "json" in req
+          ? await start.mutateAsync({ workspace: ws, id: flowId, data: req.json })
+          : await customInstance<workflowStartFlowExecutionResponse>(getWorkflowStartFlowExecutionUrl(ws, flowId), {
+              method: "POST",
+              body: req.multipart,
+            });
+      if (res.status !== 201) throw new Error(res.data.error);
+      // The execution page opens on the answer instead of reading it again; it polls from there.
+      queryClient.setQueryData(workflowsKeys.execution(res.data.id), { status: 200, data: res.data, headers: res.headers });
+      // The result is the page it opens, so no toast (FE-ACTION-2).
+      navigate(`/explore/${ws}/workflows/executions/${encodeURIComponent(res.data.id)}`);
+    } catch (err) {
+      // Nothing typed is cleared (FE-ACTION-3); an input the server names gets the message beside it (FE-FORM-4).
+      const message = err instanceof Error && err.message ? err.message : "the request failed";
+      const field = serverErrorInput(message, inputs);
+      if (field) setServerErrors({ [field]: message });
+      else setFormError(`The run could not be started: ${message}. Fix it, then run again.`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const reasonId = `${idPrefix}-run-reason`;
+  const runButton = (
+    <Button
+      type={container === "confirm" ? "button" : "submit"}
+      size="sm"
+      disabled={!runState.ok}
+      aria-describedby={runState.ok ? undefined : reasonId}
+      onClick={container === "confirm" ? () => void submit() : undefined}
+    >
+      {submitting ? <Loader2 className="animate-spin" aria-hidden /> : <Play aria-hidden />}
+      Run
+    </Button>
+  );
+  const reasons = <DisabledReasons actions={[{ id: reasonId, label: "Run", enablement: runState }]} />;
+
+  const notices = (
+    <>
+      {draftDiffers ? (
+        <p role="note" className="rounded-md border border-highlight/40 bg-highlight/10 px-3 py-2 text-sm">
+          Runs live v{liveVersion}; your draft is not published
+        </p>
+      ) : null}
+      {sourceError ? (
+        <Alert variant="destructive">
+          <AlertDescription>
+            The live version's inputs could not be read: {sourceError}. Publish the flow again, then run it.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {unsupported.length > 0 ? (
+        <Alert>
+          <AlertDescription>
+            <p>This form cannot enter these inputs, so the flow cannot be run from here:</p>
+            <ul className="mt-1 list-disc pl-5">
+              {unsupported.map((u) => (
+                <li key={u.id}>
+                  <code>{u.id}</code> ({u.type})
+                </li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {formError ? (
+        <Alert variant="destructive">
+          <AlertDescription>{formError}</AlertDescription>
+        </Alert>
+      ) : null}
+    </>
+  );
+
+  if (container === "confirm") {
+    return (
+      <AlertDialog open={open} onOpenChange={onOpenChange}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Run {flowName}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This starts an execution of live v{liveVersion}. The flow has no inputs.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {notices}
+          <AlertDialogFooter className="items-center">
+            {reasons}
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            {runButton}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    );
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        data-container={container}
+        className={
+          container === "drawer"
+            ? // The right-hand drawer (spec §6.1). There is no sheet primitive in `components/ui`,
+              // so it is the dialog primitive pinned to the right edge at full height.
+              "top-0 right-0 left-auto h-dvh max-h-dvh w-full max-w-lg translate-x-0 translate-y-0 rounded-none border-y-0 border-r-0"
+            : undefined
+        }
+      >
+        <form className="grid gap-4" onSubmit={(e) => void submit(e)} noValidate>
+          <DialogHeader>
+            <DialogTitle>Run {flowName}</DialogTitle>
+            <DialogDescription>Starts an execution of live v{liveVersion}.</DialogDescription>
+          </DialogHeader>
+          {notices}
+          {/* An unsupported input has no control; the notice above names it with its type. */}
+          {inputs
+            .filter((input) => !unsupported.some((u) => u.id === input.id))
+            .map((input) => (
+              <InputField
+                key={input.id}
+                input={input}
+                value={form.values[input.id] ?? null}
+                onChange={(v) => setValue(input.id, v)}
+                error={serverErrors[input.id] ?? clientErrors[input.id]}
+                idPrefix={idPrefix}
+              />
+            ))}
+          <DialogFooter className="items-center">
+            {reasons}
+            <Button type="button" size="sm" variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            {runButton}
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function without(errors: Record<string, string>, id: string): Record<string, string> {
+  if (!(id in errors)) return errors;
+  const next = { ...errors };
+  delete next[id];
+  return next;
+}

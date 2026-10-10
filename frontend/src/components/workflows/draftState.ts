@@ -62,9 +62,23 @@ export function canPublish({
   return { ok: true };
 }
 
-/** Run starts the live version (W1), so it needs one. */
-export function canRun({ liveVersionId, manage }: { liveVersionId: string | null | undefined; manage: boolean }): Enablement {
+/**
+ * Run starts the live version (W1), so it needs one; and the run form reads
+ * that version's inputs (spec §6.1), so it waits for its source. `live` is
+ * left out by a caller that does not read it, and counts as known.
+ */
+export function canRun({
+  liveVersionId,
+  manage,
+  live = "known",
+}: {
+  liveVersionId: string | null | undefined;
+  manage: boolean;
+  live?: "loading" | "unknown" | "known";
+}): Enablement {
   if (!manage) return { ok: false, reason: "Running a flow needs the workflow:manage permission" };
   if (!liveVersionId) return { ok: false, reason: "Publish the flow before running it" };
+  if (live === "loading") return { ok: false, reason: "Loading the live version…" };
+  if (live === "unknown") return { ok: false, reason: "Live version unknown" };
   return { ok: true };
 }

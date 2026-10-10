@@ -21,6 +21,7 @@ import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { StateChip } from "@/components/workflows/StateChip";
 import { PublishDialog } from "@/components/workflows/PublishDialog";
+import { RunFlow } from "@/components/workflows/run/RunFlow";
 import { StaleSaveDialog } from "@/components/workflows/StaleSaveDialog";
 import {
   canPublish,
@@ -197,6 +198,7 @@ function FlowWorkspace({
   const [staleOpen, setStaleOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [runOpen, setRunOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const inFlight = useRef(false);
   /**
@@ -334,7 +336,9 @@ function FlowWorkspace({
   const errors = editor.problems.filter((p) => p.severity === "error").length;
   const saveState = canSave({ dirty, saving });
   const publishState = canPublish({ dirty, errors, validationStatus: editor.validation.status });
-  const runState = canRun({ liveVersionId: flow.live_version_id, manage });
+  // The run form reads the live version's inputs (spec §6.1), so Run waits for its source.
+  const live = versionsQuery.isError || (versions && liveSource === undefined) ? "unknown" : versions ? "known" : "loading";
+  const runState = canRun({ liveVersionId: flow.live_version_id, manage, live });
   const nextVersion = versions ? Math.max(0, ...versions.map((v) => v.version)) + 1 : null;
   const flowName = `${flow.namespace}.${flow.flow_id}`;
   const reasonsId = useId();
@@ -365,8 +369,7 @@ function FlowWorkspace({
                 <Upload aria-hidden />
                 Publish
               </ReasonButton>
-              {/* The run form (spec §6) lands with W7a Task 6, which opens it from here. */}
-              <ReasonButton enablement={runState} reasonId={`${reasonsId}-run`} variant="outline" onClick={() => {}}>
+              <ReasonButton enablement={runState} reasonId={`${reasonsId}-run`} variant="outline" onClick={() => setRunOpen(true)}>
                 <Play aria-hidden />
                 Run
               </ReasonButton>
@@ -422,6 +425,21 @@ function FlowWorkspace({
         nextVersion={nextVersion}
         onPublish={runPublish}
       />
+      {manage && liveVersion && liveSource !== undefined ? (
+        // Keyed by the live version: a new one starts a new form; the same one keeps what was typed.
+        <RunFlow
+          key={liveVersion.id}
+          ws={ws}
+          flowId={id}
+          flowName={flowName}
+          liveVersion={liveVersion.version}
+          liveSource={liveSource}
+          // What is in the editor, saved or not, against what will run.
+          draftDiffers={draftDiffersFromLive(editor.source, liveSource)}
+          open={runOpen}
+          onOpenChange={setRunOpen}
+        />
+      ) : null}
       <ConfirmDeleteDialog
         open={deleteOpen}
         onOpenChange={setDeleteOpen}

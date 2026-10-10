@@ -81,4 +81,12 @@ describe("canRun", () => {
   it("needs workflow:manage", () => {
     expect(canRun({ liveVersionId: "v1", manage: false }).ok).toBe(false);
   });
+
+  it("waits for the live version's source, which the run form reads its inputs from", () => {
+    expect(canRun({ liveVersionId: "v1", manage: true, live: "loading" })).toEqual({ ok: false, reason: "Loading the live version…" });
+    expect(canRun({ liveVersionId: "v1", manage: true, live: "unknown" })).toEqual({ ok: false, reason: "Live version unknown" });
+    expect(canRun({ liveVersionId: "v1", manage: true, live: "known" })).toEqual({ ok: true });
+    // No live version outranks an unread one.
+    expect(canRun({ liveVersionId: null, manage: true, live: "loading" })).toEqual({ ok: false, reason: "Publish the flow before running it" });
+  });
 });
