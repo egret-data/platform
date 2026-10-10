@@ -1,5 +1,7 @@
 # Quy ước UI của egret
 
+> **Các rule nay nằm ở [`frontend-rules.md`](frontend-rules.md), và đó là bản chuẩn.** Tài liệu này là phần giải thích lý do và ghi lại các quyết định đã đảo mà bộ rule trỏ tới.
+
 Cách frontend egret dựng trang danh sách, luồng tạo mới, bảng cấu hình, và những bài test
 bảo vệ chúng.
 
