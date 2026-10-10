@@ -498,6 +498,33 @@ Nothing is wrong with those tasks' conclusions — they were measured when taken
 statement about a moment**, and this plan's pre-merge steps below inherit that: re-run them rather than
 citing the old counts.
 
+### Task 17: `prune-target.sh` caps file COUNTS, so it cannot prevent a disk-full
+
+**Files:** `deploy/prune-target.sh`
+
+**Found by Tasks 8+10 the hard way: it filled the disk**, with `/` at **100 %** and 117 Mi available, and
+recovered by deleting `target/debug/incremental` (7.3 G). Measured now: three worktrees hold **161 G** of
+`target` (`egret` 73 G, `egret-w9c-kv` 55 G, `egret-sp4a` 33 G) against **9.5 Gi** free.
+
+The script's own comment says it is capped **by directory count rather than by bytes on purpose**, because
+`du` on a 37 G tree is slow. That reasoning is sound for its original job — startup cost scales with file
+count — and it means **the script cannot do the job its second half claims**: its own header says
+`debug/incremental` "is capped for DISK", and a count cap does not bound bytes.
+
+So this is not a bug in the script; it is a **gate that does not cover what its own comment says it
+covers** — the same class as Tasks 8 and 10, in our tooling rather than in the product.
+
+- [ ] **Step 1: Decide what the cheap byte signal is.** `df` on the volume is O(1) and already tells you
+the thing that matters — free space, not tree size. A threshold on *free space* avoids the `du` cost the
+comment correctly rejects.
+- [ ] **Step 2: Do not delete another worktree's artefacts.** Three worktrees share this host and other
+sessions build in them; the script runs per-invocation, so it may only prune the tree it was invoked for.
+Say that at the site, because the tempting fix is a global sweep.
+- [ ] **Step 3: Correct the header.** It currently claims `incremental` "is capped for DISK". Either make
+that true or say what the cap actually bounds.
+
+---
+
 ## Pre-merge steps
 
 1. **Run migration 0166's own listing query** (`migrations/0166_…sql:124`) against any cluster that
