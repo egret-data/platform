@@ -7052,7 +7052,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input, missing policy name, a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter policy that would be served alongside another one selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)",
+            "description": "Invalid editor input, missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter policy that would be served alongside another one selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7364,7 +7364,7 @@
           "policy-admin"
         ],
         "summary": "POST /policies/services — create a policy profile (a Ranger service\ninstance) of the given type. The manual analogue of Trino provisioning's\nauto-bind, so a StarRocks profile can exist without an egret-provisioned\nengine.",
-        "description": "`config` is stored VERBATIM, which makes this the one reachable surface that\ncould pair a non-Trino `type` with a `tagService` — a state in which every tag\npolicy under the profile is silently inert, because the tag download writes the\nresource level `schema` and only Trino's service-def has one. `create_service`\nrefuses it (400); see `egret_policy::store`'s\n`refuse_tag_service_on_non_trino_profile` for the measurement and for the\nenumeration of every write path that can reach the state.",
+        "description": "`config` is stored VERBATIM except for two refusals — the type rule below,\nand SP4d debt Task 9's value-shape rule: a `tagService` whose value is not a\nnon-empty string names no profile, and four of the five readers of that field\ngo through `as_str()` while the fifth reads `->>`, so the shape produces four\ndifferent behaviours. See `egret_policy::store`'s\n`refuse_unnameable_tag_service`.\n\nThis makes it the one reachable surface that\ncould pair a non-Trino `type` with a `tagService` — a state in which every tag\npolicy under the profile is silently inert, because the tag download writes the\nresource level `schema` and only Trino's service-def has one. `create_service`\nrefuses it (400); see `egret_policy::store`'s\n`refuse_tag_service_on_non_trino_profile` for the measurement and for the\nenumeration of every write path that can reach the state.",
         "operationId": "create_profile",
         "requestBody": {
           "content": {
@@ -7388,7 +7388,7 @@
             }
           },
           "400": {
-            "description": "Invalid type, missing name, or a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert)",
+            "description": "Invalid type, missing name, a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no policy profile, and the plugin download would carry no `tagPolicies` block)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7750,6 +7750,7 @@
           "policy-admin"
         ],
         "summary": "PUT /policies/{id} — replace a policy's body (any kind).",
+        "description": "# SP4d debt Task 16: the tag branch\n\nUntil Task 16 this handler had no `is_tag_kind` branch, so a `tag-*` form\nreached `editor_to_ranger_json` and came back `\"unknown policy kind:\ntag-masking\"`. `create_policy` had the branch and `delete_policy_handler`\nneeds none, so an editor-authored tag mask or tag row filter could be\n**created and deleted but never edited** — reachable straight from the UI,\nwhich sends `updatePolicy(id, {kind: \"tag-masking\", service: <trino\nprofile>, …})` whenever the Tags tab's row link is followed\n(`frontend/src/routes/governance/PolicyEditorPage.tsx`, `buildPayload`).\n\nThat gap is why `crate::unreadable_table_mask`'s refusal named only two\nremedies: \"edit the policy to address it by path\" was not available, so the\nreal remedy for an editor-origin pair was delete-and-recreate — a workflow\nnobody would write down. The branch and that third remedy land together.\n\nBoth authoring verbs run the same guards through\n[`guard_tag_policy_authoring`]; the one argument that differs is\n`replacing: Some(id)`, so the arbitration guard does not pair the new body\nagainst the row it is replacing.",
         "operationId": "update_policy",
         "parameters": [
           {
@@ -7785,7 +7786,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input, missing policy name, or a mask/row-filter body that would be served alongside another policy selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)",
+            "description": "Invalid editor input, missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter body that would be served alongside another policy selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)",
             "content": {
               "application/json": {
                 "schema": {
