@@ -18,6 +18,11 @@ export type ServerValidation = {
   /** The last answer's findings; kept while the next one is pending, so markers do not flicker. */
   findings: ServerFinding[];
   error: string | null;
+  /**
+   * The server refused with 403: the caller lacks `workflow:manage`, which
+   * both validate routes check. The create page reads it as "cannot create".
+   */
+  forbidden?: boolean;
   retry: () => void;
 };
 
@@ -44,7 +49,7 @@ function fromReport(report: ValidationReportDto): ServerFinding[] {
   ];
 }
 
-type Answer = { key: string; status: "ok" | "error"; findings: ServerFinding[]; error: string | null };
+type Answer = { key: string; status: "ok" | "error"; findings: ServerFinding[]; error: string | null; forbidden?: boolean };
 
 /**
  * Validates `source` on the server as it is edited (spec §5.2): 600 ms after
@@ -90,7 +95,8 @@ export function useServerValidation(
             setAnswer({ key, status: "ok", findings: [parseErrorFinding(err.message)], error: null });
           } else {
             const message = err instanceof Error && err.message ? err.message : "The request did not complete.";
-            setAnswer({ key, status: "error", findings: [], error: message });
+            const forbidden = err instanceof ApiError && err.status === 403;
+            setAnswer({ key, status: "error", findings: [], error: message, forbidden });
           }
         },
       );
@@ -112,7 +118,8 @@ export function useServerValidation(
     : !answer || answer.key !== key ? "validating" : answer.status;
   const findings = enabled && answer ? answer.findings : NO_FINDINGS;
   const error = status === "error" ? answer?.error ?? null : null;
-  return useMemo(() => ({ status, findings, error, retry }), [status, findings, error, retry]);
+  const forbidden = status === "error" && !!answer?.forbidden;
+  return useMemo(() => ({ status, findings, error, forbidden, retry }), [status, findings, error, forbidden, retry]);
 }
 
 const NO_FINDINGS: ServerFinding[] = [];

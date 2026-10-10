@@ -126,7 +126,14 @@ pub enum WriteError {
     Core(Error),
     /// The source calls `secret()` and the caller lacks [`WF_USE_SECRETS`].
     SecretsNotAllowed,
+    /// `if_updated_at` no longer matches the draft (W7a spec §7.3): a 409
+    /// with [`DRAFT_CHANGED_CODE`], so a client tells it from the other 409
+    /// (a namespace and id another flow holds) without reading the prose.
+    DraftChanged,
 }
+
+/// `ErrorBody.code` of [`WriteError::DraftChanged`].
+pub const DRAFT_CHANGED_CODE: &str = "draft_changed";
 
 impl From<Error> for WriteError {
     fn from(e: Error) -> Self {
@@ -143,6 +150,14 @@ impl axum::response::IntoResponse for WriteError {
                 Json(egret_core::http::ErrorBody {
                     error: USE_SECRETS_REFUSAL.to_string(),
                     code: None,
+                }),
+            )
+                .into_response(),
+            WriteError::DraftChanged => (
+                StatusCode::CONFLICT,
+                Json(egret_core::http::ErrorBody {
+                    error: Error::Conflict(crate::repo::DRAFT_CHANGED.into()).to_string(),
+                    code: Some(DRAFT_CHANGED_CODE.to_string()),
                 }),
             )
                 .into_response(),
@@ -689,7 +704,7 @@ async fn get_flow(
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace, or the flow calls secret() and the caller lacks workflow:use_secrets", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such flow in this workspace", body = egret_core::http::ErrorBody),
-        (status = 409, description = "Another flow already claims this namespace and id in the workspace, or `if_updated_at` was sent and the draft was changed since (\"the draft was changed since you opened it\"); nothing was written", body = egret_core::http::ErrorBody),
+        (status = 409, description = "Another flow already claims this namespace and id in the workspace, or `if_updated_at` was sent and the draft was changed since (`code` is `draft_changed`; the other conflict carries no code); nothing was written", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -751,7 +766,13 @@ async fn update_flow(
                 if_updated_at: body.if_updated_at,
             },
         )
-        .await?;
+        .await
+        // The repo names a failed precondition with this crate's own constant
+        // (`FlowRepo::update`, its only writer); it becomes the coded 409 here.
+        .map_err(|e| match e {
+            Error::Conflict(m) if m == crate::repo::DRAFT_CHANGED => WriteError::DraftChanged,
+            e => WriteError::Core(e),
+        })?;
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ctx.workspace_id.0),

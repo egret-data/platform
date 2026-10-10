@@ -275,7 +275,7 @@ Khi execution chưa kết thúc, trang poll `GET …/executions/{id}` mỗi 2 gi
 ### 7.3 `if_updated_at` trong `PUT /flows/{id}`
 
 `UpdateFlowRequest` có thêm trường tuỳ chọn `if_updated_at` (RFC 3339).
-- Khi có trường này mà nó khác `updated_at` của hàng, lần cập nhật bị từ chối với 409, "the draft was changed since you opened it", và không có gì được ghi.
+- Khi có trường này mà nó khác `updated_at` của hàng, lần cập nhật bị từ chối với 409, "the draft was changed since you opened it", và không có gì được ghi. `code` trong body là `draft_changed` *(W7a Task 5, vòng sửa 1)*; 409 còn lại của route này, khi namespace và id đã thuộc flow khác, không có code. Client rẽ nhánh theo code, không bao giờ theo câu chữ.
 - So sánh và ghi nằm trong một câu lệnh (`UPDATE … WHERE id = $1 AND updated_at = $2`), nên hai lần lưu đồng thời không thể cùng qua.
 - Không có trường này thì route giữ nguyên hành vi như hiện nay.
 - Mọi nơi ghi `flows.updated_at` được liệt kê trong doc comment của route, vì ý nghĩa của điều kiện tiên quyết này dựa vào chúng (rule FE-STATE-4, áp cho một điều kiện tiên quyết).
@@ -290,7 +290,7 @@ Khi execution chưa kết thúc, trang poll `GET …/executions/{id}` mỗi 2 gi
 
 *(Thêm ở W7a Task 5.)* `GET …/flows/{id}` trả `can_manage: bool`: người gọi có `workflow:manage` trong workspace này hay không, do PDP quyết định bằng đúng phép kiểm tra các route ghi dùng. Khi nó là false, editor mở ở chế độ chỉ đọc, không có Save, Publish, Run hay Delete (§5.2). `workflow:manage` là quyền theo workspace, còn `/auth/me` chỉ liệt kê quyền platform, nên frontend không có cách nào khác để biết; cách này theo `can_manage` mà các đối tượng workspace khác đã mang (dashboard, schedule, app). Create và update trả `true`, vì người gọi vừa qua phép kiểm tra. PDP lỗi là lỗi, không phải `false`. Đây chỉ là gợi ý cho UI: mọi route ghi vẫn tự kiểm tra.
 
-Trang tạo flow chưa có flow để hỏi, nên nó giả định có quyền; người không có quyền bị server từ chối khi Save, kèm thông điệp của server.
+Trang tạo flow chưa có flow để hỏi. Lời gọi validate không-id của chính nó làm đúng phép kiểm tra `workflow:manage`, nên một 403 từ lời gọi đó, hoặc từ Save, chuyển trang sang chỉ đọc, với banner "You need permission to manage flows" và không có Save. Nút "New flow" ở danh sách vẫn không bị chặn: danh sách không mang tín hiệu quyền nào mà không phải đoán.
 
 ## 8. Cấu trúc frontend
 

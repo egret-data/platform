@@ -217,6 +217,34 @@ describe("FlowDetail: Save", () => {
   });
 });
 
+describe("FlowDetail: the two kinds of 409", () => {
+  it("treats a 409 without the draft_changed code as a plain refusal, whatever its words", async () => {
+    server = new FakeWorkflowServer();
+    // The stale sentence, but no code: the page must not read the prose.
+    server.putReply = {
+      status: 409,
+      body: { error: "conflict: a flow already exists at company.team/hello in this workspace; the draft was changed since you opened it" },
+    };
+    renderAt();
+    const box = await editorBox();
+    type(box, flowSource("taken"));
+    await userEvent.click(button("Save"));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("a flow already exists")));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(box).toHaveValue(flowSource("taken"));
+  });
+
+  it("opens the stale-save dialog on the draft_changed code, whatever its words", async () => {
+    server = new FakeWorkflowServer();
+    server.putReply = { status: 409, body: { error: "conflict: reworded", code: "draft_changed" } };
+    renderAt();
+    type(await editorBox(), flowSource("mine"));
+    await userEvent.click(button("Save"));
+    expect(await screen.findByRole("alertdialog", { name: "The draft changed since you opened it" })).toBeInTheDocument();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+});
+
 describe("FlowDetail: Publish", () => {
   it("is disabled with \"Save first\" while there are unsaved edits", async () => {
     server = new FakeWorkflowServer();
@@ -225,6 +253,8 @@ describe("FlowDetail: Publish", () => {
     type(await editorBox(), flowSource("two"));
     expect(button("Publish")).toBeDisabled();
     expect(button("Publish")).toHaveAccessibleDescription("Save first");
+    // Shown as text too, for keyboard and touch users, who never see a tooltip.
+    expect(screen.getByText("Save first")).toBeVisible();
   });
 
   it("is disabled with the error count while validation reports errors", async () => {
@@ -296,6 +326,42 @@ describe("FlowDetail: Publish", () => {
   });
 });
 
+describe("FlowDetail: a failed read after Publish", () => {
+  async function publishWithFailedReread() {
+    renderAt();
+    await waitFor(() => expect(button("Publish")).toBeEnabled(), LONG);
+    await userEvent.click(button("Publish"));
+    const dialog = await screen.findByRole("dialog");
+    server.getFlowFailures = 1; // the re-read that follows the publish
+    await userEvent.click(within(dialog).getByRole("button", { name: "Publish" }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Published v1"));
+    expect(server.getFlowFailures).toBe(0);
+  }
+
+  it("reads the draft before the next save, so the save is not refused as stale", async () => {
+    server = new FakeWorkflowServer();
+    await publishWithFailedReread();
+    const movedByPublish = server.flow!.updated_at;
+    type(screen.getByRole("textbox", { name: "Flow source" }), flowSource("after"));
+    await userEvent.click(button("Save"));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Flow saved"));
+    expect((puts()[0].body as { if_updated_at: string }).if_updated_at).toBe(movedByPublish);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("does not save, and says to reload, when that read fails too", async () => {
+    server = new FakeWorkflowServer();
+    await publishWithFailedReread();
+    server.getFlowFailures = 1;
+    type(screen.getByRole("textbox", { name: "Flow source" }), flowSource("after"));
+    await userEvent.click(button("Save"));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("Reload the page")));
+    expect(puts()).toHaveLength(0);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Flow source" })).toHaveValue(flowSource("after"));
+  });
+});
+
 describe("FlowDetail: Run", () => {
   it("is disabled until a version is live", async () => {
     server = new FakeWorkflowServer({ live_version_id: null });
@@ -355,6 +421,15 @@ describe("FlowDetail: routing and states", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Flow not found" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Back to flows" })).toHaveAttribute("href", `/explore/${WS}/workflows/flows`);
     expect(screen.queryByRole("textbox", { name: "Flow source" })).not.toBeInTheDocument();
+  });
+
+  it("shows the forbidden page on a 403, with no retry", async () => {
+    server = new FakeWorkflowServer();
+    server.getFlowReply = { status: 403, body: { error: "forbidden" } };
+    renderAt();
+    expect(await screen.findByRole("heading", { level: 1, name: "403 — Forbidden" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Flow not found")).not.toBeInTheDocument();
   });
 
   it("shows a failed load with its message and a retry, never as not found", async () => {

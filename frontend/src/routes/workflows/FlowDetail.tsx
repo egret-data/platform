@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { History, Play, RotateCw, Save, Trash2, Upload } from "lucide-react";
@@ -32,7 +32,14 @@ import {
 import { useFlowEditor } from "@/components/workflows/editor/EditorContext";
 import { disposeFlowModel } from "@/components/workflows/editor/flowModel";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
-import { FlowEditPage, ReasonButton, useFlowLayout, useSaveShortcut } from "@/routes/workflows/FlowEditPage";
+import { Forbidden } from "@/routes/Forbidden";
+import {
+  DisabledReasons,
+  FlowEditPage,
+  ReasonButton,
+  useFlowLayout,
+  useSaveShortcut,
+} from "@/routes/workflows/FlowEditPage";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
 /** The flow detail's tabs in W7a (spec §3); W7b and W7e add theirs here. */
@@ -41,12 +48,18 @@ type FlowTab = (typeof FLOW_TABS)[number];
 const isFlowTab = (t: string | undefined): t is FlowTab => (FLOW_TABS as readonly string[]).includes(t ?? "");
 
 /**
- * The 409 `PUT …/flows/{id}` answers when `if_updated_at` no longer matches
- * (`DRAFT_CHANGED` in `crates/egret-workflow/src/repo.rs`). The same status
- * also refuses a namespace and id another flow holds, so the two are told
- * apart by this sentence; the server sends no code for either.
+ * `ErrorBody.code` of the 409 `PUT …/flows/{id}` answers when `if_updated_at`
+ * no longer matches (`DRAFT_CHANGED_CODE` in
+ * `crates/egret-workflow/src/routes.rs`). The same status also refuses a
+ * namespace and id another flow holds; that one carries no code.
  */
-export const DRAFT_CHANGED = "the draft was changed since you opened it";
+export const DRAFT_CHANGED_CODE = "draft_changed";
+
+/**
+ * Where the create page hands over text typed while its POST was in flight
+ * (`FlowNew.tsx`): the flow's editor opens on it, unsaved.
+ */
+export type CarriedDraft = { unsavedSource: string };
 
 const errorMessage = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
 
@@ -72,6 +85,8 @@ function FlowDetailLoader({ ws, id, tab }: { ws: string; id: string; tab: FlowTa
   // fails after the editor opened must not unmount it and drop unsaved edits
   // (FE-ACTION-3); the editor stays on the last answer.
   if (query.isError && !flow) {
+    // Spec §10: a 403 (the module or `workflow:read`) is the forbidden page; a retry cannot help.
+    if (query.error instanceof ApiError && query.error.status === 403) return <Forbidden />;
     const notFound = query.error instanceof ApiError && query.error.status === 404;
     return (
       <div className="p-4">
@@ -135,7 +150,7 @@ function FlowWorkspace({
   tab: FlowTab;
   /** The latest answer of `GET …/flows/{id}`: state, live version and permission come from here. */
   flow: FlowDto;
-  refetchFlow: () => Promise<{ data?: { status: number; data: unknown } }>;
+  refetchFlow: () => Promise<{ isError: boolean; data?: { status: number; data: unknown } }>;
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -143,6 +158,15 @@ function FlowWorkspace({
   const manage = flow.can_manage;
 
   const [baseline, setBaseline] = useState<Baseline>(() => ({ source: flow.source, updatedAt: flow.updated_at }));
+  // Text the create page carried over (typed while its POST was in flight). Read
+  // once, then cleared from the history entry so a reload opens the saved draft.
+  const location = useLocation();
+  const [carried] = useState(() => (location.state as CarriedDraft | null)?.unsavedSource);
+  useEffect(() => {
+    if (carried !== undefined) navigate(location.pathname, { replace: true, state: null });
+    // Once, on mount: `carried` never changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const versionsQuery = useWorkflowListFlowVersions(ws, id, { query: { queryKey: workflowsKeys.versions(id) } });
   const versions: FlowVersionDto[] | undefined = versionsQuery.data?.status === 200 ? versionsQuery.data.data : undefined;
 
@@ -158,7 +182,7 @@ function FlowWorkspace({
   const editor = useFlowEditor({
     workspace: ws,
     flowId: id,
-    initialSource: flow.source,
+    initialSource: carried ?? flow.source,
     readOnly: !manage,
     save: manage ? save : undefined,
     onRevealCode: flowLayout.revealCode,
@@ -175,6 +199,19 @@ function FlowWorkspace({
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const inFlight = useRef(false);
+  /**
+   * Set when the read after a publish failed, so `baseline.updatedAt` may be
+   * the pre-publish value: the next save reads the draft first rather than
+   * collect a false "draft changed".
+   */
+  const needsReread = useRef(false);
+
+  /** `GET …/flows/{id}` again; `undefined` when that read failed (react-query keeps the old data then). */
+  const readFresh = async (): Promise<FlowDto | undefined> => {
+    const res = await refetchFlow();
+    if (res.isError || res.data?.status !== 200) return undefined;
+    return res.data.data as FlowDto;
+  };
 
   const adopt = useCallback((saved: FlowDto) => {
     setBaseline({ source: saved.source, updatedAt: saved.updated_at });
@@ -190,7 +227,22 @@ function FlowWorkspace({
     if (!overwrite && source === baseline.source) return;
     inFlight.current = true;
     setSaving(true);
+    let precondition = baseline.updatedAt;
     try {
+      if (needsReread.current && !overwrite) {
+        const fresh = await readFresh();
+        if (!fresh) {
+          toast.error("The draft could not be re-read after publishing, so it was not saved. Reload the page, then save again.");
+          return;
+        }
+        needsReread.current = false;
+        // Still the draft this editor saved: publishing moved only `updated_at`. If
+        // someone else saved meanwhile, the old value stands and the save is refused.
+        if (fresh.source === baseline.source) {
+          precondition = fresh.updated_at;
+          setBaseline({ source: baseline.source, updatedAt: fresh.updated_at });
+        }
+      }
       const res = await update.mutateAsync({
         workspace: ws,
         id,
@@ -198,14 +250,14 @@ function FlowWorkspace({
         // workflow UI never moves a flow between folders.
         data: overwrite
           ? { source, folder_id: flow.folder_id ?? null }
-          : { source, folder_id: flow.folder_id ?? null, if_updated_at: baseline.updatedAt },
+          : { source, folder_id: flow.folder_id ?? null, if_updated_at: precondition },
       });
       if (res.status !== 200) throw new Error("The flow could not be saved.");
       adopt(res.data);
       setStaleOpen(false);
       toast.success("Flow saved");
     } catch (e) {
-      if (!overwrite && e instanceof ApiError && e.status === 409 && e.message.includes(DRAFT_CHANGED)) {
+      if (!overwrite && e instanceof ApiError && e.status === 409 && e.code === DRAFT_CHANGED_CODE) {
         setStaleOpen(true);
       } else {
         toast.error(errorMessage(e, "The flow could not be saved. Try again."));
@@ -221,12 +273,12 @@ function FlowWorkspace({
 
   /** Reload after a 409: the saved draft replaces the editor's text (the dialog has confirmed). */
   const reload = async () => {
-    const res = await refetchFlow();
-    const fresh = res.data?.status === 200 ? (res.data.data as FlowDto) : undefined;
+    const fresh = await readFresh();
     if (!fresh) {
       toast.error("The saved draft could not be loaded. Try again.");
       throw new Error("reload failed");
     }
+    needsReread.current = false;
     setBaseline({ source: fresh.source, updatedAt: fresh.updated_at });
     editor.setSource(fresh.source);
     toast.success("Reloaded the saved draft");
@@ -242,10 +294,11 @@ function FlowWorkspace({
     // conditional save needs the new one. It is taken only while the saved
     // draft is still the text this editor holds; if someone saved in between,
     // the next save is refused, which is the point of the precondition.
-    const reread = await refetchFlow();
-    const fresh = reread.data?.status === 200 ? (reread.data.data as FlowDto) : undefined;
+    const fresh = await readFresh();
     const ours = baseline;
-    if (fresh && fresh.source === ours.source) setBaseline({ source: ours.source, updatedAt: fresh.updated_at });
+    // A failed read leaves the pre-publish `updated_at`; the next save reads first.
+    if (!fresh) needsReread.current = true;
+    else if (fresh.source === ours.source) setBaseline({ source: ours.source, updatedAt: fresh.updated_at });
     if (liveSourceOf(version) !== undefined && liveSourceOf(version) !== ours.source) {
       toast.warning(`Published v${version.version} from the saved draft, which someone changed since you opened it.`);
     } else {
@@ -284,6 +337,7 @@ function FlowWorkspace({
   const runState = canRun({ liveVersionId: flow.live_version_id, manage });
   const nextVersion = versions ? Math.max(0, ...versions.map((v) => v.version)) + 1 : null;
   const flowName = `${flow.namespace}.${flow.flow_id}`;
+  const reasonsId = useId();
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -301,24 +355,33 @@ function FlowWorkspace({
           <p className="text-sm text-muted-foreground">{flow.namespace}</p>
         </div>
         {manage && (
-          <div className="flex flex-wrap items-center gap-2">
-            <ReasonButton enablement={saveState} variant="outline" onClick={save}>
-              <Save aria-hidden />
-              Save
-            </ReasonButton>
-            <ReasonButton enablement={publishState} onClick={() => setPublishOpen(true)}>
-              <Upload aria-hidden />
-              Publish
-            </ReasonButton>
-            {/* The run form (spec §6) lands with W7a Task 6, which opens it from here. */}
-            <ReasonButton enablement={runState} variant="outline" onClick={() => {}}>
-              <Play aria-hidden />
-              Run
-            </ReasonButton>
-            <Button type="button" size="sm" variant="ghost" onClick={() => setDeleteOpen(true)}>
-              <Trash2 aria-hidden />
-              Delete
-            </Button>
+          <div className="flex flex-col items-end gap-1">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <ReasonButton enablement={saveState} reasonId={`${reasonsId}-save`} variant="outline" onClick={save}>
+                <Save aria-hidden />
+                Save
+              </ReasonButton>
+              <ReasonButton enablement={publishState} reasonId={`${reasonsId}-publish`} onClick={() => setPublishOpen(true)}>
+                <Upload aria-hidden />
+                Publish
+              </ReasonButton>
+              {/* The run form (spec §6) lands with W7a Task 6, which opens it from here. */}
+              <ReasonButton enablement={runState} reasonId={`${reasonsId}-run`} variant="outline" onClick={() => {}}>
+                <Play aria-hidden />
+                Run
+              </ReasonButton>
+              <Button type="button" size="sm" variant="ghost" onClick={() => setDeleteOpen(true)}>
+                <Trash2 aria-hidden />
+                Delete
+              </Button>
+            </div>
+            <DisabledReasons
+              actions={[
+                { id: `${reasonsId}-save`, label: "Save", enablement: saveState },
+                { id: `${reasonsId}-publish`, label: "Publish", enablement: publishState },
+                { id: `${reasonsId}-run`, label: "Run", enablement: runState },
+              ]}
+            />
           </div>
         )}
       </header>

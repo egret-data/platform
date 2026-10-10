@@ -1131,14 +1131,14 @@ async fn update_with_a_stale_if_updated_at_is_refused_and_writes_nothing() {
     )
     .await;
     assert_eq!(res.status(), StatusCode::CONFLICT);
-    let msg = common::json(res).await["error"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let refusal = common::json(res).await;
+    let msg = refusal["error"].as_str().unwrap().to_string();
     assert!(
         msg.contains("the draft was changed since you opened it"),
         "{msg}"
     );
+    // The client branches on the code, never on the sentence.
+    assert_eq!(refusal["code"], "draft_changed", "{refusal}");
 
     let row = common::json(common::get(&app, &path, user).await).await;
     assert_eq!(
@@ -1490,4 +1490,88 @@ async fn get_flow_says_whether_the_caller_may_manage_it() {
         let body = common::json(res).await;
         assert_eq!(body["can_manage"], expected, "{perms:?}: {body}");
     }
+}
+
+/// The other 409 a `PUT` can answer -- another flow holds the namespace and
+/// id -- carries no `code`, even with a matching `if_updated_at`, so a client
+/// branching on `draft_changed` cannot mistake it for a stale save.
+#[tokio::test]
+async fn an_identity_collision_on_update_is_a_409_without_the_draft_changed_code() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let (_taken, _) = created_flow(&app, ws, user, "a.taken").await;
+    let (id, at) = created_flow(&app, ws, user, "a.mover").await;
+
+    let res = common::put(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}"),
+        user,
+        serde_json::json!({ "source": minimal_flow("a.taken"), "folder_id": null, "if_updated_at": at }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let refusal = common::json(res).await;
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("already exists"),
+        "{refusal}"
+    );
+    assert!(refusal.get("code").is_none(), "{refusal}");
+}
+
+/// Create and update answer `can_manage: true`: the caller just passed the
+/// `workflow:manage` check those routes make.
+#[tokio::test]
+async fn create_and_update_answer_can_manage_true() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let created = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows"),
+        user,
+        serde_json::json!({ "source": minimal_flow("a.cm") }),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created = common::json(created).await;
+    assert_eq!(created["can_manage"], true, "{created}");
+
+    let id = created["id"].as_str().unwrap();
+    let updated = common::put(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}"),
+        user,
+        serde_json::json!({ "source": minimal_flow("a.cm2"), "folder_id": null }),
+    )
+    .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated = common::json(updated).await;
+    assert_eq!(updated["can_manage"], true, "{updated}");
+}
+
+/// A PDP that fails while deciding `workflow:manage` is an error (500), not
+/// a "no": `get_flow` must not open the editor read-only on an outage. The
+/// read check (`workflow:read`) goes to the real PDP and passes, so the 500
+/// can only come from the `can_manage` decision.
+#[tokio::test]
+async fn get_flow_answers_an_error_when_the_can_manage_decision_fails() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let id = common::seed_flow(&db, ws, user, &minimal_flow("a.pdp"), "draft").await;
+
+    // Control: the same request through an app whose PDP fails on nothing.
+    let ok = common::app_with_failing_pdp_action(&db, "no-such-action").await;
+    let res = common::get(&ok, &format!("/api/ws/{ws}/workflows/flows/{id}"), user).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let app = common::app_with_failing_pdp_action(&db, "workflow:manage").await;
+    let res = common::get(&app, &format!("/api/ws/{ws}/workflows/flows/{id}"), user).await;
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }

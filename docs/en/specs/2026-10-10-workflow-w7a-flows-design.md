@@ -273,7 +273,7 @@ While the execution is not terminal, it polls `GET …/executions/{id}` every 2 
 ### 7.3 `if_updated_at` on `PUT /flows/{id}`
 
 `UpdateFlowRequest` gains an optional `if_updated_at` (RFC 3339).
-- When it is present and differs from the row's `updated_at`, the update is refused with 409, "the draft was changed since you opened it", and nothing is written.
+- When it is present and differs from the row's `updated_at`, the update is refused with 409, "the draft was changed since you opened it", and nothing is written. The body's `code` is `draft_changed` *(W7a Task 5 fix round 1)*; the other 409 this route answers, a namespace and id another flow holds, carries no code. Clients branch on the code, never on the sentence.
 - The comparison and the write happen in one statement (`UPDATE … WHERE id = $1 AND updated_at = $2`), so two concurrent saves cannot both pass.
 - Absent, the route behaves exactly as today.
 - Every writer of `flows.updated_at` is listed in the route's doc comment, because the precondition's meaning rests on them (FE-STATE-4's rule, applied to a precondition).
@@ -288,7 +288,7 @@ While the execution is not terminal, it polls `GET …/executions/{id}` every 2 
 
 *(Added in W7a Task 5.)* `GET …/flows/{id}` answers `can_manage: bool`: whether the caller holds `workflow:manage` in this workspace, decided by the PDP with the same check the mutating routes make. The editor opens read-only, with no Save, Publish, Run or Delete, when it is false (§5.2). `workflow:manage` is workspace-scoped, and `/auth/me` lists only platform permissions, so the frontend cannot tell otherwise; this follows the `can_manage` other workspace objects carry (dashboards, schedules, apps). Create and update answer `true`, since the caller just passed the check. A PDP failure is an error, not `false`. It is a hint for the UI only: every mutating route still checks.
 
-The create page has no flow to ask, so it assumes the permission; a caller without it is refused by the server on Save, with its message.
+The create page has no flow to ask. Its own id-less validate call makes the same `workflow:manage` check, so a 403 from it, or from Save, turns the page read-only, with the banner "You need permission to manage flows" and no Save. The list's "New flow" stays ungated: the list carries no permission signal that does not guess.
 
 ## 8. Frontend structure
 

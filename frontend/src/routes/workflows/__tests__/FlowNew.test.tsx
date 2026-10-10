@@ -111,4 +111,47 @@ describe("FlowNew", () => {
     await waitFor(() => expect(server.callsTo("POST", `${BASE}/flows`)).toHaveLength(1));
     expect(server.callsTo("POST", `${BASE}/flows`)[0].body).toEqual({ source: NEW_FLOW_TEMPLATE });
   });
+
+  it("keeps text typed while the create request is in flight, as unsaved edits of the new flow", async () => {
+    let release!: () => void;
+    server.createGate = new Promise<void>((r) => { release = r; });
+    renderNew();
+    const box = await editorBox();
+    fireEvent.change(box, { target: { value: flowSource("sent") } });
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(server.callsTo("POST", `${BASE}/flows`)).toHaveLength(1));
+    // Typed after the request left.
+    fireEvent.change(box, { target: { value: flowSource("typed during save") } });
+    release();
+
+    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent(`/flows/${FLOW_ID}/edit`));
+    expect(await screen.findByRole("heading", { level: 1, name: "hello" })).toBeInTheDocument();
+    expect(await editorBox()).toHaveValue(flowSource("typed during save"));
+    expect(server.flow!.source).toBe(flowSource("sent"));
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+  });
+
+  it("turns read-only, with a banner and no Save, when the server says the caller cannot manage flows", async () => {
+    server.validation = { status: 403, body: { error: "forbidden" } };
+    renderNew();
+    expect(await screen.findByText("You need permission to manage flows", {}, LONG)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(await editorBox()).toHaveAttribute("readonly");
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    // Latched: read-only stops validation, and the page stays as it is.
+    await new Promise((r) => setTimeout(r, 700));
+    expect(server.callsTo("POST", `${BASE}/flows`)).toHaveLength(0);
+    expect(server.callsTo("POST", `${BASE}/flows/validate`)).toHaveLength(1);
+    expect(screen.getByText("You need permission to manage flows")).toBeInTheDocument();
+  });
+
+  it("turns read-only on a 403 from Save too", async () => {
+    server.createReply = { status: 403, body: { error: "forbidden" } };
+    renderNew();
+    await editorBox();
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("You need permission to manage flows")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Flow source" })).toHaveValue(NEW_FLOW_TEMPLATE);
+  });
 });

@@ -35,6 +35,12 @@ export class FakeWorkflowServer {
   /** Answers the next `POST …/flows` with this instead of creating. */
   createReply: Reply | null = null;
   getFlowReply: Reply | null = null;
+  /** Answers the next `PUT …/flows/{id}` with this instead of saving. */
+  putReply: Reply | null = null;
+  /** How many of the next `GET …/flows/{id}` fail with 503. */
+  getFlowFailures = 0;
+  /** While set, `POST …/flows` waits for it before answering. */
+  createGate: Promise<void> | null = null;
 
   constructor(flow: Partial<FlowDto> | null = {}) {
     this.flow = flow === null ? null : {
@@ -88,6 +94,7 @@ export class FakeWorkflowServer {
       const path = String(input).split("?")[0];
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
       this.calls.push({ method, path, body });
+      if (method === "POST" && path === `/api/ws/${WS}/workflows/flows` && this.createGate) await this.createGate;
       const { status, body: out, headers } = this.route(method, path, body);
       return new Response(out === undefined ? null : JSON.stringify(out), {
         status,
@@ -109,12 +116,19 @@ export class FakeWorkflowServer {
       return { status: 201, body: this.flow };
     }
     if (!this.flow || !path.startsWith(flowPath)) return { status: 404, body: { error: "not found: flow" } };
-    if (method === "GET" && path === flowPath) return this.getFlowReply ?? { status: 200, body: this.flow };
+    if (method === "GET" && path === flowPath) {
+      if (this.getFlowFailures > 0) {
+        this.getFlowFailures--;
+        return { status: 503, body: { error: "the database is unavailable" } };
+      }
+      return this.getFlowReply ?? { status: 200, body: this.flow };
+    }
     if (method === "GET" && path === `${flowPath}/versions`) return { status: 200, body: this.versions };
     if (method === "PUT" && path === flowPath) {
+      if (this.putReply) return this.putReply;
       const req = body as { source: string; if_updated_at?: string | null };
       if (req.if_updated_at != null && req.if_updated_at !== this.flow.updated_at) {
-        return { status: 409, body: { error: "conflict: the draft was changed since you opened it" } };
+        return { status: 409, body: { error: "conflict: the draft was changed since you opened it", code: "draft_changed" } };
       }
       this.flow = { ...this.flow, source: req.source, updated_at: stamp() };
       return { status: 200, body: this.flow };
