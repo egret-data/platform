@@ -125,6 +125,10 @@ pub fn perm_router() -> Router<PermState> {
         .route("/perm/preview", post(preview))
         .route("/perm/explain", post(explain))
         .route("/perm/compile/{service_id}", post(compile))
+        .route(
+            "/perm/policies/services/{service_id}/classify",
+            get(classify_service_policies),
+        )
 }
 
 /// The `perm` surface's OpenAPI document, merged into the top-level doc by
@@ -148,7 +152,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         delete_rule,
         preview,
         explain,
-        compile
+        compile,
+        classify_service_policies
     ),
     components(schemas(
         NewGrant,
@@ -192,6 +197,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::explain_wire::WireEngineType,
         crate::explain_wire::WirePluginVersion,
         CompileResponse,
+        crate::classify::ClassifiedPolicy,
+        crate::classify::ProposedObjects,
         CreatedResponse,
         SkipReport,
         Grant,
@@ -3044,6 +3051,37 @@ async fn compile(
         vec![service_id],
         std::slice::from_ref(&summary),
     )))
+}
+
+/// SP4d-3 Task 5: every policy of one profile, classified — its owner,
+/// whether it can be migrated into the permission model, and if not, every
+/// reason as a sentence naming the offending value. Read-only; `infra` and
+/// `compiler` rows are reported (as not migratable, with the reason), never
+/// omitted. See [`crate::classify`] for how the service kind, the catalog
+/// lookup and the tag lookup are derived from the profile.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/policies/services/{service_id}/classify",
+    tag = "perm",
+    params(("service_id" = i64, Path, description = "policy.authz_services id")),
+    responses(
+        (status = 200, description = "Every policy of the profile, ordered by id, with its owner, verdict and blocker sentences", body = Vec<crate::classify::ClassifiedPolicy>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn classify_service_policies(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(service_id): Path<i64>,
+) -> Result<Json<Vec<crate::classify::ClassifiedPolicy>>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
+    Ok(Json(
+        crate::classify::classify_service(&mut conn, service_id).await?,
+    ))
 }
 
 #[cfg(test)]

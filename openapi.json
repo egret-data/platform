@@ -6503,6 +6503,82 @@
         }
       }
     },
+    "/api/control-plane/perm/policies/services/{service_id}/classify": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP4d-3 Task 5: every policy of one profile, classified — its owner,\nwhether it can be migrated into the permission model, and if not, every\nreason as a sentence naming the offending value. Read-only; `infra` and\n`compiler` rows are reported (as not migratable, with the reason), never\nomitted. See [`crate::classify`] for how the service kind, the catalog\nlookup and the tag lookup are derived from the profile.",
+        "operationId": "classify_service_policies",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "description": "policy.authz_services id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every policy of the profile, ordered by id, with its owner, verdict and blocker sentences",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ClassifiedPolicy"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/preview": {
       "post": {
         "tags": [
@@ -33521,6 +33597,56 @@
           }
         }
       },
+      "ClassifiedPolicy": {
+        "type": "object",
+        "description": "One policy of the profile, as the classifier reports it.",
+        "required": [
+          "id",
+          "name",
+          "managed_by",
+          "enabled",
+          "migratable",
+          "blockers"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "managed_by": {
+            "type": "string",
+            "description": "`compiler` | `infra` | `operator` — `policy.authz_policies.managed_by`."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "The `enabled` COLUMN — what decides whether the engine downloads it."
+          },
+          "migratable": {
+            "type": "boolean"
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every reason the policy cannot be migrated, as operator-readable\nsentences naming the offending value. Empty iff `migratable`."
+          },
+          "proposed": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProposedObjects",
+                "description": "For a migratable policy, the model objects it would become."
+              }
+            ]
+          }
+        }
+      },
       "ClientDto": {
         "type": "object",
         "required": [
@@ -39274,6 +39400,24 @@
           },
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "ProposedObjects": {
+        "type": "object",
+        "description": "How many model objects a migratable policy becomes. No `clearances`:\nclearance migration is out of scope ([`Blocker::ClearanceNotExpressible`]).",
+        "required": [
+          "grants",
+          "rules"
+        ],
+        "properties": {
+          "grants": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rules": {
+            "type": "integer",
+            "minimum": 0
           }
         }
       },

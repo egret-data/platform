@@ -25,6 +25,7 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  ClassifiedPolicy,
   CompileResponse,
   ErrorBody,
   ExplainRequest,
@@ -768,7 +769,151 @@ export const usePermPatchGrant = <TError = ErrorBody,
       > => {
       return useMutation(getPermPatchGrantMutationOptions(options), queryClient);
     }
-    export type permPreviewResponse200 = {
+    export type permClassifyServicePoliciesResponse200 = {
+  data: ClassifiedPolicy[]
+  status: 200
+}
+
+export type permClassifyServicePoliciesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permClassifyServicePoliciesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permClassifyServicePoliciesResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permClassifyServicePoliciesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permClassifyServicePoliciesResponseSuccess = (permClassifyServicePoliciesResponse200) & {
+  headers: Headers;
+};
+export type permClassifyServicePoliciesResponseError = (permClassifyServicePoliciesResponse401 | permClassifyServicePoliciesResponse403 | permClassifyServicePoliciesResponse404 | permClassifyServicePoliciesResponse500) & {
+  headers: Headers;
+};
+
+export type permClassifyServicePoliciesResponse = (permClassifyServicePoliciesResponseSuccess | permClassifyServicePoliciesResponseError)
+
+export const getPermClassifyServicePoliciesUrl = (serviceId: number,) => {
+
+
+
+
+  return `/api/control-plane/perm/policies/services/${encodeURIComponent(serviceId)}/classify`
+}
+
+/**
+ * @summary SP4d-3 Task 5: every policy of one profile, classified — its owner,
+whether it can be migrated into the permission model, and if not, every
+reason as a sentence naming the offending value. Read-only; `infra` and
+`compiler` rows are reported (as not migratable, with the reason), never
+omitted. See [`crate::classify`] for how the service kind, the catalog
+lookup and the tag lookup are derived from the profile.
+ */
+export const permClassifyServicePolicies = async (serviceId: number, options?: Parameters<typeof customInstance>[1]): Promise<permClassifyServicePoliciesResponse> => {
+
+  return customInstance<permClassifyServicePoliciesResponse>(getPermClassifyServicePoliciesUrl(serviceId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermClassifyServicePoliciesQueryKey = (serviceId: number,) => {
+    return [
+    `/api/control-plane/perm/policies/services/${encodeURIComponent(serviceId)}/classify`
+    ] as const;
+    }
+
+
+export const getPermClassifyServicePoliciesQueryOptions = <TData = Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError = ErrorBody>(serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermClassifyServicePoliciesQueryKey(serviceId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permClassifyServicePolicies>>> = ({ signal }) => permClassifyServicePolicies(serviceId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: serviceId !== null && serviceId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermClassifyServicePoliciesQueryResult = NonNullable<Awaited<ReturnType<typeof permClassifyServicePolicies>>>
+export type PermClassifyServicePoliciesQueryError = ErrorBody
+
+
+export function usePermClassifyServicePolicies<TData = Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError = ErrorBody>(
+ serviceId: number, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permClassifyServicePolicies>>,
+          TError,
+          Awaited<ReturnType<typeof permClassifyServicePolicies>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermClassifyServicePolicies<TData = Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permClassifyServicePolicies>>,
+          TError,
+          Awaited<ReturnType<typeof permClassifyServicePolicies>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermClassifyServicePolicies<TData = Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary SP4d-3 Task 5: every policy of one profile, classified — its owner,
+whether it can be migrated into the permission model, and if not, every
+reason as a sentence naming the offending value. Read-only; `infra` and
+`compiler` rows are reported (as not migratable, with the reason), never
+omitted. See [`crate::classify`] for how the service kind, the catalog
+lookup and the tag lookup are derived from the profile.
+ */
+
+export function usePermClassifyServicePolicies<TData = Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermClassifyServicePoliciesQueryOptions(serviceId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permPreviewResponse200 = {
   data: PreviewResponse
   status: 200
 }
