@@ -211,12 +211,12 @@ Mục kiểm bằng lint chính là danh sách legacy của rule đó (§7). M�
      Rule không áp dụng dưới `src/components/chart/echarts/` (FE-VISUAL-6).
    - **`egret/no-arbitrary-text-size`** báo `text-[<số><đơn vị>]`.
    - **`egret/no-window-confirm`** báo `window.confirm(…)` và `confirm(…)` trơn khi nó trỏ tới hàm global.
-2. **`eslint-plugin-jsx-a11y`**, với cấu hình `recommended`, ở mức error.
+2. **`eslint-plugin-jsx-a11y-x`**, với cấu hình `recommended`, ở mức error. *(Sửa 2026-10-10, theo plan: đây là bản fork còn được bảo trì của `eslint-plugin-jsx-a11y`, cùng bộ rule. Bản gốc 6.10.2, phát hành lần cuối năm 2024, chỉ khai báo hỗ trợ tới ESLint 9, còn egret chạy ESLint 10. Phần settings `jsx-a11y` của fork ánh xạ các primitive của egret (`Button`, `Input`, `Label`, `Textarea`) sang thẻ HTML tương ứng.)*
 3. **Danh sách legacy.**
-   - Mỗi rule có danh sách riêng gồm các file vi phạm nó lúc rule được đưa vào: `frontend/eslint-rules/legacy.js`, mỗi rule một mảng export.
+   - Mỗi rule có danh sách riêng gồm các file vi phạm nó lúc rule được đưa vào: `frontend/eslint-rules/legacy.js`, mỗi mã rule một mục, cho cả `egret/*` lẫn `jsx-a11y/*`.
    - `eslint.config.js` tắt đúng rule đó cho đúng các file ấy.
    - Một file không bao giờ được thêm vào danh sách sau khi danh sách đã được tạo.
-4. **Danh sách luôn đúng.** Một script, `npm run lint:legacy`, chạy mỗi rule không kèm danh sách legacy trên các file được liệt kê. Script thất bại khi một file trong danh sách không còn vi phạm rule của nó, nên file đã sửa phải ra khỏi danh sách. Script chạy trong cổng kiểm (FE-TEST-4).
+4. **Danh sách luôn đúng.** Một script, `npm run lint:legacy`, chạy mỗi rule không kèm danh sách legacy trên các file được liệt kê. Script thất bại khi một file trong danh sách không còn vi phạm rule của nó, nên file đã sửa phải ra khỏi danh sách. Script chạy trong cổng kiểm: `npm run lint` chạy ESLint rồi chạy script này (FE-TEST-4).
 5. Mọi rule này đều ở mức error. Các rule React Compiler mà `eslint.config.js` đặt ở mức warn vẫn giữ nguyên; chúng nằm ngoài package này.
 
 ## 8. Kiểm thử
