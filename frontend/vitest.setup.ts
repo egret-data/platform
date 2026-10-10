@@ -46,6 +46,8 @@ if (typeof HTMLCanvasElement !== "undefined") {
 
 // jsdom lacks these; Radix DropdownMenu/Select need them to open via pointer events.
 beforeEach(() => {
+  // `// @vitest-environment node` files (the eslint-rules tests) have no DOM.
+  if (typeof HTMLElement === "undefined") return;
   if (!HTMLElement.prototype.hasPointerCapture) HTMLElement.prototype.hasPointerCapture = () => false;
   if (!HTMLElement.prototype.setPointerCapture) HTMLElement.prototype.setPointerCapture = () => undefined;
   if (!HTMLElement.prototype.releasePointerCapture) HTMLElement.prototype.releasePointerCapture = () => undefined;
