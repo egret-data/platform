@@ -472,7 +472,11 @@ pub(crate) fn ensure_scope_levels_are_named(scope: &Scope) -> Result<(), Compile
 /// binaries, mutating a live disagreement into silence. The mask is call order,
 /// and call order is not a test. `tests::empty_level_is_not_a_wildcard_run_so_0178_owns_the_refusal`
 /// pins it by calling this rule DIRECTLY, past that mask.
-fn level_is_a_wildcard_run(value: &str) -> bool {
+///
+/// `pub(crate)` since SP4d-3 Task 3: `crate::grammar` reads a hand-written
+/// policy's levels with this SAME predicate, so "what is a wildcard run" has one
+/// spelling for the compiler and for its inverse.
+pub(crate) fn level_is_a_wildcard_run(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|b| b == b'*')
 }
 
