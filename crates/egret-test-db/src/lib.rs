@@ -1121,10 +1121,28 @@ mod tests {
     /// A name must not be reachable by moving bytes between neighbouring migrations.
     ///
     /// The pair below collides under an unframed digest — `version || kind || checksum`,
-    /// concatenated. `[(1, SIMPLE, 0x…02)]` hashes the same bytes as
-    /// `[(1, SIMPLE, b""), (2, SIMPLE, b"")]`, because the first set's checksum IS the second
-    /// set's second version and kind. Length-framing is what separates them, and this is the
-    /// test that dies if the frame is removed — `assert_ne!` on two arbitrary sets would not.
+    /// concatenated. Length-framing is what separates them, and this is the test that dies
+    /// if the frame is removed; `assert_ne!` on two arbitrary sets would not.
+    ///
+    /// # ⚠ The fixture was one byte short and the test could not fail (fixed 2026-10-10,
+    /// whole-branch review finding H-B)
+    ///
+    /// The absorbed checksum used to be `2i64.to_be_bytes()` — eight bytes, the second
+    /// entry's VERSION and nothing else. The second entry is `version || kind`, nine bytes,
+    /// so the two pre-images were 17 and 18 bytes long: they did not collide even unframed,
+    /// and the review measured exactly that — delete
+    /// `h.update((checksum.len() as u64).to_be_bytes())` from [`template_db_name`] and this
+    /// test still PASSED (12 passed / 1 failed; the only death was
+    /// `the_same_migration_set_always_names_the_same_template`, on its hard-coded literal
+    /// digest, which dies on any digest change at all and so distinguishes nothing). The
+    /// doc claimed to be "the test that dies if the frame is removed" while being the test
+    /// that could not.
+    ///
+    /// The checksum is nine bytes now — the second entry's version followed by its KIND
+    /// byte — so the unframed pre-images are byte-identical. The `assert_eq!` below pins
+    /// that premise explicitly rather than leaving it to arithmetic in a comment: if a later
+    /// edit makes the pair stop colliding unframed, that assertion fails and says so,
+    /// instead of this test going quietly green while guarding nothing.
     ///
     /// # ⚠ Narrowed by review round 2: this pair is NOT reachable from sqlx
     ///
@@ -1137,8 +1155,38 @@ mod tests {
     /// observed defect, and this comment no longer implies it was.
     #[test]
     fn a_name_cannot_be_reached_by_moving_bytes_between_migrations() {
-        let absorbing: &[(i64, u8, &[u8])] = &[(1, SIMPLE, &2i64.to_be_bytes())];
+        // Nine bytes: `(2, SIMPLE)` as the digest would feed it WITHOUT a frame — the
+        // version's eight big-endian bytes, then the one kind byte. Built rather than
+        // written as a literal so it cannot drift from the encoding it is absorbing.
+        let mut absorbed = [0u8; 9];
+        absorbed[..8].copy_from_slice(&2i64.to_be_bytes());
+        absorbed[8] = SIMPLE;
+
+        let absorbing: &[(i64, u8, &[u8])] = &[(1, SIMPLE, &absorbed)];
         let two_empty: &[(i64, u8, &[u8])] = &[(1, SIMPLE, b""), (2, SIMPLE, b"")];
+
+        // The premise, asserted instead of asserted-about: with no length frame both sets
+        // feed the hasher exactly the same bytes. This is the half that makes the
+        // `assert_ne!` below able to fail — see the ⚠ note above.
+        fn unframed(migrations: &[(i64, u8, &[u8])]) -> Vec<u8> {
+            let mut set = migrations.to_vec();
+            set.sort_unstable();
+            let mut out = Vec::new();
+            for (version, kind, checksum) in &set {
+                out.extend_from_slice(&version.to_be_bytes());
+                out.push(*kind);
+                out.extend_from_slice(checksum);
+            }
+            out
+        }
+        assert_eq!(
+            unframed(absorbing),
+            unframed(two_empty),
+            "this fixture only tests the frame while the two sets are INDISTINGUISHABLE \
+             without it; if these pre-images differ, the `assert_ne!` below passes for a \
+             reason that has nothing to do with framing"
+        );
+
         assert_ne!(
             template_db_name(absorbing),
             template_db_name(two_empty),

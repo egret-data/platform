@@ -48,14 +48,48 @@
 # So there are now two independent caps on `incremental`, and they answer different
 # questions:
 #
-#   MAX_INCREMENTAL_DIRS  — count. Stops unbounded accumulation during normal work.
-#   PRUNE_MIN_FREE_GB     — bytes, via `df`. Fires only when the VOLUME is running out,
-#                           and then drops the count cap to LOW_DISK_INCREMENTAL_DIRS.
+#   MAX_INCREMENTAL_DIRS  — count. Stops unbounded accumulation during normal work, and
+#                           only while no cargo/rustc process is running: for a COUNT cap
+#                           the build guard below is evaluated first.
+#   PRUNE_MIN_FREE_GB     — bytes, via `df`. Fires when the VOLUME is running out, and
+#                           then drops the count cap to LOW_DISK_INCREMENTAL_DIRS. It is
+#                           evaluated BEFORE the build guard and OUTSIDE the
+#                           `[ -d "$inc" ]` test, so a crossed floor prunes `incremental`
+#                           even mid-build and an absent `incremental` still reports the
+#                           volume. The next paragraph is why that inversion is deliberate.
 #
-# Deleting a session directory only costs the next build's incremental speed for the
-# crates it covered; it is never a correctness risk, unlike deleting from `deps/`. That
-# asymmetry is why the low-disk path is allowed to empty `incremental` outright and is
-# NOT allowed to go harder on `deps/`.
+# ⚠ WHY THE FLOOR IS CHECKED BEFORE THE BUILD GUARD FOR `incremental` AND NOT FOR `deps/`
+# (fixed 2026-10-10, whole-branch review finding H-A). When the floor was added it was
+# written UNDERNEATH the build guard, inherited from the `deps/` loop above without being
+# re-decided, and that made it unable to fire in the one scenario it exists for. Measured
+# on 2026-10-10 on the unfixed script, on a throwaway fixture tree of three session
+# directories with a real cargo build in flight: `PRUNE_MIN_FREE_GB=999999` deleted 0 of
+# 3, exited 0, and never printed a free-space figure at all — the floor was never
+# evaluated. The control, identical but with `pgrep` stubbed to exit 1, dropped the cap to
+# 0 and deleted 3 of 3. A disk that fills WHILE something builds is the only way this disk
+# has ever filled, so "fires only when the volume is running out" was promising something
+# the code could not do.
+#
+# The two directories need OPPOSITE answers because their failure modes are opposite.
+# Deleting from `deps/` mid-build can break that build, and a broken build is recoverable
+# in minutes — so for `deps/` erring toward not deleting is right and the guard stays
+# first. For `incremental`, NOT deleting IS the disk-full, and the disk-full on this host
+# did not merely break a build: `/` reached 117 Mi, which filled the Docker VM's log with
+# `input/output error` and left Postgres unreachable for an hour (74 test failures, every
+# binary ~3.0 s — the shape of a connection timeout). So on a crossed floor the floor wins.
+#
+# The inversion is not free and the cost is named rather than denied: removing a crate's
+# incremental directory while rustc is writing into it can make that build fail, and the
+# failure reads as a source error. It is NARROWED, not eliminated — while a build is
+# running the low-disk path skips any crate directory that currently holds an
+# `s-*-working` session directory, rustc's marker for a session it has not finalised.
+# rustc can still create one between that check and the `rm`, so this is a smaller race,
+# not a closed one. At 117 Mi free, losing one build is the better side of that bet.
+#
+# Outside that one case, deleting a FINALISED session directory only costs the next
+# build's incremental speed for the crates it covered; it is never a correctness risk,
+# unlike deleting from `deps/`. That asymmetry is why the low-disk path is allowed to
+# empty `incremental` outright and is NOT allowed to go harder on `deps/`.
 #
 # ⚠ THIS SCRIPT PRUNES ONE TREE: the one it was invoked for ($CARGO_TARGET_DIR, or
 # ./target). Several worktrees share this host and other sessions build in them — on
@@ -83,7 +117,8 @@ MAX_INCREMENTAL_DIRS="${PRUNE_MAX_INCREMENTAL_DIRS:-200}"
 # measurements: one full workspace rebuild of this repo writes well over 10 G into
 # `target`, and the disk-full that motivated this left 117 Mi — so the threshold has to
 # be high enough that a build which starts just after a pass cannot cross zero before
-# the next commit fires this script again.
+# the next commit fires this script again. Evaluated once, before the build guard — see
+# the header's H-A paragraph.
 MIN_FREE_GB="${PRUNE_MIN_FREE_GB:-20}"
 # 0 = remove every session directory in THIS tree. Safe by the asymmetry above: the only
 # cost is the next build's incremental speed.
@@ -119,8 +154,11 @@ free_gb() {
 # it sees cargo and rustc themselves and nothing that merely talks about them.
 #
 # It is still deliberately GLOBAL rather than per-worktree: pgrep cannot see a process's
-# cwd portably, so a build in a sibling tree does pause pruning here. That errs toward
-# not deleting, which is the right direction for `deps/`.
+# cwd portably, so a build in a sibling tree does pause pruning here. That errs toward not
+# deleting, which is the right direction for `deps/` — and was the WRONG direction for
+# `incremental`, where not deleting is the disk-full. Review H-A found this guard had been
+# inherited to `incremental` unchanged and was what held the byte cap shut; the floor there
+# is now evaluated above it. Do not "fix" that by weakening this function back to `-f`.
 build_running() {
   pgrep -x cargo >/dev/null 2>&1 || pgrep -x rustc >/dev/null 2>&1
 }
@@ -149,47 +187,84 @@ for deps in "$TARGET_DIR"/debug/deps "$TARGET_DIR"/release/deps; do
   echo "prune-target: $deps now has $(ls -f "$deps" | wc -l | tr -d ' ') files"
 done
 
+# ── THE BYTE FLOOR, evaluated ONCE, before the build guard and outside `[ -d "$inc" ]` ──
+#
+# Once rather than per-directory: `debug/incremental` and `release/incremental` are on the
+# same volume by construction, so a second `df` would answer the same question twice.
+#
+# On a path that EXISTS. The floor used to be computed inside `[ -d "$inc" ]` (review
+# H-A), so a tree with no `incremental` directory never evaluated it and a volume at 117 Mi
+# went unreported by a script whose whole job that day was to report it. `$TARGET_DIR` is
+# the right probe for the reason the header's `df`-not-`du` note gives, and it falls back
+# to the tree's parent and then `.` — both of which a post-commit hook always has — so an
+# empty figure below means `df` FAILED, never "the path was missing".
+disk_probe="$TARGET_DIR"
+if [ ! -d "$disk_probe" ]; then
+  disk_probe=$(dirname "$TARGET_DIR")
+  [ -d "$disk_probe" ] || disk_probe="."
+fi
+free_before=$(free_gb "$disk_probe")
+low_disk=no
+# Say so out loud, in all three states. A byte cap that silently degrades to "no byte cap"
+# when its measurement fails is the same defect this gate was added to close — and so is
+# one that says nothing at all when it does not fire, because then "it never mentioned
+# free space" is indistinguishable from "it was never reached", which is exactly how H-A
+# survived review.
+if [ -z "$free_before" ]; then
+  echo "prune-target: WARNING — df gave no free-space figure for $disk_probe; the ${MIN_FREE_GB} GiB floor is NOT being enforced on this run."
+elif [ "$free_before" -lt "$MIN_FREE_GB" ]; then
+  low_disk=yes
+  echo "prune-target: ${free_before} GiB free on $disk_probe's volume, under the ${MIN_FREE_GB} GiB floor."
+  # Name the siblings; do NOT touch them. See the header's one-tree note. Sizes are
+  # left to the operator because `du` on these is exactly the cost `df` avoids.
+  # `|| true` on the whole pipeline, and `if` rather than `&&` inside it: with
+  # `set -e` a trailing `&&`-list that ends false aborts the script, and when that
+  # happened here the sibling NOTICE silently replaced the pruning it was supposed
+  # to accompany (the run printed the names, freed nothing, and exited 1).
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    mine=$(cd "$(dirname "$TARGET_DIR")" 2>/dev/null && pwd -P || true)
+    git worktree list --porcelain 2>/dev/null \
+      | awk '/^worktree /{print $2}' \
+      | while read -r wt; do
+          here=$(cd "$wt" 2>/dev/null && pwd -P || true)
+          if [ -n "$here" ] && [ "$here" = "$mine" ]; then
+            continue
+          fi
+          if [ -d "$wt/target" ]; then
+            echo "prune-target: NOT pruned (another session may be building): $wt/target"
+          fi
+        done || true
+  fi
+else
+  echo "prune-target: ${free_before} GiB free on $disk_probe's volume, at or above the ${MIN_FREE_GB} GiB floor — the byte cap does not fire."
+fi
+
+# Is rustc still inside this crate directory? An unfinalised session is `s-<id>-working`;
+# rustc renames it to `s-<id>` when it is done, so the suffix is the marker and not a
+# heuristic about mtimes. One readdir per candidate, and only consulted on the low-disk
+# path WHILE a build runs, so the ordinary no-build prune pays nothing for it.
+has_working_session() {
+  [ -n "$(find "$1" -mindepth 1 -maxdepth 1 -type d -name 's-*-working' -print -quit 2>/dev/null)" ]
+}
+
 for inc in "$TARGET_DIR"/debug/incremental "$TARGET_DIR"/release/incremental; do
   [ -d "$inc" ] || continue
 
-  # Same guard as above, and for the same reason: a build that loses its incremental
-  # state mid-run reports errors that look like source errors.
-  if build_running; then
+  cap="$MAX_INCREMENTAL_DIRS"
+  protect_working=no
+  if [ "$low_disk" = yes ]; then
+    cap="$LOW_DISK_INCREMENTAL_DIRS"
+    echo "prune-target: dropping the session-dir cap from $MAX_INCREMENTAL_DIRS to $cap for THIS tree's $inc."
+    if build_running; then
+      # The H-A inversion: the floor beats the guard here. See the header.
+      protect_working=yes
+      echo "prune-target: a cargo/rustc process is running, but the floor is crossed — pruning $inc anyway, skipping crate dirs with an unfinalised s-*-working session."
+    fi
+  elif build_running; then
+    # Floor not crossed, so the COUNT cap is the only one asking, and for a count cap
+    # waiting for the build is the right direction — see the header.
     echo "prune-target: a cargo/rustc process is running — leaving $inc alone"
     continue
-  fi
-
-  cap="$MAX_INCREMENTAL_DIRS"
-  free_before=$(free_gb "$inc")
-  # Say so out loud. A byte cap that silently degrades to "no byte cap" when its
-  # measurement fails is the same defect this gate was added to close.
-  if [ -z "$free_before" ]; then
-    echo "prune-target: WARNING — df gave no free-space figure for $inc; the ${MIN_FREE_GB} GiB floor is NOT being enforced on this run."
-  fi
-  if [ -n "$free_before" ] && [ "$free_before" -lt "$MIN_FREE_GB" ]; then
-    cap="$LOW_DISK_INCREMENTAL_DIRS"
-    echo "prune-target: ${free_before} GiB free on $inc's volume, under the ${MIN_FREE_GB} GiB floor."
-    echo "prune-target: dropping the session-dir cap from $MAX_INCREMENTAL_DIRS to $cap for THIS tree."
-    # Name the siblings; do NOT touch them. See the header's one-tree note. Sizes are
-    # left to the operator because `du` on these is exactly the cost `df` avoids.
-    # `|| true` on the whole pipeline, and `if` rather than `&&` inside it: with
-    # `set -e` a trailing `&&`-list that ends false aborts the script, and when that
-    # happened here the sibling NOTICE silently replaced the pruning it was supposed
-    # to accompany (the run printed the names, freed nothing, and exited 1).
-    if git rev-parse --git-dir >/dev/null 2>&1; then
-      mine=$(cd "$(dirname "$TARGET_DIR")" 2>/dev/null && pwd -P || true)
-      git worktree list --porcelain 2>/dev/null \
-        | awk '/^worktree /{print $2}' \
-        | while read -r wt; do
-            here=$(cd "$wt" 2>/dev/null && pwd -P || true)
-            if [ -n "$here" ] && [ "$here" = "$mine" ]; then
-              continue
-            fi
-            if [ -d "$wt/target" ]; then
-              echo "prune-target: NOT pruned (another session may be building): $wt/target"
-            fi
-          done || true
-    fi
   fi
 
   # `-mindepth 1 -maxdepth 1`: count SESSION DIRECTORIES, not the files inside them.
@@ -201,11 +276,30 @@ for inc in "$TARGET_DIR"/debug/incremental "$TARGET_DIR"/release/incremental; do
 
   excess=$((dirs - cap))
   echo "prune-target: $inc has $dirs session dirs, over the $cap cap."
-  echo "prune-target: removing the $excess oldest — this costs rebuild speed, never correctness."
-  find "$inc" -mindepth 1 -maxdepth 1 -type d -print0 \
+  echo "prune-target: removing the $excess oldest — this costs rebuild speed, and correctness only for a build this takes the session dir of (header, H-A)."
+  # Oldest first. The removal is a loop rather than the one-shot `head | xargs rm` this
+  # used to be, because a skipped in-use directory must not consume one of the $excess
+  # slots: the loop walks further down the list instead of freeing less than it reported.
+  candidates=$(find "$inc" -mindepth 1 -maxdepth 1 -type d -print0 \
     | xargs -0 stat -f '%m %N' 2>/dev/null \
-    | sort -n | head -n "$excess" | cut -d' ' -f2- \
-    | tr '\n' '\0' | xargs -0 rm -rf 2>/dev/null || true
-  free_after=$(free_gb "$inc")
+    | sort -n | cut -d' ' -f2- || true)
+  removed=0
+  skipped=0
+  while IFS= read -r victim; do
+    [ "$removed" -lt "$excess" ] || break
+    [ -n "$victim" ] || continue
+    if [ "$protect_working" = yes ] && has_working_session "$victim"; then
+      skipped=$((skipped + 1))
+      continue
+    fi
+    rm -rf "$victim" 2>/dev/null || true
+    removed=$((removed + 1))
+  done <<CANDIDATES
+$candidates
+CANDIDATES
+  if [ "$skipped" -gt 0 ]; then
+    echo "prune-target: left $skipped crate dir(s) alone — an unfinalised s-*-working session says a build is inside them."
+  fi
+  free_after=$(free_gb "$disk_probe")
   echo "prune-target: $inc now has $(find "$inc" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ') session dirs, ${free_after:-?} GiB free (was ${free_before:-?} GiB)"
 done

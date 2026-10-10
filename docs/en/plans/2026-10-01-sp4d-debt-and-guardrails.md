@@ -105,7 +105,7 @@
 - Modify: the rule write path and the tag-assignment write path (`crates/egret-perm-compile`, `crates/egret-policy`)
 - Test: both directions, DB-free where the seam allows
 
-**The measurement (live, Trino 470):** a tag-addressed `MASK` rule plus a **table-level** tag assignment makes Trino type-check the mask against **every column of the scanned table**, so `SELECT item`, `SELECT id` and even `count(*)` all fail — the table is **unreadable**, not masked. Reachable from two supported surfaces: `PUT …/resource-tags` with `column` absent, and `POST …/perm/rules` with a tag selector (which is how live policy 8799 exists). Not live today only because every live assignment is column-level on a `varchar`, every `id` is a `bigint`, and no `id` is tagged — **one assignment away**. The obvious explanation was measured and killed: a clean table-level MASK with no row filter fails identically, so the row filter is not the cause.
+**The measurement (live, Trino 470):** a tag-addressed `MASK` rule plus a **table-level** tag assignment makes Trino type-check the mask against **every column of the scanned table**, so `SELECT item`, `SELECT id` and even `count(*)` all fail — the table is **unreadable**, not masked. Reachable from two supported surfaces: `PUT …/resource-tags` with `column` absent, and `POST …/perm/rules` with a tag selector. Not live today only because every live assignment is column-level on a `varchar`, every `id` is a `bigint`, and no `id` is tagged — **one assignment away**. The obvious explanation was measured and killed: a clean table-level MASK with no row filter fails identically, so the row filter is not the cause. **Struck 2026-10-10 (whole-branch review):** a parenthetical here used to add *“which is how live policy 8799 exists”*, attributing that policy to `POST …/perm/rules`. The branch itself falsified it — all **four** live `tag-masking` instances were measured as coming from the policy **editor** (`POST /policies` with `kind: "tag-masking"`), and **none** from `perm.rules`. The live Postgres that held 8799 is gone, so 8799's own surface is now **unknowable**; the attribution is removed rather than restated with a different guess. The two-surface reachability claim above does not depend on it.
 
 - [ ] **Step 1: Write the failing tests, both directions.** A tag-addressed MASK rule is refused when the tag is already attached at table level; **and** a table-level attachment is refused when a tag-addressed MASK rule already names that tag. The second is the one the obvious implementation misses.
 - [ ] **Step 2: Run, watch both fail. Step 3: Implement. Step 4: Confirm green.**
@@ -553,18 +553,29 @@ mistake — and after Tasks 9+16 it is at least **visible**: the write path refu
 1. **Run migration 0166's own listing query** (`migrations/0166_…sql:124`) against any cluster that
    may hold **hand-written** tag rows. 0166 is `VALID` with no clearing statement, deliberately, so
    `migrate()` **aborts before the process serves** if such a row exists — which is the correct
-   behaviour and a bad surprise during an upgrade. A survey of **all 28 databases on this host**
-   found zero violating rows, and the only deployment is the local kind cluster whose database is on
-   this host, so this is covered. It stays on the list because "the only deployment is local" is a
+   behaviour and a bad surprise during an upgrade. A survey **on 2026-10-01, of the 28 databases this
+   host *then had*,** found zero violating rows, and the only deployment is the local kind cluster
+   whose database is on this host, so this is covered **as of that measurement**. It stays on the list because "the only deployment is local" is a
    claim about **reach**, and reach claims have been wrong five times on this programme while the
    behaviour claim beside them was right.
 
 2. **Run migration 0167's listing query too**, for the same reason as 0166's and with a weaker evidence
-   base. Task 12 measured **23 databases on this host**: 4 grant rows and 3 rule rows in total, all in
-   scratch DBs, **zero violating**. But as it said itself, that is weaker than it looks — **no database on
+   base. Task 12 measured, **on 2026-10-01, the 23 databases this host *then had* with a `perm.grants`
+   table** (not every database on the host — the shipped migration says so at
+   `migrations/0178_perm_scope_levels_are_named.sql:75`, "that **then** had"): 4 grant rows and 3 rule
+   rows in total, all in scratch DBs, **zero violating**. But as it said itself, that is weaker than it looks — **no database on
    this host has ever held a `perm.grants` row outside three scratch DBs**, and the only live-cluster
    measurement on record in this repo is about **tag assignments, not grants**. 0167 is `VALID`, so it
    aborts `migrate()` before the process serves if a real cluster holds one.
+
+   ⚠ **Every database count on this page is a MOMENT, not a standing fact, and is dated for that
+   reason.** The host's population churns because `egret-test-db` mints a template and every
+   `#[sqlx::test]` mints a clone: the same host read **23** (2026-10-01, with `perm.grants`), **28**
+   (2026-10-01, all databases), **29** with `perm.grants`/`perm.rules` plus 10 with no `perm` schema
+   (`migrations/0179_perm_wildcard_levels_name_nothing_beneath.sql:127`), and **10** non-template
+   databases on 2026-10-10 — a `datname` listing seconds after that same `count(*)` returned **11**,
+   because a parallel suite had minted one in between. Re-measure before citing any of them; an
+   undated count on this page is a bug, not a figure.
 
 ## Open, not in this plan — named so it is not mistaken for closed
 
@@ -577,6 +588,6 @@ into Task 2.
 
 ## Verification for every task
 
-`cargo test -p egret-ranger-eval --no-fail-fast` (baseline **262/0 across 10 binaries**; the flag matters, or cargo stops at the first failing binary and undercounts) · `cargo test -p egret-perm-compile` with `DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test` passed **explicitly** · `cargo check --workspace --all-targets` · `cargo fmt --all -- --check` · scoped `clippy -D warnings` (note `cargo clippy --workspace` is rc 101 on `crates/egret-workspace/src/members.rs:191,196`, byte-identical to `origin/main` — pre-existing, not yours) · the `--lib` drift gate · `just test-ranger-gates` · and in `frontend/`: `npx tsc --noEmit`, `npx eslint .`, and the ExplainAccess suite by its real path `src/routes/governance/__tests__/ExplainAccess.test.tsx` (a path missing `__tests__/` exits 0 with "No test files found").
+`cargo test -p egret-ranger-eval --no-fail-fast` (baseline **263/0 across 10 binaries**, measured 2026-10-10; this page said **262** and that was one short — the flag matters, or cargo stops at the first failing binary and undercounts, and so does reading the total through `tail`: grep the whole log for `test result:` and sum) · `cargo test -p egret-perm-compile` with `DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test` passed **explicitly** · `cargo check --workspace --all-targets` · `cargo fmt --all -- --check` · scoped `clippy -D warnings` (note `cargo clippy --workspace` is rc 101 on `crates/egret-workspace/src/members.rs:191,196`, byte-identical to `origin/main` — pre-existing, not yours) · the `--lib` drift gate · `just test-ranger-gates` · and in `frontend/`: `npx tsc --noEmit`, `npx eslint .`, and the ExplainAccess suite by its real path `src/routes/governance/__tests__/ExplainAccess.test.tsx` (a path missing `__tests__/` exits 0 with "No test files found").
 
 Never pass `-q` to anything — empty output is not a pass. Capture exit codes. Commands over ~120 s are auto-backgrounded and the completion notification IS the result; commit before starting a long suite.

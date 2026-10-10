@@ -1958,6 +1958,10 @@ pub fn evaluate(
     //   then: Integer.compare(me.getEvalOrder(), other.getEvalOrder())
     //   then: compareStrings(policy name)
     //
+    // Read out of `ranger-plugins-common-2.5.0` (Trino 470's jar) and not out of
+    // StarRocks's 2.8.0 — see [`sort_eval_order`]'s "WHICH JAR" note, which also
+    // names the artifact the two plugin versions are measured to disagree about.
+    //
     // The first two keys are load-bearing: the priority order is what makes
     // a higher-priority allow final, and the hasDeny-first order is what
     // makes a deny beat an allow at EQUAL priority (a non-deny policy that
@@ -3030,6 +3034,25 @@ fn request_preamble(
 /// then: Integer.compare(me.getEvalOrder(), other.getEvalOrder())
 /// then: compareStrings(policy name)
 /// ```
+///
+/// # ⚠ WHICH JAR (added 2026-10-10, whole-branch review)
+///
+/// That listing — four keys, total order, ending at the policy name — is
+/// `compareNormal` **as disassembled from `ranger-plugins-common-2.5.0`**, the
+/// version Trino 470 loads. The record is
+/// `tests/differential.rs`'s `access_order_duel`, which states the jar. StarRocks
+/// fe-ubuntu 4.1 loads **2.8.0**, and no disassembly of THIS comparator out of the
+/// 2.8.0 jar is on record in this crate, so the listing is not asserted for it.
+/// (The three TAG comparators are different: [`sort_tag_candidates`] records all
+/// three disassembled in both jars and byte-identical.)
+///
+/// The distinction is not pedantry — the two plugins demonstrably disagree about
+/// another artifact. A tag DENY under a strictly higher-priority resource ALLOW
+/// carrying no deny items is `Allowed` on 2.8.0 and not on 2.5.0, which is why
+/// [`UndecidableCause::TagDenyReopenedDiffersByPluginVersion`] exists and why
+/// [`EngineConfig::plugin_version`] is an input rather than a constant. An
+/// unversioned claim about plugin internals is how a comment comes to promise
+/// 2.8.0's behaviour to a 2.5.0 reader.
 ///
 /// `getEvalOrder()` is `RangerOptimizedPolicyEvaluator.computeEvalOrder()`,
 /// a resource-specificity score, and is NOT reproduced. A stable
@@ -4896,7 +4919,14 @@ fn tag_order_without_the_id_standin(
 
 /// `RangerPolicyEvaluator.NAME_COMPARATOR`, and — with `getEvalOrder()`
 /// unreproduced — `EVAL_ORDER_COMPARATOR` too: priority DESC, `hasDeny` first,
-/// then `compareStrings(policy name)`, and **nothing after that**. The policy-id
+/// then `compareStrings(policy name)`, and **nothing after that**.
+///
+/// "Nothing after that" is a claim about a total order, so it names its source:
+/// both comparators disassembled from `ranger-plugins-common` **2.5.0 and 2.8.0**
+/// and byte-identical there, which is the record [`sort_tag_candidates`] carries
+/// for all three tag comparators. That is wider than what is on record for the
+/// RESOURCE path's `PolicyEvalOrderComparator`, where only the 2.5.0 jar is named
+/// — see [`sort_eval_order`]'s "WHICH JAR" note. The policy-id
 /// stand-in lives in [`sort_tag_candidates`] instead, so that
 /// [`tag_order_without_the_id_standin`] can say when two candidates are tied
 /// for RANGER rather than merely tied here.
