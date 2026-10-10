@@ -52,6 +52,7 @@
     "echarts": "^6.1.0",
     "lucide-react": "^1.31.0",
     "monaco-editor": "^0.56.0",
+    "monaco-yaml": "5.5.1",
     "plotly.js-dist-min": "^3.7.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -63,7 +64,8 @@
     "sonner": "^2.0.8",
     "sql-formatter": "^15.8.2",
     "tailwind-merge": "^3.4.0",
-    "write-excel-file": "^4.1.1"
+    "write-excel-file": "^4.1.1",
+    "yaml": "2.9.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

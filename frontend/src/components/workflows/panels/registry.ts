@@ -21,6 +21,12 @@ export type TabDefinition<C = unknown> = {
   /** `false` hides the Close item. Code is also refused by `closeTab` itself. */
   closable: boolean;
   render: (context: C) => ReactNode;
+  /**
+   * Drawn in the tab after its title, from the same `context`; Problems shows
+   * its error count here (spec §5.2). It is part of the tab's accessible name,
+   * so give it words for a screen reader, not only a number.
+   */
+  badge?: (context: C) => ReactNode;
 };
 
 const tabs = new Map<TabId, TabDefinition<never>>();

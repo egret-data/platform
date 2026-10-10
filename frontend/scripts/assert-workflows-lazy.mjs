@@ -43,6 +43,10 @@ const MARKERS = [
   // `EMPTY_SEGMENT_LABEL`, this module's only string literal.
   ["src/components/workflows/namespaceTree.ts", "(empty segment)"],
   ["src/routes/workflows/ExecutionsPlaceholder.tsx", "The executions list is not here yet"],
+  // The flow editor's tabs (W7a Task 4), registered when the area loads.
+  ["src/components/workflows/editor/CodeTab.tsx", "egret-validate"],
+  ["src/components/workflows/editor/DocsTab.tsx", "This type has no documented outputs."],
+  ["src/components/workflows/editor/ProblemsTab.tsx", "(not found in the source, shown on line 1)"],
 ];
 
 const entry = entryChunkName(DIST);

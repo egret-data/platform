@@ -2,6 +2,9 @@ import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import { Placeholder } from "@/routes/Placeholder";
 import FlowsList from "@/routes/workflows/FlowsList";
 import ExecutionsPlaceholder from "@/routes/workflows/ExecutionsPlaceholder";
+// Registers the flow editor's Code, Docs and Problems tabs with the panel frame
+// (spec §5.1). Here, so they register inside this lazy area and not before.
+import "@/components/workflows/editor/registerEditorTabs";
 
 /**
  * The Workflows area, `/explore/:workspace/workflows/*` (spec §3).

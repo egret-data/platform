@@ -90,6 +90,7 @@ export function MultiPanel<C>({ layout, onChange, context }: Props<C>) {
   // A tab registered after the first render (a lazily loaded package) re-renders the frame.
   useTabsVersion();
   const defs = new Map(getTabs<C>().map((d) => [d.id, d as unknown as TabDefinition<never>]));
+  const badgeOf = (tab: TabId) => defs.get(tab)?.badge?.(context as never);
   const baseId = useId();
   const tabDomId = (tab: TabId) => `${baseId}-tab-${tab}`;
   const [dragging, setDragging] = useState<TabId | null>(null);
@@ -209,6 +210,7 @@ export function MultiPanel<C>({ layout, onChange, context }: Props<C>) {
                     tabDomId={tabDomId}
                     tabpanelId={tabpanelId}
                     onChange={change}
+                    badgeOf={badgeOf}
                   />
                   <div
                     role="tabpanel"

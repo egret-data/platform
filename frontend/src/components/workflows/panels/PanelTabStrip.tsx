@@ -1,4 +1,4 @@
-import type { KeyboardEvent, MouseEvent } from "react";
+import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { Columns2, EllipsisVertical, MoveRight, Plus, X, type LucideIcon } from "lucide-react";
 import {
@@ -53,10 +53,11 @@ const isClosable = (defs: Map<TabId, TabDefinition<never>>, tab: TabId) =>
  * already selected by then — selection follows focus).
  */
 function TabButton({
-  tab, title, icon: Icon, panelId, selected, closable, domId, controls, onSelect, onClose, onKeyDown,
+  tab, title, badge, icon: Icon, panelId, selected, closable, domId, controls, onSelect, onClose, onKeyDown,
 }: {
   tab: TabId;
   title: string;
+  badge?: ReactNode;
   icon: LucideIcon | undefined;
   panelId: string;
   selected: boolean;
@@ -112,6 +113,7 @@ function TabButton({
     >
       {Icon && <Icon aria-hidden className="size-3.5 shrink-0" />}
       <span>{title}</span>
+      {badge}
       {closable && (
         <X
           data-tab-close
@@ -136,7 +138,7 @@ function TabButton({
  * actions is two keystrokes (arrows, then Tab).
  */
 export function PanelTabStrip({
-  layout, panel, index, defs, tabDomId, tabpanelId, onChange,
+  layout, panel, index, defs, tabDomId, tabpanelId, onChange, badgeOf,
 }: {
   layout: Layout;
   panel: PanelLayout;
@@ -146,6 +148,8 @@ export function PanelTabStrip({
   tabpanelId: string;
   /** `focus`: the tab to move keyboard focus to once the change has rendered. */
   onChange: (next: Layout, focus?: TabId) => void;
+  /** A tab's badge (`TabDefinition.badge`), already given the frame's context. */
+  badgeOf?: (tab: TabId) => ReactNode;
 }) {
   const { setNodeRef: setStripRef, isOver: overStrip } = useDroppable({ id: `strip:${panel.id}`, data: { kind: "strip", panel: panel.id } satisfies DropData });
   const active = panel.active;
@@ -195,6 +199,7 @@ export function PanelTabStrip({
             key={tab}
             tab={tab}
             title={tabTitle(defs, tab)}
+            badge={badgeOf?.(tab)}
             icon={defs.get(tab)?.icon}
             panelId={panel.id}
             selected={tab === active}
