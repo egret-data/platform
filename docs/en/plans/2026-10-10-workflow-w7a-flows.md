@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** In the browser, a user lists flows grouped by a namespace tree, writes a flow in a Kestra-style multi-panel editor, saves and publishes it, reads its revisions, and runs its live version. Three small backend additions support this: the schema endpoint, id-less validation and stale-save refusal.
+> **Superseded in part (2026-10-10).** The user's rulings of 2026-10-10 in the spec header supersede this plan's execution model. Every execution runs the saved draft. "Create version" replaces Publish: it makes a numbered, immutable snapshot and does not change what runs. The draft indicator reads "Changes since v{n}" and compares the saved draft with the latest version. Run needs no version. The Task 5–8 passages that describe Publish or a live version are marked below; the spec (§5.3, §6) is canonical.
+
+**Goal:** In the browser, a user lists flows grouped by a namespace tree, writes a flow in a Kestra-style multi-panel editor, saves it (which changes what runs), creates numbered versions of it, reads and restores its revisions, and runs its saved draft. Three small backend additions support this: the schema endpoint, id-less validation and stale-save refusal.
 
 **Architecture:**
 - **Backend** (`crates/egret-workflow`):
@@ -28,7 +30,7 @@
   - W7 is split W7a → W7e. W7a is the nav group, flow list, flow editor, Revisions and Run.
   - The flow list groups by a namespace tree, and `folder_id` is never shown.
   - The editor is the full multi-panel layout (Kestra's `MultiPanelTabs`).
-  - Save and Publish are two buttons, with a content-derived draft indicator.
+  - Save and Create version are two buttons, with a content-derived indicator ("Changes since v{n}"). Save writes the draft, which every execution runs; Create version makes an immutable snapshot and changes nothing that runs. *(Corrected 2026-10-10; this line first read "Save and Publish".)*
   - Schema plus server validation drive the editor.
   - The schema's property data comes from Kestra's export filtered to egret, plus hand-written egret-only types.
 - **Routes:** under `/explore/:workspace/workflows/`, all lazy (`React.lazy`), behind `RequireFeature feature="workflows"`.
@@ -313,6 +315,8 @@
 
 ### Task 5: The flow detail header, Save/Publish/Delete, the draft indicator, and the create page
 
+> **Superseded by the ruling, see spec §5.3/§6.** "Publish" is now "Create version"; `draftDiffersFromLive`, `canRun({ liveVersionId })`, "Fix N errors to publish" and "Publish the flow before running it" below describe the old model. The shipped helpers compare the saved draft with the latest version, and Run is gated on unsaved edits, errors and `disabled` only.
+
 **Files:**
 - Create, under `frontend/src/routes/workflows/`:
   - `FlowDetail.tsx` (header and tabs)
@@ -326,9 +330,9 @@
 **Interfaces:**
 - Consumes: Tasks 2–4; the routes in §5.3, including `if_updated_at`.
 - Produces:
-  - `draftDiffersFromLive(draftSource, liveSource): boolean`, a byte comparison;
+  - `draftDiffersFromLive(draftSource, liveSource): boolean`, a byte comparison; *(Superseded by the ruling, see spec §5.3/§6.)*
   - `canPublish({ dirty, errors, validationStatus })`, returning `{ ok } | { ok: false, reason }`;
-  - `canRun({ liveVersionId, manage })`.
+  - `canRun({ liveVersionId, manage })`. *(Superseded by the ruling, see spec §5.3/§6.)*
 
 - [ ] **Step 1: Tests (red).**
   - **Draft pill:**
@@ -346,7 +350,7 @@
     - disabled with "Validation unavailable" when validation errors;
     - the dialog sends the note;
     - versions are invalidated.
-  - **Run:** disabled with "Publish the flow before running it" when nothing is live.
+  - **Run:** disabled with "Publish the flow before running it" when nothing is live. *(Superseded by the ruling, see spec §5.3/§6.)*
   - **Delete:** goes through `ConfirmDeleteDialog`, then navigates to the list.
   - **Read-only user:** sees no Save, Publish or Run, and sees the banner.
   - **404:** "Flow not found" with a link back.
@@ -372,7 +376,7 @@
 
 **Interfaces:**
 - Consumes:
-  - the live version's snapshot, via `GET …/flows/{id}/versions/{v}`, or the flow's `live_version_id`, whichever the API offers;
+  - the live version's snapshot, via `GET …/flows/{id}/versions/{v}`, or the flow's `live_version_id`, whichever the API offers; *(Superseded by the ruling, see spec §5.3/§6.)* The run form reads the saved draft's `inputs:`.
   - `POST …/flows/{id}/executions`;
   - `GET …/executions/{id}`.
 - Produces:
@@ -392,7 +396,7 @@
     - otherwise a drawer;
     - every control has a label tied by `htmlFor`;
     - server field errors show beside their field, and the values stay;
-    - "Runs live v{n}; your draft is not published" appears when the draft differs;
+    - "Runs live v{n}; your draft is not published" appears when the draft differs; *(Superseded by the ruling, see spec §5.3/§6.)*
     - an unsupported input disables Run with its name and type shown;
     - success navigates to `executions/{id}`.
   - **`ExecutionMinimal`:**
@@ -402,7 +406,7 @@
 
   Check whether the backend evaluates `dependsOn`, and record the answer for the spec's §15 in the report.
 
-- [ ] **Step 2: Implement, then the gates and commit.** `feat(workflows): run a flow's live version with typed inputs, and a minimal execution page`.
+- [ ] **Step 2: Implement, then the gates and commit.** `feat(workflows): run a flow's live version with typed inputs, and a minimal execution page`. *(Superseded by the ruling, see spec §5.3/§6.)*
 
 ### Task 7: Revisions
 
@@ -413,14 +417,14 @@
 - Test: `routes/workflows/__tests__/FlowRevisions.test.tsx`
 
 - [ ] **Step 1: Tests (red).**
-  - **The list:** version, note, author and time, with the live version marked, and the three states.
+  - **The list:** version, note, author and time, with the live version marked, and the three states. *(Superseded by the ruling, see spec §5.3/§6.)* No version is "live".
   - **Selecting:**
     - selecting a version shows its YAML;
     - "Compare with…" picks a second version or "Current draft";
     - the diff component receives the two sources.
   - **"Restore to draft":**
     - it writes the version's source into the draft with `if_updated_at`;
-    - when the draft differs from live it first asks for a confirm that names what is lost;
+    - when the draft differs from live it first asks for a confirm that names what is lost; *(Superseded by the ruling, see spec §5.3/§6.)*
     - it never publishes;
     - a toast and an invalidation follow.
   - **The URL** carries `?v=` and `?compare=` (FE-PAGE-2).
@@ -441,7 +445,7 @@
   1. Create a flow.
   2. Type `type: ` in a task and see a completion list containing `io.kestra.plugin.core.log.Log`.
   3. Introduce an error. It is marked, and it is listed in Problems; clicking the item moves the cursor.
-  4. Save, then Publish with a note.
+  4. Save, then Publish with a note. *(Superseded by the ruling, see spec §5.3/§6.)* The button is "Create version".
   5. Run with one STRING input, and land on the execution page, which reaches SUCCESS.
   6. Drag the Docs tab to the right edge of the Code panel: there are three panels. Reload, and there are still three.
   7. Use the keyboard path, "Split right" from the tab menu.
