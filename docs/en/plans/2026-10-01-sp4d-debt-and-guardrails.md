@@ -20,12 +20,19 @@
 - **Clippy has a trap that will cost you an hour.** `clippy -p <pkg> -- -D warnings` **without
   `--no-deps`** applies `-D warnings` to path dependencies, so naming a crate that depends on a
   dirty one reproduces that crate's failure as if it were yours. Use `--no-deps`. And there are
-  **four** pre-existing clippy-dirty crates, not one: `egret-workspace`
-  (`src/members.rs:191,196`), `egret-engine-mgmt` (`tests/routes.rs:113,168`,
-  `src/engines.rs:6964+`) and **`egret-bi`** (`catalog_tags.rs:232`, `tags.rs:206,208,504`) — all
-  byte-identical to `origin/main` on those lines, so `just check`'s workspace clippy fails
-  independently of anything in this plan. **Each task so far has found one more; stop trusting
-  this list to be complete and measure the crate you touch.**
+  clippy-dirty crates beyond the one you are touching. ⚠ **An earlier version of this bullet
+  listed four of them and called all four "byte-identical to `origin/main` on those lines". That
+  was measured once and then trusted, and by 2026-10-10 it was wrong about two of them, in
+  opposite directions.** `egret-workspace`'s two warnings (`src/members.rs:191,196`) were
+  **introduced by this branch** — `origin/main` had plain `tx` there — so `-D warnings` would
+  have failed on this plan's own code while this page vouched for it; fixed in `d1048de03`.
+  `egret-bi`'s five (`catalog_tags.rs:274`, `tags.rs:257,259,555` — not the line numbers the old
+  bullet gave) were pre-existing **as of the branch point** but **absent from current
+  `origin/main`**, because main refactored those files afterwards. The honest form of such a
+  claim is *"pre-existing as of the branch point"*, never *"byte-identical to main"*, and it has
+  to be re-measured per line with `git show origin/main:<file>` rather than inherited. The old
+  bullet's own closing advice is the part that held up: **each task so far has found one more;
+  stop trusting this list to be complete and measure the crate you touch.**
 - Mutations: `assert count == 1`, confirm each mutant COMPILES, restore by a plain write plus a SHA-256 compare. `cp -f` does **not** defeat the `cp -i` alias — it sits at the overwrite prompt, is auto-backgrounded, and the file stays mutated.
 
 ## Decided, not open
