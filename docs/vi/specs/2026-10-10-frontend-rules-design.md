@@ -214,7 +214,7 @@ Mục kiểm bằng lint chính là danh sách legacy của rule đó (§7). M�
      Rule không áp dụng dưới `src/components/chart/echarts/` (FE-VISUAL-6).
    - **`egret/no-arbitrary-text-size`** báo `text-[<số><đơn vị>]`.
    - **`egret/no-window-confirm`** báo `window.confirm(…)` và `confirm(…)` trơn khi nó trỏ tới hàm global.
-2. **`eslint-plugin-jsx-a11y-x`**, với cấu hình `recommended`, ở mức error. *(Sửa 2026-10-10, theo plan: đây là bản fork còn được bảo trì của `eslint-plugin-jsx-a11y`, cùng bộ rule. Bản gốc 6.10.2, phát hành lần cuối năm 2024, chỉ khai báo hỗ trợ tới ESLint 9, còn egret chạy ESLint 10. Phần settings `jsx-a11y` của fork ánh xạ các primitive của egret (`Button`, `Input`, `Label`, `Textarea`) sang thẻ HTML tương ứng.)*
+2. **`eslint-plugin-jsx-a11y-x`**, với cấu hình `recommended`, ở mức error. *(Sửa 2026-10-10, theo plan: đây là bản fork còn được bảo trì của `eslint-plugin-jsx-a11y`, cùng bộ rule. Bản gốc 6.10.2, phát hành lần cuối năm 2024, chỉ khai báo hỗ trợ tới ESLint 9, còn egret chạy ESLint 10. Phần settings của fork, dưới key `jsx-a11y-x`, ánh xạ các primitive của egret (`Button`, `Input`, `Label`, `Textarea`) sang thẻ HTML tương ứng.)*
 3. **Danh sách legacy.**
    - Mỗi rule có danh sách riêng gồm các file vi phạm nó lúc rule được đưa vào: `frontend/eslint-rules/legacy.js`, mỗi mã rule một mục, cho cả `egret/*` lẫn `jsx-a11y/*`.
    - `eslint.config.js` tắt đúng rule đó cho đúng các file ấy.

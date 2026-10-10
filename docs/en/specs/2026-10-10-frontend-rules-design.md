@@ -212,7 +212,7 @@ A lint-checked entry is the rule's legacy list (§7). A review-checked entry is 
      It does not apply under `src/components/chart/echarts/` (FE-VISUAL-6).
    - **`egret/no-arbitrary-text-size`** reports `text-[<number><unit>]`.
    - **`egret/no-window-confirm`** reports `window.confirm(…)` and a bare `confirm(…)` that resolves to the global.
-2. **`eslint-plugin-jsx-a11y-x`**, with its `recommended` config, at error. *(Amended 2026-10-10, plan: the maintained fork of `eslint-plugin-jsx-a11y`, with the same rules. Upstream 6.10.2, last published 2024, declares ESLint up to 9, and egret runs ESLint 10. The fork's `jsx-a11y` settings map egret's primitives (`Button`, `Input`, `Label`, `Textarea`) to their elements.)*
+2. **`eslint-plugin-jsx-a11y-x`**, with its `recommended` config, at error. *(Amended 2026-10-10, plan: the maintained fork of `eslint-plugin-jsx-a11y`, with the same rules. Upstream 6.10.2, last published 2024, declares ESLint up to 9, and egret runs ESLint 10. The fork's settings, under the key `jsx-a11y-x`, map egret's primitives (`Button`, `Input`, `Label`, `Textarea`) to their elements.)*
 3. **Legacy lists.**
    - Each rule has its own list of files that broke it when it was introduced: `frontend/eslint-rules/legacy.js`, one entry per rule id, `egret/*` and `jsx-a11y/*` alike.
    - `eslint.config.js` turns that one rule off for exactly those files.

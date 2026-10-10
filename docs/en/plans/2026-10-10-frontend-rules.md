@@ -367,7 +367,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - use `new ESLint({ cwd })` with the real `eslint.config.js`;
   - call `calculateConfigForFile("src/components/explore/EmptyState.tsx")`;
   - assert that `rules["jsx-a11y/alt-text"]` and `rules["jsx-a11y/label-has-associated-control"]` are at severity 2;
-  - assert that `settings["jsx-a11y"].components` maps `Button` to `"button"`, `Input` to `"input"`, `Label` to `"label"` and `Textarea` to `"textarea"`;
+  - assert that `settings["jsx-a11y-x"].components` (the fork reads only that key: `lib/util/getElementType.js`; corrected 2026-10-10 after Task 2's review) maps `Button` to `"button"`, `Input` to `"input"`, `Label` to `"label"` and `Textarea` to `"textarea"`;
   - assert that for `src/components/explore/__tests__/x.test.tsx` the jsx-a11y rules are off.
 
   Expected: FAIL.
@@ -376,7 +376,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ```js
 settings: {
-  "jsx-a11y": {
+  "jsx-a11y-x": {
     // egret's primitives render these elements (src/components/ui), so the
     // rules see through them (FE-A11Y-1, FE-FORM-2).
     components: { Button: "button", Input: "input", Label: "label", Textarea: "textarea" },
