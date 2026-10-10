@@ -4,8 +4,9 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
-// No msw in this repo: the page's two data sources are mocked at the module,
-// as `Endpoints.test.tsx` does.
+// No msw in this repo: the page's data source is mocked at the module, as
+// `Endpoints.test.tsx` does. `@/api/members` is mocked too, and only so the
+// test can prove the page never calls it (spec §7.4).
 vi.mock("@/api/generated/workflow/workflow");
 vi.mock("@/api/members");
 
@@ -23,6 +24,7 @@ function flow(namespace: string, flow_id: string, over: Partial<FlowListItemDto>
     flow_id,
     state: "draft",
     created_by: ALICE,
+    created_by_name: "Alice Nguyen",
     created_at: "2026-10-01T00:00:00Z",
     updated_at: "2026-10-02T00:00:00Z",
     ...over,
@@ -100,9 +102,6 @@ function headers(): string[] {
 
 beforeEach(() => {
   localStorage.clear();
-  vi.mocked(members.useWorkspaceMembers).mockReturnValue({
-    data: [{ principal_type: "user", principal_id: ALICE, principal_name: "alice@example.com" }],
-  } as unknown as ReturnType<typeof members.useWorkspaceMembers>);
 });
 
 afterEach(() => vi.clearAllMocks());
@@ -176,19 +175,38 @@ describe("FlowsList — the namespace tree", () => {
     );
   });
 
-  it("shows each flow's state chip, its creator by name, and never its folder", () => {
+  it("shows each flow's state chip, its creator by the server's name, and never its folder", () => {
     mockFlows([flow("a", "one", { state: "live", folder_id: "folder-secret" })]);
     renderAt();
     const row = screen.getByRole("link", { name: "one" }).closest("tr") as HTMLElement;
     expect(within(row).getByText("Live")).toBeInTheDocument();
-    expect(within(row).getByText("alice@example.com")).toBeInTheDocument();
+    expect(within(row).getByText("Alice Nguyen")).toBeInTheDocument();
     expect(screen.queryByText(/folder-secret/)).not.toBeInTheDocument();
+    // The name comes with the row; workspace members are never fetched for it.
+    expect(members.useWorkspaceMembers).not.toHaveBeenCalled();
   });
 
-  it("falls back to a short id for a creator it cannot name", () => {
-    mockFlows([flow("a", "one", { created_by: "99999999-0000-0000-0000-000000000000" })]);
+  it("shows a dash, not an id, when the server has no name for the creator", () => {
+    mockFlows([
+      flow("a", "nobody", { created_by: null, created_by_name: null }),
+      flow("a", "gone", { created_by: ALICE, created_by_name: null }),
+    ]);
     renderAt();
-    expect(screen.getByText("99999999")).toBeInTheDocument();
+    for (const id of ["nobody", "gone"]) {
+      const row = screen.getByRole("link", { name: id }).closest("tr") as HTMLElement;
+      expect(within(row).getAllByRole("cell").at(-1)).toHaveTextContent(/^—$/);
+    }
+    expect(screen.queryByText(ALICE.slice(0, 8))).not.toBeInTheDocument();
+  });
+
+  it("names an empty namespace segment instead of leaving a bare chevron", () => {
+    mockFlows([flow("a..b", "deep"), flow("a.", "trailing")]);
+    renderAt();
+    // `a.` is the node for the empty segment between the dots, and the parent of `a..b`.
+    const toggle = screen.getByRole("button", { name: "a. (2)" });
+    expect(toggle).toHaveTextContent("(empty segment)");
+    expect(within(toggle).getByText("(empty segment)")).toHaveClass("text-muted-foreground");
+    expect(headers()).toEqual(["a (2)", "a. (2)", "a..b (1)"]);
   });
 
   it("collapsing a namespace hides its own flows AND everything beneath it", async () => {
@@ -243,6 +261,36 @@ describe("FlowsList — the namespace tree", () => {
   });
 });
 
+describe("FlowsList — collapse while filtering", () => {
+  it("opens every namespace while a filter is on, and restores the viewer's collapse when it clears", async () => {
+    const user = userEvent.setup();
+    mockFlows(FLOWS);
+    renderAt();
+    await user.click(screen.getByRole("button", { name: "company.team (2)" }));
+    expect(flowLinks()).not.toContain("etl");
+
+    // A search that hits a flow inside the collapsed namespace shows it.
+    await user.type(screen.getByLabelText("Search flows"), "etl");
+    expect(flowLinks()).toEqual(["etl"]);
+    expect(screen.getByRole("button", { name: "company.team (1)" })).toHaveAttribute("aria-expanded", "true");
+
+    // Clearing the search brings the stored collapse back, untouched.
+    await user.clear(screen.getByLabelText("Search flows"));
+    expect(screen.getByRole("button", { name: "company.team (2)" })).toHaveAttribute("aria-expanded", "false");
+    expect(flowLinks()).toEqual(["root-a", "root-b", "other"]);
+    expect(JSON.parse(localStorage.getItem(nsCollapseKey("eng")) ?? "[]")).toEqual(["company.team"]);
+  });
+
+  it("folds a branch of the results without writing the viewer's stored collapse", async () => {
+    const user = userEvent.setup();
+    mockFlows(FLOWS);
+    renderAt("?namespace=company");
+    await user.click(screen.getByRole("button", { name: "company.team (2)" }));
+    expect(flowLinks()).toEqual(["root-a", "root-b"]);
+    expect(localStorage.getItem(nsCollapseKey("eng"))).toBeNull();
+  });
+});
+
 describe("FlowsList — filters live in the URL", () => {
   it("writes the search to the URL as it is typed", async () => {
     const user = userEvent.setup();
@@ -292,6 +340,29 @@ describe("FlowsList — filters live in the URL", () => {
     mockFlows(FLOWS);
     renderAt("?namespace=company");
     expect(flowLinks()).toEqual(["root-a", "root-b", "etl", "sync"]);
+  });
+
+  it("offers every ancestor namespace in the picker, not only the namespaces flows live in", async () => {
+    const user = userEvent.setup();
+    mockFlows([flow("x.y.z", "deep"), flow("b", "flat")]);
+    renderAt();
+    await user.click(screen.getByLabelText("Namespace"));
+    const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
+    expect(options).toEqual(["All", "b", "x", "x.y", "x.y.z"]);
+    // Choosing an ancestor selects its subtree.
+    await user.click(screen.getByRole("option", { name: "x" }));
+    expect(searchParams().get("namespace")).toBe("x");
+    expect(flowLinks()).toEqual(["deep"]);
+  });
+
+  it("keeps a stale ?namespace= selectable and says the filter matches nothing", async () => {
+    const user = userEvent.setup();
+    mockFlows(FLOWS);
+    renderAt("?namespace=retired.team");
+    expect(screen.getByLabelText("Namespace")).toHaveTextContent("retired.team");
+    expect(screen.getByText("No flows match the current filters.")).toBeInTheDocument();
+    await user.click(screen.getByLabelText("Namespace"));
+    expect(await screen.findByRole("option", { name: "retired.team" })).toBeInTheDocument();
   });
 
   it("filters by state", () => {

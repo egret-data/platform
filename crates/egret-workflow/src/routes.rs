@@ -305,6 +305,9 @@ pub struct FlowDto {
     pub state: String,
     pub live_version_id: Option<Uuid>,
     pub created_by: Option<Uuid>,
+    /// The creator's display name: the profile name, else the email. Null
+    /// when `created_by` is null or the user no longer exists (W7a spec §7.4).
+    pub created_by_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub validation: ValidationReportDto,
@@ -324,6 +327,9 @@ pub struct FlowListItemDto {
     pub state: String,
     pub live_version_id: Option<Uuid>,
     pub created_by: Option<Uuid>,
+    /// The creator's display name: the profile name, else the email. Null
+    /// when `created_by` is null or the user no longer exists (W7a spec §7.4).
+    pub created_by_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -338,6 +344,7 @@ impl From<FlowRow> for FlowListItemDto {
             state: r.state,
             live_version_id: r.live_version_id,
             created_by: r.created_by,
+            created_by_name: r.created_by_name,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
@@ -354,6 +361,9 @@ pub struct FlowVersionDto {
     pub snapshot: serde_json::Value,
     pub note: String,
     pub created_by: Option<Uuid>,
+    /// The publisher's display name: the profile name, else the email. Null
+    /// when `created_by` is null or the user no longer exists (W7a spec §7.4).
+    pub created_by_name: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -366,6 +376,7 @@ impl From<FlowVersionRow> for FlowVersionDto {
             snapshot: r.snapshot,
             note: r.note,
             created_by: r.created_by,
+            created_by_name: r.created_by_name,
             created_at: r.created_at,
         }
     }
@@ -454,6 +465,7 @@ fn draft_dto(row: FlowRow) -> EgretResult<FlowDto> {
         state: row.state,
         live_version_id: row.live_version_id,
         created_by: row.created_by,
+        created_by_name: row.created_by_name,
         created_at: row.created_at,
         updated_at: row.updated_at,
         validation: ValidationReportDto::from(&report),

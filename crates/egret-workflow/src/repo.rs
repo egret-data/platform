@@ -121,6 +121,27 @@ macro_rules! flow_cols {
 // projection keeps that read from drifting from every other one.
 pub(crate) use flow_cols;
 
+/// The creator's display name, for a row `r` read in a CTE: the profile
+/// name, else the email -- the same expression `DashboardRepo::attribution_names`
+/// uses (`egret-bi`). `LEFT JOIN`, so a NULL `created_by` or a user who no
+/// longer exists answers NULL rather than dropping the row (W7a spec §7.4).
+///
+/// Every route that answers a `FlowDto`, `FlowListItemDto` or
+/// `FlowVersionDto` reads its row through this, in the SAME statement that
+/// reads (or writes) the row: the user-listing endpoints are admin-gated, so
+/// the browser cannot resolve the id itself for an ordinary editor.
+macro_rules! with_creator_name {
+    ($cte:expr, $tail:expr) => {
+        concat!(
+            "WITH r AS (",
+            $cte,
+            ") SELECT r.*, COALESCE(NULLIF(u.name, ''), u.email::text) AS created_by_name \
+             FROM r LEFT JOIN users u ON u.id = r.created_by",
+            $tail
+        )
+    };
+}
+
 /// A flow draft row, as stored.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct FlowRow {
@@ -139,6 +160,12 @@ pub struct FlowRow {
     pub state: String,
     pub live_version_id: Option<Uuid>,
     pub created_by: Option<Uuid>,
+    /// The creator's display name (W7a spec §7.4). Filled by the reads that
+    /// answer a route (`get`, `list`, `create`, `update`); `None` from the
+    /// internal reads that only feed the scheduler, which never select it --
+    /// hence `#[sqlx(default)]`.
+    #[sqlx(default)]
+    pub created_by_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
@@ -156,6 +183,10 @@ pub struct FlowVersionRow {
     pub snapshot: serde_json::Value,
     pub note: String,
     pub created_by: Option<Uuid>,
+    /// The publisher's display name (W7a spec §7.4); see
+    /// [`FlowRow::created_by_name`].
+    #[sqlx(default)]
+    pub created_by_name: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -221,12 +252,15 @@ impl FlowRepo {
         // W12: the insert and `scheduler::sync` commit together, so a flow
         // never exists without the trigger rows its YAML declares.
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
-        let row: std::result::Result<FlowRow, sqlx::Error> = sqlx::query_as(concat!(
-            "INSERT INTO workflow.flows \
-               (workspace_id, folder_id, namespace, flow_id, source, plan, created_by) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) \
-             RETURNING ",
-            flow_cols!()
+        let row: std::result::Result<FlowRow, sqlx::Error> = sqlx::query_as(with_creator_name!(
+            concat!(
+                "INSERT INTO workflow.flows \
+                   (workspace_id, folder_id, namespace, flow_id, source, plan, created_by) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                 RETURNING ",
+                flow_cols!()
+            ),
+            ""
         ))
         .bind(workspace)
         .bind(input.folder_id)
@@ -288,10 +322,13 @@ impl FlowRepo {
     /// One draft, if it belongs to `workspace`. `NotFound` otherwise -- see
     /// the module comment on why the predicate is here and not in the caller.
     pub async fn get(&self, ws: Uuid, id: Uuid) -> Result<FlowRow> {
-        let row: Option<FlowRow> = sqlx::query_as(concat!(
-            "SELECT ",
-            flow_cols!(),
-            " FROM workflow.flows WHERE id = $1 AND workspace_id = $2"
+        let row: Option<FlowRow> = sqlx::query_as(with_creator_name!(
+            concat!(
+                "SELECT ",
+                flow_cols!(),
+                " FROM workflow.flows WHERE id = $1 AND workspace_id = $2"
+            ),
+            ""
         ))
         .bind(id)
         .bind(ws)
@@ -303,16 +340,18 @@ impl FlowRepo {
 
     /// Every draft in `workspace` matching `filter`, newest first.
     pub async fn list(&self, ws: Uuid, filter: &ListFilter) -> Result<Vec<FlowRow>> {
-        sqlx::query_as(concat!(
-            "SELECT ",
-            flow_cols!(),
-            " FROM workflow.flows \
-             WHERE workspace_id = $1 \
-               AND ($2::uuid IS NULL OR folder_id = $2) \
-               AND ($3::text IS NULL OR namespace = $3) \
-               AND ($4::text IS NULL OR state = $4) \
-               AND $5 = (deleted_at IS NOT NULL) \
-             ORDER BY created_at DESC"
+        sqlx::query_as(with_creator_name!(
+            concat!(
+                "SELECT ",
+                flow_cols!(),
+                " FROM workflow.flows \
+                 WHERE workspace_id = $1 \
+                   AND ($2::uuid IS NULL OR folder_id = $2) \
+                   AND ($3::text IS NULL OR namespace = $3) \
+                   AND ($4::text IS NULL OR state = $4) \
+                   AND $5 = (deleted_at IS NOT NULL)"
+            ),
+            " ORDER BY r.created_at DESC"
         ))
         .bind(ws)
         .bind(filter.folder_id)
@@ -341,30 +380,34 @@ impl FlowRepo {
         // W12: the update and `scheduler::sync` commit together -- also when
         // only `namespace`/`folder_id` changed, where `sync` is a no-op.
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
-        let row: std::result::Result<Option<FlowRow>, sqlx::Error> = sqlx::query_as(concat!(
-            "UPDATE workflow.flows SET \
-               namespace = COALESCE($3, namespace), \
-               flow_id   = COALESCE($4, flow_id), \
-               source    = COALESCE($5, source), \
-               plan      = COALESCE($6, plan), \
-               folder_id = CASE WHEN $7 THEN $8 ELSE folder_id END, \
-               updated_at = now() \
-             WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL \
-               AND ($9::timestamptz IS NULL OR updated_at = $9) \
-             RETURNING ",
-            flow_cols!()
-        ))
-        .bind(id)
-        .bind(ws)
-        .bind(&input.namespace)
-        .bind(&input.flow_id)
-        .bind(&input.source)
-        .bind(&input.plan)
-        .bind(input.folder_id.is_some())
-        .bind(input.folder_id.flatten())
-        .bind(input.if_updated_at)
-        .fetch_optional(&mut *tx)
-        .await;
+        let row: std::result::Result<Option<FlowRow>, sqlx::Error> =
+            sqlx::query_as(with_creator_name!(
+                concat!(
+                    "UPDATE workflow.flows SET \
+                   namespace = COALESCE($3, namespace), \
+                   flow_id   = COALESCE($4, flow_id), \
+                   source    = COALESCE($5, source), \
+                   plan      = COALESCE($6, plan), \
+                   folder_id = CASE WHEN $7 THEN $8 ELSE folder_id END, \
+                   updated_at = now() \
+                 WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL \
+                   AND ($9::timestamptz IS NULL OR updated_at = $9) \
+                 RETURNING ",
+                    flow_cols!()
+                ),
+                ""
+            ))
+            .bind(id)
+            .bind(ws)
+            .bind(&input.namespace)
+            .bind(&input.flow_id)
+            .bind(&input.source)
+            .bind(&input.plan)
+            .bind(input.folder_id.is_some())
+            .bind(input.folder_id.flatten())
+            .bind(input.if_updated_at)
+            .fetch_optional(&mut *tx)
+            .await;
         // Whole-branch review, IMPORTANT finding 3: same `UNIQUE
         // (workspace_id, namespace, flow_id)` this table's `create` can
         // hit -- reachable here too, since an update may repoint a flow's
@@ -502,12 +545,13 @@ impl FlowRepo {
         snapshot: &serde_json::Value,
         note: &str,
     ) -> Result<FlowVersionRow> {
-        sqlx::query_as(
+        sqlx::query_as(with_creator_name!(
             "INSERT INTO workflow.flow_versions (flow_id, version, snapshot, note, created_by) \
              SELECT $1, COALESCE(MAX(version), 0) + 1, $2, $3, $4 \
                FROM workflow.flow_versions WHERE flow_id = $1 \
              RETURNING id, flow_id, version, snapshot, note, created_by, created_at",
-        )
+            ""
+        ))
         .bind(flow)
         .bind(snapshot)
         .bind(note)
@@ -554,13 +598,13 @@ impl FlowRepo {
     /// sentence describing an obligation is weaker than closing it in the
     /// query, so nobody has to remember it.
     pub async fn list_versions(&self, ws: Uuid, flow: Uuid) -> Result<Vec<FlowVersionRow>> {
-        sqlx::query_as(
+        sqlx::query_as(with_creator_name!(
             "SELECT v.id, v.flow_id, v.version, v.snapshot, v.note, v.created_by, v.created_at \
              FROM workflow.flow_versions v \
              JOIN workflow.flows f ON f.id = v.flow_id \
-             WHERE v.flow_id = $1 AND f.workspace_id = $2 \
-             ORDER BY v.version DESC",
-        )
+             WHERE v.flow_id = $1 AND f.workspace_id = $2",
+            " ORDER BY r.version DESC"
+        ))
         .bind(flow)
         .bind(ws)
         .fetch_all(&self.db.pool)
@@ -574,12 +618,13 @@ impl FlowRepo {
     /// foreign `flow`/`version` pair and a pair that does not exist at all
     /// both answer `NotFound`, indistinguishably.
     pub async fn get_version(&self, ws: Uuid, flow: Uuid, version: i32) -> Result<FlowVersionRow> {
-        let row: Option<FlowVersionRow> = sqlx::query_as(
+        let row: Option<FlowVersionRow> = sqlx::query_as(with_creator_name!(
             "SELECT v.id, v.flow_id, v.version, v.snapshot, v.note, v.created_by, v.created_at \
              FROM workflow.flow_versions v \
              JOIN workflow.flows f ON f.id = v.flow_id \
              WHERE v.flow_id = $1 AND v.version = $2 AND f.workspace_id = $3",
-        )
+            ""
+        ))
         .bind(flow)
         .bind(version)
         .bind(ws)

@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import {
   BrowserRouter,
@@ -31,6 +31,7 @@ import { RequireFeature } from "@/components/explore/RequireFeature";
 import { exploreRedirectTo, useDefaultExplorePath } from "@/hooks/useWorkspaceFeatures";
 import PrintObject from "@/routes/print/PrintObject";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { LazyRouteArea } from "@/components/layout/LazyRouteArea";
 
 /**
  * The Workflows area, code-split (FE-ROUTE-2): the first lazy route area in
@@ -288,9 +289,9 @@ function ExploreRoutes() {
             path="workflows/*"
             element={
               <RequireFeature feature="workflows">
-                <Suspense fallback={<WorkflowsFallback />}>
+                <LazyRouteArea area="Workflows" fallback={<WorkflowsFallback />}>
                   <WorkflowsRoutes />
-                </Suspense>
+                </LazyRouteArea>
               </RequireFeature>
             }
           />

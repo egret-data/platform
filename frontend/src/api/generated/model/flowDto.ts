@@ -26,6 +26,12 @@ export interface FlowDto {
   live_version_id?: string | null;
   /** @nullable */
   created_by?: string | null;
+  /**
+     * The creator's display name: the profile name, else the email. Null
+     * when `created_by` is null or the user no longer exists (W7a spec §7.4).
+     * @nullable
+     */
+  created_by_name?: string | null;
   created_at: string;
   updated_at: string;
   validation: ValidationReportDto;

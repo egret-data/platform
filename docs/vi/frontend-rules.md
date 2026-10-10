@@ -137,12 +137,12 @@ Dữ liệu từ server không bao giờ được cache trong `localStorage`. `l
 ## 7. Routing (FE-ROUTE)
 
 #### FE-ROUTE-1 — Route nằm trong `App.tsx`, sau guard của nó · PHẢI
-Route được khai báo trong `frontend/src/App.tsx`. Mỗi route được bọc trong guard mà khu vực của nó cần (`RequireFeature`, `RequirePermission`, `RequireGlobalAdmin`). Redirect dùng đường dẫn tuyệt đối.
+Route được khai báo trong `frontend/src/App.tsx`, hoặc trong module của một khu vực lazy mà `App.tsx` mount (route con của khu vực phải nằm ở đó, nếu không `App.tsx` sẽ import các trang của nó một cách eager; ví dụ `frontend/src/routes/workflows/WorkflowsRoutes.tsx`). Mỗi route được bọc trong guard mà khu vực của nó cần (`RequireFeature`, `RequirePermission`, `RequireGlobalAdmin`). Redirect dùng đường dẫn tuyệt đối.
 **Làm thế này:** `frontend/src/auth/guards.tsx`. **Kiểm bằng:** review.
 
 #### FE-ROUTE-2 — Khu vực tính năng mới được lazy-load · PHẢI
 Mọi khu vực tính năng mới, bắt đầu từ Workflow, được tách code bằng `React.lazy` và `Suspense`, với fallback là skeleton.
-**Làm thế này:** một khu vực route: `workflows/*` trong `frontend/src/App.tsx` (`lazy(() => import("@/routes/workflows/WorkflowsRoutes"))` dưới `Suspense` với fallback là skeleton); một component: `frontend/src/components/monaco/MonacoEditor.tsx`. **Kiểm bằng:** test: mỗi khu vực lazy một bundle test, `npm run test:bundle:workflows` (`frontend/scripts/assert-workflows-lazy.mjs`) cho các route Workflows và `npm run test:bundle:monaco` (`frontend/scripts/assert-monaco-lazy.mjs`) cho Monaco.
+**Làm thế này:** một khu vực route: `workflows/*` trong `frontend/src/App.tsx` (`lazy(() => import("@/routes/workflows/WorkflowsRoutes"))` bên trong `LazyRouteArea`, `frontend/src/components/layout/LazyRouteArea.tsx`: `Suspense` với fallback là skeleton, dưới một error boundary để một chunk tải hỏng hiện nút tải lại thay vì cả app trắng trơn); một component: `frontend/src/components/monaco/MonacoEditor.tsx`. **Kiểm bằng:** test: mỗi khu vực lazy một bundle test, `npm run test:bundle:workflows` (`frontend/scripts/assert-workflows-lazy.mjs`) cho các module Workflows mà nó liệt kê, mỗi module một marker và `npm run test:bundle:monaco` (`frontend/scripts/assert-monaco-lazy.mjs`) cho Monaco.
 
 #### FE-ROUTE-3 — URL kebab-case, thuộc workspace · PHẢI
 URL viết kebab-case và thuộc workspace, dưới `/explore/:workspace/…`.
@@ -260,7 +260,7 @@ Mọi rule mà reviewer phải xác nhận đều ở đây: hoặc lint không 
 - [ ] FE-DATA-1 — API client được sinh lại bằng `npm run gen:api`.
 - [ ] FE-DATA-2 — Endpoint mới qua hook của orval; key tự viết lấy từ factory key của domain.
 - [ ] FE-DATA-3 — Không có dữ liệu server trong `localStorage`; mọi lần truy cập đều được bọc.
-- [ ] FE-ROUTE-1 — Route trong `App.tsx`, sau guard của khu vực; redirect dùng đường dẫn tuyệt đối.
+- [ ] FE-ROUTE-1 — Route trong `App.tsx` hoặc trong module khu vực lazy mà nó mount, sau guard của khu vực; redirect dùng đường dẫn tuyệt đối.
 - [ ] FE-ROUTE-2 — Khu vực tính năng mới được lazy-load với fallback là skeleton, và có bundle test giữ điều đó (W7 thêm test đầu tiên).
 - [ ] FE-ROUTE-3 — URL kebab-case dưới `/explore/:workspace/…`.
 - [ ] FE-A11Y-2 — Focus dùng ring chung, đạt 3:1 trên mọi bề mặt nó xuất hiện; token bề mặt mới được thêm vào `focusIndicatorContrast.test.ts`.
@@ -311,9 +311,9 @@ Mỗi dòng là một danh sách legacy trong `frontend/eslint-rules/legacy.js`:
 | Rule | Nợ | Số đếm grep |
 |---|---|---|
 | FE-PAGE-1 | trang danh sách của control-plane và governance tự viết khung | (1) 42 file route có `<h1>` riêng; (2) 42 file trong số đó không nhắc tới `ListPageShell` |
-| FE-PAGE-4 | `<table>` tự viết ngoài các bảng dùng chung (một số là grid đặc thù được phép) | (3) 19 dòng |
+| FE-PAGE-4 | `<table>` tự viết ngoài các bảng dùng chung (một số là grid đặc thù được phép) | (3) 21 dòng |
 | FE-STATE-2 | chữ "Loading…"; spinner dùng cho nội dung (chưa đếm) | (4) 28 dòng |
-| FE-STATE-3 | chữ rỗng "No X" tự viết, và khối rỗng viền đứt | (5) 20 dòng dạng `"No <từ> yet\|found`; (6) 12 dòng `border-dashed` |
+| FE-STATE-3 | chữ rỗng "No X" tự viết, và khối rỗng viền đứt | (5) 21 dòng dạng `"No <từ> yet\|found`; (6) 12 dòng `border-dashed` |
 | FE-DATA-2 | hai tiền tố key `cp` và `control-plane` cho cùng một domain | (7) 30 dòng `["cp"`; (8) 52 dòng `["control-plane"` |
 | FE-ROUTE-2 | chỉ khu vực Workflows trong `App.tsx` được lazy-load; các khu vực có trước nó vẫn eager | (9) 1 `lazy(` trong `App.tsx` (Workflows, W7a) |
 | tài liệu | `docs/vi/ui-conventions.md` đã lệch so với `docs/en/ui-conventions.md` | (10) 664 dòng so với 2.227 |

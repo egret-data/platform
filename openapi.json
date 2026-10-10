@@ -37337,6 +37337,13 @@
             ],
             "format": "uuid"
           },
+          "created_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The creator's display name: the profile name, else the email. Null\nwhen `created_by` is null or the user no longer exists (W7a spec §7.4)."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -37396,6 +37403,13 @@
             ],
             "format": "uuid"
           },
+          "created_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The creator's display name: the profile name, else the email. Null\nwhen `created_by` is null or the user no longer exists (W7a spec §7.4)."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -37442,6 +37456,13 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "created_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The publisher's display name: the profile name, else the email. Null\nwhen `created_by` is null or the user no longer exists (W7a spec §7.4)."
           },
           "created_at": {
             "type": "string",

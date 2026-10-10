@@ -1215,11 +1215,14 @@ async fn two_concurrent_saves_with_the_same_if_updated_at_one_wins() {
         .execute(&mut *holder)
         .await
         .unwrap();
+    // The save's statement starts `WITH r AS (UPDATE workflow.flows SET ...`
+    // since W7a's creator-name join (spec §7.4), hence the leading `%`. This
+    // probe's own text matches too, but it is never waiting on a lock.
     let blocked_saves = || async {
         sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM pg_stat_activity \
               WHERE datname = current_database() AND wait_event_type = 'Lock' \
-                AND query LIKE 'UPDATE workflow.flows SET%'",
+                AND query LIKE '%UPDATE workflow.flows SET%'",
         )
         .fetch_one(&db.pool)
         .await
@@ -1258,4 +1261,211 @@ async fn two_concurrent_saves_with_the_same_if_updated_at_one_wins() {
     }
     statuses.sort();
     assert_eq!(statuses, vec![StatusCode::OK, StatusCode::CONFLICT]);
+}
+
+// ---------------------------------------------------------------------------
+// W7a spec §7.4: creator names, joined server-side.
+// ---------------------------------------------------------------------------
+
+/// Sets `user`'s profile name, so an assertion on it cannot be satisfied by
+/// the seed's shared `'t'`.
+async fn name_user(db: &egret_metastore::Db, user: egret_core::UserId, name: &str) {
+    sqlx::query("UPDATE users SET name = $2 WHERE id = $1")
+        .bind(user.0)
+        .bind(name)
+        .execute(&db.pool)
+        .await
+        .expect("name user");
+}
+
+/// Every DTO that carries `created_by` carries its name too, from every route
+/// that answers one: create, get, list, put, publish, versions, version.
+#[tokio::test]
+async fn every_flow_route_names_the_creator() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let name = format!("Ada {}", Uuid::new_v4().simple());
+    name_user(&db, user, &name).await;
+
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/flows");
+    let created = common::json(
+        common::post(
+            &app,
+            &base,
+            user,
+            serde_json::json!({ "source": minimal_flow("a.named") }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(created["created_by_name"], name, "create: {created}");
+    let id = created["id"].as_str().unwrap();
+
+    let got = common::json(common::get(&app, &format!("{base}/{id}"), user).await).await;
+    assert_eq!(got["created_by_name"], name, "get: {got}");
+
+    let list = common::json(common::get(&app, &base, user).await).await;
+    assert_eq!(list[0]["created_by_name"], name, "list: {list}");
+
+    let put = common::json(
+        common::put(
+            &app,
+            &format!("{base}/{id}"),
+            user,
+            serde_json::json!({ "source": minimal_flow("a.named2") }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(put["created_by_name"], name, "put: {put}");
+
+    let published = common::json(
+        common::post(
+            &app,
+            &format!("{base}/{id}/publish"),
+            user,
+            serde_json::json!({}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(published["created_by_name"], name, "publish: {published}");
+    let versions =
+        common::json(common::get(&app, &format!("{base}/{id}/versions"), user).await).await;
+    assert_eq!(versions[0]["created_by_name"], name, "versions: {versions}");
+    let one = common::json(common::get(&app, &format!("{base}/{id}/versions/1"), user).await).await;
+    assert_eq!(one["created_by_name"], name, "version: {one}");
+}
+
+/// No profile name: the email stands in, as for dashboards.
+#[tokio::test]
+async fn a_creator_without_a_profile_name_is_named_by_email() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    name_user(&db, user, "").await;
+    let email: String = sqlx::query_scalar("SELECT email::text FROM users WHERE id = $1")
+        .bind(user.0)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/flows");
+    common::post(
+        &app,
+        &base,
+        user,
+        serde_json::json!({ "source": minimal_flow("a.email") }),
+    )
+    .await;
+    let list = common::json(common::get(&app, &base, user).await).await;
+    assert_eq!(list[0]["created_by_name"], email, "{list}");
+}
+
+/// A row with no creator answers a null name -- and is still listed: the
+/// join is a LEFT JOIN, so the row is not dropped.
+#[tokio::test]
+async fn a_flow_without_a_creator_has_a_null_name_and_is_still_listed() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/flows");
+    let created = common::json(
+        common::post(
+            &app,
+            &base,
+            user,
+            serde_json::json!({ "source": minimal_flow("a.nobody") }),
+        )
+        .await,
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+    sqlx::query("UPDATE workflow.flows SET created_by = NULL WHERE id = $1::uuid")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let list = common::json(common::get(&app, &base, user).await).await;
+    assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+    assert!(list[0]["created_by"].is_null());
+    assert!(list[0]["created_by_name"].is_null(), "{list}");
+    let got = common::json(common::get(&app, &format!("{base}/{id}"), user).await).await;
+    assert!(got["created_by_name"].is_null(), "{got}");
+}
+
+/// The creator's account is deleted: the name goes with it (null), and the
+/// flow and its version stay listed.
+#[tokio::test]
+async fn a_deleted_creator_leaves_a_null_name() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/flows");
+    let created = common::json(
+        common::post(
+            &app,
+            &base,
+            user,
+            serde_json::json!({ "source": minimal_flow("a.gone") }),
+        )
+        .await,
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+    common::post(
+        &app,
+        &format!("{base}/{id}/publish"),
+        user,
+        serde_json::json!({}),
+    )
+    .await;
+
+    // A second account owns the flow and its version, and is then deleted.
+    // (The caller cannot be the one deleted: it must still be able to read.)
+    let leaver: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (email, name, provider, status, password_hash) \
+         VALUES ($1, 'Leaver', 'local', 'active', 'x') RETURNING id",
+    )
+    .bind(format!("leaver_{}@t.local", Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE workflow.flows SET created_by = $2 WHERE id = $1::uuid")
+        .bind(id)
+        .bind(leaver)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workflow.flow_versions SET created_by = $2 WHERE flow_id = $1::uuid")
+        .bind(id)
+        .bind(leaver)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    // Control: the name is there while the account exists.
+    let before = common::json(common::get(&app, &base, user).await).await;
+    assert_eq!(before[0]["created_by_name"], "Leaver", "{before}");
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(leaver)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let list = common::json(common::get(&app, &base, user).await).await;
+    assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+    assert!(list[0]["created_by_name"].is_null(), "{list}");
+    let versions =
+        common::json(common::get(&app, &format!("{base}/{id}/versions"), user).await).await;
+    assert_eq!(versions.as_array().unwrap().len(), 1, "{versions}");
+    assert!(versions[0]["created_by_name"].is_null(), "{versions}");
 }

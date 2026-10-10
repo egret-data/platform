@@ -1,9 +1,8 @@
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ChevronDown, ChevronRight, Search, Workflow } from "lucide-react";
 import { useWorkflowListFlows } from "@/api/generated/workflow/workflow";
 import type { FlowListItemDto } from "@/api/generated/model";
-import { useWorkspaceMembers } from "@/api/members";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -17,6 +16,7 @@ import { useCollapsed } from "@/components/explore/folders";
 import { StateChip } from "@/components/workflows/StateChip";
 import {
   buildNamespaceTree,
+  EMPTY_SEGMENT_LABEL,
   knownNamespaces,
   namespaceContains,
   type NamespaceNode,
@@ -67,19 +67,6 @@ export default function FlowsList() {
   const flows: FlowListItemDto[] | undefined = query.data?.status === 200 ? query.data.data : undefined;
   const hasData = !!flows && flows.length > 0;
 
-  // `created_by` is a user id. Members carry the name; a viewer who may not
-  // list members still gets the page, with a short id in that column.
-  const { data: members } = useWorkspaceMembers(ws);
-  const nameById = useMemo(
-    () =>
-      new Map(
-        (members ?? [])
-          .filter((m) => m.principal_type === "user" && m.principal_name)
-          .map((m) => [m.principal_id, m.principal_name as string]),
-      ),
-    [members],
-  );
-
   // Filters live in the URL (FE-PAGE-2): a filtered list can be shared and
   // survives a reload. The search box replaces the entry per keystroke; a
   // picker pushes one, so Back undoes it.
@@ -123,7 +110,30 @@ export default function FlowsList() {
     return known.map((ns) => ({ value: ns, label: ns }));
   }, [flows, nsFilter]);
 
-  const { isCollapsed, toggle } = useCollapsed(nsCollapseKey(ws));
+  const { isCollapsed: isStoredCollapsed, toggle } = useCollapsed(nsCollapseKey(ws));
+  // While a filter is engaged the tree shows every match: a search that hits a
+  // flow inside a collapsed namespace would otherwise show a header and no row.
+  // The stored state is neither read nor written then, and returns when the
+  // filters clear. The toggles still work on the results, but what they fold
+  // is kept in memory for THIS filter only (`filterSig`): a new search starts
+  // fully open again, and nothing about a transient search is persisted.
+  const filterSig = filtering ? JSON.stringify([q, nsFilter, stateFilter]) : "";
+  const [filterFolds, setFilterFolds] = useState<{ sig: string; closed: Set<string> }>(() => ({
+    sig: "",
+    closed: new Set(),
+  }));
+  const closedNow = filterFolds.sig === filterSig ? filterFolds.closed : null;
+  const isCollapsed = useCallback(
+    (path: string) => (filtering ? (closedNow?.has(path) ?? false) : isStoredCollapsed(path)),
+    [filtering, closedNow, isStoredCollapsed],
+  );
+  const onToggle = (path: string) => {
+    if (!filtering) return toggle(path);
+    const next = new Set(closedNow ?? []);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    setFilterFolds({ sig: filterSig, closed: next });
+  };
   const sections = useMemo(() => {
     const out: Section[] = [];
     const walk = (nodes: NamespaceNode[], depth: number) => {
@@ -243,7 +253,7 @@ export default function FlowsList() {
                       node={node}
                       depth={depth}
                       collapsed={collapsed}
-                      onToggle={() => toggle(node.path)}
+                      onToggle={() => onToggle(node.path)}
                     />
                     {!collapsed &&
                       node.flows.map((f) => (
@@ -260,7 +270,9 @@ export default function FlowsList() {
                             <RelativeTime iso={f.updated_at} />
                           </td>
                           <td className="text-muted-foreground">
-                            {f.created_by ? (nameById.get(f.created_by) ?? f.created_by.slice(0, 8)) : "—"}
+                            {/* Joined server-side (spec §7.4): null when there is no
+                                creator or the account is gone. */}
+                            {f.created_by_name ?? "—"}
                           </td>
                         </tr>
                       ))}
@@ -318,7 +330,11 @@ function NamespaceHeaderRow({
           title={node.path}
         >
           <Chevron aria-hidden="true" className="h-4 w-4 text-muted-foreground" />
-          {node.segment}
+          {node.segment === "" ? (
+            <span className="italic text-muted-foreground">{EMPTY_SEGMENT_LABEL}</span>
+          ) : (
+            node.segment
+          )}
           <span className="tabular-nums text-muted-foreground">({node.total})</span>
         </button>
       </td>

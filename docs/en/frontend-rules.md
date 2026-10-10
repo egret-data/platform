@@ -135,12 +135,12 @@ Server data is never cached in `localStorage`. `localStorage` holds per-viewer p
 ## 7. Routing (FE-ROUTE)
 
 #### FE-ROUTE-1 — Routes live in `App.tsx`, behind their guard · MUST
-Routes are declared in `frontend/src/App.tsx`. A route is wrapped in the guard its area needs (`RequireFeature`, `RequirePermission`, `RequireGlobalAdmin`). A redirect uses an absolute path.
+Routes are declared in `frontend/src/App.tsx`, or in a lazy area module that `App.tsx` mounts (the area's sub-routes must live there, or `App.tsx` would import its pages eagerly; for example `frontend/src/routes/workflows/WorkflowsRoutes.tsx`). A route is wrapped in the guard its area needs (`RequireFeature`, `RequirePermission`, `RequireGlobalAdmin`). A redirect uses an absolute path.
 **Do this:** `frontend/src/auth/guards.tsx`. **Checked by:** review.
 
 #### FE-ROUTE-2 — New feature areas are lazy · MUST
 Every new feature area, starting with Workflow, is code-split with `React.lazy` and `Suspense`, with a skeleton fallback.
-**Do this:** a route area: `workflows/*` in `frontend/src/App.tsx` (`lazy(() => import("@/routes/workflows/WorkflowsRoutes"))` under `Suspense` with a skeleton fallback); a component: `frontend/src/components/monaco/MonacoEditor.tsx`. **Checked by:** test: a bundle test per lazy area, `npm run test:bundle:workflows` (`frontend/scripts/assert-workflows-lazy.mjs`) for the Workflows routes and `npm run test:bundle:monaco` (`frontend/scripts/assert-monaco-lazy.mjs`) for Monaco.
+**Do this:** a route area: `workflows/*` in `frontend/src/App.tsx` (`lazy(() => import("@/routes/workflows/WorkflowsRoutes"))` inside `LazyRouteArea`, `frontend/src/components/layout/LazyRouteArea.tsx`: `Suspense` with a skeleton fallback, under an error boundary so a chunk that fails to load shows a reload instead of a blank app); a component: `frontend/src/components/monaco/MonacoEditor.tsx`. **Checked by:** test: a bundle test per lazy area, `npm run test:bundle:workflows` (`frontend/scripts/assert-workflows-lazy.mjs`) for the Workflows modules it lists, one marker per module and `npm run test:bundle:monaco` (`frontend/scripts/assert-monaco-lazy.mjs`) for Monaco.
 
 #### FE-ROUTE-3 — Kebab-case, workspace-scoped URLs · MUST
 URLs are kebab-case and workspace-scoped under `/explore/:workspace/…`.
@@ -258,7 +258,7 @@ Every rule a reviewer must confirm is here: either lint cannot check it, or its 
 - [ ] FE-DATA-1 — The API client was regenerated with `npm run gen:api`.
 - [ ] FE-DATA-2 — New endpoints through orval hooks; hand-written keys from the domain's key factory.
 - [ ] FE-DATA-3 — No server data in `localStorage`; every access wrapped.
-- [ ] FE-ROUTE-1 — Routes in `App.tsx`, behind their area's guard; redirects are absolute.
+- [ ] FE-ROUTE-1 — Routes in `App.tsx` or in a lazy area module it mounts, behind their area's guard; redirects are absolute.
 - [ ] FE-ROUTE-2 — A new feature area is lazy with a skeleton fallback, and a bundle test guards it (W7 adds the first).
 - [ ] FE-ROUTE-3 — URLs are kebab-case under `/explore/:workspace/…`.
 - [ ] FE-A11Y-2 — Focus uses the shared ring, at 3:1 against every surface it lands on; a new surface token is added to `focusIndicatorContrast.test.ts`.
@@ -309,9 +309,9 @@ Counted on 2026-10-10. These are **grep counts, not an inventory**: each is a ro
 | Rule | Debt | Grep count |
 |---|---|---|
 | FE-PAGE-1 | control-plane and governance list pages hand-roll their frame | (1) 42 route files with their own `<h1>`; (2) 42 of them do not mention `ListPageShell` |
-| FE-PAGE-4 | hand-written `<table>` outside the shared tables (some are allowed specialised grids) | (3) 19 lines |
+| FE-PAGE-4 | hand-written `<table>` outside the shared tables (some are allowed specialised grids) | (3) 21 lines |
 | FE-STATE-2 | "Loading…" texts; spinners used for content (not counted) | (4) 28 lines |
-| FE-STATE-3 | hand-written "No X" empty texts, and dashed empty blocks | (5) 20 lines of the form `"No <word> yet\|found`; (6) 12 `border-dashed` lines |
+| FE-STATE-3 | hand-written "No X" empty texts, and dashed empty blocks | (5) 21 lines of the form `"No <word> yet\|found`; (6) 12 `border-dashed` lines |
 | FE-DATA-2 | the `cp` and `control-plane` key prefixes for one domain | (7) 30 `["cp"` lines; (8) 52 `["control-plane"` lines |
 | FE-ROUTE-2 | only the Workflows area in `App.tsx` is lazy; the areas before it are eager | (9) 1 `lazy(` in `App.tsx` (Workflows, W7a) |
 | docs | `docs/vi/ui-conventions.md` has drifted from `docs/en/ui-conventions.md` | (10) 664 lines against 2,227 |

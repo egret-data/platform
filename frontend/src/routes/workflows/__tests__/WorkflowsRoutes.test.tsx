@@ -3,10 +3,8 @@ import { render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
 vi.mock("@/api/generated/workflow/workflow");
-vi.mock("@/api/members");
 
 import * as api from "@/api/generated/workflow/workflow";
-import * as members from "@/api/members";
 import WorkflowsRoutes from "@/routes/workflows/WorkflowsRoutes";
 
 function Where() {
@@ -20,9 +18,6 @@ function renderAt(path: string) {
     isError: false,
     error: null,
   } as unknown as ReturnType<typeof api.useWorkflowListFlows>);
-  vi.mocked(members.useWorkspaceMembers).mockReturnValue({ data: [] } as unknown as ReturnType<
-    typeof members.useWorkspaceMembers
-  >);
   render(
     <MemoryRouter initialEntries={[path]}>
       <Routes>

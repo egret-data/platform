@@ -100,6 +100,15 @@ describe("buildNamespaceTree", () => {
     expect(find(tree, "a").total).toBe(1);
   });
 
+  it("gives an empty segment its own node, keyed by the full path", () => {
+    // `a..b` and `a.` are both admitted by the backend's namespace pattern.
+    const tree = buildNamespaceTree([flow("a..b", "deep"), flow("a.", "trailing")]);
+    expect(paths(tree)).toEqual(["a", "a.", "a..b"]);
+    expect(find(tree, "a.").segment).toBe("");
+    expect(find(tree, "a.").flows.map((f) => f.flow_id)).toEqual(["trailing"]);
+    expect(find(tree, "a..b").segment).toBe("b");
+  });
+
   it("returns no nodes for no flows", () => {
     expect(buildNamespaceTree([])).toEqual([]);
   });

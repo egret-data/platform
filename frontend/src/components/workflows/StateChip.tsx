@@ -57,6 +57,10 @@ const UNKNOWN: StateLook = { tone: "neutral", icon: CircleHelp };
 /**
  * The seventeen Kestra execution states, by §8.1's groups.
  *
+ * `RESUBMITTED` doubles as this module's marker in
+ * `scripts/assert-workflows-lazy.mjs`, which proves the chip stays out of the
+ * entry chunk.
+ *
  * Maps, not object literals: the state is a server string, and a plain
  * object would answer `constructor` or `toString` from its prototype.
  */

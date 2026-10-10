@@ -74,3 +74,14 @@ export function knownNamespaces(flows: FlowListItemDto[]): string[] {
   }
   return [...out].sort((a, b) => a.localeCompare(b));
 }
+
+/**
+ * What a header shows for an empty segment. The backend's namespace pattern
+ * (`^[a-z0-9][a-z0-9._-]*`, `spec/validate.rs`) admits `a..b` and `a.`, whose
+ * nodes have segment `""`; without this the header would be a bare chevron
+ * and a count. A leading dot cannot happen.
+ *
+ * Also a bundle-test marker (`scripts/assert-workflows-lazy.mjs`): the one
+ * string literal in this module that survives minification.
+ */
+export const EMPTY_SEGMENT_LABEL = "(empty segment)";
