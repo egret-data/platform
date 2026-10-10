@@ -110,6 +110,18 @@ impl SessionService {
         // live overlay. If the target user is not active (disabled since the overlay
         // was started), the overlay is treated as inert and we fall through to the
         // admin principal — impersonating a disabled user must not resolve.
+        //
+        // The same applies to a target who has GAINED platform authority since the
+        // overlay began. The principal below is rebuilt from live tables on every
+        // request, so `validate_impersonation_target`'s creation-time check was
+        // time-dependent and therefore escapable (whole-branch review, H-1): an IdP
+        // group change replayed by `sync_user_oidc_groups`, or a console grant,
+        // needs no permission from the admin and handed a `ws_admin`'s own token a
+        // principal carrying platform permissions that no `/api/control-plane` route
+        // confines. So the SAME predicate the creation guard uses —
+        // `overlay_refused_by_platform_authority`, called, never restated — is
+        // re-evaluated here, and when it refuses, the overlay is inert and we fall
+        // through to the admin principal exactly as for a disabled target.
         if let Some(ov) = self
             .impersonations
             .active_for_session(row.session_id)
@@ -124,23 +136,35 @@ impl SessionService {
                     .map_err(db_err)?;
             if let Some((target_email, target_status)) = target_row {
                 if target_status == "active" {
-                    // `impersonator_id` == the session owner (`row.user_id`), by
-                    // construction — the overlay is always attached to the admin's own
-                    // session — so `row.email` is the impersonator's email and no extra
-                    // query is needed.
-                    return Ok(Some(Principal {
-                        user_id: target,
-                        email: target_email,
-                        platform_roles: self.platform_roles(target).await?,
-                        permissions: self.permissions(target).await?,
-                        group_ids: self.group_ids(target).await?,
-                        impersonator: Some(egret_core::context::Impersonator {
-                            user_id: UserId(ov.impersonator_id),
-                            email: row.email.clone(),
-                            workspace_scope: ov.workspace_scope_id.map(egret_core::WorkspaceId),
-                            expires_at: ov.expires_at,
-                        }),
-                    }));
+                    // Hoisted out of the `Principal` literal below, which already
+                    // fetched it on that line — so re-checking the platform-authority
+                    // rule costs no extra query.
+                    let target_platform_roles = self.platform_roles(target).await?;
+                    // Refused ⇒ no `return` happens here and control reaches the
+                    // admin-principal tail below: the overlay is inert, nothing is
+                    // written, and the admin is simply an admin again.
+                    if !crate::impersonation::overlay_refused_by_platform_authority(
+                        ov.workspace_scope_id.is_some(),
+                        &target_platform_roles,
+                    ) {
+                        // `impersonator_id` == the session owner (`row.user_id`), by
+                        // construction — the overlay is always attached to the admin's own
+                        // session — so `row.email` is the impersonator's email and no extra
+                        // query is needed.
+                        return Ok(Some(Principal {
+                            user_id: target,
+                            email: target_email,
+                            platform_roles: target_platform_roles,
+                            permissions: self.permissions(target).await?,
+                            group_ids: self.group_ids(target).await?,
+                            impersonator: Some(egret_core::context::Impersonator {
+                                user_id: UserId(ov.impersonator_id),
+                                email: row.email.clone(),
+                                workspace_scope: ov.workspace_scope_id.map(egret_core::WorkspaceId),
+                                expires_at: ov.expires_at,
+                            }),
+                        }));
+                    }
                 }
             }
         }
@@ -230,6 +254,40 @@ impl SessionService {
         .await
         .map_err(db_err)?;
         Ok(exists)
+    }
+
+    /// The user's role names in ONE workspace (direct + via group, non-expired). An
+    /// empty vector means the user is not a member of it.
+    ///
+    /// A direct `access_grants` query for the same reason [`Self::ws_admin_of`] is
+    /// one — egret-auth cannot import egret-workspace's `Authorizer` without a
+    /// dependency cycle, and this authority IS just a grant row. Same shape as
+    /// `egret_workspace::rbac::Authorizer::workspace_roles_for`.
+    ///
+    /// Read by `impersonation::validate_ws_impersonation_target_membership`, which is
+    /// the single place the "member of A and not a `ws_admin` of A" rule lives, so
+    /// the OIDC step-up callback applies the same target rule as the inline
+    /// `ws_impersonate_start` (whole-branch review, M-1).
+    pub async fn workspace_roles_of(
+        &self,
+        user_id: UserId,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT r.name FROM access_grants ag \
+             JOIN roles r ON r.id = ag.role_id \
+             WHERE ag.scope_type = 'workspace' AND ag.scope_id = $2 \
+               AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+               AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
+                  OR (ag.principal_type = 'group' AND ag.principal_id IN \
+                         (SELECT group_id FROM user_groups WHERE user_id = $1)) )",
+        )
+        .bind(user_id.0)
+        .bind(workspace_id.0)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(rows.into_iter().map(|(n,)| n).collect())
     }
 
     /// Platform roles for the user (direct + via group membership).

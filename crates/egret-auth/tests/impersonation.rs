@@ -381,6 +381,225 @@ async fn validate_disabled_target_falls_through_to_admin() {
     assert!(p.impersonator.is_none());
 }
 
+/// Grant `user` a fresh platform-scoped role carrying `policy:update` — the shape
+/// migration `0059_rbac_permission_seed.sql` gives `data_steward`, built here with
+/// its own role so the fixture does not depend on the seed's contents. It is
+/// deliberately NOT `platform_admin`: the pre-existing rule already refused that
+/// target under both scopes, so a test built on one would prove nothing new.
+async fn grant_platform_steward_shaped_role(db: &Db, user: UserId) {
+    let role_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (scope, name, description) VALUES ('platform', $1, 'overlay liveness') \
+         RETURNING id",
+    )
+    .bind(format!("overlay_steward_{}", uuid::Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'policy:update')")
+        .bind(role_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL)",
+    )
+    .bind(user.0)
+    .bind(role_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
+/// **The platform-authority rule must hold for the LIFE of the overlay, not only at
+/// its creation** (whole-branch review, H-1).
+///
+/// `validate_impersonation_target` reads the target's platform-scoped role grants
+/// ONCE, when the overlay is written. `SessionService::validate` then rebuilds the
+/// TARGET's `platform_roles` and `permissions` from live tables on **every request**
+/// for the overlay's 30 minutes. Nothing re-checked in between, and the production
+/// trigger needs no attacker permission: `sync_user_oidc_groups` replaces
+/// `user_groups` from the IdP claim on every OIDC login, and group-derived platform
+/// grants are admitted by the same query that fills the principal.
+///
+/// So a `ws_admin` of A started a ws-scoped overlay on a clean member of A; the
+/// target later gained a platform role; and the **same admin token** then resolved
+/// to a principal carrying `policy:update` with
+/// `impersonator.workspace_scope = Some(A)`. Only three consumers in the tree
+/// enforce `workspace_scope` and none of them is in `egret-policy`, so
+/// `PUT /api/control-plane/policies/{id}` was reachable — and egret IS the Ranger
+/// admin, so the body stored there is what another workspace's engine enforces.
+///
+/// **This test drives the TIME dimension, which IS the defect.** The creation guard
+/// passes first (asserted), the overlay then resolves to the target (asserted — so
+/// the test cannot pass against a predicate that makes every overlay inert), and
+/// only *afterwards* does the target gain the role. A test that granted the role up
+/// front would measure the already-working creation guard instead.
+#[tokio::test]
+async fn an_overlay_goes_inert_when_its_target_gains_a_platform_role_later() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let users = UserRepo::new(db.clone());
+    let sessions = egret_auth::session::SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(8),
+        chrono::Duration::hours(1),
+    );
+    let imp = ImpersonationRepo::new(db.clone());
+    let admin = seed_user_named(&db, "overlay-h1-admin@x").await;
+    let target = seed_user_named(&db, "overlay-h1-target@x").await;
+    let ws = seed_workspace(&db, admin).await;
+
+    // t0: the creation guard PASSES — at this instant the target holds no
+    // platform-scoped role grant at all.
+    egret_auth::impersonation::validate_impersonation_target(
+        &users,
+        &sessions,
+        admin,
+        target,
+        "support ticket",
+        Some(ws),
+    )
+    .await
+    .expect("a clean target must pass the creation guard, or this test measures nothing");
+
+    let issued = sessions.create(admin, "ua", "ip").await.unwrap();
+    let sess_id = session_id_for_token(&db, &issued.token).await;
+    imp.start(NewImpersonation {
+        admin_session_id: sess_id,
+        impersonator_id: admin,
+        target_user_id: target,
+        workspace_scope: Some(ws),
+        reason: "support ticket".into(),
+        ttl_minutes: 30,
+    })
+    .await
+    .unwrap();
+
+    // t1: LIVE. The overlay resolves to the target, scoped to A.
+    let p = sessions.validate(&issued.token).await.unwrap().unwrap();
+    assert_eq!(
+        p.email, "overlay-h1-target@x",
+        "the overlay must be live BEFORE the grant, or the assertion below is vacuous"
+    );
+    assert_eq!(
+        p.impersonator
+            .as_ref()
+            .expect("impersonator set")
+            .workspace_scope,
+        Some(ws)
+    );
+
+    // t2: the target gains platform authority mid-overlay — an IdP group change or
+    // a console grant, neither of which the admin needs any permission to cause.
+    grant_platform_steward_shaped_role(&db, target).await;
+
+    // t3: the SAME admin token must now resolve to the ADMIN. The overlay is inert.
+    let p = sessions.validate(&issued.token).await.unwrap().unwrap();
+    assert_eq!(
+        p.email, "overlay-h1-admin@x",
+        "a ws-scoped overlay must go INERT the moment its target holds platform \
+         authority — no /api/control-plane route confines a scoped overlay"
+    );
+    assert_eq!(p.user_id, admin);
+    assert!(
+        p.impersonator.is_none(),
+        "an inert overlay must not report an impersonator either: the three consumers \
+         of workspace_scope would otherwise see a scoped admin session"
+    );
+    assert!(
+        !p.permissions.iter().any(|x| x == "policy:update"),
+        "the admin token must not acquire the target's platform permission, got {:?}",
+        p.permissions
+    );
+
+    // The overlay ROW is untouched — inert, not reaped. This is the same shape as a
+    // target disabled mid-overlay, and it means the admin is back to being an admin
+    // without a destructive write on a read path.
+    assert!(
+        imp.active_for_session(sess_id).await.unwrap().is_some(),
+        "the overlay row must survive: it is treated as inert on the read path, not deleted"
+    );
+}
+
+/// **Control for the permissive arm, at the new `validate` call site.**
+///
+/// A **platform-scoped** overlay (`workspace_scope = None`) on a target holding a
+/// non-`platform_admin` platform role must keep resolving to the target: the caller
+/// on that path is already a `platform_admin`, whose PDP bypass means they hold
+/// strictly more than any steward, so refusing it prevents no escalation and
+/// removes the support path of reproducing what a steward sees.
+///
+/// This is the cell a tightening that collapsed the rule to "refuse any platform
+/// role" would silently delete, and nothing else in the suite notices a predicate
+/// that merely makes MORE overlays inert. `validate` is asserted to hand back the
+/// target *with* `policy:update`, so this is the live half of the pair the H-1 test
+/// above completes.
+#[tokio::test]
+async fn a_platform_scoped_overlay_on_a_steward_target_stays_live() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let users = UserRepo::new(db.clone());
+    let sessions = egret_auth::session::SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(8),
+        chrono::Duration::hours(1),
+    );
+    let imp = ImpersonationRepo::new(db.clone());
+    let admin = seed_user_named(&db, "overlay-plat-admin@x").await;
+    let target = seed_user_named(&db, "overlay-plat-target@x").await;
+    grant_platform_steward_shaped_role(&db, target).await;
+
+    // The creation guard permits this pairing on the platform path.
+    egret_auth::impersonation::validate_impersonation_target(
+        &users,
+        &sessions,
+        admin,
+        target,
+        "reproduce a steward's view",
+        None,
+    )
+    .await
+    .expect("a platform-scoped overlay MAY target a non-admin platform-permission holder");
+
+    let issued = sessions.create(admin, "ua", "ip").await.unwrap();
+    let sess_id = session_id_for_token(&db, &issued.token).await;
+    imp.start(NewImpersonation {
+        admin_session_id: sess_id,
+        impersonator_id: admin,
+        target_user_id: target,
+        workspace_scope: None,
+        reason: "reproduce a steward's view".into(),
+        ttl_minutes: 30,
+    })
+    .await
+    .unwrap();
+
+    let p = sessions.validate(&issued.token).await.unwrap().unwrap();
+    assert_eq!(
+        p.email, "overlay-plat-target@x",
+        "a platform-scoped overlay on a steward target must stay LIVE"
+    );
+    assert!(
+        p.impersonator
+            .as_ref()
+            .expect("impersonator set")
+            .workspace_scope
+            .is_none(),
+        "the platform overlay carries no workspace scope"
+    );
+    assert!(
+        p.permissions.iter().any(|x| x == "policy:update"),
+        "the support path exists to see what the steward sees, so the steward's own \
+         permission must be present, got {:?}",
+        p.permissions
+    );
+}
+
 /// A service account must not be an impersonation target.
 ///
 /// Migration 0119's `users_service_has_no_password` CHECK exists to make "a
@@ -1332,6 +1551,151 @@ mod http {
             "a revoked platform_admin must not complete the step-up"
         );
         assert_eq!(active_overlay_count(&db, a).await, 0);
+    }
+
+    /// Grant `uid` the workspace role `role` on `ws` (direct user grant).
+    async fn grant_ws_role(db: &Db, uid: UserId, ws: WorkspaceId, role: &str) {
+        let n = sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'user', $1, id, 'workspace', $2 FROM roles \
+             WHERE scope = 'workspace' AND name = $3 \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(uid.0)
+        .bind(ws.0)
+        .bind(role)
+        .execute(&db.pool)
+        .await
+        .unwrap()
+        .rows_affected();
+        assert_eq!(
+            n, 1,
+            "the fixture must really grant {role} on the workspace"
+        );
+    }
+
+    /// **The OIDC step-up callback omitted `ws_impersonate_start`'s step 4**
+    /// (whole-branch review, M-1).
+    ///
+    /// `ws_impersonate_start` runs FOUR target guards before writing a ws-scoped
+    /// overlay: the three shared ones in `validate_impersonation_target`, and then a
+    /// workspace-specific pair — the target must be a MEMBER of that workspace and
+    /// must not be a `ws_admin` of it. An OIDC caller never reaches that write: the
+    /// start endpoint returns a `409` and the overlay is minted here, in the
+    /// callback — which re-checked the CALLER (`ws_admin_of`) and re-ran the shared
+    /// target guards but never the workspace-specific pair. Remove the target from
+    /// the workspace, or promote them to `ws_admin` there, during the IdP round trip
+    /// and the overlay was minted anyway.
+    ///
+    /// Three cells, because a guard proven only by its refusals is not proven:
+    /// non-member → 403, `ws_admin` there → 403, ordinary member → overlay minted.
+    #[tokio::test]
+    async fn oidc_callback_rejects_a_ws_scoped_target_who_is_not_a_member() {
+        let Some(db) = connect().await else {
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+            return;
+        };
+        let st = oidc_routes_state(&db).await;
+        let a = seed_oidc_user(&db, "wsAdminNonMember").await;
+        let ws = seed_workspace(&db, a).await;
+        grant_ws_role(&db, a, ws, "ws_admin").await;
+        // The target holds NO role in this workspace at callback time — removed
+        // during the IdP round trip, or never a member at all.
+        let (target, _te) = seed_local(&db).await;
+
+        let intent = egret_auth::oidc_cookie::ImpersonateIntent {
+            impersonator_id: a.0,
+            target_user_id: target.0,
+            reason: "support ticket".into(),
+            workspace_id: Some(ws.0),
+        };
+        let resp = call_step_up(&st, a, intent).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a ws-scoped step-up must not mint an overlay over a NON-MEMBER of that \
+             workspace — the start endpoint refuses it, so the callback must too"
+        );
+        assert_eq!(
+            active_overlay_count(&db, a).await,
+            0,
+            "a refused step-up writes no overlay"
+        );
+    }
+
+    /// The second half of the omitted guard: the target is a `ws_admin` of the
+    /// intent's workspace (promoted during the IdP round trip). `ws_impersonate_start`
+    /// refuses that — a ws_admin impersonating a peer ws_admin is a lateral move
+    /// inside the workspace's own authority — and so must the callback.
+    #[tokio::test]
+    async fn oidc_callback_rejects_a_ws_scoped_target_who_is_a_ws_admin_there() {
+        let Some(db) = connect().await else {
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+            return;
+        };
+        let st = oidc_routes_state(&db).await;
+        let a = seed_oidc_user(&db, "wsAdminPeer").await;
+        let ws = seed_workspace(&db, a).await;
+        grant_ws_role(&db, a, ws, "ws_admin").await;
+        let (target, _te) = seed_local(&db).await;
+        grant_ws_role(&db, target, ws, "ws_admin").await;
+
+        let intent = egret_auth::oidc_cookie::ImpersonateIntent {
+            impersonator_id: a.0,
+            target_user_id: target.0,
+            reason: "support ticket".into(),
+            workspace_id: Some(ws.0),
+        };
+        let resp = call_step_up(&st, a, intent).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a ws-scoped step-up must not mint an overlay over a ws_admin of that workspace"
+        );
+        assert_eq!(active_overlay_count(&db, a).await, 0);
+    }
+
+    /// **The live cell.** An ordinary member of the intent's workspace still
+    /// completes: without this, both refusals above would pass against a guard that
+    /// rejects every ws-scoped step-up.
+    #[tokio::test]
+    async fn oidc_callback_completes_a_ws_scoped_step_up_for_an_ordinary_member() {
+        let Some(db) = connect().await else {
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+            return;
+        };
+        let st = oidc_routes_state(&db).await;
+        let a = seed_oidc_user(&db, "wsAdminOk").await;
+        let ws = seed_workspace(&db, a).await;
+        grant_ws_role(&db, a, ws, "ws_admin").await;
+        let (target, _te) = seed_local(&db).await;
+        grant_ws_role(&db, target, ws, "ws_editor").await;
+
+        let intent = egret_auth::oidc_cookie::ImpersonateIntent {
+            impersonator_id: a.0,
+            target_user_id: target.0,
+            reason: "support ticket".into(),
+            workspace_id: Some(ws.0),
+        };
+        let resp = call_step_up(&st, a, intent).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::SEE_OTHER,
+            "a ws-scoped step-up over an ordinary MEMBER must still complete"
+        );
+        assert_eq!(active_overlay_count(&db, a).await, 1);
+        let scope: Option<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT workspace_scope_id FROM impersonations WHERE impersonator_id = $1",
+        )
+        .bind(a.0)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            scope,
+            Some(ws.0),
+            "the minted overlay is confined to the intent's workspace"
+        );
     }
 
     /// Extract the (plaintext) `egret_session` value from a response's Set-Cookie.

@@ -9,6 +9,54 @@ use uuid::Uuid;
 use crate::session::SessionService;
 use crate::users::UserRepo;
 
+/// **The platform-authority rule for an impersonation overlay, in exactly one
+/// place.** Pure over `(the overlay is confined to one workspace, the target's
+/// platform-scoped role grants)`:
+///
+/// | target | confined to a workspace | platform-wide |
+/// |---|---|---|
+/// | holds NO platform role | live | live |
+/// | holds a non-admin platform role | **inert / refused** | live |
+/// | holds `platform_admin` | **inert / refused** | **inert / refused** |
+///
+/// It is evaluated at **two different times**, and that is why it is a function
+/// rather than two `match`es:
+///
+/// * [`validate_impersonation_target`] evaluates it when the overlay is **written**,
+///   and turns `true` into `Forbidden` — the caller never gets an overlay.
+/// * `SessionService::validate` evaluates it on **every request** for the overlay's
+///   whole 30-minute life, and turns `true` into an **inert** overlay that falls
+///   through to the admin principal.
+///
+/// The creation check alone was a privilege escalation (whole-branch review, H-1):
+/// `validate` rebuilds the TARGET's `platform_roles` and `permissions` from live
+/// tables on every request, so a target who gained a platform role AFTER the
+/// overlay began — an IdP group change replayed by `sync_user_oidc_groups` on the
+/// next login, or a console grant, neither needing any permission from the admin —
+/// handed the same `ws_admin` token a principal carrying `policy:update` with
+/// `impersonator.workspace_scope = Some(A)`. Only three consumers in the tree
+/// enforce `workspace_scope`, none in `egret-policy`, so
+/// `PUT /api/control-plane/policies/{id}` was reachable; and egret IS the Ranger
+/// admin, so a body stored there is what another workspace's engine enforces.
+///
+/// ⚠ **Both call sites must call this; neither may restate it.** "Two guards that
+/// must agree, written to different shapes" produced a defect on this branch five
+/// times, once inside the fix for it. The permissive cell (platform-wide overlay,
+/// non-admin platform role) is load-bearing and asserted live at both times — see
+/// `a_platform_scoped_overlay_on_a_steward_target_stays_live` and
+/// `a_target_holding_any_platform_role_grant_is_refused`; nothing else notices a
+/// predicate that merely refuses MORE.
+pub fn overlay_refused_by_platform_authority(
+    scoped_to_one_workspace: bool,
+    target_platform_roles: &[String],
+) -> bool {
+    if scoped_to_one_workspace {
+        !target_platform_roles.is_empty()
+    } else {
+        target_platform_roles.iter().any(|r| r == "platform_admin")
+    }
+}
+
 /// Validate that `impersonator` (already known to be an authorized admin for the
 /// intended scope) may target `target_user_id`. Enforces the target-facing
 /// invariants shared by **every** impersonation entry point: not self, reason
@@ -128,12 +176,50 @@ pub async fn validate_impersonation_target(
     // from the target's roles. Keeping one target rule for all three entry points
     // is the shape the rest of this function already has, and a per-entry-point
     // parameter would be the second predicate this guard exists to avoid.
+    //
+    // The rule itself lives in [`overlay_refused_by_platform_authority`] and is
+    // CALLED here, not restated: `SessionService::validate` re-evaluates the same
+    // function on every request for the overlay's life (whole-branch review, H-1 —
+    // this creation check alone was time-dependent and therefore escapable), and
+    // two spellings of this rule that must agree is the failure mode that produced
+    // the defect above.
     let target_roles = sessions.platform_roles_of(target_user_id).await?;
-    let refuse = match intended_scope {
-        Some(_) => !target_roles.is_empty(),
-        None => target_roles.iter().any(|r| r == "platform_admin"),
-    };
-    if refuse {
+    if overlay_refused_by_platform_authority(intended_scope.is_some(), &target_roles) {
+        return Err(Error::Forbidden);
+    }
+    Ok(())
+}
+
+/// The workspace-specific half of the ws-scoped target rule, in exactly one place:
+/// the target of a **workspace-scoped** overlay must be a MEMBER of that workspace
+/// and must not be a `ws_admin` of it.
+///
+/// `workspace_roles_of` resolves the target's roles in that one workspace (direct +
+/// via group, non-expired), so an empty set means "not a member" and both legs catch
+/// group-derived roles rather than only direct grants.
+///
+/// Two call sites, because a ws-scoped overlay can be written from either of two
+/// places and the OIDC one is reached *after* an IdP round trip:
+///
+/// * `egret_workspace::routes::ws_impersonate_start`, step 4 — the inline path.
+/// * `egret_auth::oidc_routes::complete_impersonation_step_up` — the OIDC caller's
+///   `409` step-up completes there, and it **omitted this guard** (whole-branch
+///   review, M-1), so promoting or removing the target during the round trip minted
+///   the overlay anyway.
+///
+/// ⚠ Like [`overlay_refused_by_platform_authority`], both call sites CALL this; a
+/// copied block in the second place is the shape this branch has already been bitten
+/// by. The live cell (an ordinary member still completes) is asserted at both call
+/// sites, so a guard that refused every ws-scoped overlay would fail.
+pub async fn validate_ws_impersonation_target_membership(
+    sessions: &SessionService,
+    target_user_id: UserId,
+    workspace_id: WorkspaceId,
+) -> Result<()> {
+    let target_roles = sessions
+        .workspace_roles_of(target_user_id, workspace_id)
+        .await?;
+    if target_roles.is_empty() || target_roles.iter().any(|r| r == "ws_admin") {
         return Err(Error::Forbidden);
     }
     Ok(())

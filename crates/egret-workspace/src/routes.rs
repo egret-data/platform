@@ -1127,19 +1127,22 @@ async fn ws_impersonate_start(
     )
     .await
     .map_err(AuthError)?;
-    // 4. Workspace-specific target guards. `workspace_roles_for` resolves the
-    //    target's roles in THIS workspace (direct + via group, non-expired): an
-    //    empty set means the target is not a member (403), and a set containing
-    //    `ws_admin` means the target is itself an admin here (403). Both catch
-    //    group-derived roles, not just direct grants.
-    let target_roles = st
-        .authz
-        .workspace_roles_for(target, ctx.workspace_id)
-        .await
-        .map_err(AuthError)?;
-    if target_roles.is_empty() || target_roles.iter().any(|r| r == "ws_admin") {
-        return Err(AuthError(Error::Forbidden));
-    }
+    // 4. Workspace-specific target guards: the target must be a MEMBER of THIS
+    //    workspace (an empty role set means they are not) and must not be a
+    //    `ws_admin` of it. Both catch group-derived roles, not just direct grants.
+    //
+    //    The rule lives in `validate_ws_impersonation_target_membership` and is
+    //    CALLED here, because the OIDC step-up callback mints this same ws-scoped
+    //    overlay after an IdP round trip and had omitted the pair entirely
+    //    (whole-branch review, M-1) — one function, two call sites, so the two
+    //    cannot drift.
+    egret_auth::impersonation::validate_ws_impersonation_target_membership(
+        &st.sessions,
+        target,
+        ctx.workspace_id,
+    )
+    .await
+    .map_err(AuthError)?;
     // 5. Step-up re-authentication of the CALLER. A local caller re-enters their
     //    password inline; an OIDC caller must re-authenticate with the IdP, so we
     //    return a 409 carrying the authorize URL with the impersonation intent —
