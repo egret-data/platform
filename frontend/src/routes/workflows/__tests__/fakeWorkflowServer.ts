@@ -39,6 +39,10 @@ export class FakeWorkflowServer {
   putReply: Reply | null = null;
   /** How many of the next `GET …/flows/{id}` fail with 503. */
   getFlowFailures = 0;
+  /** Answers `GET …/flows/{id}/versions` with this instead of the versions. */
+  versionsReply: Reply | null = null;
+  /** While set, `GET …/flows/{id}/versions` waits for it before answering. */
+  versionsGate: Promise<void> | null = null;
   /** While set, `POST …/flows` waits for it before answering. */
   createGate: Promise<void> | null = null;
 
@@ -96,6 +100,7 @@ export class FakeWorkflowServer {
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
       this.calls.push({ method, path, body });
       if (method === "POST" && path === `/api/ws/${WS}/workflows/flows` && this.createGate) await this.createGate;
+      if (method === "GET" && path.endsWith("/versions") && this.versionsGate) await this.versionsGate;
       const { status, body: out, headers } = this.route(method, path, body);
       return new Response(out === undefined ? null : JSON.stringify(out), {
         status,
@@ -124,7 +129,7 @@ export class FakeWorkflowServer {
       }
       return this.getFlowReply ?? { status: 200, body: this.flow };
     }
-    if (method === "GET" && path === `${flowPath}/versions`) return { status: 200, body: this.versions };
+    if (method === "GET" && path === `${flowPath}/versions`) return this.versionsReply ?? { status: 200, body: this.versions };
     if (method === "PUT" && path === flowPath) {
       if (this.putReply) return this.putReply;
       const req = body as { source: string; if_updated_at?: string | null };

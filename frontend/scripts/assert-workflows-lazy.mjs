@@ -77,6 +77,10 @@ const MARKERS = [
   ["src/components/workflows/run/RunFlow.tsx", "Fix the YAML, save, then run it.", "editor"],
   ["src/components/workflows/run/inputControls.tsx", "This input depends on other inputs", "editor"],
   ["src/components/workflows/run/inputModel.ts", "Add at least one item.", "editor"],
+  // The Revisions tab (W7a Task 7), on the flow page. Monaco's diff editor itself stays in the Monaco
+  // chunk (`MonacoDiffEditor`, `assert-monaco-lazy.mjs`).
+  ["src/routes/workflows/FlowRevisions.tsx", "The saved draft already has this text", "editor"],
+  ["src/components/workflows/RevisionDiff.tsx", "Differences between ", "editor"],
   // The minimal execution page (W7a Task 6), in the area's own chunk with the list.
   ["src/routes/workflows/ExecutionMinimal.tsx", "The execution ended before any task ran."],
 ];

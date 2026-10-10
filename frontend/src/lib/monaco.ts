@@ -11,7 +11,7 @@
  * Module evaluation is strictly before the lazy component can render, and
  * `init()` is called on mount, so the ordering here is deterministic.
  */
-import ReactEditor, { loader } from "@monaco-editor/react";
+import ReactEditor, { DiffEditor, loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor/editor";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 // `monaco-yaml`'s language service. Its worker imports
@@ -57,3 +57,6 @@ loader.config({ monaco });
 /** `React.lazy` resolves a module's default export, so this IS the component
  *  `MonacoEditor` renders once the chunk has landed. */
 export default ReactEditor;
+
+/** The diff editor (a flow's Revisions tab), reached through the same lazy import as the editor. */
+export { DiffEditor };

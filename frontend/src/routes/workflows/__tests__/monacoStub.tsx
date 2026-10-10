@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { EditorProps } from "@monaco-editor/react";
+import type { DiffEditorProps, EditorProps } from "@monaco-editor/react";
 
 /**
  * A stand-in for `@/components/monaco/MonacoEditor`, for the flow pages'
@@ -27,11 +27,14 @@ type Model = {
 export const stub = {
   models: new Map<string, Model>(),
   commands: new Map<number, () => void>(),
+  /** The props of every diff editor rendered, latest last. */
+  diffs: [] as DiffEditorProps[],
 };
 
 export function resetMonacoStub(): void {
   stub.models.clear();
   stub.commands.clear();
+  stub.diffs = [];
 }
 
 /** Run the editor's own `Ctrl/Cmd+S` binding, as Monaco would on that key. */
@@ -111,10 +114,24 @@ export default function MonacoStub(props: EditorProps) {
   }, [model]);
   return (
     <textarea
-      aria-label="Flow source"
+      aria-label={props.options?.ariaLabel ?? "Flow source"}
       readOnly={!!props.options?.readOnly}
       value={model.text}
       onChange={(e) => typeInto(model, e.target.value)}
     />
+  );
+}
+
+/**
+ * A stand-in for `MonacoDiffEditor`: the two sides as read-only text boxes,
+ * named "Original" and "Modified", with the props recorded in `stub.diffs`.
+ */
+export function MonacoDiffEditor(props: DiffEditorProps) {
+  stub.diffs.push(props);
+  return (
+    <div role="group" aria-label={props.options?.ariaLabel ?? "Diff"}>
+      <textarea aria-label="Original" readOnly value={props.original ?? ""} />
+      <textarea aria-label="Modified" readOnly value={props.modified ?? ""} />
+    </div>
   );
 }

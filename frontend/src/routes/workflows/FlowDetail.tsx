@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { History, Milestone, Play, RotateCw, Save, Trash2 } from "lucide-react";
+import { Milestone, Play, RotateCw, Save, Trash2 } from "lucide-react";
 import { ApiError } from "@/api/client";
 import {
   useWorkflowDeleteFlow,
@@ -43,6 +43,7 @@ import {
   useFlowLayout,
   useSaveShortcut,
 } from "@/routes/workflows/FlowEditPage";
+import { FlowRevisions } from "@/routes/workflows/FlowRevisions";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
 /** The flow detail's tabs in W7a (spec §3); W7b and W7e add theirs here. */
@@ -130,6 +131,22 @@ function FlowDetailLoader({ ws, id, tab }: { ws: string; id: string; tab: FlowTa
   return <FlowWorkspace ws={ws} id={id} tab={tab} flow={flow} refetchFlow={query.refetch} />;
 }
 
+/**
+ * One save of the draft. A plain Save sends the editor's text at the moment it
+ * runs; "Restore to draft" sends a version's text and, once it is saved, puts
+ * it in the editor (one undoable edit, `CodeTab`), so a refused or failed
+ * restore leaves the editor's text as it was (FE-ACTION-3).
+ */
+type SaveRequest = {
+  /** The text to save; the editor's current text when absent. */
+  source?: string;
+  /** Write `source` into the editor once it is saved (a restore). */
+  replaceEditor?: boolean;
+  successToast?: string;
+};
+
+const SAVED_TOAST = "Saved. New runs use this version of the flow.";
+
 /** What the editor's text was last loaded or saved as: the precondition of the next save. */
 type Baseline = {
   source: string;
@@ -179,7 +196,7 @@ function FlowWorkspace({
 
   // Save is bound once, into Monaco's Ctrl/Cmd+S and the context, so it calls
   // through a ref that every render points at that render's `saveFlow`.
-  const saveRef = useRef<(overwrite?: boolean) => Promise<void>>(async () => {});
+  const saveRef = useRef<(request?: SaveRequest, overwrite?: boolean) => Promise<boolean>>(async () => false);
   const save = useCallback(() => void saveRef.current(), []);
   const flowLayout = useFlowLayout(id);
   const editor = useFlowEditor({
@@ -197,7 +214,8 @@ function FlowWorkspace({
   const dirty = editor.source !== baseline.source;
   useUnsavedChangesWarning(dirty);
 
-  const [staleOpen, setStaleOpen] = useState(false);
+  /** The save the server refused with `draft_changed`, which the stale dialog may overwrite; open while set. */
+  const [staleSave, setStaleSave] = useState<SaveRequest | null>(null);
   const [publishOpen, setPublishOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
@@ -224,11 +242,12 @@ function FlowWorkspace({
     void queryClient.invalidateQueries({ queryKey: workflowsKeys.flows(ws) });
   }, [queryClient, id, ws]);
 
-  const saveFlow = async (overwrite = false) => {
+  /** Resolves `true` when the draft was saved; a refusal or failure has been said (a toast, the stale dialog). */
+  const saveFlow = async (request: SaveRequest = {}, overwrite = false): Promise<boolean> => {
     // One save at a time: Ctrl/Cmd+S reaches both Monaco's binding and the page's.
-    if (!manage || inFlight.current) return;
-    const source = editor.source;
-    if (!overwrite && source === baseline.source) return;
+    if (!manage || inFlight.current) return false;
+    const source = request.source ?? editor.source;
+    if (!overwrite && source === baseline.source) return false;
     inFlight.current = true;
     setSaving(true);
     let precondition = baseline.updatedAt;
@@ -237,7 +256,7 @@ function FlowWorkspace({
         const fresh = await readFresh();
         if (!fresh) {
           toast.error("The draft could not be re-read after publishing, so it was not saved. Reload the page, then save again.");
-          return;
+          return false;
         }
         needsReread.current = false;
         // Still the draft this editor saved: publishing moved only `updated_at`. If
@@ -258,16 +277,19 @@ function FlowWorkspace({
       });
       if (res.status !== 200) throw new Error("The flow could not be saved.");
       adopt(res.data);
-      setStaleOpen(false);
+      if (request.replaceEditor) editor.setSource(res.data.source);
+      setStaleSave(null);
       // Every execution runs the saved draft (the user's ruling, 2026-10-10), so a save changes what runs.
-      toast.success("Saved. New runs use this version of the flow.");
+      toast.success(request.successToast ?? SAVED_TOAST);
+      return true;
     } catch (e) {
       if (!overwrite && e instanceof ApiError && e.status === 409 && e.code === DRAFT_CHANGED_CODE) {
-        setStaleOpen(true);
+        setStaleSave(request);
       } else {
         toast.error(errorMessage(e, "The flow could not be saved. Try again."));
         if (overwrite) throw e;
       }
+      return false;
     } finally {
       inFlight.current = false;
       setSaving(false);
@@ -275,6 +297,20 @@ function FlowWorkspace({
   };
   useEffect(() => { saveRef.current = saveFlow; });
   useSaveShortcut(save, manage);
+
+  /**
+   * "Restore to draft" (Revisions): a Save of the version's text, with the same
+   * precondition and the same stale-draft dialog. It never publishes.
+   */
+  const restoreVersion = async (version: FlowVersionDto, source: string) => {
+    const saved = await saveFlow({
+      source,
+      replaceEditor: true,
+      successToast: `Restored v${version.version} to the draft. New runs use it.`,
+    });
+    if (saved) void queryClient.invalidateQueries({ queryKey: workflowsKeys.versions(id) });
+    return saved;
+  };
 
   /** Reload after a 409: the saved draft replaces the editor's text (the dialog has confirmed). */
   const reload = async () => {
@@ -413,22 +449,23 @@ function FlowWorkspace({
         <TabsContent value="edit" className="min-h-0 flex-1">
           <FlowEditPage ctx={editor} flowLayout={flowLayout} />
         </TabsContent>
-        <TabsContent value="revisions" className="min-h-0 flex-1 p-4">
-          {/* W7a Task 7 fills this tab. */}
-          <EmptyState
-            variant="dashed"
-            icon={History}
-            title="Revisions are not listed here yet"
-            description="Versions and their differences arrive in a later release."
+        <TabsContent value="revisions" className="min-h-0 flex-1 overflow-auto p-4">
+          <FlowRevisions
+            ws={ws}
+            flowId={id}
+            savedSource={baseline.source}
+            dirty={dirty}
+            manage={manage}
+            onRestore={restoreVersion}
           />
         </TabsContent>
       </Tabs>
 
       <StaleSaveDialog
-        open={staleOpen}
-        onOpenChange={setStaleOpen}
+        open={staleSave !== null}
+        onOpenChange={(o) => { if (!o) setStaleSave(null); }}
         onReload={reload}
-        onOverwrite={() => saveFlow(true)}
+        onOverwrite={async () => { await saveFlow(staleSave ?? {}, true); }}
       />
       <PublishDialog
         open={publishOpen}
