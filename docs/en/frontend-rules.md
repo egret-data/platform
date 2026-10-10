@@ -309,9 +309,9 @@ Counted on 2026-10-10. These are **grep counts, not an inventory**: each is a ro
 | Rule | Debt | Grep count |
 |---|---|---|
 | FE-PAGE-1 | control-plane and governance list pages hand-roll their frame | (1) 42 route files with their own `<h1>`; (2) 42 of them do not mention `ListPageShell` |
-| FE-PAGE-4 | hand-written `<table>` outside the shared tables (some are allowed specialised grids) | (3) 21 lines |
+| FE-PAGE-4 | hand-written `<table>` outside the shared tables (some are allowed specialised grids) | (3) 17 lines |
 | FE-STATE-2 | "Loading…" texts; spinners used for content (not counted) | (4) 28 lines |
-| FE-STATE-3 | hand-written "No X" empty texts, and dashed empty blocks | (5) 21 lines of the form `"No <word> yet\|found`; (6) 12 `border-dashed` lines |
+| FE-STATE-3 | hand-written "No X" empty texts, and dashed empty blocks | (5) 6 lines of the form `"No <word> yet\|found`; (6) 12 `border-dashed` lines |
 | FE-DATA-2 | the `cp` and `control-plane` key prefixes for one domain | (7) 30 `["cp"` lines; (8) 52 `["control-plane"` lines |
 | FE-ROUTE-2 | only the Workflows area in `App.tsx` is lazy; the areas before it are eager | (9) 1 `lazy(` in `App.tsx` (Workflows, W7a) |
 | docs | `docs/vi/ui-conventions.md` has drifted from `docs/en/ui-conventions.md` | (10) 664 lines against 2,227 |
@@ -319,12 +319,14 @@ Counted on 2026-10-10. These are **grep counts, not an inventory**: each is a ro
 ```bash
 grep -rln "<h1" src/routes --include='*.tsx' | grep -v __tests__ | wc -l                                       # (1)
 grep -rLn "ListPageShell" $(grep -rln "<h1" src/routes --include='*.tsx' | grep -v __tests__) | wc -l           # (2)
-grep -rn "<table" src --include='*.tsx' | grep -v __tests__ | grep -v "components/ui/table" | wc -l             # (3)
+grep -rn "<table" src --include='*.tsx' | grep -v __tests__ | grep -v "components/ui/table" | grep -v "\.tsx:[0-9]*: *\({/\*\|//\|\*\)" | wc -l   # (3)
 grep -rn "Loading…\|Loading\.\.\." src --include='*.tsx' | grep -v __tests__ | wc -l                            # (4)
-grep -rn "\"No [a-z]\+ \(yet\|found\)" src --include='*.tsx' | grep -v __tests__ | wc -l                        # (5)
+grep -rn "\"No [a-z]\+ \(yet\|found\)" src --include='*.tsx' | grep -v __tests__ | grep -v "title=\|\.tsx:[0-9]*: *\({/\*\|//\|\*\)" | wc -l   # (5)
 grep -rn "border-dashed" src --include='*.tsx' | grep -v __tests__ | wc -l                                      # (6)
 grep -rn "\[\"cp\"\|\['cp'" src --include='*.ts*' | grep -v __tests__ | wc -l                                  # (7)
 grep -rn "\[\"control-plane\"" src --include='*.ts*' | grep -v __tests__ | wc -l                                # (8)
 grep -c "lazy(" src/App.tsx                                                                                    # (9)
 wc -l ../docs/vi/ui-conventions.md ../docs/en/ui-conventions.md                                               # (10)
 ```
+
+**Narrowed greps (2026-10-10, W7a final review).** Greps (3) and (5) used to count compliant code, so W7a's compliant additions read as new debt (FE-PAGE-4 from 19 to 21, FE-STATE-3 from 20 to 22). They now skip comment lines, and (5) skips `title=` lines, which are `EmptyState` titles (the compliant form). On the same narrowed greps the counts before W7a were 16 and 6. The one W7a line still counted by (3) is compliant: the namespace-grouped `<table>` in `src/routes/workflows/FlowsList.tsx`, an allowed specialised grid with its FE-PAGE-4 comment.
